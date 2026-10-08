@@ -1548,7 +1548,7 @@
         "extra": {
           "workflowRendererVersion": "LG"
         },
-        "category": "Image generation and editing/Inpaint image",
+        "category": "Image editing/Inpaint image",
         "description": "Inpaints masked regions using Qwen-Image, extending its multilingual text rendering to inpainting tasks."
       },
       {

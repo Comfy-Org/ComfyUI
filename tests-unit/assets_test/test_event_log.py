@@ -1,0 +1,402 @@
+"""Tests for the structured assets event log lines (``app/assets/event_log.py``)."""
+
+import errno
+import logging
+import re
+import sqlite3
+from pathlib import Path
+
+import pytest
+from sqlalchemy.exc import OperationalError
+
+from app.assets import event_log
+from app.assets.event_log import ALLOWED_FIELDS, ERROR_KINDS, TAG, EventLogError, emit, error_kind, error_type
+
+# The line grammar below is the CONTRACT shared with the desktop launcher's log
+# tap: Comfy-Org/Comfy-Desktop `src/main/lib/assetsTap.ts` holds the equivalent
+# regex, and `tests-unit/assets_test/fixtures/assets_event_lines.txt` is a
+# byte-identical copy of that repo's `src/main/lib/__fixtures__/assets-event-lines.txt`.
+# Neither side may change without the other.
+EVENT_LINE_PATTERN = re.compile(
+    r"^\[assets-event\] (?P<event>[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)*)"
+    r"(?P<fields>(?: [a-z_]+=[^ =]+)*)$"
+)
+
+FIXTURE_PATH = Path(__file__).parent / "fixtures" / "assets_event_lines.txt"
+
+# One valid value per allowed field, covering every enum member so the desktop
+# tap's mirrored validator matrix has a counterpart on this side.
+VALID_VALUES: dict[str, list[object]] = {
+    "root": ["models", "input", "output", "user", "temp"],
+    "phase": ["fast", "enrich", "full"],
+    "stage": ["mark_missing", "pruning", "fast_scan", "enrich", "finalize"],
+    "elapsed_ms": [0, 8123],
+    "cpu_ms": [0, 2710],
+    "paused_ms": [0, 61250],
+    "dirs_listed_count": [0, 42],
+    "files_statted_count": [0, 9876],
+    "created": [0, 12],
+    "enriched": [4],
+    "skipped": [3],
+    "hash_failed": [2],
+    "enrich_failed": [0],
+    "permission_denied": [0],
+    "missing_marked_count": [0, 10],
+    "recovered_count": [10],
+    "count": [1],
+    "error_type": ["ValueError", "FileNotFoundError"],
+    "error_kind": sorted(ERROR_KINDS),
+    "hashing_enabled": [True, False],
+    "site": ["discovery", "enrich"],
+}
+
+
+@pytest.fixture(autouse=True)
+def autoclean_unit_test_assets():
+    """Shadow the conftest fixture of the same name.
+
+    The conftest version reaches a running server to delete test-tagged assets,
+    which transitively boots ComfyUI for every test in this directory. Nothing
+    here touches a server or creates an asset, so the boot is pure cost.
+    """
+    yield
+
+
+def fixture_lines() -> list[str]:
+    return FIXTURE_PATH.read_text(encoding="utf-8").splitlines()
+
+
+def parse_fields(raw: str) -> dict[str, bool | int | str]:
+    fields: dict[str, bool | int | str] = {}
+    for pair in raw.split():
+        name, value = pair.split("=", maxsplit=1)
+        if value == "true":
+            fields[name] = True
+        elif value == "false":
+            fields[name] = False
+        elif value.removeprefix("-").isdigit():
+            fields[name] = int(value)
+        else:
+            fields[name] = value
+    return fields
+
+
+def emit_line(caplog: pytest.LogCaptureFixture, event: str, **fields: object) -> str:
+    """Emit one event and return the single tagged line it produced."""
+    caplog.clear()
+    with caplog.at_level(logging.INFO):
+        emit(event, **fields)
+    tagged = [r.getMessage() for r in caplog.records if r.getMessage().startswith(TAG)]
+    assert len(tagged) == 1, tagged
+    return tagged[0]
+
+
+def go_to_production_mode(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Leave strict mode so invalid calls warn-and-drop instead of raising."""
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+    monkeypatch.delenv("COMFYUI_ASSETS_EVENT_LOG_STRICT", raising=False)
+    event_log._warned_call_sites.clear()
+
+
+# --- the shared cross-repo fixture -------------------------------------------------
+
+
+def test_shared_fixture_file_holds_three_newline_terminated_lines():
+    raw = FIXTURE_PATH.read_text(encoding="utf-8")
+
+    assert raw.endswith("\n")
+    assert len(raw.splitlines()) == 3
+
+
+@pytest.mark.parametrize("line", fixture_lines())
+def test_emit_reproduces_each_shared_fixture_line_byte_for_byte(caplog, line):
+    """Given a canonical line, When its fields are re-emitted, Then the bytes match."""
+    match = EVENT_LINE_PATTERN.match(line)
+    assert match is not None, line
+    fields = parse_fields(match.group("fields"))
+
+    assert emit_line(caplog, match.group("event"), **fields) == line
+
+
+# --- line shape ---------------------------------------------------------------------
+
+
+def test_fields_are_serialized_as_sorted_logfmt(caplog):
+    line = emit_line(caplog, "seeder.scan_started", root="models", phase="fast")
+
+    assert line == "[assets-event] seeder.scan_started phase=fast root=models"
+
+
+def test_a_fieldless_event_still_matches_the_shared_pattern(caplog):
+    line = emit_line(caplog, "scanner.hash_discarded_modified")
+
+    assert line == "[assets-event] scanner.hash_discarded_modified"
+    assert EVENT_LINE_PATTERN.match(line) is not None
+
+
+def test_the_emitted_record_is_a_single_line(caplog):
+    line = emit_line(caplog, "seeder.scan_failed", error_type="ValueError")
+
+    assert "\n" not in line
+    assert "\r" not in line
+
+
+# --- error_type ---------------------------------------------------------------------
+
+
+def test_error_type_is_the_class_name_and_the_path_never_reaches_the_line(caplog):
+    exc = FileNotFoundError("/home/x/model.safetensors")
+
+    assert error_type(exc) == "FileNotFoundError"
+
+    line = emit_line(caplog, "seeder.scan_failed", error_type=error_type(exc))
+    assert "/home/x/model.safetensors" not in line
+    assert "model.safetensors" not in line
+
+
+# --- error_kind ---------------------------------------------------------------------
+
+
+def _wrapped(driver_error: BaseException) -> OperationalError:
+    # How SQLAlchemy surfaces a driver error: its str() carries the statement and params.
+    return OperationalError("SELECT * FROM c WHERE path = ?", ("/home/x/model.safetensors",), driver_error)
+
+
+@pytest.mark.parametrize(
+    ("exc", "kind"),
+    [
+        (_wrapped(sqlite3.OperationalError("Expression tree is too large (maximum depth 1000)")), "expression_tree_too_large"),
+        (_wrapped(sqlite3.OperationalError("too many SQL variables")), "too_many_variables"),
+        (_wrapped(sqlite3.OperationalError("database is locked")), "database_locked"),
+        (_wrapped(sqlite3.OperationalError("database table is locked: assets")), "database_locked"),
+        (_wrapped(sqlite3.OperationalError("database or disk is full")), "disk_full"),
+        (_wrapped(sqlite3.OperationalError("disk I/O error")), "disk_io"),
+        (_wrapped(sqlite3.OperationalError("unable to open database file")), "unable_to_open"),
+        (_wrapped(sqlite3.DatabaseError("database disk image is malformed")), "database_corrupt"),
+        (sqlite3.OperationalError("database is locked"), "database_locked"),
+        (_wrapped(sqlite3.OperationalError("no such table: assets")), "other"),
+        (OSError(errno.ENOSPC, "No space left on device", "/home/x/out.png"), "disk_full"),
+        (OSError(errno.EIO, "Input/output error"), "disk_io"),
+        (PermissionError(errno.EACCES, "Permission denied", "/home/x/out.png"), "permission_denied"),
+        (FileNotFoundError("/home/x/model.safetensors"), "other"),
+        (ValueError("database is locked"), "other"),
+    ],
+    ids=[
+        "expression-tree", "too-many-variables", "locked", "table-locked", "sqlite-full",
+        "sqlite-io", "unable-to-open", "corrupt", "unwrapped-sqlite", "unknown-sqlite",
+        "enospc", "eio", "eacces", "no-errno", "not-a-driver-error",
+    ],
+)
+def test_error_kind_classifies_without_reading_the_wrapped_statement(exc, kind):
+    assert error_kind(exc) == kind
+
+
+def _with_code(exc: sqlite3.Error, code: int) -> sqlite3.Error:
+    exc.sqlite_errorcode = code  # set by the driver itself on Python 3.11+
+    return exc
+
+
+def _windows_error(winerror: int) -> PermissionError:
+    exc = PermissionError(errno.EACCES, "Permission denied")
+    exc.winerror = winerror  # set by the OS layer on Windows only
+    return exc
+
+
+@pytest.mark.parametrize(
+    ("exc", "kind"),
+    [
+        (_wrapped(_with_code(sqlite3.OperationalError("unexpected wording"), 261)), "database_locked"),
+        (_wrapped(_with_code(sqlite3.OperationalError("unexpected wording"), 13)), "disk_full"),
+        (_wrapped(_with_code(sqlite3.DatabaseError("unexpected wording"), 26)), "database_corrupt"),
+        (_wrapped(_with_code(sqlite3.OperationalError("Expression tree is too large"), 1)), "expression_tree_too_large"),
+        (_wrapped(sqlite3.DatabaseError("file is not a database")), "database_corrupt"),
+        (_wrapped(_with_code(sqlite3.OperationalError("unexpected wording"), 8)), "read_only"),
+        (_wrapped(sqlite3.OperationalError("attempt to write a readonly database")), "read_only"),
+        (OSError(errno.EROFS, "Read-only file system"), "read_only"),
+        (_windows_error(32), "file_locked"),
+        (_windows_error(33), "file_locked"),
+        (_windows_error(5), "permission_denied"),
+    ],
+    ids=[
+        "busy-extended-code", "full-code", "notadb-code", "generic-code-falls-back-to-message",
+        "notadb-message", "readonly-code", "readonly-message", "erofs", "sharing-violation", "lock-violation", "access-denied",
+    ],
+)
+def test_error_kind_prefers_the_sqlite_code_and_windows_error(exc, kind):
+    assert error_kind(exc) == kind
+
+
+def test_error_kind_classifies_a_real_non_database_file(tmp_path: Path):
+    not_a_db = tmp_path / "assets.db"
+    not_a_db.write_bytes(b"this is not sqlite" * 100)
+    connection = sqlite3.connect(not_a_db)
+    try:
+        with pytest.raises(sqlite3.DatabaseError) as raised:
+            connection.execute("SELECT * FROM sqlite_master")
+    finally:
+        connection.close()
+
+    assert error_kind(raised.value) == "database_corrupt"
+
+
+def test_error_kind_never_carries_the_statement_or_params(caplog):
+    exc = _wrapped(sqlite3.OperationalError("database is locked"))
+    assert "/home/x/model.safetensors" in str(exc)
+
+    line = emit_line(caplog, "seeder.scan_failed", error_type=error_type(exc), error_kind=error_kind(exc))
+
+    assert "model.safetensors" not in line
+    assert "SELECT" not in line
+
+
+# --- the closed vocabulary ----------------------------------------------------------
+
+
+def test_the_valid_value_matrix_covers_every_allowed_field():
+    assert set(VALID_VALUES) == set(ALLOWED_FIELDS)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [(field, value) for field, values in VALID_VALUES.items() for value in values],
+)
+def test_every_allowed_field_value_round_trips(caplog, field, value):
+    line = emit_line(caplog, "seeder.scan_completed", **{field: value})
+
+    match = EVENT_LINE_PATTERN.match(line)
+    assert match is not None, line
+    assert parse_fields(match.group("fields")) == {field: value}
+
+
+def test_unknown_field_raises_under_pytest():
+    with pytest.raises(EventLogError):
+        emit("seeder.scan_started", path="/home/x/models")
+
+
+@pytest.mark.parametrize(
+    "value", ["a/b", "a\\b", "a:b", "a b", "a=b", 'a"b', "a\nb", "a\rb"]
+)
+def test_a_string_value_carrying_a_forbidden_character_raises(value):
+    with pytest.raises(EventLogError):
+        emit("seeder.scan_failed", error_type=value)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("root", "checkpoints"),
+        ("root", 1),
+        ("phase", "quick"),
+        ("phase", None),
+        ("stage", "scanning"),
+        ("site", "reference"),
+        ("error_type", "x" * 65),
+        ("error_type", ""),
+        ("error_type", 7),
+        ("error_kind", "sqlite_busy"),
+        ("elapsed_ms", "8123"),
+        ("count", 1.5),
+        ("created", True),
+        ("hashing_enabled", 1),
+        ("hashing_enabled", "true"),
+    ],
+    ids=[
+        "bad-root",
+        "non-string-root",
+        "bad-phase",
+        "none-phase",
+        "bad-stage",
+        "bad-site",
+        "oversized-string",
+        "empty-string",
+        "non-string-error-type",
+        "bad-error-kind",
+        "string-into-int-field",
+        "float-into-int-field",
+        "bool-into-int-field",
+        "int-into-bool-field",
+        "string-into-bool-field",
+    ],
+)
+def test_every_validator_rejects_its_bad_value(field, value):
+    with pytest.raises(EventLogError):
+        emit("seeder.scan_completed", **{field: value})
+
+
+@pytest.mark.parametrize(
+    "event",
+    ["", "Seeder.scan_started", "seeder..scan", "9seeder.scan", "seeder.scan-started", "seeder scan", "seeder.", "scanner.made_up"],
+)
+def test_an_invalid_event_name_raises(event):
+    with pytest.raises(EventLogError):
+        emit(event)
+
+
+# --- strict mode vs production mode -------------------------------------------------
+
+
+def test_the_env_var_enables_strict_mode_without_pytest(monkeypatch):
+    go_to_production_mode(monkeypatch)
+    monkeypatch.setenv("COMFYUI_ASSETS_EVENT_LOG_STRICT", "1")
+
+    with pytest.raises(EventLogError):
+        emit("seeder.scan_started", path="/home/x")
+
+
+def test_an_env_var_value_other_than_1_is_not_strict(caplog, monkeypatch):
+    go_to_production_mode(monkeypatch)
+    monkeypatch.setenv("COMFYUI_ASSETS_EVENT_LOG_STRICT", "true")
+
+    with caplog.at_level(logging.WARNING):
+        emit("seeder.scan_started", path="/home/x")
+
+    assert [r for r in caplog.records if r.levelno == logging.WARNING]
+
+
+def test_production_mode_warns_once_for_repeated_calls_from_one_call_site(caplog, monkeypatch):
+    go_to_production_mode(monkeypatch)
+    caplog.clear()
+
+    with caplog.at_level(logging.WARNING):
+        for _ in range(3):
+            emit("seeder.scan_started", path="/home/x/models")
+
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1
+    assert not [r for r in caplog.records if r.getMessage().startswith(TAG)]
+    assert "/home/x/models" not in caplog.text
+
+
+def test_production_mode_warns_once_per_distinct_call_site(caplog, monkeypatch):
+    go_to_production_mode(monkeypatch)
+    caplog.clear()
+
+    with caplog.at_level(logging.WARNING):
+        emit("seeder.scan_started", path="/home/x/models")
+        emit("seeder.scan_started", path="/home/x/models")
+
+    assert len([r for r in caplog.records if r.levelno == logging.WARNING]) == 2
+
+
+def test_production_mode_still_emits_valid_events_after_a_dropped_one(caplog, monkeypatch):
+    go_to_production_mode(monkeypatch)
+
+    with caplog.at_level(logging.INFO):
+        emit("seeder.scan_started", path="/home/x/models")
+        emit("seeder.scan_started", phase="fast")
+
+    tagged = [r.getMessage() for r in caplog.records if r.getMessage().startswith(TAG)]
+    assert tagged == ["[assets-event] seeder.scan_started phase=fast"]
+
+
+def test_error_kind_classifies_a_real_read_only_database(tmp_path: Path):
+    db_path = tmp_path / "assets.db"
+    sqlite3.connect(db_path).execute("CREATE TABLE t (x)").connection.close()
+    connection = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    try:
+        with pytest.raises(sqlite3.OperationalError) as raised:
+            connection.execute("INSERT INTO t VALUES (1)")
+    finally:
+        connection.close()
+
+    assert error_kind(raised.value) == "read_only"

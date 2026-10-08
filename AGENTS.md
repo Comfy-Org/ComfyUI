@@ -120,6 +120,10 @@ Full rules: [docs/agents/models.md](docs/agents/models.md).
   without changing expected dtype, device, memory, or interface behavior. This
   is the default implementation requirement, not an optional follow-up
   optimization.
+- Model implementations must use `AttentionTensorContainer` and per-module
+  `self.comfy_attention = ComfyAttention()`, passed to attention as `preferred_attention`.
+- Integrate model block loops with the memory compiler and prefetch helpers in
+  `comfy.model_prefetch`, following existing model patterns.
 - All models should use the optimized attention function selected by ComfyUI.
   Treat optimized backend functions, dispatch helpers, and capability-selected
   callables as opaque. Higher-level code must not inspect function identity,

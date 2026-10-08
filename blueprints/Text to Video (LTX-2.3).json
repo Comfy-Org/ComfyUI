@@ -4286,7 +4286,7 @@
         "extra": {
           "workflowRendererVersion": "Vue-corrected"
         },
-        "category": "Video generation and editing/Text to video",
+        "category": "Video generation/Text to video",
         "description": "Generates video from text prompts using LTX-2.3, Lightricks' video diffusion model."
       }
     ]

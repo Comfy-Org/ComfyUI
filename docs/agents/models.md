@@ -50,6 +50,10 @@ Detailed rules referenced from [AGENTS.md](../../AGENTS.md).
   handwritten implementations of the same operation. Remove duplicate local
   kernels and adapt inputs to the shared operation's documented layout while
   preserving the model's original math and output contract.
+- Model implementations must use `AttentionTensorContainer` and per-module
+  `self.comfy_attention = ComfyAttention()`, passed to attention as `preferred_attention`.
+- Integrate model block loops with the memory compiler and prefetch helpers in
+  `comfy.model_prefetch`, following existing model patterns.
 - All models should use the optimized attention function selected by ComfyUI.
   Treat optimized backend functions, dispatch helpers, and capability-selected
   callables as opaque. Higher-level code must not inspect function identity,

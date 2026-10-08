@@ -1,5 +1,5 @@
 import av
-import torchaudio
+import comfy.audio
 import torch
 import comfy.model_management
 import folder_paths
@@ -85,7 +85,7 @@ class VAEEncodeAudio(IO.ComfyNode):
         sample_rate = audio["sample_rate"]
         vae_sample_rate = getattr(vae, "audio_sample_rate", 44100)
         if vae_sample_rate != sample_rate:
-            waveform = torchaudio.functional.resample(audio["waveform"], sample_rate, vae_sample_rate)
+            waveform = comfy.audio.resample(audio["waveform"], sample_rate, vae_sample_rate)
         else:
             waveform = audio["waveform"]
 
@@ -299,7 +299,7 @@ class PreviewAudio(IO.ComfyNode):
     def define_schema(cls):
         return IO.Schema(
             node_id="PreviewAudio",
-            search_aliases=["play audio"],
+            search_aliases=["preview", "preview audio", "play audio"],
             display_name="Preview Audio",
             category="audio",
             description="Preview the audio without saving it to the ComfyUI output directory.",
@@ -578,11 +578,11 @@ class JoinAudioChannels(IO.ComfyNode):
 def match_audio_sample_rates(waveform_1, sample_rate_1, waveform_2, sample_rate_2):
     if sample_rate_1 != sample_rate_2:
         if sample_rate_1 > sample_rate_2:
-            waveform_2 = torchaudio.functional.resample(waveform_2, sample_rate_2, sample_rate_1)
+            waveform_2 = comfy.audio.resample(waveform_2, sample_rate_2, sample_rate_1)
             output_sample_rate = sample_rate_1
             logging.info(f"Resampling audio2 from {sample_rate_2}Hz to {sample_rate_1}Hz for merging.")
         else:
-            waveform_1 = torchaudio.functional.resample(waveform_1, sample_rate_1, sample_rate_2)
+            waveform_1 = comfy.audio.resample(waveform_1, sample_rate_1, sample_rate_2)
             output_sample_rate = sample_rate_2
             logging.info(f"Resampling audio1 from {sample_rate_1}Hz to {sample_rate_2}Hz for merging.")
     else:
@@ -835,7 +835,7 @@ class AudioEqualizer3Band(IO.ComfyNode):
 
         # 1. Apply Low Shelf (Bass)
         if low_gain_dB != 0:
-            eq_waveform = torchaudio.functional.bass_biquad(
+            eq_waveform = comfy.audio.bass_biquad(
                 eq_waveform,
                 sample_rate,
                 gain=low_gain_dB,
@@ -845,7 +845,7 @@ class AudioEqualizer3Band(IO.ComfyNode):
 
         # 2. Apply Peaking EQ (Mids)
         if mid_gain_dB != 0:
-            eq_waveform = torchaudio.functional.equalizer_biquad(
+            eq_waveform = comfy.audio.equalizer_biquad(
                 eq_waveform,
                 sample_rate,
                 center_freq=float(mid_freq),
@@ -855,7 +855,7 @@ class AudioEqualizer3Band(IO.ComfyNode):
 
         # 3. Apply High Shelf (Treble)
         if high_gain_dB != 0:
-            eq_waveform = torchaudio.functional.treble_biquad(
+            eq_waveform = comfy.audio.treble_biquad(
                 eq_waveform,
                 sample_rate,
                 gain=high_gain_dB,

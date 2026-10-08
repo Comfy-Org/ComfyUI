@@ -47,6 +47,8 @@ class Blend(io.ComfyNode):
         blended_image = cls.blend_mode(image1, image2, blend_mode)
         blended_image = image1 * (1 - blend_factor) + blended_image * blend_factor
         blended_image = torch.clamp(blended_image, 0, 1)
+        if image1.shape[-1] == 4:  # alpha stores transparency, not color
+            blended_image[..., 3] = image1[..., 3]
         return io.NodeOutput(blended_image)
 
     @classmethod
@@ -156,11 +158,12 @@ class Quantize(io.ComfyNode):
 
     @classmethod
     def execute(cls, image: torch.Tensor, colors: int, dither: str) -> io.NodeOutput:
-        batch_size, height, width, _ = image.shape
-        result = torch.zeros_like(image)
+        rgb = image[..., :3]
+        batch_size, height, width, _ = rgb.shape
+        result = torch.zeros_like(rgb)
 
         for b in range(batch_size):
-            im = Image.fromarray((image[b] * 255).to(torch.uint8).numpy(), mode='RGB')
+            im = Image.fromarray((rgb[b] * 255).to(torch.uint8).numpy(), mode='RGB')
 
             pal_im = im.quantize(colors=colors) # Required as described in https://github.com/python-pillow/Pillow/issues/5836
 
@@ -175,6 +178,8 @@ class Quantize(io.ComfyNode):
             quantized_array = torch.tensor(np.array(quantized_image.convert("RGB"))).float() / 255
             result[b] = quantized_array
 
+        if image.shape[-1] == 4:
+            result = torch.cat((result, image[..., 3:]), dim=-1)
         return io.NodeOutput(result)
 
 class Sharpen(io.ComfyNode):

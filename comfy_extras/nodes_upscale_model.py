@@ -8,6 +8,7 @@ from typing_extensions import override
 from comfy_api.latest import ComfyExtension, io
 import comfy.model_management
 import comfy.model_patcher
+import comfy.storage
 
 try:
     from spandrel_extra_arches import EXTRA_REGISTRY
@@ -43,7 +44,7 @@ class UpscaleModelLoader(io.ComfyNode):
         if not isinstance(out, ImageModelDescriptor):
             raise Exception("Upscale model must be a single-image model.")
 
-        out.patcher = comfy.model_patcher.CoreModelPatcher(out.model, load_device=model_management.get_torch_device(), offload_device=model_management.unet_offload_device())
+        out.patcher = comfy.model_patcher.CoreModelPatcher(out.model, load_device=model_management.get_torch_device(), offload_device=model_management.unet_offload_device(), fast_disk=comfy.storage.state_dict_fast_disk(sd))
         return io.NodeOutput(out)
 
     load_model = execute  # TODO: remove
@@ -70,6 +71,11 @@ class ImageUpscaleWithModel(io.ComfyNode):
     def execute(cls, upscale_model, image) -> io.NodeOutput:
         device = upscale_model.patcher.load_device
 
+        alpha = None
+        if image.shape[-1] == 4:
+            alpha = image[..., 3:4]
+            image = image[..., :3]
+
         memory_required = (512 * 512 * 3) * image.element_size() * max(upscale_model.scale, 1.0) * 384.0 #The 384.0 is an estimate of how much some of these models take, TODO: make it more accurate
         memory_required += image.nelement() * image.element_size()
         model_management.load_models_gpu([upscale_model.patcher], memory_required=memory_required, force_full_load=True)
@@ -95,6 +101,11 @@ class ImageUpscaleWithModel(io.ComfyNode):
                     raise e
 
         s = torch.clamp(s.movedim(-3,-1), min=0, max=1.0).to(comfy.model_management.intermediate_dtype())
+
+        if alpha is not None:
+            alpha = comfy.utils.common_upscale(alpha.movedim(-1, -3).to(s), s.shape[2], s.shape[1], "bilinear", "disabled")
+            s = torch.cat((s, alpha.movedim(-3, -1)), dim=-1)
+
         return io.NodeOutput(s)
 
     upscale = execute  # TODO: remove

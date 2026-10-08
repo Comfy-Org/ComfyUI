@@ -21,11 +21,13 @@ class MiniMaxH3FunControl(torch.nn.Module):
     def __init__(self, control_in_dim=49, injection_layers=(0, 10, 20, 30, 40), hidden_size=5376,
                  num_attention_heads=56, attention_head_dim=128, ffn_hidden_size=14336,
                  time_embed_dim=2688, patch_size=(1, 2, 2), norm_eps=1e-5, qk_norm_eps=1e-5,
-                 use_adaln_curves=False, dtype=None, device=None, operations=None):
+                 use_adaln_curves=False, inpaint_post_norm=False, dtype=None, device=None, operations=None):
         super().__init__()
         self.dtype = dtype
         self.patch_size = tuple(patch_size)
         self.injection_layers = tuple(injection_layers)
+        # v2 checkpoints mask the source video after VAE normalization (holes at mid-gray, not black)
+        self.inpaint_post_norm = inpaint_post_norm
         if not self.injection_layers or self.injection_layers[0] != 0:
             raise ValueError("MiniMax H3 Fun control injection layers must start at layer 0")
         if self.injection_layers != tuple(sorted(set(self.injection_layers))):
@@ -42,8 +44,6 @@ class MiniMaxH3FunControl(torch.nn.Module):
             for i in range(len(self.injection_layers))])
 
     def init_stream(self, h, control_latent, layout, t_emb):
-        if any(kind not in ("text", "audio", "video") for _, _, kind in layout.segments):
-            raise ValueError("MiniMax H3 Fun ControlNet does not support keyframe or reference conditioning")
         adaln_in = self.control_blocks[0].adaln_proj.linear.in_features
         if t_emb.shape[-1] != adaln_in:
             raise RuntimeError(
@@ -59,8 +59,13 @@ class MiniMaxH3FunControl(torch.nn.Module):
         elif target_rows.shape[1] > patch_dim:
             raise ValueError("MiniMax H3 control input has {} columns but the model patch expects {}".format(target_rows.shape[1], patch_dim))
 
+        # keyframe/reference conditioning rows get a zero control row
+        img_update = layout.img_update.to(h.device)
+        rows = torch.zeros(img_update.shape[0], patch_dim, dtype=torch.float32, device=h.device)
+        rows[img_update] = target_rows
+
         c = h.clone()
-        c[layout.img_pos.to(h.device)] = self.control_proj_in(target_rows).to(h.dtype)
+        c[layout.img_pos.to(h.device)] = self.control_proj_in(rows).to(h.dtype)
         return self.control_blocks[0].before_proj(c).add_(h)
 
     def step(self, index, c, t_emb, mod_segments, rope_freqs, transformer_options):

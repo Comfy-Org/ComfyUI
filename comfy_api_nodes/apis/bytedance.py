@@ -3,16 +3,6 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field
 
 
-class Text2ImageTaskCreationRequest(BaseModel):
-    model: str = Field(...)
-    prompt: str = Field(...)
-    response_format: str | None = Field("url")
-    size: str | None = Field(None)
-    seed: int | None = Field(0, ge=0, le=2147483647)
-    guidance_scale: float | None = Field(..., ge=1.0, le=10.0)
-    watermark: bool | None = Field(False)
-
-
 class Seedream4Options(BaseModel):
     max_images: int = Field(15)
 
@@ -95,6 +85,15 @@ class TaskAudioContent(BaseModel):
     role: str = Field("reference_audio")
 
 
+class TaskDraftTaskContentTask(BaseModel):
+    id: str = Field(...)
+
+
+class TaskDraftTaskContent(BaseModel):
+    type: str = Field("draft_task")
+    draft_task: TaskDraftTaskContentTask = Field(...)
+
+
 class Text2VideoTaskCreationRequest(BaseModel):
     model: str = Field(...)
     content: list[TaskTextContent] = Field(..., min_length=1)
@@ -109,7 +108,9 @@ class Image2VideoTaskCreationRequest(BaseModel):
 
 class Seedance2TaskCreationRequest(BaseModel):
     model: str = Field(...)
-    content: list[TaskTextContent | TaskImageContent | TaskVideoContent | TaskAudioContent] = Field(..., min_length=1)
+    content: list[
+        TaskTextContent | TaskImageContent | TaskVideoContent | TaskAudioContent | TaskDraftTaskContent
+    ] = Field(..., min_length=1)
     generate_audio: bool | None = Field(None)
     resolution: str | None = Field(None)
     ratio: str | None = Field(None)
@@ -118,6 +119,7 @@ class Seedance2TaskCreationRequest(BaseModel):
     watermark: bool | None = Field(None)
     output_format: str | None = Field(None)
     omni_reference_task_type: str | None = Field(None, description="One of: auto, reference, edit, extend.")
+    draft: bool | None = Field(None)
 
 
 class TaskCreationResponse(BaseModel):
@@ -188,19 +190,6 @@ class SeedanceVirtualLibraryCreateAssetRequest(BaseModel):
     asset_type: str | None = Field(None, description="BytePlus asset type. Defaults to Image server-side when omitted.")
 
 
-RECOMMENDED_PRESETS = [
-    ("1024x1024 (1:1)", 1024, 1024),
-    ("864x1152 (3:4)", 864, 1152),
-    ("1152x864 (4:3)", 1152, 864),
-    ("1280x720 (16:9)", 1280, 720),
-    ("720x1280 (9:16)", 720, 1280),
-    ("832x1248 (2:3)", 832, 1248),
-    ("1248x832 (3:2)", 1248, 832),
-    ("1512x648 (21:9)", 1512, 648),
-    ("2048x2048 (1:1)", 2048, 2048),
-    ("Custom", None, None),
-]
-
 RECOMMENDED_PRESETS_SEEDREAM_4 = [
     ("2048x2048 (1:1)", 2048, 2048),
     ("2304x1728 (4:3)", 2304, 1728),
@@ -261,19 +250,35 @@ _PRESETS_SEEDREAM_4K = [
 
 _CUSTOM_PRESET = [("Custom", None, None)]
 
-_PRESETS_SEEDREAM_2K_PRO = [
+RECOMMENDED_PRESETS_SEEDREAM_5_PRO = (
+    _PRESETS_SEEDREAM_1K + _PRESETS_SEEDREAM_2K + _CUSTOM_PRESET
+)
+RECOMMENDED_PRESETS_SEEDREAM_5_FLASH = [
+    ("(1K) 1024x1024 (1:1)", 1024, 1024),
+    ("(1K) 864x1152 (3:4)", 864, 1152),
+    ("(1K) 1152x864 (4:3)", 1152, 864),
+    ("(1K) 1424x800 (16:9)", 1424, 800),
+    ("(1K) 800x1424 (9:16)", 800, 1424),
+    ("(1K) 832x1248 (2:3)", 832, 1248),
+    ("(1K) 1248x832 (3:2)", 1248, 832),
+    ("(1K) 1568x672 (21:9)", 1568, 672),
+    ("(1.5K) 1536x1536 (1:1)", 1536, 1536),
+    ("(1.5K) 1344x1792 (3:4)", 1344, 1792),
+    ("(1.5K) 1792x1344 (4:3)", 1792, 1344),
+    ("(1.5K) 2048x1152 (16:9)", 2048, 1152),
+    ("(1.5K) 1152x2048 (9:16)", 1152, 2048),
+    ("(1.5K) 1248x1872 (2:3)", 1248, 1872),
+    ("(1.5K) 1872x1248 (3:2)", 1872, 1248),
+    ("(1.5K) 2352x1008 (21:9)", 2352, 1008),
     ("(2K) 2048x2048 (1:1)", 2048, 2048),
-    ("(2K) 1728x2304 (3:4)", 1728, 2304),
-    ("(2K) 2304x1728 (4:3)", 2304, 1728),
-    # ("(2K) 2848x1600 (16:9)", 2848, 1600),  # 4,556,800 px - temporarily unavailable
-    # ("(2K) 1600x2848 (9:16)", 1600, 2848),  # 4,556,800 px - temporarily unavailable
+    ("(2K) 1776x2368 (3:4)", 1776, 2368),
+    ("(2K) 2368x1776 (4:3)", 2368, 1776),
+    ("(2K) 2816x1584 (16:9)", 2816, 1584),
+    ("(2K) 1584x2816 (9:16)", 1584, 2816),
     ("(2K) 1664x2496 (2:3)", 1664, 2496),
     ("(2K) 2496x1664 (3:2)", 2496, 1664),
-    # ("(2K) 3136x1344 (21:9)", 3136, 1344),  # 4,214,784 px - temporarily unavailable
-]
-RECOMMENDED_PRESETS_SEEDREAM_5_PRO = (
-    _PRESETS_SEEDREAM_1K + _PRESETS_SEEDREAM_2K_PRO + _CUSTOM_PRESET
-)
+    ("(2K) 3136x1344 (21:9)", 3136, 1344),
+] + _CUSTOM_PRESET
 RECOMMENDED_PRESETS_SEEDREAM_5_LITE = (
     _PRESETS_SEEDREAM_2K + _PRESETS_SEEDREAM_3K + _PRESETS_SEEDREAM_4K + _CUSTOM_PRESET
 )
@@ -327,16 +332,6 @@ def seedance2_reference_limits(model_id: str) -> dict:
 
 # The time in this dictionary are given for 10 seconds duration.
 VIDEO_TASKS_EXECUTION_TIME = {
-    "seedance-1-0-lite-t2v-250428": {
-        "480p": 40,
-        "720p": 60,
-        "1080p": 90,
-    },
-    "seedance-1-0-lite-i2v-250428": {
-        "480p": 40,
-        "720p": 60,
-        "1080p": 90,
-    },
     "seedance-1-0-pro-250528": {
         "480p": 70,
         "720p": 85,

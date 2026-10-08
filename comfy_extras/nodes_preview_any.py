@@ -17,7 +17,7 @@ class PreviewAny():
     OUTPUT_NODE = True
 
     CATEGORY = "utilities"
-    SEARCH_ALIASES = ["show output", "inspect", "debug", "print value", "show text"]
+    SEARCH_ALIASES = ["preview", "preview text", "show output", "inspect", "debug", "print value", "show text"]
     DESCRIPTION = "Preview any input value as text."
 
     def main(self, source=None):
