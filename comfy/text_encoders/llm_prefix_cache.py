@@ -209,7 +209,7 @@ def finish(pkv, ids, generated):
     stats["gen_tokens"] = len(generated)
     full = list(ids) + list(generated)
     idx = next(kv.index for kv in pkv if isinstance(kv, LinearKV))
-    if len(ids) < idx <= len(full):
+    if _slot.cpu is None and len(ids) < idx <= len(full):
         # MTP may have consumed accepted drafts past a stop token: then idx > len(full) and the state is unusable
         _slot.checkpoints.append((full[:idx], _linear_states(pkv, clone=False)))
         _slot.kv_len = idx
