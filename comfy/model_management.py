@@ -892,6 +892,8 @@ def minimum_inference_memory():
 
 def free_memory(memory_required, device, keep_loaded=[], for_dynamic=False, pins_required=0, ram_required=0):
     cleanup_models_gc()
+    import comfy.text_encoders.llm_prefix_cache
+    comfy.text_encoders.llm_prefix_cache.on_memory_pressure(memory_required, device)
     if not for_dynamic:
         detail("Non dynamic memory free called! memory_required=%s pins_required=%s ram_required=%s", memory_required, pins_required, ram_required)
     unloaded_model = []
