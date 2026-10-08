@@ -7,7 +7,6 @@ import sqlite3
 import time
 from contextlib import closing
 from app.logger import log_startup_warning
-from utils.install_util import get_missing_requirements_message
 from filelock import FileLock, Timeout
 from comfy.cli_args import args, database_default_path
 
@@ -34,17 +33,9 @@ try:
     import blake3  # noqa: F401 — verify the hard dependency is importable at startup
 
     _DB_AVAILABLE = True
-except ImportError as e:
-    if not args.disable_assets:  # nothing else needs these packages
-        log_startup_warning(
-            f"""
-------------------------------------------------------------------------
-Error importing dependencies: {e}
-{get_missing_requirements_message()}
-This error is happening because ComfyUI now uses a local sqlite database.
-------------------------------------------------------------------------
-""".strip()
-        )
+except ImportError:
+    # Only the assets system needs these; with it on, startup stops and says what to install.
+    logging.debug("Database packages failed to import", exc_info=True)
 
 
 def dependencies_available():
@@ -292,7 +283,7 @@ def _init_file_db(db_url):
     try:
         copy_legacy_default_db(db_path)
         db_exists = os.path.exists(db_path)
-        for path in (db_path, db_path + "-wal", db_path + "-shm"):
+        for path in (db_path, db_path + "-wal", db_path + "-shm", db_path + ".bkp"):
             # Before the backup and upgrade, which would otherwise leave read-only copies behind.
             if os.path.exists(path) and not os.access(path, os.W_OK):
                 raise PermissionError(errno.EACCES, "Permission denied", path)

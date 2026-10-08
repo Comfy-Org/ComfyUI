@@ -25,6 +25,7 @@ setup_logger(log_level=console_log_level, file_outputs=file_log_outputs, use_std
 
 from app.database.db import DatabasePathError, dependencies_available, get_database_url, get_db_path, init_db, lock_holder_db_path, missing_dependencies
 from app.assets.event_log import error_kind
+from utils.install_util import get_missing_requirements_message
 from app.assets.lifecycle import cleanup_temp_filesystem
 from app.assets.manager import AssetManager, default_asset_manager
 import itertools
@@ -509,8 +510,8 @@ def stop_startup(kind, message):
 
 
 def another_database_url():
-    # An absolute path: on Linux and macOS that makes four slashes, which a hand-typed example tends to miss.
-    return f"sqlite:///{os.path.join(folder_paths.get_user_directory(), 'comfyui-2.db')}"
+    # Absolute (four slashes on Linux and macOS, which a hand-typed example tends to miss) and quoted for spaces.
+    return f'"sqlite:///{os.path.join(folder_paths.get_user_directory(), "comfyui-2.db")}"'
 
 
 def database_failure_message(error, db_url):
@@ -549,9 +550,9 @@ def database_failure_message(error, db_url):
         failure = "other"
         what = f"Could not open or upgrade the asset database '{location}': {detail}"
         fix = ("If the database is damaged, move that file aside and start again: ComfyUI creates a new "
-               "database and rebuilds the asset catalog by rescanning your files.")
+               "database and rebuilds the asset catalog by rescanning your files. Run with --verbose DEBUG for the full error.")
     lines = [what, fix]
-    if args.database_url is None:
+    if failure in ("in_use", "locked") and args.database_url is None:
         lines.append(f"Or give this ComfyUI its own database: --database-url {another_database_url()}")
     return failure, "\n".join(lines + [WITHOUT_ASSETS])
 
@@ -584,9 +585,9 @@ def start_comfyui(asyncio_loop=None):
         folder_paths.set_temp_directory(temp_dir)
 
     if not args.disable_assets and not dependencies_available():
-        missing = ", ".join(missing_dependencies()) or "see the import error above"
-        stop_startup("missing_packages", f"The assets system needs packages that could not be imported: {missing}. "
-                                         f"Install them as shown above.\n{WITHOUT_ASSETS}")
+        missing = ", ".join(missing_dependencies()) or "run with --verbose DEBUG to see the import error"
+        stop_startup("missing_packages", f"The assets system needs packages that could not be imported: {missing}.\n"
+                                         f"{get_missing_requirements_message()}\n{WITHOUT_ASSETS}")
     asset_manager: AssetManager = default_asset_manager()
     feature_flags.SERVER_FEATURE_FLAGS["assets"] = asset_manager.enabled
     if not asset_manager.enabled:

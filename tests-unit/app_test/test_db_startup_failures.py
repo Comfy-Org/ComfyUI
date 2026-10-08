@@ -46,12 +46,12 @@ def db_path(tmp_path, monkeypatch):
         db_module._db_lock.release(force=True)
 
 
-def _startup_error(caplog, asset_manager=None, kind=None):
-    with caplog.at_level(logging.ERROR), pytest.raises(SystemExit) as stopped:
+def _startup_error(caplog, asset_manager=None, *, kind, level=logging.ERROR):
+    with caplog.at_level(level), pytest.raises(SystemExit) as stopped:
         main.setup_database(asset_manager or _AssetsOn())
     assert stopped.value.code == 1
     assert "--disable-assets" in caplog.text
-    assert f"ASSETS_STARTUP_FAILED: {kind or ''}" in caplog.text
+    assert f"ASSETS_STARTUP_FAILED: {kind}\n" in caplog.text
     return caplog.text
 
 
@@ -65,7 +65,7 @@ def test_lock_held_by_another_comfyui(db_path, caplog):
     holder = FileLock(db_path + ".lock")
     holder.acquire(timeout=0)
     try:
-        error = _startup_error(caplog)
+        error = _startup_error(caplog, kind="in_use")
     finally:
         holder.release()
 
@@ -80,7 +80,7 @@ def test_database_locked_by_another_program(db_path, caplog):
     other = sqlite3.connect(db_path, isolation_level=None)
     other.execute("BEGIN EXCLUSIVE")
     try:
-        error = _startup_error(caplog)
+        error = _startup_error(caplog, kind="locked")
     finally:
         other.close()
 
@@ -92,7 +92,7 @@ def test_corrupt_database(db_path, caplog):
     with open(db_path, "wb") as f:
         f.write(b"not a database" * 1000)
 
-    error = _startup_error(caplog)
+    error = _startup_error(caplog, kind="corrupt")
 
     assert f"The asset database '{db_path}' is corrupt (file is not a database)." in error
     assert "Move that file aside, or delete it, and start again" in error
@@ -101,7 +101,7 @@ def test_corrupt_database(db_path, caplog):
 def test_database_from_a_newer_comfyui(db_path, caplog):
     _stamp(db_path, "0099_from_a_newer_release")
 
-    error = _startup_error(caplog)
+    error = _startup_error(caplog, kind="newer_revision")
 
     assert f"The asset database '{db_path}' was last used by a newer version of ComfyUI" in error
     assert "0099_from_a_newer_release" in error
@@ -111,19 +111,20 @@ def test_database_from_a_newer_comfyui(db_path, caplog):
 def test_failed_upgrade(db_path, caplog):
     _stamp(db_path, "0006_add_loader_path")  # but none of 0006's tables, so the next migration fails
 
-    error = _startup_error(caplog)
+    error = _startup_error(caplog, kind="other")
 
     assert f"Could not open or upgrade the asset database '{db_path}': no such table" in error
     assert "If the database is damaged, move that file aside and start again" in error
     assert "delete it" not in error
     assert "Error upgrading database" not in error  # its traceback is at DEBUG
+    assert "Run with --verbose DEBUG for the full error." in error
 
 
 @pytest.mark.skipif(sys.platform == "win32" or os.geteuid() == 0, reason="needs POSIX permissions enforced")
 def test_folder_not_writable(tmp_path, db_path, caplog):
     os.chmod(tmp_path, 0o555)
     try:
-        error = _startup_error(caplog)
+        error = _startup_error(caplog, kind="not_writable")
     finally:
         os.chmod(tmp_path, 0o755)
 
@@ -134,16 +135,23 @@ def test_folder_not_writable(tmp_path, db_path, caplog):
 def test_database_path_is_a_directory(db_path, caplog):
     os.mkdir(db_path)
 
-    error = _startup_error(caplog)
+    error = _startup_error(caplog, kind="not_writable")
 
     assert f"ComfyUI can't create, open or write the asset database '{db_path}'" in error
     assert "the database path is a writable file" in error
     assert "delete it" not in error
 
 
-def test_folder_path_runs_through_a_file(tmp_path, monkeypatch, db_path, caplog):
+@pytest.mark.parametrize(
+    "parts",
+    [
+        ("taken", "comfyui.db"),
+        pytest.param(("taken", "sub", "comfyui.db"), marks=pytest.mark.skipif(sys.platform == "win32", reason="Windows reports this as a missing path")),
+    ],
+)
+def test_folder_path_runs_through_a_file(tmp_path, monkeypatch, db_path, caplog, parts):
     (tmp_path / "taken").write_text("")
-    path = str(tmp_path / "taken" / "sub" / "comfyui.db")
+    path = str(tmp_path.joinpath(*parts))
     monkeypatch.setattr(db_module.args, "database_url", f"sqlite:///{path}")
 
     error = _startup_error(caplog, kind="path_blocked")
@@ -187,6 +195,17 @@ def _start_and_stop(db_path):
 
 
 @pytest.mark.skipif(sys.platform == "win32" or os.geteuid() == 0, reason="needs POSIX permissions enforced")
+def test_read_only_backup_left_by_an_earlier_run_is_named(db_path, caplog):
+    _start_and_stop(db_path)
+    open(db_path + ".bkp", "a").close()
+    os.chmod(db_path + ".bkp", 0o444)
+
+    error = _startup_error(caplog, kind="not_writable")
+
+    assert f"[Errno 13] Permission denied: '{db_path}.bkp'" in error
+
+
+@pytest.mark.skipif(sys.platform == "win32" or os.geteuid() == 0, reason="needs POSIX permissions enforced")
 def test_unwritable_database_the_permission_check_misses(db_path, monkeypatch, caplog):
     # e.g. a Windows deny-write ACL, which os.access doesn't see; the write at startup does.
     _start_and_stop(db_path)
@@ -225,7 +244,7 @@ def test_file_held_open_by_another_process_on_windows(monkeypatch, db_path, capl
 
     monkeypatch.setattr(db_module, "prepare_file_db_path", _sharing_violation)
 
-    error = _startup_error(caplog)
+    error = _startup_error(caplog, kind="locked")
 
     assert f"The asset database '{db_path}' is locked by another program" in error
 
@@ -235,7 +254,7 @@ def test_failure_after_the_database_opened_doesnt_suggest_deleting_it(db_path, c
         def startup(self):
             raise RuntimeError("hash mode state unreadable")
 
-    error = _startup_error(caplog, _StartupFails())
+    error = _startup_error(caplog, _StartupFails(), kind="other")
 
     assert f"Could not open or upgrade the asset database '{db_path}': hash mode state unreadable" in error
     assert "delete it" not in error
@@ -247,16 +266,33 @@ def test_failure_after_the_database_opened_doesnt_suggest_deleting_it(db_path, c
 def test_database_url_that_is_not_sqlite_file_url(monkeypatch, db_path, caplog, url):
     monkeypatch.setattr(db_module.args, "database_url", url)
 
-    with caplog.at_level(logging.DEBUG):
-        error = _startup_error(caplog, kind="unsupported_url")
+    error = _startup_error(caplog, kind="unsupported_url", level=logging.DEBUG)
 
-    assert "--database-url must start with sqlite:///, like sqlite:///" in error
+    assert '--database-url must start with sqlite:///, like "sqlite:///' in error
     assert url not in error
     assert "secret" not in caplog.text
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="checks the POSIX four-slash form")
-def test_default_database_gets_an_absolute_example_url(tmp_path, monkeypatch, db_path, caplog):
+def test_default_database_in_use_suggests_an_absolute_database_url(tmp_path, monkeypatch, db_path, caplog):
+    user_dir = tmp_path / "user dir"
+    user_dir.mkdir()
+    monkeypatch.setattr(db_module.args, "database_url", None)
+    monkeypatch.setattr(db_module, "get_legacy_default_db_path", lambda: None)
+    monkeypatch.setattr(folder_paths, "get_user_directory", lambda: str(user_dir))
+    holder = FileLock(str(user_dir / "comfyui.db.lock"))
+    holder.acquire(timeout=0)
+    try:
+        error = _startup_error(caplog, kind="in_use")
+    finally:
+        holder.release()
+
+    assert f'Or give this ComfyUI its own database: --database-url "sqlite:///{user_dir / "comfyui-2.db"}"' in error
+    assert '--database-url "sqlite:////' in error
+
+
+def test_no_second_database_suggested_for_a_broken_one(tmp_path, monkeypatch, db_path, caplog):
+    # A fresh file would quietly start a second, empty catalog instead of fixing this one.
     user_dir = tmp_path / "user"
     user_dir.mkdir()
     (user_dir / "comfyui.db").write_bytes(b"not a database" * 1000)
@@ -266,8 +302,7 @@ def test_default_database_gets_an_absolute_example_url(tmp_path, monkeypatch, db
 
     error = _startup_error(caplog, kind="corrupt")
 
-    assert f"Or give this ComfyUI its own database: --database-url sqlite:///{user_dir / 'comfyui-2.db'}" in error
-    assert "--database-url sqlite:////" in error
+    assert "comfyui-2.db" not in error
 
 
 def test_opens_from_an_install_folder_with_a_percent_sign(tmp_path, monkeypatch, db_path):
@@ -336,7 +371,7 @@ def test_question_mark_in_the_default_path_stops_startup_on_older_sqlalchemy(tmp
     monkeypatch.setattr(folder_paths, "get_user_directory", lambda: str(user_dir))
     monkeypatch.setattr(db_module, "URL", _UnquotedURL)
 
-    error = _startup_error(caplog)
+    error = _startup_error(caplog, kind="path_unsupported")
 
     assert f"The asset database path '{user_dir / 'comfyui.db'}' contains a '?'" in error
     assert "upgrade SQLAlchemy to 2.1 or newer" in error
