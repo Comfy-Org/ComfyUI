@@ -1415,7 +1415,14 @@ class VAE:
 
     def decode_tiled(self, samples, tile_x=None, tile_y=None, overlap=None, tile_t=None, overlap_t=None):
         self.throw_exception_if_invalid()
-        memory_used = self.memory_used_decode(self._tile_bounded_shape(samples.shape, tile_x, tile_y, tile_t), self.vae_dtype)
+        if isinstance(self.first_stage_model, comfy.ldm.kandinsky6.audio_vae.Kandinsky6AudioVAE):
+            # K6 audio latents are time-first [B, T, C]: bound the time axis, not the channel axis.
+            shape = list(samples.shape)
+            if tile_x is not None:
+                shape[1] = min(shape[1], tile_x)
+            memory_used = self.memory_used_decode(tuple(shape), self.vae_dtype)
+        else:
+            memory_used = self.memory_used_decode(self._tile_bounded_shape(samples.shape, tile_x, tile_y, tile_t), self.vae_dtype)
         model_management.load_models_gpu([self.patcher], memory_required=memory_used, force_full_load=self.disable_offload)
         dims = samples.ndim - 2
         args = {}

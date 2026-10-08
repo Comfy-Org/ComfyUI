@@ -277,18 +277,21 @@ def test_vae_decode_oom_fallback_tiles_k6_audio():
     vae = _k6_audio_vae()
     torch.manual_seed(0)
     samples = torch.randn(1, 50, 40)
-    calls = [0]
+    lengths = []
     real_decode = vae.first_stage_model.decode
 
     def flaky_decode(a, **kwargs):
-        calls[0] += 1
-        if calls[0] == 1:
+        lengths.append(a.shape[1])
+        if a.shape[1] == samples.shape[1]:
             raise model_management.OOM_EXCEPTION("test")
         return real_decode(a, **kwargs)
 
     vae.first_stage_model.decode = flaky_decode
+    # Pin the budget so the fallback must pick a tile below the full length on any host.
+    vae.patcher.get_free_memory = lambda device: 4_000_000_000
     out = vae.decode(samples)
-    assert calls[0] > 1
+    assert lengths[0] == samples.shape[1]
+    assert all(length < samples.shape[1] for length in lengths[1:])
     assert tuple(out.shape) == (1, 50 * 32, 1)
     assert torch.isfinite(out).all()
 
