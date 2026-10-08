@@ -9,7 +9,6 @@ import sys
 from pathlib import Path
 
 import pytest
-import sqlalchemy
 import torch
 from alembic import command
 from alembic.script import ScriptDirectory
@@ -234,13 +233,7 @@ def test_opens_from_an_install_folder_with_a_percent_sign(tmp_path, monkeypatch,
     "folder",
     [
         "100%20x",
-        pytest.param(
-            "what?",
-            marks=pytest.mark.skipif(
-                sys.platform == "win32" or sqlalchemy.__version__ < "2.1",
-                reason="? isn't allowed in Windows paths, and SQLAlchemy 2.0 URLs can't carry it",
-            ),
-        ),
+        pytest.param("what?", marks=pytest.mark.skipif(sys.platform == "win32", reason="? isn't allowed in Windows paths")),
     ],
 )
 def test_default_database_path_is_used_literally(tmp_path, monkeypatch, db_path, folder):
