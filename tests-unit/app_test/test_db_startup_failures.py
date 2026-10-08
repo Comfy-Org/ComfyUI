@@ -159,6 +159,42 @@ def test_read_only_database_file_that_needs_an_upgrade(db_path, caplog):
     assert "delete it" not in error
 
 
+def _start_and_stop(db_path):
+    """Open the database the way a previous run would, then let it go."""
+    main.setup_database(_AssetsOn())
+    db_module._db_lock.release(force=True)
+    db_module._db_lock = None
+
+
+@pytest.mark.skipif(sys.platform == "win32" or os.geteuid() == 0, reason="needs POSIX permissions enforced")
+def test_read_only_database_file_at_the_current_revision(db_path, caplog):
+    _start_and_stop(db_path)
+    os.chmod(db_path, 0o444)
+
+    error = _startup_error(caplog)
+
+    assert f"ComfyUI can't create, open or write the asset database '{db_path}' (attempt to write a readonly database)" in error
+    assert "delete it" not in error
+
+
+def test_new_database_passes_the_write_check(db_path):
+    main.setup_database(_AssetsOn())
+
+    with sqlite3.connect(db_path) as conn:
+        assert conn.execute("SELECT version_num FROM alembic_version").fetchone()[0] == _head()
+
+
+def test_another_reader_holding_the_database_open_doesnt_stop_startup(db_path):
+    _start_and_stop(db_path)
+    reader = sqlite3.connect(db_path, isolation_level=None)
+    reader.execute("BEGIN")
+    reader.execute("SELECT count(*) FROM alembic_version").fetchone()
+    try:
+        main.setup_database(_AssetsOn())
+    finally:
+        reader.close()
+
+
 def test_file_held_open_by_another_process_on_windows(monkeypatch, db_path, caplog):
     def _sharing_violation(path):
         error = PermissionError(errno.EACCES, "The process cannot access the file", path)

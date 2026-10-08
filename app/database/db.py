@@ -281,9 +281,19 @@ def _init_file_db(db_url):
         copy_legacy_default_db(db_path)
         db_exists = os.path.exists(db_path)
         _migrate_and_bind(db_url, db_path, db_exists)
+        _check_writable()
     except Exception:
         _db_lock.release()
         raise
+
+
+def _check_writable():
+    """A read-only database at the current revision opens and reads fine, so write to it once: a no-op."""
+    with WriteSession() as session:
+        connection = session.connection()
+        version = connection.exec_driver_sql("PRAGMA user_version").scalar_one()
+        connection.exec_driver_sql(f"PRAGMA user_version = {int(version)}")
+        session.commit()
 
 
 # NORMAL: commits skip the fsync that held the write lock. A power loss or OS crash can
