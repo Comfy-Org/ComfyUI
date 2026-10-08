@@ -171,7 +171,7 @@ vram_group.add_argument("--lowvram", action="store_true", help="Doesn't do anyth
 vram_group.add_argument("--novram", action="store_true", help="When lowvram isn't enough.")
 vram_group.add_argument("--cpu", action="store_true", help="To use the CPU for everything (slow).")
 
-parser.add_argument("--reserve-vram", type=float, default=73.5, help="Set the amount of vram in GB you want to reserve for use by your OS/other software. By default some amount is reserved depending on your OS.")
+parser.add_argument("--reserve-vram", type=float, default=84, help="Set the amount of vram in GB you want to reserve for use by your OS/other software. By default some amount is reserved depending on your OS.")
 parser.add_argument("--vram-headroom", type=float, default=0, help="Set the amount of vram in GB for DynamicVRAM to maintain as extra headroom above default. ComfyUI will try and keep this much VRAM completely free and unused, even counting VRAM from other apps.")
 parser.add_argument("--disable-nvml-pressure", action="store_true", help="Use CUDA instead of NVML for DynamicVRAM memory pressure.")
 
