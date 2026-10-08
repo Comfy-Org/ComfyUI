@@ -87,7 +87,7 @@ def test_database_an_interrupted_upgrade_left_unupgradable_is_recreated(
     [moved] = _moved_aside(default_db)
     assert os.stat(moved).st_ino == old_file  # moved aside, not deleted
     # A handled failure is one warning naming the moved file: no ERROR, no traceback above DEBUG.
-    shown = [r for r in caplog.records if r.levelno >= logging.INFO and r.name == "root"]
+    shown = [r for r in caplog.records if r.levelno >= logging.INFO]
     [warning] = [r for r in shown if r.levelno >= logging.WARNING and "Database upgrade failed" in r.getMessage()]
     assert error in warning.getMessage() and moved in warning.getMessage()
     assert "[SQL:" not in warning.getMessage()  # the driver's message, not SQLAlchemy's wrapper
@@ -131,7 +131,8 @@ def test_failed_upgrade_of_an_explicit_database_url_is_not_recreated(explicit_db
     ["BEGIN IMMEDIATE"],  # others may still read (the pre-upgrade backup), not write
     ["BEGIN", "SELECT count(*) FROM sqlite_master"],  # a reader: the upgrade can't commit, the probe could
 ])
-def test_database_locked_by_another_process_is_not_recreated(default_db, hold):
+def test_database_locked_by_another_process_is_not_recreated(default_db, hold, monkeypatch, caplog):
+    monkeypatch.setattr(db_module, "_BACKUP_TIMEOUT_SECONDS", 0.2)
     _make_db(default_db, revision="0006_add_loader_path")
     holder = sqlite3.connect(default_db, isolation_level=None)
     for statement in hold:
@@ -144,6 +145,7 @@ def test_database_locked_by_another_process_is_not_recreated(default_db, hold):
 
     assert _moved_aside(default_db) == []
     assert _revision(default_db) == "0006_add_loader_path"
+    _assert_upgrade_error_logged(caplog, "database is locked")
 
 
 def test_revision_from_a_newer_release_reports_the_upgrade_error(default_db):
@@ -229,7 +231,8 @@ def test_failed_move_puts_every_file_back(default_db, monkeypatch, caplog):
     _assert_upgrade_error_logged(caplog, "no such index")
 
 
-def test_unupgradable_database_held_by_another_process_is_not_moved(default_db, caplog):
+def test_unupgradable_database_held_by_another_process_is_not_moved(default_db, monkeypatch, caplog):
+    monkeypatch.setattr(db_module, "_BACKUP_TIMEOUT_SECONDS", 0.2)
     # The upgrade fails on the schema before it needs a lock, so its error says nothing about the holder.
     _make_db(default_db, revision="0001_assets")
     _execute(default_db, "DROP INDEX ix_asset_info_meta_key_val_bool")
@@ -250,7 +253,8 @@ def test_unupgradable_database_held_by_another_process_is_not_moved(default_db, 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="Windows refuses to rename an open file, so the move is undone")
 @pytest.mark.parametrize("wal", [False, True])
-def test_unupgradable_database_open_only_for_reading_is_moved(default_db, wal, caplog):
+def test_unupgradable_database_open_only_for_reading_is_moved(default_db, wal, monkeypatch, caplog):
+    monkeypatch.setattr(db_module, "_BACKUP_TIMEOUT_SECONDS", 0.2)
     # Known limitation: only a writer stops the move. A reader keeps reading the moved file.
     _make_db(default_db, revision="0001_assets", marker="original")
     _execute(default_db, "DROP INDEX ix_asset_info_meta_key_val_bool")
@@ -269,7 +273,7 @@ def test_unupgradable_database_open_only_for_reading_is_moved(default_db, wal, c
     [moved] = _moved_aside(default_db)
     assert os.path.exists(moved + "-wal") == wal  # the reader keeps the WAL open, so it moves with the database
     assert os.path.exists(moved + "-shm") == wal
-    shown = [r for r in caplog.records if r.levelno >= logging.INFO and r.name == "root"]
+    shown = [r for r in caplog.records if r.levelno >= logging.INFO]
     assert not [r for r in shown if r.levelno >= logging.ERROR or r.exc_info]  # recovered: warnings only
     # Without WAL the reader also blocks the pre-upgrade restore; on a recovered start that is a warning.
     assert any(r.levelno == logging.WARNING and "Restoring the database" in r.getMessage() for r in shown) == (not wal)
@@ -277,7 +281,7 @@ def test_unupgradable_database_open_only_for_reading_is_moved(default_db, wal, c
         assert conn.execute("SELECT value FROM marker").fetchone() == ("original",)
 
 
-def test_upgrade_failure_that_is_not_recovered_is_logged_as_an_error(explicit_db, monkeypatch, caplog):
+def test_upgrade_failure_that_is_not_recovered_is_logged_as_an_error(explicit_db, caplog):
     _make_db(explicit_db, revision="0001_assets")
     _execute(explicit_db, "DROP INDEX ix_asset_info_meta_key_val_bool")
 
