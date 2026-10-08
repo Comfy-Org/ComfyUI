@@ -618,14 +618,14 @@ def _returned_files(
     candidates: dict[str, list[tuple[str, int]]], should_stop: ShouldStop, listings: DirListings | None = None
 ) -> dict[str, int]:
     """Content id -> mtime_ns of the newest candidate row whose file its directory lists
-    again at the row's size. Each directory is listed once, or taken from ``listings``
+    again, settled, at the row's size. Each directory is listed once, or taken from ``listings``
     when the caller has already walked it: a directory Core recreated empty (a save, an
     upload) lists nothing, so its rows stay missing. A name the listing spells
     differently (a case-insensitive filesystem) is left to the per-file revive."""
     by_dir: dict[str, list[tuple[str, list[tuple[str, int]]]]] = {}
     for path, rows in candidates.items():
         by_dir.setdefault(os.path.dirname(path), []).append((os.path.basename(path), rows))
-    returned: dict[str, int] = {}
+    matched: list[tuple[str, os.stat_result, str]] = []
     for directory, files in by_dir.items():
         if should_stop():
             return {}
@@ -652,8 +652,11 @@ def _returned_files(
                 continue
             match = next((content_id for content_id, size in rows if size == stat_result.st_size), None)
             if match is not None:
-                returned[match] = get_mtime_ns(stat_result)
-    return returned
+                matched.append((os.path.join(directory, name), stat_result, match))
+    # A file still being written (a copy that preallocates its size) waits on the watch
+    # list, as a new file does, and later comes back through the per-file revive.
+    settled = set(_two_stat_admit([(path, st) for path, st, _ in matched], None, should_stop)[0])
+    return {content_id: get_mtime_ns(st) for path, st, content_id in matched if path in settled}
 
 
 def revive_returned_references_safely(

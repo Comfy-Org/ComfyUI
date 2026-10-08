@@ -3,7 +3,8 @@ whose file is gone, splitting a row whose bytes changed, and recovering one
 whose file came back. Recovery never fires for a path a live row already
 occupies, so a restored file can never leave two live rows describing one
 location. With hashing on, the returning file's hash must identify exactly one
-missing row; with hashing off, its size and modification time must match.
+missing row; with hashing off, its size must match, and its modification time too
+once REVIVE_WINDOW has passed since a scan marked the row missing.
 """
 
 from __future__ import annotations

@@ -14,7 +14,7 @@ import pytest
 import sqlalchemy as sa
 from sqlalchemy.orm import Session as SASession, sessionmaker
 
-from app.assets import mode, scanner, seeder as seeder_module
+from app.assets import mode, scanner, scanner_admission, seeder as seeder_module
 from app.assets.database.models import Asset, AssetContent, AssetTag
 from app.assets.database.queries.records import (
     create_content,
@@ -514,3 +514,20 @@ def test_a_file_the_bulk_pass_missed_still_keeps_its_row(root, session, monkeypa
     assert [(c.is_missing, c.mtime_ns) for c in _contents(session)] == [
         (False, path.stat().st_mtime_ns) for path in sorted(files)
     ]
+
+
+def test_a_file_still_being_written_waits_on_the_watch_list(root, session, monkeypatch):
+    files, _ = _gone_and_copied_back(root, session)
+
+    def still_copying(_seconds):
+        stat_result = files[0].stat()  # the copy is still writing into a preallocated file
+        os.utime(files[0], ns=(stat_result.st_atime_ns, stat_result.st_mtime_ns + 1_000_000_000))
+
+    monkeypatch.setattr(scanner_admission.time, "sleep", still_copying)
+    progress = seeder_module._ScanState()
+    scanner.revive_returned_references_safely("output", progress)
+
+    assert progress.recovered == len(files) - 1
+    missing = [c.path for c in _contents(session) if c.is_missing]
+    assert missing == [str(files[0])]
+    assert [entry.path for entry in _WATCH_LIST] == [str(files[0])]

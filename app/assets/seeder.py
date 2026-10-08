@@ -133,8 +133,8 @@ class _ScanState:
     # models listing is not counted.
     dirs_listed: int = 0
     # os.stat calls on files in the reference sync, output-listing check, discovery,
-    # admission, seed, watch-list and enrich loops. Hashing's own stability stats are
-    # not counted.
+    # admission, seed, watch-list and enrich loops. Hashing's own stability stats and
+    # the bulk revive's are not counted.
     files_statted: int = 0
     # Time blocked at the pause gate.
     paused_s: float = 0.0
@@ -204,7 +204,8 @@ class _AssetSeeder:
         self._prune_first: bool = False
         # The startup prune waits for the node list: a custom node may register its model
         # folders in INPUT_TYPES, and a prune before that would mark their rows missing.
-        # A server no client loads the node list from never prunes, short of the prune API.
+        # A server no client loads the node list from never prunes, short of the prune API;
+        # a prune that fails stays pending, so the next scan tries again.
         self._prune_pending: bool = False
         self._node_list_served: bool = False
         self._progress_callback: ProgressCallback | None = None
