@@ -399,6 +399,21 @@ See also: [https://www.comfy.org/](https://www.comfy.org/)
 
 > _psst — we're hiring!_ Help build ComfyUI: [comfy.org/careers](https://www.comfy.org/careers)
 
+## V2 Custom Node API
+
+Import `io` and `sdk` from `comfy_api.latest` for node schemas, typed resource
+handles, and context services. The API works independently of an optional
+sandbox overlay; service availability and permissions depend on the installed
+provider.
+
+- [Python typing contract](comfy_api/latest/_sdk_public.pyi)
+- [Machine-readable API inventory](comfy_api/latest/api-spec.json), including
+  nested schema types, signatures, argument kinds, and async operations
+
+Regenerate with `python -m comfy_api.generate_api_spec`; verify freshness with
+`python -m comfy_api.generate_api_spec --check`. Neither command requires the
+private sandbox overlay.
+
 ## Frontend Development
 
 As of August 15, 2024, we have transitioned to a new frontend, which is now hosted in a separate repository: [ComfyUI Frontend](https://github.com/Comfy-Org/ComfyUI_frontend). The compiled JS files (from TS/Vue) are published to [pypi](https://pypi.org/project/comfyui-frontend-package) and installed as a dependency in ComfyUI.
