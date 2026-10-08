@@ -6,8 +6,8 @@ generation. A recurrent state can't be truncated, so a new prompt resumes from t
 checkpoint inside its common prefix with the cached tokens and prefills only the rest; the KV is
 truncated to match through the decode bias.
 
-COMFY_LLM_PREFIX_CACHE: off (default) | on (kept in VRAM, moved to pinned RAM when another model
-needs the memory) | ram (moved to pinned RAM after every call).
+COMFY_LLM_PREFIX_CACHE: off (default) | on (kept in VRAM, moved to RAM when another model needs the
+memory) | ram (moved to RAM after every call). It is dropped when there is no RAM for it.
 """
 import logging
 import os
@@ -34,9 +34,13 @@ def _sync(device):
         torch.cuda.synchronize(device)
 
 
-def _pinned(t):
-    h = torch.empty(t.shape, dtype=t.dtype, pin_memory=True)
-    h.copy_(t, non_blocking=True)
+def _host(t):
+    # pinned when the driver allows it; ComfyUI's own pinned weights can exhaust that before RAM runs out
+    try:
+        h = torch.empty(t.shape, dtype=t.dtype, pin_memory=True)
+    except RuntimeError:
+        h = torch.empty(t.shape, dtype=t.dtype)
+    h.copy_(t, non_blocking=h.is_host())
     return h
 
 
@@ -48,7 +52,7 @@ class _Slot:
         self.capacity = next(iter(self.attn.values())).key.shape[2]
         self.ids = list(ids)  # the tokens the KV holds
         self.checkpoints = checkpoints  # {position: {layer: (conv, recurrent)}}
-        self.parked = None  # {layer: (key, value)} in pinned RAM
+        self.parked = None  # {layer: (key, value)} in host RAM
 
     def nbytes(self):
         if self.parked is not None:
@@ -58,16 +62,16 @@ class _Slot:
         return n + sum(c.nbytes + r.nbytes for st in self.checkpoints.values() for c, r in st.values())
 
     def park(self):
-        # copy the used KV and the checkpoints to pinned host memory and free the device copies
+        # copy the used KV and the checkpoints to host memory and free the device copies
         if self.parked is not None:
             return
         t = time.perf_counter()
         n = len(self.ids)
-        self.parked = {i: (_pinned(kv.key[:, :, :n]), _pinned(kv.value[:, :, :n])) for i, kv in self.attn.items()}
-        self.checkpoints = {pos: {i: (_pinned(c), _pinned(r)) for i, (c, r) in st.items()} for pos, st in self.checkpoints.items()}
+        self.parked = {i: (_host(kv.key[:, :, :n]), _host(kv.value[:, :, :n])) for i, kv in self.attn.items()}
+        self.checkpoints = {pos: {i: (_host(c), _host(r)) for i, (c, r) in st.items()} for pos, st in self.checkpoints.items()}
         torch.cuda.synchronize()
         self.attn = None
-        logging.info("llm prefix cache: moved %.2f GB to pinned RAM in %.2f s", self.nbytes() / 1e9, time.perf_counter() - t)
+        logging.info("llm prefix cache: moved %.2f GB to RAM in %.2f s", self.nbytes() / 1e9, time.perf_counter() - t)
 
 
 def _match(ids):
@@ -199,7 +203,7 @@ def finish(pkv, ids, generated):
     stats["end_s"] = round(time.perf_counter() - stats["t0"], 3)
     stats["cache_gb"] = round(_slot.nbytes() / 1e9, 2)
     if MODE == "ram":
-        _slot.park()
+        _park_or_drop()
     logging.info("llm prefix cache: %s", {k: v for k, v in stats.items() if k != "t0"})
 
 
@@ -208,10 +212,19 @@ def drop():
     _slot = None
 
 
+def _park_or_drop():
+    # parking must never fail the caller: without the RAM for it, the cache is dropped
+    try:
+        _slot.park()
+    except RuntimeError as e:
+        logging.warning("llm prefix cache: dropped, could not move it to RAM: %s", e)
+        drop()
+
+
 def on_memory_pressure(memory_required, device):
     # model_management.free_memory hook: park instead of holding VRAM another model needs
     if _slot is None or _slot.parked is not None or device is None or device.type != "cuda":
         return
     import comfy.model_management
     if comfy.model_management.get_free_memory(device) < memory_required:
-        _slot.park()
+        _park_or_drop()
