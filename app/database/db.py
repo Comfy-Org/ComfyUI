@@ -283,24 +283,25 @@ def _init_file_db(db_url):
             _migrate_and_bind(db_url, db_path, os.path.exists(db_path), True)  # defer_upgrade_error
         except Exception as e:
             corrupt = is_recoverable_corruption(e)
-            deferred = getattr(e, "upgrade_discards_the_catalog", False)  # _migrate logged it at debug only
-            recreate = (
+            deferred = getattr(e, "upgrade_error_deferred", False)  # _migrate logged it at debug only
+            recreated = (
                 not corrupt
-                and _is_default_db()
                 and deferred
+                and _is_default_db()
                 and error_kind(e) != "database_locked"  # another process has it open
+                and _recreate_after_failed_upgrade(db_path, e)
             )
-            if deferred and not recreate:
+            if deferred and not recreated:
                 logging.error("Error upgrading database: ", exc_info=e)
+            if getattr(e, "restore_failure", None):
+                message, restore_error = e.restore_failure
+                if recreated:
+                    logging.warning(message)
+                else:
+                    logging.error(message, exc_info=restore_error)
             if corrupt:
                 _quarantine_and_restore(db_path, e)
-            elif recreate:
-                try:
-                    _recreate_after_failed_upgrade(db_path, e)
-                except Exception:
-                    logging.error("Error upgrading database: ", exc_info=e)
-                    raise
-            else:
+            elif not recreated:
                 raise
             _migrate_and_bind(db_url, db_path, os.path.exists(db_path))
     except Exception:
@@ -364,12 +365,13 @@ def _passes_integrity_check(path):
 
 
 def _recreate_after_failed_upgrade(db_path, error):
-    """The failed upgrade would have discarded the asset catalog, so start a new database instead."""
-    with closing(sqlite3.connect(db_path, timeout=0)) as conn:
-        try:
+    """Move the database aside so a new one is created: the failed upgrade would have discarded its asset
+    catalog anyway. False, with everything left in place, when that isn't safe or a move fails."""
+    try:
+        with closing(sqlite3.connect(db_path, timeout=0)) as conn:
             conn.execute("BEGIN IMMEDIATE")  # the upgrade's error can be a schema error while another process holds it
-        except sqlite3.OperationalError:
-            raise error
+    except sqlite3.Error:
+        return False
     aside_path = f"{db_path}.failed-upgrade-{time.strftime('%Y%m%d-%H%M%S')}"
     moved = []
     try:
@@ -384,11 +386,12 @@ def _recreate_after_failed_upgrade(db_path, error):
                 os.replace(dst, src)
             except OSError:
                 logging.exception(f"Could not move '{dst}' back to '{src}'")
-        raise error
+        return False
     logging.warning(
         f"Database upgrade failed ({getattr(error, 'orig', error)}): '{db_path}' was moved to "
         f"'{aside_path}'; starting with a new database. The asset catalog is rebuilt by rescanning your files."
     )
+    return True
 
 
 def _quarantine_and_restore(db_path, error):
@@ -575,7 +578,9 @@ def _migrate(conn, engine, write_engine, config, db_path, db_exists, defer_upgra
             command.upgrade(config, target_rev)
             logging.info(f"Database upgraded from {current_rev} to {target_rev}")
         except Exception as e:
-            if defer_upgrade_error and discards_catalog:  # the caller logs it unless a new database replaces this one
+            # Deferred: the caller logs these as errors unless a new database replaces this one.
+            e.upgrade_error_deferred = defer_upgrade_error and discards_catalog
+            if e.upgrade_error_deferred:
                 logging.debug("Error upgrading database: ", exc_info=True)
             else:
                 logging.exception("Error upgrading database: ")
@@ -584,12 +589,15 @@ def _migrate(conn, engine, write_engine, config, db_path, db_exists, defer_upgra
                 try:
                     _backup_database(backup_path, db_path)
                     os.remove(backup_path)
-                except Exception:
-                    logging.exception(
+                except Exception as restore_error:
+                    message = (
                         f"Restoring the database from its pre-upgrade backup, or removing the "
                         f"backup afterwards, failed; the pre-upgrade copy is kept at {backup_path}"
                     )
-            e.upgrade_discards_the_catalog = defer_upgrade_error and discards_catalog
+                    if e.upgrade_error_deferred:
+                        e.restore_failure = (message, restore_error)
+                    else:
+                        logging.exception(message)
             raise e
 
         if discards_catalog:

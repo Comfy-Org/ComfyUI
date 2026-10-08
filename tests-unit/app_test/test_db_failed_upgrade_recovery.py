@@ -182,7 +182,7 @@ def _recreate_with_a_journal_left_behind(monkeypatch):
 
     def recreate(db_path, error):
         open(db_path + "-journal", "wb").close()  # a sidecar another connection left
-        real_recreate(db_path, error)
+        return real_recreate(db_path, error)
 
     monkeypatch.setattr(db_module, "_recreate_after_failed_upgrade", recreate)
 
@@ -242,13 +242,15 @@ def test_unupgradable_database_held_by_another_process_is_not_moved(default_db, 
         holder.close()
 
     _assert_upgrade_error_logged(caplog, "no such index")  # failed on the schema, not the lock
+    [restore] = [r for r in caplog.records if "Restoring the database" in r.getMessage()]
+    assert restore.levelno == logging.ERROR and restore.exc_info  # not recovered: still an error
     assert glob.glob(default_db + ".failed-upgrade-*") == []
     assert _revision(default_db) == "0001_assets"
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="Windows refuses to rename an open file, so the move is undone")
 @pytest.mark.parametrize("wal", [False, True])
-def test_unupgradable_database_open_only_for_reading_is_moved(default_db, wal):
+def test_unupgradable_database_open_only_for_reading_is_moved(default_db, wal, caplog):
     # Known limitation: only a writer stops the move. A reader keeps reading the moved file.
     _make_db(default_db, revision="0001_assets", marker="original")
     _execute(default_db, "DROP INDEX ix_asset_info_meta_key_val_bool")
@@ -267,6 +269,10 @@ def test_unupgradable_database_open_only_for_reading_is_moved(default_db, wal):
     [moved] = _moved_aside(default_db)
     assert os.path.exists(moved + "-wal") == wal  # the reader keeps the WAL open, so it moves with the database
     assert os.path.exists(moved + "-shm") == wal
+    shown = [r for r in caplog.records if r.levelno >= logging.INFO and r.name == "root"]
+    assert not [r for r in shown if r.levelno >= logging.ERROR or r.exc_info]  # recovered: warnings only
+    # Without WAL the reader also blocks the pre-upgrade restore; on a recovered start that is a warning.
+    assert any(r.levelno == logging.WARNING and "Restoring the database" in r.getMessage() for r in shown) == (not wal)
     with closing(sqlite3.connect(moved)) as conn:
         assert conn.execute("SELECT value FROM marker").fetchone() == ("original",)
 
