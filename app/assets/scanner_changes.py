@@ -22,6 +22,7 @@ from app.assets.database.queries.records import (
     create_content,
     create_record,
     mark_content_missing,
+    revive_contents,
     unset_content_missing,
 )
 from app.assets.helpers import get_utc_now, path_prefix_matcher, sql_path_under_prefix_batches, to_stored_hash
@@ -158,22 +159,13 @@ def recover_missing_content_by_stat(
     ]
     if not matches:
         return "no_match"
-    # "= 0", not "IS 0", so the partial live-path index serves it instead of a table scan.
-    occupied = session.scalar(
-        sa.select(AssetContent.id)
-        .where(AssetContent.path == path, AssetContent.is_missing == sa.false())
-        .limit(1)
-    )
-    if occupied is not None:
-        return "no_match"
     # Several match only when earlier offline cycles left copies of one file behind;
-    # the newest is the one that was live last.
+    # the newest is the one that was live last. The bulk revive's write does the rest,
+    # and skips it if a live row now holds the path.
     recovered = max(matches, key=lambda candidate: (candidate.created_at, candidate.id))
-    if recovered.mtime_ns != mtime_ns:
-        # As a same-size mtime bump on a live row: keep the row, drop the unproven hash.
-        recovered.mtime_ns, recovered.hash = mtime_ns, None
-    unset_content_missing(session, recovered.id)
-    return "recovered"
+    revived = revive_contents(session, {recovered.id: mtime_ns})
+    session.expire(recovered)
+    return "recovered" if revived else "no_match"
 
 
 def is_path_under_prefixes(path: str, prefixes: list[str]) -> bool:

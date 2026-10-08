@@ -618,11 +618,10 @@ def _returned_files(
     candidates: dict[str, list[tuple[str, int]]], should_stop: ShouldStop, listings: DirListings | None = None
 ) -> dict[str, int]:
     """Content id -> mtime_ns of the newest candidate row whose file its directory lists
-    again, settled, at the row's size. Each directory is listed once, or taken from ``listings``
-    when the caller has already walked it: a directory Core recreated empty (a save, an
-    upload) lists nothing, so its rows stay missing. A name the listing spells
-    differently (a case-insensitive filesystem) is not revived; the scan catalogues
-    the file under its on-disk spelling."""
+    again, settled, at the row's size. Each directory is listed once, or taken from
+    ``listings`` when the caller has already walked it. The listing is what matches names
+    exactly: on a case-insensitive filesystem a stat would also find a file under another
+    spelling, and the walk would then catalogue that spelling as a second live row."""
     by_dir: dict[str, list[tuple[str, list[tuple[str, int]]]]] = {}
     for path, rows in candidates.items():
         by_dir.setdefault(os.path.dirname(path), []).append((os.path.basename(path), rows))
