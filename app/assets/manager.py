@@ -1,7 +1,7 @@
 """Selects and implements the enabled and disabled asset managers.
 
-``default_asset_manager`` checks database dependencies before enabling assets
-and chooses ``NoAssets`` when the requested mode cannot run.
+``default_asset_manager`` chooses ``NoAssets`` only for ``--disable-assets``; main.py
+stops startup before that if assets are on and the database packages are missing.
 """
 
 from __future__ import annotations

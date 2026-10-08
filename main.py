@@ -23,7 +23,7 @@ console_log_level = get_console_log_level(args.verbose)
 file_log_outputs = get_file_log_outputs(args.verbose)
 setup_logger(log_level=console_log_level, file_outputs=file_log_outputs, use_stdout=args.log_stdout)
 
-from app.database.db import dependencies_available, get_database_url, init_db, lock_holder_db_path, missing_dependencies
+from app.database.db import dependencies_available, get_database_url, get_db_path, init_db, lock_holder_db_path, missing_dependencies
 from app.assets.event_log import error_kind
 from utils.install_util import get_missing_requirements_message
 from app.assets.lifecycle import cleanup_temp_filesystem
@@ -506,21 +506,21 @@ def database_failure_message(error, db_url):
     """What stopped the asset database from opening, and how to fix it."""
     if not db_url.startswith("sqlite:"):
         return f"--database-url must be a SQLite URL, like sqlite:///path/to/comfyui.db, not '{db_url}'.\n{WITHOUT_ASSETS}"
-    location = db_url.removeprefix("sqlite:///")
+    location = get_db_path() if db_url.startswith("sqlite:///") else db_url
     kind = error_kind(error)
     detail = getattr(error, "orig", None) or error
     if "Could not acquire lock on database" in str(error):
         what = f"Another ComfyUI is already using the asset database '{location}'."
-        fix = "Close the other ComfyUI and start this one again."
+        fix = "Close the other ComfyUI and start this one again, or, to run both, give this one its own database as below."
     elif kind == "database_locked":
         what = f"The asset database '{location}' is locked by another program ({detail})."
         fix = "Close any program that has it open, such as another ComfyUI or a database viewer, and start again."
     elif "Can't locate revision" in str(error):
         what = f"The asset database '{location}' was last used by a newer version of ComfyUI ({detail})."
         fix = "Update ComfyUI, or move that file aside and start again to create a new database."
-    elif kind == "permission_denied" or isinstance(error, FileExistsError):
+    elif kind in ("permission_denied", "read_only") or isinstance(error, FileExistsError):
         what = f"ComfyUI can't create or write the asset database '{location}' ({detail})."
-        fix = "Make its folder writable."
+        fix = "Make sure its folder is a writable directory and the file itself is writable."
     else:
         what = (f"The asset database '{location}' is corrupt ({detail})." if kind == "database_corrupt"
                 else f"Could not open or upgrade the asset database '{location}': {detail}")

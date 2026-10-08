@@ -23,6 +23,7 @@ try:
     from alembic.runtime.migration import MigrationContext
     from alembic.script import ScriptDirectory
     from sqlalchemy import create_engine, event
+    from sqlalchemy.engine import URL, make_url
     from sqlalchemy.exc import OperationalError
     from sqlalchemy.orm import sessionmaker
     from sqlalchemy.pool import StaticPool
@@ -92,7 +93,8 @@ def get_database_url():
     import folder_paths
 
     db_path = os.path.join(folder_paths.get_user_directory(), "comfyui.db")
-    return f"sqlite:///{db_path}"
+    # SQLAlchemy quotes it, so a ? or %xx in the path stays part of the file name.
+    return URL.create("sqlite", database=db_path).render_as_string()
 
 
 def get_legacy_default_db_path():
@@ -102,7 +104,7 @@ def get_legacy_default_db_path():
 def get_db_path():
     url = get_database_url()
     if url.startswith("sqlite:///"):
-        return url.split("///", 1)[1]
+        return make_url(url).database
     else:
         raise ValueError(f"Unsupported database URL '{url}'.")
 

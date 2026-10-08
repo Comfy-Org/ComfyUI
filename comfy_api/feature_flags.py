@@ -109,7 +109,7 @@ _CORE_FEATURE_FLAGS: dict[str, Any] = {
     "max_upload_size": args.max_upload_size * 1024 * 1024, # Convert MB to bytes
     "extension": {"manager": {"supports_v4": True}},
     "node_replacements": True,
-    # main.py replaces this at startup with the selected AssetManager's state, which is off without database dependencies.
+    # main.py replaces this at startup with the selected AssetManager's state.
     "assets": not args.disable_assets,
 }
 

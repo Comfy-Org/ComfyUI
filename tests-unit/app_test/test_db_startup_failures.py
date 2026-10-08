@@ -1,6 +1,7 @@
 """Each way the asset database can fail to open stops startup with a message that names
 the database and the fix. Every case drives the real init_db against a real file."""
 
+import errno
 import logging
 import os
 import sqlite3
@@ -8,9 +9,12 @@ import sys
 from pathlib import Path
 
 import pytest
+import sqlalchemy
 import torch
+from alembic.script import ScriptDirectory
 from filelock import FileLock
 
+import folder_paths
 from app.database import db as db_module
 from comfy.cli_args import args as cli_args
 
@@ -64,6 +68,7 @@ def test_lock_held_by_another_comfyui(db_path, caplog):
 
     assert f"Another ComfyUI is already using the asset database '{db_path}'." in error
     assert "Close the other ComfyUI" in error
+    assert "to run both, give this one its own database" in error
 
 
 def test_database_locked_by_another_program(db_path, caplog):
@@ -117,7 +122,7 @@ def test_folder_not_writable(tmp_path, db_path, caplog):
         os.chmod(tmp_path, 0o755)
 
     assert f"ComfyUI can't create or write the asset database '{db_path}' ([Errno 13] Permission denied" in error
-    assert "Make its folder writable." in error
+    assert "Make sure its folder is a writable directory" in error
 
 
 def test_folder_is_a_file(tmp_path, monkeypatch, db_path, caplog):
@@ -128,7 +133,19 @@ def test_folder_is_a_file(tmp_path, monkeypatch, db_path, caplog):
     error = _startup_error(caplog)
 
     assert f"ComfyUI can't create or write the asset database '{path}'" in error
-    assert "Make its folder writable." in error
+    assert "Make sure its folder is a writable directory" in error
+
+
+def test_read_only_file_system(monkeypatch, db_path, caplog):
+    def _read_only_mount(path):
+        raise OSError(errno.EROFS, "Read-only file system", path)
+
+    monkeypatch.setattr(db_module, "prepare_file_db_path", _read_only_mount)
+
+    error = _startup_error(caplog)
+
+    assert f"ComfyUI can't create or write the asset database '{db_path}'" in error
+    assert "delete it" not in error
 
 
 def test_database_url_that_is_not_sqlite(monkeypatch, db_path, caplog):
@@ -151,4 +168,35 @@ def test_opens_from_an_install_folder_with_a_percent_sign(tmp_path, monkeypatch,
     db_module.init_db()
 
     with sqlite3.connect(db_path) as conn:
-        assert conn.execute("SELECT version_num FROM alembic_version").fetchone()[0].startswith("0008")
+        assert conn.execute("SELECT version_num FROM alembic_version").fetchone()[0] == _head()
+
+
+@pytest.mark.parametrize(
+    "folder",
+    [
+        "100%20x",
+        pytest.param(
+            "what?",
+            marks=pytest.mark.skipif(
+                sys.platform == "win32" or sqlalchemy.__version__ < "2.1",
+                reason="? isn't allowed in Windows paths, and SQLAlchemy 2.0 URLs can't carry it",
+            ),
+        ),
+    ],
+)
+def test_default_database_path_is_used_literally(tmp_path, monkeypatch, db_path, folder):
+    # SQLAlchemy 2.1 decodes %xx in a URL and ends the path at ?, so the path must be quoted.
+    user_dir = tmp_path / folder
+    monkeypatch.setattr(db_module.args, "database_url", None)
+    monkeypatch.setattr(db_module, "get_legacy_default_db_path", lambda: None)
+    monkeypatch.setattr(folder_paths, "get_user_directory", lambda: str(user_dir))
+
+    db_module.init_db()
+
+    assert db_module.get_db_path() == str(user_dir / "comfyui.db")
+    with sqlite3.connect(user_dir / "comfyui.db") as conn:
+        assert conn.execute("SELECT version_num FROM alembic_version").fetchone()[0] == _head()
+
+
+def _head():
+    return ScriptDirectory(str(Path(main.__file__).parent / "alembic_db")).get_current_head()
