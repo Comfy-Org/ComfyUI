@@ -253,12 +253,40 @@ def test_startup_runs_against_memory_db_without_starting_a_scanner_thread(
 def test_ensure_scan_started_starts_the_lazy_object_info_scan(
     enabled_manager: AssetsEnabled, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    seeder_start = MagicMock()
-    monkeypatch.setattr(asset_seeder, "start", seeder_start)
+    calls = MagicMock()
+    monkeypatch.setattr(asset_seeder, "start", calls.start)
+    monkeypatch.setattr(asset_seeder, "node_list_served", calls.node_list_served)
 
     enabled_manager.ensure_scan_started()
 
-    seeder_start.assert_called_once_with(roots=("models", "input", "output"))
+    # The flag first: a scan thread started before it would skip the pending prune.
+    hashes = enabled_manager._args.enable_asset_hashing
+    assert calls.mock_calls[:2] == [
+        call.node_list_served(),
+        call.start(roots=("models", "input", "output"), compute_hashes=hashes),
+    ]
+
+
+@pytest.mark.parametrize("pending", [True, False])
+def test_ensure_scan_started_queues_the_pending_prune_behind_a_running_scan(
+    enabled_manager: AssetsEnabled, monkeypatch: pytest.MonkeyPatch, pending: bool
+) -> None:
+    enqueue = MagicMock()
+    monkeypatch.setattr(asset_seeder, "start", MagicMock(return_value=False))
+    monkeypatch.setattr(asset_seeder, "node_list_served", MagicMock())
+    monkeypatch.setattr(asset_seeder, "prune_pending", lambda: pending)
+    monkeypatch.setattr(asset_seeder, "enqueue_scan", enqueue)
+
+    enabled_manager.ensure_scan_started()
+
+    if pending:
+        enqueue.assert_called_once_with(
+            roots=("models", "input", "output"),
+            phase=seeder_module.ScanPhase.FULL,
+            compute_hashes=enabled_manager._args.enable_asset_hashing,
+        )
+    else:
+        enqueue.assert_not_called()
 
 
 def test_shutdown_runs_lifecycle_cleanup_when_seeder_shutdown_times_out(
@@ -294,3 +322,19 @@ def test_shutdown_runs_lifecycle_cleanup_when_seeder_shutdown_times_out(
     with mock_create_session() as session:
         assert session.get(Asset, asset_id) is None
         assert session.get(AssetContent, content_id) is None
+
+
+def test_ensure_scan_started_hashes_when_hashing_is_on(monkeypatch: pytest.MonkeyPatch) -> None:
+    class _HashingArgs(_ArgsStub):
+        enable_asset_hashing = True
+
+    start, enqueue = MagicMock(return_value=False), MagicMock()
+    monkeypatch.setattr(asset_seeder, "start", start)
+    monkeypatch.setattr(asset_seeder, "node_list_served", MagicMock())
+    monkeypatch.setattr(asset_seeder, "prune_pending", lambda: True)
+    monkeypatch.setattr(asset_seeder, "enqueue_scan", enqueue)
+
+    AssetsEnabled(_HashingArgs()).ensure_scan_started()
+
+    assert start.call_args.kwargs["compute_hashes"] is True
+    assert enqueue.call_args.kwargs["compute_hashes"] is True
