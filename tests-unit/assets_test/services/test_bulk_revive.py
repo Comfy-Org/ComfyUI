@@ -55,6 +55,12 @@ def isolated_state(db_engine):
     _WATCH_LIST.clear()
 
 
+@pytest.fixture
+def bulk_only(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Turn the per-file revive off, so a test sees what the bulk pass alone revives."""
+    monkeypatch.setattr(scanner, "recover_missing_content_by_stat", lambda *_args: "no_match")
+
+
 def _scan(roots=("output",)) -> seeder_module._ScanState:
     """A fast phase; ``("output",)`` takes the after-prompt listing rescan, so the
     default exercises the path that never stats a listed file."""
@@ -212,7 +218,7 @@ def test_a_folder_recreated_empty_revives_nothing_and_keeps_the_stamps(root, ses
     assert _scan().recovered == len(files)
 
 
-def test_a_file_back_at_a_different_size_is_not_revived(root, session):
+def test_a_file_back_at_a_different_size_is_not_revived(root, session, bulk_only):
     files, edits = _gone_and_copied_back(root, session)
     files[0].write_bytes(b"y" * 999)
 
@@ -266,7 +272,7 @@ def test_a_file_deleted_from_a_folder_that_stays_is_marked_once(root, session):
     assert (state.recovered, state.missing_marked) == (0, 0)
 
 
-def test_a_live_row_at_the_path_blocks_the_revive(root, session):
+def test_a_live_row_at_the_path_blocks_the_revive(root, session, bulk_only):
     files, _ = _gone_and_copied_back(root, session)
     squatter = create_content(session, path=str(files[0]), size_bytes=10, mtime_ns=1)
     create_record(session, content_id=squatter.id, name="new")
@@ -279,7 +285,7 @@ def test_a_live_row_at_the_path_blocks_the_revive(root, session):
     assert sorted((c.id == squatter.id, c.is_missing) for c in rows) == [(False, True), (True, False)]
 
 
-def test_the_newest_row_with_a_record_wins_over_a_newer_one_without(root, session):
+def test_the_newest_row_with_a_record_wins_over_a_newer_one_without(root, session, bulk_only):
     files = _populate(root / "batch", 1)
     _scan()
     (users,) = _contents(session)
@@ -328,7 +334,7 @@ def test_hashing_on_keeps_the_per_file_revive(root, session):
     assert len(files) == len(_contents(session))
 
 
-def test_the_newest_of_two_rows_with_records_wins(root, session):
+def test_the_newest_of_two_rows_with_records_wins(root, session, bulk_only):
     files = _populate(root / "batch", 1)
     _scan()
     (older,) = _contents(session)
@@ -367,7 +373,7 @@ def test_a_row_whose_record_went_before_the_write_is_not_revived(root, session):
     assert session.get(AssetContent, content.id).is_missing
 
 
-def test_a_pre_epoch_file_does_not_stop_the_rest_reviving(root, session):
+def test_a_pre_epoch_file_does_not_stop_the_rest_reviving(root, session, bulk_only):
     files, edits = _gone_and_copied_back(root, session)
     os.utime(files[0], ns=(0, -1_000_000_000))
 
@@ -408,7 +414,7 @@ def test_a_failing_revive_leaves_the_rest_of_the_scan_running(root, session, mon
     assert "bulk revive failed" in caplog.text
 
 
-def test_the_newest_row_of_the_returned_size_wins(root, session):
+def test_the_newest_row_of_the_returned_size_wins(root, session, bulk_only):
     files = _populate(root / "batch", 1)
     _scan()
     (original,) = _contents(session)
@@ -481,7 +487,7 @@ def test_the_revive_writes_in_batches_and_counts_what_committed(root, session, m
 
 
 @pytest.mark.skipif(os.name == "nt" or os.geteuid() == 0, reason="needs POSIX permissions and a non-root user")
-def test_an_unreadable_entry_does_not_hide_the_rest_of_its_directory(root, session):
+def test_an_unreadable_entry_does_not_hide_the_rest_of_its_directory(root, session, bulk_only):
     files, edits = _gone_and_copied_back(root, session)
     locked = root.parent / "locked"
     (locked / "inner").mkdir(parents=True)
