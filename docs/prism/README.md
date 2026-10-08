@@ -6,7 +6,7 @@ Native loading of the released Prism Alpha joint checkpoint, Wan UMT5 conditioni
 
 | File | ComfyUI folder | Notes |
 | --- | --- | --- |
-| `Prism/diffusion_pytorch_model.safetensors` | `models/diffusion_models` | Alpha BF16 joint checkpoint |
+| `prism_alpha_bf16.safetensors` | `models/diffusion_models` | Alpha BF16 joint checkpoint |
 | `prism_alpha_video_fp8_scaled.safetensors` | `models/diffusion_models` | Video-block row-scaled E4M3FN, `.prism_scale`; weight-only high-precision computation |
 | `prism_alpha_video_int8_convrot.safetensors` | `models/diffusion_models` | Native `int8_tensorwise`, `convrot=true`, group size 256 |
 | `prism_umt5_xxl_bf16.safetensors` | `models/text_encoders` | Load with the existing CLIP Loader, type `wan` |
@@ -19,7 +19,7 @@ The two quantized checkpoints change only 800 video-block Linear weights. Audio,
 
 Import **`prism_native_test_workflow.json`** and replace the Load Image input with your reference. The original test reference image is not distributed here. Select one of the three main checkpoints in the normal UNET Loader; leave `weight_dtype=default`. Other nodes remain unchanged.
 
-This workflow was extracted from `nativebf16test.mp4`. Metadata in all three provided outputs confirms the same settings: 81 frames, 848x480, 24 fps, seed 666, 30 steps, CFG 5, Euler/simple, video shift 9, audio shift 7. Results are 3.375 seconds with generated audio. Differences in output quality are not claimed to be zero.
+This workflow was extracted from `nativebf16test.mp4`; only the BF16 checkpoint filename was normalized to the categorized distribution name. Metadata in all three provided outputs confirms the same settings: 81 frames, 848x480, 24 fps, seed 666, 30 steps, CFG 5, Euler/simple, video shift 9, audio shift 7. Results are 3.375 seconds with generated audio. Differences in output quality are not claimed to be zero.
 
 `PrismPrepareAV` produces standard conditioning and a joint latent. `ModelSamplingAV` maps the video and audio schedules to the stock sampler. `PrismAttention` sets attention options through model patches. Decoding uses VAELoader, VAEDecode and VAEDecodeAudio; the explicit original audio sample count is preserved through AV latent separation.
 
@@ -44,3 +44,5 @@ Architecture and sparse kernels: Tencent-Hunyuan/Prism (MIT with the listed thir
 Without a `PrismAttention` override, the model uses `dense` attention and does not import Triton. The supplied workflow explicitly selects `prism_sparse_tail_safe`; that optional path still requires CUDA and Triton.
 
 On devices supporting FP64, adjacent-pair rotary arithmetic retains the upstream complex multiplication and single final rounding, with sequence chunks limiting temporary allocation size. Devices without FP64 use real FP32 rotation matrices and the shared ComfyUI RoPE dispatcher. Frequency tables are created on the target device once per tower forward and are not retained between executions. The FP32 fallback is not claimed to be numerically identical to the FP64 reference.
+
+The companion ModelScope repository groups weights under `diffusion_models/`, `vae/`, and `text_encoders/`. Copy each folder into the corresponding ComfyUI `models` folder. The renamed BF16 checkpoint is byte-identical to the original Alpha checkpoint. Historical output metadata in `test_results.json` retains the original filenames.

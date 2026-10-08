@@ -33,7 +33,7 @@
         "Node name for S&R": "UNETLoader"
       },
       "widgets_values": [
-        "Prism\\diffusion_pytorch_model.safetensors",
+        "prism_alpha_bf16.safetensors",
         "default"
       ],
       "widgets_values_named": {
