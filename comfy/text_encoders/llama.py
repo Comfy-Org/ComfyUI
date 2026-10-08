@@ -942,7 +942,7 @@ class Llama2_(nn.Module):
                                     device=device)
 
     def forward(self, x, attention_mask=None, embeds=None, num_tokens=None, intermediate_output=None, final_layer_norm_intermediate=True,
-                dtype=None, position_ids=None, embeds_info=[], past_key_values=None, input_ids=None,deepstack_embeds=None, visual_pos_masks=None, decode_buffers=None):
+                dtype=None, position_ids=None, embeds_info=[], past_key_values=None, input_ids=None,deepstack_embeds=None, visual_pos_masks=None, decode_buffers=None, freqs_cis=None):
         if embeds is not None:
             x = embeds
         else:
@@ -957,10 +957,10 @@ class Llama2_(nn.Module):
         if fixed_kv_decode:
             attention_mask = None
 
-        if position_ids is None:
-            position_ids = torch.arange(past_len, past_len + seq_len, device=x.device).unsqueeze(0)
-
-        freqs_cis = self.compute_freqs_cis(position_ids, x.device)
+        if freqs_cis is None:
+            if position_ids is None:
+                position_ids = torch.arange(past_len, past_len + seq_len, device=x.device).unsqueeze(0)
+            freqs_cis = self.compute_freqs_cis(position_ids, x.device)
 
         mask = None
         if attention_mask is not None:
@@ -1178,6 +1178,10 @@ class BaseGenerate:
             if init_decode_buffers is not None:
                 decode_buffers = init_decode_buffers(embeds.shape[0], device, execution_dtype)
         decode_tokens = torch.empty((embeds.shape[0], 1), dtype=torch.long, device=device)
+        # Precompute decode RoPE once; explicit MRoPE positions keep their existing path.
+        rope = None
+        if decode_buffers is not None and next_pos is None:
+            rope = rope_matrix(self.model.compute_freqs_cis(torch.arange(max_cache_len, device=device, dtype=torch.float).unsqueeze(0), device))
         penalize = penalty_active(repetition_penalty, presence_penalty)
         penalty_mask = None
 
@@ -1199,6 +1203,9 @@ class BaseGenerate:
             extra = {}
             if decode_buffers is not None:
                 extra["decode_buffers"] = decode_buffers
+                if rope is not None and step > 0:
+                    past_len = self.model.get_past_len(past_key_values)
+                    extra["freqs_cis"] = rope[:, :, past_len:past_len + 1]
             if step == 0 and deepstack_embeds is not None:
                 extra["deepstack_embeds"] = deepstack_embeds
                 extra["visual_pos_masks"] = visual_pos_masks
