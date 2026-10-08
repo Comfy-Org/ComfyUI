@@ -96,7 +96,7 @@ def test_a_scan_queued_behind_the_startup_scan_runs_the_prune(scan_seeder, prune
     assert entered.wait(5)  # past its prune check
 
     scan_seeder.start_after_node_list(ROOTS, compute_hashes=True)
-    assert scan_seeder._pending_scan == {"roots": ROOTS, "phase": ScanPhase.FULL, "compute_hashes": True}
+    assert scan_seeder._pending_scan == {"roots": ("models",), "phase": ScanPhase.FULL, "compute_hashes": True}
     release.set()
     _settle(scan_seeder)
 

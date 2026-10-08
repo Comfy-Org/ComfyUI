@@ -241,7 +241,8 @@ class _AssetSeeder:
             roots: Tuple of root types to scan (models, input, output)
             phase: Scan phase to run (FAST, ENRICH, or FULL for both)
             progress_callback: Optional callback called with progress updates
-            prune_first: If True, prune orphaned assets before scanning
+            prune_first: If True (the startup scan), sync temp references and prune
+                orphaned assets once the node list has been built
             compute_hashes: If True, compute blake3 hashes (slow)
             _start_paused: Start with phase work blocked until resume()
 
@@ -290,7 +291,8 @@ class _AssetSeeder:
         Args:
             roots: Tuple of root types to scan
             progress_callback: Optional callback for progress updates
-            prune_first: If True, prune orphaned assets before scanning
+            prune_first: If True (the startup scan), sync temp references and prune
+                orphaned assets once the node list has been built
 
         Returns:
             True if scan was started, False if already running
@@ -398,11 +400,12 @@ class _AssetSeeder:
     def start_after_node_list(self, roots: tuple[RootType, ...], compute_hashes: bool) -> None:
         """The node list has been built, so every root a custom node registers at import or
         in INPUT_TYPES is registered. Start a scan, or, if the one running won't run the
-        pending prune, queue one behind it that will."""
+        pending prune, queue a models scan behind it that will: the prune covers every
+        root, and only model folders are registered late."""
         with self._lock:
             self._node_list_served = True
             if not self.start(roots=roots, compute_hashes=compute_hashes) and self._prune_pending and not self._scan_prunes:
-                self.enqueue_scan(roots=roots, phase=ScanPhase.FULL, compute_hashes=compute_hashes)
+                self.enqueue_scan(roots=("models",), phase=ScanPhase.FULL, compute_hashes=compute_hashes)
 
     def restart(
         self,
