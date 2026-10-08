@@ -126,6 +126,7 @@ AITER_OTHER_BACKEND_REQUESTED = any((
 # Aiter's documented FMHA targets; a CK codegen factory alone does not establish Aiter support.
 _AITER_SUPPORTED_ARCHES = {"gfx942", "gfx950", "gfx1100", "gfx1151", "gfx1201"}
 _AITER_DEVICE_ARCHES = {}
+_AITER_READY_VARIANTS = set()
 
 
 def _aiter_device_arch(device):
@@ -961,12 +962,17 @@ def attention_flash(q, k, v, heads, mask=None, attn_precision=None, skip_reshape
 
 @wrap_attn
 def attention_aiter(q, k, v, heads, mask=None, attn_precision=None, skip_reshape=False, skip_output_reshape=False, **kwargs):
+    global AITER_ATTENTION_IS_AVAILABLE
+
     def fallback():
         attention = attention_sub_quad if q.device.type == "cpu" else _AITER_FALLBACK
         return attention(
             q, k, v, heads, mask=mask, attn_precision=attn_precision,
             skip_reshape=skip_reshape, skip_output_reshape=skip_output_reshape, **kwargs,
         )
+
+    if not AITER_ATTENTION_IS_AVAILABLE:
+        return fallback()
 
     if torch.version.hip is not None and q.device.type == "cuda":
         arch = _aiter_device_arch(q.device)
@@ -1018,11 +1024,27 @@ def attention_aiter(q, k, v, heads, mask=None, attn_precision=None, skip_reshape
     if q_bshd.shape[0] == 0 or q_bshd.shape[1] == 0 or not (0 < dim_head <= 256 and dim_head % 8 == 0):
         return fallback()
 
+    variant = (q.device, q.dtype)
+    is_compiling = torch.compiler.is_compiling()
+    if is_compiling and not AITER_EXPLICITLY_REQUESTED and variant not in _AITER_READY_VARIANTS:
+        return fallback()
+
     softmax_scale = float(kwargs["scale"]) if kwargs.get("scale") is not None else dim_head ** -0.5
-    output = mha_fwd(
-        q_bshd, k_bshd, v_bshd,
-        0.0, softmax_scale, False, -1, -1, 0, False, False,
-    )[0]
+    try:
+        output = mha_fwd(
+            q_bshd, k_bshd, v_bshd,
+            0.0, softmax_scale, False, -1, -1, 0, False, False,
+        )[0]
+    except (ImportError, OSError, RuntimeError) as e:
+        if isinstance(e, RuntimeError) and not str(e).startswith("[aiter] build [mha_fwd_"):
+            raise
+        if AITER_EXPLICITLY_REQUESTED:
+            raise RuntimeError("Aiter FMHA failed during explicit --use-aiter-attention execution.") from e
+        AITER_ATTENTION_IS_AVAILABLE = False
+        logging.warning("Aiter FMHA build/load failed; using the previous attention backend for the rest of this process: %s", e)
+        return fallback()
+    if not is_compiling and type(output) is torch.Tensor:
+        _AITER_READY_VARIANTS.add(variant)
     if skip_output_reshape:
         return output.transpose(1, 2)
     return output.reshape(output.shape[0], output.shape[1], -1)

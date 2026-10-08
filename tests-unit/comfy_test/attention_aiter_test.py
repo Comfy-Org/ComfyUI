@@ -327,9 +327,13 @@ def attention_namespace():
         "torch": torch,
         "functools": functools,
         "args": SimpleNamespace(dont_upcast_attention=False),
+        "AITER_ATTENTION_IS_AVAILABLE": True,
+        "AITER_EXPLICITLY_REQUESTED": False,
+        "_AITER_READY_VARIANTS": set(),
         "FORCE_UPCAST_ATTENTION_DTYPE": {},
         "_AITER_SUPPORTED_ARCHES": {"gfx942", "gfx950", "gfx1100", "gfx1151", "gfx1201"},
         "_aiter_device_arch": lambda device: "gfx1151",
+        "logging": Mock(),
         "attention_sub_quad": lambda q, k, v, *args, **kwargs: q + k + v,
         "_AITER_FALLBACK": None,
         "mha_fwd": Mock(),
@@ -450,6 +454,124 @@ def test_aiter_eligible_fake_cuda_shapes_and_output_layout(attention_namespace, 
     assert mha_calls[0][3] == pytest.approx(8 ** -0.5 if scale is None else scale)
 
 
+def _fake_eligible_cuda_qkv(dtype=torch.float16, device="cuda:0"):
+    q = torch.randn((1, 3, 16), device=device, dtype=dtype)
+    k = torch.randn((1, 5, 16), device=device, dtype=dtype)
+    v = torch.randn((1, 5, 16), device=device, dtype=dtype)
+    return q, k, v
+
+
+def test_aiter_cold_compile_auto_falls_back_without_capturing_native(attention_namespace, monkeypatch):
+    monkeypatch.setattr(torch.version, "hip", "test-hip")
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    monkeypatch.setattr(torch.compiler, "is_compiling", lambda: True)
+    fallback = Mock(return_value="fallback-result")
+    native = Mock()
+    attention_namespace["_AITER_FALLBACK"] = fallback
+    attention_namespace["mha_fwd"] = native
+
+    with FakeTensorMode():
+        q, k, v = _fake_eligible_cuda_qkv()
+        assert attention_namespace["attention_aiter"](q, k, v, 2) == "fallback-result"
+        assert attention_namespace["_AITER_READY_VARIANTS"] == set()
+
+    native.assert_not_called()
+    fallback.assert_called_once()
+
+
+def test_aiter_successful_eager_call_warms_only_its_variant_for_compile(attention_namespace, monkeypatch):
+    monkeypatch.setattr(torch.version, "hip", "test-hip")
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    compiling = False
+    monkeypatch.setattr(torch.compiler, "is_compiling", lambda: compiling)
+    fallback = Mock(return_value="fallback-result")
+    native_output = torch.empty((1, 3, 2, 8), dtype=torch.float16)
+    native = Mock(return_value=(native_output,))
+    attention_namespace["_AITER_FALLBACK"] = fallback
+    attention_namespace["mha_fwd"] = native
+
+    with FakeTensorMode(allow_non_fake_inputs=True):
+        q, k, v = _fake_eligible_cuda_qkv()
+        variant = (q.device, q.dtype)
+        eager_output = attention_namespace["attention_aiter"](q, k, v, 2)
+        assert eager_output.shape == q.shape
+        assert attention_namespace["_AITER_READY_VARIANTS"] == {variant}
+
+        compiling = True
+        compiled_output = attention_namespace["attention_aiter"](q, k, v, 2)
+        assert compiled_output.shape == q.shape
+        assert attention_namespace["_AITER_READY_VARIANTS"] == {variant}
+
+    assert native.call_count == 2
+    fallback.assert_not_called()
+
+
+def test_aiter_fake_eager_result_does_not_warm_variant(attention_namespace, monkeypatch):
+    monkeypatch.setattr(torch.version, "hip", "test-hip")
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    monkeypatch.setattr(torch.compiler, "is_compiling", lambda: False)
+    native = Mock(side_effect=lambda q, *args: (torch.empty_like(q),))
+    attention_namespace["mha_fwd"] = native
+
+    with FakeTensorMode():
+        q, k, v = _fake_eligible_cuda_qkv()
+        attention_namespace["attention_aiter"](q, k, v, 2)
+        assert attention_namespace["_AITER_READY_VARIANTS"] == set()
+
+    native.assert_called_once()
+
+
+@pytest.mark.parametrize(
+    ("ready_dtype", "call_dtype", "device"),
+    [
+        (torch.float16, torch.bfloat16, "cuda:0"),
+        (torch.float16, torch.float16, "cuda:1"),
+    ],
+)
+def test_aiter_compile_readiness_isolated_by_dtype_and_device(
+    attention_namespace, monkeypatch, ready_dtype, call_dtype, device,
+):
+    monkeypatch.setattr(torch.version, "hip", "test-hip")
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    monkeypatch.setattr(torch.compiler, "is_compiling", lambda: True)
+    fallback = Mock(return_value="fallback-result")
+    native = Mock()
+    attention_namespace["_AITER_FALLBACK"] = fallback
+    attention_namespace["mha_fwd"] = native
+
+    with FakeTensorMode():
+        ready_q, _, _ = _fake_eligible_cuda_qkv(dtype=ready_dtype)
+        call_q, call_k, call_v = _fake_eligible_cuda_qkv(dtype=call_dtype, device=device)
+        attention_namespace["_AITER_READY_VARIANTS"].add((ready_q.device, ready_q.dtype))
+        assert attention_namespace["attention_aiter"](call_q, call_k, call_v, 2) == "fallback-result"
+        assert attention_namespace["_AITER_READY_VARIANTS"] == {(ready_q.device, ready_q.dtype)}
+
+    native.assert_not_called()
+    fallback.assert_called_once()
+
+
+def test_aiter_explicit_cold_compile_keeps_native_failure_visible(attention_namespace, monkeypatch):
+    monkeypatch.setattr(torch.version, "hip", "test-hip")
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    monkeypatch.setattr(torch.compiler, "is_compiling", lambda: True)
+    attention_namespace["AITER_EXPLICITLY_REQUESTED"] = True
+    failure = RuntimeError("compiled custom op failed")
+    native = Mock(side_effect=failure)
+    fallback = Mock(return_value="fallback-result")
+    attention_namespace["mha_fwd"] = native
+    attention_namespace["_AITER_FALLBACK"] = fallback
+
+    with FakeTensorMode():
+        q, k, v = _fake_eligible_cuda_qkv()
+        with pytest.raises(RuntimeError, match="compiled custom op failed") as exc_info:
+            attention_namespace["attention_aiter"](q, k, v, 2)
+        assert attention_namespace["_AITER_READY_VARIANTS"] == set()
+
+    assert exc_info.value is failure
+    native.assert_called_once()
+    fallback.assert_not_called()
+
+
 @pytest.mark.parametrize(
     ("case", "mask_shape"),
     [
@@ -548,6 +670,107 @@ def test_aiter_unsupported_secondary_device_falls_back_or_errors(attention_names
         assert result == "fallback-result"
         attention_namespace["_AITER_FALLBACK"].assert_called_once()
     attention_namespace["mha_fwd"].assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        ImportError("native op unavailable"),
+        ModuleNotFoundError("module_mha_fwd"),
+        OSError("native library could not be loaded"),
+        RuntimeError("[aiter] build [mha_fwd_fp16_nbias_nmask_nlse_ndropout_nqscale] failed"),
+        RuntimeError("[aiter] build [mha_fwd_bf16_nbias_nmask_nlse_ndropout_nqscale] failed"),
+    ],
+)
+def test_aiter_auto_recovers_from_native_load_or_build_failure_once(attention_namespace, monkeypatch, failure):
+    monkeypatch.setattr(torch.version, "hip", "test-hip")
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    fallback = Mock(return_value="fallback-result")
+    native = Mock(side_effect=failure)
+    attention_namespace["_AITER_FALLBACK"] = fallback
+    attention_namespace["mha_fwd"] = native
+    with FakeTensorMode():
+        q = torch.randn((1, 3, 16), device="cuda", dtype=torch.float16)
+        k = torch.randn((1, 5, 16), device="cuda", dtype=torch.float16)
+        v = torch.randn((1, 5, 16), device="cuda", dtype=torch.float16)
+
+        assert attention_namespace["attention_aiter"](q, k, v, 2, scale=0.25) == "fallback-result"
+        assert attention_namespace["AITER_ATTENTION_IS_AVAILABLE"] is False
+        native.assert_called_once()
+        fallback.assert_called_once_with(
+            q, k, v, 2, mask=None, attn_precision=None,
+            skip_reshape=False, skip_output_reshape=False, scale=0.25,
+            _inside_attn_wrapper=True,
+        )
+
+        assert attention_namespace["attention_aiter"](q, k, v, 2, scale=0.25) == "fallback-result"
+
+    assert native.call_count == 1
+    assert fallback.call_count == 2
+    attention_namespace["logging"].warning.assert_called_once()
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        ImportError("native op unavailable"),
+        OSError("native library could not be loaded"),
+        RuntimeError("[aiter] build [mha_fwd_bf16_nbias_nmask_nlse_ndropout_nqscale] failed"),
+    ],
+)
+def test_aiter_explicit_request_raises_chained_native_failure(attention_namespace, monkeypatch, failure):
+    monkeypatch.setattr(torch.version, "hip", "test-hip")
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    attention_namespace["AITER_EXPLICITLY_REQUESTED"] = True
+    fallback = Mock(return_value="fallback-result")
+    native = Mock(side_effect=failure)
+    attention_namespace["_AITER_FALLBACK"] = fallback
+    attention_namespace["mha_fwd"] = native
+    with FakeTensorMode():
+        q = torch.randn((1, 3, 16), device="cuda", dtype=torch.bfloat16)
+        k = torch.randn((1, 5, 16), device="cuda", dtype=torch.bfloat16)
+        v = torch.randn((1, 5, 16), device="cuda", dtype=torch.bfloat16)
+
+        with pytest.raises(RuntimeError, match="Aiter FMHA failed during explicit") as exc_info:
+            attention_namespace["attention_aiter"](q, k, v, 2)
+
+    assert exc_info.value.__cause__ is failure
+    assert attention_namespace["AITER_ATTENTION_IS_AVAILABLE"] is True
+    native.assert_called_once()
+    fallback.assert_not_called()
+    attention_namespace["logging"].warning.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        RuntimeError("HIP error: invalid device function"),
+        RuntimeError("[aiter] build [mha_bwd_fp16] failed"),
+        RuntimeError("[aiter] build [gemm_a8w8] failed"),
+        RuntimeError("[aiter] build [module_mha_fwd] failed"),
+        ValueError("invalid runtime argument"),
+    ],
+)
+def test_aiter_auto_propagates_unclassified_native_failures(attention_namespace, monkeypatch, failure):
+    monkeypatch.setattr(torch.version, "hip", "test-hip")
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    fallback = Mock(return_value="fallback-result")
+    native = Mock(side_effect=failure)
+    attention_namespace["_AITER_FALLBACK"] = fallback
+    attention_namespace["mha_fwd"] = native
+    with FakeTensorMode():
+        q = torch.randn((1, 3, 16), device="cuda", dtype=torch.float16)
+        k = torch.randn((1, 5, 16), device="cuda", dtype=torch.float16)
+        v = torch.randn((1, 5, 16), device="cuda", dtype=torch.float16)
+
+        with pytest.raises(type(failure)) as exc_info:
+            attention_namespace["attention_aiter"](q, k, v, 2)
+
+    assert exc_info.value is failure
+    assert attention_namespace["AITER_ATTENTION_IS_AVAILABLE"] is True
+    native.assert_called_once()
+    fallback.assert_not_called()
+    attention_namespace["logging"].warning.assert_not_called()
 
 
 def test_attention_container_and_model_override_contract(attention_namespace):
