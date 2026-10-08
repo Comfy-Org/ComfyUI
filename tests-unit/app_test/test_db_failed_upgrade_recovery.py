@@ -1,4 +1,5 @@
 import glob
+import logging
 import os
 import sqlite3
 import sys
@@ -13,7 +14,7 @@ from app_test.test_db_corruption_recovery import _boot, _head, _make_db, _revisi
 # The boot fixtures of the corruption-recovery tests: the autouse ones reset boot state between tests.
 boot_state = corruption_recovery.boot_state
 boot_events = corruption_recovery.boot_events
-startup_warnings = corruption_recovery.startup_warnings
+startup_warnings = corruption_recovery.startup_warnings  # autouse: isolates the summary list
 default_db = corruption_recovery.default_db
 explicit_db = corruption_recovery.explicit_db
 
@@ -68,7 +69,7 @@ _INTERRUPTED_UPGRADES = {
     "revision, statements, error", _INTERRUPTED_UPGRADES.values(), ids=_INTERRUPTED_UPGRADES.keys()
 )
 def test_database_an_interrupted_upgrade_left_unupgradable_is_recreated(
-    default_db, startup_warnings, revision, statements, error
+    default_db, caplog, startup_warnings, revision, statements, error
 ):
     _make_db(default_db, revision=revision)
     _execute(default_db, *statements)
@@ -79,8 +80,13 @@ def test_database_an_interrupted_upgrade_left_unupgradable_is_recreated(
     assert _revision(default_db) == _head()
     [moved] = _moved_aside(default_db)
     assert os.stat(moved).st_ino == old_file  # moved aside, not deleted
-    assert any("Database upgrade failed" in w and error in w and moved in w for w in startup_warnings)
-    assert not any("[SQL:" in w for w in startup_warnings)  # the driver's message, not SQLAlchemy's wrapper
+    # A handled failure is one warning naming the moved file: no ERROR, no traceback above DEBUG.
+    shown = [r for r in caplog.records if r.levelno >= logging.INFO and r.name == "root"]
+    [warning] = [r for r in shown if r.levelno >= logging.WARNING and "Database upgrade failed" in r.getMessage()]
+    assert error in warning.getMessage() and moved in warning.getMessage()
+    assert "[SQL:" not in warning.getMessage()  # the driver's message, not SQLAlchemy's wrapper
+    assert not [r for r in shown if r.levelno >= logging.ERROR or r.exc_info]
+    assert not any("Database upgrade failed" in w for w in startup_warnings)  # not repeated in the summary
 
 
 def _failing_upgrade(monkeypatch):
@@ -143,17 +149,17 @@ def test_revision_from_a_newer_release_reports_the_upgrade_error(default_db):
     assert _moved_aside(default_db) == []
 
 
-def test_failed_first_upgrade_of_a_new_database_is_not_moved_aside(default_db, monkeypatch, startup_warnings):
+def test_failed_first_upgrade_of_a_new_database_is_not_moved_aside(default_db, monkeypatch, caplog):
     _failing_upgrade(monkeypatch)
 
     with pytest.raises(SystemExit):
         _boot()
 
     assert _moved_aside(default_db) == []
-    assert not any("Database upgrade failed" in w for w in startup_warnings)
+    assert "Database upgrade failed" not in caplog.text
 
 
-def test_explicit_database_url_naming_the_default_file_is_recreated(default_db, monkeypatch, startup_warnings):
+def test_explicit_database_url_naming_the_default_file_is_recreated(default_db, monkeypatch):
     monkeypatch.setattr(db_module.args, "database_url", f"sqlite:///{default_db}")
     _make_db(default_db, revision="0001_assets")
     _execute(default_db, "DROP INDEX ix_asset_info_meta_key_val_bool")
@@ -250,3 +256,14 @@ def test_unupgradable_database_open_only_for_reading_is_moved(default_db):
     [moved] = _moved_aside(default_db)
     with closing(sqlite3.connect(moved)) as conn:
         assert conn.execute("SELECT value FROM marker").fetchone() == ("original",)
+
+
+def test_upgrade_failure_that_is_not_recovered_is_logged_as_an_error(explicit_db, monkeypatch, caplog):
+    _make_db(explicit_db, revision="0001_assets")
+    _execute(explicit_db, "DROP INDEX ix_asset_info_meta_key_val_bool")
+
+    with pytest.raises(SystemExit):
+        _boot()
+
+    [error] = [r for r in caplog.records if r.levelno == logging.ERROR and "Error upgrading database" in r.getMessage()]
+    assert error.exc_info

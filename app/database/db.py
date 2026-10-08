@@ -282,14 +282,23 @@ def _init_file_db(db_url):
         try:
             _migrate_and_bind(db_url, db_path, os.path.exists(db_path))
         except Exception as e:
-            if is_recoverable_corruption(e):
-                _quarantine_and_restore(db_path, e)
-            elif (
-                _is_default_db()
+            corrupt = is_recoverable_corruption(e)
+            recreate = (
+                not corrupt
+                and _is_default_db()
                 and getattr(e, "upgrade_discards_the_catalog", False)
                 and error_kind(e) != "database_locked"  # another process has it open
-            ):
-                _recreate_after_failed_upgrade(db_path, e)
+            )
+            if getattr(e, "upgrade_discards_the_catalog", False) and not recreate:
+                logging.error("Error upgrading database: ", exc_info=e)  # deferred by _migrate
+            if corrupt:
+                _quarantine_and_restore(db_path, e)
+            elif recreate:
+                try:
+                    _recreate_after_failed_upgrade(db_path, e)
+                except Exception:
+                    logging.error("Error upgrading database: ", exc_info=e)
+                    raise
             else:
                 raise
             _migrate_and_bind(db_url, db_path, os.path.exists(db_path))
@@ -375,7 +384,7 @@ def _recreate_after_failed_upgrade(db_path, error):
             except OSError:
                 logging.exception(f"Could not move '{dst}' back to '{src}'")
         raise error
-    log_startup_warning(
+    logging.warning(
         f"Database upgrade failed ({getattr(error, 'orig', error)}): '{db_path}' was moved to "
         f"'{aside_path}'; starting with a new database. The asset catalog is rebuilt by rescanning your files."
     )
@@ -565,7 +574,10 @@ def _migrate(conn, engine, write_engine, config, db_path, db_exists):
             command.upgrade(config, target_rev)
             logging.info(f"Database upgraded from {current_rev} to {target_rev}")
         except Exception as e:
-            logging.exception("Error upgrading database: ")
+            if discards_catalog:  # _init_file_db logs it, unless a new database replaces this one
+                logging.debug("Error upgrading database: ", exc_info=True)
+            else:
+                logging.exception("Error upgrading database: ")
             if backup_path:
                 # Restore the database from backup if upgrade fails
                 try:
