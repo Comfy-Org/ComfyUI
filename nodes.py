@@ -1750,9 +1750,10 @@ class LoadImage:
         input_dir = folder_paths.get_input_directory()
         files = [f for f in os.listdir(input_dir) if os.path.isfile(os.path.join(input_dir, f))]
         files = folder_paths.filter_files_content_types(files, ["image"])
-        return {"required":
-                    {"image": (sorted(files), {"image_upload": True})},
-                }
+        return {
+            "required": {},
+            "optional": {"image": (sorted(files), {"image_upload": True})},
+        }
 
     CATEGORY = "image"
     ESSENTIALS_CATEGORY = "Basics"
@@ -1814,7 +1815,10 @@ class LoadImage:
         return m.digest().hex()
 
     @classmethod
-    def VALIDATE_INPUTS(s, image):
+    def VALIDATE_INPUTS(s, image=None):
+        if not isinstance(image, str) or not image.strip():
+            return "No image selected. Upload or select an image first."
+
         if not folder_paths.exists_annotated_filepath(image):
             return "Invalid image file: {}".format(image)
 
@@ -1831,10 +1835,8 @@ class LoadImageMask(LoadImage):
     def INPUT_TYPES(s):
         types = super().INPUT_TYPES()
         return {
-            "required": {
-                **types["required"],
-                "channel": (s._color_channels, )
-            }
+            "required": {"channel": (s._color_channels,)},
+            "optional": types["optional"],
         }
 
     CATEGORY = "image"
