@@ -9,7 +9,7 @@ import pytest
 
 from app.database import db as db_module
 from app_test import test_db_corruption_recovery as corruption_recovery
-from app_test.test_db_corruption_recovery import _boot, _head, _make_db, _revision, _use_wal
+from app_test.test_db_corruption_recovery import _boot, _head, _make_db, _overwrite_header, _revision, _use_wal
 
 # The boot fixtures of the corruption-recovery tests: the autouse ones reset boot state between tests.
 boot_state = corruption_recovery.boot_state
@@ -266,6 +266,7 @@ def test_unupgradable_database_open_only_for_reading_is_moved(default_db, wal):
     assert _revision(default_db) == _head()
     [moved] = _moved_aside(default_db)
     assert os.path.exists(moved + "-wal") == wal  # the reader keeps the WAL open, so it moves with the database
+    assert os.path.exists(moved + "-shm") == wal
     with closing(sqlite3.connect(moved)) as conn:
         assert conn.execute("SELECT value FROM marker").fetchone() == ("original",)
 
@@ -278,3 +279,35 @@ def test_upgrade_failure_that_is_not_recovered_is_logged_as_an_error(explicit_db
         _boot()
 
     _assert_upgrade_error_logged(caplog, "no such index")
+
+
+def test_failed_move_back_is_reported(default_db, monkeypatch, caplog):
+    _make_db(default_db, revision="0001_assets")
+    _execute(default_db, "DROP INDEX ix_asset_info_meta_key_val_bool")
+    real_replace = os.replace
+
+    def nothing_moves_back(src, dst):
+        if src == default_db or dst == default_db + "-journal":
+            raise PermissionError("held open")
+        real_replace(src, dst)
+
+    with monkeypatch.context() as patch:
+        _recreate_with_a_journal_left_behind(patch)
+        patch.setattr(db_module.os, "replace", nothing_moves_back)
+        with pytest.raises(SystemExit):
+            _boot()
+
+    assert f"back to '{default_db}-journal'" in caplog.text
+
+
+def test_upgrade_of_a_restored_daily_backup_logs_its_error(default_db, monkeypatch, caplog):
+    # Only the first attempt defers its error: nothing would log it after the corruption path's retry.
+    _make_db(default_db + ".daily-backup", revision="0006_add_loader_path")
+    _make_db(default_db)
+    _overwrite_header(default_db)
+    _failing_upgrade(monkeypatch)
+
+    with pytest.raises(SystemExit):
+        _boot()
+
+    _assert_upgrade_error_logged(caplog, "upgrade failed")
