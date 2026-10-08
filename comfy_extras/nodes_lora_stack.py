@@ -18,6 +18,8 @@ def _lora_template() -> list[io.Input]:
                        tooltip="The name of the LoRA file to apply."),
         io.Float.Input("strength", default=1.0, min=-100.0, max=100.0, step=0.01,
                        tooltip="How strongly to apply this LoRA. 0 = off, negative inverts the effect."),
+        io.Boolean.Input("enabled", default=True,
+                         tooltip="Turn off to skip this LoRA without changing its file or strength."),
     ]
 
 
@@ -50,7 +52,7 @@ class LoadLoraModel(io.ComfyNode):
         for row in loras:
             lora_name = row.get("lora_name")
             strength = row["strength"]
-            if not lora_name or strength == 0:
+            if not lora_name or not row["enabled"] or strength == 0:
                 continue
             lora, metadata = _load_lora_file(lora_name)
             model, _ = comfy.sd.load_lora_for_models(model, None, lora, strength, 0, lora_metadata=metadata)
@@ -86,7 +88,7 @@ class LoadLoraTextEncoder(io.ComfyNode):
         for row in loras:
             lora_name = row.get("lora_name")
             strength = row["strength"]
-            if not lora_name or strength == 0:
+            if not lora_name or not row["enabled"] or strength == 0:
                 continue
             lora, metadata = _load_lora_file(lora_name)
             _, clip = comfy.sd.load_lora_for_models(None, clip, lora, 0, strength, lora_metadata=metadata)
