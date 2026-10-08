@@ -196,10 +196,10 @@ def convert_fused_qkv_lora(sd):
                 sd_out["{}{}.row_offset".format(base, proj)] = torch.tensor(offset)
                 offset += size
 
-    # The per-projection entries next to a fused adapter belong to the unused unfused modules:
-    # their delta is empty and their DoRA scale covers the same weights, so the fused adapter is
-    # their only source of trained values and dropping them costs nothing. A trained entry would
-    # be lost and is reported, because only one adapter can be applied per weight.
+    # The per-projection entries next to a fused adapter belong to the unused unfused modules and
+    # their delta is empty. The split emits the trained delta and DoRA scale of every projection
+    # and only one adapter can be applied per weight, so dropping them costs nothing. A trained
+    # entry would be lost and is reported.
     duplicates = {}
     for k in sd:
         if k in converted_keys:
