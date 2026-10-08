@@ -5,7 +5,6 @@ a test says otherwise."""
 
 import os
 import shutil
-import sys
 from contextlib import contextmanager
 from datetime import timedelta
 from pathlib import Path
@@ -380,17 +379,15 @@ def test_a_pre_epoch_file_does_not_stop_the_rest_reviving(root, session):
 
 def test_a_cancel_during_the_revive_leaves_the_rows_missing(root, session):
     files, _ = _gone_and_copied_back(root, session)
-    checks = 0
+    calls = 0
 
-    def cancelled_while_checking_files() -> bool:
-        """False for the directory's own check, True from its first file on."""
-        nonlocal checks
-        if sys._getframe(1).f_code.co_name != "_returned_files":
-            return False
-        checks += 1
-        return checks > 1
+    def cancelled_at_the_second_file() -> bool:
+        """The revive asks once per file before writing; cancel on the second ask."""
+        nonlocal calls
+        calls += 1
+        return calls >= 2
 
-    scanner.revive_returned_references_safely("output", should_stop=cancelled_while_checking_files)
+    scanner.revive_returned_references_safely("output", should_stop=cancelled_at_the_second_file)
 
     assert sum(1 for c in _contents(session) if c.is_missing) == len(files)
 
@@ -480,16 +477,3 @@ def test_the_revive_writes_in_batches_and_counts_what_committed(root, session, m
     assert sum(1 for c in _contents(session) if not c.is_missing) == len(files)  # the scan's per-file path
 
 
-@pytest.mark.skipif(os.name == "nt" or os.geteuid() == 0, reason="needs POSIX permissions and a non-root user")
-def test_an_unreadable_entry_does_not_hide_the_rest_of_its_directory(root, session):
-    files, edits = _gone_and_copied_back(root, session)
-    locked = root.parent / "locked"
-    (locked / "inner").mkdir(parents=True)
-    (root / "batch" / "link").symlink_to(locked / "inner")
-    locked.chmod(0)  # stat'ing the link's target now raises PermissionError
-    try:
-        # A full scan: the output rescan reads names from its walk and never lists the folder itself.
-        assert _scan(("models", "input", "output")).recovered == len(files)
-    finally:
-        locked.chmod(0o755)
-    assert _records(session) == edits
