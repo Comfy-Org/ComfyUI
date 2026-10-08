@@ -231,8 +231,10 @@ def test_lokr_fused_qkv_mapped_to_one_projection_picks_projection_rows():
 
 def test_load_lora_maps_fused_qkv_key_to_the_split_projection():
     # convert_lora splits a fused to_qkv adapter per projection, so a loader that maps the fused
-    # key itself is loaded for the projection of the target weight.
+    # key itself is loaded for the projection of the target weight. Keys the converter keeps under
+    # the fused name must not stop that.
     sd = _make_sd(16, 576, 16, 384)  # not q/k/v aligned, so the projections need row offsets
+    sd[MAIN_PREFIX + ".reshape_weight"] = torch.tensor([1, 1])
     reference = _apply(sd, MAIN_PREFIX, MAIN_OUT, MAIN_IN)
 
     key = "diffusion_model.blocks.0.attn.wk.weight"

@@ -63,32 +63,34 @@ def qkv_projection_key(x, target, lora):
         return x
     key = x[:-len("qkv")] + projection
     # a split adapter has its fused factors replaced by the projection ones
-    if any(k.startswith(x + ".") for k in lora) or not any(k.startswith(key + ".") for k in lora):
-        return x
-    return key
+    split = any(key + suffix in lora for suffix in QKV_FACTORS)
+    if split and not any(x + suffix in lora for suffix in QKV_FACTORS):
+        return key
+    return x
 
 
-KREA2_FUSED_QKV = re.compile(r"(.*attn[._]to_)qkv(?=\.|$)")
-KREA2_PROJECTION_QKV = re.compile(r"(.*attn[._]to_)([qkv])(?=\.|$)")
+FUSED_QKV = re.compile(r"(.*attn[._]to_)qkv(?=\.|$)")
+QKV_PROJECTION = re.compile(r"(.*attn[._]to_)([qkv])(?=\.|$)")
 
-# Parameters of a fused Krea2 qkv adapter, grouped by how they are turned into
-# per-projection parameters. Shared parameters repeat for to_q/to_k/to_v, output parameters are
-# split into rows and the LoKr outer factor is split too when the factorization allows it.
-KREA2_QKV_SHARED = (
+# Parameters of a fused qkv adapter, grouped by how they are turned into per-projection
+# parameters. Shared parameters repeat for to_q/to_k/to_v, output parameters are split into rows
+# and the LoKr outer factor is split too when the factorization allows it.
+QKV_SHARED = (
     ".lokr_w2", ".lokr_w2_a", ".lokr_w2_b", ".lokr_t2", ".lokr_w1_b",
     ".alpha", ".lora_A.weight", ".lora_down.weight", ".lora_mid.weight",
 )
-KREA2_QKV_OUTER = (".lokr_w1", ".lokr_w1_a")
-KREA2_QKV_OUTPUT = (".dora_scale", ".lora_B.weight", ".lora_up.weight")
+QKV_OUTER = (".lokr_w1", ".lokr_w1_a")
+QKV_OUTPUT = (".dora_scale", ".lora_B.weight", ".lora_up.weight")
+QKV_FACTORS = QKV_SHARED + QKV_OUTER + QKV_OUTPUT
 
 
 def krea2_fused_qkv_lora(sd):
     """Whether a lora keeps Krea2 attention in one fused to_qkv adapter."""
-    return any("text_fusion" in k for k in sd) and any(KREA2_FUSED_QKV.search(k) is not None for k in sd)
+    return any("text_fusion" in k for k in sd) and any(FUSED_QKV.search(k) is not None for k in sd)
 
 
-def _krea2_qkv_shapes(tensors):
-    """(output size, input size, LoKr inner factor) of a fused Krea2 qkv adapter."""
+def _qkv_shapes(tensors):
+    """(output size, input size, LoKr inner factor) of a fused qkv adapter."""
     if ".lokr_w2" in tensors and (".lokr_w1" in tensors or ".lokr_w1_a" in tensors):
         out_inner = tensors[".lokr_w2"].shape[0]
         in_inner = tensors[".lokr_w2"].shape[1]
@@ -121,7 +123,7 @@ def _krea2_qkv_shapes(tensors):
     return out_dim, in_dim, out_inner
 
 
-def _krea2_qkv_has_delta(tensors):
+def _qkv_has_delta(tensors):
     """Whether a per-projection qkv entry holds a trained delta instead of being a placeholder."""
     w1 = tensors.get(".lokr_w1", tensors.get(".lokr_w1_a"))
     w2 = tensors.get(".lokr_w2", tensors.get(".lokr_w2_a"))
@@ -134,13 +136,13 @@ def _krea2_qkv_has_delta(tensors):
     return False
 
 
-def convert_krea2_lora(sd):
-    # SimpleTuner/LyCORIS save Krea2 attention as one fused to_qkv adapter while ComfyUI's
-    # Krea2 model keeps wq/wk/wv separate. Split the fused adapter (and its DoRA scale) into
-    # the three projections and drop the unused per-projection entries written next to it.
+def convert_fused_qkv_lora(sd):
+    # SimpleTuner/LyCORIS save attention as one fused to_qkv adapter while ComfyUI's model keeps
+    # wq/wk/wv separate. Split the fused adapter (and its DoRA scale) into the three projections
+    # and drop the unused per-projection entries written next to it.
     fused = {}
     for k in sd:
-        m = KREA2_FUSED_QKV.search(k)
+        m = FUSED_QKV.search(k)
         if m is not None:
             fused.setdefault(m.group(1), {})[k[m.end():]] = k
 
@@ -149,13 +151,13 @@ def convert_krea2_lora(sd):
     converted_keys = set()
     for base, params in fused.items():
         tensors = {suffix: sd[key] for suffix, key in params.items()}
-        shapes = _krea2_qkv_shapes(tensors)
+        shapes = _qkv_shapes(tensors)
         if shapes is None:
             continue
         out_dim, in_dim, out_inner = shapes
 
-        # Krea2 self attention keeps the query as wide as its input, the remaining outputs are
-        # split evenly between key and value.
+        # The query keeps the width of the input, the remaining outputs are split evenly between
+        # key and value.
         q_out = in_dim
         kv_out = (out_dim - q_out) // 2
         if kv_out <= 0 or q_out + 2 * kv_out != out_dim:
@@ -167,17 +169,17 @@ def convert_krea2_lora(sd):
         # of the Kronecker product.
         outer_split = out_inner is not None and q_out % out_inner == 0 and kv_out % out_inner == 0
         outer_sizes = (q_out // out_inner, kv_out // out_inner, kv_out // out_inner) if outer_split else None
-        row_offsets = not outer_split and any(suffix in tensors for suffix in KREA2_QKV_OUTER)
+        row_offsets = not outer_split and any(suffix in tensors for suffix in QKV_OUTER)
 
         converted_bases.add(base)
         converted_keys.update(params.values())
         for suffix, key in params.items():
             tensor = tensors[suffix]
-            if suffix in KREA2_QKV_SHARED:
+            if suffix in QKV_SHARED:
                 parts = (tensor, tensor, tensor)
-            elif suffix in KREA2_QKV_OUTPUT:
+            elif suffix in QKV_OUTPUT:
                 parts = tensor.split(output_sizes, dim=0)
-            elif suffix in KREA2_QKV_OUTER:
+            elif suffix in QKV_OUTER:
                 parts = tensor.split(outer_sizes, dim=0) if outer_split else (tensor, tensor, tensor)
             else:
                 sd_out[key] = tensor
@@ -198,17 +200,17 @@ def convert_krea2_lora(sd):
     for k in sd:
         if k in converted_keys:
             continue
-        m = KREA2_PROJECTION_QKV.search(k)
+        m = QKV_PROJECTION.search(k)
         if m is not None and m.group(1) in converted_bases:
             duplicates.setdefault(m.group(1) + m.group(2), {})[k[m.end():]] = k
             continue
         sd_out[k] = sd[k]
 
     trained = [base for base, params in duplicates.items()
-               if _krea2_qkv_has_delta({suffix: sd[key] for suffix, key in params.items()})]
+               if _qkv_has_delta({suffix: sd[key] for suffix, key in params.items()})]
     if trained:
         logging.warning(
-            "Krea2 lora: the trained per-projection adapters {} are not applied, the fused to_qkv "
+            "The trained per-projection adapters {} are not applied, the fused to_qkv "
             "adapter of the same module already covers these weights".format(", ".join(sorted(trained)[:2]))
         )
     return sd_out
@@ -222,5 +224,5 @@ def convert_lora(sd):
     if "single_blocks.37.processor.qkv_lora.up.weight" in sd and "double_blocks.18.processor.qkv_lora2.up.weight" in sd:
         return convert_uso_lora(sd)
     if krea2_fused_qkv_lora(sd):
-        return convert_krea2_lora(sd)
+        return convert_fused_qkv_lora(sd)
     return sd
