@@ -1015,20 +1015,60 @@ def _fp16_linear_wanted(x):
 
 
 def linear_input_act(linear, x, input_act, act_weight=None, act_eps=0.0,
-                     residual=None, residual_scale=None):
+                     residual=None, residual_scale=None, residual_segments=None):
     run_every_op()
     weight = linear.weight
     quantized = isinstance(weight, QuantizedTensor)
+    hooks = (linear._forward_hooks or linear._forward_pre_hooks
+             or torch.nn.modules.module._global_forward_hooks
+             or torch.nn.modules.module._global_forward_pre_hooks)
+    needs_grad = torch.is_grad_enabled() and (
+        any(isinstance(t, torch.Tensor) and t.requires_grad
+            for t in (x, weight, linear.bias, act_weight, residual, residual_scale))
+        or (isinstance(act_weight, torch.nn.Module)
+            and any(p.requires_grad for p in act_weight.parameters())))
+
+    def residual_out(out):
+        if residual_segments is None:
+            return _linear_residual(out, residual, residual_scale)
+        if (not comfy.model_management.in_training and not needs_grad and not out.requires_grad
+                and residual.dtype == out.dtype and not hooks):
+            for start, stop, row in residual_segments:
+                segment = out[start:stop]
+                torch.addcmul(residual[start:stop], segment, residual_scale[row].to(out.dtype), out=segment)
+            return out
+        return torch.cat([
+            torch.addcmul(residual[start:stop], out[start:stop], residual_scale[row].to(out.dtype))
+            for start, stop, row in residual_segments
+        ], dim=0)
+
     if (comfy.model_management.in_training or getattr(linear, "_full_precision_mm", False)
+            or (residual_segments is not None and (hooks or needs_grad))
             or not ((quantized and weight._layout_cls == "TensorWiseINT8Layout"
                      and not getattr(weight._params, "transposed", False))
-                    or (not quantized and _fp16_linear_wanted(x)))):
-        out = linear(_eager_input_act(x, input_act, act_weight, act_eps))
-        return _linear_residual(out, residual, residual_scale)
+                    or (not quantized and residual_segments is None and _fp16_linear_wanted(x)))):
+        return residual_out(linear(_eager_input_act(x, input_act, act_weight, act_eps)))
 
     with CastBiasWeightContext(linear, x, offloadable=True,
                                compute_dtype=x.dtype if quantized else None,
                                want_requant=quantized) as (weight, bias):
+        if residual_segments is not None:
+            indexed_gate = getattr(quant_ops.ck, "int8_linear_indexed_gate", None)
+            if (indexed_gate is not None and isinstance(weight, QuantizedTensor)
+                    and bias is None and x.dtype == torch.bfloat16
+                    and residual is not None and residual.dtype == torch.bfloat16
+                    and weight._params.convrot and weight._params.convrot_groupsize == 256
+                    and input_act in (None, "swiglu")):
+                qdata, scale = TensorWiseINT8Layout.get_plain_tensors(weight)
+                rows = torch.empty(x.shape[0], dtype=torch.int32, device=x.device)
+                for start, stop, row in residual_segments:
+                    rows[start:stop] = row
+                return indexed_gate(
+                    x, qdata.contiguous(), scale.reshape(-1).expand(qdata.shape[0]).contiguous(),
+                    residual_scale.to(x.dtype).contiguous(), rows, residual,
+                    input_act=input_act)
+            return residual_out(linear_input_act_(
+                x, weight, bias, input_act, act_weight, act_eps, fp16_accumulation=False))
         return linear_input_act_(x, weight, bias, input_act, act_weight, act_eps,
                                  residual, residual_scale, fp16_accumulation=not quantized)
 
