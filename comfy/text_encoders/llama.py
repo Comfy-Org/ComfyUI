@@ -43,11 +43,11 @@ class FixedKVBias(FixedKV):
     tracker: dict = None
 
     def prepare(self, num_tokens):
-        if num_tokens == 1 and self.seqlen is not None:
-            self.seqlen.fill_(self.index + num_tokens)
         if self.tracker["step"] == (self.index, num_tokens):
             return
         self.tracker["step"] = (self.index, num_tokens)
+        if num_tokens == 1 and self.seqlen is not None:
+            self.seqlen.fill_(self.index + num_tokens)
         i = self.index
         rows = self.bias.shape[-2]
         if num_tokens <= rows:
@@ -61,10 +61,13 @@ class FixedKVBias(FixedKV):
             self.bias[..., :, i:i + num_tokens] = 0
 
     @staticmethod
-    def shared(capacity, device, dtype):
-        # all layers advance in lockstep, so the bias caches share one position/bias/tracker
+    def shared(batch, capacity, head_dim, device, dtype):
+        # all layers advance in lockstep, so the bias caches share one position/seqlen/bias/tracker
         rows = 6
         position = torch.empty((rows,), device=device, dtype=torch.int64)
+        seqlen = None
+        if dtype == torch.bfloat16 and head_dim in (128, 256) and comfy_kitchen.flash_attention_decode_is_available(device):
+            seqlen = torch.empty((batch,), device=device, dtype=torch.int32)
         bias = torch.full((1, 1, rows, capacity), torch.finfo(dtype).min, device=device, dtype=dtype)
         tracker = {"step": -1}
         # window templates per decode width: row r serves query j = r - (rows - n) and may see slots <= index + j
@@ -73,16 +76,13 @@ class FixedKVBias(FixedKV):
             for r in range(rows):
                 window[r, :rows + max(r - (rows - n), 0)] = 0
             tracker[n] = window
-        return position, bias, tracker
+        return position, seqlen, bias, tracker
 
     @classmethod
     def zeros(cls, batch, kv_heads, capacity, head_dim, device, dtype, shared):
         # zero-init: decode attends full capacity with masked tails, 0*0 stays finite
         key = torch.zeros((batch, kv_heads, capacity, head_dim), device=device, dtype=dtype)
-        seqlen = None
-        if dtype == torch.bfloat16 and head_dim in (128, 256) and comfy_kitchen.flash_attention_decode_is_available(key.device):
-            seqlen = torch.empty((batch,), device=device, dtype=torch.int32)
-        return cls(key, torch.zeros_like(key), 0, shared[0], seqlen, shared[1], shared[2])
+        return cls(key, torch.zeros_like(key), 0, *shared)
 
     def append(self, xk, xv):
         seq = xk.shape[2]
@@ -914,12 +914,13 @@ class Llama2_(nn.Module):
         caches = []
         flash = getattr(comfy_kitchen, "flash_attention_decode_is_available", None)
         flash_kv = self.fixed_kv and flash is not None and flash(device)
+        if flash_kv:
+            pos = torch.empty((batch,), device=device, dtype=torch.int64)
+            seqlen = torch.zeros((batch,), device=device, dtype=torch.int32)
         for _ in range(self.config.num_hidden_layers):
             if flash_kv:
                 key = torch.empty((batch, capacity, self.config.num_key_value_heads, self.config.head_dim), device=device, dtype=dtype)
                 value = torch.empty_like(key)
-                pos = torch.empty((batch,), device=device, dtype=torch.int64)
-                seqlen = torch.zeros((batch,), device=device, dtype=torch.int32)
                 caches.append(FixedKV(key, value, 0, pos, seqlen))
             else:
                 key = torch.empty((batch, self.config.num_key_value_heads, capacity, self.config.head_dim), device=device, dtype=dtype)
@@ -1011,11 +1012,14 @@ class Llama2_(nn.Module):
             if past_key_values is not None:
                 past_kv = past_key_values[i] if len(past_key_values) > 0 else []
 
-            if fixed_kv:
+            if fixed_kv and type(past_kv) is not FixedKV:
                 past_kv.prepare(seq_len)
 
             def core():
                 nonlocal x
+                # Plain FixedKV shares GPU counters; prepare once, eager or graph-replayed.
+                if i == 0 and type(past_kv) is FixedKV:
+                    past_kv.prepare(seq_len)
                 output, current_kv = layer(
                     x=x,
                     attention_mask=mask,

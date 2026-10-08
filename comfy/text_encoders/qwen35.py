@@ -778,7 +778,7 @@ class Qwen35(BaseLlama, BaseGenerate, torch.nn.Module):
         pkv = self.init_kv_cache(embeds.shape[0], cap, device, dt)
         # repair window: drafting ahead plus a near-full rollback
         mtp_kv = FixedKVBias.zeros(embeds.shape[0], cfg.num_key_value_heads, cap, cfg.head_dim, device, dt,
-                                   FixedKVBias.shared(cap, device, dt))
+                                   FixedKVBias.shared(embeds.shape[0], cap, cfg.head_dim, device, dt))
         head = self.model.lm_head if hasattr(self.model, "lm_head") else self.model.embed_tokens
 
         def verify_logits(x):
@@ -990,7 +990,7 @@ class Qwen35(BaseLlama, BaseGenerate, torch.nn.Module):
     def init_kv_cache(self, batch, max_cache_len, device, execution_dtype):
         model_config = self.model.config
         past_key_values = []
-        shared = FixedKVBias.shared(max_cache_len, device, execution_dtype)
+        shared = FixedKVBias.shared(batch, max_cache_len, model_config.head_dim, device, execution_dtype)
         for i in range(model_config.num_hidden_layers):
             if model_config.layer_types[i] == "linear_attention":
                 recurrent_state = torch.zeros(
