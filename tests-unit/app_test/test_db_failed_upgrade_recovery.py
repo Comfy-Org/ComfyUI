@@ -1,6 +1,7 @@
 import glob
 import os
 import sqlite3
+import sys
 from contextlib import closing
 
 import pytest
@@ -229,3 +230,23 @@ def test_unupgradable_database_held_by_another_process_is_not_moved(default_db, 
     assert "no such index: ix_asset_info_meta_key_val_bool" in caplog.text  # failed on the schema, not the lock
     assert glob.glob(default_db + ".failed-upgrade-*") == []
     assert _revision(default_db) == "0001_assets"
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows refuses to rename an open file, so the move is undone")
+def test_unupgradable_database_open_only_for_reading_is_moved(default_db):
+    # Known limitation: only a writer stops the move. A reader keeps reading the moved file.
+    _make_db(default_db, revision="0001_assets", marker="original")
+    _execute(default_db, "DROP INDEX ix_asset_info_meta_key_val_bool")
+    reader = sqlite3.connect(default_db, isolation_level=None)
+    reader.execute("BEGIN")
+    reader.execute("SELECT count(*) FROM sqlite_master")
+    try:
+        _boot()
+        assert reader.execute("SELECT value FROM marker").fetchone() == ("original",)
+    finally:
+        reader.close()
+
+    assert _revision(default_db) == _head()
+    [moved] = _moved_aside(default_db)
+    with closing(sqlite3.connect(moved)) as conn:
+        assert conn.execute("SELECT value FROM marker").fetchone() == ("original",)
