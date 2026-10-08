@@ -380,9 +380,15 @@ def test_a_pre_epoch_file_does_not_stop_the_rest_reviving(root, session):
 
 def test_a_cancel_during_the_revive_leaves_the_rows_missing(root, session):
     files, _ = _gone_and_copied_back(root, session)
+    checks = 0
 
     def cancelled_while_checking_files() -> bool:
-        return sys._getframe(1).f_code.co_name == "_returned_files"
+        """False for the directory's own check, True from its first file on."""
+        nonlocal checks
+        if sys._getframe(1).f_code.co_name != "_returned_files":
+            return False
+        checks += 1
+        return checks > 1
 
     scanner.revive_returned_references_safely("output", should_stop=cancelled_while_checking_files)
 
