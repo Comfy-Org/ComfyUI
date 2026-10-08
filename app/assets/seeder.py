@@ -320,7 +320,8 @@ class _AssetSeeder:
                 compute_hashes=compute_hashes,
             ):
                 return True
-            if self._pending_scan is not None:
+            merged = self._pending_scan is not None
+            if merged:
                 existing_roots = set(self._pending_scan["roots"])
                 existing_roots.update(roots)
                 self._pending_scan["roots"] = tuple(existing_roots)
@@ -335,7 +336,9 @@ class _AssetSeeder:
                     "phase": phase,
                     "compute_hashes": compute_hashes,
                 }
-            logging.info(
+            # One line per queued scan: a request that merges into it logs at debug.
+            logging.log(
+                logging.DEBUG if merged else logging.INFO,
                 "Scan queued (roots=%s, phase=%s)",
                 self._pending_scan["roots"],
                 self._pending_scan["phase"].value,
@@ -913,7 +916,7 @@ class _AssetSeeder:
                 compute_hashes=pending["compute_hashes"],
                 _start_paused=start_paused,
             ):
-                logging.warning(
+                (logging.debug if self._shutting_down else logging.warning)(
                     "Pending scan could not start (roots=%s, phase=%s)",
                     pending["roots"],
                     pending["phase"].value,
