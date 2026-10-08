@@ -22,6 +22,8 @@ MSG_END = (248046, 198)  # "<|im_end|>\n" in the Qwen3.5 vocab: a checkpoint may
 MIN_SUFFIX = 7  # suffixes of 6 or fewer tokens would take the decode/verify paths
 # spike: a directory to persist the stable prefix (KV and DeltaNet state at the end of the system message) across processes
 DISK = os.environ.get("COMFY_LLM_PREFIX_CACHE_DISK")
+# spike, for benchmarks: never reuse, so a no-cache baseline logs the same timings
+NO_REUSE = os.environ.get("COMFY_LLM_PREFIX_CACHE_NO_REUSE") == "1"
 
 _slot = None
 stats = {}
@@ -112,8 +114,8 @@ def _restore(model, key, ids, need, device, dtype):
     """Returns (pkv, reused prefix length, checkpoints still valid). Allocates a fresh cache on a miss."""
     global _slot
     from .qwen35 import LinearKV
-    hit = _match(ids) if _slot is not None and _slot.key == key else None
-    if DISK:
+    hit = _match(ids) if _slot is not None and _slot.key == key and not NO_REUSE else None
+    if DISK and not NO_REUSE:
         pos = _stable_end(ids)
         if pos is not None and (hit is None or hit[0] < pos):
             from . import llm_prefix_cache_disk as disk
