@@ -97,8 +97,12 @@ QKV_FACTORS = QKV_SHARED + QKV_OUTER + QKV_OUTPUT
 
 
 def krea2_fused_qkv_lora(sd):
-    """Whether a lora keeps Krea2 attention in one fused to_qkv adapter."""
-    return any("text_fusion" in k for k in sd) and any(FUSED_QKV.search(k) is not None for k in sd)
+    """Whether a lora keeps Krea2 attention in one fused to_qkv adapter.
+
+    Krea2 names its attention after transformer_blocks or text_fusion, other models with a fused
+    to_qkv module name it differently.
+    """
+    return any(FUSED_QKV.search(k) is not None and ("text_fusion" in k or "transformer_blocks" in k) for k in sd)
 
 
 def _qkv_shapes(tensors):
@@ -106,7 +110,7 @@ def _qkv_shapes(tensors):
     if ".lokr_w2" in tensors and (".lokr_w1" in tensors or ".lokr_w1_a" in tensors):
         out_inner = tensors[".lokr_w2"].shape[0]
         in_inner = tensors[".lokr_w2"].shape[1]
-    elif ".lokr_w2_a" in tensors and ".lokr_w2_b" in tensors and ".lokr_w1_a" in tensors:
+    elif ".lokr_w2_a" in tensors and ".lokr_w2_b" in tensors and (".lokr_w1" in tensors or ".lokr_w1_a" in tensors):
         out_inner = tensors[".lokr_w2_a"].shape[0]
         in_inner = tensors[".lokr_w2_b"].shape[1]
     else:
@@ -117,15 +121,15 @@ def _qkv_shapes(tensors):
             return None
         out_dim = tensors[".lokr_w1"].shape[0] * out_inner
         in_dim = tensors[".lokr_w1"].shape[1] * in_inner
-    elif ".lokr_w1_a" in tensors:
+    elif ".lokr_w1_a" in tensors and ".lokr_w1_b" in tensors:
         if out_inner is None:
             return None
         out_dim = tensors[".lokr_w1_a"].shape[0] * out_inner
         in_dim = tensors[".lokr_w1_b"].shape[1] * in_inner
-    elif ".lora_B.weight" in tensors:
+    elif ".lora_B.weight" in tensors and ".lora_A.weight" in tensors:
         out_dim = tensors[".lora_B.weight"].shape[0]
         in_dim = tensors[".lora_A.weight"].shape[1]
-    elif ".lora_up.weight" in tensors:
+    elif ".lora_up.weight" in tensors and ".lora_down.weight" in tensors:
         out_dim = tensors[".lora_up.weight"].shape[0]
         in_dim = tensors[".lora_down.weight"].shape[1]
     else:
@@ -137,14 +141,14 @@ def _qkv_shapes(tensors):
 
 def _qkv_has_delta(tensors):
     """Whether a per-projection qkv entry holds a trained delta instead of being a placeholder."""
-    w1 = tensors.get(".lokr_w1", tensors.get(".lokr_w1_a"))
-    w2 = tensors.get(".lokr_w2", tensors.get(".lokr_w2_a"))
-    if w1 is not None and w2 is not None:
-        return bool(w1.any() and w2.any())
-    up = tensors.get(".lora_up.weight", tensors.get(".lora_B.weight"))
-    down = tensors.get(".lora_down.weight", tensors.get(".lora_A.weight"))
-    if up is not None and down is not None:
-        return bool(up.any() and down.any())
+    w1 = [tensors[name].any() for name in (".lokr_w1", ".lokr_w1_a", ".lokr_w1_b") if name in tensors]
+    w2 = [tensors[name].any() for name in (".lokr_w2", ".lokr_w2_a", ".lokr_w2_b") if name in tensors]
+    if w1 and w2:
+        return all(w1 + w2)
+    up = [tensors[name].any() for name in (".lora_up.weight", ".lora_B.weight") if name in tensors]
+    down = [tensors[name].any() for name in (".lora_down.weight", ".lora_A.weight") if name in tensors]
+    if up and down:
+        return all(up + down)
     return False
 
 
@@ -204,10 +208,10 @@ def convert_fused_qkv_lora(sd):
                 sd_out["{}{}.row_offset".format(base, proj)] = torch.tensor(offset)
                 offset += size
 
-    # The per-projection entries next to a fused adapter belong to the unused unfused modules:
-    # their delta is empty and their DoRA scale covers the same weights, so the fused adapter is
-    # their only source of trained values and dropping them costs nothing. A trained entry would
-    # be lost and is reported, because only one adapter can be applied per weight.
+    # The per-projection entries next to a fused adapter belong to the unused unfused modules and
+    # their delta is empty. The split emits the trained delta and DoRA scale of every projection
+    # and only one adapter can be applied per weight, so dropping them costs nothing. A trained
+    # entry would be lost and is reported.
     duplicates = {}
     for k in sd:
         if k in converted_keys:
