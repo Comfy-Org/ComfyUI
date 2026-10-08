@@ -96,10 +96,13 @@ class VAEEncodeAudio(IO.ComfyNode):
 
 
 def vae_decode_audio(vae, samples, tile=None, overlap=None):
+    """Decode channel-last VAE output to AUDIO [batch, channels, samples]."""
     latent = samples["samples"]
     if latent.is_nested:
         latent = latent.unbind()[-1]
 
+    # VAE.decode/decode_tiled move codec channels last; restore AUDIO layout
+    # before validating and trimming the final (sample) axis.
     if tile is not None:
         audio = vae.decode_tiled(latent, tile_x=tile, tile_y=tile, overlap=overlap).movedim(-1, 1)
     else:
