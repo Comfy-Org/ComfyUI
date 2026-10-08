@@ -602,6 +602,7 @@ class MiniMaxH3VideoVAE(nn.Module):
 
         # Blended tiles are written straight into a pre-allocated canvas. Tiles blend against
         # their neighbours as already blended, so seams stay continuous where overlaps cross.
+        # The canvas sits on the intermediate device so finished tiles leave VRAM.
         canvas = None
         strip = None
         out_y = 0
@@ -622,7 +623,8 @@ class MiniMaxH3VideoVAE(nn.Module):
                 if j < len(x_idx) - 1:
                     tile = tile[..., :, :-x_overlap[j]]
                 if canvas is None:
-                    canvas = torch.empty(*tile.shape[:-2], height, width, dtype=tile.dtype, device=tile.device)
+                    canvas = torch.empty(*tile.shape[:-2], height, width, dtype=tile.dtype,
+                                         device=comfy.model_management.intermediate_device())
                 if i < len(y_idx) - 1:
                     if new_strip is None:
                         new_strip = torch.empty(*tile.shape[:-2], y_overlap[i], width, dtype=tile.dtype, device=tile.device)
