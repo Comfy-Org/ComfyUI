@@ -627,7 +627,7 @@ def test_batch_insert_failure_emits_only_the_exception_type(
         raise PermissionError("/private/models/asset.safetensors")
 
     monkeypatch.setattr(seeder_module, "insert_asset_specs", fail_insert)
-    monkeypatch.setattr(seeder_module, "revive_returned_references_safely", lambda *_args: None)
+    monkeypatch.setattr(seeder_module, "revive_returned_references_safely", lambda *_args: set())
     monkeypatch.setattr(seeder_module, "create_session", lambda: nullcontext(session))
     monkeypatch.setattr(seeder_module, "tick_watch_list", lambda _progress=None: None)
 

@@ -615,74 +615,64 @@ def _revival_candidates(session: Session, prefixes: list[str], since: datetime) 
 
 
 def _returned_files(
-    candidates: dict[str, list[tuple[str, int]]], should_stop: ShouldStop, listings: DirListings | None = None
-) -> dict[str, int]:
-    """Content id -> mtime_ns of the newest candidate row whose file its directory lists
-    again, settled, at the row's size. Each directory is listed once, or taken from
-    ``listings`` when the caller has already walked it. The listing is what matches names
-    exactly: on a case-insensitive filesystem a stat would also find a file under another
-    spelling, and the walk would then catalogue that spelling as a second live row."""
-    by_dir: dict[str, list[tuple[str, list[tuple[str, int]]]]] = {}
-    for path, rows in candidates.items():
-        by_dir.setdefault(os.path.dirname(path), []).append((os.path.basename(path), rows))
+    candidates: dict[str, list[tuple[str, int]]], walked: set[str], should_stop: ShouldStop
+) -> dict[str, tuple[str, int]]:
+    """Path -> (content id, mtime_ns) of the newest candidate row whose path this scan's
+    walk found again, as a settled regular file of the row's size.
+    The walk's own spelling is the test: on a case-insensitive filesystem a stat would
+    also find a file under another spelling, which the walk then catalogues as a second
+    live row."""
     matched: list[tuple[str, os.stat_result, str]] = []
-    for directory, files in by_dir.items():
+    for path, rows in candidates.items():
+        yield_gil(run=RESCAN_YIELD_RUN)
         if should_stop():
             return {}
-        if listings is not None and directory in listings:
-            names = set(listings[directory][0])
-        else:
-            try:
-                with os.scandir(directory) as it:
-                    names = {entry.name for entry in it}
-            except OSError:
-                continue
-        for name, rows in files:
-            yield_gil(run=RESCAN_YIELD_RUN)
-            if should_stop():
-                return {}
-            if name not in names:
-                continue
-            try:
-                stat_result = os.stat(os.path.join(directory, name))
-            except OSError:
-                continue
-            # A pre-epoch mtime can't be stored; that file is left to the per-file path.
-            if not stat.S_ISREG(stat_result.st_mode) or get_mtime_ns(stat_result) < 0:
-                continue
-            match = next((content_id for content_id, size in rows if size == stat_result.st_size), None)
-            if match is not None:
-                matched.append((os.path.join(directory, name), stat_result, match))
+        if path not in walked:
+            continue
+        try:
+            stat_result = os.stat(path)
+        except OSError:
+            continue
+        # A pre-epoch mtime can't be stored; that file is left to the per-file path.
+        if not stat.S_ISREG(stat_result.st_mode) or get_mtime_ns(stat_result) < 0:
+            continue
+        match = next((content_id for content_id, size in rows if size == stat_result.st_size), None)
+        if match is not None:
+            matched.append((path, stat_result, match))
     # A file still being written (a copy that preallocates its size) waits on the watch
     # list, as a new file does, and later comes back through the per-file revive.
     settled = set(_two_stat_admit([(path, st) for path, st, _ in matched], None, should_stop)[0])
-    return {content_id: get_mtime_ns(st) for path, st, content_id in matched if path in settled}
+    return {path: (content_id, get_mtime_ns(st)) for path, st, content_id in matched if path in settled}
 
 
 def revive_returned_references_safely(
     root: RootType,
+    walked: set[str],
     progress: _ScanProgress | None = None,
     should_stop: ShouldStop = _never_stop,
-    listings: DirListings | None = None,
-) -> None:
+) -> set[str]:
     """Bulk-revive the rows under ``root`` a scan marked missing within REVIVE_WINDOW whose
-    file is back at the same size, counting them as recovered. Not with hashing on: there
-    a returning file keeps the per-file revive, which verifies its hash first."""
+    file this scan's walk found again at the same size, counting them as recovered;
+    returns their paths. Not with hashing on: there a returning file keeps the per-file
+    revive, which verifies its hash first."""
     if mode.hashing_enabled():
-        return
+        return set()
     revived: list[int] = []
+    revived_ids: set[str] = set()
+
+    def write(session: Session, batch: list) -> int:
+        ids = revive_contents(session, dict(batch))
+        revived_ids.update(ids)
+        return len(ids)
+
+    returned: dict[str, tuple[str, int]] = {}
     try:
         with create_session() as session:
             candidates = _revival_candidates(
                 session, get_scan_prefixes_for_root(root), get_utc_now() - REVIVE_WINDOW
             )
-        returned = _returned_files(candidates, should_stop, listings)
-        _write_in_batches(
-            list(returned.items()),
-            lambda session, batch: len(revive_contents(session, dict(batch))),
-            should_stop,
-            revived,
-        )
+        returned = _returned_files(candidates, walked, should_stop)
+        _write_in_batches(list(returned.values()), write, should_stop, revived)
     except Exception as exc:
         logging.exception("bulk revive failed for %s: %s", root, exc)
         emit(
@@ -693,6 +683,7 @@ def revive_returned_references_safely(
         )
     if progress is not None:
         progress.recovered += sum(revived)
+    return {path for path, (content_id, _) in returned.items() if content_id in revived_ids}
 
 
 def list_output_for_rescan() -> ListingWalk:

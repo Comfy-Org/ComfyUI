@@ -26,7 +26,7 @@ from app.assets.database.queries.records import (
     ensure_tag_link,
     mark_content_missing,
 )
-from app.assets.scanner import SeedAssetSpec, insert_asset_specs, seed_asset_specs
+from app.assets.scanner import SeedAssetSpec, SeedCounts, insert_asset_specs, seed_asset_specs
 from app.assets.scanner_changes import recover_missing_content_by_stat
 from app.assets.scanner_admission import _WATCH_LIST
 
@@ -319,10 +319,11 @@ def test_stat_recovery_skips_a_path_a_live_row_already_occupies(session, temp_di
     create_record(session, content_id=live.id, name=path.name)
     session.commit()
 
-    created, error = seed_asset_specs(session, [_spec(path)])
+    counts = SeedCounts()
+    created, error = seed_asset_specs(session, [_spec(path)], counts=counts)
     session.commit()
 
-    assert (created, error) == (0, None)
+    assert (created, error, counts.recovered) == (0, None, 0)
     assert session.get(AssetContent, missing.id).is_missing is True
     assert session.get(AssetContent, live.id).is_missing is False
 

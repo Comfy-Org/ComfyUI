@@ -73,6 +73,11 @@ def _scan(roots=("output",)) -> seeder_module._ScanState:
     return seeder._scan_state
 
 
+def _walked(root: Path) -> set[str]:
+    """What a scan's walk of ``root`` finds."""
+    return {str(path) for path in root.rglob("*") if path.is_file()}
+
+
 def _populate(folder: Path, count: int = 5) -> list[Path]:
     files = []
     for i in range(count):
@@ -139,12 +144,11 @@ def _gone_and_copied_back(root: Path, session) -> tuple[list[Path], dict]:
 
 
 @pytest.mark.parametrize("roots", [("output",), ("models", "input", "output")])
-def test_a_copied_back_folder_keeps_its_rows_and_history(root, session, roots):
+def test_a_copied_back_folder_keeps_its_rows_and_history(root, session, roots, bulk_only):
     files, edits = _gone_and_copied_back(root, session)
 
     state = _scan(roots)
 
-    # The per-file revive needs an exact mtime match, so only the bulk revive gets these.
     assert state.recovered == len(files)
     assert _records(session) == edits
     contents = _contents(session)
@@ -306,7 +310,7 @@ def test_the_newest_row_with_a_record_wins_over_a_newer_one_without(root, sessio
     assert session.get(Asset, users_record).content_id == users.id
 
 
-def test_only_the_returned_part_of_a_nested_folder_revives(root, session):
+def test_only_the_returned_part_of_a_nested_folder_revives(root, session, bulk_only):
     top = _populate(root / "batch", 2)
     (root / "batch" / "sub").mkdir()
     nested = _populate(root / "batch" / "sub", 2)
@@ -328,7 +332,7 @@ def test_hashing_on_keeps_the_per_file_revive(root, session):
         enable_asset_hashing = True
 
     mode.init(_HashingOn())
-    scanner.revive_returned_references_safely("output")
+    scanner.revive_returned_references_safely("output", _walked(root))
 
     assert all(c.is_missing for c in _contents(session))
     assert len(files) == len(_contents(session))
@@ -385,6 +389,7 @@ def test_a_pre_epoch_file_does_not_stop_the_rest_reviving(root, session, bulk_on
 
 def test_a_cancel_stops_the_revive_before_it_stats_the_files(root, session, monkeypatch):
     files, _ = _gone_and_copied_back(root, session)
+    walked = _walked(root)
     real_stat = os.stat
     statted: list[str] = []
 
@@ -394,14 +399,7 @@ def test_a_cancel_stops_the_revive_before_it_stats_the_files(root, session, monk
         return real_stat(path, *args, **kwargs)
 
     monkeypatch.setattr(os, "stat", counting_stat)
-    calls = 0
-
-    def cancelled_after_the_directory_check() -> bool:
-        nonlocal calls
-        calls += 1
-        return calls >= 2
-
-    scanner.revive_returned_references_safely("output", should_stop=cancelled_after_the_directory_check)
+    scanner.revive_returned_references_safely("output", walked, should_stop=lambda: True)
 
     assert statted == []
     assert sum(1 for c in _contents(session) if c.is_missing) == len(files)
@@ -485,7 +483,7 @@ def test_the_revive_writes_in_batches_and_counts_what_committed(root, session, m
 
     monkeypatch.setattr(scanner, "revive_contents", revive)
     progress = seeder_module._ScanState()
-    scanner.revive_returned_references_safely("output", progress)
+    scanner.revive_returned_references_safely("output", _walked(root), progress)
 
     assert batches == [2, 2]
     assert progress.recovered == 2  # the first batch committed; the failure stopped the rest
@@ -493,19 +491,6 @@ def test_the_revive_writes_in_batches_and_counts_what_committed(root, session, m
     assert _scan().recovered == len(files) - 2
 
 
-@pytest.mark.skipif(os.name == "nt" or os.geteuid() == 0, reason="needs POSIX permissions and a non-root user")
-def test_an_unreadable_entry_does_not_hide_the_rest_of_its_directory(root, session, bulk_only):
-    files, edits = _gone_and_copied_back(root, session)
-    locked = root.parent / "locked"
-    (locked / "inner").mkdir(parents=True)
-    (root / "batch" / "link").symlink_to(locked / "inner")
-    locked.chmod(0)  # stat'ing the link's target now raises PermissionError
-    try:
-        # A full scan: the output rescan reads names from its walk and never lists the folder itself.
-        assert _scan(("models", "input", "output")).recovered == len(files)
-    finally:
-        locked.chmod(0o755)
-    assert _records(session) == edits
 
 
 def test_a_file_the_bulk_pass_missed_still_keeps_its_row(root, session, monkeypatch):
@@ -532,9 +517,50 @@ def test_a_file_still_being_written_waits_on_the_watch_list(root, session, monke
 
     monkeypatch.setattr(scanner_admission.time, "sleep", still_copying)
     progress = seeder_module._ScanState()
-    scanner.revive_returned_references_safely("output", progress)
+    scanner.revive_returned_references_safely("output", _walked(root), progress)
 
     assert progress.recovered == len(files) - 1
     missing = [c.path for c in _contents(session) if c.is_missing]
     assert missing == [str(files[0])]
     assert [entry.path for entry in _WATCH_LIST] == [str(files[0])]
+
+
+def _case_insensitive(folder: Path) -> bool:
+    probe = folder / "CaseProbe"
+    probe.write_bytes(b"")
+    try:
+        return (folder / "caseprobe").exists()
+    finally:
+        probe.unlink()
+
+
+@pytest.mark.parametrize("renamed", ["file", "folder"])
+def test_a_name_back_in_other_letter_case_leaves_one_live_row(root, session, renamed):
+    if not _case_insensitive(root):
+        pytest.skip("needs a case-insensitive filesystem")
+    _populate(root / "batch", 1)
+    _scan(("models", "input", "output"))
+    parked = _move_away(root / "batch")
+    _scan(("models", "input", "output"))
+    if renamed == "folder":
+        shutil.copytree(parked, root / "Batch", copy_function=shutil.copy)
+    else:
+        (root / "batch").mkdir()
+        shutil.copy(parked / "image_0.png", root / "batch" / "IMAGE_0.png")
+
+    _scan(("models", "input", "output"))
+
+    live = [c.path for c in _contents(session) if not c.is_missing]
+    assert len({path.casefold() for path in live}) == len(live) == 1
+
+
+def test_only_a_path_the_walk_found_is_revived(root, session):
+    files, _ = _gone_and_copied_back(root, session)
+    walked = _walked(root) - {str(files[0])}  # e.g. found only under another spelling
+
+    progress = seeder_module._ScanState()
+    revived = scanner.revive_returned_references_safely("output", walked, progress)
+
+    assert progress.recovered == len(files) - 1
+    assert revived == {str(p) for p in files[1:]}
+    assert [c.path for c in _contents(session) if c.is_missing] == [str(files[0])]

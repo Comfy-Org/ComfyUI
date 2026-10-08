@@ -944,19 +944,7 @@ class _AssetSeeder:
         t_sync = time.perf_counter()
         assert self._scan_state is not None
         scan_state = self._scan_state
-        # The listing rescan walks first, so the revive reads names from its listings.
-        if by_listing and self._check_pause_and_cancel(_ScanStage.FAST_SCAN):
-            return total_created, skipped_existing, 0
-        walk = list_output_for_rescan() if by_listing else None
         for r in roots:
-            if self._check_pause_and_cancel(_ScanStage.FAST_SCAN):
-                return total_created, skipped_existing, 0
-            revive_returned_references_safely(
-                r,
-                scan_state,
-                lambda: self._check_pause_and_cancel(_ScanStage.FAST_SCAN),
-                walk.listings if walk is not None else None,
-            )
             if self._check_pause_and_cancel(_ScanStage.FAST_SCAN):
                 return total_created, skipped_existing, 0
             if by_listing:
@@ -980,6 +968,7 @@ class _AssetSeeder:
             return total_created, skipped_existing, 0
 
         t_collect = time.perf_counter()
+        walk = list_output_for_rescan() if by_listing else None
         should_stop = lambda: self._check_pause_and_cancel(_ScanStage.FAST_SCAN)
         paths = walk.files if walk is not None else collect_paths_for_roots(roots, scan_state, should_stop)
         # A cancel during the walk leaves paths partial.
@@ -1008,6 +997,11 @@ class _AssetSeeder:
                 len(vanished),
                 unlisted,
             )
+        walked = {os.path.abspath(p) for p in paths}
+        for r in roots:
+            existing_paths.update(revive_returned_references_safely(r, walked, scan_state, should_stop))
+            if should_stop():
+                return total_created, skipped_existing, 0
         total_paths = len(paths)
         self._update_progress(total=total_paths)
 
