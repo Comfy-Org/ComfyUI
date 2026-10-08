@@ -280,17 +280,18 @@ def _init_file_db(db_url):
     try:
         copy_legacy_default_db(db_path)
         try:
-            _migrate_and_bind(db_url, db_path, os.path.exists(db_path))
+            _migrate_and_bind(db_url, db_path, os.path.exists(db_path), True)  # defer_upgrade_error
         except Exception as e:
             corrupt = is_recoverable_corruption(e)
+            deferred = getattr(e, "upgrade_discards_the_catalog", False)  # _migrate logged it at debug only
             recreate = (
                 not corrupt
                 and _is_default_db()
-                and getattr(e, "upgrade_discards_the_catalog", False)
+                and deferred
                 and error_kind(e) != "database_locked"  # another process has it open
             )
-            if getattr(e, "upgrade_discards_the_catalog", False) and not recreate:
-                logging.error("Error upgrading database: ", exc_info=e)  # deferred by _migrate
+            if deferred and not recreate:
+                logging.error("Error upgrading database: ", exc_info=e)
             if corrupt:
                 _quarantine_and_restore(db_path, e)
             elif recreate:
@@ -497,7 +498,7 @@ def _upgrade_discards_the_catalog(script, target_rev, current_rev):
     )
 
 
-def _migrate_and_bind(db_url, db_path, db_exists):
+def _migrate_and_bind(db_url, db_path, db_exists, defer_upgrade_error=False):
     config = get_alembic_config()
 
     # Check if we need to upgrade
@@ -527,7 +528,7 @@ def _migrate_and_bind(db_url, db_path, db_exists):
 
     conn = engine.connect()
     try:
-        _migrate(conn, engine, write_engine, config, db_path, db_exists)
+        _migrate(conn, engine, write_engine, config, db_path, db_exists, defer_upgrade_error)
     except BaseException:
         # Close every handle: Windows refuses to rename the file aside while one is open.
         conn.close()
@@ -536,7 +537,7 @@ def _migrate_and_bind(db_url, db_path, db_exists):
         raise
 
 
-def _migrate(conn, engine, write_engine, config, db_path, db_exists):
+def _migrate(conn, engine, write_engine, config, db_path, db_exists, defer_upgrade_error):
     try:
         journal_mode = conn.exec_driver_sql("PRAGMA journal_mode=WAL").scalar_one()
     except OperationalError:
@@ -574,7 +575,7 @@ def _migrate(conn, engine, write_engine, config, db_path, db_exists):
             command.upgrade(config, target_rev)
             logging.info(f"Database upgraded from {current_rev} to {target_rev}")
         except Exception as e:
-            if discards_catalog:  # _init_file_db logs it, unless a new database replaces this one
+            if defer_upgrade_error and discards_catalog:  # the caller logs it unless a new database replaces this one
                 logging.debug("Error upgrading database: ", exc_info=True)
             else:
                 logging.exception("Error upgrading database: ")
@@ -588,7 +589,7 @@ def _migrate(conn, engine, write_engine, config, db_path, db_exists):
                         f"Restoring the database from its pre-upgrade backup, or removing the "
                         f"backup afterwards, failed; the pre-upgrade copy is kept at {backup_path}"
                     )
-            e.upgrade_discards_the_catalog = discards_catalog
+            e.upgrade_discards_the_catalog = defer_upgrade_error and discards_catalog
             raise e
 
         if discards_catalog:

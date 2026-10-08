@@ -9,7 +9,7 @@ import pytest
 
 from app.database import db as db_module
 from app_test import test_db_corruption_recovery as corruption_recovery
-from app_test.test_db_corruption_recovery import _boot, _head, _make_db, _revision
+from app_test.test_db_corruption_recovery import _boot, _head, _make_db, _revision, _use_wal
 
 # The boot fixtures of the corruption-recovery tests: the autouse ones reset boot state between tests.
 boot_state = corruption_recovery.boot_state
@@ -17,6 +17,12 @@ boot_events = corruption_recovery.boot_events
 startup_warnings = corruption_recovery.startup_warnings  # autouse: isolates the summary list
 default_db = corruption_recovery.default_db
 explicit_db = corruption_recovery.explicit_db
+
+
+def _assert_upgrade_error_logged(caplog, cause):
+    [error] = [r for r in caplog.records if r.levelno == logging.ERROR and "Error upgrading database" in r.getMessage()]
+    assert cause in str(error.exc_info[1])  # the upgrade's own error, with its traceback
+    assert "Database upgrade failed" not in caplog.text
 
 
 def _moved_aside(db_path):
@@ -96,7 +102,7 @@ def _failing_upgrade(monkeypatch):
     monkeypatch.setattr(db_module.command, "upgrade", fail)
 
 
-def test_failed_upgrade_that_keeps_the_catalog_is_not_recreated(default_db, monkeypatch):
+def test_failed_upgrade_that_keeps_the_catalog_is_not_recreated(default_db, monkeypatch, caplog):
     _make_db(default_db, revision="0007_record_content_split")
     old_file = os.stat(default_db).st_ino
     _failing_upgrade(monkeypatch)
@@ -107,6 +113,7 @@ def test_failed_upgrade_that_keeps_the_catalog_is_not_recreated(default_db, monk
     assert _moved_aside(default_db) == []
     assert os.stat(default_db).st_ino == old_file
     assert _revision(default_db) == "0007_record_content_split"
+    _assert_upgrade_error_logged(caplog, "upgrade failed")
 
 
 def test_failed_upgrade_of_an_explicit_database_url_is_not_recreated(explicit_db, monkeypatch):
@@ -200,7 +207,7 @@ def test_sidecars_move_before_the_database(default_db, monkeypatch):
     assert os.path.exists(moved + "-journal")
 
 
-def test_failed_move_puts_every_file_back(default_db, monkeypatch):
+def test_failed_move_puts_every_file_back(default_db, monkeypatch, caplog):
     _make_db(default_db, revision="0001_assets")
     _execute(default_db, "DROP INDEX ix_asset_info_meta_key_val_bool")
     real_replace = os.replace
@@ -219,6 +226,7 @@ def test_failed_move_puts_every_file_back(default_db, monkeypatch):
     assert os.path.exists(default_db + "-journal")
     assert glob.glob(default_db + ".failed-upgrade-*") == []
     assert _revision(default_db) == "0001_assets"
+    _assert_upgrade_error_logged(caplog, "no such index")
 
 
 def test_unupgradable_database_held_by_another_process_is_not_moved(default_db, caplog):
@@ -233,16 +241,19 @@ def test_unupgradable_database_held_by_another_process_is_not_moved(default_db, 
     finally:
         holder.close()
 
-    assert "no such index: ix_asset_info_meta_key_val_bool" in caplog.text  # failed on the schema, not the lock
+    _assert_upgrade_error_logged(caplog, "no such index")  # failed on the schema, not the lock
     assert glob.glob(default_db + ".failed-upgrade-*") == []
     assert _revision(default_db) == "0001_assets"
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="Windows refuses to rename an open file, so the move is undone")
-def test_unupgradable_database_open_only_for_reading_is_moved(default_db):
+@pytest.mark.parametrize("wal", [False, True])
+def test_unupgradable_database_open_only_for_reading_is_moved(default_db, wal):
     # Known limitation: only a writer stops the move. A reader keeps reading the moved file.
     _make_db(default_db, revision="0001_assets", marker="original")
     _execute(default_db, "DROP INDEX ix_asset_info_meta_key_val_bool")
+    if wal:
+        _use_wal(default_db)
     reader = sqlite3.connect(default_db, isolation_level=None)
     reader.execute("BEGIN")
     reader.execute("SELECT count(*) FROM sqlite_master")
@@ -254,6 +265,7 @@ def test_unupgradable_database_open_only_for_reading_is_moved(default_db):
 
     assert _revision(default_db) == _head()
     [moved] = _moved_aside(default_db)
+    assert os.path.exists(moved + "-wal") == wal  # the reader keeps the WAL open, so it moves with the database
     with closing(sqlite3.connect(moved)) as conn:
         assert conn.execute("SELECT value FROM marker").fetchone() == ("original",)
 
@@ -265,5 +277,4 @@ def test_upgrade_failure_that_is_not_recovered_is_logged_as_an_error(explicit_db
     with pytest.raises(SystemExit):
         _boot()
 
-    [error] = [r for r in caplog.records if r.levelno == logging.ERROR and "Error upgrading database" in r.getMessage()]
-    assert error.exc_info
+    _assert_upgrade_error_logged(caplog, "no such index")
