@@ -505,7 +505,7 @@ WITHOUT_ASSETS = "Or start ComfyUI without the assets system: --disable-assets"
 def database_failure_message(error, db_url):
     """What stopped the asset database from opening, and how to fix it."""
     if not db_url.startswith("sqlite:"):
-        return f"--database-url must be a SQLite URL, like sqlite:///path/to/comfyui.db, not '{db_url}'.\n{WITHOUT_ASSETS}"
+        return f"--database-url must start with sqlite:///, like sqlite:///path/to/comfyui.db, not '{db_url}'.\n{WITHOUT_ASSETS}"
     location = get_db_path() if db_url.startswith("sqlite:///") else db_url
     kind = error_kind(error)
     detail = getattr(error, "orig", None) or error

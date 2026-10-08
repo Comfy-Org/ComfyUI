@@ -225,7 +225,7 @@ def test_database_url_that_is_not_sqlite(monkeypatch, db_path, caplog):
 
     error = _startup_error(caplog)
 
-    assert "--database-url must be a SQLite URL, like sqlite:///path/to/comfyui.db, not 'postgresql://localhost/comfy'." in error
+    assert "--database-url must start with sqlite:///, like sqlite:///path/to/comfyui.db, not 'postgresql://localhost/comfy'." in error
 
 
 def test_opens_from_an_install_folder_with_a_percent_sign(tmp_path, monkeypatch, db_path):
@@ -243,11 +243,23 @@ def test_opens_from_an_install_folder_with_a_percent_sign(tmp_path, monkeypatch,
         assert conn.execute("SELECT version_num FROM alembic_version").fetchone()[0] == _head()
 
 
+def _sqlalchemy_quotes_question_marks():
+    from sqlalchemy.engine import URL, make_url
+
+    return make_url(URL.create("sqlite", database="/a?/b.db").render_as_string()).database == "/a?/b.db"
+
+
 @pytest.mark.parametrize(
     "folder",
     [
         "100%20x",
-        pytest.param("what?", marks=pytest.mark.skipif(sys.platform == "win32", reason="? isn't allowed in Windows paths")),
+        pytest.param(
+            "what?",
+            marks=pytest.mark.skipif(
+                sys.platform == "win32" or not _sqlalchemy_quotes_question_marks(),
+                reason="? isn't allowed in Windows paths, and SQLAlchemy before 2.1 can't put one in a URL",
+            ),
+        ),
     ],
 )
 def test_default_database_path_is_used_literally(tmp_path, monkeypatch, db_path, folder):
