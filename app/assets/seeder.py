@@ -204,6 +204,7 @@ class _AssetSeeder:
         self._prune_first: bool = False
         # The startup prune waits for the node list: a custom node may register its model
         # folders in INPUT_TYPES, and a prune before that would mark their rows missing.
+        # A server no client loads the node list from never prunes, short of the prune API.
         self._prune_pending: bool = False
         self._node_list_served: bool = False
         self._progress_callback: ProgressCallback | None = None
@@ -943,6 +944,8 @@ class _AssetSeeder:
         assert self._scan_state is not None
         scan_state = self._scan_state
         # The listing rescan walks first, so the revive reads names from its listings.
+        if by_listing and self._check_pause_and_cancel(_ScanStage.FAST_SCAN):
+            return total_created, skipped_existing, 0
         walk = list_output_for_rescan() if by_listing else None
         for r in roots:
             if self._check_pause_and_cancel(_ScanStage.FAST_SCAN):

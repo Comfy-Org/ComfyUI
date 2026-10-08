@@ -592,12 +592,12 @@ def mark_unlisted_references_missing_safely(
 REVIVE_WINDOW = timedelta(days=7)
 
 
-def _revival_candidates(session: Session, prefixes: list[str], since: datetime) -> dict[str, tuple[str, int]]:
-    """Path -> (content id, size) of the row at each path that a scan marked missing since
-    ``since``, still has a record, and was created last (the per-file revive's pick).
-    Records come first: a newer row whose records were deleted must not hide an older
-    one the user's history hangs off."""
-    newest: dict[str, tuple[tuple[datetime, str], int]] = {}
+def _revival_candidates(session: Session, prefixes: list[str], since: datetime) -> dict[str, list[tuple[str, int]]]:
+    """Path -> (content id, size) of each row at the path that a scan marked missing since
+    ``since`` and that still has a record, newest first, as the per-file revive prefers.
+    Rows whose records were deleted are left out: one must not hide an older row the
+    user's history hangs off."""
+    found: dict[str, dict[str, tuple[datetime, int]]] = {}
     for under_prefixes in sql_path_under_prefix_batches(AssetContent.path, prefixes):
         stmt = sa.select(AssetContent.id, AssetContent.path, AssetContent.size_bytes, AssetContent.created_at).where(
             AssetContent.is_missing.is_(True),
@@ -606,25 +606,28 @@ def _revival_candidates(session: Session, prefixes: list[str], since: datetime) 
             sa.exists().where(Asset.content_id == AssetContent.id),
         )
         for content_id, path, size_bytes, created_at in session.execute(stmt):
-            key = (created_at, content_id)
-            if path not in newest or key > newest[path][0]:
-                newest[path] = (key, size_bytes)
-    return {path: (key[1], size_bytes) for path, (key, size_bytes) in newest.items()}
+            found.setdefault(path, {})[content_id] = (created_at, size_bytes)
+    return {
+        path: [(content_id, size) for content_id, (_, size) in sorted(rows.items(), key=lambda r: (r[1][0], r[0]), reverse=True)]
+        for path, rows in found.items()
+    }
 
 
 def _returned_files(
-    candidates: dict[str, tuple[str, int]], should_stop: ShouldStop, listings: DirListings | None = None
+    candidates: dict[str, list[tuple[str, int]]], should_stop: ShouldStop, listings: DirListings | None = None
 ) -> dict[str, int]:
-    """Content id -> mtime_ns for each candidate its directory lists again as a file of the
-    row's size. Each directory is listed once, or taken from ``listings`` when the caller
-    has already walked it: a directory Core recreated empty (a save, an upload) lists
-    nothing, so its rows stay missing. A name the listing spells differently (a
-    case-insensitive filesystem) is left to the per-file revive."""
-    by_dir: dict[str, list[tuple[str, str, int]]] = {}
-    for path, (content_id, size_bytes) in candidates.items():
-        by_dir.setdefault(os.path.dirname(path), []).append((os.path.basename(path), content_id, size_bytes))
+    """Content id -> mtime_ns of the newest candidate row whose file its directory lists
+    again at the row's size. Each directory is listed once, or taken from ``listings``
+    when the caller has already walked it: a directory Core recreated empty (a save, an
+    upload) lists nothing, so its rows stay missing. A name the listing spells
+    differently (a case-insensitive filesystem) is left to the per-file revive."""
+    by_dir: dict[str, list[tuple[str, list[tuple[str, int]]]]] = {}
+    for path, rows in candidates.items():
+        by_dir.setdefault(os.path.dirname(path), []).append((os.path.basename(path), rows))
     returned: dict[str, int] = {}
-    for directory, rows in by_dir.items():
+    for directory, files in by_dir.items():
+        if should_stop():
+            return {}
         if listings is not None and directory in listings:
             names = set(listings[directory][0])
         else:
@@ -633,7 +636,7 @@ def _returned_files(
                     names = {entry.name for entry in it if entry.is_file()}
             except OSError:
                 continue
-        for name, content_id, size_bytes in rows:
+        for name, rows in files:
             yield_gil(run=RESCAN_YIELD_RUN)
             if should_stop():
                 return {}
@@ -644,8 +647,11 @@ def _returned_files(
             except OSError:
                 continue
             # A pre-epoch mtime can't be stored; that file is left to the per-file path.
-            if stat_result.st_size == size_bytes and get_mtime_ns(stat_result) >= 0:
-                returned[content_id] = get_mtime_ns(stat_result)
+            if get_mtime_ns(stat_result) < 0:
+                continue
+            match = next((content_id for content_id, size in rows if size == stat_result.st_size), None)
+            if match is not None:
+                returned[match] = get_mtime_ns(stat_result)
     return returned
 
 

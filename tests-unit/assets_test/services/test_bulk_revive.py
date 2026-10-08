@@ -77,21 +77,25 @@ def _populate(folder: Path, count: int = 5) -> list[Path]:
     return files
 
 
-def _customise(session) -> dict[str, tuple[str, set[str]]]:
+def _customise(session) -> dict[str, tuple[str, dict | None, str | None, set[str]]]:
     session.expire_all()
     ensure_tag(session, "favourite")
     for i, record in enumerate(session.scalars(sa.select(Asset).order_by(Asset.name))):
         record.name = f"renamed {i}"
+        record.user_metadata = {"note": i}
+        record.job_id = f"job-{i}"
         ensure_tag_link(session, asset_id=record.id, tag_name="favourite", origin="manual")
     session.commit()
     return _records(session)
 
 
-def _records(session) -> dict[str, tuple[str, set[str]]]:
+def _records(session) -> dict[str, tuple[str, dict | None, str | None, set[str]]]:
     session.expire_all()
     return {
         record.id: (
             record.name,
+            record.user_metadata,
+            record.job_id,
             set(session.scalars(sa.select(AssetTag.tag_name).where(AssetTag.asset_id == record.id))),
         )
         for record in session.scalars(sa.select(Asset))
@@ -153,14 +157,14 @@ def test_a_revived_row_loses_its_missing_tag_and_its_hash_when_the_mtime_moved(r
     session.commit()
     parked = _move_away(root / "batch")
     _scan()
-    assert "missing" in next(iter(_records(session).values()))[1]
+    assert "missing" in next(iter(_records(session).values()))[-1]
     _copy_back(parked, root / "batch")
 
     _scan()
 
     (content,) = _contents(session)
     assert content.hash is None
-    assert "missing" not in next(iter(_records(session).values()))[1]
+    assert "missing" not in next(iter(_records(session).values()))[-1]
 
 
 def test_scan_marks_are_stamped_and_single_row_marks_are_not(root, session):
@@ -180,7 +184,7 @@ def test_scan_marks_are_stamped_and_single_row_marks_are_not(root, session):
     assert session.get(AssetContent, live.id).missing_since is None
 
 
-def test_every_revive_clears_the_stamp(root, session):
+def test_the_per_file_unmark_clears_the_stamp(root, session):
     _populate(root / "batch", 1)
     _scan()
     _move_away(root / "batch")
@@ -306,7 +310,7 @@ def test_only_the_returned_part_of_a_nested_folder_revives(root, session):
     _scan()
     (root / "batch").mkdir()
     for path in top:
-        shutil.copy2(parked / path.name, path)
+        shutil.copy(parked / path.name, path)  # new mtimes, so only the bulk revive takes them
 
     assert _scan().recovered == len(top)
     assert {c.path for c in _contents(session) if c.is_missing} == {str(p) for p in nested}
@@ -355,7 +359,7 @@ def test_a_row_whose_record_went_before_the_write_is_not_revived(root, session):
     candidates = scanner._revival_candidates(
         session, [str(root)], get_utc_now() - scanner.REVIVE_WINDOW
     )
-    assert list(candidates.values()) == [(content.id, 10)]
+    assert list(candidates.values()) == [[(content.id, 10)]]
     session.execute(sa.delete(AssetTag))
     session.execute(sa.delete(Asset))  # the user deletes it while the scan is paused
     session.commit()
@@ -398,3 +402,54 @@ def test_a_failing_revive_leaves_the_rest_of_the_scan_running(root, session, mon
     assert state.recovered == 0
     assert any(c.path == str(root / "new.png") and not c.is_missing for c in _contents(session))
     assert "bulk revive failed" in caplog.text
+
+
+def test_the_newest_row_of_the_returned_size_wins(root, session):
+    files = _populate(root / "batch", 1)
+    _scan()
+    (original,) = _contents(session)
+    original.created_at = original.created_at - timedelta(days=1)
+    original.is_missing, original.missing_since = True, get_utc_now()
+    session.commit()
+    replacement = create_content(session, path=str(files[0]), size_bytes=999, mtime_ns=1)
+    create_record(session, content_id=replacement.id, name="replacement")
+    replacement.is_missing, replacement.missing_since = True, get_utc_now()
+    session.commit()
+    stat_result = files[0].stat()
+    os.utime(files[0], ns=(stat_result.st_atime_ns, stat_result.st_mtime_ns + 5_000_000_000))
+
+    assert _scan().recovered == 1
+
+    assert not session.get(AssetContent, original.id).is_missing
+    assert session.get(AssetContent, replacement.id).is_missing
+
+
+def test_a_revive_keeps_the_hash_when_the_mtime_did_not_move(root, session):
+    _populate(root / "batch", 1)
+    _scan()
+    (content,) = _contents(session)
+    content.hash = "blake3:" + "0" * 64
+    session.commit()
+    parked = _move_away(root / "batch")
+    _scan()
+    shutil.move(parked, root / "batch")  # a move keeps the mtime
+
+    assert _scan().recovered == 1
+
+    (content,) = _contents(session)
+    assert (content.is_missing, content.hash) == (False, "blake3:" + "0" * 64)
+
+
+def test_rows_marked_before_the_upgrade_still_revive_per_file(root, session):
+    files = _populate(root / "batch")
+    _scan()
+    edits = _customise(session)
+    for content in _contents(session):
+        mark_content_missing(session, content.id)  # no stamp, like a row marked before 0009
+    session.commit()
+
+    state = _scan()
+
+    assert state.recovered == len(files)
+    assert _records(session) == edits
+    assert all(not c.is_missing and c.missing_since is None for c in _contents(session))

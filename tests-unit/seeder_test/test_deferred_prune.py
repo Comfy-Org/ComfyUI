@@ -59,6 +59,7 @@ def test_the_first_scan_after_the_node_list_prunes_once(scan_seeder, prunes, tem
     scan_seeder.node_list_served()
     scan_seeder._run_scan()
     scan_seeder._state = State.RUNNING
+    scan_seeder._scan_state = _ScanState()
     scan_seeder._prune_first = False
     scan_seeder._run_scan()
 
@@ -156,14 +157,17 @@ def test_the_startup_prune_runs_in_the_first_ordinary_scan_after_the_node_list(l
 
 
 def test_a_scan_queued_behind_the_startup_scan_runs_the_prune(live_seeder, prunes, monkeypatch):
-    release = threading.Event()
+    entered, release = threading.Event(), threading.Event()
 
     def held_fast_phase(roots):
+        entered.set()
         release.wait(5)
         return 0, 0, 0
 
     monkeypatch.setattr(live_seeder, "_run_fast_phase", held_fast_phase)
     assert live_seeder.start(prune_first=True, phase=ScanPhase.FAST)
+    assert entered.wait(5)  # past its prune check, so only the queued scan can prune
+    assert prunes == []
     live_seeder.node_list_served()
     assert not live_seeder.start(phase=ScanPhase.FAST)
     live_seeder.enqueue_scan(roots=("models", "input", "output"), phase=ScanPhase.FAST)
