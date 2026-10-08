@@ -184,7 +184,7 @@ def test_read_only_sidecar_file_is_named(db_path, caplog):
 
     error = _startup_error(caplog, kind="not_writable")
 
-    assert f"[Errno 13] Permission denied: '{db_path}-shm'" in error
+    assert f"ComfyUI can't write '{db_path}-shm', beside the asset database '{db_path}'" in error
 
 
 def _start_and_stop(db_path):
@@ -195,14 +195,24 @@ def _start_and_stop(db_path):
 
 
 @pytest.mark.skipif(sys.platform == "win32" or os.geteuid() == 0, reason="needs POSIX permissions enforced")
-def test_read_only_backup_left_by_an_earlier_run_is_named(db_path, caplog):
-    _start_and_stop(db_path)
+def test_read_only_backup_left_by_an_earlier_run_is_named_before_an_upgrade(db_path, caplog):
+    command.upgrade(db_module.get_alembic_config(), "0006_add_loader_path")
     open(db_path + ".bkp", "a").close()
     os.chmod(db_path + ".bkp", 0o444)
 
     error = _startup_error(caplog, kind="not_writable")
 
-    assert f"[Errno 13] Permission denied: '{db_path}.bkp'" in error
+    assert f"ComfyUI can't write '{db_path}.bkp', beside the asset database '{db_path}'" in error
+    assert _revision(db_path) == "0006_add_loader_path"
+
+
+@pytest.mark.skipif(sys.platform == "win32" or os.geteuid() == 0, reason="needs POSIX permissions enforced")
+def test_read_only_backup_doesnt_matter_without_an_upgrade(db_path):
+    _start_and_stop(db_path)
+    open(db_path + ".bkp", "a").close()
+    os.chmod(db_path + ".bkp", 0o444)
+
+    main.setup_database(_AssetsOn())
 
 
 @pytest.mark.skipif(sys.platform == "win32" or os.geteuid() == 0, reason="needs POSIX permissions enforced")
@@ -349,6 +359,11 @@ def test_default_database_path_is_used_literally(tmp_path, monkeypatch, db_path,
     assert db_module.get_db_path() == str(user_dir / "comfyui.db")
     with sqlite3.connect(user_dir / "comfyui.db") as conn:
         assert conn.execute("SELECT version_num FROM alembic_version").fetchone()[0] == _head()
+
+
+def _revision(path):
+    with sqlite3.connect(path) as conn:
+        return conn.execute("SELECT version_num FROM alembic_version").fetchone()[0]
 
 
 def _head():

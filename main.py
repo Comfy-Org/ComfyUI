@@ -539,7 +539,10 @@ def database_failure_message(error, db_url):
         fix = "Move that file, or choose another folder."
     elif kind in ("read_only", "unable_to_open") or isinstance(error, OSError):
         failure = "not_writable"
-        what = f"ComfyUI can't create, open or write the asset database '{location}' ({detail})."
+        blocked = getattr(error, "filename", None)
+        what = (f"ComfyUI can't write '{blocked}', beside the asset database '{location}' ({detail})."
+                if blocked and blocked not in (location, location + ".lock") else
+                f"ComfyUI can't create, open or write the asset database '{location}' ({detail}).")
         fix = "Make sure its folder is a writable directory and the database path is a writable file, or doesn't exist yet."
     elif kind == "database_corrupt":
         failure = "corrupt"

@@ -283,7 +283,7 @@ def _init_file_db(db_url):
     try:
         copy_legacy_default_db(db_path)
         db_exists = os.path.exists(db_path)
-        for path in (db_path, db_path + "-wal", db_path + "-shm", db_path + ".bkp"):
+        for path in (db_path, db_path + "-wal", db_path + "-shm"):
             # Before the backup and upgrade, which would otherwise leave read-only copies behind.
             if os.path.exists(path) and not os.access(path, os.W_OK):
                 raise PermissionError(errno.EACCES, "Permission denied", path)
@@ -377,6 +377,8 @@ def _migrate_and_bind(db_url, db_path, db_exists):
         # Backup the database pre upgrade
         backup_path = db_path + ".bkp"
         if db_exists:
+            if os.path.exists(backup_path) and not os.access(backup_path, os.W_OK):  # left read-only by an earlier run
+                raise PermissionError(errno.EACCES, "Permission denied", backup_path)
             _backup_database(db_path, backup_path)
         else:
             backup_path = None
