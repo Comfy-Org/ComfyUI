@@ -512,20 +512,23 @@ def database_failure_message(error, db_url):
     if "Could not acquire lock on database" in str(error):
         what = f"Another ComfyUI is already using the asset database '{location}'."
         fix = "Close the other ComfyUI and start this one again, or, to run both, give this one its own database as below."
-    elif kind == "database_locked":
+    elif kind in ("database_locked", "file_locked"):
         what = f"The asset database '{location}' is locked by another program ({detail})."
         fix = "Close any program that has it open, such as another ComfyUI or a database viewer, and start again."
     elif "Can't locate revision" in str(error):
         what = f"The asset database '{location}' was last used by a newer version of ComfyUI ({detail})."
         fix = "Update ComfyUI, or move that file aside and start again to create a new database."
-    elif kind in ("permission_denied", "read_only") or isinstance(error, FileExistsError):
-        what = f"ComfyUI can't create or write the asset database '{location}' ({detail})."
-        fix = "Make sure its folder is a writable directory and the file itself is writable."
-    else:
-        what = (f"The asset database '{location}' is corrupt ({detail})." if kind == "database_corrupt"
-                else f"Could not open or upgrade the asset database '{location}': {detail}")
+    elif kind in ("read_only", "unable_to_open") or isinstance(error, OSError):
+        what = f"ComfyUI can't create, open or write the asset database '{location}' ({detail})."
+        fix = "Make sure its folder is a writable directory and the database path is a writable file, or doesn't exist yet."
+    elif kind == "database_corrupt":
+        what = f"The asset database '{location}' is corrupt ({detail})."
         fix = ("Move that file aside, or delete it, and start again: ComfyUI creates a new database "
                "and rebuilds the asset catalog by rescanning your files.")
+    else:
+        what = f"Could not open or upgrade the asset database '{location}': {detail}"
+        fix = ("If the database is damaged, move that file aside and start again: ComfyUI creates a new "
+               "database and rebuilds the asset catalog by rescanning your files.")
     return f"{what}\n{fix}\nOr give this ComfyUI its own database: --database-url sqlite:///path/to/another.db\n{WITHOUT_ASSETS}"
 
 

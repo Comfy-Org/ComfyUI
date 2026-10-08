@@ -482,8 +482,7 @@ class TestExecution:
         { "extra_args" : ["--cache-classic"], "should_cache_results" : True },
         { "extra_args" : ["--cache-lru", 100], "should_cache_results" : True },
         { "extra_args" : ["--cache-none"], "should_cache_results" : False },
-        # TODO: re-enable once the --enable-assets execution runs stop flaking.
-        # {"extra_args": ["--enable-assets"], "should_cache_results": True, "assets": True},
+        {"extra_args": [], "should_cache_results": True, "assets": True},
     ])
     def server(self, args_pytest, request, tmp_path_factory):
         # Start server

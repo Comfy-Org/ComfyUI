@@ -52,12 +52,16 @@ def _revision(db: Path) -> str:
         return conn.execute("SELECT version_num FROM alembic_version").fetchone()[0]
 
 
-def test_assets_are_on_by_default_with_hashing_off(tmp_path):
-    result = _quick_start(tmp_path)
+@pytest.mark.parametrize(("flags", "hashing"), [((), "false"), (("--enable-asset-hashing",), "true")])
+def test_assets_are_on_by_default_and_hashing_stays_opt_in(tmp_path, flags, hashing):
+    result = _quick_start(tmp_path, *flags)
+    output = result.stdout + result.stderr
 
     assert result.returncode == 0, result.stderr
     assert _revision(_db(tmp_path)) == HEAD
-    assert "[assets-event] assets.enabled hashing_enabled=false" in result.stdout + result.stderr
+    assert [line.split("assets.enabled ", 1)[1] for line in output.splitlines() if "[assets-event] assets.enabled " in line] == [
+        f"hashing_enabled={hashing}"
+    ]
     assert DEPRECATED not in result.stderr
 
 
@@ -107,11 +111,20 @@ def _free_port() -> int:
 
 @pytest.fixture
 def default_server(tmp_path):
+    yield from _serve(tmp_path)
+
+
+@pytest.fixture
+def disabled_server(tmp_path):
+    yield from _serve(tmp_path, "--disable-assets")
+
+
+def _serve(tmp_path, *flags):
     port = _free_port()
     log_path = tmp_path / "server.log"
     with open(log_path, "w") as log:
         server = subprocess.Popen(
-            _comfy_args(tmp_path, "--listen", "127.0.0.1", "--port", str(port)),
+            _comfy_args(tmp_path, *flags, "--listen", "127.0.0.1", "--port", str(port)),
             cwd=tmp_path,
             stdout=log,
             stderr=subprocess.STDOUT,
@@ -130,8 +143,11 @@ def default_server(tmp_path):
         yield base_url
     finally:
         server.terminate()
-        with contextlib.suppress(subprocess.TimeoutExpired):
+        try:
             server.wait(timeout=30)
+        except subprocess.TimeoutExpired:
+            server.kill()
+            server.wait()
 
 
 def test_default_server_serves_assets_and_registers_uploads(default_server):
@@ -142,6 +158,7 @@ def test_default_server_serves_assets_and_registers_uploads(default_server):
         timeout=10,
     )
     assert upload.status_code == 200
+    assert upload.json()["asset"]["name"] == "default-on.png"
     view = requests.get(f"{default_server}/view", params={"filename": "default-on.png", "type": "input"}, timeout=10)
     assert view.content == b"default-on-bytes"
 
@@ -149,3 +166,12 @@ def test_default_server_serves_assets_and_registers_uploads(default_server):
 
     assert listed.status_code == 200
     assert "default-on.png" in [asset["name"] for asset in listed.json()["assets"]]
+    assert requests.get(f"{default_server}/features", timeout=10).json()["assets"] is True
+
+
+def test_disabled_server_reports_assets_off(disabled_server):
+    disabled = requests.get(f"{disabled_server}/api/assets", timeout=10)
+
+    assert disabled.status_code == 503
+    assert "--disable-assets" in disabled.json()["error"]["message"]
+    assert requests.get(f"{disabled_server}/features", timeout=10).json()["assets"] is False
