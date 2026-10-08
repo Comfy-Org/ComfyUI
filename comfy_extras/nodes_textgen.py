@@ -1,3 +1,7 @@
+import json
+import time
+
+from comfy.text_encoders import llm_prefix_cache
 from comfy_api.latest import ComfyExtension, io
 from typing_extensions import override
 
@@ -41,6 +45,7 @@ class TextGenerate(io.ComfyNode):
                 io.Boolean.Input("use_default_template", optional=True, default=True, tooltip="Use the built in system prompt/template if the model has one.", advanced=True),
                 io.Combo.Input("mtp", options=["auto", "off", "2", "3", "4", "5"], default="auto", optional=True, tooltip="Speculative decoding with the checkpoint's multi-token-prediction head. No effect without MTP weights. auto adapts the draft depth; 2-5 pins it. Sampled output stays correctly distributed but differs from non-MTP output for the same seed."),
                 io.String.Input("system_prompt", force_input=True, optional=True, tooltip="Replaces the system prompt in the model's chat template. Ignored when the default template is not used."),
+                io.Combo.Input("prefix_cache", options=["env", "off", "stats", "gpu", "cpu"], default="env", optional=True, advanced=True, tooltip="Spike: prefix cache mode; env keeps COMFY_LLM_PREFIX_CACHE."),
             ],
             outputs=[
                 io.String.Output(display_name="generated_text"),
@@ -49,7 +54,9 @@ class TextGenerate(io.ComfyNode):
         )
 
     @classmethod
-    def execute(cls, clip, prompt, max_length, sampling_mode, image=None, thinking=False, use_default_template=True, video=None, audio=None, mtp="auto", system_prompt="") -> io.NodeOutput:
+    def execute(cls, clip, prompt, max_length, sampling_mode, image=None, thinking=False, use_default_template=True, video=None, audio=None, mtp="auto", system_prompt="", prefix_cache="env") -> io.NodeOutput:
+        if prefix_cache != "env":
+            llm_prefix_cache.MODE = prefix_cache
 
         mtp = False if mtp == "off" else (True if mtp == "auto" else int(mtp))
 
@@ -235,7 +242,7 @@ class TextGenerateLTX2Prompt(TextGenerate):
         )
 
     @classmethod
-    def execute(cls, clip, prompt, max_length, sampling_mode, image=None, thinking=False, use_default_template=True, video=None, audio=None, mtp="auto", system_prompt="") -> io.NodeOutput:
+    def execute(cls, clip, prompt, max_length, sampling_mode, image=None, thinking=False, use_default_template=True, video=None, audio=None, mtp="auto", system_prompt="", prefix_cache="env") -> io.NodeOutput:
         # Gemma 3 and Gemma 4 use different chat-turn markers and image tokens.
         # The Gemma 4 text encoder is the LTX 2.4 path; Gemma 3 is LTX 2.0.
         is_gemma4 = "gemma4" in getattr(clip.tokenizer, "clip_name", "")
@@ -264,10 +271,27 @@ class TextGenerateLTX2Prompt(TextGenerate):
                 f"<start_of_turn>model\n"
             )
 
-        out = super().execute(clip, formatted_prompt, max_length, sampling_mode, image=image, thinking=thinking, use_default_template=use_default_template, video=video, audio=audio, mtp=mtp)
+        out = super().execute(clip, formatted_prompt, max_length, sampling_mode, image=image, thinking=thinking, use_default_template=use_default_template, video=video, audio=audio, mtp=mtp, prefix_cache=prefix_cache)
 
         # Both system prompts ask for the original prompt back when there is nothing to give; empty conditions on nothing.
         return io.NodeOutput(out.args[0] or prompt, out.args[1])
+
+
+class LLMPrefixCacheStats(io.ComfyNode):
+    # spike: the last generate's prefix-cache timing, as JSON; wire the generated text in so it runs after
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(node_id="LLMPrefixCacheStats", category="text",
+                         inputs=[io.String.Input("text", force_input=True)],
+                         outputs=[io.String.Output(display_name="stats")])
+
+    @classmethod
+    def fingerprint_inputs(cls, **kwargs):
+        return time.time()
+
+    @classmethod
+    def execute(cls, text) -> io.NodeOutput:
+        return io.NodeOutput(json.dumps({k: v for k, v in llm_prefix_cache.stats.items() if k != "t0"}))
 
 
 class TextgenExtension(ComfyExtension):
@@ -276,6 +300,7 @@ class TextgenExtension(ComfyExtension):
         return [
             TextGenerate,
             TextGenerateLTX2Prompt,
+            LLMPrefixCacheStats,
         ]
 
 async def comfy_entrypoint() -> TextgenExtension:
