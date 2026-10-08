@@ -110,6 +110,31 @@ from comfy.cli_args import args
 import comfy.ops
 ops = comfy.ops.disable_weight_init
 
+AITER_ATTENTION_IS_AVAILABLE = False
+mha_fwd = None
+AITER_EXPLICITLY_REQUESTED = args.use_aiter_attention
+AITER_OTHER_BACKEND_REQUESTED = any((
+    args.use_split_cross_attention,
+    args.use_quad_cross_attention,
+    args.use_pytorch_cross_attention,
+    args.use_sage_attention,
+    args.use_flash_attention,
+    args.use_ck_attention,
+))
+
+
+if AITER_EXPLICITLY_REQUESTED and (torch.version.hip is None or args.cpu):
+    logging.error("Aiter attention requires ROCm/HIP GPU mode; remove --cpu and use a ROCm/HIP PyTorch build.")
+    exit(-1)
+elif torch.version.hip is not None and not args.cpu and (AITER_EXPLICITLY_REQUESTED or not AITER_OTHER_BACKEND_REQUESTED):
+    try:
+        from aiter.ops.mha import mha_fwd
+        AITER_ATTENTION_IS_AVAILABLE = True
+    except (ImportError, OSError) as e:
+        if AITER_EXPLICITLY_REQUESTED:
+            logging.error("Aiter attention was requested but its native FMHA runtime could not be loaded. Install an Aiter build compatible with this PyTorch/ROCm environment: %s", e)
+            exit(-1)
+
 FORCE_UPCAST_ATTENTION_DTYPE = model_management.force_upcast_attention_dtype()
 
 def get_attn_precision(attn_precision, current_dtype):
@@ -911,6 +936,68 @@ def attention_flash(q, k, v, heads, mask=None, attn_precision=None, skip_reshape
     return out
 
 
+@wrap_attn
+def attention_aiter(q, k, v, heads, mask=None, attn_precision=None, skip_reshape=False, skip_output_reshape=False, **kwargs):
+    def fallback():
+        attention = attention_sub_quad if q.device.type == "cpu" else _AITER_FALLBACK
+        return attention(
+            q, k, v, heads, mask=mask, attn_precision=attn_precision,
+            skip_reshape=skip_reshape, skip_output_reshape=skip_output_reshape, **kwargs,
+        )
+
+    if (
+        torch.version.hip is None
+        or q.device.type != "cuda"
+        or mask is not None
+        or get_attn_precision(attn_precision, q.dtype) is not None
+        or q.dtype not in (torch.float16, torch.bfloat16)
+        or k.device != q.device
+        or v.device != q.device
+        or k.dtype != q.dtype
+        or v.dtype != q.dtype
+        or not isinstance(heads, int)
+        or heads <= 0
+        or kwargs.get("enable_gqa", False)
+        or kwargs.get("is_causal", False)
+        or (torch.is_grad_enabled() and any(t.requires_grad for t in (q, k, v)))
+        or bool(set(kwargs) - {"scale", "enable_gqa", "is_causal", "_inside_attn_wrapper", "transformer_options"})
+    ):
+        return fallback()
+
+    if skip_reshape:
+        if q.ndim != 4 or k.ndim != 4 or v.ndim != 4 or any(t.shape[1] != heads for t in (q, k, v)):
+            return fallback()
+        q_bshd, k_bshd, v_bshd = (t.transpose(1, 2).contiguous() for t in (q, k, v))
+    else:
+        if q.ndim != 3 or k.ndim != 3 or v.ndim != 3 or any(t.shape[-1] % heads for t in (q, k, v)):
+            return fallback()
+        q_bshd, k_bshd, v_bshd = (
+            t.reshape(t.shape[0], t.shape[1], heads, t.shape[-1] // heads).contiguous()
+            for t in (q, k, v)
+        )
+
+    if (
+        q_bshd.shape[0] != k_bshd.shape[0] or q_bshd.shape[0] != v_bshd.shape[0]
+        or q_bshd.shape[2] != k_bshd.shape[2] or q_bshd.shape[2] != v_bshd.shape[2]
+        or k_bshd.shape[1] != v_bshd.shape[1]
+        or q_bshd.shape[3] != k_bshd.shape[3] or q_bshd.shape[3] != v_bshd.shape[3]
+    ):
+        return fallback()
+
+    dim_head = q_bshd.shape[-1]
+    if q_bshd.shape[0] == 0 or q_bshd.shape[1] == 0 or not (0 < dim_head <= 256 and dim_head % 8 == 0):
+        return fallback()
+
+    softmax_scale = float(kwargs["scale"]) if kwargs.get("scale") is not None else dim_head ** -0.5
+    output = mha_fwd(
+        q_bshd, k_bshd, v_bshd,
+        0.0, softmax_scale, False, -1, -1, 0, False, False,
+    )[0]
+    if skip_output_reshape:
+        return output.transpose(1, 2)
+    return output.reshape(output.shape[0], output.shape[1], -1)
+
+
 optimized_attention = attention_basic
 
 if model_management.sage_attention_enabled():
@@ -942,6 +1029,11 @@ if model_management.comfy_kitchen_attention_enabled():
         exit(-1)
 
 optimized_attention_masked = optimized_attention
+
+if AITER_ATTENTION_IS_AVAILABLE:
+    _AITER_FALLBACK = optimized_attention
+    logging.info("Using Aiter attention")
+    optimized_attention = attention_aiter
 
 
 # register core-supported attention functions
