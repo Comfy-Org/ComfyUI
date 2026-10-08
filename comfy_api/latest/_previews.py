@@ -14,7 +14,8 @@ class PreviewGenerator(ABC):
     Core looks a generator up by the MIME type ``mimetypes.guess_type`` gives the
     file's path, so a generator for a new extension also registers it with
     ``mimetypes.add_type``. Registering a generator for a MIME type replaces any
-    earlier one for it, including Core's own.
+    earlier one for it, including Core's own. A file of a registered type is never
+    its own preview: it shows the generated one, or none when generation fails.
     """
 
     mime_types: ClassVar[tuple[str, ...]]

@@ -9,6 +9,8 @@ from PIL import Image
 
 from app.assets.manager import AssetsEnabled
 from app.assets.previews import generate_upload_preview
+from comfy_api.latest import Previews
+from comfy_execution import preview_generators
 
 from .preview_helpers import write_exr
 
@@ -65,6 +67,28 @@ async def test_a_png_upload_is_its_own_preview(mock_create_session, roots):
         asset = (await resp.json())["asset"]
 
     assert asset["preview_id"] == asset["id"]
+
+
+class _FailingPngGenerator(Previews.PreviewGenerator):
+    mime_types = ("image/png",)
+
+    def generate(self, source_path, max_pixels):
+        raise ValueError("cannot read this one")
+
+
+@pytest.mark.asyncio
+async def test_a_type_with_a_generator_never_falls_back_to_itself(mock_create_session, roots):
+    generator = _FailingPngGenerator()
+    preview_generators.register_preview_generator(generator)
+    try:
+        async with await _client(AssetsEnabled(_Args())) as client:
+            resp = await client.post("/upload/image", data=_form("still.png", _png()))
+            asset = (await resp.json())["asset"]
+    finally:
+        preview_generators.unregister_preview_generator(generator)
+
+    assert asset.get("preview_id") is None
+    assert asset.get("preview_url") is None
 
 
 @pytest.mark.asyncio

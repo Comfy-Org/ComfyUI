@@ -2,6 +2,8 @@
 import mimetypes
 import os
 
+from comfy_execution.preview_generators import get_preview_generator
+
 # What a client can render from the bytes themselves; anything else needs a nominated preview.
 PREVIEWABLE_MIME_PREFIXES = ("image/", "video/", "audio/", "text/")
 
@@ -20,6 +22,9 @@ def own_preview_kind(mime_type: str | None, path: str | None) -> str | None:
     if not mime.startswith(PREVIEWABLE_MIME_PREFIXES):
         return None
     if mime in _NEVER_SELF_MIME_TYPES or os.path.splitext(path or "")[1].lower() in _NEVER_SELF_EXTENSIONS:
+        return None
+    # A type with a generator (looked up by path, as generation does) gets a generated preview or none.
+    if get_preview_generator(mimetypes.guess_type(path or "", strict=False)[0]) is not None:
         return None
     return mime.split("/", 1)[0]
 

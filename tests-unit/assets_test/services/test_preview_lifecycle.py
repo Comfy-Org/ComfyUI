@@ -306,7 +306,7 @@ class _PngGenerator:
         return Image.new("RGB", (4, 4))
 
 
-def test_a_generator_upgrades_an_output_that_is_its_own_preview(session, mock_create_session, roots):
+def test_an_output_whose_type_has_a_generator_waits_for_its_generated_preview(session, mock_create_session, roots):
     from comfy_execution import preview_generators
 
     (roots / "output" / "still.png").write_bytes(b"png")
@@ -314,7 +314,7 @@ def test_a_generator_upgrades_an_output_that_is_its_own_preview(session, mock_cr
     preview_generators.register_preview_generator(generator)
     try:
         enriched = register_executed_outputs(_ui("still.png"), "job", AssetsEnabled(_Args()))
-        assert enriched["images"][0]["preview_id"] == enriched["images"][0]["id"], "its own preview until generated"
+        assert "preview_id" not in enriched["images"][0], "never its own preview, even before generating"
         asyncio.run(generate_output_previews(enriched))
     finally:
         preview_generators.unregister_preview_generator(generator)

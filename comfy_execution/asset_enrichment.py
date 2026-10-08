@@ -85,8 +85,7 @@ async def generate_output_previews(output_ui: dict) -> None:
         for entry in entries:
             if not isinstance(entry, dict) or "id" not in entry:
                 continue
-            # A linked preview stays; an entry that is only its own preview can get a better one.
-            if entry.get("preview_id") not in (None, entry["id"]):
+            if entry.get("preview_id") is not None:
                 continue
             try:
                 abs_path = _resolve_output_path(entry)
