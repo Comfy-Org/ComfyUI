@@ -123,17 +123,37 @@ AITER_OTHER_BACKEND_REQUESTED = any((
 ))
 
 
+# Aiter's documented FMHA targets; a CK codegen factory alone does not establish Aiter support.
+_AITER_SUPPORTED_ARCHES = {"gfx942", "gfx950", "gfx1100", "gfx1151", "gfx1201"}
+
+
+@functools.cache
+def _aiter_device_arch(device):
+    if device.type != "cuda":
+        return None
+    try:
+        return torch.cuda.get_device_properties(device).gcnArchName.split(":", 1)[0]
+    except (AttributeError, RuntimeError):
+        return None
+
+
 if AITER_EXPLICITLY_REQUESTED and (torch.version.hip is None or args.cpu):
     logging.error("Aiter attention requires ROCm/HIP GPU mode; remove --cpu and use a ROCm/HIP PyTorch build.")
     exit(-1)
-elif torch.version.hip is not None and not args.cpu and (AITER_EXPLICITLY_REQUESTED or not AITER_OTHER_BACKEND_REQUESTED):
-    try:
-        from aiter.ops.mha import mha_fwd
-        AITER_ATTENTION_IS_AVAILABLE = True
-    except (ImportError, OSError) as e:
+elif torch.version.hip is not None and not args.cpu and not AITER_OTHER_BACKEND_REQUESTED:
+    AITER_DEVICE_ARCH = _aiter_device_arch(model_management.get_torch_device())
+    if AITER_DEVICE_ARCH not in _AITER_SUPPORTED_ARCHES:
         if AITER_EXPLICITLY_REQUESTED:
-            logging.error("Aiter attention was requested but its native FMHA runtime could not be loaded. Install an Aiter build compatible with this PyTorch/ROCm environment: %s", e)
+            logging.error("Aiter attention was requested, but the active GPU target %s is not supported by this ComfyUI Aiter integration (supported targets: %s).", AITER_DEVICE_ARCH or "unknown", ", ".join(sorted(_AITER_SUPPORTED_ARCHES)))
             exit(-1)
+    else:
+        try:
+            from aiter.ops.mha import mha_fwd
+            AITER_ATTENTION_IS_AVAILABLE = True
+        except (ImportError, OSError) as e:
+            if AITER_EXPLICITLY_REQUESTED:
+                logging.error("Aiter attention was requested but its native FMHA runtime could not be loaded. Install an Aiter build compatible with this PyTorch/ROCm environment: %s", e)
+                exit(-1)
 
 FORCE_UPCAST_ATTENTION_DTYPE = model_management.force_upcast_attention_dtype()
 
@@ -944,6 +964,13 @@ def attention_aiter(q, k, v, heads, mask=None, attn_precision=None, skip_reshape
             q, k, v, heads, mask=mask, attn_precision=attn_precision,
             skip_reshape=skip_reshape, skip_output_reshape=skip_output_reshape, **kwargs,
         )
+
+    if torch.version.hip is not None and q.device.type == "cuda":
+        arch = _aiter_device_arch(q.device)
+        if arch not in _AITER_SUPPORTED_ARCHES:
+            if AITER_EXPLICITLY_REQUESTED:
+                raise RuntimeError(f"Aiter attention was requested, but GPU target {arch or 'unknown'} is not supported by this ComfyUI Aiter integration.")
+            return fallback()
 
     if (
         torch.version.hip is None

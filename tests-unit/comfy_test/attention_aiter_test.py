@@ -15,8 +15,19 @@ from comfy.cli_args import parser
 ATTENTION_SOURCE = Path(__file__).parents[2] / "comfy" / "ldm" / "modules" / "attention.py"
 
 
-def _run_aiter_import_probe(hip, explicitly_requested, other_backend_requested, import_error=None, cpu=False):
+def _run_aiter_import_probe(
+    hip, explicitly_requested, other_backend_requested, import_error=None, cpu=False, arch="gfx1151", arch_error=None,
+):
     source = ast.parse(ATTENTION_SOURCE.read_text(encoding="utf-8"))
+    supported_arches = next(
+        node for node in source.body
+        if isinstance(node, ast.Assign)
+        and any(isinstance(target, ast.Name) and target.id == "_AITER_SUPPORTED_ARCHES" for target in node.targets)
+    )
+    device_arch = next(
+        node for node in source.body
+        if isinstance(node, ast.FunctionDef) and node.name == "_aiter_device_arch"
+    )
     probe = next(
         node for node in source.body
         if isinstance(node, ast.If) and "AITER_EXPLICITLY_REQUESTED" in ast.unparse(node.test)
@@ -38,21 +49,34 @@ def _run_aiter_import_probe(hip, explicitly_requested, other_backend_requested, 
     def stop(code):
         raise ProbeExit(code)
 
+    def get_device_properties(device):
+        if arch_error is not None:
+            raise arch_error
+        return SimpleNamespace(gcnArchName=arch) if arch is not None else SimpleNamespace()
+
+    properties = Mock(side_effect=get_device_properties)
+
     namespace = {
         "AITER_ATTENTION_IS_AVAILABLE": False,
         "AITER_EXPLICITLY_REQUESTED": explicitly_requested,
         "AITER_OTHER_BACKEND_REQUESTED": other_backend_requested,
         "args": SimpleNamespace(cpu=cpu),
-        "torch": SimpleNamespace(version=SimpleNamespace(hip=hip)),
+        "torch": SimpleNamespace(
+            version=SimpleNamespace(hip=hip),
+            cuda=SimpleNamespace(get_device_properties=properties),
+            device=torch.device,
+        ),
+        "model_management": SimpleNamespace(get_torch_device=lambda: torch.device("cuda:0")),
+        "functools": functools,
         "logging": Mock(),
         "exit": stop,
         "__builtins__": {**vars(builtins), "__import__": fake_import},
     }
     try:
-        exec(compile(ast.Module(body=[probe], type_ignores=[]), str(ATTENTION_SOURCE), "exec"), namespace)
+        exec(compile(ast.Module(body=[supported_arches, device_arch, probe], type_ignores=[]), str(ATTENTION_SOURCE), "exec"), namespace)
     except ProbeExit as e:
-        return namespace, imported, e.args[0]
-    return namespace, imported, None
+        return namespace, imported, e.args[0], properties
+    return namespace, imported, None, properties
 
 
 def _other_backend_requested(flags):
@@ -87,36 +111,70 @@ def _other_backend_requested(flags):
     ],
 )
 def test_aiter_import_probe_selection(hip, explicit, other, expected_import):
-    namespace, imported, exit_code = _run_aiter_import_probe(hip, explicit, other)
+    namespace, imported, exit_code, properties = _run_aiter_import_probe(hip, explicit, other)
 
     assert bool(imported) is expected_import
     assert namespace["AITER_ATTENTION_IS_AVAILABLE"] is expected_import
     assert exit_code is None
+    assert properties.call_count == expected_import
+
+
+@pytest.mark.parametrize("arch", ["gfx1030", None])
+def test_aiter_import_probe_skips_unsupported_or_unknown_auto_target(arch):
+    namespace, imported, exit_code, properties = _run_aiter_import_probe("test-hip", False, False, arch=arch)
+
+    assert not namespace["AITER_ATTENTION_IS_AVAILABLE"]
+    assert imported == []
+    assert exit_code is None
+    assert properties.call_count == 1
+
+
+@pytest.mark.parametrize("arch,arch_error", [("gfx1030", None), (None, None), (None, RuntimeError("unknown device"))])
+def test_explicit_aiter_rejects_unsupported_or_unknown_target_before_import(arch, arch_error):
+    namespace, imported, exit_code, properties = _run_aiter_import_probe(
+        "test-hip", True, False, arch=arch, arch_error=arch_error,
+    )
+
+    assert exit_code == -1
+    assert imported == []
+    assert properties.call_count == 1
+    namespace["logging"].error.assert_called_once()
 
 
 def test_cpu_mode_does_not_auto_import_aiter():
-    namespace, imported, exit_code = _run_aiter_import_probe("test-hip", False, False, cpu=True)
+    namespace, imported, exit_code, properties = _run_aiter_import_probe("test-hip", False, False, cpu=True)
 
     assert imported == []
     assert namespace["AITER_ATTENTION_IS_AVAILABLE"] is False
     assert exit_code is None
+    properties.assert_not_called()
+
+
+def test_other_explicit_backend_does_not_query_or_import_aiter():
+    namespace, imported, exit_code, properties = _run_aiter_import_probe("test-hip", False, True)
+
+    assert imported == []
+    assert namespace["AITER_ATTENTION_IS_AVAILABLE"] is False
+    assert exit_code is None
+    properties.assert_not_called()
 
 
 def test_aiter_import_probe_errors_only_for_explicit_request():
-    namespace, imported, exit_code = _run_aiter_import_probe(None, True, False)
+    namespace, imported, exit_code, _ = _run_aiter_import_probe(None, True, False)
     assert imported == []
     assert exit_code == -1
     assert namespace["logging"].error.called
-    _, imported, exit_code = _run_aiter_import_probe("test-hip", True, False, cpu=True)
+    _, imported, exit_code, properties = _run_aiter_import_probe("test-hip", True, False, cpu=True)
     assert imported == []
     assert exit_code == -1
+    properties.assert_not_called()
 
-    namespace, imported, exit_code = _run_aiter_import_probe("test-hip", False, False, ImportError("missing"))
+    namespace, imported, exit_code, _ = _run_aiter_import_probe("test-hip", False, False, ImportError("missing"))
     assert imported == ["aiter.ops.mha"]
     assert namespace["AITER_ATTENTION_IS_AVAILABLE"] is False
     assert exit_code is None
 
-    namespace, imported, exit_code = _run_aiter_import_probe("test-hip", True, False, OSError("native module unavailable"))
+    namespace, imported, exit_code, _ = _run_aiter_import_probe("test-hip", True, False, OSError("native module unavailable"))
     assert imported == ["aiter.ops.mha"]
     assert exit_code == -1
     assert namespace["logging"].error.called
@@ -147,6 +205,67 @@ def test_aiter_flag_is_exclusive_with_existing_attention_backends(capsys):
         "use_ck_attention",
     ):
         assert _other_backend_requested({name})
+
+
+@pytest.mark.parametrize("arch", ["gfx1151", "gfx1151:sramecc+:xnack-"])
+def test_aiter_device_arch_reads_gcn_target_and_strips_suffix(arch):
+    source = ast.parse(ATTENTION_SOURCE.read_text(encoding="utf-8"))
+    supported_arches = next(
+        node for node in source.body
+        if isinstance(node, ast.Assign)
+        and any(isinstance(target, ast.Name) and target.id == "_AITER_SUPPORTED_ARCHES" for target in node.targets)
+    )
+    device_arch = next(
+        node for node in source.body
+        if isinstance(node, ast.FunctionDef) and node.name == "_aiter_device_arch"
+    )
+    properties = Mock(return_value=SimpleNamespace(gcnArchName=arch))
+    namespace = {
+        "torch": SimpleNamespace(cuda=SimpleNamespace(get_device_properties=properties)),
+        "functools": functools,
+    }
+    exec(compile(ast.Module(body=[supported_arches, device_arch], type_ignores=[]), str(ATTENTION_SOURCE), "exec"), namespace)
+
+    assert namespace["_aiter_device_arch"](torch.device("cuda:0")) == "gfx1151"
+    properties.assert_called_once_with(torch.device("cuda:0"))
+
+
+@pytest.mark.parametrize("properties_result", [SimpleNamespace(), RuntimeError("unknown device")])
+def test_aiter_device_arch_returns_unknown_when_runtime_property_is_unavailable(properties_result):
+    source = ast.parse(ATTENTION_SOURCE.read_text(encoding="utf-8"))
+    device_arch = next(
+        node for node in source.body
+        if isinstance(node, ast.FunctionDef) and node.name == "_aiter_device_arch"
+    )
+    properties = Mock()
+    if isinstance(properties_result, Exception):
+        properties.side_effect = properties_result
+    else:
+        properties.return_value = properties_result
+    namespace = {
+        "torch": SimpleNamespace(cuda=SimpleNamespace(get_device_properties=properties)),
+        "functools": functools,
+    }
+    exec(compile(ast.Module(body=[device_arch], type_ignores=[]), str(ATTENTION_SOURCE), "exec"), namespace)
+
+    assert namespace["_aiter_device_arch"](torch.device("cuda:0")) is None
+
+
+def test_aiter_device_arch_skips_device_query_for_cpu():
+    source = ast.parse(ATTENTION_SOURCE.read_text(encoding="utf-8"))
+    device_arch = next(
+        node for node in source.body
+        if isinstance(node, ast.FunctionDef) and node.name == "_aiter_device_arch"
+    )
+    properties = Mock()
+    namespace = {
+        "torch": SimpleNamespace(cuda=SimpleNamespace(get_device_properties=properties)),
+        "functools": functools,
+    }
+    exec(compile(ast.Module(body=[device_arch], type_ignores=[]), str(ATTENTION_SOURCE), "exec"), namespace)
+
+    assert namespace["_aiter_device_arch"](torch.device("cpu")) is None
+    properties.assert_not_called()
 
 
 def test_aiter_selector_captures_and_replaces_only_unmasked_backend():
@@ -189,6 +308,8 @@ def attention_namespace():
         "functools": functools,
         "args": SimpleNamespace(dont_upcast_attention=False),
         "FORCE_UPCAST_ATTENTION_DTYPE": {},
+        "_AITER_SUPPORTED_ARCHES": {"gfx942", "gfx950", "gfx1100", "gfx1151", "gfx1201"},
+        "_aiter_device_arch": lambda device: "gfx1151",
         "attention_sub_quad": lambda q, k, v, *args, **kwargs: q + k + v,
         "_AITER_FALLBACK": None,
         "mha_fwd": Mock(),
@@ -386,6 +507,27 @@ def test_aiter_unsupported_cuda_inputs_use_saved_backend(attention_namespace, mo
     if case == "headed_layout_mismatch":
         assert fallback.call_args.kwargs["skip_reshape"] is True
     native.assert_not_called()
+
+
+@pytest.mark.parametrize("explicit", [False, True])
+def test_aiter_unsupported_secondary_device_falls_back_or_errors(attention_namespace, monkeypatch, explicit):
+    monkeypatch.setattr(torch.version, "hip", "test-hip")
+    attention_namespace["_aiter_device_arch"] = lambda device: "gfx1030"
+    attention_namespace["AITER_EXPLICITLY_REQUESTED"] = explicit
+    attention_namespace["_AITER_FALLBACK"] = Mock(return_value="fallback-result")
+    attention_namespace["mha_fwd"] = Mock()
+    q = SimpleNamespace(device=torch.device("cuda:1"))
+    k, v = object(), object()
+
+    if explicit:
+        with pytest.raises(RuntimeError, match="gfx1030.*not supported"):
+            attention_namespace["attention_aiter"](q, k, v, 1)
+        attention_namespace["_AITER_FALLBACK"].assert_not_called()
+    else:
+        result = attention_namespace["attention_aiter"](q, k, v, 1)
+        assert result == "fallback-result"
+        attention_namespace["_AITER_FALLBACK"].assert_called_once()
+    attention_namespace["mha_fwd"].assert_not_called()
 
 
 def test_attention_container_and_model_override_contract(attention_namespace):
