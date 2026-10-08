@@ -69,7 +69,8 @@ class _Slot:
         n = len(self.ids)
         self.parked = {i: (_host(kv.key[:, :, :n]), _host(kv.value[:, :, :n])) for i, kv in self.attn.items()}
         self.checkpoints = {pos: {i: (_host(c), _host(r)) for i, (c, r) in st.items()} for pos, st in self.checkpoints.items()}
-        torch.cuda.synchronize()
+        device = next(iter(self.attn.values())).key.device
+        _sync(device)
         self.attn = None
         logging.info("llm prefix cache: moved %.2f GB to RAM in %.2f s", self.nbytes() / 1e9, time.perf_counter() - t)
 
@@ -155,12 +156,22 @@ def _linear_states(pkv, clone):
     return out
 
 
+def _key(model, device, dtype):
+    # which weights produced the cache: model type, device, dtype and a fingerprint of a few small
+    # unquantized tensors, so another checkpoint or fine-tune of the same type can't reuse it.
+    # Weight patches applied at load time (LoRA) are not covered.
+    t = model.model
+    norms = [t.layers[0].input_layernorm, t.layers[len(t.layers) // 2].post_attention_layernorm, t.norm]
+    fingerprint = tuple(round(float(m.weight.detach().float().sum()), 4) for m in norms if m is not None)
+    return getattr(model, "model_type", type(model).__name__), str(device), str(dtype), fingerprint
+
+
 def prefill(model, embeds, ids, capacity, forward):
     """Prefill `embeds` (the whole prompt) reusing a cached prefix of `ids`. Returns (pkv, x of the last position)."""
     global _slot
     stats.clear()
     device, dtype = embeds.device, embeds.dtype
-    key = (getattr(model, "model_type", type(model).__name__), str(dtype))
+    key = _key(model, device, dtype)
     _sync(device)
     stats["t0"] = time.perf_counter()
     pkv, n, checkpoints = _restore(model, key, ids, capacity, device, dtype)
