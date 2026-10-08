@@ -6,7 +6,7 @@ if not torch.cuda.is_available():
     args.cpu = True
 
 import comfy.quant_ops
-from comfy.ldm.minimax.vae import Attention
+from comfy.ldm.minimax.vae import Attention, MiniMaxH3VideoVAE
 
 
 class _OffloadedScale:
@@ -63,3 +63,23 @@ def test_attention_moves_offloaded_qk_norm_scale_to_input_device(monkeypatch):
         )
 
     assert out.device == x.device
+
+
+
+def test_still_decodes_as_first_latent_of_a_full_clip():
+    with torch.device("meta"):
+        vae = MiniMaxH3VideoVAE()
+    vae.latents_mean, vae.latents_std = torch.zeros(24), torch.ones(24)
+    vae.pixel_mean, vae.pixel_std = torch.zeros(1, 3, 1, 1, 1), torch.ones(1, 3, 1, 1, 1)
+    seen = []
+
+    def decode_pixels(z):  # every output frame holds its own index / 100
+        seen.append(z.shape[2])
+        frames = torch.arange(z.shape[2] * vae.vae_ratio_t, dtype=torch.float32) / 100
+        return frames.view(1, 1, -1, 1, 1).expand(z.shape[0], 3, -1, z.shape[-2] * vae.vae_ratio, z.shape[-1] * vae.vae_ratio)
+
+    vae._decode_pixels = decode_pixels
+    out = vae.decode(torch.zeros(1, 24, 1, 40, 24))  # 640x384, several tiles
+    assert out.shape == (1, 3, 1, 640, 384)
+    assert set(seen) == {vae.tokens_chunk_size}
+    torch.testing.assert_close(out, torch.full_like(out, vae.frame_pre_padding / 100))
