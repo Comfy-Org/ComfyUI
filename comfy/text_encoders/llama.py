@@ -15,6 +15,7 @@ import comfy.ldm.common_dit
 import comfy.clip_model
 
 from . import qwen_vl
+from . import llm_prefix_cache
 
 
 @dataclass
@@ -968,7 +969,7 @@ class Llama2_(nn.Module):
 
         spec_decode = fixed_kv and any(isinstance(kv, FixedKVBias) for kv in past_key_values) and 2 <= seq_len <= 6 and past_len > 0 and attention_mask is None
         if seq_len > 1 and not spec_decode:  # spec verify: the staircase decode bias is causal
-            causal_mask = torch.empty(past_len + seq_len, past_len + seq_len, dtype=x.dtype, device=x.device).fill_(torch.finfo(x.dtype).min / 4).triu_(1)
+            causal_mask = torch.empty(seq_len, past_len + seq_len, dtype=x.dtype, device=x.device).fill_(torch.finfo(x.dtype).min / 4).triu_(past_len + 1)
             if mask is not None:
                 mask += causal_mask
             else:
@@ -1140,7 +1141,7 @@ class BaseGenerate:
     def init_kv_cache(self, batch, max_cache_len, device, execution_dtype):
         return self.model.init_kv_cache(batch, max_cache_len, device, execution_dtype)
 
-    def generate(self, embeds=None, do_sample=True, max_length=256, temperature=1.0, top_k=50, top_p=0.9, min_p=0.0, repetition_penalty=1.0, seed=42, stop_tokens=None, initial_tokens=[], execution_dtype=None, min_tokens=0, presence_penalty=0.0, initial_input_ids=None, position_ids=None, deepstack_embeds=None, visual_pos_masks=None, embeds_info=None):
+    def generate(self, embeds=None, do_sample=True, max_length=256, temperature=1.0, top_k=50, top_p=0.9, min_p=0.0, repetition_penalty=1.0, seed=42, stop_tokens=None, initial_tokens=[], execution_dtype=None, min_tokens=0, presence_penalty=0.0, initial_input_ids=None, position_ids=None, deepstack_embeds=None, visual_pos_masks=None, embeds_info=None, cache_ids=None):
         device = embeds.device
 
         if stop_tokens is None:
@@ -1157,7 +1158,8 @@ class BaseGenerate:
             embeds = embeds.unsqueeze(0)
 
         max_cache_len = embeds.shape[1] + max_length
-        past_key_values = self.init_kv_cache(embeds.shape[0], max_cache_len, device, execution_dtype)
+        if cache_ids is None:
+            past_key_values = self.init_kv_cache(embeds.shape[0], max_cache_len, device, execution_dtype)
 
         generator = torch.Generator(device=device).manual_seed(seed) if do_sample else None
 
@@ -1198,7 +1200,11 @@ class BaseGenerate:
             if step == 0 and deepstack_embeds is not None:
                 extra["deepstack_embeds"] = deepstack_embeds
                 extra["visual_pos_masks"] = visual_pos_masks
-            x, _, past_key_values = self.model.forward(None, embeds=embeds, attention_mask=None, past_key_values=past_key_values, input_ids=current_input_ids, position_ids=position_ids, **extra, embeds_info=(embeds_info if step == 0 else None))
+            if step == 0 and cache_ids is not None:
+                past_key_values, x = llm_prefix_cache.prefill(self, embeds, cache_ids, max_cache_len,
+                                                              lambda e, pkv: self.model.forward(None, embeds=e, attention_mask=None, past_key_values=pkv, **extra)[0])
+            else:
+                x, _, past_key_values = self.model.forward(None, embeds=embeds, attention_mask=None, past_key_values=past_key_values, input_ids=current_input_ids, position_ids=position_ids, **extra, embeds_info=(embeds_info if step == 0 else None))
             logits = self.logits(x)[:, -1]
             if penalty_mask is None and do_sample and penalize:
                 # allocated on the (unbracketed) first step; later steps only index_fill_ it
@@ -1216,6 +1222,8 @@ class BaseGenerate:
 
             token_id = decode_tokens[0].item()
             generated_token_ids.append(token_id)
+            if cache_ids is not None and step < 2:
+                llm_prefix_cache.note_token(step + 1)
 
             if step == 0 and hasattr(self.model.embed_tokens, "_v"):
                 # prefill's transients can evict body pages and lower the VBAR watermark: let the decode fault them back
@@ -1230,6 +1238,8 @@ class BaseGenerate:
             if token_id in stop_tokens:
                 break
 
+        if cache_ids is not None:
+            llm_prefix_cache.finish(past_key_values, cache_ids, generated_token_ids)
         return generated_token_ids
 
     def processed_probs(self, logits, temperature, top_k, top_p, min_p, repetition_penalty, token_history, presence_penalty=0.0, penalty_mask=None):
