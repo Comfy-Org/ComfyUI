@@ -383,21 +383,28 @@ def test_a_pre_epoch_file_does_not_stop_the_rest_reviving(root, session, bulk_on
     assert all(not c.is_missing for c in _contents(session) if c.path != str(files[0]))
 
 
-def test_a_cancel_during_the_revive_leaves_the_rows_missing(root, session):
+def test_a_cancel_stops_the_revive_before_it_stats_the_files(root, session, monkeypatch):
     files, _ = _gone_and_copied_back(root, session)
+    real_stat = os.stat
+    statted: list[str] = []
+
+    def counting_stat(path, *args, **kwargs):
+        if str(path).startswith(str(root / "batch") + os.sep):
+            statted.append(str(path))
+        return real_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "stat", counting_stat)
     calls = 0
 
-    def cancelled_at_the_second_file() -> bool:
-        """The revive asks once for the directory, then once per file; cancel on the
-        second file, before anything is written."""
+    def cancelled_after_the_directory_check() -> bool:
         nonlocal calls
         calls += 1
-        return calls >= 3
+        return calls >= 2
 
-    scanner.revive_returned_references_safely("output", should_stop=cancelled_at_the_second_file)
+    scanner.revive_returned_references_safely("output", should_stop=cancelled_after_the_directory_check)
 
+    assert statted == []
     assert sum(1 for c in _contents(session) if c.is_missing) == len(files)
-
 
 def test_a_failing_revive_leaves_the_rest_of_the_scan_running(root, session, monkeypatch, caplog):
     files, _ = _gone_and_copied_back(root, session)
