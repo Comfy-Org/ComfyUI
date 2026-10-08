@@ -149,3 +149,23 @@ def test_ram_mode_parks_and_restores(model, mtp, monkeypatch):
     longer = prompt + tokens(2, 40)
     assert generate(model, longer, mtp, cache=True) == generate(model, longer, mtp, cache=False)
     assert pc.stats["restore"] == "from-ram"
+
+
+@pytest.mark.parametrize("direct", [False, True])
+@pytest.mark.parametrize("mtp", [False, True])
+def test_disk_restore_in_a_new_session(model, mtp, direct, monkeypatch, tmp_path):
+    from comfy.text_encoders import llm_prefix_cache_disk as disk
+    monkeypatch.setattr(pc, "DISK", str(tmp_path))
+    monkeypatch.setattr(disk, "DIRECT", direct)
+    system = messages(5, 1, 200)
+    generate(model, system + messages(6, 3, 30), mtp, cache=True)
+    assert pc.stats["disk_saved"] == len(system)
+    pc.drop()  # a fresh process: nothing in memory, the system prompt on disk
+    other = system + messages(8, 2, 25)
+    assert generate(model, other, mtp, cache=True) == generate(model, other, mtp, cache=False)
+    assert pc.stats["restore"] == "from-disk" and pc.stats["reused"] == len(system)
+    # a different system prompt must not hit
+    pc.drop()
+    changed = messages(9, 1, 200) + messages(8, 2, 25)
+    generate(model, changed, mtp, cache=True)
+    assert pc.stats["reused"] == 0

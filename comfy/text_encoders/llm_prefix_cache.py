@@ -20,6 +20,8 @@ HEADROOM = int(os.environ.get("COMFY_LLM_PREFIX_CACHE_HEADROOM", "4096"))  # spa
 CKPT_RECENT = int(os.environ.get("COMFY_LLM_PREFIX_CACHE_CKPTS", "6"))  # message-boundary checkpoints kept
 MSG_END = (248046, 198)  # "<|im_end|>\n" in the Qwen3.5 vocab: a checkpoint may sit after it
 MIN_SUFFIX = 7  # suffixes of 6 or fewer tokens would take the decode/verify paths
+# spike: a directory to persist the stable prefix (KV and DeltaNet state at the end of the system message) across processes
+DISK = os.environ.get("COMFY_LLM_PREFIX_CACHE_DISK")
 
 _slot = None
 stats = {}
@@ -111,6 +113,13 @@ def _restore(model, key, ids, need, device, dtype):
     global _slot
     from .qwen35 import LinearKV
     hit = _match(ids) if _slot is not None and _slot.key == key else None
+    if DISK:
+        pos = _stable_end(ids)
+        if pos is not None and (hit is None or hit[0] < pos):
+            from . import llm_prefix_cache_disk as disk
+            path = disk.entry_path(DISK, key, ids[:pos])
+            if os.path.exists(path):
+                return _restore_from_disk(model, key, path, pos, need, device, dtype)
     if hit is None:
         _slot = None  # drop the old KV before allocating the new one
         return model.init_kv_cache(1, need + HEADROOM, device, dtype), 0, {}
@@ -144,6 +153,55 @@ def _restore(model, key, ids, need, device, dtype):
     _set_prefix(pkv, n)
     _slot = None  # rebuilt from this call's cache in prefill()
     return pkv, n, carried
+
+
+def _restore_from_disk(model, key, path, pos, need, device, dtype):
+    global _slot
+    from . import llm_prefix_cache_disk as disk
+    from .qwen35 import LinearKV
+    _slot = None
+    key_repr, n, kv, states, st = disk.load(path)
+    stats.update(st)
+    if key_repr != repr(key) or n != pos:
+        logging.warning("llm prefix cache: disk entry %s doesn't match (%s, %d)", path, key_repr, n)
+        return model.init_kv_cache(1, need + HEADROOM, device, dtype), 0, {}
+    t = time.perf_counter()
+    pkv = model.init_kv_cache(1, need + HEADROOM, device, dtype)
+    for i, (k, v) in kv.items():
+        pkv[i].key[:, :, :n].copy_(k, non_blocking=True)
+        pkv[i].value[:, :, :n].copy_(v, non_blocking=True)
+    ckpt = {i: (c.to(device, non_blocking=True), r.to(device, non_blocking=True)) for i, (c, r) in states.items()}
+    for i, (c, r) in ckpt.items():
+        pkv[i] = LinearKV(c.clone(), r.clone(), n, None, None)
+    _sync(device)
+    stats["disk_h2d_s"] = round(time.perf_counter() - t, 3)
+    stats["restore"] = "from-disk"
+    _set_prefix(pkv, n)
+    return pkv, n, {n: ckpt}
+
+
+def _stable_end(ids):
+    # end of the first message (the system prompt and tool schemas): the prefix a new session shares
+    for j in range(2, len(ids) - MIN_SUFFIX + 1):
+        if ids[j - 2] == MSG_END[0] and ids[j - 1] == MSG_END[1]:
+            return j if j >= MIN_SUFFIX else None
+    return None
+
+
+def _save_stable(ids):
+    from . import llm_prefix_cache_disk as disk
+    pos = _stable_end(ids)
+    if pos is None or pos not in _slot.checkpoints or _slot.parked is not None:
+        return
+    path = disk.entry_path(DISK, _slot.key, ids[:pos])
+    if os.path.exists(path):
+        return
+    os.makedirs(DISK, exist_ok=True)
+    try:
+        stats.update(disk.save(path, _slot.key, pos, {i: (kv.key, kv.value) for i, kv in _slot.attn.items()}, _slot.checkpoints[pos]))
+        stats["disk_saved"] = pos
+    except (RuntimeError, OSError) as e:
+        logging.warning("llm prefix cache: could not save the stable prefix to disk: %s", e)
 
 
 def _checkpoint_positions(ids, start):
@@ -226,6 +284,8 @@ def finish(pkv, ids, generated):
         _slot.ids = full[:idx]
     stats["end_s"] = round(time.perf_counter() - stats["t0"], 3)
     stats["cache_gb"] = round(_slot.nbytes() / 1e9, 2)
+    if DISK:
+        _save_stable(ids)
     if MODE == "ram":
         _park_or_drop()
     logging.info("llm prefix cache: %s", {k: v for k, v in stats.items() if k != "t0"})
