@@ -103,12 +103,21 @@ def test_a_scan_queued_behind_the_startup_scan_runs_the_prune(scan_seeder, prune
     assert len(prunes) == 1
 
 
-def test_no_second_scan_is_queued_behind_one_that_will_prune(scan_seeder, prunes, monkeypatch):
+def test_no_second_scan_is_queued_behind_one_that_will_prune(scan_seeder, monkeypatch):
     scan_seeder.start(prune_first=True, phase=ScanPhase.FAST)
     _settle(scan_seeder)
-    entered, release = _hold_fast_phase(scan_seeder, monkeypatch)
+    pruning, release = threading.Event(), threading.Event()
+    prunes: list[list[str]] = []
+
+    def slow_prune(prefixes, _should_stop=None):
+        pruning.set()
+        release.wait(5)
+        prunes.append(prefixes)
+        return 0
+
+    monkeypatch.setattr(seeder_module, "mark_missing_outside_prefixes_safely", slow_prune)
     scan_seeder.start_after_node_list(ROOTS, compute_hashes=False)
-    assert entered.wait(5)
+    assert pruning.wait(5)
 
     scan_seeder.start_after_node_list(ROOTS, compute_hashes=False)  # a second tab loads the page
 
@@ -116,7 +125,6 @@ def test_no_second_scan_is_queued_behind_one_that_will_prune(scan_seeder, prunes
     release.set()
     _settle(scan_seeder)
     assert len(prunes) == 1
-
 
 def test_a_failed_prune_is_not_retried(scan_seeder, monkeypatch):
     monkeypatch.setattr(seeder_module, "mark_missing_outside_prefixes_safely", lambda _prefixes, _should_stop=None: None)
