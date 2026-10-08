@@ -24,6 +24,7 @@ try:
     from alembic.config import Config
     from alembic.runtime.migration import MigrationContext
     from alembic.script import ScriptDirectory
+    from alembic.script.revision import ResolutionError
     from sqlalchemy import create_engine, event
     from sqlalchemy.exc import OperationalError
     from sqlalchemy.orm import sessionmaker
@@ -279,11 +280,29 @@ def _init_file_db(db_url):
     try:
         copy_legacy_default_db(db_path)
         try:
-            _migrate_and_bind(db_url, db_path, os.path.exists(db_path))
+            _migrate_and_bind(db_url, db_path, os.path.exists(db_path), True)  # defer_upgrade_error
         except Exception as e:
-            if not is_recoverable_corruption(e):
+            corrupt = is_recoverable_corruption(e)
+            deferred = getattr(e, "upgrade_error_deferred", False)  # _migrate logged it at debug only
+            recreated = (
+                not corrupt
+                and deferred
+                and _is_default_db()
+                and error_kind(e) != "database_locked"  # another process has it open
+                and _recreate_after_failed_upgrade(db_path, e)
+            )
+            if deferred and not recreated:
+                logging.error("Error upgrading database: ", exc_info=e)
+            if getattr(e, "restore_failure", None):
+                message, restore_error = e.restore_failure
+                if recreated:
+                    logging.warning(message)
+                else:
+                    logging.error(message, exc_info=restore_error)
+            if corrupt:
+                _quarantine_and_restore(db_path, e)
+            elif not recreated:
                 raise
-            _quarantine_and_restore(db_path, e)
             _migrate_and_bind(db_url, db_path, os.path.exists(db_path))
     except Exception:
         _db_lock.release()
@@ -343,6 +362,36 @@ def _passes_integrity_check(path):
             return conn.execute("PRAGMA integrity_check").fetchall() == [("ok",)]
     except sqlite3.Error as e:
         return error_kind(e) == "database_locked"  # another process has it: not shown to be corrupt
+
+
+def _recreate_after_failed_upgrade(db_path, error):
+    """Move the database aside so a new one is created: the failed upgrade would have discarded its asset
+    catalog anyway. False, with everything left in place, when that isn't safe or a move fails."""
+    try:
+        with closing(sqlite3.connect(db_path, timeout=0)) as conn:
+            conn.execute("BEGIN IMMEDIATE")  # the upgrade's error can be a schema error while another process holds it
+    except sqlite3.Error:
+        return False
+    aside_path = f"{db_path}.failed-upgrade-{time.strftime('%Y%m%d-%H%M%S')}"
+    moved = []
+    try:
+        for suffix in ("-wal", "-shm", "-journal", ""):  # with its WAL, which SQLite would otherwise replay
+            if os.path.exists(db_path + suffix):
+                os.replace(db_path + suffix, aside_path + suffix)
+                moved.append((db_path + suffix, aside_path + suffix))
+    except OSError:
+        logging.exception(f"Could not move the database '{db_path}' aside")
+        for src, dst in reversed(moved):
+            try:
+                os.replace(dst, src)
+            except OSError:
+                logging.exception(f"Could not move '{dst}' back to '{src}'")
+        return False
+    logging.warning(
+        f"Database upgrade failed ({getattr(error, 'orig', error)}): '{db_path}' was moved to "
+        f"'{aside_path}'; starting with a new database. The asset catalog is rebuilt by rescanning your files."
+    )
+    return True
 
 
 def _quarantine_and_restore(db_path, error):
@@ -452,7 +501,7 @@ def _upgrade_discards_the_catalog(script, target_rev, current_rev):
     )
 
 
-def _migrate_and_bind(db_url, db_path, db_exists):
+def _migrate_and_bind(db_url, db_path, db_exists, defer_upgrade_error=False):
     config = get_alembic_config()
 
     # Check if we need to upgrade
@@ -482,7 +531,7 @@ def _migrate_and_bind(db_url, db_path, db_exists):
 
     conn = engine.connect()
     try:
-        _migrate(conn, engine, write_engine, config, db_path, db_exists)
+        _migrate(conn, engine, write_engine, config, db_path, db_exists, defer_upgrade_error)
     except BaseException:
         # Close every handle: Windows refuses to rename the file aside while one is open.
         conn.close()
@@ -491,7 +540,7 @@ def _migrate_and_bind(db_url, db_path, db_exists):
         raise
 
 
-def _migrate(conn, engine, write_engine, config, db_path, db_exists):
+def _migrate(conn, engine, write_engine, config, db_path, db_exists, defer_upgrade_error):
     try:
         journal_mode = conn.exec_driver_sql("PRAGMA journal_mode=WAL").scalar_one()
     except OperationalError:
@@ -514,6 +563,10 @@ def _migrate(conn, engine, write_engine, config, db_path, db_exists):
     if target_rev is None:
         logging.warning("No target revision found.")
     elif current_rev != target_rev:
+        try:
+            discards_catalog = db_exists and _upgrade_discards_the_catalog(script, target_rev, current_rev)
+        except ResolutionError:  # stamped by a newer release: the upgrade reports it
+            discards_catalog = False
         # Backup the database pre upgrade
         backup_path = db_path + ".bkp"
         if db_exists:
@@ -525,20 +578,29 @@ def _migrate(conn, engine, write_engine, config, db_path, db_exists):
             command.upgrade(config, target_rev)
             logging.info(f"Database upgraded from {current_rev} to {target_rev}")
         except Exception as e:
-            logging.exception("Error upgrading database: ")
+            # Deferred: the caller logs these as errors unless a new database replaces this one.
+            e.upgrade_error_deferred = defer_upgrade_error and discards_catalog
+            if e.upgrade_error_deferred:
+                logging.debug("Error upgrading database: ", exc_info=True)
+            else:
+                logging.exception("Error upgrading database: ")
             if backup_path:
                 # Restore the database from backup if upgrade fails
                 try:
                     _backup_database(backup_path, db_path)
                     os.remove(backup_path)
-                except Exception:
-                    logging.exception(
+                except Exception as restore_error:
+                    message = (
                         f"Restoring the database from its pre-upgrade backup, or removing the "
                         f"backup afterwards, failed; the pre-upgrade copy is kept at {backup_path}"
                     )
+                    if e.upgrade_error_deferred:
+                        e.restore_failure = (message, restore_error)
+                    else:
+                        logging.exception(message)
             raise e
 
-        if backup_path and _upgrade_discards_the_catalog(script, target_rev, current_rev):
+        if discards_catalog:
             log_startup_warning(
                 f"The asset catalog was rebuilt from scratch by migration "
                 f"{_DESTRUCTIVE_REVISION}: manual tags, user metadata, previews, renames, "
