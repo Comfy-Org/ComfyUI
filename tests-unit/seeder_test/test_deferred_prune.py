@@ -115,7 +115,7 @@ def test_no_scan_starts_once_shutdown_has_begun(monkeypatch):
     thread.assert_not_called()
 
 
-def test_a_scan_queued_during_startup_does_not_run_into_shutdown(monkeypatch):
+def test_a_scan_queued_during_startup_does_not_run_into_shutdown(monkeypatch, caplog):
     instance = _AssetSeeder()
     instance._state = State.RUNNING
     instance._pending_scan = {"roots": ("output",), "phase": ScanPhase.FULL, "compute_hashes": False}
@@ -128,6 +128,7 @@ def test_a_scan_queued_during_startup_does_not_run_into_shutdown(monkeypatch):
 
     thread.assert_not_called()
     assert instance._state is State.IDLE
+    assert "could not start" not in caplog.text
 
 
 @pytest.fixture

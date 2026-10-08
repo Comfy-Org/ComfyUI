@@ -901,7 +901,7 @@ class _AssetSeeder:
         start_paused = self._state is State.PAUSED
         self._reset_to_idle()
         pending = self._pending_scan
-        if pending is not None:
+        if pending is not None and not self._shutting_down:
             self._pending_scan = None
             if not self.start(
                 roots=pending["roots"],

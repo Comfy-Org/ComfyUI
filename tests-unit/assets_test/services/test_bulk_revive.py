@@ -459,3 +459,37 @@ def test_rows_marked_before_the_upgrade_still_revive_per_file(root, session):
     assert state.recovered == len(files)
     assert _records(session) == edits
     assert all(not c.is_missing and c.missing_since is None for c in _contents(session))
+
+
+def test_the_revive_writes_in_batches_and_counts_what_committed(root, session, monkeypatch):
+    files, _ = _gone_and_copied_back(root, session)
+    monkeypatch.setattr(scanner, "WRITE_BATCH_ROWS", 2)
+    batches: list[int] = []
+
+    def revive(session, mtimes):
+        batches.append(len(mtimes))
+        if len(batches) == 2:
+            raise RuntimeError("database is locked")
+        return revive_contents(session, mtimes)
+
+    monkeypatch.setattr(scanner, "revive_contents", revive)
+    state = _scan()
+
+    assert batches == [2, 2]
+    assert state.recovered == 2  # the first batch committed; the failure stopped the rest
+    assert sum(1 for c in _contents(session) if not c.is_missing) == len(files)  # the scan's per-file path
+
+
+@pytest.mark.skipif(os.name == "nt" or os.geteuid() == 0, reason="needs POSIX permissions and a non-root user")
+def test_an_unreadable_entry_does_not_hide_the_rest_of_its_directory(root, session):
+    files, edits = _gone_and_copied_back(root, session)
+    locked = root.parent / "locked"
+    (locked / "inner").mkdir(parents=True)
+    (root / "batch" / "link").symlink_to(locked / "inner")
+    locked.chmod(0)  # stat'ing the link's target now raises PermissionError
+    try:
+        # A full scan: the output rescan reads names from its walk and never lists the folder itself.
+        assert _scan(("models", "input", "output")).recovered == len(files)
+    finally:
+        locked.chmod(0o755)
+    assert _records(session) == edits
