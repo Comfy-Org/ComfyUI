@@ -23,7 +23,7 @@ console_log_level = get_console_log_level(args.verbose)
 file_log_outputs = get_file_log_outputs(args.verbose)
 setup_logger(log_level=console_log_level, file_outputs=file_log_outputs, use_stdout=args.log_stdout)
 
-from app.database.db import dependencies_available, get_database_url, get_db_path, init_db, lock_holder_db_path, missing_dependencies
+from app.database.db import DatabasePathError, dependencies_available, get_database_url, get_db_path, init_db, lock_holder_db_path, missing_dependencies
 from app.assets.event_log import error_kind
 from utils.install_util import get_missing_requirements_message
 from app.assets.lifecycle import cleanup_temp_filesystem
@@ -495,7 +495,7 @@ def setup_database(asset_manager):
         init_db()
         asset_manager.startup()
     except Exception as e:
-        logging.error(database_failure_message(e, get_database_url()))
+        logging.error(f"{e}\n{WITHOUT_ASSETS}" if isinstance(e, DatabasePathError) else database_failure_message(e, get_database_url()))
         sys.exit(1)
 
 

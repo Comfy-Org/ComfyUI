@@ -6,6 +6,7 @@ import logging
 import os
 import sqlite3
 import sys
+import types
 from pathlib import Path
 
 import pytest
@@ -265,3 +266,27 @@ def test_default_database_path_is_used_literally(tmp_path, monkeypatch, db_path,
 
 def _head():
     return ScriptDirectory(str(Path(main.__file__).parent / "alembic_db")).get_current_head()
+
+
+class _UnquotedURL:
+    """SQLAlchemy 2.0's URL rendering: the database path goes in as is."""
+
+    @staticmethod
+    def create(drivername, database):
+        return types.SimpleNamespace(render_as_string=lambda: f"{drivername}:///{database}")
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="? isn't allowed in Windows paths")
+def test_question_mark_in_the_default_path_stops_startup_on_older_sqlalchemy(tmp_path, monkeypatch, db_path, caplog):
+    user_dir = tmp_path / "what?"
+    monkeypatch.setattr(db_module.args, "database_url", None)
+    monkeypatch.setattr(db_module, "get_legacy_default_db_path", lambda: None)
+    monkeypatch.setattr(folder_paths, "get_user_directory", lambda: str(user_dir))
+    monkeypatch.setattr(db_module, "URL", _UnquotedURL)
+
+    error = _startup_error(caplog)
+
+    assert f"The asset database path '{user_dir / 'comfyui.db'}' contains a '?'" in error
+    assert "upgrade SQLAlchemy to 2.1 or newer" in error
+    assert not (tmp_path / "what").exists()
+

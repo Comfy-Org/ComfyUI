@@ -134,7 +134,7 @@ def _serve(tmp_path, *flags):
         deadline = time.monotonic() + 120
         while time.monotonic() < deadline:
             assert server.poll() is None, log_path.read_text()[-4000:]
-            with contextlib.suppress(requests.ConnectionError):
+            with contextlib.suppress(requests.RequestException):
                 if requests.get(f"{base_url}/system_stats", timeout=1).status_code == 200:
                     break
             time.sleep(0.25)

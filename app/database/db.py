@@ -86,6 +86,10 @@ def get_alembic_config():
     return config
 
 
+class DatabasePathError(ValueError):
+    """The default database path can't be put in a URL by the installed SQLAlchemy."""
+
+
 def get_database_url():
     if args.database_url is not None:
         return args.database_url
@@ -94,7 +98,13 @@ def get_database_url():
 
     db_path = os.path.join(folder_paths.get_user_directory(), "comfyui.db")
     # SQLAlchemy quotes it, so a ? or %xx in the path stays part of the file name.
-    return URL.create("sqlite", database=db_path).render_as_string()
+    url = URL.create("sqlite", database=db_path).render_as_string()
+    if make_url(url).database != db_path:  # SQLAlchemy before 2.1 doesn't quote a ?
+        raise DatabasePathError(
+            f"The asset database path '{db_path}' contains a '?', which the installed SQLAlchemy can't open.\n"
+            "Move the user folder to a path without '?', set --database-url, or upgrade SQLAlchemy to 2.1 or newer (Python 3.11+)."
+        )
+    return url
 
 
 def get_legacy_default_db_path():

@@ -18,7 +18,7 @@ scipy
 tqdm
 psutil
 alembic
-SQLAlchemy>=2.1.0
+SQLAlchemy>=2.0.0
 filelock
 av>=17.0.0
 comfy-kitchen==0.2.37
