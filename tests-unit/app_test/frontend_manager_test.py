@@ -1,7 +1,9 @@
 import argparse
+from types import SimpleNamespace
+from unittest.mock import patch, mock_open
+
 import pytest
 from requests.exceptions import HTTPError
-from unittest.mock import patch, mock_open
 
 from app.frontend_management import (
     FrontendManager,
@@ -287,3 +289,34 @@ def test_get_installed_templates_version_not_installed():
 
     # Assert
     assert version is None
+
+
+def test_template_asset_map_skips_missing_assets():
+    template_entries = [
+        SimpleNamespace(
+            template_id="example",
+            assets=[
+                SimpleNamespace(filename="example.json"),
+                SimpleNamespace(filename="preview.webp"),
+            ],
+        )
+    ]
+
+    def get_asset_path(template_id, filename):
+        if filename == "preview.webp":
+            raise FileNotFoundError
+        return f"/templates/{filename}"
+
+    with (
+        patch(
+            "comfyui_workflow_templates.iter_templates",
+            return_value=template_entries,
+        ),
+        patch(
+            "comfyui_workflow_templates.get_asset_path",
+            side_effect=get_asset_path,
+        ),
+    ):
+        asset_map = FrontendManager.template_asset_map()
+
+    assert asset_map == {"example.json": "/templates/example.json"}

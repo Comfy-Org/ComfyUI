@@ -1,3 +1,10 @@
+"""Parses and validates everything the asset API accepts from a client, so
+handlers receive typed values instead of raw JSON. Query strings, JSON bodies
+and multipart upload specs each get a model that rejects malformed input at the
+boundary, normalizes tags and hashes, and raises errors already carrying the
+HTTP status and code the handler should return.
+"""
+
 import json
 from dataclasses import dataclass
 from typing import Any, Literal
@@ -58,15 +65,12 @@ class ListAssetsQuery(BaseModel):
     tags_none: list[str] = Field(default_factory=list)
     name_contains: str | None = None
 
-    # Filter by exact content hash (emitted as `asset_hash` in responses)
+    # Filter by exact content hash (the `hash` field of each listed asset)
     hash: str | None = None
 
     # Accepted for API compatibility; has no effect, as there is no shared
     # asset pool to include or exclude
     include_public: bool = True
-
-    # Accept either a JSON string (query param) or a dict
-    metadata_filter: dict[str, Any] | None = None
 
     limit: conint(ge=1, le=500) = 20
     offset: conint(ge=0) = 0
@@ -107,21 +111,6 @@ class ListAssetsQuery(BaseModel):
         if isinstance(v, str):
             return v.strip().lower()
         return v
-
-    @field_validator("metadata_filter", mode="before")
-    @classmethod
-    def _parse_metadata_json(cls, v):
-        if v is None or isinstance(v, dict):
-            return v
-        if isinstance(v, str) and v.strip():
-            try:
-                parsed = json.loads(v)
-            except Exception as e:
-                raise ValueError(f"metadata_filter must be JSON: {e}") from e
-            if not isinstance(parsed, dict):
-                raise ValueError("metadata_filter must be a JSON object")
-            return parsed
-        return None
 
 
 class UpdateAssetBody(BaseModel):
@@ -183,7 +172,6 @@ class TagsRefineQuery(BaseModel):
     tags_any: list[str] = Field(default_factory=list)
     tags_none: list[str] = Field(default_factory=list)
     name_contains: str | None = None
-    metadata_filter: dict[str, Any] | None = None
     limit: conint(ge=1, le=1000) = 100
 
     @field_validator(
@@ -203,22 +191,6 @@ class TagsRefineQuery(BaseModel):
                     out.extend([t.strip() for t in item.split(",") if t.strip()])
             return out
         return v
-
-    @field_validator("metadata_filter", mode="before")
-    @classmethod
-    def _parse_metadata_json(cls, v):
-        if v is None or isinstance(v, dict):
-            return v
-        if isinstance(v, str) and v.strip():
-            try:
-                parsed = json.loads(v)
-            except Exception as e:
-                raise ValueError(f"metadata_filter must be JSON: {e}") from e
-            if not isinstance(parsed, dict):
-                raise ValueError("metadata_filter must be a JSON object")
-            return parsed
-        return None
-
 
 class TagsListQuery(BaseModel):
     model_config = ConfigDict(extra="ignore", str_strip_whitespace=True)

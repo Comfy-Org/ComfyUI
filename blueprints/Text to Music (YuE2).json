@@ -1,0 +1,1630 @@
+{
+  "revision": 0,
+  "last_node_id": "33",
+  "last_link_id": 0,
+  "nodes": [
+    {
+      "id": 33,
+      "type": "59dddde1-2d83-4b6e-9c71-1e5cb2d823d6",
+      "pos": [
+        1440,
+        -260
+      ],
+      "size": [
+        390,
+        450
+      ],
+      "flags": {},
+      "order": 0,
+      "mode": 0,
+      "inputs": [
+        {
+          "label": "Style",
+          "name": "value",
+          "type": "STRING",
+          "widget": {
+            "name": "value"
+          },
+          "link": null
+        },
+        {
+          "label": "Lyrics",
+          "name": "value_1",
+          "type": "STRING",
+          "widget": {
+            "name": "value_1"
+          },
+          "link": null
+        },
+        {
+          "name": "mode",
+          "type": "COMBO",
+          "widget": {
+            "name": "mode"
+          },
+          "link": null
+        },
+        {
+          "label": "ABC_planning",
+          "name": "value_2",
+          "type": "BOOLEAN",
+          "widget": {
+            "name": "value_2"
+          },
+          "link": null
+        },
+        {
+          "name": "max_duration",
+          "type": "FLOAT",
+          "widget": {
+            "name": "max_duration"
+          },
+          "link": null
+        },
+        {
+          "name": "seed",
+          "type": "INT",
+          "widget": {
+            "name": "seed"
+          },
+          "link": null
+        },
+        {
+          "name": "ckpt_name",
+          "type": "COMBO",
+          "widget": {
+            "name": "ckpt_name"
+          },
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "localized_name": "AUDIO",
+          "name": "AUDIO",
+          "type": "AUDIO",
+          "links": []
+        }
+      ],
+      "properties": {
+        "previewExposures": [
+          {
+            "name": "$$canvas-image-preview",
+            "sourceNodeId": "8",
+            "sourcePreviewName": "$$canvas-image-preview"
+          }
+        ]
+      },
+      "widgets_values": [
+        "",
+        "",
+        "full",
+        true,
+        120,
+        0,
+        "yue2_3b_int8_convrot.safetensors"
+      ],
+      "widgets_values_named": {
+        "value": "",
+        "value_1": "",
+        "mode": "full",
+        "value_2": true,
+        "max_duration": 120,
+        "seed": 0,
+        "ckpt_name": "yue2_3b_int8_convrot.safetensors"
+      },
+      "title": "Text to Music (YuE2)"
+    }
+  ],
+  "links": [],
+  "version": 0.4,
+  "definitions": {
+    "subgraphs": [
+      {
+        "id": "59dddde1-2d83-4b6e-9c71-1e5cb2d823d6",
+        "version": 1,
+        "state": {
+          "lastGroupId": 7,
+          "lastNodeId": 40,
+          "lastLinkId": 85,
+          "lastRerouteId": 0
+        },
+        "revision": 0,
+        "config": {},
+        "name": "Text to Music (YuE2)",
+        "inputNode": {
+          "id": -10,
+          "bounding": [
+            -1000,
+            40,
+            128,
+            188
+          ]
+        },
+        "outputNode": {
+          "id": -20,
+          "bounding": [
+            3600,
+            -331,
+            128,
+            68
+          ]
+        },
+        "inputs": [
+          {
+            "id": "6c1f1dc8-09bc-416e-93e6-185bdbb48f42",
+            "name": "value",
+            "type": "STRING",
+            "linkIds": [
+              85
+            ],
+            "label": "Style",
+            "pos": [
+              -896,
+              64
+            ]
+          },
+          {
+            "id": "54203a99-fe32-452b-8bc6-fa9add883a70",
+            "name": "value_1",
+            "type": "STRING",
+            "linkIds": [
+              84
+            ],
+            "label": "Lyrics",
+            "pos": [
+              -896,
+              84
+            ]
+          },
+          {
+            "id": "4a3b1965-73f7-4b51-a8b7-77eb939029c7",
+            "name": "mode",
+            "type": "COMBO",
+            "linkIds": [
+              76,
+              77
+            ],
+            "pos": [
+              -896,
+              104
+            ]
+          },
+          {
+            "id": "20a4c74f-f02d-4601-a674-9cb14dc29d52",
+            "name": "value_2",
+            "type": "BOOLEAN",
+            "linkIds": [
+              78
+            ],
+            "label": "ABC_planning",
+            "pos": [
+              -896,
+              124
+            ]
+          },
+          {
+            "id": "d0fcad51-9ad7-4a92-ab62-efffeb4c47a1",
+            "name": "max_duration",
+            "type": "FLOAT",
+            "linkIds": [
+              79
+            ],
+            "pos": [
+              -896,
+              144
+            ]
+          },
+          {
+            "id": "42d2b2cb-be16-40f7-a6d2-95a45aefcfca",
+            "name": "seed",
+            "type": "INT",
+            "linkIds": [
+              80
+            ],
+            "pos": [
+              -896,
+              164
+            ]
+          },
+          {
+            "id": "99304313-156e-4357-aab8-34fa0944f94a",
+            "name": "ckpt_name",
+            "type": "COMBO",
+            "linkIds": [
+              81
+            ],
+            "pos": [
+              -896,
+              184
+            ]
+          }
+        ],
+        "outputs": [
+          {
+            "id": "0732a71d-66d1-4d9b-aae6-02256c00fab7",
+            "name": "AUDIO",
+            "type": "AUDIO",
+            "linkIds": [
+              31
+            ],
+            "localized_name": "AUDIO",
+            "pos": [
+              3624,
+              -307
+            ]
+          }
+        ],
+        "widgets": [],
+        "nodes": [
+          {
+            "id": 15,
+            "type": "CheckpointLoaderSimple",
+            "pos": [
+              -240,
+              -890
+            ],
+            "size": [
+              420,
+              130
+            ],
+            "flags": {},
+            "order": 5,
+            "mode": 0,
+            "inputs": [
+              {
+                "localized_name": "ckpt_name",
+                "name": "ckpt_name",
+                "type": "COMBO",
+                "widget": {
+                  "name": "ckpt_name"
+                },
+                "link": 81
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "MODEL",
+                "name": "MODEL",
+                "type": "MODEL",
+                "links": [
+                  18
+                ]
+              },
+              {
+                "localized_name": "CLIP",
+                "name": "CLIP",
+                "type": "CLIP",
+                "links": [
+                  38,
+                  43
+                ]
+              },
+              {
+                "localized_name": "VAE",
+                "name": "VAE",
+                "type": "VAE",
+                "links": [
+                  21
+                ]
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "CheckpointLoaderSimple",
+              "models": [
+                {
+                  "name": "yue2_3b_int8_convrot.safetensors",
+                  "url": "https://huggingface.co/Comfy-Org/YuE2/resolve/main/checkpoints/yue2_3b_int8_convrot.safetensors",
+                  "directory": "checkpoints"
+                }
+              ]
+            },
+            "widgets_values": [
+              "yue2_3b_int8_convrot.safetensors"
+            ],
+            "widgets_values_named": {
+              "ckpt_name": "yue2_3b_int8_convrot.safetensors"
+            }
+          },
+          {
+            "id": 24,
+            "type": "YuE2GenerateABC",
+            "pos": [
+              570,
+              -580
+            ],
+            "size": [
+              400,
+              450
+            ],
+            "flags": {},
+            "order": 8,
+            "mode": 0,
+            "showAdvanced": true,
+            "inputs": [
+              {
+                "localized_name": "clip",
+                "name": "clip",
+                "type": "CLIP",
+                "link": 38
+              },
+              {
+                "localized_name": "style",
+                "name": "style",
+                "type": "STRING",
+                "widget": {
+                  "name": "style"
+                },
+                "link": 70
+              },
+              {
+                "localized_name": "lyrics",
+                "name": "lyrics",
+                "type": "STRING",
+                "widget": {
+                  "name": "lyrics"
+                },
+                "link": 72
+              },
+              {
+                "localized_name": "seed",
+                "name": "seed",
+                "type": "INT",
+                "widget": {
+                  "name": "seed"
+                },
+                "link": 67
+              },
+              {
+                "localized_name": "mode",
+                "name": "mode",
+                "type": "COMBO",
+                "widget": {
+                  "name": "mode"
+                },
+                "link": 77
+              },
+              {
+                "localized_name": "max_abc_tokens",
+                "name": "max_abc_tokens",
+                "type": "INT",
+                "widget": {
+                  "name": "max_abc_tokens"
+                },
+                "link": null
+              },
+              {
+                "localized_name": "temperature",
+                "name": "temperature",
+                "type": "FLOAT",
+                "widget": {
+                  "name": "temperature"
+                },
+                "link": null
+              },
+              {
+                "localized_name": "top_p",
+                "name": "top_p",
+                "type": "FLOAT",
+                "widget": {
+                  "name": "top_p"
+                },
+                "link": null
+              },
+              {
+                "localized_name": "top_k",
+                "name": "top_k",
+                "type": "INT",
+                "widget": {
+                  "name": "top_k"
+                },
+                "link": null
+              },
+              {
+                "localized_name": "repetition_penalty",
+                "name": "repetition_penalty",
+                "type": "FLOAT",
+                "widget": {
+                  "name": "repetition_penalty"
+                },
+                "link": null
+              },
+              {
+                "localized_name": "penalty_window",
+                "name": "penalty_window",
+                "type": "INT",
+                "widget": {
+                  "name": "penalty_window"
+                },
+                "link": null
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "abc",
+                "name": "abc",
+                "type": "STRING",
+                "links": [
+                  82
+                ]
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "YuE2GenerateABC"
+            },
+            "widgets_values": [
+              "",
+              "",
+              429124050625962,
+              "randomize",
+              "full",
+              8192,
+              0.7,
+              0.9,
+              30,
+              1.005,
+              100
+            ],
+            "widgets_values_named": {
+              "style": "",
+              "lyrics": "",
+              "seed": 429124050625962,
+              "control_after_generate": "randomize",
+              "mode": "full",
+              "max_abc_tokens": 8192,
+              "temperature": 0.7,
+              "top_p": 0.9,
+              "top_k": 30,
+              "repetition_penalty": 1.005,
+              "penalty_window": 100
+            }
+          },
+          {
+            "id": 14,
+            "type": "PreviewAny",
+            "pos": [
+              1000,
+              -580
+            ],
+            "size": [
+              420,
+              430
+            ],
+            "flags": {},
+            "order": 4,
+            "mode": 0,
+            "inputs": [
+              {
+                "localized_name": "source",
+                "name": "source",
+                "type": "*",
+                "link": 61
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "STRING",
+                "name": "STRING",
+                "type": "STRING",
+                "links": [
+                  62
+                ]
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "PreviewAny"
+            },
+            "widgets_values": [],
+            "widgets_values_named": {}
+          },
+          {
+            "id": 30,
+            "type": "ComfySwitchNode",
+            "pos": [
+              1060,
+              -90
+            ],
+            "size": [
+              270,
+              110
+            ],
+            "flags": {},
+            "order": 10,
+            "mode": 0,
+            "inputs": [
+              {
+                "localized_name": "on_false",
+                "name": "on_false",
+                "shape": 7,
+                "type": "*",
+                "link": 83
+              },
+              {
+                "localized_name": "on_true",
+                "name": "on_true",
+                "shape": 7,
+                "type": "*",
+                "link": 82
+              },
+              {
+                "localized_name": "switch",
+                "name": "switch",
+                "type": "BOOLEAN",
+                "widget": {
+                  "name": "switch"
+                },
+                "link": 58
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "output",
+                "name": "output",
+                "type": "*",
+                "links": [
+                  61
+                ]
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "ComfySwitchNode"
+            },
+            "widgets_values": [
+              false
+            ],
+            "widgets_values_named": {
+              "switch": false
+            }
+          },
+          {
+            "id": 32,
+            "type": "PrimitiveString",
+            "pos": [
+              590,
+              -60
+            ],
+            "size": [
+              370,
+              100
+            ],
+            "flags": {},
+            "order": 0,
+            "mode": 0,
+            "inputs": [
+              {
+                "localized_name": "value",
+                "name": "value",
+                "type": "STRING",
+                "widget": {
+                  "name": "value"
+                },
+                "link": null
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "STRING",
+                "name": "STRING",
+                "type": "STRING",
+                "links": [
+                  83
+                ]
+              }
+            ],
+            "title": "Text (Empty ABC)",
+            "properties": {
+              "Node name for S&R": "PrimitiveString"
+            },
+            "widgets_values": [
+              ""
+            ],
+            "widgets_values_named": {
+              "value": ""
+            }
+          },
+          {
+            "id": 25,
+            "type": "YuE2GenerateMusic",
+            "pos": [
+              1830,
+              -530
+            ],
+            "size": [
+              400,
+              410
+            ],
+            "flags": {},
+            "order": 9,
+            "mode": 0,
+            "inputs": [
+              {
+                "localized_name": "clip",
+                "name": "clip",
+                "type": "CLIP",
+                "link": 43
+              },
+              {
+                "localized_name": "style",
+                "name": "style",
+                "type": "STRING",
+                "widget": {
+                  "name": "style"
+                },
+                "link": 71
+              },
+              {
+                "localized_name": "lyrics",
+                "name": "lyrics",
+                "type": "STRING",
+                "widget": {
+                  "name": "lyrics"
+                },
+                "link": 73
+              },
+              {
+                "localized_name": "abc",
+                "name": "abc",
+                "type": "STRING",
+                "widget": {
+                  "name": "abc"
+                },
+                "link": 62
+              },
+              {
+                "localized_name": "seed",
+                "name": "seed",
+                "type": "INT",
+                "widget": {
+                  "name": "seed"
+                },
+                "link": 68
+              },
+              {
+                "localized_name": "mode",
+                "name": "mode",
+                "type": "COMBO",
+                "widget": {
+                  "name": "mode"
+                },
+                "link": 76
+              },
+              {
+                "localized_name": "max_duration",
+                "name": "max_duration",
+                "type": "FLOAT",
+                "widget": {
+                  "name": "max_duration"
+                },
+                "link": 79
+              },
+              {
+                "localized_name": "temperature",
+                "name": "temperature",
+                "type": "FLOAT",
+                "widget": {
+                  "name": "temperature"
+                },
+                "link": null
+              },
+              {
+                "localized_name": "top_p",
+                "name": "top_p",
+                "type": "FLOAT",
+                "widget": {
+                  "name": "top_p"
+                },
+                "link": null
+              },
+              {
+                "localized_name": "top_k",
+                "name": "top_k",
+                "type": "INT",
+                "widget": {
+                  "name": "top_k"
+                },
+                "link": null
+              },
+              {
+                "localized_name": "repetition_penalty",
+                "name": "repetition_penalty",
+                "type": "FLOAT",
+                "widget": {
+                  "name": "repetition_penalty"
+                },
+                "link": null
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "CONDITIONING",
+                "name": "CONDITIONING",
+                "type": "CONDITIONING",
+                "links": [
+                  49,
+                  50
+                ]
+              },
+              {
+                "localized_name": "seconds",
+                "name": "seconds",
+                "type": "FLOAT",
+                "links": [
+                  48,
+                  51
+                ]
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "YuE2GenerateMusic"
+            },
+            "widgets_values": [
+              "",
+              "",
+              "",
+              530976807293994,
+              "randomize",
+              "full",
+              360,
+              1,
+              0.95,
+              100,
+              1.2
+            ],
+            "widgets_values_named": {
+              "style": "",
+              "lyrics": "",
+              "abc": "",
+              "seed": 530976807293994,
+              "control_after_generate": "randomize",
+              "mode": "full",
+              "max_duration": 360,
+              "temperature": 1,
+              "top_p": 0.95,
+              "top_k": 100,
+              "repetition_penalty": 1.2
+            }
+          },
+          {
+            "id": 31,
+            "type": "PrimitiveBoolean",
+            "pos": [
+              -160,
+              230
+            ],
+            "size": [
+              230,
+              90
+            ],
+            "flags": {},
+            "order": 11,
+            "mode": 0,
+            "inputs": [
+              {
+                "localized_name": "value",
+                "name": "value",
+                "type": "BOOLEAN",
+                "widget": {
+                  "name": "value"
+                },
+                "link": 78
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "BOOLEAN",
+                "name": "BOOLEAN",
+                "type": "BOOLEAN",
+                "links": [
+                  58
+                ]
+              }
+            ],
+            "title": "Boolean (ABC planning)",
+            "properties": {
+              "Node name for S&R": "PrimitiveBoolean"
+            },
+            "widgets_values": [
+              false
+            ],
+            "widgets_values_named": {
+              "value": false
+            }
+          },
+          {
+            "id": 18,
+            "type": "ConditioningZeroOut",
+            "pos": [
+              2330,
+              -520
+            ],
+            "size": [
+              230,
+              60
+            ],
+            "flags": {},
+            "order": 6,
+            "mode": 0,
+            "inputs": [
+              {
+                "localized_name": "conditioning",
+                "name": "conditioning",
+                "type": "CONDITIONING",
+                "link": 50
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "CONDITIONING",
+                "name": "CONDITIONING",
+                "type": "CONDITIONING",
+                "links": [
+                  26
+                ]
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "ConditioningZeroOut"
+            }
+          },
+          {
+            "id": 23,
+            "type": "PreviewAny",
+            "pos": [
+              2310,
+              -400
+            ],
+            "size": [
+              270,
+              170
+            ],
+            "flags": {},
+            "order": 7,
+            "mode": 0,
+            "inputs": [
+              {
+                "localized_name": "source",
+                "name": "source",
+                "type": "*",
+                "link": 51
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "STRING",
+                "name": "STRING",
+                "type": "STRING",
+                "links": null
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "PreviewAny"
+            },
+            "widgets_values": [],
+            "widgets_values_named": {}
+          },
+          {
+            "id": 8,
+            "type": "KSampler",
+            "pos": [
+              2860,
+              -580
+            ],
+            "size": [
+              330,
+              290
+            ],
+            "flags": {},
+            "order": 2,
+            "mode": 0,
+            "inputs": [
+              {
+                "localized_name": "model",
+                "name": "model",
+                "type": "MODEL",
+                "link": 18
+              },
+              {
+                "localized_name": "positive",
+                "name": "positive",
+                "type": "CONDITIONING",
+                "link": 49
+              },
+              {
+                "localized_name": "negative",
+                "name": "negative",
+                "type": "CONDITIONING",
+                "link": 26
+              },
+              {
+                "localized_name": "latent_image",
+                "name": "latent_image",
+                "type": "LATENT",
+                "link": 8
+              },
+              {
+                "localized_name": "seed",
+                "name": "seed",
+                "type": "INT",
+                "widget": {
+                  "name": "seed"
+                },
+                "link": 69
+              },
+              {
+                "localized_name": "steps",
+                "name": "steps",
+                "type": "INT",
+                "widget": {
+                  "name": "steps"
+                },
+                "link": null
+              },
+              {
+                "localized_name": "cfg",
+                "name": "cfg",
+                "type": "FLOAT",
+                "widget": {
+                  "name": "cfg"
+                },
+                "link": null
+              },
+              {
+                "localized_name": "sampler_name",
+                "name": "sampler_name",
+                "type": "COMBO",
+                "widget": {
+                  "name": "sampler_name"
+                },
+                "link": null
+              },
+              {
+                "localized_name": "scheduler",
+                "name": "scheduler",
+                "type": "COMBO",
+                "widget": {
+                  "name": "scheduler"
+                },
+                "link": null
+              },
+              {
+                "localized_name": "denoise",
+                "name": "denoise",
+                "type": "FLOAT",
+                "widget": {
+                  "name": "denoise"
+                },
+                "link": null
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "LATENT",
+                "name": "LATENT",
+                "type": "LATENT",
+                "links": [
+                  9
+                ]
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "KSampler"
+            },
+            "widgets_values": [
+              42,
+              "fixed",
+              32,
+              1,
+              "dpm_2",
+              "sgm_uniform",
+              1
+            ],
+            "widgets_values_named": {
+              "seed": 42,
+              "control_after_generate": "fixed",
+              "steps": 32,
+              "cfg": 1,
+              "sampler_name": "dpm_2",
+              "scheduler": "sgm_uniform",
+              "denoise": 1
+            }
+          },
+          {
+            "id": 5,
+            "type": "EmptyYuE2LatentAudio",
+            "pos": [
+              3070,
+              -110
+            ],
+            "size": [
+              230,
+              120
+            ],
+            "flags": {},
+            "order": 1,
+            "mode": 0,
+            "inputs": [
+              {
+                "localized_name": "seconds",
+                "name": "seconds",
+                "type": "FLOAT",
+                "widget": {
+                  "name": "seconds"
+                },
+                "link": 48
+              },
+              {
+                "localized_name": "batch_size",
+                "name": "batch_size",
+                "type": "INT",
+                "widget": {
+                  "name": "batch_size"
+                },
+                "link": null
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "LATENT",
+                "name": "LATENT",
+                "type": "LATENT",
+                "links": [
+                  8
+                ]
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "EmptyYuE2LatentAudio"
+            },
+            "widgets_values": [
+              120,
+              1
+            ],
+            "widgets_values_named": {
+              "seconds": 120,
+              "batch_size": 1
+            },
+            "color": "#323",
+            "bgcolor": "#535"
+          },
+          {
+            "id": 9,
+            "type": "VAEDecodeAudio",
+            "pos": [
+              3240,
+              -500
+            ],
+            "size": [
+              230,
+              80
+            ],
+            "flags": {},
+            "order": 3,
+            "mode": 0,
+            "inputs": [
+              {
+                "localized_name": "samples",
+                "name": "samples",
+                "type": "LATENT",
+                "link": 9
+              },
+              {
+                "localized_name": "vae",
+                "name": "vae",
+                "type": "VAE",
+                "link": 21
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "AUDIO",
+                "name": "AUDIO",
+                "type": "AUDIO",
+                "links": [
+                  31
+                ]
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "VAEDecodeAudio"
+            }
+          },
+          {
+            "id": 34,
+            "type": "SeedNode",
+            "pos": [
+              -190,
+              470
+            ],
+            "size": [
+              270,
+              90
+            ],
+            "flags": {},
+            "order": 12,
+            "mode": 0,
+            "inputs": [
+              {
+                "localized_name": "seed",
+                "name": "seed",
+                "type": "INT",
+                "widget": {
+                  "name": "seed"
+                },
+                "link": 80
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "seed",
+                "name": "seed",
+                "type": "INT",
+                "links": [
+                  67,
+                  68,
+                  69
+                ]
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "SeedNode"
+            },
+            "widgets_values": [
+              0,
+              "fixed"
+            ],
+            "widgets_values_named": {
+              "seed": 0,
+              "fixed": "fixed"
+            }
+          },
+          {
+            "id": 36,
+            "type": "PrimitiveStringMultiline",
+            "pos": [
+              -260,
+              -590
+            ],
+            "size": [
+              480,
+              260
+            ],
+            "flags": {},
+            "order": 13,
+            "mode": 0,
+            "inputs": [
+              {
+                "localized_name": "value",
+                "name": "value",
+                "type": "STRING",
+                "widget": {
+                  "name": "value"
+                },
+                "link": 85
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "STRING",
+                "name": "STRING",
+                "type": "STRING",
+                "links": [
+                  70,
+                  71
+                ]
+              }
+            ],
+            "title": "Text (Style)",
+            "properties": {
+              "Node name for S&R": "PrimitiveStringMultiline"
+            },
+            "widgets_values": [
+              ""
+            ],
+            "widgets_values_named": {
+              "value": ""
+            },
+            "color": "#232",
+            "bgcolor": "#353"
+          },
+          {
+            "id": 37,
+            "type": "PrimitiveStringMultiline",
+            "pos": [
+              -250,
+              -260
+            ],
+            "size": [
+              480,
+              260
+            ],
+            "flags": {},
+            "order": 14,
+            "mode": 0,
+            "inputs": [
+              {
+                "localized_name": "value",
+                "name": "value",
+                "type": "STRING",
+                "widget": {
+                  "name": "value"
+                },
+                "link": 84
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "STRING",
+                "name": "STRING",
+                "type": "STRING",
+                "links": [
+                  72,
+                  73
+                ]
+              }
+            ],
+            "title": "Text (Lyrics)",
+            "properties": {
+              "Node name for S&R": "PrimitiveStringMultiline"
+            },
+            "widgets_values": [
+              ""
+            ],
+            "widgets_values_named": {
+              "value": ""
+            },
+            "color": "#232",
+            "bgcolor": "#353"
+          }
+        ],
+        "groups": [
+          {
+            "id": 3,
+            "title": "Model",
+            "bounding": [
+              -340,
+              -980,
+              630,
+              230
+            ],
+            "color": "#3f789e",
+            "flags": {}
+          },
+          {
+            "id": 1,
+            "title": "Style & Lyrics",
+            "bounding": [
+              -340,
+              -720,
+              630,
+              790
+            ],
+            "color": "#3f789e",
+            "flags": {}
+          },
+          {
+            "id": 2,
+            "title": "ABC planning",
+            "bounding": [
+              400,
+              -720,
+              1140,
+              790
+            ],
+            "color": "#3f789e",
+            "flags": {}
+          },
+          {
+            "id": 7,
+            "title": "ABC planning?",
+            "bounding": [
+              -340,
+              120,
+              630,
+              270
+            ],
+            "color": "#3f789e",
+            "flags": {}
+          },
+          {
+            "id": 6,
+            "title": "Conditioning",
+            "bounding": [
+              1570,
+              -720,
+              1160,
+              790
+            ],
+            "color": "#3f789e",
+            "flags": {}
+          },
+          {
+            "id": 4,
+            "title": "Duration",
+            "bounding": [
+              2820,
+              -210,
+              720,
+              280
+            ],
+            "color": "#3f789e",
+            "flags": {}
+          },
+          {
+            "id": 5,
+            "title": "Sampling & Decode",
+            "bounding": [
+              2820,
+              -720,
+              720,
+              480
+            ],
+            "color": "#3f789e",
+            "flags": {}
+          }
+        ],
+        "links": [
+          {
+            "id": 38,
+            "origin_id": 15,
+            "origin_slot": 1,
+            "target_id": 24,
+            "target_slot": 0,
+            "type": "CLIP"
+          },
+          {
+            "id": 61,
+            "origin_id": 30,
+            "origin_slot": 0,
+            "target_id": 14,
+            "target_slot": 0,
+            "type": "STRING"
+          },
+          {
+            "id": 58,
+            "origin_id": 31,
+            "origin_slot": 0,
+            "target_id": 30,
+            "target_slot": 2,
+            "type": "BOOLEAN"
+          },
+          {
+            "id": 43,
+            "origin_id": 15,
+            "origin_slot": 1,
+            "target_id": 25,
+            "target_slot": 0,
+            "type": "CLIP"
+          },
+          {
+            "id": 62,
+            "origin_id": 14,
+            "origin_slot": 0,
+            "target_id": 25,
+            "target_slot": 3,
+            "type": "STRING"
+          },
+          {
+            "id": 50,
+            "origin_id": 25,
+            "origin_slot": 0,
+            "target_id": 18,
+            "target_slot": 0,
+            "type": "CONDITIONING"
+          },
+          {
+            "id": 51,
+            "origin_id": 25,
+            "origin_slot": 1,
+            "target_id": 23,
+            "target_slot": 0,
+            "type": "FLOAT"
+          },
+          {
+            "id": 18,
+            "origin_id": 15,
+            "origin_slot": 0,
+            "target_id": 8,
+            "target_slot": 0,
+            "type": "MODEL"
+          },
+          {
+            "id": 49,
+            "origin_id": 25,
+            "origin_slot": 0,
+            "target_id": 8,
+            "target_slot": 1,
+            "type": "CONDITIONING"
+          },
+          {
+            "id": 26,
+            "origin_id": 18,
+            "origin_slot": 0,
+            "target_id": 8,
+            "target_slot": 2,
+            "type": "CONDITIONING"
+          },
+          {
+            "id": 8,
+            "origin_id": 5,
+            "origin_slot": 0,
+            "target_id": 8,
+            "target_slot": 3,
+            "type": "LATENT"
+          },
+          {
+            "id": 48,
+            "origin_id": 25,
+            "origin_slot": 1,
+            "target_id": 5,
+            "target_slot": 0,
+            "type": "FLOAT"
+          },
+          {
+            "id": 9,
+            "origin_id": 8,
+            "origin_slot": 0,
+            "target_id": 9,
+            "target_slot": 0,
+            "type": "LATENT"
+          },
+          {
+            "id": 21,
+            "origin_id": 15,
+            "origin_slot": 2,
+            "target_id": 9,
+            "target_slot": 1,
+            "type": "VAE"
+          },
+          {
+            "id": 31,
+            "origin_id": 9,
+            "origin_slot": 0,
+            "target_id": -20,
+            "target_slot": 0,
+            "type": "AUDIO"
+          },
+          {
+            "id": 67,
+            "origin_id": 34,
+            "origin_slot": 0,
+            "target_id": 24,
+            "target_slot": 3,
+            "type": "INT"
+          },
+          {
+            "id": 68,
+            "origin_id": 34,
+            "origin_slot": 0,
+            "target_id": 25,
+            "target_slot": 4,
+            "type": "INT"
+          },
+          {
+            "id": 69,
+            "origin_id": 34,
+            "origin_slot": 0,
+            "target_id": 8,
+            "target_slot": 4,
+            "type": "INT"
+          },
+          {
+            "id": 70,
+            "origin_id": 36,
+            "origin_slot": 0,
+            "target_id": 24,
+            "target_slot": 1,
+            "type": "STRING"
+          },
+          {
+            "id": 71,
+            "origin_id": 36,
+            "origin_slot": 0,
+            "target_id": 25,
+            "target_slot": 1,
+            "type": "STRING"
+          },
+          {
+            "id": 72,
+            "origin_id": 37,
+            "origin_slot": 0,
+            "target_id": 24,
+            "target_slot": 2,
+            "type": "STRING"
+          },
+          {
+            "id": 73,
+            "origin_id": 37,
+            "origin_slot": 0,
+            "target_id": 25,
+            "target_slot": 2,
+            "type": "STRING"
+          },
+          {
+            "id": 76,
+            "origin_id": -10,
+            "origin_slot": 2,
+            "target_id": 25,
+            "target_slot": 5,
+            "type": "COMBO"
+          },
+          {
+            "id": 77,
+            "origin_id": -10,
+            "origin_slot": 2,
+            "target_id": 24,
+            "target_slot": 4,
+            "type": "COMBO"
+          },
+          {
+            "id": 78,
+            "origin_id": -10,
+            "origin_slot": 3,
+            "target_id": 31,
+            "target_slot": 0,
+            "type": "BOOLEAN"
+          },
+          {
+            "id": 79,
+            "origin_id": -10,
+            "origin_slot": 4,
+            "target_id": 25,
+            "target_slot": 6,
+            "type": "FLOAT"
+          },
+          {
+            "id": 80,
+            "origin_id": -10,
+            "origin_slot": 5,
+            "target_id": 34,
+            "target_slot": 0,
+            "type": "INT"
+          },
+          {
+            "id": 81,
+            "origin_id": -10,
+            "origin_slot": 6,
+            "target_id": 15,
+            "target_slot": 0,
+            "type": "COMBO"
+          },
+          {
+            "id": 82,
+            "origin_id": 24,
+            "origin_slot": 0,
+            "target_id": 30,
+            "target_slot": 1,
+            "type": "STRING"
+          },
+          {
+            "id": 83,
+            "origin_id": 32,
+            "origin_slot": 0,
+            "target_id": 30,
+            "target_slot": 0,
+            "type": "STRING"
+          },
+          {
+            "id": 84,
+            "origin_id": -10,
+            "origin_slot": 1,
+            "target_id": 37,
+            "target_slot": 0,
+            "type": "STRING"
+          },
+          {
+            "id": 85,
+            "origin_id": -10,
+            "origin_slot": 0,
+            "target_id": 36,
+            "target_slot": 0,
+            "type": "STRING"
+          }
+        ],
+        "extra": {},
+        "category": "Audio/Music generation",
+        "description": "Generates complete songs from a music style and lyrics using YuE2, with symbolic planning for structured melody, harmony, vocals, and accompaniment."
+      }
+    ]
+  },
+  "extra": {}
+}

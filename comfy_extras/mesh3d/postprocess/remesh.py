@@ -356,6 +356,8 @@ def _dual_contour(voxel_coords: torch.Tensor, corner_udf: torch.Tensor,
                                    torch.zeros_like(found)).reshape(Nv, 8)
         edge_valid = cv_per_voxel[:, EDGES[:, 0]] & cv_per_voxel[:, EDGES[:, 1]]
         crosses = crosses & edge_valid
+        del cv_per_voxel, edge_valid
+    del keys_per_voxel, idx_per_voxel, idx_clamped, found
     # Zero-crossing interp factor per edge
     t = a_sd / (a_sd - b_sd + 1e-20)
     t = t.clamp(0.0, 1.0).unsqueeze(-1)
@@ -364,6 +366,7 @@ def _dual_contour(voxel_coords: torch.Tensor, corner_udf: torch.Tensor,
     a_pos = corner_world[:, EDGES[:, 0]]   # (Nv, 12, 3)
     b_pos = corner_world[:, EDGES[:, 1]]
     crossing_pts = torch.lerp(a_pos, b_pos, t)  # (Nv, 12, 3)
+    del corner_pos_per_voxel, a_pos, b_pos, t
 
     # Default dual vert: centroid of crossings (also QEF/no-crossing fallback)
     crosses_f = crosses.float().unsqueeze(-1)
@@ -412,6 +415,12 @@ def _dual_contour(voxel_coords: torch.Tensor, corner_udf: torch.Tensor,
             qef_solution = torch.where(in_box.unsqueeze(-1), qef_solution, centroid_verts)
 
             dual_verts = torch.where(has_cross, qef_solution, centre_world)
+            del query_pts, qef_tri_idx, valid_q, normals_at_q, full_normals, n_per_edge
+            del A, n_dot_p, b, qef_solution, lo, hi, in_box
+        del flat_pts, flat_mask
+
+    del crossing_pts, corner_world, crosses_f, crossing_sum, n_cross
+    del centroid_verts, centre_world, has_cross
 
     # Topology: each crossing grid edge is shared by 4 voxels -> quad -> 2 tris.
     # NEIGHBOUR_OFFS lays out the 4 sharing voxels per axis; y-axis order is
@@ -993,6 +1002,7 @@ def remesh_narrow_band_dc(
     unique_corner_keys, corner_inv = torch.unique(corner_keys, return_inverse=True)
     unique_corners = torch.zeros((unique_corner_keys.shape[0], 3), dtype=torch.long, device=device)
     unique_corners[corner_inv] = corners
+    del corners, corner_keys, corner_inv
 
     if sign_mode == "sdf":
         use_sdf = True
@@ -1003,8 +1013,6 @@ def remesh_narrow_band_dc(
 
     # Step 3: distance field at every unique corner.
     tri_verts_g = vertices[faces.long()]
-    centroids = tri_verts_g.mean(dim=1)
-    tri_radii = (tri_verts_g - centroids.unsqueeze(1)).norm(dim=-1).max(dim=-1).values
     # face normals: needed for the SDF sign AND for QEF placement (QEF is sign-agnostic,
     # so it works in UDF mode too — (n·(x-p))² is unchanged by normal orientation)
     if use_sdf or qef:
@@ -1027,11 +1035,10 @@ def remesh_narrow_band_dc(
     else:
         # UDF mode: iso at UDF=eps; double surface on closed meshes, weld after
         sdf = udf - eps
+    del unique_corners, corner_world, udf, corner_closest, corner_tri
+    if use_sdf:
+        del sign, n_for_corner, offset, sign_dot
     tick()  # SDF done
-
-    # Short-range hash reused by project_back / colors sampling (max_dist up to 4*cell)
-    short_hash_cell_t = torch.tensor(2.0 * cell_size, dtype=vertices.dtype, device=device)
-    short_hash = _build_tri_spatial_hash(centroids, tri_radii, short_hash_cell_t)
 
     # Step 4 + 5: dual contouring + topology. QEF works in both modes (sign-agnostic);
     # in UDF it pulls the ±eps crossing back onto the triangle planes → sharper edges.
@@ -1060,12 +1067,20 @@ def remesh_narrow_band_dc(
             tri_face_normals=tri_face_normals, qef_query=_qef_query,
             # corner_valid filter only matters in SDF mode
             corner_valid=corner_valid if use_sdf else None)
+    del voxel_coords, sdf, unique_corner_keys, corner_valid
+    del tri_face_normals, _qef_query
+    if use_sdf or qef:
+        del tri_face_normals_all
     tick()  # DC done
 
     # Step 6: project_back and / or color sampling share one closest-point query
     need_query = (project_back > 0 or colors is not None) and dual_verts.numel() > 0
     out_colors = None
     if need_query:
+        centroids = tri_verts_g.mean(dim=1)
+        tri_radii = (tri_verts_g - centroids.unsqueeze(1)).norm(dim=-1).max(dim=-1).values
+        short_hash_cell_t = torch.tensor(2.0 * cell_size, dtype=vertices.dtype, device=device)
+        short_hash = _build_tri_spatial_hash(centroids, tri_radii, short_hash_cell_t)
         result = _udf_query(
             dual_verts, tri_verts_g, short_hash, short_hash_cell_t,
             max_dist=4.0 * cell_size,

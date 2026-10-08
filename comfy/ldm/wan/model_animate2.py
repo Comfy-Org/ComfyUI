@@ -14,9 +14,9 @@ import comfy.model_management
 import comfy.quant_ops
 import comfy.utils
 from comfy.ldm.flux.math import apply_rope1
-from comfy.ldm.modules.attention import optimized_attention
+from comfy.ldm.modules.attention import AttentionTensorContainer, optimized_attention
 
-from .model import WanAttentionBlock, WanModel, WanSelfAttention, repeat_e, sinusoidal_embedding_1d
+from .model import WanAttentionBlock, WanModel, WanSelfAttention, modulate, repeat_e, sinusoidal_embedding_1d
 
 
 class WanAnimate2SelfAttention(WanSelfAttention):
@@ -39,7 +39,7 @@ class WanAnimate2SelfAttention(WanSelfAttention):
     def forward_pose(self, x, freqs, transformer_options={}):
         b, s, n, d = *x.shape[:2], self.num_heads, self.head_dim
         q, k, v = self.qkv(x, freqs)
-        out = optimized_attention(q.reshape(b, s, n * d), k.reshape(b, s, n * d), v.reshape(b, s, n * d), heads=self.num_heads, transformer_options=transformer_options)
+        out = optimized_attention(AttentionTensorContainer(q.reshape(b, s, n * d)), AttentionTensorContainer(k.reshape(b, s, n * d)), AttentionTensorContainer(v.reshape(b, s, n * d)), heads=self.num_heads, preferred_attention=self.comfy_attention, transformer_options=transformer_options)
         return self.o(self._attn1_patch(out, q, k, transformer_options)), k, v
 
     def forward_gen(self, x, freqs, k_pose, v_pose, f_gen, hw, buffers, ref_strength=1.0, transformer_options={}):
@@ -50,7 +50,7 @@ class WanAnimate2SelfAttention(WanSelfAttention):
             v[:, :hw] *= ref_strength  # frame 0 is the reference image's slot
 
         if k_pose is None:  # pose influence windowed out: plain self-attention, no per-frame loop
-            out = optimized_attention(q.reshape(b, s, n * d), k.reshape(b, s, n * d), v.reshape(b, s, n * d), heads=self.num_heads, transformer_options=transformer_options)
+            out = optimized_attention(AttentionTensorContainer(q.reshape(b, s, n * d)), AttentionTensorContainer(k.reshape(b, s, n * d)), AttentionTensorContainer(v.reshape(b, s, n * d)), heads=self.num_heads, preferred_attention=self.comfy_attention, transformer_options=transformer_options)
             return self.o(self._attn1_patch(out, q, k, transformer_options))
 
         # gen half is the same every frame; only the hw-token pose tail is rewritten
@@ -66,7 +66,7 @@ class WanAnimate2SelfAttention(WanSelfAttention):
                 kbuf[:, s:] = k_pose[:, (j - 1) * hw:j * hw]
                 vbuf[:, s:] = v_pose[:, (j - 1) * hw:j * hw]
                 kk, vv = kbuf, vbuf
-            out[:, j * hw:(j + 1) * hw] = optimized_attention(q_j, kk.reshape(b, kk.shape[1], n * d), vv.reshape(b, kk.shape[1], n * d), heads=self.num_heads, transformer_options=transformer_options)
+            out[:, j * hw:(j + 1) * hw] = optimized_attention(AttentionTensorContainer(q_j), AttentionTensorContainer(kk.reshape(b, kk.shape[1], n * d)), AttentionTensorContainer(vv.reshape(b, kk.shape[1], n * d)), heads=self.num_heads, preferred_attention=self.comfy_attention, transformer_options=transformer_options)
         return self.o(self._attn1_patch(out, q, k, transformer_options))
 
 
@@ -85,13 +85,13 @@ class WanAnimate2Block(WanAttentionBlock):
         x = x + self.cross_attn(self.norm3(x), context, context_img_len=context_img_len, transformer_options=transformer_options)
         for p in transformer_options.get("patches", {}).get("attn2_patch", []):
             x = p({"x": x, "transformer_options": transformer_options})
-        y = self.ffn(torch.addcmul(repeat_e(e[3], x), self.norm2(x), 1 + repeat_e(e[4], x)))
+        y = self.ffn(modulate(x, self.norm2, e[3], e[4]))
         return torch.addcmul(x, y, repeat_e(e[5], x))
 
     def forward_pose(self, x, e, freqs, context, context_img_len=257, transformer_options={}):
         e = self._modulation(e, x)
         x = x.contiguous()
-        y, k, v = self.self_attn.forward_pose(torch.addcmul(repeat_e(e[0], x), self.norm1(x), 1 + repeat_e(e[1], x)), freqs, transformer_options=transformer_options)
+        y, k, v = self.self_attn.forward_pose(modulate(x, self.norm1, e[0], e[1]), freqs, transformer_options=transformer_options)
         x = torch.addcmul(x, y, repeat_e(e[2], x))
         del y
         return self._cross_attn_ffn(x, e, context, context_img_len, transformer_options), k, v
@@ -99,12 +99,12 @@ class WanAnimate2Block(WanAttentionBlock):
     def kv_from_input(self, x_pose, e, freqs, transformer_options={}):
         e = self._modulation(e, x_pose)
         x_pose = x_pose.contiguous()
-        return self.self_attn.kv(torch.addcmul(repeat_e(e[0], x_pose), self.norm1(x_pose), 1 + repeat_e(e[1], x_pose)), freqs)
+        return self.self_attn.kv(modulate(x_pose, self.norm1, e[0], e[1]), freqs)
 
     def forward_gen(self, x, e, freqs, context, k_pose, v_pose, f_gen, hw, buffers, ref_strength=1.0, context_img_len=257, transformer_options={}):
         e = self._modulation(e, x)
         x = x.contiguous()
-        y = self.self_attn.forward_gen(torch.addcmul(repeat_e(e[0], x), self.norm1(x), 1 + repeat_e(e[1], x)), freqs, k_pose, v_pose, f_gen, hw, buffers, ref_strength=ref_strength, transformer_options=transformer_options)
+        y = self.self_attn.forward_gen(modulate(x, self.norm1, e[0], e[1]), freqs, k_pose, v_pose, f_gen, hw, buffers, ref_strength=ref_strength, transformer_options=transformer_options)
         x = torch.addcmul(x, y, repeat_e(e[2], x))
         del y
         return self._cross_attn_ffn(x, e, context, context_img_len, transformer_options)
@@ -116,7 +116,8 @@ class PoseBranchCache:
     Caching the block input rather than its K/V halves the memory; reprojecting K/V on read
     costs ~4% of re-running the block. One slot per distinct pose sequence, so under
     context windows each window keeps its own; least recently used slots are evicted when
-    the store device runs low on memory. Created and freed by WanAnimate2Cache.
+    the store device runs low on memory. Created and freed by WanAnimate2Cache; Qwen-Image 2.1
+    also stores its prefix K/V in it.
     """
 
     CONVROT_GROUPSIZE = 256
@@ -129,21 +130,22 @@ class PoseBranchCache:
         self._pending = {}
         self._staging = {}
 
-    def select(self, pose_latents):
+    def select(self, k, create=True):
         # select runs at a forward boundary: an interrupted forward can leave copies in flight that a different slot's forward would then mistake for its own
         if self._pending:
             for t, stream in self._pending.values():
                 if stream is not None:
                     stream.synchronize()
             self._pending = {}
-        # keyed on batch element 0, so a cond batch size change mid-run stays valid
-        k = pose_latents[:1]
         for s in self.slots:
             if s["key"].shape == k.shape and torch.equal(s["key"], k.to(s["key"].device)):
                 self.slots.remove(s)
                 self.slots.append(s)
                 self.slot = s
-                return
+                return True
+        self.slot = None
+        if not create:
+            return False
         # cache what fits: a filled slot is the size estimate for the next one, and least recently used slots make room when the store device runs low
         est = max((self._slot_bytes(s) for s in self.slots), default=0) * 1.5
         while self.slots and comfy.model_management.get_free_memory(self.store_device) < est:
@@ -169,8 +171,7 @@ class PoseBranchCache:
     def filled(self, num_blocks):
         return self.slot is not None and len(self.slot["blocks"]) == num_blocks
 
-    def put(self, i, x_pose):
-        t = x_pose[:1]
+    def put(self, i, t):
         params = None
         if self.dtype in ("int8", "int4"):
             # convrot is what lets low-bit survive the ~125x per-channel outliers here, and over a [tokens, dim] view per-row scale means per-token. The kernels want 2D and a power-of-4 group that divides dim.
@@ -184,7 +185,7 @@ class PoseBranchCache:
                 t, params = comfy.quant_ops.TensorWiseINT8Layout.quantize(t.reshape(-1, t.shape[-1]), is_weight=True, per_channel=True, convrot=True, convrot_groupsize=g)
 
         t = t.to(self.store_device, copy=True)
-        if comfy.model_management.pin_memory(t):
+        if comfy.model_management.pin_memory(t, evict_active=False):
             self.slot["pinned"].append(t)
         self.slot["blocks"][i] = t
         # the scales follow the blocks off the GPU: per-window slots would otherwise pile them up in VRAM (~200 MB per window at 480p int4)
@@ -294,7 +295,7 @@ class WanAnimate2Model(WanModel):
 
         cache = transformer_options.get("animate2_cache", None) if apply_pose else None
         if cache is not None:
-            cache.select(pose_latents)
+            cache.select(pose_latents[:1])  # keyed on batch element 0, so a cond batch size change mid-run stays valid
         cached = cache is not None and cache.filled(len(self.blocks))
 
         x_pose = None
@@ -342,7 +343,7 @@ class WanAnimate2Model(WanModel):
             # pose-only prepass, to avoid inflating dynamic VRAM calibration when using multiple context windows
             for i, block in enumerate(self.blocks):
                 transformer_options["block_index"] = i
-                cache.put(i, x_pose)
+                cache.put(i, x_pose[:1])
                 x_pose = block.forward_pose(x_pose, e0_pose, freqs_pose, context_pose, context_img_len=context_img_len_pose, transformer_options=transformer_options)[0]
             x_pose = None
             cached = True
@@ -365,7 +366,7 @@ class WanAnimate2Model(WanModel):
                 del x_pose_in
             else:
                 if cache is not None:
-                    cache.put(i, x_pose)
+                    cache.put(i, x_pose[:1])
                 # runs even under a block replace: its state has to reach block i+1
                 x_pose, k_pose, v_pose = block.forward_pose(x_pose, e0_pose, freqs_pose, context_pose, context_img_len=context_img_len_pose, transformer_options=transformer_options)
             if v_pose is not None and pose_strength != 1.0:

@@ -4,6 +4,7 @@
 from typing import Optional
 
 import torch
+from comfy.ldm.modules.attention import AttentionTensorContainer, ComfyAttention, optimized_attention
 import torch.nn as nn
 import torch.nn.functional as F
 
@@ -51,6 +52,7 @@ class AttentionPool(nn.Module):
             output_dim (int): Dimensionality of output tokens. Defaults to embed_dim.
         """
         super().__init__()
+        self.comfy_attention = ComfyAttention()
         self.num_heads = num_heads
         self.to_kv = operations.Linear(embed_dim, 2 * embed_dim, device=device, dtype=dtype)
         self.to_q = operations.Linear(embed_dim, embed_dim, device=device, dtype=dtype)
@@ -92,9 +94,9 @@ class AttentionPool(nn.Module):
         q = q.unsqueeze(2)  # (B, H, 1, head_dim)
 
         # Compute attention.
-        x = F.scaled_dot_product_attention(
-            q, k, v, attn_mask=attn_mask, dropout_p=0.0
-        )  # (B, H, 1, head_dim)
+        del kv
+        q, k, v = AttentionTensorContainer(q), AttentionTensorContainer(k), AttentionTensorContainer(v)
+        x = optimized_attention(q, k, v, self.num_heads, mask=attn_mask, skip_reshape=True, skip_output_reshape=True, preferred_attention=self.comfy_attention)
 
         # Concatenate heads and run output.
         x = x.squeeze(2).flatten(1, 2)  # (B, D = H * head_dim)

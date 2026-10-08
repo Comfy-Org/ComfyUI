@@ -1,0 +1,253 @@
+"""Structured event log lines for the assets system.
+
+Every line is ``[assets-event] <event> key=value ...`` on the standard logging
+INFO channel, with fields sorted by name and omitted when an event has none. This
+mirrors the ``assets.seed.*`` events the seeder already puts on the PromptServer
+bus. A log-tailing launcher can pick assets health signals out of core's output
+without parsing prose, and the existing human-readable lines stay exactly as
+they are.
+
+The field vocabulary is closed. Only the names in :data:`ALLOWED_FIELDS` may be
+carried, each has a validator, and no string value may contain a path separator,
+logfmt delimiter or line break — so file names, paths, asset ids and content
+hashes cannot ride along.
+"""
+
+import errno
+import logging
+import os
+import sqlite3
+import traceback
+from collections.abc import Callable
+from typing import Any
+
+TAG = "[assets-event]"
+
+MAX_STRING_LENGTH = 64
+FORBIDDEN_STRING_CHARS = ("/", "\\", ":", " ", "=", '"', "\n", "\r")
+
+ROOTS = frozenset({"models", "input", "output", "user", "temp"})
+PHASES = frozenset({"fast", "enrich", "full"})
+STAGES = frozenset({"mark_missing", "pruning", "fast_scan", "enrich", "finalize"})
+STAT_SITES = frozenset({"discovery", "enrich"})
+ERROR_KINDS = frozenset({
+    "expression_tree_too_large",
+    "too_many_variables",
+    "database_locked",
+    "disk_full",
+    "disk_io",
+    "unable_to_open",
+    "database_corrupt",
+    "permission_denied",
+    "file_locked",
+    "read_only",
+    "other",
+})
+ALLOWED_EVENTS = frozenset({
+    "assets.enabled",
+    "seeder.scan_started",
+    "seeder.scan_completed",
+    "seeder.scan_failed",
+    "seeder.scan_cancelled",
+    "seeder.marked_missing",
+    "seeder.batch_insert_failed",
+    "scanner.hash_failed",
+    "scanner.enrich_failed",
+    "scanner.hash_discarded_modified",
+    "scanner.fast_scan_failed",
+    "scanner.temp_sync_failed",
+    "scanner.mark_missing_failed",
+    "scanner.stat_failed",
+    "scanner.invalid_mtime",
+    "scanner.watch_stat_failed",
+    "scanner.watch_spec_failed",
+    "scanner.watch_seed_failed",
+})
+
+
+class EventLogError(ValueError):
+    """An emit() call that would break the closed event vocabulary."""
+
+
+def _is_safe_string(value: Any) -> bool:
+    return (
+        isinstance(value, str)
+        and 0 < len(value) <= MAX_STRING_LENGTH
+        and not any(char in value for char in FORBIDDEN_STRING_CHARS)
+    )
+
+
+def _one_of(allowed: frozenset[str]) -> Callable[[Any], bool]:
+    def validate(value: Any) -> bool:
+        return _is_safe_string(value) and value in allowed
+
+    return validate
+
+
+def _is_count(value: Any) -> bool:
+    # bool subclasses int, so it has to be excluded before the int check.
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _is_flag(value: Any) -> bool:
+    return isinstance(value, bool)
+
+
+ALLOWED_FIELDS: dict[str, Callable[[Any], bool]] = {
+    "root": _one_of(ROOTS),
+    "phase": _one_of(PHASES),
+    "stage": _one_of(STAGES),
+    "elapsed_ms": _is_count,
+    "cpu_ms": _is_count,
+    "paused_ms": _is_count,
+    "dirs_listed_count": _is_count,
+    "files_statted_count": _is_count,
+    "created": _is_count,
+    "enriched": _is_count,
+    "skipped": _is_count,
+    "hash_failed": _is_count,
+    "enrich_failed": _is_count,
+    "permission_denied": _is_count,
+    "missing_marked_count": _is_count,
+    "recovered_count": _is_count,
+    "count": _is_count,
+    "error_type": _is_safe_string,
+    "error_kind": _one_of(ERROR_KINDS),
+    "hashing_enabled": _is_flag,
+    "site": _one_of(STAT_SITES),
+}
+
+_warned_call_sites: set[tuple[str, int]] = set()
+
+
+def _find_problem(event: Any, fields: dict[str, Any]) -> str | None:
+    if not isinstance(event, str) or event not in ALLOWED_EVENTS:
+        return "invalid event name"
+    for name, value in fields.items():
+        validate = ALLOWED_FIELDS.get(name)
+        if validate is None:
+            return f"field {name!r} is not in the allowed vocabulary"
+        if not validate(value):
+            return f"field {name!r} has a value its validator rejected"
+    return None
+
+
+def _strict_mode() -> bool:
+    return (
+        "PYTEST_CURRENT_TEST" in os.environ
+        or os.environ.get("COMFYUI_ASSETS_EVENT_LOG_STRICT") == "1"
+    )
+
+
+def _caller_call_site() -> tuple[str, int]:
+    """Identify emit()'s caller so a bad call site warns at most once."""
+    caller = traceback.extract_stack(limit=3)[0]
+    return (caller.filename, caller.lineno or 0)
+
+
+def emit(event: str, *, root: str | None = None, **fields: Any) -> None:
+    """Log one tagged event line.
+
+    An invalid call raises in strict mode (under pytest, or with
+    COMFYUI_ASSETS_EVENT_LOG_STRICT=1) so a bad call site fails the test suite.
+    In production it warns once per call site and drops the event, so a
+    vocabulary mistake can never break a running server.
+    """
+    if root is not None:
+        fields["root"] = root
+
+    problem = _find_problem(event, fields)
+    if problem is None:
+        pairs = " ".join(
+            f"{name}={str(value).lower() if isinstance(value, bool) else value}"
+            for name, value in sorted(fields.items())
+        )
+        line = f"{TAG} {event}" + (f" {pairs}" if pairs else "")
+        logging.info("%s", line)
+        return
+
+    if _strict_mode():
+        raise EventLogError(problem)
+
+    call_site = _caller_call_site()
+    if call_site not in _warned_call_sites:
+        _warned_call_sites.add(call_site)
+        logging.warning(
+            "Dropped an invalid assets event at %s:%d: %s",
+            call_site[0],
+            call_site[1],
+            problem,
+        )
+
+
+def error_type(exc: BaseException) -> str:
+    """The only sanctioned description of an exception: its class name.
+
+    Stringifying the exception itself is banned here, because FileNotFoundError
+    and friends embed the path that triggered them.
+    """
+    return type(exc).__name__
+
+
+# SQLite primary result codes (sqlite3.Error.sqlite_errorcode & 0xFF, Python 3.11+).
+_SQLITE_CODE_KINDS = {
+    5: "database_locked",  # SQLITE_BUSY
+    6: "database_locked",  # SQLITE_LOCKED
+    8: "read_only",  # SQLITE_READONLY
+    10: "disk_io",  # SQLITE_IOERR
+    11: "database_corrupt",  # SQLITE_CORRUPT
+    13: "disk_full",  # SQLITE_FULL
+    14: "unable_to_open",  # SQLITE_CANTOPEN
+    26: "database_corrupt",  # SQLITE_NOTADB
+}
+# SQLite's own fixed messages, matched as substrings of the driver exception's first
+# argument, which never carries the SQL or its bound parameters (paths). The first two
+# share the generic SQLITE_ERROR code, so only the message tells them apart; the rest
+# cover Python 3.10, which has no sqlite_errorcode.
+_SQLITE_MESSAGE_KINDS = (
+    ("expression tree is too large", "expression_tree_too_large"),
+    ("too many sql variables", "too_many_variables"),
+    ("database is locked", "database_locked"),
+    ("database table is locked", "database_locked"),
+    ("database or disk is full", "disk_full"),
+    ("disk i/o error", "disk_io"),
+    ("unable to open database file", "unable_to_open"),
+    ("database disk image is malformed", "database_corrupt"),
+    ("file is not a database", "database_corrupt"),
+    ("attempt to write a readonly database", "read_only"),
+)
+# Windows reports a file held open by another process (ERROR_SHARING_VIOLATION,
+# ERROR_LOCK_VIOLATION) as EACCES; tell it apart from a real permission problem.
+_WINERROR_KINDS = {32: "file_locked", 33: "file_locked"}
+_ERRNO_KINDS = {
+    errno.ENOSPC: "disk_full",
+    errno.EIO: "disk_io",
+    errno.EACCES: "permission_denied",
+    errno.EPERM: "permission_denied",
+    errno.EROFS: "read_only",
+}
+
+
+def error_kind(exc: BaseException) -> str:
+    """Classify a failure into :data:`ERROR_KINDS`, without ever emitting its text.
+
+    SQLAlchemy wraps the driver's exception as ``exc.orig``; its str() would carry the
+    statement and bound parameters, so only the driver's own message is inspected.
+    """
+    orig = getattr(exc, "orig", None)
+    source = orig if isinstance(orig, BaseException) else exc
+    if isinstance(source, sqlite3.Error):
+        code = getattr(source, "sqlite_errorcode", None)
+        if isinstance(code, int) and (code & 0xFF) in _SQLITE_CODE_KINDS:
+            return _SQLITE_CODE_KINDS[code & 0xFF]
+        if source.args and isinstance(source.args[0], str):
+            message = source.args[0].lower()
+            for needle, kind in _SQLITE_MESSAGE_KINDS:
+                if needle in message:
+                    return kind
+    if isinstance(source, OSError):
+        winerror = getattr(source, "winerror", None)
+        if winerror in _WINERROR_KINDS:
+            return _WINERROR_KINDS[winerror]
+        return _ERRNO_KINDS.get(source.errno, "other")
+    return "other"

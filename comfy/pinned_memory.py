@@ -7,8 +7,6 @@ import comfy_aimdo.host_buffer
 import comfy_aimdo.torch
 import torch
 
-from comfy.cli_args import args
-
 def _add_to_bucket(module, module_pin, buckets, size, priority):
     bucket = buckets.setdefault(size, [])
     entry = [-priority, 0, module]
@@ -51,7 +49,7 @@ def get_pin(module, subset="weights"):
     pins = module.__dict__.get("_pins")
     module_pin = None if pins is None else pins.get(subset)
     pin = None if module_pin is None else module_pin.get("pin")
-    if pin is None or module_pin["registered"] or args.disable_pinned_memory:
+    if pin is None or module_pin["registered"] or comfy.model_management.DISABLE_PINNED_MEMORY:
         return pin
 
     _, _, stack_split, pinned_size, *_ = module._pin_state[subset]
@@ -70,7 +68,7 @@ def get_pin(module, subset="weights"):
 
 def pin_memory(module, subset="weights", size=None):
     pin_state = module._pin_state
-    if args.disable_pinned_memory:
+    if comfy.model_management.DISABLE_PINNED_MEMORY:
         return
 
     pin = get_pin(module, subset)
@@ -84,6 +82,7 @@ def pin_memory(module, subset="weights", size=None):
         size = comfy.memory_management.vram_aligned_size([ module.weight, module.bias ])
     registerable_size = size
     loaded = subset.endswith("-loaded")
+    fast = subset.endswith("-fast")
     priority = module_pin.get("balancer_priority")
 
     if priority is None:
@@ -93,7 +92,7 @@ def pin_memory(module, subset="weights", size=None):
 
     comfy.memory_management.extra_ram_release(comfy.memory_management.RAM_CACHE_HEADROOM)
     if (not comfy.model_management.ensure_pin_budget(size, loaded=loaded) or
-        not comfy.model_management.ensure_pin_registerable(registerable_size)):
+        not comfy.model_management.ensure_pin_registerable(registerable_size, evict_active=not fast)):
         return _steal_pin(module, stack, buckets, size, priority, subset)
 
     offset = hostbuf.size
@@ -105,7 +104,7 @@ def pin_memory(module, subset="weights", size=None):
         pin.untyped_storage()._comfy_hostbuf = hostbuf
         if torch.cuda.cudart().cudaHostRegister(pin.data_ptr(), size, 1) != 0:
             comfy.model_management.discard_cuda_async_error()
-            comfy.model_management.free_registrations(size)
+            comfy.model_management.free_registrations(size, evict_active=not fast)
             if torch.cuda.cudart().cudaHostRegister(pin.data_ptr(), size, 1) != 0:
                 comfy.model_management.discard_cuda_async_error()
                 del pin

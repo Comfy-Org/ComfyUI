@@ -176,3 +176,22 @@ class BFLFluxVideoUpscaleRequest(BaseModel):
     creativity: int = Field(1, description="0 preserves the source precisely, 1 enhances detail.")
     prompt: str | None = Field(None)
     safety_tolerance: int = Field(2, ge=0, le=4)
+
+
+class BFLFluxVideoEditRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    video: str = Field(..., description="MP4 (URL or base64), at most 15 seconds and 50 MiB.")
+    prompt: str = Field(..., description="Edit instruction, 1 to 4096 characters once trimmed.")
+    safety_tolerance: int = Field(4, ge=0, le=4)
+
+
+class Flux3ImageRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    prompt: str = Field(...)
+    images: list[str] | None = Field(None, description="1 to 10 reference images (URL or base64).")
+    aspect_ratio: str = Field("auto")
+    resolution: str = Field("1k")
+    grounding: bool = Field(True, description="Web and image search before generating.")
+    safety_tolerance: int = Field(2, ge=0, le=4)

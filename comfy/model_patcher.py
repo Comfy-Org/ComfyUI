@@ -338,9 +338,10 @@ class LazyCastingParamPiece(torch.nn.Parameter):
 
 
 class ModelPatcher:
-    def __init__(self, model, load_device, offload_device, size=0, weight_inplace_update=False):
+    def __init__(self, model, load_device, offload_device, size=0, weight_inplace_update=False, fast_disk=False):
         self.size = size
         self.model = model
+        self.fast_disk = fast_disk
         if not hasattr(self.model, 'device'):
             logging.debug("Model doesn't have a device attribute.")
             self.model.device = offload_device
@@ -442,7 +443,7 @@ class ModelPatcher:
         if model_override is None:
             model_override = self.get_clone_model_override()
 
-        n = class_(model_override[0], self.load_device, self.offload_device, self.model_size(), weight_inplace_update=self.weight_inplace_update)
+        n = class_(model_override[0], self.load_device, self.offload_device, self.model_size(), weight_inplace_update=self.weight_inplace_update, fast_disk=self.fast_disk)
         n.patches = {}
         for k in self.patches:
             n.patches[k] = self.patches[k][:]
@@ -873,6 +874,8 @@ class ModelPatcher:
             bk = self.backup.get(k, None)
             hbk = self.hook_backup.get(k, None)
             weight, set_func, convert_func = get_key_weight(self.model, k)
+            if not isinstance(weight, torch.Tensor):
+                continue
             if bk is not None:
                 weight = bk.weight
             if hbk is not None:
@@ -1020,14 +1023,14 @@ class ModelPatcher:
                         m.bias_function = []
 
                     if weight_key in self.patches:
-                        if force_patch_weights:
+                        if force_patch_weights or comfy.lora.calculate_shape(self.patches[weight_key], m.weight, weight_key) != m.weight.shape:
                             self.patch_weight_to_device(weight_key)
                         else:
                             _, set_func, convert_func = get_key_weight(self.model, weight_key)
                             m.weight_function = [LowVramPatch(weight_key, self.patches, convert_func, set_func)]
                             patch_counter += 1
                     if bias_key in self.patches:
-                        if force_patch_weights:
+                        if force_patch_weights or comfy.lora.calculate_shape(self.patches[bias_key], m.bias, bias_key) != m.bias.shape:
                             self.patch_weight_to_device(bias_key)
                         else:
                             _, set_func, convert_func = get_key_weight(self.model, bias_key)
@@ -1217,14 +1220,14 @@ class ModelPatcher:
                         module_mem += move_weight_functions(m, device_to)
                         if lowvram_possible:
                             if weight_key in self.patches:
-                                if force_patch_weights:
+                                if force_patch_weights or comfy.lora.calculate_shape(self.patches[weight_key], m.weight, weight_key) != m.weight.shape:
                                     self.patch_weight_to_device(weight_key)
                                 else:
                                     _, set_func, convert_func = get_key_weight(self.model, weight_key)
                                     m.weight_function.append(LowVramPatch(weight_key, self.patches, convert_func, set_func))
                                     patch_counter += 1
                             if bias_key in self.patches:
-                                if force_patch_weights:
+                                if force_patch_weights or comfy.lora.calculate_shape(self.patches[bias_key], m.bias, bias_key) != m.bias.shape:
                                     self.patch_weight_to_device(bias_key)
                                 else:
                                     _, set_func, convert_func = get_key_weight(self.model, bias_key)
@@ -1748,14 +1751,14 @@ class ModelPatcher:
 
 class ModelPatcherDynamic(ModelPatcher):
 
-    def __new__(cls, model=None, load_device=None, offload_device=None, size=0, weight_inplace_update=False):
+    def __new__(cls, model=None, load_device=None, offload_device=None, size=0, weight_inplace_update=False, fast_disk=False):
         if load_device is not None and comfy.model_management.is_device_cpu(load_device):
             #reroute to default MP for CPUs
-            return ModelPatcher(model, load_device, offload_device, size, weight_inplace_update)
+            return ModelPatcher(model, load_device, offload_device, size, weight_inplace_update, fast_disk)
         return super().__new__(cls)
 
-    def __init__(self, model, load_device, offload_device, size=0, weight_inplace_update=False):
-        super().__init__(model, load_device, offload_device, size, weight_inplace_update)
+    def __init__(self, model, load_device, offload_device, size=0, weight_inplace_update=False, fast_disk=False):
+        super().__init__(model, load_device, offload_device, size, weight_inplace_update, fast_disk)
         if not hasattr(self.model, "dynamic_vbars"):
             self.model.dynamic_vbars = {}
         if not hasattr(self.model, "dynamic_pins"):
@@ -1782,6 +1785,9 @@ class ModelPatcherDynamic(ModelPatcher):
                 "patches": (comfy_aimdo.host_buffer.HostBuffer(0, 0, 0), [], [-1], [0], [0], {}),
                 "weights-loaded": (comfy_aimdo.host_buffer.HostBuffer(0, 0, 0), [], [-1], [0], [0], {}),
                 "patches-loaded": (comfy_aimdo.host_buffer.HostBuffer(0, 0, 0), [], [-1], [0], [0], {}),
+                "weights-fast": (comfy_aimdo.host_buffer.HostBuffer(0, 0, 0), [], [-1], [0], [0], {}),
+                "patches-fast": (comfy_aimdo.host_buffer.HostBuffer(0, 0, 0), [], [-1], [0], [0], {}),
+                "fast_disk": self.fast_disk,
                 "hostbufs_initialized": False,
                 "failed": False,
                 "active": False,
@@ -1878,6 +1884,8 @@ class ModelPatcherDynamic(ModelPatcher):
                 pin_state["patches"] = (comfy_aimdo.host_buffer.HostBuffer(0, 8 * 1024 * 1024, hostbuf_size), [], [-1], [0], [0], {})
                 pin_state["weights-loaded"] = (comfy_aimdo.host_buffer.HostBuffer(0, 64 * 1024 * 1024, hostbuf_size), [], [-1], [0], [0], {})
                 pin_state["patches-loaded"] = (comfy_aimdo.host_buffer.HostBuffer(0, 8 * 1024 * 1024, hostbuf_size), [], [-1], [0], [0], {})
+                pin_state["weights-fast"] = (comfy_aimdo.host_buffer.HostBuffer(0, 64 * 1024 * 1024, hostbuf_size), [], [-1], [0], [0], {})
+                pin_state["patches-fast"] = (comfy_aimdo.host_buffer.HostBuffer(0, 8 * 1024 * 1024, hostbuf_size), [], [-1], [0], [0], {})
                 pin_state["hostbufs_initialized"] = True
             pin_state["failed"] = False
             pin_state["active"] = True
@@ -2063,11 +2071,11 @@ class ModelPatcherDynamic(ModelPatcher):
 
     def loaded_ram_size(self):
         pin_state = self.model.dynamic_pins[self.load_device]
-        return pin_state["weights"][0].size + pin_state["weights-loaded"][0].size
+        return pin_state["weights"][0].size + pin_state["weights-loaded"][0].size + pin_state["weights-fast"][0].size
 
     def pinned_memory_size(self):
         pin_state = self.model.dynamic_pins[self.load_device]
-        return pin_state["weights"][3][0] + pin_state["weights-loaded"][3][0]
+        return pin_state["weights"][3][0] + pin_state["weights-loaded"][3][0] + pin_state["weights-fast"][3][0]
 
     def unregister_inactive_pins(self, ram_to_unload, subsets=[ "weights-loaded", "patches-loaded", "weights", "patches" ]):
         freed = 0
@@ -2096,7 +2104,7 @@ class ModelPatcherDynamic(ModelPatcher):
                     return freed
         return freed
 
-    def partially_unload_ram(self, ram_to_unload, subsets=[ "weights-loaded", "patches-loaded", "weights", "patches" ]):
+    def partially_unload_ram(self, ram_to_unload, subsets=[ "weights-fast", "patches-fast", "weights-loaded", "patches-loaded", "weights", "patches" ]):
         freed = 0
         pin_state = self.model.dynamic_pins[self.load_device]
         for subset in subsets:

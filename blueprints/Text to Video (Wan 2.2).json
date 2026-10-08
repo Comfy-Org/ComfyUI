@@ -1572,7 +1572,7 @@
         "extra": {
           "workflowRendererVersion": "LG"
         },
-        "category": "Video generation and editing/Text to video",
+        "category": "Video generation/Text to video",
         "description": "Generates video from text prompts using Wan2.2, Alibaba's diffusion video model."
       }
     ]
