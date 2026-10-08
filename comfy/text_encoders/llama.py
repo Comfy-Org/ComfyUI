@@ -510,12 +510,11 @@ class RMSNorm(nn.Module):
         self.weight = nn.Parameter(torch.empty(dim, device=device, dtype=dtype))
         self.add = add
 
-    def forward(self, x: torch.Tensor):
-        w = self.weight
-        if self.add:
-            w = w + 1.0
+    def scale(self):
+        return self.weight + 1.0 if self.add else self.weight
 
-        return comfy.ldm.common_dit.rms_norm(x, w, self.eps)
+    def forward(self, x: torch.Tensor):
+        return comfy.ldm.common_dit.rms_norm(x, self.scale(), self.eps)
 
 
 
@@ -750,13 +749,19 @@ class MLP(nn.Module):
             self.activation = lambda a: torch.nn.functional.gelu(a, approximate="tanh")
             self.merged_input_act = None
 
-    def forward(self, x):
+    def forward(self, x, norm=None):
+        # norm: the block's pre-norm, folded into the merged projection's input quantizer where supported
         if self.merged_mlp:
-            x = self.gate_up_proj(x)
+            if norm is not None:
+                x = comfy.ops.linear_input_act(self.gate_up_proj, x, "rms_norm", norm.scale(), norm.eps)
+            else:
+                x = self.gate_up_proj(x)
             if self.merged_input_act is not None:
                 return comfy.ops.linear_input_act(self.down_proj, x, self.merged_input_act)
             gate, up = x.chunk(2, dim=-1)
             return self.down_proj(self.activation(gate) * up)
+        if norm is not None:
+            x = norm(x)
         return self.down_proj(self.activation(self.gate_proj(x)) * self.up_proj(x))
 
 class TransformerBlock(nn.Module):

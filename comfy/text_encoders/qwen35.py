@@ -423,7 +423,7 @@ class Qwen35TransformerBlock(nn.Module):
 
         # in-place into the input buffer so CUDA-graph replays land in the static x
         x = torch.add(x, h, out=output)
-        x = torch.add(x, self.mlp(self.post_attention_layernorm(x)), out=output)
+        x = torch.add(x, self.mlp(x, norm=self.post_attention_layernorm), out=output)
         return x, present_key_value
 
 
