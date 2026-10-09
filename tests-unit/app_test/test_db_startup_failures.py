@@ -200,6 +200,18 @@ def test_read_only_backup_left_by_an_earlier_run_is_named_before_an_upgrade(db_p
 
 
 @pytest.mark.skipif(sys.platform == "win32" or os.geteuid() == 0, reason="needs POSIX permissions enforced")
+def test_read_only_backup_doesnt_matter_after_a_run_that_didnt_shut_down(db_path):
+    main.setup_database(_AssetsOn())  # its connections stay open, so the current revision is still in the WAL
+    db_module._db_lock.release(force=True)
+    db_module._db_lock = None
+    assert os.path.exists(db_path + "-wal")
+    open(db_path + ".bkp", "a").close()
+    os.chmod(db_path + ".bkp", 0o444)
+
+    main.setup_database(_AssetsOn())
+
+
+@pytest.mark.skipif(sys.platform == "win32" or os.geteuid() == 0, reason="needs POSIX permissions enforced")
 def test_read_only_backup_doesnt_matter_without_an_upgrade(db_path):
     _start_and_stop(db_path)
     open(db_path + ".bkp", "a").close()
@@ -241,6 +253,7 @@ def test_database_url_that_is_not_sqlite_file_url(monkeypatch, db_path, caplog, 
     error = _startup_error(caplog, kind="unsupported_url", level=logging.DEBUG)
 
     assert '--database-url must start with sqlite:///, like "sqlite:///' in error
+    assert "or be left out to use the default database" in error
     assert url not in error
     assert "secret" not in caplog.text
 

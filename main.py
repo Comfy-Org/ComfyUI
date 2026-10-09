@@ -515,7 +515,8 @@ def another_database_url():
 def database_failure_message(error, db_url):
     """The kind of failure that stopped the asset database from opening, and how to fix it."""
     if not (db_url.startswith("sqlite:///") or db_url == "sqlite://"):
-        return "unsupported_url", f"--database-url must start with sqlite:///, like {another_database_url()}\n{WITHOUT_ASSETS}"
+        return "unsupported_url", (f"--database-url must start with sqlite:///, like {another_database_url()}, "
+                                   f"or be left out to use the default database.\n{WITHOUT_ASSETS}")
     location = get_db_path() if db_url.startswith("sqlite:///") else db_url
     kind = error_kind(error)
     detail = getattr(error, "orig", None) or error

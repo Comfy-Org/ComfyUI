@@ -87,7 +87,7 @@ def get_database_url():
     import folder_paths
 
     db_path = os.path.join(folder_paths.get_user_directory(), "comfyui.db")
-    # SQLAlchemy quotes it, so a ? or %xx in the path stays part of the file name.
+    # SQLAlchemy 2.1+ quotes it, so a ? or %xx in the path stays part of the file name (2.0 doesn't quote a ?).
     return URL.create("sqlite", database=db_path).render_as_string()
 
 
@@ -285,9 +285,11 @@ def _init_file_db(db_url):
 
 
 def _upgrade_pending(db_path):
-    """Whether the stored revision isn't the current one. Read immutably, so no side files are created."""
+    """Whether the stored revision isn't the current one, read without creating side files: immutably
+    after a clean shutdown, when everything is in the main file; through the WAL left by one that wasn't."""
+    mode = "mode=ro" if os.path.exists(db_path + "-wal") else "immutable=1"
     try:
-        with closing(sqlite3.connect(f"file:{pathname2url(db_path)}?immutable=1", uri=True)) as conn:
+        with closing(sqlite3.connect(f"file:{pathname2url(db_path)}?{mode}", uri=True)) as conn:
             current = conn.execute("SELECT version_num FROM alembic_version").fetchone()
     except sqlite3.Error:
         return True
