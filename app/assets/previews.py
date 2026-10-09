@@ -14,6 +14,7 @@ from dataclasses import dataclass
 
 import av
 import numpy as np
+import torch
 from PIL import Image
 
 import folder_paths
@@ -56,8 +57,6 @@ def _decode_for_preview(path: str, max_pixels: int) -> Image.Image:
         rgb = np.repeat(frame.to_ndarray(format="grayf32le")[..., None], 3, axis=-1)
     else:
         rgb = frame.to_ndarray(format="gbrpf32le")
-    import torch  # not at import time: this module loads before main.py configures CUDA's allocator
-
     return linear_to_preview(torch.from_numpy(rgb), max_pixels)
 
 

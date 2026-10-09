@@ -1653,7 +1653,7 @@ def _to_scene_linear(img_tensor: torch.Tensor, colorspace: str) -> torch.Tensor:
 def _write_asset_preview(linear: torch.Tensor) -> dict | None:
     """Write a preview of a scene-linear image to previews/, named by its blake3 hash."""
     try:
-        from blake3 import blake3
+        from blake3 import blake3  # an optional assets dependency; ComfyUI starts without it
 
         image = linear_to_preview(linear)
         buffer = io.BytesIO()
