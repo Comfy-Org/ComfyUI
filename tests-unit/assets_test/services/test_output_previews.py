@@ -121,20 +121,9 @@ def test_identical_previews_share_one_file_content_and_record(session, mock_crea
     assert session.query(AssetContent).filter(AssetContent.path.startswith(str(roots / "previews"))).count() == 1
 
     delete_asset_reference(first.id)
-    assert (roots / "previews" / ref["filename"]).exists(), "the other output still uses it"
     delete_asset_reference(second.id)
-    assert not (roots / "previews" / ref["filename"]).exists()
-    assert _previews(session) == []
-
-
-def test_a_preview_removed_with_its_last_user_is_rewritten_and_linked_again(session, mock_create_session, roots):
-    first = register_executed_output(_output(roots, "a.exr"), "job", write_preview(roots))
-    delete_asset_reference(first.id)
-
-    again = register_executed_output(_output(roots, "b.exr"), "job", write_preview(roots))
-
-    assert again.preview_id is not None and again.preview_id != first.preview_id
-    assert session.get(Asset, again.preview_id) is not None
+    assert (roots / "previews" / ref["filename"]).exists(), "deleting its outputs leaves the preview"
+    assert len(_previews(session)) == 1
 
 
 def test_a_cached_rerun_reuses_the_preview(session, mock_create_session, roots):

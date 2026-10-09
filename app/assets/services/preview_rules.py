@@ -11,6 +11,9 @@ PREVIEWABLE_MIME_PREFIXES = ("image/", "video/", "audio/", "text/")
 # .exr is covered by Core's EXR generator.
 _NEVER_SELF_EXTENSIONS = frozenset({".hdr"})
 _NEVER_SELF_MIME_TYPES = frozenset({"image/x-exr", "image/vnd.radiance"})
+_BROWSER_IMAGE_TYPES = frozenset(
+    {"image/png", "image/jpeg", "image/gif", "image/webp", "image/avif", "image/bmp", "image/svg+xml", "image/x-icon"}
+)
 
 
 def own_preview_kind(mime_type: str | None, path: str | None) -> str | None:
@@ -24,9 +27,11 @@ def own_preview_kind(mime_type: str | None, path: str | None) -> str | None:
         return None
     if mime in _NEVER_SELF_MIME_TYPES or os.path.splitext(path or "")[1].lower() in _NEVER_SELF_EXTENSIONS:
         return None
-    # A type with a generator (looked up by path, as generation does) gets a generated preview or none.
-    if get_preview_generator(mimetypes.guess_type(path or "", strict=False)[0]) is not None:
-        return None
+    # An image type browsers can't show that has a generator (looked up by path, as generation
+    # does) gets a generated preview or none; a generator never hides a type browsers can show.
+    if mime.startswith("image/") and mime not in _BROWSER_IMAGE_TYPES:
+        if get_preview_generator(mimetypes.guess_type(path or "", strict=False)[0]) is not None:
+            return None
     return mime.split("/", 1)[0]
 
 

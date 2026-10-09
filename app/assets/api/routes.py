@@ -548,6 +548,10 @@ class _AssetFileResponse(web.FileResponse):
         return super()._get_file_path_stat_encoding("")
 
 
+if not hasattr(web.FileResponse, "_get_file_path_stat_encoding"):  # a private aiohttp method
+    logging.warning("aiohttp no longer has _get_file_path_stat_encoding; asset content may be served precompressed")
+
+
 @ROUTES.get(f"/api/assets/{{id:{UUID_RE}}}/content")
 @_require_assets_feature_enabled
 async def download_asset_content(request: web.Request) -> web.Response:
@@ -783,7 +787,6 @@ async def update_asset_route(request: web.Request) -> web.Response:
             name=body.name,
             user_metadata=body.user_metadata,
             preview_id=body.preview_id,
-            clear_preview=body.clears_preview,
         )
         payload = _build_asset_response(result, _resolve_preview_paths([result]))
     except PermissionError as pe:

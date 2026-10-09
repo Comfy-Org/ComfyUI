@@ -69,8 +69,8 @@ async def test_a_png_upload_is_its_own_preview(mock_create_session, roots):
     assert asset["preview_id"] == asset["id"]
 
 
-class _FailingPngGenerator(Previews.PreviewGenerator):
-    mime_types = ("image/png",)
+class _FailingTiffGenerator(Previews.PreviewGenerator):
+    mime_types = ("image/tiff",)
 
     def generate(self, source_path, max_pixels):
         raise ValueError("cannot read this one")
@@ -78,11 +78,11 @@ class _FailingPngGenerator(Previews.PreviewGenerator):
 
 @pytest.mark.asyncio
 async def test_a_type_with_a_generator_never_falls_back_to_itself(mock_create_session, roots):
-    generator = _FailingPngGenerator()
+    generator = _FailingTiffGenerator()
     preview_generators.register_preview_generator(generator)
     try:
         async with await _client(AssetsEnabled(_Args())) as client:
-            resp = await client.post("/upload/image", data=_form("still.png", _png()))
+            resp = await client.post("/upload/image", data=_form("still.tiff", b"tiff bytes"))
             asset = (await resp.json())["asset"]
     finally:
         preview_generators.unregister_preview_generator(generator)
@@ -235,28 +235,6 @@ async def test_a_from_hash_exr_gets_a_generated_preview(mock_create_session, roo
 
 
 @pytest.mark.asyncio
-async def test_put_null_preview_id_clears_the_link(mock_create_session, roots, assets_routes_on, session):
-    from app.assets.database.models import Asset
-    from app.assets.database.queries.records import create_content, create_record
-
-    thumb = roots / "output" / "thumb.png"
-    thumb.write_bytes(_png())
-    model = roots / "output" / "m.glb"
-    model.write_bytes(b"glb")
-    preview = create_record(session, create_content(session, str(thumb)).id, "thumb.png")
-    parent = create_record(session, create_content(session, str(model)).id, "m.glb")
-    parent.preview_id = preview.id
-    session.commit()
-    parent_id = parent.id
-
-    async with await _assets_client() as client:
-        resp = await client.put(f"/api/assets/{parent_id}", json={"preview_id": None})
-
-    assert resp.status == 200, await resp.text()
-    session.expire_all()
-    assert session.get(Asset, parent_id).preview_id is None
-
-
 def _plain_record(session, path, name, mime_type=None):
     from app.assets.database.queries.records import create_content, create_record
 
@@ -312,17 +290,6 @@ async def test_a_corrupt_exr_upload_still_succeeds(mock_create_session, roots):
 
 
 @pytest.mark.asyncio
-async def test_an_upload_tagged_preview_lands_in_previews(mock_create_session, roots, assets_routes_on):
-    form = FormData()
-    form.add_field("file", _png(), filename="thumb.png")
-    form.add_field("tags", json.dumps(["preview"]))
-    async with await _assets_client() as client:
-        resp = await client.post("/api/assets", data=form)
-
-    assert resp.status == 201, await resp.text()
-    assert [p.suffix for p in (roots / "previews").iterdir()] == [".png"]
-
-
 @pytest.mark.parametrize(("dest", "records"), [("image", False), ("video", False), ("audio", False), ("document", True), (None, True)])
 @pytest.mark.asyncio
 async def test_only_reads_that_are_not_media_renders_record_access(mock_create_session, roots, assets_routes_on, session, dest, records):

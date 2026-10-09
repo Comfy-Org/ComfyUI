@@ -37,11 +37,8 @@ def resolve_destination_from_tags(tags: list[str]) -> tuple[str, list[str]]:
     remain labels; they do not become path components or trusted classification.
     """
     destination_roles = [t for t in tags if t in {"input", "models", "output"}]
-    # "preview" is a destination only on its own; beside another role it stays a label.
-    if not destination_roles and "preview" in tags:
-        destination_roles = ["preview"]
     if len(destination_roles) != 1:
-        raise ValueError("uploads require exactly one destination role: input, models, output, or preview")
+        raise ValueError("uploads require exactly one destination role: input, models, or output")
 
     root = destination_roles[0]
     if root == "models":
@@ -63,8 +60,6 @@ def resolve_destination_from_tags(tags: list[str]) -> tuple[str, list[str]]:
         base_dir = os.path.abspath(bases[0])
     elif root == "input":
         base_dir = os.path.abspath(folder_paths.get_input_directory())
-    elif root == "preview":
-        base_dir = os.path.abspath(folder_paths.get_previews_directory())
     else:
         base_dir = os.path.abspath(folder_paths.get_output_directory())
 
