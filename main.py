@@ -539,7 +539,7 @@ def database_failure_message(error, db_url):
     elif kind in ("read_only", "unable_to_open") or isinstance(error, OSError):
         failure = "not_writable"
         blocked = getattr(error, "filename", None)
-        if blocked in (location + "-wal", location + "-shm", location + ".bkp"):
+        if blocked in tuple(location + suffix for suffix in ("-wal", "-shm", ".bkp", ".bkp-wal", ".bkp-shm")):
             what = f"ComfyUI can't write '{blocked}', beside the asset database '{location}' ({detail})."
             fix = "Make that file writable, and start again."
         else:

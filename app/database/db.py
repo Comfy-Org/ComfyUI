@@ -378,8 +378,9 @@ def _migrate_and_bind(db_url, db_path, db_exists):
         # Backup the database pre upgrade
         backup_path = db_path + ".bkp"
         if db_exists:
-            if os.path.exists(backup_path) and not os.access(backup_path, os.W_OK):  # left read-only by an earlier run
-                raise PermissionError(errno.EACCES, "Permission denied", backup_path)
+            for path in (backup_path, backup_path + "-wal", backup_path + "-shm"):  # left read-only by an earlier run
+                if os.path.exists(path) and not os.access(path, os.W_OK):
+                    raise PermissionError(errno.EACCES, "Permission denied", path)
             _backup_database(db_path, backup_path)
         else:
             backup_path = None

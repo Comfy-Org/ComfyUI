@@ -223,14 +223,16 @@ def _start_and_stop(db_path):
 
 
 @pytest.mark.skipif(sys.platform == "win32" or os.geteuid() == 0, reason="needs POSIX permissions enforced")
-def test_read_only_backup_left_by_an_earlier_run_is_named_before_an_upgrade(db_path, caplog):
+@pytest.mark.parametrize("suffix", [".bkp", ".bkp-wal", ".bkp-shm"])
+def test_read_only_backup_left_by_an_earlier_run_is_named_before_an_upgrade(db_path, caplog, suffix):
     command.upgrade(db_module.get_alembic_config(), "0006_add_loader_path")
     open(db_path + ".bkp", "a").close()
-    os.chmod(db_path + ".bkp", 0o444)
+    open(db_path + suffix, "a").close()
+    os.chmod(db_path + suffix, 0o444)
 
     error = _startup_error(caplog, kind="not_writable")
 
-    assert f"ComfyUI can't write '{db_path}.bkp', beside the asset database '{db_path}'" in error
+    assert f"ComfyUI can't write '{db_path}{suffix}', beside the asset database '{db_path}'" in error
     assert _revision(db_path) == "0006_add_loader_path"
 
 
