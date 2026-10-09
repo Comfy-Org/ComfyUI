@@ -15,7 +15,7 @@ from comfy.ldm.modules.attention import optimized_attention_for_device
 from comfy import sd1_clip
 import comfy.text_encoders.qwen_vl
 
-from .llama import BaseLlama, BaseGenerate, FixedKV, FixedKVCache, Llama2_, MLP, RMSNorm, apply_penalty, apply_rope, penalty_active, precompute_freqs_cis, rope_matrix
+from .llama import BaseLlama, BaseGenerate, FixedKV, FixedKVCache, Int8FixedKVCache, Llama2_, MLP, RMSNorm, apply_penalty, apply_rope, penalty_active, precompute_freqs_cis, rope_matrix
 
 
 @dataclass
@@ -778,8 +778,9 @@ class Qwen35(BaseLlama, BaseGenerate, torch.nn.Module):
         cap = embeds.shape[1] + max_length + 7
         pkv = self.init_kv_cache(embeds.shape[0], cap, device, dt)
         # repair window: drafting ahead plus a near-full rollback
-        mtp_kv = FixedKVCache.zeros(embeds.shape[0], cfg.num_key_value_heads, cap, cfg.head_dim, device, dt,
-                                    FixedKVCache.shared(embeds.shape[0], device))
+        cache_type = self.kv_cache_type()
+        mtp_kv = cache_type.zeros(embeds.shape[0], cfg.num_key_value_heads, cap, cfg.head_dim, device, dt,
+                                 cache_type.shared(embeds.shape[0], device))
         head = self.model.lm_head if hasattr(self.model, "lm_head") else self.model.embed_tokens
 
         def verify_logits(x):
@@ -988,10 +989,14 @@ class Qwen35(BaseLlama, BaseGenerate, torch.nn.Module):
             comfy.model_prefetch.cleanup_prefetch_queues()
         return ids
 
+    def kv_cache_type(self):
+        return Int8FixedKVCache if comfy.model_management.comfy_kitchen_attention_enabled() else FixedKVCache
+
     def init_kv_cache(self, batch, max_cache_len, device, execution_dtype):
         model_config = self.model.config
         past_key_values = []
-        shared = FixedKVCache.shared(batch, device)
+        cache_type = self.kv_cache_type()
+        shared = cache_type.shared(batch, device)
         for i in range(model_config.num_hidden_layers):
             if model_config.layer_types[i] == "linear_attention":
                 recurrent_state = torch.zeros(
@@ -1005,7 +1010,7 @@ class Qwen35(BaseLlama, BaseGenerate, torch.nn.Module):
                 )
                 past_key_values.append(LinearKV(conv_state, recurrent_state, 0, None, None))
             else:
-                past_key_values.append(FixedKVCache.zeros(batch, model_config.num_key_value_heads, max_cache_len, model_config.head_dim, device, execution_dtype, shared))
+                past_key_values.append(cache_type.zeros(batch, model_config.num_key_value_heads, max_cache_len, model_config.head_dim, device, execution_dtype, shared))
         return past_key_values
 
 # Tokenizer and Text Encoder Wrappers

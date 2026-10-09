@@ -6,6 +6,7 @@ import math
 from tqdm import tqdm
 import comfy.utils
 import comfy_kitchen
+from comfy_kitchen.int8_decode import Int8DecodeCache
 
 from comfy.ldm.modules.attention import optimized_attention_for_device
 import comfy.model_management
@@ -84,6 +85,41 @@ class FixedKVCache(FixedKVState):
         rel = torch.arange(self.key.shape[2], device=self.key.device) - self.seqlen.view(-1, 1, 1, 1)
         visible = rel < torch.arange(1 - seq, 1, device=self.key.device).view(seq, 1)
         return torch.zeros(visible.shape, device=self.key.device, dtype=self.key.dtype).masked_fill_(~visible, float("-inf"))
+
+
+class Int8FixedKVCache(FixedKVState):
+    # INT8 prefix with a bounded BF16 window for page updates and speculative commits.
+    @classmethod
+    def zeros(cls, batch, kv_heads, capacity, head_dim, device, dtype, shared):
+        packed = Int8DecodeCache(batch, kv_heads, capacity, device)
+        # Two pages may be refreshed after a rollback while new rows enter the next page.
+        window = min(capacity, 3 * packed.key.shape[3])
+        key = torch.zeros((batch, kv_heads, window, head_dim), device=device, dtype=dtype)
+        cache = cls(key, torch.zeros_like(key), 0, *shared)
+        cache.packed = packed
+        return cache
+
+    def append(self, xk, xv):
+        # Prefill attends its original tensors; only the quantized prefix survives it.
+        seq = xk.shape[2]
+        length = torch.full_like(self.position[:1], seq)
+        self.packed.update(xk.contiguous(), xv.contiguous(), length, initialize=True)
+        start = max(0, seq - self.key.shape[2])
+        slots = torch.arange(start, seq, device=xk.device).remainder(self.key.shape[2])
+        self.key.index_copy_(2, slots, xk[:, :, start:])
+        self.value.index_copy_(2, slots, xv[:, :, start:])
+        return xk, xv
+
+    def write(self, xk, xv):
+        position = self.position[:xk.shape[2]].remainder(self.key.shape[2])
+        self.key.index_copy_(2, position, xk)
+        self.value.index_copy_(2, position, xv)
+
+    def attend(self, xq, xk, xv):
+        length = self.position[:1]
+        self.packed.update(self.key, self.value, length)
+        out, lse = self.packed.attend(xq, length)
+        return comfy_kitchen.flash_attention_decode_step_merge(out, lse, xq, xk, xv, torch.empty_like(out))
 
 @dataclass
 class Llama2Config:
