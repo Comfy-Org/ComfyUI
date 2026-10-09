@@ -67,7 +67,6 @@ ALLOWED_EVENTS = frozenset({
 })
 PREVIEW_SOURCE_FORMATS = frozenset({"exr", "other"})
 PREVIEW_FAILURE_REASONS = frozenset({"too_large", "decode_failed", "encode_failed", "write_failed", "timeout"})
-PREVIEW_SOURCES = frozenset({"upload"})
 
 
 class EventLogError(ValueError):
@@ -122,7 +121,6 @@ ALLOWED_FIELDS: dict[str, Callable[[Any], bool]] = {
     "site": _one_of(STAT_SITES),
     "format": _one_of(PREVIEW_SOURCE_FORMATS),
     "reason": _one_of(PREVIEW_FAILURE_REASONS),
-    "source": _one_of(PREVIEW_SOURCES),
 }
 
 _warned_call_sites: set[tuple[str, int]] = set()

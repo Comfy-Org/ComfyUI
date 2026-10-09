@@ -182,11 +182,11 @@ async def generate_upload_preview(asset_id: str, path: str | None, preview_id: s
 
 
 def _emit_failed(path: str, reason: str) -> None:
-    emit("previews.generation_failed", format=_format(path), reason=reason, source="upload")
+    emit("previews.generation_failed", format=_format(path), reason=reason)
 
 
 def _emit_error(path: str, reason: str, exc: BaseException) -> None:
-    emit("previews.generation_failed", format=_format(path), reason=reason, source="upload", error_type=error_type(exc))
+    emit("previews.generation_failed", format=_format(path), reason=reason, error_type=error_type(exc))
 
 
 def _store_result(parent_id: str, path: str, result, started: float) -> str | None:
@@ -205,5 +205,5 @@ def _store_result(parent_id: str, path: str, result, started: float) -> str | No
         _emit_error(path, "write_failed", exc)
         return None
     if preview_id is not None:
-        emit("previews.generated", format=_format(path), source="upload", elapsed_ms=int((time.monotonic() - started) * 1000))
+        emit("previews.generated", format=_format(path), elapsed_ms=int((time.monotonic() - started) * 1000))
     return preview_id
