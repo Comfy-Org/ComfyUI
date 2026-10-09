@@ -88,7 +88,12 @@ def get_database_url():
 
     db_path = os.path.join(folder_paths.get_user_directory(), "comfyui.db")
     # SQLAlchemy 2.1+ quotes it, so a ? or %xx in the path stays part of the file name (2.0 doesn't quote a ?).
-    return URL.create("sqlite", database=db_path).render_as_string()
+    return sqlite_url(db_path)
+
+
+def sqlite_url(path):
+    """A SQLite URL for a file path, quoted so it opens that exact file."""
+    return URL.create("sqlite", database=path).render_as_string()
 
 
 def get_legacy_default_db_path():

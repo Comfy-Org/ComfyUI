@@ -139,6 +139,7 @@ def test_database_path_is_a_directory(db_path, caplog):
 
     assert f"ComfyUI can't create, open or write the asset database '{db_path}'" in error
     assert "the database path is a writable file" in error
+    assert "no other program has it open" in error  # SQLite says the same for a file another program holds
     assert "delete it" not in error
 
 
@@ -238,7 +239,9 @@ def test_failure_after_the_database_opened_doesnt_suggest_deleting_it(db_path, c
         def startup(self):
             raise RuntimeError("hash mode state unreadable")
 
-    error = _startup_error(caplog, _StartupFails(), kind="other")
+    error = _startup_error(caplog, _StartupFails(), kind="other", level=logging.DEBUG)
+
+    assert "Asset database startup failed" in error  # the --verbose DEBUG detail the message points to
 
     assert f"Could not open or upgrade the asset database '{db_path}': hash mode state unreadable" in error
     assert "delete it" not in error
@@ -260,7 +263,7 @@ def test_database_url_that_is_not_sqlite_file_url(monkeypatch, db_path, caplog, 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="checks the POSIX four-slash form")
 def test_default_database_in_use_suggests_an_absolute_database_url(tmp_path, monkeypatch, db_path, caplog):
-    user_dir = tmp_path / "user dir"
+    user_dir = tmp_path / "user dir %20x"
     user_dir.mkdir()
     monkeypatch.setattr(db_module.args, "database_url", None)
     monkeypatch.setattr(db_module, "get_legacy_default_db_path", lambda: None)
@@ -272,8 +275,9 @@ def test_default_database_in_use_suggests_an_absolute_database_url(tmp_path, mon
     finally:
         holder.release()
 
-    assert f'Or give this ComfyUI its own database: --database-url "sqlite:///{user_dir / "comfyui-2.db"}"' in error
-    assert '--database-url "sqlite:////' in error
+    suggested = error.split('--database-url "', 1)[1].split('"', 1)[0]
+    assert suggested.startswith("sqlite:////")
+    assert make_url(suggested).database == str(user_dir / "comfyui-2.db")
 
 
 def test_no_second_database_suggested_for_a_broken_one(tmp_path, monkeypatch, db_path, caplog):
