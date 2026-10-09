@@ -7,7 +7,6 @@ import asyncio
 import io
 import mimetypes
 import os
-import threading
 import time
 import uuid
 
@@ -26,7 +25,7 @@ from comfy_execution.preview_tonemap import linear_to_preview
 
 # A decode costs ~30 MB per MP, and running out of memory can't be caught.
 PREVIEW_MAX_SOURCE_PIXELS = 17_000_000
-_DECODE_SLOTS = threading.BoundedSemaphore(2)
+_DECODE_SLOTS = asyncio.Semaphore(2)
 
 
 class PreviewSkipped(Exception):
@@ -52,8 +51,7 @@ def _decode_for_preview(path: str) -> Image.Image:
 
 
 def _make_preview(path: str) -> tuple[bytes, int, int]:
-    with _DECODE_SLOTS:
-        image = _decode_for_preview(path)
+    image = _decode_for_preview(path)
     buffer = io.BytesIO()
     image.save(buffer, format="WEBP", quality=80)
     return buffer.getvalue(), image.width, image.height
@@ -113,7 +111,8 @@ async def generate_upload_preview(asset_id: str, path: str | None, preview_id: s
         return preview_id
     started = time.monotonic()
     try:
-        webp, width, height = await asyncio.to_thread(_make_preview, path)
+        async with _DECODE_SLOTS:
+            webp, width, height = await asyncio.to_thread(_make_preview, path)
     except PreviewSkipped as skipped:
         _emit_failed(skipped.args[0])
         return None
@@ -121,7 +120,7 @@ async def generate_upload_preview(asset_id: str, path: str | None, preview_id: s
         _emit_error("decode_failed", exc)
         return None
     try:
-        linked = _store_and_link(asset_id, webp, width, height)
+        linked = await asyncio.to_thread(_store_and_link, asset_id, webp, width, height)
     except Exception as exc:
         _emit_error("write_failed", exc)
         return None

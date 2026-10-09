@@ -5,11 +5,17 @@ from unittest.mock import patch
 
 import pytest
 from sqlalchemy import create_engine, event
+from sqlalchemy.pool import StaticPool
 from sqlalchemy.orm import Session, Session as SASession, sessionmaker
 
 import folder_paths
 from app.assets import mode
 from app.assets.database.models import Base
+
+
+def _memory_engine():
+    # One shared connection: upload previews are stored from a worker thread.
+    return create_engine("sqlite:///:memory:", poolclass=StaticPool, connect_args={"check_same_thread": False})
 
 
 @pytest.fixture(autouse=True)
@@ -31,7 +37,7 @@ def initialised_hash_mode():
 @pytest.fixture
 def db_engine():
     """In-memory SQLite engine for fast unit tests."""
-    engine = create_engine("sqlite:///:memory:")
+    engine = _memory_engine()
     Base.metadata.create_all(engine)
     return engine
 
@@ -39,7 +45,7 @@ def db_engine():
 @pytest.fixture
 def db_engine_fk():
     """In-memory SQLite engine with foreign key enforcement enabled."""
-    engine = create_engine("sqlite:///:memory:")
+    engine = _memory_engine()
 
     @event.listens_for(engine, "connect")
     def _set_pragma(dbapi_connection, connection_record):

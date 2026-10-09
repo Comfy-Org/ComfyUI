@@ -173,3 +173,12 @@ def test_the_saved_exr_is_scene_linear(dirs, shape, colorspace, linear):
     entry = _save(torch.full(shape, 0.5), colorspace)[0]
 
     assert np.allclose(_decoded(dirs / "output" / entry["filename"]), linear, atol=1e-3)
+
+
+def test_a_failed_publish_leaves_no_temp_file(dirs):
+    with patch.object(nodes_images.os, "replace", side_effect=OSError("disk")):
+        entry = _save(torch.full((1, 8, 8, 3), 0.5))[0]
+
+    assert "asset_preview" not in entry
+    assert list((dirs / "previews").iterdir()) == []
+

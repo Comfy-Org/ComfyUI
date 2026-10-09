@@ -295,3 +295,16 @@ def test_a_preview_file_already_removed_does_not_block_the_delete(session, mock_
     session.expire_all()
     assert session.get(Asset, parent_id) is None
 
+
+def test_a_preview_under_a_symlinked_previews_directory_is_reclaimed(session, mock_create_session, roots, tmp_path):
+    import folder_paths
+
+    (tmp_path / "linked-previews").symlink_to(roots / "previews")
+    folder_paths.set_previews_directory(str(tmp_path / "linked-previews"))
+    preview = _record(session, roots / "previews" / "p.webp", tags=["preview"])
+    parent_id = _record(session, roots / "output" / "a.exr", preview_id=preview.id).id
+
+    delete_asset_reference(parent_id)
+
+    assert not (roots / "previews" / "p.webp").exists()
+

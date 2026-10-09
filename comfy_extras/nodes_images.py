@@ -1671,9 +1671,13 @@ def _write_asset_preview(linear: torch.Tensor) -> dict | None:
             os.makedirs(directory, exist_ok=True)
             # Publish atomically, so a truncated file never sits under a trusted name.
             temp_path = f"{path}.{uuid.uuid4().hex}.tmp"
-            with open(temp_path, "wb") as f:
-                f.write(data)
-            os.replace(temp_path, path)
+            try:
+                with open(temp_path, "wb") as f:
+                    f.write(data)
+                os.replace(temp_path, path)
+            finally:
+                if os.path.exists(temp_path):
+                    os.remove(temp_path)
         return {"filename": filename, "width": image.width, "height": image.height}
     except Exception:
         logging.warning("Could not write a preview for an EXR output", exc_info=True)

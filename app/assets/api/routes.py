@@ -157,6 +157,11 @@ class SystemTagForbiddenError(Exception):
         self.tag = tag
 
 
+def _reserved_preview_tag() -> web.Response:
+    # Core deletes a `preview`-tagged preview with its parent, so clients can't create one.
+    return _build_error_response(400, "SYSTEM_TAG_FORBIDDEN", "Tag 'preview' is reserved", {"tag": "preview"})
+
+
 def _reject_system_tags(tags: list[str]) -> None:
     for tag in tags:
         if tag in SYSTEM_TAGS:
@@ -634,6 +639,9 @@ async def create_asset_from_hash_route(request: web.Request) -> web.Response:
             400, "INVALID_JSON", "Request body must be valid JSON."
         )
 
+    if "preview" in (body.tags or ()):
+        return _reserved_preview_tag()
+
     # Derive name from hash if not provided
     name = body.name
     if name is None:
@@ -696,6 +704,9 @@ async def upload_asset(request: web.Request) -> web.Response:
         return _build_error_response(
             400, "INVALID_BODY", f"Validation failed: {ve.json()}"
         )
+    if "preview" in (spec.tags or ()):
+        delete_temp_file_if_exists(parsed.tmp_path)
+        return _reserved_preview_tag()
 
     try:
         if not parsed.file_present and spec.hash:

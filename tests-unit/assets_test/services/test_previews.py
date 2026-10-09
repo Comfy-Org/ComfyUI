@@ -73,6 +73,13 @@ def test_exr_dimensions_are_the_display_window(tmp_path):
     assert extract_image_dimensions(str(path), mime_type="image/x-exr") == {"kind": "image", "width": 80, "height": 64}
 
 
+def _duplicate_data_window(data: bytes) -> bytes:
+    key = b"dataWindow\x00box2i\x00"
+    at = data.find(key)
+    end = at + len(key) + 4 + 16
+    return data[:end] + data[at:end] + data[end:]
+
+
 @pytest.mark.parametrize(
     "mutate",
     [
@@ -80,6 +87,7 @@ def test_exr_dimensions_are_the_display_window(tmp_path):
         lambda b: b.replace(b"displayWindow\x00box2i\x00\x10\x00\x00\x00", b"displayWindow\x00box2i\x00\xff\xff\xff\xff"),  # negative size
         lambda b: b.replace(b"displayWindow", b"displayWindoX"),  # missing window
         lambda b: b.replace(b"\x00" * 8 + b"\x3f\x00\x00\x00", b"\x00" * 8 + b"\xf0\xff\xff\xff", 1),  # inverted window
+        lambda b: _duplicate_data_window(b),  # decoders differ on which copy applies
     ],
 )
 def test_a_malformed_exr_header_reads_as_none(tmp_path, mutate):
@@ -285,13 +293,12 @@ def test_a_failed_registration_leaves_no_preview_file(session, mock_create_sessi
 
 
 
-def test_at_most_two_uploads_decode_at_once():
+def test_at_most_two_uploads_decode_at_once(tmp_path):
     import threading
-    from concurrent.futures import ThreadPoolExecutor
 
     running, peak, lock = 0, 0, threading.Lock()
 
-    def decode(path):
+    def make(path):
         nonlocal running, peak
         with lock:
             running += 1
@@ -299,9 +306,37 @@ def test_at_most_two_uploads_decode_at_once():
         time.sleep(0.1)
         with lock:
             running -= 1
-        return Image.new("RGB", (2, 2))
+        return b"webp", 2, 2
 
-    with patch.object(previews, "_decode_for_preview", decode), ThreadPoolExecutor(6) as pool:
-        list(pool.map(previews._make_preview, ["a.exr"] * 6))
+    async def uploads():
+        await asyncio.gather(*(previews.generate_upload_preview(f"id{i}", str(tmp_path / f"{i}.exr"), None) for i in range(6)))
 
-    assert peak == 2, "each decode can hold ~0.5 GB"
+    with patch.object(previews, "_make_preview", make), patch.object(previews, "_store_and_link", return_value=None):
+        asyncio.run(uploads())
+
+    assert peak == 2, "each decode can hold ~0.5 GB, and waiting uploads must not hold executor threads"
+
+
+def test_the_event_loop_keeps_running_while_an_upload_preview_is_stored(tmp_path):
+    def slow_store(*args):
+        time.sleep(0.5)
+
+    async def scenario():
+        ticks = []
+
+        async def tick():
+            while True:
+                ticks.append(time.monotonic())
+                await asyncio.sleep(0.01)
+
+        ticker = asyncio.create_task(tick())
+        await previews.generate_upload_preview("id", str(tmp_path / "a.exr"), None)
+        await asyncio.sleep(0.05)
+        ticker.cancel()
+        return ticks
+
+    with patch.object(previews, "_make_preview", return_value=(b"webp", 2, 2)), patch.object(previews, "_store_and_link", slow_store):
+        ticks = asyncio.run(scenario())
+
+    assert max(b - a for a, b in zip(ticks, ticks[1:])) < 0.4, "storing a preview doesn't block the server"
+

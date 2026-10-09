@@ -161,7 +161,7 @@ def _is_core_preview(session, record: Asset) -> bool:
     if "preview" not in fetch_record_tags(session, record.id):
         return False
     path = session.get(AssetContent, record.content_id).path
-    return Path(path).is_relative_to(os.path.abspath(folder_paths.get_previews_directory()))
+    return Path(os.path.realpath(path)).is_relative_to(os.path.realpath(folder_paths.get_previews_directory()))
 
 
 def _drop_unused_content(session, content_id: str) -> None:

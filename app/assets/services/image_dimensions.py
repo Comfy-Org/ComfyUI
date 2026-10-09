@@ -46,6 +46,8 @@ def read_exr_windows(file_path: str) -> tuple[tuple[int, int], tuple[int, int]] 
                 if size < 0:
                     return None
                 if name in (b"displayWindow", b"dataWindow") and size == 16:
+                    if name in windows:
+                        return None  # decoders differ on which copy applies
                     x_min, y_min, x_max, y_max = struct.unpack("<4i", f.read(16))
                     windows[name] = (x_max - x_min + 1, y_max - y_min + 1)
                 else:

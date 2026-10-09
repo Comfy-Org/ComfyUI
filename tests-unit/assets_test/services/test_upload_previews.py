@@ -185,6 +185,20 @@ async def test_a_from_hash_exr_gets_a_generated_preview(mock_create_session, roo
     assert body["preview_id"] not in (None, body["id"]), "no sibling had a preview, so this one was generated"
 
 
+@pytest.mark.asyncio
+async def test_clients_cannot_create_a_preview_tagged_asset(mock_create_session, roots, tmp_path, assets_routes_on):
+    form = FormData()
+    form.add_field("file", b"png", filename="mine.png")
+    form.add_field("tags", json.dumps(["input", "preview"]))
+    async with await _assets_client() as client:
+        upload = await client.post("/api/assets", data=form)
+        from_hash = await client.post("/api/assets/from-hash", json={"hash": "blake3:" + "ab" * 32, "tags": ["input", "preview"]})
+        bodies = [await upload.json(), await from_hash.json()]
+
+    assert [upload.status, from_hash.status] == [400, 400]
+    assert [body["error"]["code"] for body in bodies] == ["SYSTEM_TAG_FORBIDDEN"] * 2
+
+
 def _plain_record(session, path, name, mime_type=None):
     from app.assets.database.queries.records import create_content, create_record
 
