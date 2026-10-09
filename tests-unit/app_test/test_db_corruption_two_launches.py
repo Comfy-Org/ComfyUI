@@ -16,7 +16,7 @@ from alembic import command
 from alembic.config import Config
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-LOCK_HELD = "Database is locked. Another ComfyUI process is already using this database."
+LOCK_HELD = "Another ComfyUI is already using this database"
 
 
 def _make_corrupt_db(db_path: Path, table: str) -> None:
