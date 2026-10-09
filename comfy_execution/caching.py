@@ -138,7 +138,7 @@ class CacheKeySetInputSignature(CacheKeySet):
         if not dynprompt.has_node(node_id):
             # This node doesn't exist -- we can't cache it.
             return to_hashable([float("NaN")])
-        node = dynprompt.get_node(node_id)
+        node = dynprompt.get_node_without_override(node_id)
         class_type = node["class_type"]
         class_def = nodes.NODE_CLASS_MAPPINGS[class_type]
         signature = [class_type, await self.is_changed_cache.get(node_id)]
@@ -156,7 +156,7 @@ class CacheKeySetInputSignature(CacheKeySet):
     def get_link_ancestors(self, dynprompt, node_id):
         if not dynprompt.has_node(node_id):
             return []
-        inputs = dynprompt.get_node(node_id)["inputs"]
+        inputs = dynprompt.get_node_without_override(node_id)["inputs"]
         return [inputs[key][0] for key in sorted(inputs.keys()) if is_link(inputs[key])]
 
 class BasicCache:
