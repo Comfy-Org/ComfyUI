@@ -149,3 +149,27 @@ def test_a_nan_pixel_does_not_blank_its_downsampled_neighbours():
 
     assert np.array_equal(np.asarray(linear_to_preview(image, 4)), np.asarray(linear_to_preview(zeroed, 4)))
     assert np.asarray(linear_to_preview(image, 4))[0, 0, 0] > 0
+
+
+def _decoded(path) -> np.ndarray:
+    import av
+
+    with av.open(str(path), format="exr_pipe") as container:
+        frame = next(container.decode(video=0))
+    fmt = "grayf32le" if frame.format.name.startswith("gray") else "gbrpf32le"
+    return frame.to_ndarray(format=fmt)
+
+
+@pytest.mark.parametrize(
+    ("shape", "colorspace", "linear"),
+    [
+        ((1, 4, 6, 3), "sRGB", 0.2140),
+        ((1, 4, 6, 3), "HDR", 0.0833),
+        ((1, 4, 6, 3), "linear", 0.5),
+        ((1, 6, 4), "sRGB", 0.2140),  # channel-less gray, 4 wide: not read as RGBA
+    ],
+)
+def test_the_saved_exr_is_scene_linear(dirs, shape, colorspace, linear):
+    entry = _save(torch.full(shape, 0.5), colorspace)[0]
+
+    assert np.allclose(_decoded(dirs / "output" / entry["filename"]), linear, atol=1e-3)

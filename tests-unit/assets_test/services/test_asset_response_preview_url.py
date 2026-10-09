@@ -140,6 +140,7 @@ def test_other_media_get_a_url_but_no_preview_id(
     [
         ("frame.exr", "image/x-exr"),
         ("frame.exr", None),
+        ("frame.exr", "image/png"),  # a client-supplied type
         ("sky.hdr", "image/vnd.radiance"),
         ("sky.hdr", None),
         ("sky.HDR", "image/x-whatever-this-host-says"),

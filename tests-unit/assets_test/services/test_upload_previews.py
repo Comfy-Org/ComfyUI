@@ -138,7 +138,13 @@ async def test_mask_upload_still_answers_with_json(mock_create_session, roots):
 
 @pytest.mark.asyncio
 async def test_with_assets_off_an_exr_upload_has_no_asset(roots):
-    async with await _client(MagicMock(enabled=False, register_upload=MagicMock(return_value=None))) as client:
+    from app.assets.manager import NoAssets
+
+    class _Off:
+        enable_assets = False
+        enable_asset_hashing = False
+
+    async with await _client(NoAssets(_Off())) as client:
         resp = await client.post("/upload/image", data=_form("frame.exr", b"exr"))
         body = await resp.json()
 
@@ -234,7 +240,6 @@ async def test_a_from_hash_exr_gets_a_generated_preview(mock_create_session, roo
     assert body["preview_id"] not in (None, body["id"]), "no sibling had a preview, so this one was generated"
 
 
-@pytest.mark.asyncio
 def _plain_record(session, path, name, mime_type=None):
     from app.assets.database.queries.records import create_content, create_record
 
@@ -289,7 +294,6 @@ async def test_a_corrupt_exr_upload_still_succeeds(mock_create_session, roots):
     assert "preview_id" not in asset and "preview_url" not in asset
 
 
-@pytest.mark.asyncio
 @pytest.mark.parametrize(("dest", "records"), [("image", False), ("video", False), ("audio", False), ("document", True), (None, True)])
 @pytest.mark.asyncio
 async def test_only_reads_that_are_not_media_renders_record_access(mock_create_session, roots, assets_routes_on, session, dest, records):

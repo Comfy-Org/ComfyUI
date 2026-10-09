@@ -291,7 +291,7 @@ Uploads get a preview from a generator when their type has one: EXR out of the b
 
 All previews are stored in the previews directory (`<base>/previews`, or `--previews-directory`), tagged `preview`, and never scanned; the directory is owned, so the startup prune keeps them. `preview` is a reserved tag the tag endpoints refuse. Deleting an asset leaves its preview in place.
 
-Generation for uploads is best-effort and bounded. Two daemon workers do the decoding and encoding; the upload waits at most 5.5 s and stores the preview only if it finished in time. One that didn't never gets stored and leaves nothing behind. Each outcome is a `previews.generated` or `previews.generation_failed` event; previews the save node writes are logged only when they fail.
+Generation for uploads is best-effort and bounded. Two daemon workers do the decoding and encoding; the upload waits at most 5.5 s for generation and stores the preview only if it finished in time. One that didn't never gets stored and leaves nothing behind. Each outcome is a `previews.generated` or `previews.generation_failed` event; previews the save node writes are logged only when they fail.
 
 ### `/view` routes
 

@@ -1951,8 +1951,11 @@ class SaveImageAdvanced(IO.ComfyNode):
                 ui["animated"] = (True,)
             return IO.NodeOutput(images, ui=ui)
 
+        write_previews = file_format == "exr" and PromptServer.instance.asset_manager.enabled
         for batch_number, image in enumerate(images):
             if file_format == "exr":
+                if image.ndim == 2:
+                    image = image.unsqueeze(-1)  # before conversion, which reads a 4-wide last dim as RGBA
                 image = _to_scene_linear(image, colorspace)
             encoded = _encode_image(image, file_format, bit_depth, "linear" if file_format == "exr" else colorspace)
 
@@ -1968,7 +1971,7 @@ class SaveImageAdvanced(IO.ComfyNode):
                 f.write(encoded)
 
             entry = {"filename": file, "subfolder": subfolder, "type": "output"}
-            if file_format == "exr" and PromptServer.instance.asset_manager.enabled:
+            if write_previews:
                 asset_preview = _write_asset_preview(image)
                 if asset_preview is not None:
                     entry["asset_preview"] = asset_preview

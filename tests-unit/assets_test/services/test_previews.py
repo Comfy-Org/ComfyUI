@@ -429,9 +429,16 @@ class _Float:
         return Image.new("F", (4, 4))
 
 
+class _NotAnImage:
+    mime_types = ("image/x-test-not-image",)
+
+    def generate(self, source_path, max_pixels):
+        return "not an image"
+
+
 @pytest.mark.parametrize(
     ("generator", "store_fails", "reason"),
-    [(_Float(), False, "encode_failed"), (_Instant(), True, "write_failed")],
+    [(_Float(), False, "encode_failed"), (_NotAnImage(), False, "decode_failed"), (_Instant(), True, "write_failed")],
 )
 def test_encode_and_write_failures_are_logged_and_leave_no_preview(session, mock_create_session, previews_dir, tmp_path, caplog, generator, store_fails, reason):
     caplog.set_level("INFO")

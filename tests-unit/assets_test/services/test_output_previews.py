@@ -63,6 +63,14 @@ def _escaping(roots, ref):
     return {**ref, "filename": f"../{ref['filename']}"}
 
 
+def test_a_webp_preview_registers_as_webp(session, mock_create_session, roots):
+    ref = write_preview(roots, alpha=True)
+
+    preview = session.get(Asset, register_executed_output(_output(roots), "job", ref).preview_id)
+
+    assert preview.name == ref["filename"] and preview.mime_type == "image/webp"
+
+
 @pytest.mark.parametrize(
     "bad",
     [

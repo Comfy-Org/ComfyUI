@@ -11,8 +11,9 @@ class PreviewGenerator(ABC):
     file's path, so a generator for a new extension also registers it with
     ``mimetypes.add_type``. Registering a generator for a MIME type replaces any
     earlier one for it, including Core's own. Generators run for uploads only, not
-    for node outputs. A file of a registered type is never its own preview: it
-    shows the generated one, or none.
+    for node outputs. An image of a registered type browsers can't display is never
+    its own preview: it shows the generated one, or none. A type browsers can show
+    falls back to itself when no preview is generated.
     """
 
     mime_types: ClassVar[tuple[str, ...]]
