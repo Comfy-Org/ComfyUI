@@ -11,7 +11,6 @@ so the rows it never reached are selected again when the scan resumes.
 import enum
 import logging
 import os
-import stat
 import time
 from dataclasses import dataclass
 from datetime import datetime
@@ -634,7 +633,7 @@ def _returned_files(
         except OSError:
             continue
         # A pre-epoch mtime can't be stored; that file is left to the per-file path.
-        if not stat.S_ISREG(stat_result.st_mode) or get_mtime_ns(stat_result) < 0:
+        if get_mtime_ns(stat_result) < 0:
             continue
         match = next((content_id for content_id, size in rows if size == stat_result.st_size), None)
         if match is not None:
