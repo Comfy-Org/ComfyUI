@@ -23,7 +23,7 @@ from PIL.Image import Exif
 
 from server import PromptServer
 from comfy_api.latest import ComfyExtension, IO, UI
-from comfy_execution.preview_generators import linear_to_preview
+from comfy_execution.preview_tonemap import linear_to_preview
 from comfy.cli_args import args
 from typing_extensions import override
 

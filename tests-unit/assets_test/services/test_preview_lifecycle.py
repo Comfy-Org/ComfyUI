@@ -1,5 +1,4 @@
 from pathlib import Path
-from unittest.mock import patch
 
 import pytest
 
@@ -48,7 +47,7 @@ def test_the_startup_prune_never_marks_previews_missing(session, roots):
 # --- deleting a parent ---
 
 
-def test_deleting_a_parent_leaves_its_preview(session, mock_create_session, roots):
+def test_deleting_a_parent_removes_its_unshared_preview(session, mock_create_session, roots):
     preview = _record(session, roots / "previews" / "p.webp", tags=["preview"])
     preview_id = preview.id
     parent = _record(session, roots / "output" / "a.exr", preview_id=preview_id)
@@ -56,8 +55,35 @@ def test_deleting_a_parent_leaves_its_preview(session, mock_create_session, root
     assert delete_asset_reference(parent.id)
 
     session.expire_all()
-    assert session.get(Asset, preview_id) is not None
+    assert session.get(Asset, preview_id) is None
+    assert not (roots / "previews" / "p.webp").exists()
+    assert session.query(AssetContent).filter_by(path=str(roots / "previews" / "p.webp")).count() == 0
+
+
+def test_a_preview_another_asset_links_is_kept(session, mock_create_session, roots):
+    preview = _record(session, roots / "previews" / "p.webp", tags=["preview"])
+    parent = _record(session, roots / "output" / "a.exr", preview_id=preview.id)
+    _record(session, roots / "output" / "b.exr", preview_id=preview.id)
+
+    delete_asset_reference(parent.id)
+
+    session.expire_all()
+    assert session.get(Asset, preview.id) is not None
     assert (roots / "previews" / "p.webp").exists()
+
+
+def test_a_preview_file_another_record_shares_is_kept(session, mock_create_session, roots):
+    preview = _record(session, roots / "previews" / "p.webp", tags=["preview"])
+    preview_id = preview.id
+    twin = _record(session, roots / "previews" / "p.webp", tags=["preview"])
+    parent = _record(session, roots / "output" / "a.exr", preview_id=preview_id)
+    _record(session, roots / "output" / "b.exr", preview_id=twin.id)
+
+    delete_asset_reference(parent.id)
+
+    session.expire_all()
+    assert session.get(Asset, preview_id) is None
+    assert (roots / "previews" / "p.webp").exists(), "the twin record still uses the file"
 
 
 def test_a_nominated_preview_that_is_not_a_preview_asset_is_kept(session, mock_create_session, roots):
@@ -223,31 +249,25 @@ def test_preview_is_a_reserved_tag():
         _reject_system_tags(["preview"])
 
 
-class _Generator:
-    def __init__(self, mime_type):
-        self.mime_types = (mime_type,)
+def test_a_preview_tagged_asset_outside_previews_is_not_cascaded(session, mock_create_session, roots):
+    user_file = roots / "output" / "my-preview.png"
+    tagged = _record(session, user_file, tags=["preview"])
+    tagged_id = tagged.id
+    parent = _record(session, roots / "output" / "a.exr", preview_id=tagged_id)
 
-    def generate(self, source_path, max_pixels):
-        from PIL import Image
+    delete_asset_reference(parent.id)
 
-        return Image.new("RGB", (4, 4))
+    session.expire_all()
+    assert session.get(Asset, tagged_id) is not None, "a user's own asset, whatever its tags"
+    assert user_file.exists()
 
 
-@pytest.mark.parametrize(("name", "mime_type", "own"), [("still.tiff", "image/tiff", False), ("still.png", "image/png", True)])
-def test_a_registered_generator_is_never_called_for_an_output(session, mock_create_session, roots, name, mime_type, own):
-    from comfy_execution import preview_generators
+def test_an_untagged_asset_in_previews_is_not_cascaded(session, mock_create_session, roots):
+    stray = _record(session, roots / "previews" / "stray.webp")
+    stray_id = stray.id
+    parent = _record(session, roots / "output" / "a.exr", preview_id=stray_id)
 
-    (roots / "output" / name).write_bytes(b"bytes")
-    generator = _Generator(mime_type)
-    preview_generators.register_preview_generator(generator)
-    try:
-        with patch.object(generator, "generate", wraps=generator.generate) as generate:
-            entry = register_executed_outputs(_ui(name), "job", AssetsEnabled(_Args()))["images"][0]
-    finally:
-        preview_generators.unregister_preview_generator(generator)
+    delete_asset_reference(parent.id)
 
-    generate.assert_not_called()
-    if own:
-        assert entry["preview_id"] == entry["id"], "a generator never hides a type browsers can show"
-    else:
-        assert "preview_id" not in entry, "not its own preview, and no generated one for an output"
+    session.expire_all()
+    assert session.get(Asset, stray_id) is not None, "only Core's own preview records go with their parent"

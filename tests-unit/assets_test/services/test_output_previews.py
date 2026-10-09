@@ -129,9 +129,10 @@ def test_identical_previews_share_one_file_content_and_record(session, mock_crea
     assert session.query(AssetContent).filter(AssetContent.path.startswith(str(roots / "previews"))).count() == 1
 
     delete_asset_reference(first.id)
+    assert (roots / "previews" / ref["filename"]).exists(), "the other output still uses it"
     delete_asset_reference(second.id)
-    assert (roots / "previews" / ref["filename"]).exists(), "deleting its outputs leaves the preview"
-    assert len(_previews(session)) == 1
+    assert not (roots / "previews" / ref["filename"]).exists()
+    assert _previews(session) == []
 
 
 def test_a_cached_rerun_reuses_the_preview(session, mock_create_session, roots):
@@ -142,3 +143,28 @@ def test_a_cached_rerun_reuses_the_preview(session, mock_create_session, roots):
 
     assert cached.preview_id == executed.preview_id
     assert len(_previews(session)) == 1
+
+
+def test_a_preview_removed_with_its_last_user_is_rewritten_and_linked_again(session, mock_create_session, roots):
+    first = register_executed_output(_output(roots, "a.exr"), "job", write_preview(roots))
+    delete_asset_reference(first.id)
+
+    again = register_executed_output(_output(roots, "b.exr"), "job", write_preview(roots))
+
+    assert again.preview_id is not None and again.preview_id != first.preview_id
+    assert session.get(Asset, again.preview_id) is not None
+
+
+def test_a_preview_deleted_after_the_probe_is_not_linked(session, mock_create_session, roots):
+    ref = write_preview(roots)
+    probe = ingest._probe_output_preview
+
+    def probe_then_delete(preview_ref):
+        probed = probe(preview_ref)
+        (roots / "previews" / ref["filename"]).unlink()  # a delete of its last user, between probe and link
+        return probed
+
+    with patch.object(ingest, "_probe_output_preview", probe_then_delete):
+        result = register_executed_output(_output(roots), "job", ref)
+
+    assert result is not None and result.preview_id is None, "never a link to a missing file"

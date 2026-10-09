@@ -12,7 +12,7 @@ from PIL import Image
 
 import folder_paths
 from comfy.cli_args import args
-from comfy_execution.preview_generators import linear_to_preview
+from comfy_execution.preview_tonemap import linear_to_preview
 
 previous_nodes = sys.modules.get("nodes")
 previous_server = sys.modules.get("server")
@@ -114,7 +114,7 @@ def test_outputs_and_uploads_tonemap_identically(dirs, colorspace):
         entry = _save(image, colorspace)[0]
 
     written = linear_to_preview(tonemap.call_args.args[0])
-    uploaded = _decode_for_preview(str(dirs / "output" / entry["filename"]), 1_000_000)
+    uploaded = _decode_for_preview(str(dirs / "output" / entry["filename"]))
     assert np.array_equal(np.asarray(written), np.asarray(uploaded))
 
 

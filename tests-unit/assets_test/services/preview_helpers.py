@@ -9,14 +9,15 @@ import numpy as np
 
 
 def write_exr(path: Path, width: int, height: int, value=(1.0, 0.5, 0.25), display_window=None) -> Path:
-    """An EXR the way SaveImageAdvanced writes one (PyAV, uncompressed half)."""
-    rgb = np.empty((height, width, 3), np.float32)
-    rgb[...] = value
+    """An EXR the way SaveImageAdvanced writes one (PyAV, uncompressed half); RGBA given 4 values."""
+    fmt = "gbrapf32le" if len(value) == 4 else "gbrpf32le"
+    pixels = np.empty((height, width, len(value)), np.float32)
+    pixels[...] = value
     codec = av.CodecContext.create("exr", "w")
-    codec.width, codec.height, codec.pix_fmt = width, height, "gbrpf32le"
+    codec.width, codec.height, codec.pix_fmt = width, height, fmt
     codec.time_base = Fraction(1, 1)
     codec.options = {"format": "half"}
-    frame = av.VideoFrame.from_ndarray(rgb, format="gbrpf32le")
+    frame = av.VideoFrame.from_ndarray(pixels, format=fmt)
     frame.pts = 0
     frame.time_base = codec.time_base
     data = bytearray(b"".join(bytes(p) for p in list(codec.encode(frame)) + list(codec.encode(None))))

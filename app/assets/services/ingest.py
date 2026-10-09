@@ -131,6 +131,8 @@ def _link_output_preview(session: Session, record: Asset, preview: tuple[str, st
     path, filename, width, height, stat_result = preview
     try:
         with session.begin_nested():
+            if not os.path.isfile(path):
+                return  # deleted with its last user since the probe; the write lock rules out a later delete
             content, _ = create_content_reporting_insert(
                 session, path, f"blake3:{filename.partition('.')[0]}", stat_result.st_size, get_mtime_ns(stat_result)
             )

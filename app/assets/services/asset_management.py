@@ -5,11 +5,15 @@ tag updates move ``updated_at`` only when the requested values differ. Other
 supplied metadata fields record a write.
 """
 
+import logging
 import mimetypes
 import os
+from pathlib import Path
 from typing import Sequence
 
 from sqlalchemy import delete, select, update
+
+import folder_paths
 
 from app.assets.database.models import Asset, AssetContent, AssetTag
 from app.assets.database.queries import (
@@ -35,7 +39,7 @@ from app.assets.services.schemas import (
     ReferenceData,
     UserMetadata,
 )
-from app.database.db import create_session
+from app.database.db import create_session, create_write_session
 
 
 def _record_to_detail_result(session, record) -> AssetDetailResult:
@@ -152,13 +156,41 @@ def update_asset_metadata(
     return detail
 
 
+def _unshared_preview(session, preview_id: str) -> Asset | None:
+    """The preview record, if it is one in previews/ that nothing else links."""
+    preview = session.get(Asset, preview_id)
+    if preview is None or "preview" not in fetch_record_tags(session, preview_id):
+        return None
+    content = session.get(AssetContent, preview.content_id)
+    if not Path(content.path).is_relative_to(os.path.abspath(folder_paths.get_previews_directory())):
+        return None
+    if session.scalar(select(Asset.id).where(Asset.preview_id == preview_id).limit(1)) is not None:
+        return None
+    return preview
+
+
 def delete_asset_reference(
     reference_id: str,
 ) -> bool:
-    with create_session() as session:
-        if get_record_by_id(session, reference_id) is None:
+    # A write session: a registration linking the same preview file can't interleave.
+    with create_write_session() as session:
+        record = get_record_by_id(session, reference_id)
+        if record is None:
             return False
+        preview_id = record.preview_id
         delete_record(session, reference_id)
+        preview = _unshared_preview(session, preview_id) if preview_id else None
+        if preview is not None:
+            content = session.get(AssetContent, preview.content_id)
+            delete_record(session, preview.id)
+            # Only a file no record still uses; Core never unlinks files outside previews/.
+            if session.scalar(select(Asset.id).where(Asset.content_id == content.id).limit(1)) is None:
+                session.delete(content)
+                session.flush()
+                try:
+                    os.remove(content.path)
+                except OSError:
+                    logging.warning("Could not remove preview file %s", content.path, exc_info=True)
         session.commit()
         return True
 

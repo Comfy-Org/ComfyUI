@@ -24,7 +24,6 @@ class ComfyAPI_latest(ComfyAPIBase):
         self.node_replacement = self.NodeReplacement()
         self.execution = self.Execution()
         self.caching = self.Caching()
-        self.previews = self.Previews()
 
     class NodeReplacement(ProxiedSingleton):
         async def register(self, node_replace: io.NodeReplace) -> None:
@@ -114,34 +113,6 @@ class ComfyAPI_latest(ComfyAPIBase):
             from comfy_execution.cache_provider import unregister_cache_provider
             unregister_cache_provider(provider)
 
-    class Previews(ProxiedSingleton):
-        """
-        Preview generators for file types browsers can't display.
-
-        Example::
-
-            from comfy_api.latest import ComfyAPI, Previews
-
-            class TiffPreview(Previews.PreviewGenerator):
-                mime_types = ("image/tiff",)
-
-                def generate(self, source_path, max_pixels):
-                    ...  # return an 8-bit PIL image, or None
-
-            await ComfyAPI().previews.register_generator(TiffPreview())
-        """
-        from ._previews import PreviewGenerator
-
-        async def register_generator(self, generator: "ComfyAPI_latest.Previews.PreviewGenerator") -> None:
-            """Register a generator for its mime_types, replacing any earlier one, Core's included."""
-            from comfy_execution.preview_generators import register_preview_generator
-            register_preview_generator(generator)
-
-        async def unregister_generator(self, generator: "ComfyAPI_latest.Previews.PreviewGenerator") -> None:
-            """Unregister a generator; Core's own generator for those types applies again."""
-            from comfy_execution.preview_generators import unregister_preview_generator
-            unregister_preview_generator(generator)
-
 class ComfyExtension(ABC):
     async def on_load(self) -> None:
         """
@@ -178,7 +149,6 @@ class Types:
 
 
 Caching = ComfyAPI_latest.Caching
-Previews = ComfyAPI_latest.Previews
 
 ComfyAPI = ComfyAPI_latest
 
@@ -200,7 +170,6 @@ __all__ = [
     "InputImpl",
     "Types",
     "Caching",
-    "Previews",
     "ComfyExtension",
     "io",
     "IO",
