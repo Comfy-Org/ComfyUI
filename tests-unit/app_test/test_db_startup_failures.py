@@ -6,6 +6,7 @@ from contextlib import closing
 import logging
 import os
 import sqlite3
+import subprocess
 import sys
 import types
 from pathlib import Path
@@ -99,6 +100,17 @@ def test_corrupt_database(db_path, caplog):
     assert "Move that file aside, or delete it, and start again" in error
 
 
+@pytest.mark.skipif(sys.platform == "win32" or os.geteuid() == 0, reason="needs POSIX permissions enforced")
+def test_corrupt_read_only_database_is_reported_as_corrupt(db_path, caplog):
+    with open(db_path, "wb") as f:
+        f.write(b"not a database" * 1000)
+    os.chmod(db_path, 0o444)
+
+    error = _startup_error(caplog, kind="corrupt")
+
+    assert f"The asset database '{db_path}' is corrupt" in error
+
+
 def test_database_from_a_newer_comfyui(db_path, caplog):
     _stamp(db_path, "0099_from_a_newer_release")
 
@@ -140,6 +152,7 @@ def test_database_path_is_a_directory(db_path, caplog):
 
     assert f"ComfyUI can't create, open or write the asset database '{db_path}'" in error
     assert "the database path is a writable file" in error
+    assert "no other program has it open" in error  # SQLite says the same for a file another program holds
     assert "delete it" not in error
 
 
@@ -210,6 +223,49 @@ def test_read_only_backup_left_by_an_earlier_run_is_named_before_an_upgrade(db_p
 
     assert f"ComfyUI can't write '{db_path}.bkp', beside the asset database '{db_path}'" in error
     assert _revision(db_path) == "0006_add_loader_path"
+
+
+@pytest.mark.skipif(sys.platform == "win32" or os.geteuid() == 0, reason="needs POSIX permissions enforced")
+def test_read_only_backup_doesnt_matter_after_a_run_that_didnt_shut_down(db_path):
+    main.setup_database(_AssetsOn())  # its connections stay open, so the current revision is still in the WAL
+    db_module._db_lock.release(force=True)
+    db_module._db_lock = None
+    assert os.path.exists(db_path + "-wal")
+    open(db_path + ".bkp", "a").close()
+    os.chmod(db_path + ".bkp", 0o444)
+
+    main.setup_database(_AssetsOn())
+
+
+@pytest.mark.skipif(sys.platform == "win32" or os.geteuid() == 0, reason="needs POSIX permissions enforced")
+def test_read_only_database_with_a_wal_but_no_shm_gets_no_side_file(db_path, caplog):
+    command.upgrade(db_module.get_alembic_config(), "0006_add_loader_path")
+    # A run that didn't shut down: its last write is still in the WAL.
+    script = "import sqlite3, sys, os; c = sqlite3.connect(sys.argv[1]); c.execute('PRAGMA journal_mode=WAL');" \
+             " c.execute('PRAGMA wal_autocheckpoint=0'); c.execute('CREATE TABLE unfinished (x)'); c.commit(); os._exit(0)"
+    subprocess.run([sys.executable, "-c", script, db_path], check=True)
+    os.remove(db_path + "-shm")
+    os.chmod(db_path, 0o444)
+
+    _startup_error(caplog, kind="not_writable")
+
+    assert not os.path.exists(db_path + "-shm")
+    os.chmod(db_path, 0o644)
+    main.setup_database(_AssetsOn())
+
+
+@pytest.mark.skipif(sys.platform == "win32" or os.geteuid() == 0, reason="needs POSIX permissions enforced")
+def test_read_only_wal_left_by_a_run_that_didnt_shut_down_is_named_before_an_upgrade(db_path, caplog):
+    command.upgrade(db_module.get_alembic_config(), "0006_add_loader_path")
+    script = "import sqlite3, sys, os; c = sqlite3.connect(sys.argv[1]); c.execute('PRAGMA journal_mode=WAL');" \
+             " c.execute('PRAGMA wal_autocheckpoint=0'); c.execute('CREATE TABLE unfinished (x)'); c.commit(); os._exit(0)"
+    subprocess.run([sys.executable, "-c", script, db_path], check=True)
+    os.chmod(db_path + "-wal", 0o444)
+
+    error = _startup_error(caplog, kind="not_writable")
+
+    assert f"[Errno 13] Permission denied: '{db_path}-wal'" in error
+    assert not os.path.exists(db_path + ".bkp")
 
 
 @pytest.mark.skipif(sys.platform == "win32" or os.geteuid() == 0, reason="needs POSIX permissions enforced")
@@ -295,7 +351,9 @@ def test_failure_after_the_database_opened_doesnt_suggest_deleting_it(db_path, c
         def startup(self):
             raise RuntimeError("hash mode state unreadable")
 
-    error = _startup_error(caplog, _StartupFails(), kind="other")
+    error = _startup_error(caplog, _StartupFails(), kind="other", level=logging.DEBUG)
+
+    assert "Asset database startup failed" in error  # the --verbose DEBUG detail the message points to
 
     assert f"Could not open or upgrade the asset database '{db_path}': hash mode state unreadable" in error
     assert "delete it" not in error
@@ -309,14 +367,14 @@ def test_database_url_that_is_not_sqlite_file_url(monkeypatch, db_path, caplog, 
 
     error = _startup_error(caplog, kind="unsupported_url", level=logging.DEBUG)
 
-    assert '--database-url must start with sqlite:///, like "sqlite:///' in error
+    assert "--database-url must start with sqlite:///, like sqlite:///path/to/comfyui.db" in error
+    assert "or be left out to use the default database" in error
     assert url not in error
     assert "secret" not in caplog.text
 
 
-@pytest.mark.skipif(sys.platform == "win32", reason="checks the POSIX four-slash form")
-def test_default_database_in_use_suggests_an_absolute_database_url(tmp_path, monkeypatch, db_path, caplog):
-    user_dir = tmp_path / "user dir"
+def test_default_database_in_use_suggests_its_own_database(tmp_path, monkeypatch, db_path, caplog):
+    user_dir = tmp_path / "user"
     user_dir.mkdir()
     monkeypatch.setattr(db_module.args, "database_url", None)
     monkeypatch.setattr(db_module, "get_legacy_default_db_path", lambda: None)
@@ -328,8 +386,7 @@ def test_default_database_in_use_suggests_an_absolute_database_url(tmp_path, mon
     finally:
         holder.release()
 
-    assert f'Or give this ComfyUI its own database: --database-url "sqlite:///{user_dir / "comfyui-2.db"}"' in error
-    assert '--database-url "sqlite:////' in error
+    assert "Or give this ComfyUI its own database: --database-url sqlite:///path/to/another.db" in error
 
 
 def test_no_second_database_suggested_for_a_broken_one(tmp_path, monkeypatch, db_path, caplog):

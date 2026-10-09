@@ -91,7 +91,8 @@ def get_database_url():
     import folder_paths
 
     db_path = os.path.join(folder_paths.get_user_directory(), "comfyui.db")
-    # SQLAlchemy 2.1+ quotes it, so a ? or %xx in the path stays part of the file name.
+    # Built by SQLAlchemy so its own parser reads the path back intact: 2.1+ decodes %xx, and every version
+    # stops the path at ? (which only 2.1+ quotes).
     url = URL.create("sqlite", database=db_path).render_as_string()
     if make_url(url).database != db_path:  # SQLAlchemy before 2.1 doesn't quote a ?
         raise DatabasePathError(
@@ -297,11 +298,14 @@ def _init_file_db(db_url):
 
 
 def _upgrade_pending(db_path):
-    """Whether the stored revision isn't the current one. Read immutably, so no side files are created."""
+    """Whether the stored revision isn't the current one, read without creating side files: through the
+    WAL a run that didn't shut down left behind, when both its files are there; otherwise immutably."""
+    wal_left = os.path.exists(db_path + "-wal") and os.path.exists(db_path + "-shm")
+    mode = "mode=ro" if wal_left else "immutable=1"
     try:
-        with closing(sqlite3.connect(f"file:{pathname2url(db_path)}?immutable=1", uri=True)) as conn:
+        with closing(sqlite3.connect(f"file:{pathname2url(db_path)}?{mode}", uri=True)) as conn:
             current = conn.execute("SELECT version_num FROM alembic_version").fetchone()
-    except sqlite3.Error:
+    except sqlite3.OperationalError:  # no revision table yet, or can't be opened; corruption is left to raise
         return True
     return current is None or current[0] != ScriptDirectory.from_config(get_alembic_config()).get_current_head()
 
