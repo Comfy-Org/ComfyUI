@@ -639,8 +639,9 @@ def _returned_files(
         match = next((content_id for content_id, size in rows if size == stat_result.st_size), None)
         if match is not None:
             matched.append((path, stat_result, match))
-    # A file still being written (a copy that preallocates its size) waits on the watch
-    # list, as a new file does, and later comes back through the per-file revive.
+    # A file that changed between the two stats waits on the watch list, as a new file
+    # does, and comes back through the per-file revive once it settles. A writer that
+    # pauses (a copy that preallocates its size) can still look settled.
     settled = set(_two_stat_admit([(path, st) for path, st, _ in matched], None, should_stop)[0])
     return {path: (content_id, get_mtime_ns(st)) for path, st, content_id in matched if path in settled}
 
