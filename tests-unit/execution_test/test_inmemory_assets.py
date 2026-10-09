@@ -36,6 +36,7 @@ class InMemoryAssets:
         self.calls: list[AssetCall] = []
         self.deliveries_by_path: dict[str, list[Delivery]] = {}
         self._live_output_by_path: dict[str, RegisteredAsset] = {}
+        self.preview_refs: dict[str, dict] = {}
         self._counter: int = 0
 
     @property
@@ -77,9 +78,11 @@ class InMemoryAssets:
         return None
 
     def register_executed_output(
-        self, abs_path: str, job_id: str | None
+        self, abs_path: str, job_id: str | None, preview_ref: dict | None = None
     ) -> RegisteredAsset | None:
         self._record("register_executed_output", abs_path, job_id)
+        if preview_ref is not None:
+            self.preview_refs[abs_path] = preview_ref
         deliveries = self.deliveries_by_path.setdefault(abs_path, [])
         for index, delivery in enumerate(deliveries):
             deliveries[index] = replace(delivery, superseded=True)

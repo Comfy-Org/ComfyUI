@@ -14,6 +14,7 @@ from dataclasses import dataclass
 
 import av
 import numpy as np
+import torch
 from PIL import Image
 
 import folder_paths
@@ -23,15 +24,16 @@ from app.assets.event_log import emit, error_type
 from app.assets.services.image_dimensions import read_exr_windows
 from app.database.db import create_write_session
 from comfy_execution.preview_generators import (
+    PREVIEW_MAX_PIXELS,
     get_preview_generator,
+    linear_to_preview,
     preview_deadline_seconds,
     set_core_preview_generator,
     submit_preview_job,
 )
 
-PREVIEW_MAX_PIXELS = 1_000_000
-# 8K is 33-35 MP; at 40 MP one decode peaks around 1.2 GB, and running out of memory can't be caught.
-PREVIEW_MAX_SOURCE_PIXELS = 40_000_000
+# Uploads only: a decode costs ~30 MB per MP, and running out of memory can't be caught.
+PREVIEW_MAX_SOURCE_PIXELS = 17_000_000
 _ENCODABLE_MODES = frozenset({"RGB", "RGBA", "L", "LA", "P"})
 
 
@@ -55,17 +57,7 @@ def _decode_for_preview(path: str, max_pixels: int) -> Image.Image:
         rgb = np.repeat(frame.to_ndarray(format="grayf32le")[..., None], 3, axis=-1)
     else:
         rgb = frame.to_ndarray(format="gbrpf32le")
-    height, width = rgb.shape[:2]
-    scale = min(1.0, (max_pixels / (width * height)) ** 0.5)
-    size = (max(1, int(width * scale)), max(1, int(height * scale)))
-    # Resize in float first, so the per-pixel tonemap below runs on at most max_pixels.
-    small = np.stack(
-        [np.asarray(Image.fromarray(np.ascontiguousarray(rgb[..., c]), "F").resize(size, Image.BILINEAR)) for c in range(3)],
-        axis=-1,
-    )
-    linear = np.clip(np.nan_to_num(small, nan=0.0, posinf=1.0, neginf=0.0), 0.0, 1.0)
-    srgb = np.where(linear <= 0.0031308, linear * 12.92, 1.055 * np.power(linear, 1 / 2.4) - 0.055)
-    return Image.fromarray((srgb * 255 + 0.5).astype(np.uint8), "RGB")
+    return linear_to_preview(torch.from_numpy(rgb), max_pixels)
 
 
 class ExrPreviewGenerator:

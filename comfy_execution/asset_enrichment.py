@@ -74,35 +74,23 @@ def _is_own_image_preview(abs_path: str) -> bool:
     return own_preview_kind(None, abs_path) == "image"
 
 
-async def generate_output_previews(output_ui: dict) -> None:
-    """Make previews for registered entries that need one; a cached replay never does."""
-    from app.assets.previews import generate_previews, has_preview_generator
-
-    pending: list[tuple[dict, str]] = []
+def take_asset_previews(output_ui: dict) -> dict[str, dict]:
+    """Pop the previews save nodes named for their outputs, by output path, so none reaches clients or the cache."""
+    previews: dict[str, dict] = {}
     for entries in output_ui.values():
         if not isinstance(entries, list):
             continue
         for entry in entries:
-            if not isinstance(entry, dict) or "id" not in entry:
+            if not isinstance(entry, dict) or "asset_preview" not in entry:
                 continue
-            if entry.get("preview_id") is not None:
-                continue
+            preview = entry.pop("asset_preview")
             try:
                 abs_path = _resolve_output_path(entry)
-            except Exception:  # not a file entry, e.g. a custom node's own {"id": ...} rows
+            except Exception:
                 continue
-            if abs_path is not None and has_preview_generator(abs_path):
-                pending.append((entry, abs_path))
-    if not pending:
-        return
-    try:
-        linked = await generate_previews([(entry["id"], path) for entry, path in pending], "output")
-    except Exception:
-        logging.warning("Preview generation failed for outputs", exc_info=True)
-        return
-    for entry, _ in pending:
-        if entry["id"] in linked:
-            entry["preview_id"] = linked[entry["id"]]
+            if abs_path is not None:
+                previews[abs_path] = preview
+    return previews
 
 
 def _strip_ids(output_ui: dict) -> None:
@@ -115,12 +103,17 @@ def _strip_ids(output_ui: dict) -> None:
                 entry.pop("preview_id", None)
 
 
-def register_executed_outputs(output_ui: dict, job_id: str, asset_manager: "AssetManager") -> dict:
+def register_executed_outputs(output_ui: dict, job_id: str, asset_manager: "AssetManager", asset_previews: dict[str, dict] | None = None) -> dict:
     enriched = copy.deepcopy(output_ui)
     if not asset_manager.enabled:
         return enriched
 
-    _enrich_in_place(enriched, job_id, asset_manager.register_executed_output)
+    previews = asset_previews or {}
+    _enrich_in_place(
+        enriched,
+        job_id,
+        lambda path, job: asset_manager.register_executed_output(path, job, preview_ref=previews.get(path)),
+    )
     return enriched
 
 

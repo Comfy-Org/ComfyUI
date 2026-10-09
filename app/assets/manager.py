@@ -63,7 +63,7 @@ class AssetManager(Protocol):
     ) -> UploadAssetView | None: ...
 
     def register_executed_output(
-        self, abs_path: str, job_id: str | None
+        self, abs_path: str, job_id: str | None, preview_ref: dict | None = None
     ) -> RegisteredAsset | None: ...
 
     def register_cached_output(
@@ -131,7 +131,7 @@ class NoAssets:
         return None
 
     def register_executed_output(
-        self, abs_path: str, job_id: str | None
+        self, abs_path: str, job_id: str | None, preview_ref: dict | None = None
     ) -> RegisteredAsset | None:
         return None
 
@@ -220,9 +220,9 @@ class AssetsEnabled:
             return None
 
     def register_executed_output(
-        self, abs_path: str, job_id: str | None
+        self, abs_path: str, job_id: str | None, preview_ref: dict | None = None
     ) -> RegisteredAsset | None:
-        return ingest_register_executed_output(abs_path, job_id)
+        return ingest_register_executed_output(abs_path, job_id, preview_ref)
 
     def register_cached_output(
         self, abs_path: str, job_id: str | None

@@ -43,7 +43,7 @@ from comfy_execution.graph_utils import GraphBuilder, is_link
 from comfy_execution.validation import LoopValidationError, validate_loops, validate_node_input
 from comfy_execution.progress import get_progress_state, reset_progress_state, add_progress_handler, WebUIProgressHandler
 from comfy_execution.utils import CurrentNodeContext
-from comfy_execution.asset_enrichment import register_executed_outputs, emit_cached_output, generate_output_previews
+from comfy_execution.asset_enrichment import register_executed_outputs, emit_cached_output, take_asset_previews
 from comfy_execution.media_enrichment import enrich_output_with_media_metadata
 from comfy_api.internal import _ComfyNodeInternal, _NodeOutputInternal, first_real_override, is_class, make_locked_method_func
 from comfy_api.latest import io, _io
@@ -565,6 +565,7 @@ async def execute(server: "ExecutionServer", dynprompt, caches, current_item, ex
                 return (ExecutionResult.PENDING, None, None)
         cache_ui_value = ui_outputs.get(unique_id)
         if len(output_ui) > 0:
+            asset_previews = take_asset_previews(output_ui)
             output_ui = enrich_output_with_media_metadata(output_ui)
             meta = {
                 "node_id": unique_id,
@@ -572,9 +573,7 @@ async def execute(server: "ExecutionServer", dynprompt, caches, current_item, ex
                 "parent_node": parent_node_id,
                 "real_node_id": real_node_id,
             }
-            enriched_output_ui = register_executed_outputs(output_ui, prompt_id, asset_manager)
-            if asset_manager.enabled:
-                await generate_output_previews(enriched_output_ui)
+            enriched_output_ui = register_executed_outputs(output_ui, prompt_id, asset_manager, asset_previews)
             ui_outputs[unique_id] = {"meta": meta, "output": enriched_output_ui}
             cache_ui_value = {"meta": meta, "output": output_ui}
             if server.client_id is not None:

@@ -1,4 +1,3 @@
-import asyncio
 from pathlib import Path
 from unittest.mock import patch
 
@@ -11,9 +10,9 @@ from app.assets.manager import AssetsEnabled
 from app.assets.scanner import content_ids_outside_prefixes, get_owned_prefixes
 from app.assets.services.asset_management import delete_asset_reference
 from app.assets.services.ingest import register_cached_output, register_file_in_place
-from comfy_execution.asset_enrichment import generate_output_previews, register_executed_outputs
+from comfy_execution.asset_enrichment import register_executed_outputs, take_asset_previews
 
-from .preview_helpers import write_exr
+from .preview_helpers import write_exr, write_preview
 
 
 
@@ -158,25 +157,26 @@ def test_outputs_get_their_preview_id(session, mock_create_session, roots):
     write_exr(roots / "output" / "frame.exr", 64, 48)
     (roots / "output" / "still.png").write_bytes(b"png")
     (roots / "output" / "notes.txt").write_bytes(b"txt")
+    ui = _ui("frame.exr", "still.png", "notes.txt")
+    ui["images"][0]["asset_preview"] = write_preview(roots)
 
-    enriched = register_executed_outputs(_ui("frame.exr", "still.png", "notes.txt"), "job", AssetsEnabled(_Args()))
-    asyncio.run(generate_output_previews(enriched))
+    enriched = register_executed_outputs(ui, "job", AssetsEnabled(_Args()), take_asset_previews(ui))
 
     exr, png, txt = enriched["images"]
     session.expire_all()
-    assert exr["preview_id"] == session.get(Asset, exr["id"]).preview_id != exr["id"], "a generated, linked preview"
+    assert exr["preview_id"] == session.get(Asset, exr["id"]).preview_id != exr["id"], "the named preview, linked"
     assert png["preview_id"] == png["id"], "a displayable image is its own preview"
     assert "preview_id" not in txt, "only images carry preview_id"
+    assert "asset_preview" not in exr
 
 
-def test_an_exr_whose_preview_fails_has_no_preview_id(session, mock_create_session, roots):
+def test_an_exr_with_no_named_preview_has_no_preview_id(session, mock_create_session, roots):
     from utils.mime_types import init_mime_types
 
     init_mime_types()
-    (roots / "output" / "broken.exr").write_bytes(b"not an exr")
+    write_exr(roots / "output" / "frame.exr", 8, 8)
 
-    enriched = register_executed_outputs(_ui("broken.exr"), "job", AssetsEnabled(_Args()))
-    asyncio.run(generate_output_previews(enriched))
+    enriched = register_executed_outputs(_ui("frame.exr"), "job", AssetsEnabled(_Args()))
 
     assert "preview_id" not in enriched["images"][0], "never itself, and nothing generated"
 
@@ -192,17 +192,6 @@ def test_with_assets_off_entries_are_unchanged(roots):
     ui = _ui("still.png")
 
     assert register_executed_outputs(ui, "job", NoAssets(_Off())) == ui
-
-
-def test_generation_is_only_asked_for_types_with_a_generator(session, mock_create_session, roots):
-    (roots / "output" / "still.png").write_bytes(b"png")
-    enriched = register_executed_outputs(_ui("still.png"), "job", AssetsEnabled(_Args()))
-    del enriched["images"][0]["preview_id"]
-
-    with patch("app.assets.previews.generate_previews") as generate:
-        asyncio.run(generate_output_previews(enriched))
-
-    generate.assert_not_called()
 
 
 def test_a_preview_tagged_asset_outside_previews_is_not_cascaded(session, mock_create_session, roots):
@@ -260,11 +249,11 @@ def test_a_cached_replay_drops_a_stale_preview_id(session, mock_create_session, 
 
 
 def test_a_non_file_ui_entry_with_an_id_does_not_fail_the_node(session, mock_create_session, roots):
-    ui = {"items": [{"id": "row-1", "label": "Result"}]}
+    ui = {"items": [{"id": "row-1", "label": "Result"}], "text": ["hello"]}
 
-    asyncio.run(generate_output_previews(ui))
+    enriched = register_executed_outputs(ui, "job", AssetsEnabled(_Args()), take_asset_previews(ui))
 
-    assert ui == {"items": [{"id": "row-1", "label": "Result"}]}
+    assert enriched == ui == {"items": [{"id": "row-1", "label": "Result"}], "text": ["hello"]}
 
 
 @pytest.mark.parametrize(
@@ -306,28 +295,17 @@ class _PngGenerator:
         return Image.new("RGB", (4, 4))
 
 
-def test_an_output_whose_type_has_a_generator_waits_for_its_generated_preview(session, mock_create_session, roots):
+def test_a_registered_generator_is_never_called_for_an_output(session, mock_create_session, roots):
     from comfy_execution import preview_generators
 
     (roots / "output" / "still.png").write_bytes(b"png")
     generator = _PngGenerator()
     preview_generators.register_preview_generator(generator)
     try:
-        enriched = register_executed_outputs(_ui("still.png"), "job", AssetsEnabled(_Args()))
-        assert "preview_id" not in enriched["images"][0], "never its own preview, even before generating"
-        asyncio.run(generate_output_previews(enriched))
+        with patch.object(generator, "generate", wraps=generator.generate) as generate:
+            enriched = register_executed_outputs(_ui("still.png"), "job", AssetsEnabled(_Args()))
     finally:
         preview_generators.unregister_preview_generator(generator)
 
-    entry = enriched["images"][0]
-    assert entry["preview_id"] not in (None, entry["id"])
-
-
-def test_an_output_with_a_linked_preview_is_not_regenerated(session, mock_create_session, roots):
-    (roots / "output" / "frame.exr").write_bytes(b"exr")
-    ui = {"images": [{"filename": "frame.exr", "subfolder": "", "type": "output", "id": "a", "preview_id": "p"}]}
-
-    with patch("app.assets.previews.generate_previews") as generate:
-        asyncio.run(generate_output_previews(ui))
-
     generate.assert_not_called()
+    assert "preview_id" not in enriched["images"][0], "never its own preview, and no generated one for an output"

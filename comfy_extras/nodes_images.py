@@ -2,6 +2,7 @@ import nodes
 import folder_paths
 
 import av
+import io
 import json
 
 import os
@@ -12,6 +13,7 @@ import struct
 import torch
 import logging
 import tempfile
+import uuid
 
 import zlib
 import comfy.utils
@@ -21,6 +23,7 @@ from PIL.Image import Exif
 
 from server import PromptServer
 from comfy_api.latest import ComfyExtension, IO, UI
+from comfy_execution.preview_generators import linear_to_preview
 from comfy.cli_args import args
 from typing_extensions import override
 
@@ -1639,6 +1642,44 @@ def inject_avif_metadata(path: str, metadata: dict) -> None:
 # Encoding
 # ---------------------------------------------------------------------------
 
+def _to_scene_linear(img_tensor: torch.Tensor, colorspace: str) -> torch.Tensor:
+    if colorspace == "sRGB":
+        return srgb_to_linear(img_tensor)
+    if colorspace == "HDR":
+        return hlg_to_linear(img_tensor)
+    return img_tensor
+
+
+def _write_asset_preview(linear: torch.Tensor) -> dict | None:
+    """Write a preview of a scene-linear image to previews/, named by its blake3 hash."""
+    try:
+        from blake3 import blake3
+
+        image = linear_to_preview(linear)
+        buffer = io.BytesIO()
+        if image.mode == "RGBA":
+            image.save(buffer, format="WEBP", quality=80)
+            ext = "webp"
+        else:
+            image.save(buffer, format="JPEG", quality=85)
+            ext = "jpg"
+        data = buffer.getvalue()
+        filename = f"{blake3(data).hexdigest()}.{ext}"
+        directory = folder_paths.get_previews_directory()
+        path = os.path.join(directory, filename)
+        if not os.path.exists(path):
+            os.makedirs(directory, exist_ok=True)
+            # Publish atomically, so a truncated file never sits under a trusted name.
+            temp_path = f"{path}.{uuid.uuid4().hex}.tmp"
+            with open(temp_path, "wb") as f:
+                f.write(data)
+            os.replace(temp_path, path)
+        return {"filename": filename, "width": image.width, "height": image.height}
+    except Exception:
+        logging.warning("Could not write a preview for an EXR output", exc_info=True)
+        return None
+
+
 def _encode_image(
     img_tensor: torch.Tensor,
     file_format: str,
@@ -1673,10 +1714,7 @@ def _encode_image(
 
     if spec["dtype"] == np.float32:
         # EXR path: preserve full range, no clamp.
-        if colorspace == "sRGB":
-            img_tensor = srgb_to_linear(img_tensor)
-        elif colorspace == "HDR":
-            img_tensor = hlg_to_linear(img_tensor)
+        img_tensor = _to_scene_linear(img_tensor, colorspace)
         if bit_depth == "16-bit float":
             # Round to half precision before FFmpeg's truncating float-to-half conversion.
             img_tensor = img_tensor.to(torch.float16)
@@ -1914,7 +1952,9 @@ class SaveImageAdvanced(IO.ComfyNode):
             return IO.NodeOutput(images, ui=ui)
 
         for batch_number, image in enumerate(images):
-            encoded = _encode_image(image, file_format, bit_depth, colorspace)
+            if file_format == "exr":
+                image = _to_scene_linear(image, colorspace)
+            encoded = _encode_image(image, file_format, bit_depth, "linear" if file_format == "exr" else colorspace)
 
             if write_metadata:
                 if file_format == "png":
@@ -1927,7 +1967,12 @@ class SaveImageAdvanced(IO.ComfyNode):
             with open(os.path.join(full_output_folder, file), "wb") as f:
                 f.write(encoded)
 
-            results.append({"filename": file, "subfolder": subfolder, "type": "output"})
+            entry = {"filename": file, "subfolder": subfolder, "type": "output"}
+            if file_format == "exr" and args.enable_assets:
+                asset_preview = _write_asset_preview(image)
+                if asset_preview is not None:
+                    entry["asset_preview"] = asset_preview
+            results.append(entry)
             counter += 1
 
         return IO.NodeOutput(images, ui={"images": results})

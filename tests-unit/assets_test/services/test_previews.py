@@ -121,6 +121,19 @@ def test_oversized_exr_is_skipped_without_decoding(tmp_path):
     decode.assert_not_called()
 
 
+@pytest.mark.parametrize(("height", "skipped"), [(4000, False), (4001, True)])
+def test_uploads_over_17_megapixels_are_skipped(height, skipped):
+    with (
+        patch.object(previews, "read_exr_windows", return_value=[(4250, height)]),
+        patch.object(previews, "_decode_for_preview", return_value="decoded"),
+    ):
+        if skipped:
+            with pytest.raises(previews.PreviewSkipped):
+                previews.ExrPreviewGenerator().generate("a.exr", previews.PREVIEW_MAX_PIXELS)
+        else:
+            assert previews.ExrPreviewGenerator().generate("a.exr", previews.PREVIEW_MAX_PIXELS) == "decoded"
+
+
 def test_size_guard_counts_a_data_window_bigger_than_the_display_window(tmp_path):
     path = write_exr(tmp_path / "a.exr", 64, 48, display_window=(0, 0, 7, 7))
 

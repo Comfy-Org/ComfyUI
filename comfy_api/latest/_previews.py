@@ -9,13 +9,14 @@ PREVIEW_FORMATS = frozenset({"image/jpeg", "image/png", "image/webp", "image/gif
 
 
 class PreviewGenerator(ABC):
-    """Makes a browser-displayable preview of a file type browsers can't show.
+    """Makes a browser-displayable preview of an uploaded file of a type browsers can't show.
 
     Core looks a generator up by the MIME type ``mimetypes.guess_type`` gives the
     file's path, so a generator for a new extension also registers it with
     ``mimetypes.add_type``. Registering a generator for a MIME type replaces any
-    earlier one for it, including Core's own. A file of a registered type is never
-    its own preview: it shows the generated one, or none when generation fails.
+    earlier one for it, including Core's own. Generators run for uploads only, not
+    for node outputs. A file of a registered type is never its own preview: it
+    shows the generated one, or none.
     """
 
     mime_types: ClassVar[tuple[str, ...]]

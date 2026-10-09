@@ -1,4 +1,4 @@
-"""EXR outputs get a generated preview end to end: a real server with assets enabled."""
+"""EXR outputs register already linked to the preview their save node wrote: a real server with assets enabled."""
 
 import io
 import json
@@ -53,8 +53,8 @@ def server(args_pytest, tmp_path_factory):
         log.close()
 
 
-def _run(base: str, prompt: dict) -> dict:
-    """Queue a prompt and return its executed messages by node id."""
+def _run(base: str, prompt: dict) -> tuple[dict, str]:
+    """Queue a prompt and return its executed messages by node id, and its prompt id."""
     client_id = str(uuid.uuid4())
     ws = websocket.WebSocket()
     ws.settimeout(120)
@@ -76,7 +76,7 @@ def _run(base: str, prompt: dict) -> dict:
             executed[data["node"]] = data["output"]
         if message["type"] == "executing" and data["node"] is None:
             ws.close()
-            return executed
+            return executed, prompt_id
 
 
 def _exr_save_graph(prefix: str, batch_size: int) -> tuple[dict, str]:
@@ -93,12 +93,18 @@ def _exr_save_graph(prefix: str, batch_size: int) -> tuple[dict, str]:
     return g.finalize(), save.id
 
 
+def _get(base: str, path: str):
+    with urllib.request.urlopen(f"{base}{path}") as response:
+        return json.loads(response.read())
+
+
 @pytest.mark.execution
-def test_saved_exr_frames_carry_a_generated_preview(server):
+def test_saved_exr_frames_carry_their_preview(server):
     base, previews_dir = server
     prompt, save_id = _exr_save_graph(f"exr_{uuid.uuid4().hex[:8]}", batch_size=3)
 
-    entries = _run(base, prompt)[save_id]["images"]
+    executed, prompt_id = _run(base, prompt)
+    entries = executed[save_id]["images"]
 
     assert len(entries) == 3
     for entry in entries:
@@ -106,13 +112,15 @@ def test_saved_exr_frames_carry_a_generated_preview(server):
         assert entry["preview_id"] != entry["id"], "an EXR is never its own preview"
         with urllib.request.urlopen(f"{base}/api/assets/{entry['preview_id']}/content") as response:
             preview = Image.open(io.BytesIO(response.read()))
-        assert preview.format == "WEBP"
+        assert preview.format == "JPEG"
         assert preview.size == (200, 60)
-        with urllib.request.urlopen(f"{base}/api/assets/{entry['id']}") as response:
-            asset = json.loads(response.read())
+        asset = _get(base, f"/api/assets/{entry['id']}")
         assert asset["preview_id"] == entry["preview_id"]
         assert asset["metadata"]["width"] == 200 and asset["metadata"]["height"] == 60
-    assert len(list(previews_dir.glob("*.webp"))) >= 3
+    assert len({entry["preview_id"] for entry in entries}) == 1, "identical frames share one preview"
+    assert len(list(previews_dir.glob("*.jpg"))) >= 1
+    for value in (executed, _get(base, f"/history/{prompt_id}"), _get(base, f"/api/jobs/{prompt_id}")):
+        assert "asset_preview" not in json.dumps(value)
 
 
 @pytest.mark.execution
@@ -120,8 +128,10 @@ def test_a_cached_rerun_keeps_the_preview(server):
     base, _ = server
     prompt, save_id = _exr_save_graph(f"exr_{uuid.uuid4().hex[:8]}", batch_size=1)
 
-    first = _run(base, prompt)[save_id]["images"][0]
-    replay = _run(base, prompt)[save_id]["images"][0]
+    first = _run(base, prompt)[0][save_id]["images"][0]
+    replay, _ = _run(base, prompt)
+    replay = replay[save_id]["images"][0]
 
     assert replay["id"] != first["id"], "a replay registers its own record"
     assert replay["preview_id"] == first["preview_id"], "and reuses the preview of the same bytes"
+    assert "asset_preview" not in replay
