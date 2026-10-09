@@ -31,7 +31,7 @@ reviews:
 
   pre_merge_checks:
     title:
-      mode: "warning"
+      mode: "error"
       requirements: |
         Pull requests that add or modify Partner Node implementations or
         provider metadata under comfy_api_nodes/ must start their title with
