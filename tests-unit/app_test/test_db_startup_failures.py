@@ -7,6 +7,7 @@ import logging
 import os
 import sqlite3
 import sys
+import types
 from pathlib import Path
 
 import pytest
@@ -178,6 +179,17 @@ def test_read_only_database_file_that_needs_an_upgrade(db_path, caplog):
     main.setup_database(_AssetsOn())
 
 
+@pytest.mark.skipif(sys.platform == "win32" or os.geteuid() == 0, reason="needs POSIX permissions enforced")
+def test_read_only_sidecar_file_is_named(db_path, caplog):
+    _start_and_stop(db_path)
+    open(db_path + "-shm", "a").close()
+    os.chmod(db_path + "-shm", 0o444)
+
+    error = _startup_error(caplog, kind="not_writable")
+
+    assert f"ComfyUI can't write '{db_path}-shm', beside the asset database '{db_path}'" in error
+
+
 def _start_and_stop(db_path):
     """Open the database the way a previous run would, then let it go."""
     main.setup_database(_AssetsOn())
@@ -195,7 +207,7 @@ def test_read_only_backup_left_by_an_earlier_run_is_named_before_an_upgrade(db_p
 
     error = _startup_error(caplog, kind="not_writable")
 
-    assert f"[Errno 13] Permission denied: '{db_path}.bkp'" in error
+    assert f"ComfyUI can't write '{db_path}.bkp', beside the asset database '{db_path}'" in error
     assert _revision(db_path) == "0006_add_loader_path"
 
 
@@ -206,6 +218,37 @@ def test_read_only_backup_doesnt_matter_without_an_upgrade(db_path):
     os.chmod(db_path + ".bkp", 0o444)
 
     main.setup_database(_AssetsOn())
+
+
+@pytest.mark.skipif(sys.platform == "win32" or os.geteuid() == 0, reason="needs POSIX permissions enforced")
+def test_unwritable_database_the_permission_check_misses(db_path, monkeypatch, caplog):
+    # e.g. a Windows deny-write ACL, which os.access doesn't see; the write at startup does.
+    _start_and_stop(db_path)
+    os.chmod(db_path, 0o444)
+    monkeypatch.setattr(db_module.os, "access", lambda *_args: True)
+
+    error = _startup_error(caplog, kind="not_writable")
+
+    assert f"ComfyUI can't create, open or write the asset database '{db_path}' (attempt to write a readonly database)" in error
+    assert "delete it" not in error
+
+
+def test_new_database_passes_the_write_check(db_path):
+    main.setup_database(_AssetsOn())
+
+    with sqlite3.connect(db_path) as conn:
+        assert conn.execute("SELECT version_num FROM alembic_version").fetchone()[0] == _head()
+
+
+def test_another_reader_holding_the_database_open_doesnt_stop_startup(db_path):
+    _start_and_stop(db_path)
+    reader = sqlite3.connect(db_path, isolation_level=None)
+    reader.execute("BEGIN")
+    reader.execute("SELECT count(*) FROM alembic_version").fetchone()
+    try:
+        main.setup_database(_AssetsOn())
+    finally:
+        reader.close()
 
 
 def test_file_held_open_by_another_process_on_windows(monkeypatch, db_path, caplog):
@@ -330,3 +373,28 @@ def _revision(path):
 
 def _head():
     return ScriptDirectory(str(Path(main.__file__).parent / "alembic_db")).get_current_head()
+
+
+class _UnquotedURL:
+    """SQLAlchemy 2.0's URL rendering: the database path goes in as is."""
+
+    @staticmethod
+    def create(drivername, database):
+        return types.SimpleNamespace(render_as_string=lambda: f"{drivername}:///{database}")
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="? isn't allowed in Windows paths")
+def test_question_mark_in_the_default_path_stops_startup_on_older_sqlalchemy(tmp_path, monkeypatch, db_path, caplog):
+    user_dir = tmp_path / "what?"
+    monkeypatch.setattr(db_module.args, "database_url", None)
+    monkeypatch.setattr(db_module, "get_legacy_default_db_path", lambda: None)
+    monkeypatch.setattr(folder_paths, "get_user_directory", lambda: str(user_dir))
+    monkeypatch.setattr(db_module, "URL", _UnquotedURL)
+
+    error = _startup_error(caplog, kind="path_unsupported")
+
+    assert f"The asset database path '{user_dir / 'comfyui.db'}' contains a '?'" in error
+    assert "upgrade SQLAlchemy to 2.1 or newer" in error
+    assert 'pip install -U "SQLAlchemy>=2.1"' in error
+    assert "ASSETS_STARTUP_FAILED: path_unsupported" in error
+    assert not (tmp_path / "what").exists()

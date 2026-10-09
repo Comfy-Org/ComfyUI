@@ -80,6 +80,10 @@ def get_alembic_config():
     return config
 
 
+class DatabasePathError(ValueError):
+    """The default database path can't be put in a URL by the installed SQLAlchemy."""
+
+
 def get_database_url():
     if args.database_url is not None:
         return args.database_url
@@ -88,7 +92,14 @@ def get_database_url():
 
     db_path = os.path.join(folder_paths.get_user_directory(), "comfyui.db")
     # SQLAlchemy quotes it, so a ? or %xx in the path stays part of the file name.
-    return URL.create("sqlite", database=db_path).render_as_string()
+    url = URL.create("sqlite", database=db_path).render_as_string()
+    if make_url(url).database != db_path:  # SQLAlchemy before 2.1 doesn't quote a ?
+        raise DatabasePathError(
+            f"The asset database path '{db_path}' contains a '?', which the installed SQLAlchemy can't open.\n"
+            "Move the user folder to a path without '?', set --database-url, or upgrade SQLAlchemy to 2.1 or newer "
+            "(Python 3.11+): pip install -U \"SQLAlchemy>=2.1\""
+        )
+    return url
 
 
 def get_legacy_default_db_path():
@@ -273,12 +284,13 @@ def _init_file_db(db_url):
     try:
         copy_legacy_default_db(db_path)
         db_exists = os.path.exists(db_path)
-        if db_exists and _upgrade_pending(db_path):
-            for path in (db_path, db_path + "-wal", db_path + "-shm", db_path + ".bkp"):
-                # Before connecting, backing up and upgrading, each of which would leave read-only copies behind.
-                if os.path.exists(path) and not os.access(path, os.W_OK):
-                    raise PermissionError(errno.EACCES, "Permission denied", path)
+        backup = (db_path + ".bkp",) if db_exists and _upgrade_pending(db_path) else ()
+        for path in (db_path, db_path + "-wal", db_path + "-shm") + backup:
+            # Before connecting, backing up and upgrading, each of which would leave read-only copies behind.
+            if os.path.exists(path) and not os.access(path, os.W_OK):
+                raise PermissionError(errno.EACCES, "Permission denied", path)
         _migrate_and_bind(db_url, db_path, db_exists)
+        _check_writable()
     except Exception:
         _db_lock.release()
         raise
@@ -292,6 +304,15 @@ def _upgrade_pending(db_path):
     except sqlite3.Error:
         return True
     return current is None or current[0] != ScriptDirectory.from_config(get_alembic_config()).get_current_head()
+
+
+def _check_writable():
+    """A read-only database at the current revision opens and reads fine, so write to it once: a no-op."""
+    with WriteSession() as session:
+        connection = session.connection()
+        version = connection.exec_driver_sql("PRAGMA user_version").scalar_one()
+        connection.exec_driver_sql(f"PRAGMA user_version = {int(version)}")
+        session.commit()
 
 
 # NORMAL: commits skip the fsync that held the write lock. A power loss or OS crash can
