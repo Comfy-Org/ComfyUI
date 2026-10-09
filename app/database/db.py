@@ -290,9 +290,10 @@ def _init_file_db(db_url):
 
 
 def _upgrade_pending(db_path):
-    """Whether the stored revision isn't the current one, read without creating side files: immutably
-    after a clean shutdown, when everything is in the main file; through the WAL left by one that wasn't."""
-    mode = "mode=ro" if os.path.exists(db_path + "-wal") else "immutable=1"
+    """Whether the stored revision isn't the current one, read without creating side files: through the
+    WAL a run that didn't shut down left behind, when both its files are there; otherwise immutably."""
+    wal_left = os.path.exists(db_path + "-wal") and os.path.exists(db_path + "-shm")
+    mode = "mode=ro" if wal_left else "immutable=1"
     try:
         with closing(sqlite3.connect(f"file:{pathname2url(db_path)}?{mode}", uri=True)) as conn:
             current = conn.execute("SELECT version_num FROM alembic_version").fetchone()

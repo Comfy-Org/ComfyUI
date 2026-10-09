@@ -6,6 +6,7 @@ from contextlib import closing
 import logging
 import os
 import sqlite3
+import subprocess
 import sys
 from pathlib import Path
 
@@ -209,6 +210,23 @@ def test_read_only_backup_doesnt_matter_after_a_run_that_didnt_shut_down(db_path
     open(db_path + ".bkp", "a").close()
     os.chmod(db_path + ".bkp", 0o444)
 
+    main.setup_database(_AssetsOn())
+
+
+@pytest.mark.skipif(sys.platform == "win32" or os.geteuid() == 0, reason="needs POSIX permissions enforced")
+def test_read_only_database_with_a_wal_but_no_shm_gets_no_side_file(db_path, caplog):
+    command.upgrade(db_module.get_alembic_config(), "0006_add_loader_path")
+    # A run that didn't shut down: its last write is still in the WAL.
+    script = "import sqlite3, sys, os; c = sqlite3.connect(sys.argv[1]); c.execute('PRAGMA journal_mode=WAL');" \
+             " c.execute('PRAGMA wal_autocheckpoint=0'); c.execute('CREATE TABLE unfinished (x)'); c.commit(); os._exit(0)"
+    subprocess.run([sys.executable, "-c", script, db_path], check=True)
+    os.remove(db_path + "-shm")
+    os.chmod(db_path, 0o444)
+
+    _startup_error(caplog, kind="not_writable")
+
+    assert not os.path.exists(db_path + "-shm")
+    os.chmod(db_path, 0o644)
     main.setup_database(_AssetsOn())
 
 
