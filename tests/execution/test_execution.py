@@ -268,15 +268,27 @@ def _list_output_files_on_disk(output_dir):
     return disk_paths
 
 
+def _first_fatal_log_excerpt(server_output, prefixes, context_lines=30):
+    # The server output tail usually ends long after the failure, so quote the
+    # first matching line and the traceback that follows it.
+    lines = server_output.splitlines()
+    for index, line in enumerate(lines):
+        if any(prefix in line for prefix in prefixes):
+            return "\n".join(lines[index:index + context_lines])
+    return ""
+
+
 def _assert_no_fatal_asset_logs(capture_path):
     server_output = capture_path.read_text(encoding="utf-8", errors="replace")
     matched_prefixes = [
         prefix for prefix in ASSET_FATAL_LOG_PREFIXES if prefix in server_output
     ]
     if matched_prefixes:
+        excerpt = _first_fatal_log_excerpt(server_output, matched_prefixes)
         raise AssertionError(
             "Asset health check fatal-log failure: "
-            f"matched prefixes={matched_prefixes!r}"
+            f"matched prefixes={matched_prefixes!r}\n"
+            f"First match:\n{excerpt}"
         )
 
 
@@ -482,8 +494,7 @@ class TestExecution:
         { "extra_args" : ["--cache-classic"], "should_cache_results" : True },
         { "extra_args" : ["--cache-lru", 100], "should_cache_results" : True },
         { "extra_args" : ["--cache-none"], "should_cache_results" : False },
-        # TODO: re-enable once the --enable-assets execution runs stop flaking.
-        # {"extra_args": ["--enable-assets"], "should_cache_results": True, "assets": True},
+        {"extra_args": ["--enable-assets"], "should_cache_results": True, "assets": True},
     ])
     def server(self, args_pytest, request, tmp_path_factory):
         # Start server
