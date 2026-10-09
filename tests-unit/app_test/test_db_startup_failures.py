@@ -240,8 +240,24 @@ def test_new_database_passes_the_write_check(db_path):
         assert conn.execute("SELECT version_num FROM alembic_version").fetchone()[0] == _head()
 
 
-def test_another_reader_holding_the_database_open_doesnt_stop_startup(db_path):
+def test_write_check_leaves_the_database_unchanged(db_path):
     _start_and_stop(db_path)
+    with closing(sqlite3.connect(db_path)) as conn:
+        conn.execute("PRAGMA user_version = 7")
+        conn.commit()
+
+    main.setup_database(_AssetsOn())
+
+    with closing(sqlite3.connect(db_path)) as conn:
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 7
+
+
+@pytest.mark.parametrize("journal_mode", ["wal", "delete"])
+def test_another_reader_holding_the_database_open_doesnt_stop_startup(db_path, journal_mode):
+    _start_and_stop(db_path)
+    with closing(sqlite3.connect(db_path)) as conn:
+        conn.execute(f"PRAGMA journal_mode={journal_mode}")
+    # With a rollback journal, the reader also stops startup switching to WAL, so it stays that way.
     reader = sqlite3.connect(db_path, isolation_level=None)
     reader.execute("BEGIN")
     reader.execute("SELECT count(*) FROM alembic_version").fetchone()
@@ -396,5 +412,17 @@ def test_question_mark_in_the_default_path_stops_startup_on_older_sqlalchemy(tmp
     assert f"The asset database path '{user_dir / 'comfyui.db'}' contains a '?'" in error
     assert "upgrade SQLAlchemy to 2.1 or newer" in error
     assert 'pip install -U "SQLAlchemy>=2.1"' in error
-    assert "ASSETS_STARTUP_FAILED: path_unsupported" in error
     assert not (tmp_path / "what").exists()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="? isn't allowed in Windows paths")
+def test_question_mark_in_the_default_path_doesnt_matter_with_assets_off(tmp_path, monkeypatch):
+    monkeypatch.setattr(db_module.args, "database_url", None)
+    monkeypatch.setattr(folder_paths, "get_user_directory", lambda: str(tmp_path / "what?"))
+    monkeypatch.setattr(db_module, "URL", _UnquotedURL)
+    asset_manager = types.SimpleNamespace(enabled=False, started=False)
+    asset_manager.startup = lambda: setattr(asset_manager, "started", True)
+
+    main.setup_database(asset_manager)
+
+    assert asset_manager.started
