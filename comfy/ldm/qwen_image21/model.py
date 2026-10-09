@@ -62,7 +62,7 @@ class SwiGLUFeedForward(nn.Module):
 
     def forward(self, x):
         if self.fused:
-            return self.out(self.gate_up(x), input_act="swiglu")
+            return comfy.ops.linear_input_act(self.out, self.gate_up(x), "swiglu")
         return self.out(F.silu(self.gate_layer(x)) * self.proj(x))
 
 
