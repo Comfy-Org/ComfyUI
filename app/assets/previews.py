@@ -14,7 +14,6 @@ from dataclasses import dataclass
 
 import av
 import numpy as np
-import torch
 from PIL import Image
 
 import folder_paths
@@ -27,11 +26,11 @@ from comfy_execution.preview_generators import (
     PREVIEW_MAX_PIXELS,
     get_preview_generator,
     linear_to_preview,
-    preview_deadline_seconds,
     set_core_preview_generator,
     submit_preview_job,
 )
 
+PREVIEW_DEADLINE_SECONDS = 5.5
 # Uploads only: a decode costs ~30 MB per MP, and running out of memory can't be caught.
 PREVIEW_MAX_SOURCE_PIXELS = 17_000_000
 _ENCODABLE_MODES = frozenset({"RGB", "RGBA", "L", "LA", "P"})
@@ -57,6 +56,8 @@ def _decode_for_preview(path: str, max_pixels: int) -> Image.Image:
         rgb = np.repeat(frame.to_ndarray(format="grayf32le")[..., None], 3, axis=-1)
     else:
         rgb = frame.to_ndarray(format="gbrpf32le")
+    import torch  # not at import time: this module loads before main.py configures CUDA's allocator
+
     return linear_to_preview(torch.from_numpy(rgb), max_pixels)
 
 
@@ -159,73 +160,50 @@ def _format(path: str) -> str:
 
 
 async def generate_upload_preview(asset_id: str, path: str | None, preview_id: str | None) -> str | None:
-    """The preview_id an upload ends with: the one it has, else one generated now if possible."""
+    """The preview_id an upload ends with: the one it has, else one generated now if possible.
+
+    Waits at most ``PREVIEW_DEADLINE_SECONDS``. A preview not ready by then is dropped and
+    logged as a timeout: it never gets stored, and nothing of it is kept.
+    """
     if preview_id is not None or not path or not has_preview_generator(path):
         return preview_id
+    started = time.monotonic()
     try:
-        return (await generate_previews([(asset_id, path)], "upload")).get(asset_id)
+        future = submit_preview_job(lambda: _generate(path))
+        try:
+            result = await asyncio.wait_for(asyncio.wrap_future(future), PREVIEW_DEADLINE_SECONDS)
+        except asyncio.TimeoutError:
+            _emit_failed(path, "timeout")
+            return None
+        return _store_result(asset_id, path, result, started)
     except Exception:
         logging.warning("Preview generation failed for upload %s", asset_id, exc_info=True)
         return None
 
 
-def _emit_failed(path: str, source: str, reason: str) -> None:
-    emit("previews.generation_failed", format=_format(path), reason=reason, source=source)
+def _emit_failed(path: str, reason: str) -> None:
+    emit("previews.generation_failed", format=_format(path), reason=reason, source="upload")
 
 
-def _emit_error(path: str, source: str, reason: str, exc: BaseException) -> None:
-    emit("previews.generation_failed", format=_format(path), reason=reason, source=source, error_type=error_type(exc))
+def _emit_error(path: str, reason: str, exc: BaseException) -> None:
+    emit("previews.generation_failed", format=_format(path), reason=reason, source="upload", error_type=error_type(exc))
 
 
-def _store_result(parent_id: str, path: str, source: str, result, started: float) -> str | None:
+def _store_result(parent_id: str, path: str, result, started: float) -> str | None:
     if result is None:
         return None
     if isinstance(result, _Failed):
         if result.exc is None:
-            _emit_failed(path, source, result.reason)
+            _emit_failed(path, result.reason)
         else:
-            _emit_error(path, source, result.reason, result.exc)
+            _emit_error(path, result.reason, result.exc)
         return None
     webp, width, height = result
     try:
         preview_id = _store_and_link(parent_id, webp, width, height)
     except Exception as exc:
-        _emit_error(path, source, "write_failed", exc)
+        _emit_error(path, "write_failed", exc)
         return None
     if preview_id is not None:
-        emit("previews.generated", format=_format(path), source=source, elapsed_ms=int((time.monotonic() - started) * 1000))
+        emit("previews.generated", format=_format(path), source="upload", elapsed_ms=int((time.monotonic() - started) * 1000))
     return preview_id
-
-
-async def generate_previews(parents: list[tuple[str, str]], source: str) -> dict[str, str]:
-    """Make, store and link previews for (asset id, path) pairs; returns asset id -> preview id.
-
-    Waits at most ``preview_deadline_seconds(len(parents))``. Anything not stored by then
-    is dropped and logged as a timeout: it never gets a preview, and nothing of it is kept.
-    """
-    if not parents:
-        return {}
-    started = time.monotonic()
-    deadline = started + preview_deadline_seconds(len(parents))
-    futures = {submit_preview_job(lambda p=path: _generate(p)): (parent_id, path) for parent_id, path in parents}
-    waiting = {asyncio.wrap_future(f): f for f in futures}
-    linked: dict[str, str] = {}
-    # Store each preview as it finishes, so one slow file never costs the others theirs.
-    while waiting and time.monotonic() < deadline:
-        done, _ = await asyncio.wait(waiting, timeout=deadline - time.monotonic(), return_when=asyncio.FIRST_COMPLETED)
-        for wrapped in done:
-            parent_id, path = futures[waiting.pop(wrapped)]
-            if time.monotonic() > deadline:
-                _emit_failed(path, source, "timeout")
-                continue
-            try:
-                result = wrapped.result()
-            except Exception as exc:
-                result = _Failed("encode_failed", exc)
-            preview_id = _store_result(parent_id, path, source, result, started)
-            if preview_id is not None:
-                linked[parent_id] = preview_id
-    for future in waiting.values():
-        future.cancel()
-        _emit_failed(futures[future][1], source, "timeout")
-    return linked

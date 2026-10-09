@@ -1,6 +1,6 @@
+from contextlib import nullcontext
 import asyncio
 from fractions import Fraction
-from concurrent.futures import Future
 import os
 import threading
 import time
@@ -165,11 +165,11 @@ def test_a_generated_preview_is_stored_tagged_and_linked(session, mock_create_se
     caplog.set_level("INFO")
     parent = _parent(session, write_exr(tmp_path / "frame.exr", 64, 48))
 
-    linked = asyncio.run(previews.generate_previews([(parent.id, str(tmp_path / "frame.exr"))], "output"))
+    linked = asyncio.run(previews.generate_upload_preview(parent.id, str(tmp_path / "frame.exr"), None))
 
     session.expire_all()
     preview_id = session.get(Asset, parent.id).preview_id
-    assert linked == {parent.id: preview_id}
+    assert linked == preview_id is not None
     preview = session.get(Asset, preview_id)
     assert fetch_record_tags(session, preview.id) == ["preview"]
     assert preview.mime_type == "image/webp"
@@ -183,9 +183,9 @@ def test_a_parent_deleted_before_storing_leaves_nothing_behind(session, mock_cre
     session.delete(parent)
     session.commit()
 
-    linked = asyncio.run(previews.generate_previews([(parent.id, str(tmp_path / "frame.exr"))], "upload"))
+    linked = asyncio.run(previews.generate_upload_preview(parent.id, str(tmp_path / "frame.exr"), None))
 
-    assert linked == {}
+    assert linked is None
     assert not any(previews_dir.glob("*")) if previews_dir.exists() else True
     assert session.scalars(select(Asset).where(Asset.mime_type == "image/webp")).first() is None
     assert not _events(caplog, "previews.generation_failed"), "a gone parent is not a failure"
@@ -197,9 +197,9 @@ def test_a_preview_set_while_generating_is_kept(session, mock_create_session, pr
     parent.preview_id = chosen.id  # a client's PUT landed first
     session.commit()
 
-    linked = asyncio.run(previews.generate_previews([(parent.id, str(tmp_path / "frame.exr"))], "upload"))
+    linked = asyncio.run(previews.generate_upload_preview(parent.id, str(tmp_path / "frame.exr"), None))
 
-    assert linked == {}
+    assert linked is None
     session.expire_all()
     assert session.get(Asset, parent.id).preview_id == chosen.id
     assert not previews_dir.exists() or not any(previews_dir.iterdir())
@@ -235,87 +235,22 @@ def test_a_slow_generator_does_not_hold_the_caller_past_the_deadline(session, mo
     try:
         with (
             patch.object(previews, "preview_mime_type", lambda path: "image/x-test-slow"),
-            patch.object(previews, "preview_deadline_seconds", lambda count: 0.3),
+            patch.object(previews, "PREVIEW_DEADLINE_SECONDS", 0.3),
         ):
             started = time.monotonic()
-            linked = asyncio.run(previews.generate_previews([(parent.id, str(source))], "output"))
+            linked = asyncio.run(previews.generate_upload_preview(parent.id, str(source), None))
             waited = time.monotonic() - started
             assert sleeper.finished.wait(5)
             time.sleep(0.1)
     finally:
         preview_generators.unregister_preview_generator(sleeper)
 
-    assert linked == {}
+    assert linked is None
     assert waited < 1.0, "the deadline, not the generator, decides when the caller moves on"
     assert not previews_dir.exists() or not any(previews_dir.iterdir()), "a late result is never stored"
     session.expire_all()
     assert session.get(Asset, parent.id).preview_id is None
     assert any("reason=timeout" in e for e in _events(caplog, "previews.generation_failed"))
-
-
-def _sources(tmp_path, session, mime_types):
-    paths = []
-    for i, mime_type in enumerate(mime_types):
-        path = tmp_path / f"source{i}.tst"
-        path.write_bytes(b"x")
-        paths.append(path)
-    mimes = {str(p): m for p, m in zip(paths, mime_types)}
-    parents = [_parent(session, p, mime_type=m) for p, m in zip(paths, mime_types)]
-    return [(parent.id, str(path)) for parent, path in zip(parents, paths)], mimes
-
-
-def test_storing_stops_when_the_deadline_passes(session, mock_create_session, previews_dir, tmp_path, caplog):
-    caplog.set_level("INFO")
-    items, mimes = _sources(tmp_path, session, ["image/x-test-fast"] * 2)
-    store = previews._store_and_link
-
-    def slow_store(*args):
-        time.sleep(0.4)
-        return store(*args)
-
-    def run_inline(fn):
-        # Both results are ready before the first wait, so one wait returns both.
-        future = Future()
-        future.set_result(fn())
-        return future
-
-    instant = _Instant()
-    preview_generators.register_preview_generator(instant)
-    try:
-        with (
-            patch.object(previews, "preview_mime_type", lambda path: mimes.get(path)),
-            patch.object(previews, "preview_deadline_seconds", lambda count: 0.3),
-            patch.object(previews, "_store_and_link", slow_store),
-            patch.object(previews, "submit_preview_job", run_inline),
-        ):
-            started = time.monotonic()
-            linked = asyncio.run(previews.generate_previews(items, "output"))
-            waited = time.monotonic() - started
-    finally:
-        preview_generators.unregister_preview_generator(instant)
-
-    assert len(linked) == 1, "the store already under way finishes; nothing starts after the deadline"
-    assert waited < 0.8, "at most one store runs past the deadline"
-    assert sum("reason=timeout" in e for e in _events(caplog, "previews.generation_failed")) == 1
-
-
-def test_one_slow_file_does_not_cost_the_others_their_previews(session, mock_create_session, previews_dir, tmp_path):
-    items, mimes = _sources(tmp_path, session, ["image/x-test-fast", "image/x-test-slow"])
-    instant, sleeper = _Instant(), _Sleeper(1.0)
-    for g in (instant, sleeper):
-        preview_generators.register_preview_generator(g)
-    try:
-        with (
-            patch.object(previews, "preview_mime_type", lambda path: mimes.get(path)),
-            patch.object(previews, "preview_deadline_seconds", lambda count: 0.4),
-        ):
-            linked = asyncio.run(previews.generate_previews(items, "output"))
-            assert sleeper.finished.wait(5)
-    finally:
-        for g in (instant, sleeper):
-            preview_generators.unregister_preview_generator(g)
-
-    assert list(linked) == [items[0][0]], "the fast file is stored as soon as it finishes"
 
 
 def test_the_event_loop_keeps_running_while_previews_generate(session, mock_create_session, previews_dir, tmp_path):
@@ -326,16 +261,15 @@ def test_the_event_loop_keeps_running_while_previews_generate(session, mock_crea
     preview_generators.register_preview_generator(sleeper)
 
     async def scenario():
-        ticks = 0
+        ticks = []
 
         async def tick():
-            nonlocal ticks
             while True:
-                ticks += 1
+                ticks.append(time.monotonic())
                 await asyncio.sleep(0.01)
 
         ticker = asyncio.create_task(tick())
-        await previews.generate_previews([(parent.id, str(source))], "output")
+        await previews.generate_upload_preview(parent.id, str(source), None)
         ticker.cancel()
         return ticks
 
@@ -345,7 +279,8 @@ def test_the_event_loop_keeps_running_while_previews_generate(session, mock_crea
     finally:
         preview_generators.unregister_preview_generator(sleeper)
 
-    assert ticks >= 20, "an async node pending in the same loop must not stall while previews generate"
+    gaps = [b - a for a, b in zip(ticks, ticks[1:])]
+    assert ticks[-1] - ticks[0] >= 0.4 and max(gaps) < 0.25, "the loop keeps running while a preview generates"
 
 
 class _Raises:
@@ -377,14 +312,12 @@ def test_a_raising_generator_is_logged_and_a_declining_one_is_not(session, mock_
         preview_generators.register_preview_generator(g)
     try:
         with patch.object(previews, "preview_mime_type", lambda path: mimes.get(path)):
-            linked = asyncio.run(
-                previews.generate_previews([(parents[0].id, str(raising)), (parents[1].id, str(declining))], "upload")
-            )
+            linked = [asyncio.run(previews.generate_upload_preview(p.id, str(path), None)) for p, path in zip(parents, (raising, declining))]
     finally:
         for g in generators:
             preview_generators.unregister_preview_generator(g)
 
-    assert linked == {}
+    assert linked == [None, None]
     failed = _events(caplog, "previews.generation_failed")
     assert len(failed) == 1, "declining is a normal answer, not a failure"
     assert "reason=decode_failed" in failed[0] and "format=other" in failed[0]
@@ -464,29 +397,64 @@ def test_previews_live_beside_the_other_roots_by_default():
 
 
 def test_a_job_still_queued_at_the_deadline_never_runs(session, mock_create_session, previews_dir, tmp_path):
-    slow = [_Sleeper(0.8) for _ in range(preview_generators.PREVIEW_WORKERS)]
+    release = threading.Event()
+    busy = [preview_generators.submit_preview_job(lambda: release.wait(5)) for _ in range(preview_generators.PREVIEW_WORKERS)]
+    source = tmp_path / "queued.tst"
+    source.write_bytes(b"x")
+    parent = _parent(session, source, mime_type="image/x-test-fast")
     queued = _Instant()
     calls = []
     queued.generate = lambda *args: calls.append(args) or Image.new("RGB", (4, 4))
-    mimes = [f"image/x-test-slow{i}" for i in range(len(slow))] + ["image/x-test-fast"]
-    for sleeper, mime in zip(slow, mimes):
-        sleeper.mime_types = (mime,)
-    items, by_path = _sources(tmp_path, session, mimes)
-    for g in [*slow, queued]:
-        preview_generators.register_preview_generator(g)
+    preview_generators.register_preview_generator(queued)
     try:
         with (
-            patch.object(previews, "preview_mime_type", lambda path: by_path.get(path)),
-            patch.object(previews, "preview_deadline_seconds", lambda count: 0.2),
+            patch.object(previews, "preview_mime_type", lambda path: "image/x-test-fast"),
+            patch.object(previews, "PREVIEW_DEADLINE_SECONDS", 0.2),
         ):
-            asyncio.run(previews.generate_previews(items, "output"))
-            assert all(s.finished.wait(5) for s in slow)
-            time.sleep(0.2)
+            assert asyncio.run(previews.generate_upload_preview(parent.id, str(source), None)) is None
     finally:
-        for g in [*slow, queued]:
-            preview_generators.unregister_preview_generator(g)
+        release.set()
+        for future in busy:
+            future.result(timeout=5)
+        time.sleep(0.2)
+        preview_generators.unregister_preview_generator(queued)
 
     assert calls == [], "a job cancelled before a worker reached it is skipped"
+
+
+class _Float:
+    mime_types = ("image/x-test-float",)
+
+    def generate(self, source_path, max_pixels):
+        return Image.new("F", (4, 4))
+
+
+@pytest.mark.parametrize(
+    ("generator", "store_fails", "reason"),
+    [(_Float(), False, "encode_failed"), (_Instant(), True, "write_failed")],
+)
+def test_encode_and_write_failures_are_logged_and_leave_no_preview(session, mock_create_session, previews_dir, tmp_path, caplog, generator, store_fails, reason):
+    caplog.set_level("INFO")
+    source = tmp_path / "frame.tst"
+    source.write_bytes(b"x")
+    parent = _parent(session, source, mime_type=generator.mime_types[0])
+    preview_generators.register_preview_generator(generator)
+    try:
+        with (
+            patch.object(previews, "preview_mime_type", lambda path: generator.mime_types[0]),
+            patch.object(previews, "_store_and_link", side_effect=OSError("disk")) if store_fails else nullcontext(),
+        ):
+            assert asyncio.run(previews.generate_upload_preview(parent.id, str(source), None)) is None
+    finally:
+        preview_generators.unregister_preview_generator(generator)
+
+    failed = _events(caplog, "previews.generation_failed")
+    assert len(failed) == 1 and f"reason={reason}" in failed[0]
+
+
+def test_an_upload_preview_that_cannot_start_is_no_preview(tmp_path, exr_mime):
+    with patch.object(previews, "submit_preview_job", side_effect=RuntimeError("no workers")):
+        assert asyncio.run(previews.generate_upload_preview("id", str(write_exr(tmp_path / "a.exr", 4, 4)), None)) is None
 
 
 @pytest.mark.parametrize(

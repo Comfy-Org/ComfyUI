@@ -130,7 +130,7 @@ class ComfyAPI_latest(ComfyAPIBase):
 
             await ComfyAPI().previews.register_generator(TiffPreview())
         """
-        from ._previews import PreviewGenerator, PREVIEW_FORMATS
+        from ._previews import PreviewGenerator
 
         async def register_generator(self, generator: "ComfyAPI_latest.Previews.PreviewGenerator") -> None:
             """Register a generator for its mime_types, replacing any earlier one, Core's included."""

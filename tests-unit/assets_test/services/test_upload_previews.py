@@ -91,6 +91,39 @@ async def test_a_type_with_a_generator_never_falls_back_to_itself(mock_create_se
     assert asset.get("preview_url") is None
 
 
+class _TgaPreview(Previews.PreviewGenerator):
+    """A custom node's generator, registered the way the public docstring says."""
+
+    mime_types = ("image/x-test-tga",)
+
+    def generate(self, source_path, max_pixels):
+        return Image.new("RGB", (6, 4), (0, 128, 255))
+
+
+@pytest.mark.asyncio
+async def test_an_upload_of_a_custom_type_gets_the_registered_generators_preview(mock_create_session, roots):
+    import mimetypes
+
+    from comfy_api.latest import ComfyAPI
+
+    generator = _TgaPreview()
+    mimetypes.add_type("image/x-test-tga", ".testtga")
+    await ComfyAPI().previews.register_generator(generator)
+    try:
+        async with await _client(AssetsEnabled(_Args())) as client:
+            resp = await client.post("/upload/image", data=_form("frame.testtga", b"tga bytes"))
+            asset = (await resp.json())["asset"]
+            preview = await client.get(asset["preview_url"])
+            size = Image.open(io.BytesIO(await preview.read())).size
+    finally:
+        await ComfyAPI().previews.unregister_generator(generator)
+        mimetypes.types_map.pop(".testtga", None)
+
+    assert asset["preview_id"] not in (None, asset["id"])
+    assert asset["preview_url"] == f"/api/assets/{asset['preview_id']}/content"
+    assert size == (6, 4)
+
+
 @pytest.mark.asyncio
 async def test_mask_upload_still_answers_with_json(mock_create_session, roots):
     (roots / "input" / "base.png").write_bytes(_png())
@@ -120,9 +153,9 @@ async def test_a_preview_the_client_already_set_is_kept(tmp_path):
     init_mime_types()
     exr = write_exr(tmp_path / "frame.exr", 8, 8)
 
-    with patch("app.assets.previews.generate_previews") as generate:
+    with patch("app.assets.previews.submit_preview_job") as submit:
         assert await generate_upload_preview("asset-id", str(exr), "client-preview") == "client-preview"
-    generate.assert_not_called()
+    submit.assert_not_called()
 
 
 @pytest.mark.asyncio

@@ -50,7 +50,7 @@ VALID_VALUES: dict[str, list[object]] = {
     "site": ["discovery", "enrich"],
     "format": ["exr", "other"],
     "reason": ["too_large", "decode_failed", "encode_failed", "write_failed", "timeout"],
-    "source": ["upload", "output"],
+    "source": ["upload"],
 }
 
 

@@ -33,7 +33,7 @@ def dirs(tmp_path, monkeypatch):
     folder_paths.set_output_directory(str(tmp_path / "output"))
     folder_paths.set_previews_directory(str(tmp_path / "previews"))
     (tmp_path / "output").mkdir()
-    monkeypatch.setattr(args, "enable_assets", True)
+    monkeypatch.setattr(nodes_images.PromptServer, "instance", SimpleNamespace(asset_manager=SimpleNamespace(enabled=True)), raising=False)
     monkeypatch.setattr(args, "disable_metadata", True)
     monkeypatch.setattr(SaveImageAdvanced, "hidden", SimpleNamespace(prompt=None, extra_pnginfo=None), raising=False)
     yield tmp_path
@@ -81,7 +81,7 @@ def test_a_gray_exr_gets_an_rgb_preview(dirs, shape):
 
 
 def test_with_assets_off_no_preview_is_written(dirs, monkeypatch):
-    monkeypatch.setattr(args, "enable_assets", False)
+    monkeypatch.setattr(nodes_images.PromptServer.instance.asset_manager, "enabled", False)
 
     entry = _save(torch.full((1, 8, 8, 3), 0.5))[0]
 

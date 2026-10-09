@@ -67,7 +67,7 @@ ALLOWED_EVENTS = frozenset({
 })
 PREVIEW_SOURCE_FORMATS = frozenset({"exr", "other"})
 PREVIEW_FAILURE_REASONS = frozenset({"too_large", "decode_failed", "encode_failed", "write_failed", "timeout"})
-PREVIEW_SOURCES = frozenset({"upload", "output"})
+PREVIEW_SOURCES = frozenset({"upload"})
 
 
 class EventLogError(ValueError):

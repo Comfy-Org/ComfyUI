@@ -87,9 +87,9 @@ def _extract_system_metadata_sync(
 
 
 def _live_sibling_preview_id(session: Session, content_id: str) -> str | None:
-    """A generated preview another record of the same content has, if its file is still there.
+    """A ``preview``-tagged preview another record of the same content has, if its file is still there.
 
-    Only ``preview``-tagged previews: a preview someone nominated by hand is theirs, not the bytes'.
+    A preview tagged otherwise was nominated by hand for that record, not made for the bytes.
     """
     preview = aliased(Asset)
     preview_content = aliased(AssetContent)

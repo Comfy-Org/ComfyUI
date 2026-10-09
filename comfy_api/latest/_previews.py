@@ -4,10 +4,6 @@ from typing import TYPE_CHECKING, ClassVar
 if TYPE_CHECKING:
     from PIL import Image
 
-# Every preview Core generates is one of these: Core encodes generator output itself.
-PREVIEW_FORMATS = frozenset({"image/jpeg", "image/png", "image/webp", "image/gif"})
-
-
 class PreviewGenerator(ABC):
     """Makes a browser-displayable preview of an uploaded file of a type browsers can't show.
 

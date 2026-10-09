@@ -1968,7 +1968,7 @@ class SaveImageAdvanced(IO.ComfyNode):
                 f.write(encoded)
 
             entry = {"filename": file, "subfolder": subfolder, "type": "output"}
-            if file_format == "exr" and args.enable_assets:
+            if file_format == "exr" and PromptServer.instance.asset_manager.enabled:
                 asset_preview = _write_asset_preview(image)
                 if asset_preview is not None:
                     entry["asset_preview"] = asset_preview

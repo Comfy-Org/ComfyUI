@@ -7,8 +7,9 @@ from comfy_execution.preview_generators import get_preview_generator
 # What a client can render from the bytes themselves; anything else needs a nominated preview.
 PREVIEWABLE_MIME_PREFIXES = ("image/", "video/", "audio/", "text/")
 
-# Images browsers can't display. Matched by extension too, since hosts differ on .hdr.
-_NEVER_SELF_EXTENSIONS = frozenset({".exr", ".hdr"})
+# Images browsers can't display. Matched by extension too, since hosts differ on .hdr;
+# .exr is covered by Core's EXR generator.
+_NEVER_SELF_EXTENSIONS = frozenset({".hdr"})
 _NEVER_SELF_MIME_TYPES = frozenset({"image/x-exr", "image/vnd.radiance"})
 
 

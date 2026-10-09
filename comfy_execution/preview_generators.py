@@ -13,11 +13,11 @@ import threading
 from concurrent.futures import Future
 from typing import TYPE_CHECKING, Any, Callable
 
-import torch
-import torch.nn.functional as F
 from PIL import Image
 
 if TYPE_CHECKING:
+    import torch
+
     from comfy_api.latest._previews import PreviewGenerator
 
 PREVIEW_WORKERS = 2
@@ -58,11 +58,6 @@ def get_preview_generator(mime_type: str | None) -> "PreviewGenerator | None":
     return _registered.get(mime_type) or _core.get(mime_type)
 
 
-def preview_deadline_seconds(count: int) -> float:
-    """How long a caller waits for ``count`` previews before giving up on the rest."""
-    return min(5.0 + 0.5 * count, 30.0)
-
-
 def _work() -> None:
     while True:
         fn, future = _jobs.get()
@@ -87,12 +82,16 @@ def submit_preview_job(fn: Callable[[], Any]) -> Future:
     return future
 
 
-def linear_to_preview(image: torch.Tensor, max_pixels: int = PREVIEW_MAX_PIXELS) -> Image.Image:
+def linear_to_preview(image: "torch.Tensor", max_pixels: int = PREVIEW_MAX_PIXELS) -> Image.Image:
     """An 8-bit sRGB image of a scene-linear (H, W, C) image, at most ``max_pixels``; RGBA if C is 4.
 
     Clamps to [0, 1]. RGBA is straight alpha, averaged weighted by alpha so colour under
     transparent pixels doesn't bleed into the edges.
     """
+    # Imported here: this module loads at startup, before main.py configures CUDA's allocator.
+    import torch
+    import torch.nn.functional as F
+
     if image.ndim == 2:
         image = image.unsqueeze(-1)
     x = torch.nan_to_num(image.float(), nan=0.0, posinf=1.0, neginf=0.0)
