@@ -275,16 +275,7 @@ import comfy.memory_management
 import comfy.model_patcher
 
 
-def dynamic_vram_supported():
-    if comfy.model_management.is_nvidia():
-        return True
-    if comfy.model_management.is_amd():
-        if comfy.model_management.rocm_version >= (7, 14):
-            return True
-    return False
-
-
-if args.enable_dynamic_vram or (enables_dynamic_vram() and dynamic_vram_supported()):
+if args.enable_dynamic_vram or (enables_dynamic_vram() and comfy.model_management.dynamic_vram_supported()):
     if (not args.enable_dynamic_vram) and (comfy.model_management.torch_version_numeric < (2, 8)):
         logging.warning("Unsupported Pytorch detected. DynamicVRAM support requires Pytorch version 2.8 or later (2.12+ is recommended). Falling back to legacy ModelPatcher. VRAM estimates may be unreliable especially on Windows")
     else:
