@@ -1030,7 +1030,7 @@ class VAE:
                 minimax_ops = comfy.ops.disable_weight_init
                 minimax_quant = comfy.utils.detect_layer_quantization(sd, "")
                 if minimax_quant is not None:  # int8+convrot quantized decoder
-                    minimax_ops = comfy.ops.mixed_precision_ops(minimax_quant, dtype if dtype is not None else torch.float16)
+                    minimax_ops = comfy.ops.mixed_precision_ops(minimax_quant, dtype if dtype is not None else torch.float16, full_precision_mm=True)
                 minimax_layers = sum(k.startswith("decoder.transformer_blocks.") and k.endswith(".scale1") for k in sd)
                 self.first_stage_model = comfy.ldm.minimax.vae.MiniMaxH3VideoVAE(operations=minimax_ops, num_layers=minimax_layers)
                 self.latent_channels = 24
