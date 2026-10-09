@@ -203,6 +203,7 @@ def test_read_only_sidecar_file_is_named(db_path, caplog, suffix):
     error = _startup_error(caplog, kind="not_writable")
 
     assert f"ComfyUI can't write '{db_path}{suffix}', beside the asset database '{db_path}'" in error
+    assert "Make that file writable, and start again." in error
 
 
 def _leave_an_unfinished_wal(db_path):
@@ -260,14 +261,16 @@ def test_read_only_database_with_a_wal_but_no_shm_gets_no_side_file(db_path, cap
 
 
 @pytest.mark.skipif(sys.platform == "win32" or os.geteuid() == 0, reason="needs POSIX permissions enforced")
-def test_read_only_wal_left_by_a_run_that_didnt_shut_down_is_named_before_an_upgrade(db_path, caplog):
+@pytest.mark.parametrize("suffix", ["-wal", "-shm"])
+def test_read_only_side_file_left_by_a_run_that_didnt_shut_down_is_named_before_an_upgrade(db_path, caplog, suffix):
     command.upgrade(db_module.get_alembic_config(), "0006_add_loader_path")
     _leave_an_unfinished_wal(db_path)
-    os.chmod(db_path + "-wal", 0o444)
+    assert os.path.exists(db_path + suffix)
+    os.chmod(db_path + suffix, 0o444)
 
     error = _startup_error(caplog, kind="not_writable")
 
-    assert f"[Errno 13] Permission denied: '{db_path}-wal'" in error
+    assert f"ComfyUI can't write '{db_path}{suffix}', beside the asset database '{db_path}'" in error
     assert not os.path.exists(db_path + ".bkp")
 
 
