@@ -10,8 +10,9 @@ import comfy.model_management
 import comfy.model_prefetch
 import comfy.ops
 import comfy_kitchen
+from comfy_kitchen.int8_decode import is_available as int8_decode_is_available
 from comfy.quant_ops import QuantizedTensor
-from comfy.ldm.modules.attention import optimized_attention_for_device
+from comfy.ldm.modules.attention import AttentionTensorContainer, ComfyAttention, optimized_attention_for_device
 from comfy import sd1_clip
 import comfy.text_encoders.qwen_vl
 
@@ -349,6 +350,20 @@ class GatedAttention(nn.Module):
         # QK norms with (1+weight) scaling
         self.q_norm = RMSNorm(self.head_dim, eps=config.rms_norm_eps, add=config.rms_norm_add, device=device, dtype=dtype)
         self.k_norm = RMSNorm(self.head_dim, eps=config.rms_norm_eps, add=config.rms_norm_add, device=device, dtype=dtype)
+        self.comfy_attention = ComfyAttention()
+
+    def kv_cache_type(self, device, dtype):
+        method = self.comfy_attention.method
+        if method == "comfy_kitchen_int8" or method is None and comfy.model_management.comfy_kitchen_attention_enabled():
+            if dtype == torch.bfloat16 and self.head_dim == 256 and int8_decode_is_available(device):
+                return Int8FixedKVCache
+        return FixedKVCache
+
+    def init_kv_cache(self, batch, capacity, device, dtype, shared):
+        cache_type = self.kv_cache_type(device, dtype)
+        if cache_type not in shared:
+            shared[cache_type] = cache_type.shared(batch, device)
+        return cache_type.zeros(batch, self.num_kv_heads, capacity, self.head_dim, device, dtype, shared[cache_type])
 
     def forward(self, x, attention_mask=None, freqs_cis=None, optimized_attention=None, past_key_value=None):
         batch_size, seq_length, _ = x.shape
@@ -372,14 +387,25 @@ class GatedAttention(nn.Module):
 
         # KV cache
         present_key_value = past_key_value
-        if past_key_value is not None and seq_length <= 6 and attention_mask is None:
+        decode = past_key_value is not None and seq_length <= 6 and attention_mask is None
+        if decode:
             past_key_value.write(xk, xv)
+
+        if decode and (isinstance(past_key_value, Int8FixedKVCache) or
+                       self.comfy_attention.method is None and not comfy.model_management.comfy_kitchen_attention_enabled()):
             output = past_key_value.attend(xq, xk, xv)
         else:
-            if past_key_value is not None:
+            if decode:
+                xk, xv = past_key_value.key, past_key_value.value
+                attention_mask = past_key_value.mask(seq_length)
+                optimized_attention = optimized_attention_for_device(x.device)
+            elif past_key_value is not None:
                 xk, xv = past_key_value.append(xk, xv)
             gqa_kwargs = {"enable_gqa": True} if self.num_heads != self.num_kv_heads else {}
-            output = optimized_attention(xq, xk, xv, self.num_heads, mask=attention_mask, skip_reshape=True, **gqa_kwargs)
+            q, k, v = map(AttentionTensorContainer, (xq, xk, xv))
+            del xq, xk, xv
+            output = optimized_attention(q, k, v, self.num_heads, mask=attention_mask, skip_reshape=True,
+                                         preferred_attention=self.comfy_attention, **gqa_kwargs)
 
         output = output * gate.sigmoid()
         return self.o_proj(output), present_key_value
@@ -761,9 +787,7 @@ class Qwen35(BaseLlama, BaseGenerate, torch.nn.Module):
         cap = embeds.shape[1] + max_length + 7
         pkv = self.init_kv_cache(embeds.shape[0], cap, device, dt)
         # repair window: drafting ahead plus a near-full rollback
-        cache_type = self.kv_cache_type()
-        mtp_kv = cache_type.zeros(embeds.shape[0], cfg.num_key_value_heads, cap, cfg.head_dim, device, dt,
-                                 cache_type.shared(embeds.shape[0], device))
+        mtp_kv = self.mtp.layers[0].self_attn.init_kv_cache(embeds.shape[0], cap, device, dt, {})
         head = self.model.lm_head if hasattr(self.model, "lm_head") else self.model.embed_tokens
 
         def verify_logits(x):
@@ -963,14 +987,10 @@ class Qwen35(BaseLlama, BaseGenerate, torch.nn.Module):
             comfy.model_prefetch.cleanup_prefetch_queues()
         return ids
 
-    def kv_cache_type(self):
-        return Int8FixedKVCache if comfy.model_management.comfy_kitchen_attention_enabled() else FixedKVCache
-
     def init_kv_cache(self, batch, max_cache_len, device, execution_dtype):
         model_config = self.model.config
         past_key_values = []
-        cache_type = self.kv_cache_type()
-        shared = cache_type.shared(batch, device)
+        shared = {}
         tracker = LinearKV.deferred_tracker(device)
         for i in range(model_config.num_hidden_layers):
             if model_config.layer_types[i] == "linear_attention":
@@ -989,7 +1009,7 @@ class Qwen35(BaseLlama, BaseGenerate, torch.nn.Module):
                 kv.ctl, kv.ctl_tracker = tracker["ctl"], tracker
                 past_key_values.append(kv)
             else:
-                past_key_values.append(cache_type.zeros(batch, model_config.num_key_value_heads, max_cache_len, model_config.head_dim, device, execution_dtype, shared))
+                past_key_values.append(self.model.layers[i].self_attn.init_kv_cache(batch, max_cache_len, device, execution_dtype, shared))
         return past_key_values
 
 # Tokenizer and Text Encoder Wrappers
