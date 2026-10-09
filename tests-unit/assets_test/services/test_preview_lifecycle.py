@@ -308,3 +308,23 @@ def test_a_preview_under_a_symlinked_previews_directory_is_reclaimed(session, mo
 
     assert not (roots / "previews" / "p.webp").exists()
 
+
+
+def test_the_temp_wipe_reclaims_a_temp_uploads_preview(session, mock_create_session, roots, tmp_path):
+    import folder_paths
+    from app.assets.lifecycle import wipe_temp_db_rows
+
+    saved = folder_paths.get_temp_directory()
+    folder_paths.set_temp_directory(str(tmp_path / "temp"))
+    try:
+        preview_id = _record(session, roots / "previews" / "p.webp", tags=["preview"]).id
+        _record(session, tmp_path / "temp" / "upload.exr", tags=["input"], preview_id=preview_id)
+
+        wipe_temp_db_rows(session)
+        session.commit()
+    finally:
+        folder_paths.set_temp_directory(saved)
+
+    session.expire_all()
+    assert session.get(Asset, preview_id) is None
+    assert not (roots / "previews" / "p.webp").exists()

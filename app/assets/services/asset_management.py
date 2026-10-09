@@ -177,6 +177,17 @@ def _drop_unused_content(session, content_id: str) -> None:
         logging.warning("Could not remove preview file %s", content.path, exc_info=True)
 
 
+def reclaim_preview(session, preview_id: str) -> None:
+    """Delete a Core preview, and its file, once no record links or uses them."""
+    preview = session.get(Asset, preview_id)
+    if preview is None or session.scalar(select(Asset.id).where(Asset.preview_id == preview_id).limit(1)) is not None:
+        return
+    if _is_core_preview(session, preview):
+        content_id = preview.content_id
+        delete_record(session, preview_id)
+        _drop_unused_content(session, content_id)
+
+
 def delete_asset_reference(
     reference_id: str,
 ) -> bool:
@@ -190,12 +201,8 @@ def delete_asset_reference(
         delete_record(session, reference_id)
         if is_core_preview:
             _drop_unused_content(session, content_id)
-        preview = session.get(Asset, preview_id) if preview_id else None
-        unlinked = preview is not None and session.scalar(select(Asset.id).where(Asset.preview_id == preview_id).limit(1)) is None
-        if unlinked and _is_core_preview(session, preview):
-            preview_content_id = preview.content_id
-            delete_record(session, preview_id)
-            _drop_unused_content(session, preview_content_id)
+        if preview_id:
+            reclaim_preview(session, preview_id)
         session.commit()
         return True
 
