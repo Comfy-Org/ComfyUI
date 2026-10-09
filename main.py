@@ -495,7 +495,10 @@ def setup_database(asset_manager):
         init_db()
         asset_manager.startup()
     except Exception as e:
-        stop_startup(*database_failure_message(e, get_database_url()))
+        failure, message = database_failure_message(e, get_database_url())
+        if failure != "unsupported_url":  # that error repeats the URL, which can carry a password
+            logging.debug("Asset database startup failed", exc_info=True)
+        stop_startup(failure, message)
 
 
 WITHOUT_ASSETS = "Or start ComfyUI without the assets system: --disable-assets"
@@ -507,15 +510,11 @@ def stop_startup(kind, message):
     sys.exit(1)
 
 
-def another_database_url():
-    # Absolute (four slashes on Linux and macOS, which a hand-typed example tends to miss) and quoted for spaces.
-    return f'"sqlite:///{os.path.join(folder_paths.get_user_directory(), "comfyui-2.db")}"'
-
-
 def database_failure_message(error, db_url):
     """The kind of failure that stopped the asset database from opening, and how to fix it."""
     if not (db_url.startswith("sqlite:///") or db_url == "sqlite://"):
-        return "unsupported_url", f"--database-url must start with sqlite:///, like {another_database_url()}\n{WITHOUT_ASSETS}"
+        return "unsupported_url", ("--database-url must start with sqlite:///, like sqlite:///path/to/comfyui.db, "
+                                   f"or be left out to use the default database.\n{WITHOUT_ASSETS}")
     location = get_db_path() if db_url.startswith("sqlite:///") else db_url
     kind = error_kind(error)
     detail = getattr(error, "orig", None) or error
@@ -538,7 +537,8 @@ def database_failure_message(error, db_url):
     elif kind in ("read_only", "unable_to_open") or isinstance(error, OSError):
         failure = "not_writable"
         what = f"ComfyUI can't create, open or write the asset database '{location}' ({detail})."
-        fix = "Make sure its folder is a writable directory and the database path is a writable file, or doesn't exist yet."
+        fix = ("Make sure its folder is a writable directory, the database path is a writable file (or doesn't exist yet), "
+               "and no other program has it open.")
     elif kind == "database_corrupt":
         failure = "corrupt"
         what = f"The asset database '{location}' is corrupt ({detail})."
@@ -551,7 +551,7 @@ def database_failure_message(error, db_url):
                "database and rebuilds the asset catalog by rescanning your files. Run with --verbose DEBUG for the full error.")
     lines = [what, fix]
     if failure in ("in_use", "locked") and args.database_url is None:
-        lines.append(f"Or give this ComfyUI its own database: --database-url {another_database_url()}")
+        lines.append("Or give this ComfyUI its own database: --database-url sqlite:///path/to/another.db")
     return failure, "\n".join(lines + [WITHOUT_ASSETS])
 
 
