@@ -149,7 +149,8 @@ knowledge_base:
         Surface linked-repository findings only when they change a review
         conclusion or provide decision-relevant compatibility, ownership,
         rollout, or merge-order evidence. Continue using the repository as
-        review context, but omit routine search inventories and no-match results.
+        review context, but omit routine search inventories and no-match results
+        that do not provide decision-relevant evidence.
     - repository: "Comfy-Org/comfy-kitchen"
       instructions: |
         Owns optimized inference operations and kernels used by ComfyUI. Check
@@ -158,6 +159,7 @@ knowledge_base:
         Surface linked-repository findings only when they change a review
         conclusion or provide decision-relevant ownership, performance,
         compatibility, or rollout evidence. Continue using the repository as
-        review context, but omit routine search inventories and no-match results.
+        review context, but omit routine search inventories and no-match results
+        that do not provide decision-relevant evidence.
   learnings:
     scope: "auto"
