@@ -101,14 +101,15 @@ def test_corrupt_database(db_path, caplog):
 
 
 @pytest.mark.skipif(sys.platform == "win32" or os.geteuid() == 0, reason="needs POSIX permissions enforced")
-def test_corrupt_read_only_database_is_reported_as_corrupt(db_path, caplog):
+def test_corrupt_read_only_database_is_reported_as_not_writable_then_corrupt(db_path, caplog):
     with open(db_path, "wb") as f:
         f.write(b"not a database" * 1000)
     os.chmod(db_path, 0o444)
 
-    error = _startup_error(caplog, kind="corrupt")
-
-    assert f"The asset database '{db_path}' is corrupt" in error
+    assert f"can't create, open or write the asset database '{db_path}'" in _startup_error(caplog, kind="not_writable")
+    caplog.clear()
+    os.chmod(db_path, 0o644)
+    assert f"The asset database '{db_path}' is corrupt" in _startup_error(caplog, kind="corrupt")
 
 
 def test_database_from_a_newer_comfyui(db_path, caplog):
@@ -204,6 +205,13 @@ def test_read_only_sidecar_file_is_named(db_path, caplog, suffix):
     assert f"ComfyUI can't write '{db_path}{suffix}', beside the asset database '{db_path}'" in error
 
 
+def _leave_an_unfinished_wal(db_path):
+    """A run that didn't shut down: its last write is still in the WAL."""
+    script = "import sqlite3, sys, os; c = sqlite3.connect(sys.argv[1]); c.execute('PRAGMA journal_mode=WAL');" \
+             " c.execute('PRAGMA wal_autocheckpoint=0'); c.execute('CREATE TABLE unfinished (x)'); c.commit(); os._exit(0)"
+    subprocess.run([sys.executable, "-c", script, db_path], check=True)
+
+
 def _start_and_stop(db_path):
     """Open the database the way a previous run would, then let it go."""
     main.setup_database(_AssetsOn())
@@ -240,10 +248,7 @@ def test_read_only_backup_doesnt_matter_after_a_run_that_didnt_shut_down(db_path
 @pytest.mark.skipif(sys.platform == "win32" or os.geteuid() == 0, reason="needs POSIX permissions enforced")
 def test_read_only_database_with_a_wal_but_no_shm_gets_no_side_file(db_path, caplog):
     command.upgrade(db_module.get_alembic_config(), "0006_add_loader_path")
-    # A run that didn't shut down: its last write is still in the WAL.
-    script = "import sqlite3, sys, os; c = sqlite3.connect(sys.argv[1]); c.execute('PRAGMA journal_mode=WAL');" \
-             " c.execute('PRAGMA wal_autocheckpoint=0'); c.execute('CREATE TABLE unfinished (x)'); c.commit(); os._exit(0)"
-    subprocess.run([sys.executable, "-c", script, db_path], check=True)
+    _leave_an_unfinished_wal(db_path)
     os.remove(db_path + "-shm")
     os.chmod(db_path, 0o444)
 
@@ -257,9 +262,7 @@ def test_read_only_database_with_a_wal_but_no_shm_gets_no_side_file(db_path, cap
 @pytest.mark.skipif(sys.platform == "win32" or os.geteuid() == 0, reason="needs POSIX permissions enforced")
 def test_read_only_wal_left_by_a_run_that_didnt_shut_down_is_named_before_an_upgrade(db_path, caplog):
     command.upgrade(db_module.get_alembic_config(), "0006_add_loader_path")
-    script = "import sqlite3, sys, os; c = sqlite3.connect(sys.argv[1]); c.execute('PRAGMA journal_mode=WAL');" \
-             " c.execute('PRAGMA wal_autocheckpoint=0'); c.execute('CREATE TABLE unfinished (x)'); c.commit(); os._exit(0)"
-    subprocess.run([sys.executable, "-c", script, db_path], check=True)
+    _leave_an_unfinished_wal(db_path)
     os.chmod(db_path + "-wal", 0o444)
 
     error = _startup_error(caplog, kind="not_writable")

@@ -116,7 +116,6 @@ def test_legacy_database_copy_runs_under_file_lock(tmp_path, monkeypatch):
     )
     monkeypatch.setattr(db_module, "_migrate_and_bind", lambda *_args: None)
     monkeypatch.setattr(db_module, "_check_writable", lambda: None)
-    monkeypatch.setattr(db_module, "_upgrade_pending", lambda _path: False)  # the copied file isn't a real database
     monkeypatch.setattr(db_module.shutil, "copy", _copy_while_locked)
     monkeypatch.setattr(db_module, "_db_lock", None)
 
