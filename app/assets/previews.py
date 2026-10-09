@@ -7,6 +7,7 @@ import asyncio
 import io
 import mimetypes
 import os
+import threading
 import time
 import uuid
 
@@ -25,6 +26,7 @@ from comfy_execution.preview_tonemap import linear_to_preview
 
 # A decode costs ~30 MB per MP, and running out of memory can't be caught.
 PREVIEW_MAX_SOURCE_PIXELS = 17_000_000
+_DECODE_SLOTS = threading.BoundedSemaphore(2)
 
 
 class PreviewSkipped(Exception):
@@ -50,7 +52,8 @@ def _decode_for_preview(path: str) -> Image.Image:
 
 
 def _make_preview(path: str) -> tuple[bytes, int, int]:
-    image = _decode_for_preview(path)
+    with _DECODE_SLOTS:
+        image = _decode_for_preview(path)
     buffer = io.BytesIO()
     image.save(buffer, format="WEBP", quality=80)
     return buffer.getvalue(), image.width, image.height

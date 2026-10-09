@@ -58,6 +58,21 @@ async def test_an_exr_upload_returns_its_generated_preview(mock_create_session, 
 
 
 @pytest.mark.asyncio
+async def test_a_repeat_upload_of_the_same_exr_reuses_its_preview(mock_create_session, roots, tmp_path):
+    from app.assets import previews
+
+    exr = write_exr(tmp_path / "src.exr", 64, 48).read_bytes()
+    with patch.object(previews, "_make_preview", wraps=previews._make_preview) as make:
+        async with await _client(AssetsEnabled(_Args())) as client:
+            first = (await (await client.post("/upload/image", data=_form("frame.exr", exr))).json())["asset"]
+            second = (await (await client.post("/upload/image", data=_form("frame.exr", exr))).json())["asset"]
+
+    assert second["id"] != first["id"]
+    assert second["preview_id"] == first["preview_id"] is not None
+    assert make.call_count == 1, "the same bytes are decoded once"
+
+
+@pytest.mark.asyncio
 async def test_a_png_upload_is_its_own_preview(mock_create_session, roots):
     async with await _client(AssetsEnabled(_Args())) as client:
         resp = await client.post("/upload/image", data=_form("still.png", _png()))

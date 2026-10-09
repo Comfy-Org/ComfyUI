@@ -271,3 +271,27 @@ def test_an_untagged_asset_in_previews_is_not_cascaded(session, mock_create_sess
 
     session.expire_all()
     assert session.get(Asset, stray_id) is not None, "only Core's own preview records go with their parent"
+
+
+def test_deleting_a_preview_itself_reclaims_its_file(session, mock_create_session, roots):
+    preview = _record(session, roots / "previews" / "p.webp", tags=["preview"])
+    preview_id = preview.id
+    _record(session, roots / "output" / "a.exr", preview_id=preview_id)
+
+    assert delete_asset_reference(preview_id)
+
+    session.expire_all()
+    assert not (roots / "previews" / "p.webp").exists()
+    assert session.query(AssetContent).filter_by(path=str(roots / "previews" / "p.webp")).count() == 0
+
+
+def test_a_preview_file_already_removed_does_not_block_the_delete(session, mock_create_session, roots):
+    preview = _record(session, roots / "previews" / "p.webp", tags=["preview"])
+    parent_id = _record(session, roots / "output" / "a.exr", preview_id=preview.id).id
+    (roots / "previews" / "p.webp").unlink()
+
+    assert delete_asset_reference(parent_id)
+
+    session.expire_all()
+    assert session.get(Asset, parent_id) is None
+

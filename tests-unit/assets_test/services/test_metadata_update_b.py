@@ -78,5 +78,6 @@ async def test_put_rejects_an_asset_as_its_own_preview(session, mock_create_sess
         response = await routes.update_asset_route(request)
 
     assert response.status == 400, "a self-reference makes the record undeletable, so it is refused"
+    assert b"INVALID_BODY" in response.body
     session.expire_all()
     assert session.get(Asset, record.id).preview_id is None

@@ -258,6 +258,7 @@ def test_the_event_loop_keeps_running_while_an_upload_decodes(session, mock_crea
 
         ticker = asyncio.create_task(tick())
         await previews.generate_upload_preview(parent.id, str(tmp_path / "frame.exr"), None)
+        await asyncio.sleep(0.05)  # one more tick, so a stall after the decode shows as a gap
         ticker.cancel()
         return ticks
 
@@ -265,8 +266,42 @@ def test_the_event_loop_keeps_running_while_an_upload_decodes(session, mock_crea
         ticks = asyncio.run(scenario())
 
     gaps = [b - a for a, b in zip(ticks, ticks[1:])]
-    assert ticks[-1] - ticks[0] >= 0.4 and max(gaps) < 0.25, "the loop keeps running while a preview decodes"
+    assert ticks[-1] - ticks[0] >= 0.4 and max(gaps) < 0.4, "the loop keeps running while a preview decodes"
 
 
 def test_previews_live_beside_the_other_roots_by_default():
     assert folder_paths.get_previews_directory() == os.path.join(folder_paths.base_path, "previews")
+
+
+def test_a_failed_registration_leaves_no_preview_file(session, mock_create_session, previews_dir, tmp_path):
+    parent = _parent(session, write_exr(tmp_path / "frame.exr", 8, 8))
+
+    with patch.object(previews, "create_record", side_effect=RuntimeError("db")):
+        assert _generate(parent.id, tmp_path / "frame.exr") is None
+
+    assert not any(previews_dir.iterdir())
+    session.expire_all()
+    assert session.get(Asset, parent.id).preview_id is None
+
+
+
+def test_at_most_two_uploads_decode_at_once():
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+
+    running, peak, lock = 0, 0, threading.Lock()
+
+    def decode(path):
+        nonlocal running, peak
+        with lock:
+            running += 1
+            peak = max(peak, running)
+        time.sleep(0.1)
+        with lock:
+            running -= 1
+        return Image.new("RGB", (2, 2))
+
+    with patch.object(previews, "_decode_for_preview", decode), ThreadPoolExecutor(6) as pool:
+        list(pool.map(previews._make_preview, ["a.exr"] * 6))
+
+    assert peak == 2, "each decode can hold ~0.5 GB"

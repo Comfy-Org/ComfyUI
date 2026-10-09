@@ -55,9 +55,6 @@ if __name__ == "__main__":
     if args.disable_api_nodes:
         logging.warning("--disable-api-nodes is deprecated and will be removed in a future version. It currently behaves like --offline. Use --offline to keep the frontend offline, or --disable-partner-nodes to only disable partner nodes.")
 
-# After cuda_malloc above: the asset previews import torch, which must load after the allocator is set.
-from app.assets.manager import AssetManager, default_asset_manager
-
 faulthandler.enable(file=sys.stderr, all_threads=args.debug_hang)
 if __name__ == "__main__" and args.debug_hang:
     dumping_traceback = False
@@ -266,6 +263,7 @@ import comfy.utils
 
 import execution
 import server
+from app.assets.manager import AssetManager, default_asset_manager  # imports torch, so not before the check above
 from protocol import BinaryEventTypes
 import nodes
 import comfy.model_management

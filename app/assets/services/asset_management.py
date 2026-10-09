@@ -156,17 +156,25 @@ def update_asset_metadata(
     return detail
 
 
-def _unshared_preview(session, preview_id: str) -> Asset | None:
-    """The preview record, if it is one in previews/ that nothing else links."""
-    preview = session.get(Asset, preview_id)
-    if preview is None or "preview" not in fetch_record_tags(session, preview_id):
-        return None
-    content = session.get(AssetContent, preview.content_id)
-    if not Path(content.path).is_relative_to(os.path.abspath(folder_paths.get_previews_directory())):
-        return None
-    if session.scalar(select(Asset.id).where(Asset.preview_id == preview_id).limit(1)) is not None:
-        return None
-    return preview
+def _is_core_preview(session, record: Asset) -> bool:
+    """A preview Core made: tagged ``preview`` and stored under previews/."""
+    if "preview" not in fetch_record_tags(session, record.id):
+        return False
+    path = session.get(AssetContent, record.content_id).path
+    return Path(path).is_relative_to(os.path.abspath(folder_paths.get_previews_directory()))
+
+
+def _drop_unused_content(session, content_id: str) -> None:
+    """Remove a preview's content row and file once no record uses them."""
+    if session.scalar(select(Asset.id).where(Asset.content_id == content_id).limit(1)) is not None:
+        return
+    content = session.get(AssetContent, content_id)
+    session.delete(content)
+    session.flush()
+    try:
+        os.remove(content.path)
+    except OSError:
+        logging.warning("Could not remove preview file %s", content.path, exc_info=True)
 
 
 def delete_asset_reference(
@@ -177,20 +185,17 @@ def delete_asset_reference(
         record = get_record_by_id(session, reference_id)
         if record is None:
             return False
-        preview_id = record.preview_id
+        content_id, preview_id = record.content_id, record.preview_id
+        is_core_preview = _is_core_preview(session, record)
         delete_record(session, reference_id)
-        preview = _unshared_preview(session, preview_id) if preview_id else None
-        if preview is not None:
-            content = session.get(AssetContent, preview.content_id)
-            delete_record(session, preview.id)
-            # Only a file no record still uses; Core never unlinks files outside previews/.
-            if session.scalar(select(Asset.id).where(Asset.content_id == content.id).limit(1)) is None:
-                session.delete(content)
-                session.flush()
-                try:
-                    os.remove(content.path)
-                except OSError:
-                    logging.warning("Could not remove preview file %s", content.path, exc_info=True)
+        if is_core_preview:
+            _drop_unused_content(session, content_id)
+        preview = session.get(Asset, preview_id) if preview_id else None
+        unlinked = preview is not None and session.scalar(select(Asset.id).where(Asset.preview_id == preview_id).limit(1)) is None
+        if unlinked and _is_core_preview(session, preview):
+            preview_content_id = preview.content_id
+            delete_record(session, preview_id)
+            _drop_unused_content(session, preview_content_id)
         session.commit()
         return True
 
