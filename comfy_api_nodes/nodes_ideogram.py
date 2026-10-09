@@ -1,10 +1,14 @@
+import math
+import re
 from io import BytesIO
 from typing_extensions import override
+from comfy.utils import common_upscale
 from comfy_api.latest import IO, ComfyExtension
 from PIL import Image
 import numpy as np
 import torch
 from comfy_api_nodes.apis.ideogram import (
+    Ideogram45Request,
     IdeogramGenerateResponse,
     IdeogramPImageRequest,
     IdeogramV3Request,
@@ -15,8 +19,10 @@ from comfy_api_nodes.util import (
     ApiEndpoint,
     bytesio_to_image_tensor,
     download_url_as_bytesio,
+    download_url_to_image_tensor,
     resize_mask_to_image,
     sync_op,
+    tensor_to_bytesio,
     validate_string,
 )
 
@@ -111,6 +117,56 @@ V3_RESOLUTIONS= [
     "1536x576",
     "1536x640"
 ]
+
+IDEOGRAM_45_GENERATE_PATH = "/proxy/ideogram/v2/image/generate/ideogram-4-5"
+IDEOGRAM_45_PRECISE_EDIT_PATH = "/proxy/ideogram/v2/image/precise-edit/ideogram-4-5"
+IDEOGRAM_45_MODELS = ["ideogram-4.5"]
+IDEOGRAM_45_MAX_IMAGES = 5
+IDEOGRAM_45_MAX_PIXELS = 4194304
+IDEOGRAM_45_MAX_SIDE = 4608
+IDEOGRAM_45_SIZES = [
+    "(2K) 2048x2048 (1:1)",
+    "(2K) 1440x2880 (1:2)",
+    "(2K) 2880x1440 (2:1)",
+    "(2K) 1664x2496 (2:3)",
+    "(2K) 2496x1664 (3:2)",
+    "(2K) 1792x2240 (4:5)",
+    "(2K) 2240x1792 (5:4)",
+    "(2K) 1440x2560 (9:16)",
+    "(2K) 2560x1440 (16:9)",
+    "(2K) 1600x2560 (5:8)",
+    "(2K) 2560x1600 (8:5)",
+    "(2K) 1728x2304 (3:4)",
+    "(2K) 2304x1728 (4:3)",
+    "(2K) 1296x3168 (9:22)",
+    "(2K) 3168x1296 (22:9)",
+    "(2K) 1152x2944 (9:23)",
+    "(2K) 2944x1152 (23:9)",
+    "(2K) 1248x3328 (3:8)",
+    "(2K) 3328x1248 (8:3)",
+    "(2K) 1280x3072 (5:12)",
+    "(2K) 3072x1280 (12:5)",
+    "(2K) 1024x3072 (1:3)",
+    "(2K) 3072x1024 (3:1)",
+    "(1K) 1024x1024 (1:1)",
+    "(1K) 896x1120 (4:5)",
+    "(1K) 1120x896 (5:4)",
+    "(1K) 864x1152 (3:4)",
+    "(1K) 1152x864 (4:3)",
+    "(1K) 832x1248 (2:3)",
+    "(1K) 1248x832 (3:2)",
+    "(1K) 800x1280 (5:8)",
+    "(1K) 1280x800 (8:5)",
+    "(1K) 720x1280 (9:16)",
+    "(1K) 1280x720 (16:9)",
+    "(1K) 720x1440 (1:2)",
+    "(1K) 1440x720 (2:1)",
+]
+IDEOGRAM_45_EDIT_SIZES = [
+    s for s in IDEOGRAM_45_SIZES if all(int(v) % 32 == 0 for v in s.split(" ")[1].split("x"))
+]
+_IMAGE_REF_RE = re.compile(r"@image(?P<idx>\d*)(?!\w)", re.IGNORECASE | re.ASCII)
+
 
 async def download_and_process_images(image_urls):
     """Helper function to download and process multiple images from URLs"""
@@ -663,6 +719,367 @@ class IdeogramPImage(IO.ComfyNode):
         )
 
 
+def _resolve_image_refs(prompt: str, total_images: int) -> str:
+    parts = []
+    pos = 0
+    prev_end = -1
+    for match in _IMAGE_REF_RE.finditer(prompt):
+        start = match.start()
+        if start > 0 and start != prev_end and (prompt[start - 1].isalnum() or prompt[start - 1] == "_"):
+            continue
+        idx = int(match.group("idx") or 1)
+        if not 1 <= idx <= total_images:
+            raise ValueError(
+                f"The prompt references @Image{idx}, but only {total_images} images "
+                f"are connected (a batched input counts once per image)."
+            )
+        parts.append(prompt[pos:start])
+        parts.append(f"image {idx}")
+        pos = match.end()
+        prev_end = match.end()
+    parts.append(prompt[pos:])
+    return "".join(parts)
+
+
+def _ideogram_45_images(model: dict) -> list[torch.Tensor]:
+    images = [image for key in model["images"] for image in model["images"][key]]
+    if len(images) > IDEOGRAM_45_MAX_IMAGES:
+        raise ValueError(
+            f"A maximum of {IDEOGRAM_45_MAX_IMAGES} images is supported; got {len(images)} "
+            f"(a batched input counts once per image)."
+        )
+    for i, image in enumerate(images, start=1):
+        height, width = image.shape[0], image.shape[1]
+        if max(width, height) > 6 * min(width, height):
+            raise ValueError(f"Image {i} is {width}x{height}; its aspect ratio must be between 1:6 and 6:1.")
+    return images
+
+
+def _ideogram_45_image_file(image: torch.Tensor) -> BytesIO:
+    image = image.unsqueeze(0)
+    height, width = image.shape[1], image.shape[2]
+    scale = min(1.0, IDEOGRAM_45_MAX_SIDE / max(width, height), math.sqrt(IDEOGRAM_45_MAX_PIXELS / (width * height)))
+    while True:
+        new_width, new_height = max(1, round(width * scale)), max(1, round(height * scale))
+        if math.ceil(new_width / 32) * math.ceil(new_height / 32) * 1024 <= IDEOGRAM_45_MAX_PIXELS:
+            break
+        scale *= 0.995
+    if (new_width, new_height) != (width, height):
+        image = common_upscale(image.movedim(-1, 1), new_width, new_height, "lanczos", "disabled").movedim(1, -1)
+    return tensor_to_bytesio(image, total_pixels=None, mime_type="image/png")
+
+
+async def _ideogram_45_output(cls: type[IO.ComfyNode], response: IdeogramGenerateResponse) -> torch.Tensor:
+    data = response.data or []
+    urls = [item.url for item in data if item.url]
+    if not urls:
+        if any(item.is_image_safe is False for item in data):
+            raise Exception(
+                "The result was blocked by Ideogram's content safety filter. "
+                "Adjust the prompt or images and try again."
+            )
+        raise Exception("No images were generated in the response")
+    return torch.cat([await download_url_to_image_tensor(url, cls=cls) for url in urls])
+
+
+def _ideogram_45_quality_input(options: list[str]) -> IO.Combo.Input:
+    return IO.Combo.Input(
+        "quality",
+        options=options,
+        default="medium",
+        tooltip="Quality tier. Higher tiers cost more and take longer.",
+    )
+
+
+def _ideogram_45_seed_input(tooltip: str) -> IO.Int.Input:
+    return IO.Int.Input(
+        "seed",
+        default=42,
+        min=0,
+        max=2147483647,
+        step=1,
+        control_after_generate=True,
+        display_mode=IO.NumberDisplay.number,
+        tooltip=tooltip,
+    )
+
+
+def _ideogram_45_edit_inputs(with_size: bool) -> list:
+    inputs = [
+        IO.Autogrow.Input(
+            "images",
+            template=IO.Autogrow.TemplateNames(
+                IO.Image.Input("image"),
+                names=[f"image_{i}" for i in range(1, IDEOGRAM_45_MAX_IMAGES + 1)],
+                min=1,
+            ),
+            tooltip="Image 1 is the image to edit; images 2-5 are optional references. "
+            "Refer to them in the prompt as @Image1, @Image2, ...; a batched input counts once per image.",
+        ),
+        IO.String.Input(
+            "prompt",
+            multiline=True,
+            default="",
+            tooltip="Editing instructions. Supports @Image1-style references to the input images.",
+        ),
+    ]
+    if with_size:
+        inputs.extend(
+            [
+                IO.Combo.Input(
+                    "size",
+                    options=["auto", "source", *IDEOGRAM_45_EDIT_SIZES, "custom"],
+                    default="auto",
+                    tooltip="Output size. 'auto' picks a ~2K canvas from the images and prompt, 'source' keeps "
+                    "the size of image 1 (images above ~4 MP are scaled down first), and a preset with a different "
+                    "aspect ratio recomposes the scene. Select 'custom' to use the width and height below.",
+                ),
+                IO.Int.Input(
+                    "width",
+                    default=2048,
+                    min=256,
+                    max=IDEOGRAM_45_MAX_SIDE,
+                    step=32,
+                    tooltip="Custom output width. Used only when size is set to 'custom'.",
+                ),
+                IO.Int.Input(
+                    "height",
+                    default=2048,
+                    min=256,
+                    max=IDEOGRAM_45_MAX_SIDE,
+                    step=32,
+                    tooltip="Custom output height. Used only when size is set to 'custom'.",
+                ),
+            ]
+        )
+    inputs.extend(
+        [
+            _ideogram_45_quality_input(["very_low", "low", "medium", "high"]),
+            _ideogram_45_seed_input("Seed for generation. The same images, prompt, settings and seed give the same result."),
+        ]
+    )
+    return inputs
+
+
+def _ideogram_45_price_badge() -> IO.PriceBadge:
+    return IO.PriceBadge(
+        depends_on=IO.PriceBadgeDepends(widgets=["model", "model.quality"]),
+        expr="""
+        (
+          $q := $lookup(widgets, "model.quality");
+          {"type": "usd", "usd": $q = "very_low" ? 0.01144 : $q = "low" ? 0.0429 : $q = "high" ? 0.286 : 0.0858}
+        )
+        """,
+    )
+
+
+class IdeogramTextToImageApi(IO.ComfyNode):
+
+    @classmethod
+    def define_schema(cls):
+        return IO.Schema(
+            node_id="IdeogramTextToImageApi",
+            display_name="Ideogram 4.5 Text to Image",
+            category="partner/image/Ideogram",
+            description="Generates images from a text prompt using Ideogram 4.5.",
+            inputs=[
+                IO.DynamicCombo.Input(
+                    "model",
+                    options=[
+                        IO.DynamicCombo.Option(
+                            model_id,
+                            [
+                                IO.String.Input(
+                                    "prompt",
+                                    multiline=True,
+                                    default="",
+                                    tooltip="Text prompt. Also accepts an Ideogram structured JSON caption, "
+                                    "for example a previous final_prompt.",
+                                ),
+                                IO.Combo.Input(
+                                    "size",
+                                    options=["auto", *IDEOGRAM_45_SIZES],
+                                    default="auto",
+                                    tooltip="Output size. 'auto' lets the model pick a canvas that suits the prompt.",
+                                ),
+                                _ideogram_45_quality_input(["low", "medium", "high"]),
+                                IO.Combo.Input(
+                                    "magic_prompt",
+                                    options=["auto", "on", "off"],
+                                    default="auto",
+                                    tooltip="Rewrites the prompt into a detailed structured caption before "
+                                    "generating; 'off' keeps your wording as literal as possible. "
+                                    "The caption is returned as final_prompt.",
+                                    advanced=True,
+                                ),
+                                _ideogram_45_seed_input(
+                                    "Seed for generation. Text-to-image is not reproducible from the seed alone "
+                                    "because the prompt is rewritten on every run; to reproduce an image, reuse "
+                                    "its final_prompt with magic_prompt set to 'off' and the same seed."
+                                ),
+                            ],
+                        )
+                        for model_id in IDEOGRAM_45_MODELS
+                    ],
+                    tooltip="Model to use.",
+                ),
+            ],
+            outputs=[
+                IO.Image.Output(),
+                IO.String.Output(
+                    "final_prompt",
+                    tooltip="The structured caption the image was generated from. Feed it back with "
+                    "magic_prompt set to 'off' and the same seed to reproduce the image.",
+                ),
+            ],
+            hidden=[
+                IO.Hidden.auth_token_comfy_org,
+                IO.Hidden.api_key_comfy_org,
+                IO.Hidden.unique_id,
+            ],
+            is_api_node=True,
+            price_badge=_ideogram_45_price_badge(),
+        )
+
+    @classmethod
+    async def execute(cls, model: dict):
+        validate_string(model["prompt"], strip_whitespace=True, min_length=1, max_length=10000)
+        response = await sync_op(
+            cls,
+            ApiEndpoint(path=IDEOGRAM_45_GENERATE_PATH, method="POST"),
+            response_model=IdeogramGenerateResponse,
+            data=Ideogram45Request(
+                prompt=model["prompt"],
+                quality=model["quality"],
+                seed=model["seed"],
+                size=None if model["size"] == "auto" else model["size"].split(" ")[1],
+                magic_prompt=model["magic_prompt"],
+            ),
+        )
+        image = await _ideogram_45_output(cls, response)
+        return IO.NodeOutput(image, response.data[0].prompt or model["prompt"])
+
+
+class IdeogramEditApi(IO.ComfyNode):
+
+    @classmethod
+    def define_schema(cls):
+        return IO.Schema(
+            node_id="IdeogramEditApi",
+            display_name="Ideogram 4.5 Edit",
+            category="partner/image/Ideogram",
+            description="Edits or combines up to 5 images guided by a text prompt using Ideogram 4.5. "
+            "Re-renders the whole image and can change its size or aspect ratio; "
+            "use Ideogram 4.5 Precise Edit to keep untouched pixels unchanged.",
+            inputs=[
+                IO.DynamicCombo.Input(
+                    "model",
+                    options=[
+                        IO.DynamicCombo.Option(model_id, _ideogram_45_edit_inputs(with_size=True))
+                        for model_id in IDEOGRAM_45_MODELS
+                    ],
+                    tooltip="Model to use.",
+                ),
+            ],
+            outputs=[
+                IO.Image.Output(),
+            ],
+            hidden=[
+                IO.Hidden.auth_token_comfy_org,
+                IO.Hidden.api_key_comfy_org,
+                IO.Hidden.unique_id,
+            ],
+            is_api_node=True,
+            price_badge=_ideogram_45_price_badge(),
+        )
+
+    @classmethod
+    async def execute(cls, model: dict):
+        validate_string(model["prompt"], strip_whitespace=True, min_length=1, max_length=10000)
+        images = _ideogram_45_images(model)
+        size = model["size"]
+        if size == "custom":
+            width, height = model["width"], model["height"]
+            if width * height > IDEOGRAM_45_MAX_PIXELS:
+                raise ValueError(
+                    f"Custom size {width}x{height} exceeds the maximum of {IDEOGRAM_45_MAX_PIXELS} pixels (2048x2048)."
+                )
+            if max(width, height) > 6 * min(width, height):
+                raise ValueError(f"Custom size {width}x{height} exceeds the maximum aspect ratio of 6:1.")
+            size = f"{width}x{height}"
+        elif size == "auto":
+            size = None
+        elif size != "source":
+            size = size.split(" ")[1]
+        prompt = _resolve_image_refs(model["prompt"], len(images))
+        response = await sync_op(
+            cls,
+            ApiEndpoint(path=IDEOGRAM_45_GENERATE_PATH, method="POST"),
+            response_model=IdeogramGenerateResponse,
+            data=Ideogram45Request(prompt=prompt, quality=model["quality"], seed=model["seed"], size=size),
+            files=[
+                ("images", (f"image_{i}.png", _ideogram_45_image_file(image), "image/png"))
+                for i, image in enumerate(images, start=1)
+            ],
+            content_type="multipart/form-data",
+        )
+        return IO.NodeOutput(await _ideogram_45_output(cls, response))
+
+
+class IdeogramPreciseEditApi(IO.ComfyNode):
+
+    @classmethod
+    def define_schema(cls):
+        return IO.Schema(
+            node_id="IdeogramPreciseEditApi",
+            display_name="Ideogram 4.5 Precise Edit",
+            category="partner/image/Ideogram",
+            description="Edits an image guided by a text prompt using Ideogram 4.5 precise editing: only what the "
+            "prompt asks for changes, untouched pixels stay identical and the output keeps the size of image 1 "
+            "(images above ~4 MP are scaled down first). Accepts up to 4 reference images.",
+            inputs=[
+                IO.DynamicCombo.Input(
+                    "model",
+                    options=[
+                        IO.DynamicCombo.Option(model_id, _ideogram_45_edit_inputs(with_size=False))
+                        for model_id in IDEOGRAM_45_MODELS
+                    ],
+                    tooltip="Model to use.",
+                ),
+            ],
+            outputs=[
+                IO.Image.Output(),
+            ],
+            hidden=[
+                IO.Hidden.auth_token_comfy_org,
+                IO.Hidden.api_key_comfy_org,
+                IO.Hidden.unique_id,
+            ],
+            is_api_node=True,
+            price_badge=_ideogram_45_price_badge(),
+        )
+
+    @classmethod
+    async def execute(cls, model: dict):
+        validate_string(model["prompt"], strip_whitespace=True, min_length=1, max_length=10000)
+        images = _ideogram_45_images(model)
+        prompt = _resolve_image_refs(model["prompt"], len(images))
+        files = [("image", ("image_1.png", _ideogram_45_image_file(images[0]), "image/png"))]
+        files.extend(
+            ("reference_images", (f"image_{i}.png", _ideogram_45_image_file(image), "image/png"))
+            for i, image in enumerate(images[1:], start=2)
+        )
+        response = await sync_op(
+            cls,
+            ApiEndpoint(path=IDEOGRAM_45_PRECISE_EDIT_PATH, method="POST"),
+            response_model=IdeogramGenerateResponse,
+            data=Ideogram45Request(prompt=prompt, quality=model["quality"], seed=model["seed"]),
+            files=files,
+            content_type="multipart/form-data",
+        )
+        return IO.NodeOutput(await _ideogram_45_output(cls, response))
+
+
 class IdeogramExtension(ComfyExtension):
     @override
     async def get_node_list(self) -> list[type[IO.ComfyNode]]:
@@ -670,6 +1087,9 @@ class IdeogramExtension(ComfyExtension):
             IdeogramV3,
             IdeogramV4,
             IdeogramPImage,
+            IdeogramTextToImageApi,
+            IdeogramEditApi,
+            IdeogramPreciseEditApi,
         ]
 
 
