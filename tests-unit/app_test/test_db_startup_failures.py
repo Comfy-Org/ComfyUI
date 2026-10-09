@@ -297,6 +297,19 @@ def test_unwritable_database_the_permission_check_misses(db_path, monkeypatch, c
 
 
 @pytest.mark.skipif(sys.platform == "win32" or os.geteuid() == 0, reason="needs POSIX permissions enforced")
+def test_unwritable_database_the_permission_check_misses_stops_before_an_upgrade(db_path, monkeypatch, caplog):
+    command.upgrade(db_module.get_alembic_config(), "0006_add_loader_path")
+    os.chmod(db_path, 0o444)
+    monkeypatch.setattr(db_module.os, "access", lambda *_args: True)
+
+    error = _startup_error(caplog, kind="not_writable")
+
+    assert f"ComfyUI can't create, open or write the asset database '{db_path}' (attempt to write a readonly database)" in error
+    assert not os.path.exists(db_path + ".bkp")
+    assert _revision(db_path) == "0006_add_loader_path"
+
+
+@pytest.mark.skipif(sys.platform == "win32" or os.geteuid() == 0, reason="needs POSIX permissions enforced")
 def test_database_whose_folder_cant_take_a_journal(db_path, tmp_path, caplog):
     # With a rollback journal, the file opens for writing; only a write needs the -journal beside it.
     _start_and_stop(db_path)

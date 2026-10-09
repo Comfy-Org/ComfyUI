@@ -289,19 +289,18 @@ def _init_file_db(db_url):
             if os.path.exists(path) and not os.access(path, os.W_OK):
                 raise PermissionError(errno.EACCES, "Permission denied", path)
         _migrate_and_bind(db_url, db_path, db_exists)
-        _check_writable()
     except Exception:
         _db_lock.release()
         raise
 
 
-def _check_writable():
-    """A read-only database at the current revision opens and reads fine, so try a write.
+def _check_writable(write_engine):
+    """A read-only database opens and reads fine, so try a write before anything is backed up or upgraded.
 
     Rolled back, not committed: a commit in rollback-journal mode waits for other readers to finish."""
-    with WriteSession() as session:
-        session.connection().exec_driver_sql("PRAGMA user_version = 0")
-        session.rollback()
+    with write_engine.connect() as connection, connection.begin() as transaction:
+        connection.exec_driver_sql("PRAGMA user_version = 0")
+        transaction.rollback()
 
 
 # NORMAL: commits skip the fsync that held the write lock. A power loss or OS crash can
@@ -368,6 +367,7 @@ def _migrate_and_bind(db_url, db_path, db_exists):
 
     context = MigrationContext.configure(conn)
     current_rev = context.get_current_revision()
+    _check_writable(write_engine)
 
     script = ScriptDirectory.from_config(config)
     target_rev = script.get_current_head()
