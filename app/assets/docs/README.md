@@ -289,7 +289,7 @@ An EXR output of `SaveImageAdvanced` gets its preview from the node itself, writ
 
 An uploaded EXR (`/upload/image`, multipart `POST /api/assets`, from-hash creation) gets a preview decoded from the file, with the same tonemap, only when the record has no preview yet; a record over content another record already has a live preview for reuses that preview instead. A cached rerun of an output only ever reuses. Upload previews are WebP of at most one megapixel, with alpha when the EXR has an alpha channel. Files over 17 megapixels get none, checked from the EXR header before decoding.
 
-All previews are stored in the previews directory (`<base>/previews`, or `--previews-directory`), tagged `preview`, and never scanned; the directory is owned, so the startup prune keeps them. `preview` is a reserved tag the tag endpoints refuse.
+All previews are stored in the previews directory (`<base>/previews`, or `--previews-directory`), tagged `preview`, and never scanned; the directory is owned, so the startup prune keeps them. `preview` is a reserved tag the tag endpoints refuse. Previews are ordinary assets, so a listing with no tag filter includes them; filter by `input`, `output` or `models` to leave them out.
 
 The upload decodes on a worker thread, so the server stays responsive, and responds once its preview is stored. A failed decode leaves the upload without a preview. Each outcome is a `previews.generated` or `previews.generation_failed` event; previews the save node writes are logged only when they fail.
 
