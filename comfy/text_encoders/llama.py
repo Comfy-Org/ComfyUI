@@ -865,6 +865,9 @@ def _make_scaled_embedding(ops, vocab_size, hidden_size, scale, device, dtype):
     class ScaledEmbedding(ops.Embedding):
         def forward(self, input_ids, out_dtype=None):
             return super().forward(input_ids, out_dtype=out_dtype) * scale
+
+        def host_rows(self, input_ids, out_dtype=None):
+            return super().host_rows(input_ids, out_dtype=out_dtype) * scale
     return ScaledEmbedding(vocab_size, hidden_size, device=device, dtype=dtype)
 
 
@@ -1180,7 +1183,11 @@ class BaseGenerate:
             if step > 0:
                 if compile_allocations:
                     comfy.model_prefetch.malloc_graph_begin(device)
-                embeds = self.model.embed_tokens(decode_tokens).to(execution_dtype)
+                embed = self.model.embed_tokens
+                if hasattr(embed, "_v") and embed.weight_lowvram_function is None and len(embed.weight_function) == 0 and comfy.ops.vbar_above_watermark(embed):
+                    embeds = embed.host_rows(decode_tokens, out_dtype=execution_dtype)
+                else:
+                    embeds = embed(decode_tokens).to(execution_dtype)
                 current_input_ids = decode_tokens if initial_input_ids is not None else None
                 position_ids = torch.tensor([[next_pos]], device=device) if next_pos is not None else None
 
@@ -1209,6 +1216,12 @@ class BaseGenerate:
 
             token_id = decode_tokens[0].item()
             generated_token_ids.append(token_id)
+
+            if step == 0 and hasattr(self.model.embed_tokens, "_v"):
+                # prefill's transients can evict body pages and lower the VBAR watermark: let the decode fault them back
+                vbar = self.model.embed_tokens._v[0]
+                comfy.model_management.reset_cast_buffers()
+                vbar.set_watermark(vbar.max_size)
 
             if step > 0 and next_pos is not None:
                 next_pos += 1

@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-LOCK_HELD = "Database is locked. Another ComfyUI process is already using this database."
+LOCK_HELD = "Another ComfyUI is already using this database"
 IN_USE = "Another ComfyUI is already using this install's asset database"
 
 HOLD_SCRIPT = (
@@ -87,14 +87,14 @@ def held_lock(tmp_path):
 
 def test_running_assets_off_instance_does_not_block_an_assets_on_start(tmp_path):
     # A previous assets-on run leaves the database and its lock file behind, as on a real install.
-    first = _quick_start(tmp_path, "--enable-assets")
+    first = _quick_start(tmp_path)
     assert first.returncode == 0, first.stderr
 
     port = _free_port()
     server_log = tmp_path / "server.log"
     with open(server_log, "w") as log:
         server = subprocess.Popen(
-            _comfy_args(tmp_path, "--listen", "127.0.0.1", "--port", str(port)),
+            _comfy_args(tmp_path, "--disable-assets", "--listen", "127.0.0.1", "--port", str(port)),
             cwd=REPO_ROOT,
             stdout=log,
             stderr=subprocess.STDOUT,
@@ -105,7 +105,7 @@ def test_running_assets_off_instance_does_not_block_an_assets_on_start(tmp_path)
         except AssertionError as e:
             raise AssertionError(f"{e}\n{server_log.read_text()[-4000:]}") from None
 
-        second = _quick_start(tmp_path, "--enable-assets")
+        second = _quick_start(tmp_path)
 
         assert server.poll() is None
     finally:
@@ -117,17 +117,17 @@ def test_running_assets_off_instance_does_not_block_an_assets_on_start(tmp_path)
 
 
 def test_assets_off_start_warns_and_continues_when_the_database_is_held(tmp_path, held_lock):
-    result = _quick_start(tmp_path)
+    result = _quick_start(tmp_path, "--disable-assets")
 
     assert result.returncode == 0, result.stderr
     assert IN_USE in result.stderr
     assert str(tmp_path / "comfyui.db") in result.stderr
-    assert "A future version will refuse to start two ComfyUIs on the same asset database" in result.stderr
+    assert "doesn't use that database and will start anyway" in result.stderr
     assert "Traceback" not in result.stderr
 
 
 def test_assets_on_start_still_fails_when_the_database_is_held(tmp_path, held_lock):
-    result = _quick_start(tmp_path, "--enable-assets")
+    result = _quick_start(tmp_path)
 
     assert result.returncode == 1, result.stderr
     assert LOCK_HELD in result.stderr

@@ -44,10 +44,11 @@ from comfy_execution.validation import LoopValidationError, validate_loops, vali
 from comfy_execution.progress import get_progress_state, reset_progress_state, add_progress_handler, WebUIProgressHandler
 from comfy_execution.utils import CurrentNodeContext
 from comfy_execution.asset_enrichment import register_executed_outputs, emit_cached_output
+from comfy_execution.media_enrichment import enrich_output_with_media_metadata
 from comfy_api.internal import _ComfyNodeInternal, _NodeOutputInternal, first_real_override, is_class, make_locked_method_func
 from comfy_api.latest import io, _io
 from comfy_execution.cache_provider import _has_cache_providers, _get_cache_providers, _logger as _cache_logger
-from app.assets.manager import AssetManager, default_asset_manager
+from app.assets.manager import AssetManager, NoAssets
 
 if TYPE_CHECKING:
     from comfy_execution.server_protocol import ExecutionServer
@@ -564,6 +565,7 @@ async def execute(server: "ExecutionServer", dynprompt, caches, current_item, ex
                 return (ExecutionResult.PENDING, None, None)
         cache_ui_value = ui_outputs.get(unique_id)
         if len(output_ui) > 0:
+            output_ui = enrich_output_with_media_metadata(output_ui)
             meta = {
                 "node_id": unique_id,
                 "display_node": display_node_id,
@@ -665,7 +667,7 @@ class PromptExecutor:
         self.cache_args = cache_args
         self.cache_type = cache_type
         self.server = server
-        self.asset_manager = asset_manager if asset_manager is not None else default_asset_manager()
+        self.asset_manager = asset_manager if asset_manager is not None else NoAssets(args)
         self.prompt_model_tracker = comfy.model_patcher.PromptModelTracker()
         self.reset()
 
@@ -1091,29 +1093,35 @@ async def validate_inputs(prompt_id, prompt, item, validated, visiting=None):
 
     if len(validate_function_inputs) > 0 or validate_has_kwargs:
         input_data_all, _, v3_data = get_input_data(inputs, obj_class, unique_id)
+        dynamic_paths = v3_data.get("dynamic_paths", {})
+        if not validate_has_kwargs:
+            dynamic_paths = {key: path for key, path in dynamic_paths.items() if path.split(".")[0] in validate_function_inputs}
+            v3_data = v3_data | {
+                "dynamic_paths": dynamic_paths,
+                "list_paths": {path for path in v3_data.get("list_paths", set()) if path.split(".")[0] in validate_function_inputs},
+            }
         input_filtered = {}
         for x in input_data_all:
-            if x in validate_function_inputs or validate_has_kwargs:
+            input_name = dynamic_paths[x].split(".")[0] if x in dynamic_paths else x
+            if input_name in validate_function_inputs or validate_has_kwargs:
                 input_filtered[x] = input_data_all[x]
         if 'input_types' in validate_function_inputs:
             input_filtered['input_types'] = [received_types]
 
         ret = await _async_map_node_over_list(prompt_id, unique_id, obj_class, input_filtered, validate_function_name, v3_data=v3_data)
         ret = await resolve_map_node_over_list_results(ret)
-        for x in input_filtered:
+        for x in input_filtered or (None,):
             for i, r in enumerate(ret):
                 if r is not True and not isinstance(r, ExecutionBlocker):
-                    details = f"{x}"
+                    details = x if x is not None else ""
                     if r is not False:
-                        details += f" - {str(r)}"
+                        details = f"{x} - {r}" if x is not None else str(r)
 
                     error = {
                         "type": "custom_validation_failed",
                         "message": "Custom validation failed for node",
                         "details": details,
-                        "extra_info": {
-                            "input_name": x,
-                        }
+                        "extra_info": {"input_name": x} if x is not None else {},
                     }
                     errors.append(error)
                     continue

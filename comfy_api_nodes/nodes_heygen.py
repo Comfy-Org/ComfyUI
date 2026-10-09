@@ -845,8 +845,9 @@ class HeyGenReferenceToVideoNode(IO.ComfyNode):
                                 ),
                                 IO.Combo.Input(
                                     "resolution",
-                                    options=["768p", "480p"],
-                                    tooltip="Output resolution.",
+                                    options=["768p", "480p", "2k"],
+                                    tooltip="Output resolution. 2k requires the 16:9 or 9:16 aspect ratio; "
+                                    "'auto' works at 2k only without references.",
                                 ),
                                 IO.Combo.Input(
                                     "aspect_ratio",
@@ -916,12 +917,14 @@ class HeyGenReferenceToVideoNode(IO.ComfyNode):
                 expr="""
                 (
                   $dur := $lookup(widgets, "model.duration");
-                  $hd := $lookup(widgets, "model.resolution") = "768p";
+                  $res := $lookup(widgets, "model.resolution");
                   $imgsRaw := $lookup(inputGroups, "model.reference_images");
                   $imgs := $imgsRaw ? $imgsRaw : 0;
                   $vidsRaw := $lookup(inputGroups, "model.reference_videos");
                   $vids := $vidsRaw ? $vidsRaw : 0;
-                  $rate := ($imgs + $vids) > 0 ? ($hd ? 0.0429 : 0.0286) : ($hd ? 0.02145 : 0.0143);
+                  $rate := ($imgs + $vids) > 0
+                    ? $lookup({"480p": 0.0286, "768p": 0.0429, "2k": 0.1287}, $res)
+                    : $lookup({"480p": 0.0143, "768p": 0.02145, "2k": 0.06435}, $res);
                   $vids > 0
                     ? {"type":"range_usd","min_usd": $rate * $dur, "max_usd": $rate * ($dur + 5 * $vids)}
                     : {"type":"usd","usd": $rate * $dur}
@@ -940,6 +943,9 @@ class HeyGenReferenceToVideoNode(IO.ComfyNode):
         total = len(reference_images) + len(reference_videos) + len(reference_audios)
         if total > 12:
             raise ValueError(f"At most 12 references can be connected in total; got {total}.")
+        if model["resolution"] == "2k" and model["aspect_ratio"] not in ("16:9", "9:16"):
+            if model["aspect_ratio"] != "auto" or reference_images or reference_videos:
+                raise ValueError("2k resolution requires the 16:9 or 9:16 aspect ratio.")
         for key, image in reference_images.items():
             if get_number_of_images(image) != 1:
                 raise ValueError(f"Reference image input '{key}' must contain exactly one image, not a batch.")
@@ -1021,7 +1027,7 @@ class HeyGenImageToVideoNode(IO.ComfyNode):
                                 ),
                                 IO.Combo.Input(
                                     "resolution",
-                                    options=["768p", "480p"],
+                                    options=["768p", "480p", "2k"],
                                     tooltip="Output resolution.",
                                 ),
                                 IO.Int.Input(
@@ -1048,7 +1054,7 @@ class HeyGenImageToVideoNode(IO.ComfyNode):
             price_badge=IO.PriceBadge(
                 depends_on=IO.PriceBadgeDepends(widgets=["model", "model.duration", "model.resolution"]),
                 expr="""
-                {"type":"usd","usd": ($lookup(widgets, "model.resolution") = "768p" ? 0.02145 : 0.0143)
+                {"type":"usd","usd": $lookup({"480p": 0.0143, "768p": 0.02145, "2k": 0.06435}, $lookup(widgets, "model.resolution"))
                   * $lookup(widgets, "model.duration")}
                 """,
             ),
