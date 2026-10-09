@@ -23,7 +23,7 @@ console_log_level = get_console_log_level(args.verbose)
 file_log_outputs = get_file_log_outputs(args.verbose)
 setup_logger(log_level=console_log_level, file_outputs=file_log_outputs, use_stdout=args.log_stdout)
 
-from app.database.db import dependencies_available, get_database_url, get_db_path, init_db, lock_holder_db_path, missing_dependencies, sqlite_url
+from app.database.db import dependencies_available, get_database_url, get_db_path, init_db, lock_holder_db_path, missing_dependencies
 from app.assets.event_log import error_kind
 from utils.install_util import get_missing_requirements_message
 from app.assets.lifecycle import cleanup_temp_filesystem
@@ -510,16 +510,10 @@ def stop_startup(kind, message):
     sys.exit(1)
 
 
-def another_database_url():
-    # Absolute (four slashes on Linux and macOS, which a hand-typed example tends to miss), URL-quoted, and in
-    # double quotes so a space in the path stays one argument.
-    return f'"{sqlite_url(os.path.join(folder_paths.get_user_directory(), "comfyui-2.db"))}"'
-
-
 def database_failure_message(error, db_url):
     """The kind of failure that stopped the asset database from opening, and how to fix it."""
     if not (db_url.startswith("sqlite:///") or db_url == "sqlite://"):
-        return "unsupported_url", (f"--database-url must start with sqlite:///, like {another_database_url()}, "
+        return "unsupported_url", ("--database-url must start with sqlite:///, like sqlite:///path/to/comfyui.db, "
                                    f"or be left out to use the default database.\n{WITHOUT_ASSETS}")
     location = get_db_path() if db_url.startswith("sqlite:///") else db_url
     kind = error_kind(error)
@@ -557,7 +551,7 @@ def database_failure_message(error, db_url):
                "database and rebuilds the asset catalog by rescanning your files. Run with --verbose DEBUG for the full error.")
     lines = [what, fix]
     if failure in ("in_use", "locked") and args.database_url is None:
-        lines.append(f"Or give this ComfyUI its own database: --database-url {another_database_url()}")
+        lines.append("Or give this ComfyUI its own database: --database-url sqlite:///path/to/another.db")
     return failure, "\n".join(lines + [WITHOUT_ASSETS])
 
 

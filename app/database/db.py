@@ -24,7 +24,7 @@ try:
     from alembic.runtime.migration import MigrationContext
     from alembic.script import ScriptDirectory
     from sqlalchemy import create_engine, event
-    from sqlalchemy.engine import make_url
+    from sqlalchemy.engine import URL, make_url
     from sqlalchemy.exc import OperationalError
     from sqlalchemy.orm import sessionmaker
     from sqlalchemy.pool import StaticPool
@@ -32,9 +32,6 @@ try:
     from app.database.models import Base
     import app.assets.database.models  # noqa: F401 — register models with Base.metadata
     import blake3  # noqa: F401 — verify the hard dependency is importable at startup
-
-    # SQLAlchemy 2.1+ decodes %xx in a URL's path and stops it at ? or #; 2.0 reads the path as written.
-    _URL_DECODES_PATH = make_url("sqlite:///%25").database == "%"
 
     _DB_AVAILABLE = True
 except ImportError:
@@ -90,16 +87,9 @@ def get_database_url():
     import folder_paths
 
     db_path = os.path.join(folder_paths.get_user_directory(), "comfyui.db")
-    # SQLAlchemy 2.1+ quotes it, so a ? or %xx in the path stays part of the file name (2.0 doesn't quote a ?).
-    return sqlite_url(db_path)
-
-
-def sqlite_url(path):
-    """A SQLite URL that opens exactly this file. Only what the installed SQLAlchemy reads as URL syntax is
-    quoted, so a plain path stays as typed (a quoted ':' or '\\' would break when pasted into a .bat file)."""
-    if _URL_DECODES_PATH:
-        path = path.replace("%", "%25").replace("?", "%3F").replace("#", "%23")
-    return f"sqlite:///{path}"
+    # Built by SQLAlchemy so its own parser reads the path back intact: 2.1+ decodes %xx, and every version
+    # stops the path at ? (which only 2.1+ quotes).
+    return URL.create("sqlite", database=db_path).render_as_string()
 
 
 def get_legacy_default_db_path():
