@@ -48,7 +48,7 @@ from comfy_execution.media_enrichment import enrich_output_with_media_metadata
 from comfy_api.internal import _ComfyNodeInternal, _NodeOutputInternal, first_real_override, is_class, make_locked_method_func
 from comfy_api.latest import io, _io
 from comfy_execution.cache_provider import _has_cache_providers, _get_cache_providers, _logger as _cache_logger
-from app.assets.manager import AssetManager, default_asset_manager
+from app.assets.manager import AssetManager, NoAssets
 
 if TYPE_CHECKING:
     from comfy_execution.server_protocol import ExecutionServer
@@ -667,7 +667,7 @@ class PromptExecutor:
         self.cache_args = cache_args
         self.cache_type = cache_type
         self.server = server
-        self.asset_manager = asset_manager if asset_manager is not None else default_asset_manager()
+        self.asset_manager = asset_manager if asset_manager is not None else NoAssets(args)
         self.prompt_model_tracker = comfy.model_patcher.PromptModelTracker()
         self.reset()
 

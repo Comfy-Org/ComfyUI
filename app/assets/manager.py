@@ -1,7 +1,7 @@
 """Selects and implements the enabled and disabled asset managers.
 
-``default_asset_manager`` checks database dependencies before enabling assets
-and chooses ``NoAssets`` when the requested mode cannot run.
+``default_asset_manager`` chooses ``NoAssets`` only for ``--disable-assets``; main.py
+stops startup before that if assets are on and the database packages are missing.
 """
 
 from __future__ import annotations
@@ -13,10 +13,9 @@ from aiohttp import web
 
 from app.assets import mode
 from app.assets.lifecycle import record_hash_mode_transition_intent, run_shutdown, run_startup
-from app.database.db import dependencies_available, missing_dependencies
+from app.database.db import dependencies_available
 from app.user_manager import UserManager
 from comfy.cli_args import args
-from utils.install_util import get_missing_requirements_message
 
 # These need the database packages. Without them only NoAssets is used, and it
 # does not touch these names.
@@ -74,7 +73,7 @@ class AssetManager(Protocol):
 
 
 class _ArgsLike(Protocol):
-    enable_assets: bool
+    disable_assets: bool
     enable_asset_hashing: bool
 
 
@@ -233,11 +232,4 @@ class AssetsEnabled:
 
 
 def default_asset_manager() -> AssetManager:
-    if args.enable_assets and not dependencies_available():
-        missing = ", ".join(missing_dependencies()) or "see the import error above"
-        logging.error(
-            f"--enable-assets requires packages that could not be imported: {missing}. "
-            f"Assets are disabled.\n{get_missing_requirements_message()}"
-        )
-        return NoAssets(args)
-    return AssetsEnabled(args) if args.enable_assets else NoAssets(args)
+    return NoAssets(args) if args.disable_assets else AssetsEnabled(args)

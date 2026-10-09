@@ -14,7 +14,7 @@ def test_default_database_url_uses_effective_user_directory(monkeypatch, tmp_pat
     monkeypatch.setattr(db.args, "database_url", None)
     monkeypatch.setattr("folder_paths.get_user_directory", lambda: str(user_dir))
 
-    assert db.get_database_url() == f"sqlite:///{user_dir / 'comfyui.db'}"
+    assert db.get_db_path() == str(user_dir / "comfyui.db")
 
 
 def test_default_db_path_matches_legacy_default_without_custom_user_directory(monkeypatch):
