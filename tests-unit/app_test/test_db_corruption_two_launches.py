@@ -27,9 +27,10 @@ def _make_corrupt_db(db_path: Path, table: str) -> None:
     with closing(sqlite3.connect(db_path)) as conn:
         conn.execute("PRAGMA journal_mode=DELETE")
         page = conn.execute("SELECT rootpage FROM sqlite_master WHERE name = ?", (table,)).fetchone()[0]
+        page_size = conn.execute("PRAGMA page_size").fetchone()[0]
     with open(db_path, "r+b") as f:
-        f.seek((page - 1) * 4096)
-        f.write(b"\xa5" * 4096)
+        f.seek((page - 1) * page_size)
+        f.write(b"\xa5" * page_size)
 
 
 def _free_port() -> int:

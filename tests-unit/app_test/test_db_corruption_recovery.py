@@ -28,7 +28,6 @@ if not torch.cuda.is_available():
 
 import main  # noqa: E402
 
-_PAGE = 4096
 
 
 def _config(db_path: str) -> Config:
@@ -66,9 +65,10 @@ def _use_wal(db_path: str) -> None:
 def _overwrite_page_of(db_path: str, table: str) -> None:
     with closing(sqlite3.connect(db_path)) as conn:
         page = conn.execute("SELECT rootpage FROM sqlite_master WHERE name = ?", (table,)).fetchone()[0]
+        page_size = conn.execute("PRAGMA page_size").fetchone()[0]
     with open(db_path, "r+b") as f:
-        f.seek((page - 1) * _PAGE)
-        f.write(b"\xa5" * _PAGE)
+        f.seek((page - 1) * page_size)
+        f.write(b"\xa5" * page_size)
 
 
 def _overwrite_header(db_path: str) -> None:
@@ -581,12 +581,13 @@ def test_index_damage_quick_check_misses_counts_as_corruption(live_db):
         conn.execute("CREATE INDEX marker_value ON marker (value)")
         conn.commit()
         page = conn.execute("SELECT rootpage FROM sqlite_master WHERE name = 'marker'").fetchone()[0]
+        page_size = conn.execute("PRAGMA page_size").fetchone()[0]
     with open(live_db, "r+b") as f:  # change the row, not its index entry
-        f.seek((page - 1) * _PAGE)
-        data = bytearray(f.read(_PAGE))
+        f.seek((page - 1) * page_size)
+        data = bytearray(f.read(page_size))
         at = data.index(b"live")
         data[at:at + 4] = b"lime"
-        f.seek((page - 1) * _PAGE)
+        f.seek((page - 1) * page_size)
         f.write(data)
     with closing(sqlite3.connect(live_db)) as conn:
         assert conn.execute("PRAGMA quick_check").fetchone() == ("ok",)
@@ -774,9 +775,10 @@ def test_wal_kept_by_another_connection_does_not_reach_the_restored_database(def
     other.execute("INSERT INTO marker VALUES ('in the corrupt database wal')")
     other.commit()
     page = other.execute("SELECT rootpage FROM sqlite_master WHERE name = 'alembic_version'").fetchone()[0]
+    page_size = other.execute("PRAGMA page_size").fetchone()[0]
     with open(default_db, "r+b") as f:  # a page the WAL doesn't hold
-        f.seek((page - 1) * _PAGE)
-        f.write(b"\xa5" * _PAGE)
+        f.seek((page - 1) * page_size)
+        f.write(b"\xa5" * page_size)
     try:
         if os.name == "nt":
             # Windows refuses to rename a file another connection has open: launch fails as before.
@@ -802,9 +804,10 @@ def test_journal_of_another_connection_moves_with_the_corrupt_database(default_d
     other.execute("BEGIN IMMEDIATE")
     other.execute("CREATE TABLE marker (value TEXT)")  # its -journal now exists
     page = other.execute("SELECT rootpage FROM sqlite_master WHERE name = 'alembic_version'").fetchone()[0]
+    page_size = other.execute("PRAGMA page_size").fetchone()[0]
     with open(default_db, "r+b") as f:
-        f.seek((page - 1) * _PAGE)
-        f.write(b"\xa5" * _PAGE)
+        f.seek((page - 1) * page_size)
+        f.write(b"\xa5" * page_size)
     assert os.path.exists(default_db + "-journal")
     try:
         if os.name == "nt":
