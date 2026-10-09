@@ -12,6 +12,7 @@ from abc import ABC, abstractmethod
 
 import nodes
 
+from comfy_api.internal import _ComfyNodeInternal
 from comfy_execution.graph_utils import is_link
 from comfy_execution.cache_provider import _contains_self_unequal, _serialize_cache_key
 
@@ -87,6 +88,7 @@ class CacheKeySetInputSignature(CacheKeySet):
         self.dynprompt = dynprompt
         self.is_changed_cache = is_changed_cache
         self.signatures = {}
+        self.descendant_signatures = {}
         self.tokens = {}
 
     def include_node_id_in_input(self) -> bool:
@@ -129,7 +131,7 @@ class CacheKeySetInputSignature(CacheKeySet):
         # serialize gets a fresh NaN so its descendants never match across
         # prompts either.
         if ancestor_id not in self.tokens:
-            signature = self.signatures.get(ancestor_id)
+            signature = self.descendant_signatures.get(ancestor_id, self.signatures.get(ancestor_id))
             token = None if signature is None or _contains_self_unequal(signature) else _serialize_cache_key(signature)
             self.tokens[ancestor_id] = float("NaN") if token is None else token
         return self.tokens[ancestor_id]
@@ -151,6 +153,10 @@ class CacheKeySetInputSignature(CacheKeySet):
                 signature.append((key, ("ANCESTOR", self.ancestor_token(ancestor_id), ancestor_socket)))
             else:
                 signature.append((key, inputs[key]))
+        # Start Loop's NaN fingerprint only makes it expand on every run. With
+        # cache_iterations on, its descendants are keyed on its inputs alone.
+        if inputs.get("cache_iterations") is True and issubclass(class_def, _ComfyNodeInternal) and class_def.GET_SCHEMA().loop_boundary == "start":
+            self.descendant_signatures[node_id] = to_hashable(signature[:1] + signature[2:])
         return to_hashable(signature)
 
     def get_link_ancestors(self, dynprompt, node_id):

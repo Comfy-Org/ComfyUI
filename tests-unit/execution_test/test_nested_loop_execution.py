@@ -652,39 +652,53 @@ def test_iteration_cache_policy_and_end_cache(cache_iterations, expected_calls):
 
     assert executor.success
     assert Increment.calls == expected_calls
+    # With cache_iterations on, the unchanged End Loop comes from cache and the loop does not expand again.
     assert Progress.messages == [
         ("Iteration 0 / 2", "loop"),
         ("Iteration 1 / 2", "loop"),
         ("Iteration 2 / 2", "loop"),
-    ] * 2
-    assert Progress.body_call_counts == [0, 1, 2] + ([2, 2, 2] if cache_iterations else [2, 3, 4])
+    ] * (1 if cache_iterations else 2)
+    assert Progress.body_call_counts == [0, 1, 2] + ([] if cache_iterations else [2, 3, 4])
     assert prompt["close"]["inputs"]["output_value"] == ["increment", 0]
     assert second_prompt["close"]["inputs"]["output_value"] == ["increment", 0]
+
+
+def chained_loops(value, first_cache_iterations=True):
+    loop = {"mode": "simple", "mode.num_iterations": 1, "cache_iterations": True}
+    return {
+        "constant": {"class_type": "TestConstant", "inputs": {"value": value}},
+        "first": {"class_type": "StartLoop",
+                  "inputs": {**loop, "cache_iterations": first_cache_iterations, "initial_iteration_value": ["constant", 0]}},
+        "first_increment": {"class_type": "TestIncrement", "inputs": {"value": ["first", 4]}},
+        "first_close": {"class_type": "EndLoop", "inputs": {"output_value": ["first_increment", 0], "accumulate": False}},
+        "second": {"class_type": "StartLoop", "inputs": {**loop, "initial_iteration_value": ["first_close", 0]}},
+        "second_increment": {"class_type": "TestIncrement", "inputs": {"value": ["second", 4]}},
+        "second_close": {"class_type": "EndLoop", "inputs": {"output_value": ["second_increment", 0], "accumulate": False}},
+        "capture": {"class_type": "TestCapture", "inputs": {"value": ["second_close", 0]}},
+    }
 
 
 @pytest.mark.parametrize("cache_type", [CacheType.CLASSIC, CacheType.LRU, CacheType.RAM_PRESSURE])
 def test_cached_loop_iteration_follows_a_change_in_an_upstream_loop(cache_type):
     Capture.values = []
-
-    def prompt(value):
-        loop = {"mode": "simple", "mode.num_iterations": 1, "cache_iterations": True}
-        return {
-            "constant": {"class_type": "TestConstant", "inputs": {"value": value}},
-            "first": {"class_type": "StartLoop", "inputs": {**loop, "initial_iteration_value": ["constant", 0]}},
-            "first_increment": {"class_type": "TestIncrement", "inputs": {"value": ["first", 4]}},
-            "first_close": {"class_type": "EndLoop", "inputs": {"output_value": ["first_increment", 0], "accumulate": False}},
-            "second": {"class_type": "StartLoop", "inputs": {**loop, "initial_iteration_value": ["first_close", 0]}},
-            "second_increment": {"class_type": "TestIncrement", "inputs": {"value": ["second", 4]}},
-            "second_close": {"class_type": "EndLoop", "inputs": {"output_value": ["second_increment", 0], "accumulate": False}},
-            "capture": {"class_type": "TestCapture", "inputs": {"value": ["second_close", 0]}},
-        }
-
     executor = PromptExecutor(Server(), cache_type=cache_type, cache_args={"lru": 10, "ram": 0, "ram_inactive": 0})
-    executor.execute(prompt(1), "upstream-loop-first", execute_outputs=["capture"])
-    executor.execute(prompt(10), "upstream-loop-second", execute_outputs=["capture"])
+    executor.execute(chained_loops(1), "upstream-loop-first", execute_outputs=["capture"])
+    executor.execute(chained_loops(10), "upstream-loop-second", execute_outputs=["capture"])
 
     assert executor.success
     assert Capture.values == [3, 12]
+
+
+@pytest.mark.parametrize("cache_type", [CacheType.CLASSIC, CacheType.LRU, CacheType.RAM_PRESSURE])
+@pytest.mark.parametrize(("first_cache_iterations", "expected_calls"), [(True, [2, 3]), (False, [2, 3, 2, 3])])
+def test_loop_fed_by_an_unchanged_loop_comes_from_cache(cache_type, first_cache_iterations, expected_calls):
+    Increment.calls = []
+    executor = PromptExecutor(Server(), cache_type=cache_type, cache_args={"lru": 10, "ram": 0, "ram_inactive": 0})
+    for prompt_id in ("unchanged-loop-first", "unchanged-loop-second"):
+        executor.execute(chained_loops(1, first_cache_iterations), prompt_id, execute_outputs=["capture"])
+        assert executor.success
+
+    assert Increment.calls == expected_calls
 
 
 def test_iteration_cache_still_expands_when_only_termination_is_requested():
