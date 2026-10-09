@@ -99,6 +99,17 @@ def test_corrupt_database(db_path, caplog):
     assert "Move that file aside, or delete it, and start again" in error
 
 
+@pytest.mark.skipif(sys.platform == "win32" or os.geteuid() == 0, reason="needs POSIX permissions enforced")
+def test_corrupt_read_only_database_is_reported_as_corrupt(db_path, caplog):
+    with open(db_path, "wb") as f:
+        f.write(b"not a database" * 1000)
+    os.chmod(db_path, 0o444)
+
+    error = _startup_error(caplog, kind="corrupt")
+
+    assert f"The asset database '{db_path}' is corrupt" in error
+
+
 def test_database_from_a_newer_comfyui(db_path, caplog):
     _stamp(db_path, "0099_from_a_newer_release")
 
@@ -365,3 +376,16 @@ def _revision(path):
 
 def _head():
     return ScriptDirectory(str(Path(main.__file__).parent / "alembic_db")).get_current_head()
+
+
+@pytest.mark.parametrize(
+    "path", ["/home/u/ComfyUI/user/comfyui.db", r"C:\a b\ComfyUI\user\comfyui.db", "/a %20b% c/x.db", "/x/a@b:c/x.db", "/q?x#y/x.db"]
+)
+def test_sqlite_url_opens_that_file_and_leaves_plain_paths_as_typed(path):
+    if "?" in path and not db_module._URL_DECODES_PATH:
+        pytest.skip("SQLAlchemy before 2.1 can't put a ? in a URL")
+    url = db_module.sqlite_url(path)
+
+    assert make_url(url).database == path
+    if not any(c in path for c in "%?#"):
+        assert url == f"sqlite:///{path}"  # nothing quoted, so it's safe to paste into a .bat file

@@ -24,7 +24,7 @@ try:
     from alembic.runtime.migration import MigrationContext
     from alembic.script import ScriptDirectory
     from sqlalchemy import create_engine, event
-    from sqlalchemy.engine import URL, make_url
+    from sqlalchemy.engine import make_url
     from sqlalchemy.exc import OperationalError
     from sqlalchemy.orm import sessionmaker
     from sqlalchemy.pool import StaticPool
@@ -32,6 +32,9 @@ try:
     from app.database.models import Base
     import app.assets.database.models  # noqa: F401 — register models with Base.metadata
     import blake3  # noqa: F401 — verify the hard dependency is importable at startup
+
+    # SQLAlchemy 2.1+ decodes %xx in a URL's path and stops it at ? or #; 2.0 reads the path as written.
+    _URL_DECODES_PATH = make_url("sqlite:///%25").database == "%"
 
     _DB_AVAILABLE = True
 except ImportError:
@@ -92,8 +95,11 @@ def get_database_url():
 
 
 def sqlite_url(path):
-    """A SQLite URL for a file path, quoted so it opens that exact file."""
-    return URL.create("sqlite", database=path).render_as_string()
+    """A SQLite URL that opens exactly this file. Only what the installed SQLAlchemy reads as URL syntax is
+    quoted, so a plain path stays as typed (a quoted ':' or '\\' would break when pasted into a .bat file)."""
+    if _URL_DECODES_PATH:
+        path = path.replace("%", "%25").replace("?", "%3F").replace("#", "%23")
+    return f"sqlite:///{path}"
 
 
 def get_legacy_default_db_path():
@@ -297,7 +303,7 @@ def _upgrade_pending(db_path):
     try:
         with closing(sqlite3.connect(f"file:{pathname2url(db_path)}?{mode}", uri=True)) as conn:
             current = conn.execute("SELECT version_num FROM alembic_version").fetchone()
-    except sqlite3.Error:
+    except sqlite3.OperationalError:  # no revision table yet, or can't be opened; corruption is left to raise
         return True
     return current is None or current[0] != ScriptDirectory.from_config(get_alembic_config()).get_current_head()
 
