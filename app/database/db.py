@@ -1,4 +1,3 @@
-import errno
 import importlib
 import logging
 import os
@@ -6,7 +5,6 @@ import shutil
 import sqlite3
 import time
 from contextlib import closing
-from urllib.request import pathname2url
 from app.logger import log_startup_warning
 from filelock import FileLock, Timeout
 from comfy.cli_args import args, database_default_path
@@ -274,28 +272,10 @@ def _init_file_db(db_url):
     try:
         copy_legacy_default_db(db_path)
         db_exists = os.path.exists(db_path)
-        if db_exists and _upgrade_pending(db_path):
-            for path in (db_path, db_path + "-wal", db_path + "-shm", db_path + ".bkp"):
-                # Before connecting, backing up and upgrading, each of which would leave read-only copies behind.
-                if os.path.exists(path) and not os.access(path, os.W_OK):
-                    raise PermissionError(errno.EACCES, "Permission denied", path)
         _migrate_and_bind(db_url, db_path, db_exists)
     except Exception:
         _db_lock.release()
         raise
-
-
-def _upgrade_pending(db_path):
-    """Whether the stored revision isn't the current one, read without creating side files: through the
-    WAL a run that didn't shut down left behind, when both its files are there; otherwise immutably."""
-    wal_left = os.path.exists(db_path + "-wal") and os.path.exists(db_path + "-shm")
-    mode = "mode=ro" if wal_left else "immutable=1"
-    try:
-        with closing(sqlite3.connect(f"file:{pathname2url(db_path)}?{mode}", uri=True)) as conn:
-            current = conn.execute("SELECT version_num FROM alembic_version").fetchone()
-    except sqlite3.OperationalError:  # no revision table yet, or can't be opened; corruption is left to raise
-        return True
-    return current is None or current[0] != ScriptDirectory.from_config(get_alembic_config()).get_current_head()
 
 
 # NORMAL: commits skip the fsync that held the write lock. A power loss or OS crash can

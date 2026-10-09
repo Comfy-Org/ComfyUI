@@ -6,7 +6,6 @@ from contextlib import closing
 import logging
 import os
 import sqlite3
-import subprocess
 import sys
 from pathlib import Path
 
@@ -183,85 +182,8 @@ def test_read_only_database_file_that_needs_an_upgrade(db_path, caplog):
 
     error = _startup_error(caplog, kind="not_writable")
 
-    assert f"ComfyUI can't create, open or write the asset database '{db_path}' ([Errno 13] Permission denied: '{db_path}')" in error
+    assert f"ComfyUI can't create, open or write the asset database '{db_path}' (attempt to write a readonly database)" in error
     assert "delete it" not in error
-    # Nothing read-only is left behind, so making the file writable is the whole fix.
-    assert sorted(os.listdir(os.path.dirname(db_path))) == ["comfyui.db", "comfyui.db.lock"]
-    os.chmod(db_path, 0o644)
-    main.setup_database(_AssetsOn())
-
-
-def _start_and_stop(db_path):
-    """Open the database the way a previous run would, then let it go."""
-    main.setup_database(_AssetsOn())
-    for factory in (db_module.Session, db_module.WriteSession):
-        factory.kw["bind"].dispose()  # a run that exits checkpoints its WAL
-    db_module._db_lock.release(force=True)
-    db_module._db_lock = None
-
-
-@pytest.mark.skipif(sys.platform == "win32" or os.geteuid() == 0, reason="needs POSIX permissions enforced")
-def test_read_only_backup_left_by_an_earlier_run_is_named_before_an_upgrade(db_path, caplog):
-    command.upgrade(db_module.get_alembic_config(), "0006_add_loader_path")
-    open(db_path + ".bkp", "a").close()
-    os.chmod(db_path + ".bkp", 0o444)
-
-    error = _startup_error(caplog, kind="not_writable")
-
-    assert f"[Errno 13] Permission denied: '{db_path}.bkp'" in error
-    assert _revision(db_path) == "0006_add_loader_path"
-
-
-@pytest.mark.skipif(sys.platform == "win32" or os.geteuid() == 0, reason="needs POSIX permissions enforced")
-def test_read_only_backup_doesnt_matter_after_a_run_that_didnt_shut_down(db_path):
-    main.setup_database(_AssetsOn())  # its connections stay open, so the current revision is still in the WAL
-    db_module._db_lock.release(force=True)
-    db_module._db_lock = None
-    assert os.path.exists(db_path + "-wal")
-    open(db_path + ".bkp", "a").close()
-    os.chmod(db_path + ".bkp", 0o444)
-
-    main.setup_database(_AssetsOn())
-
-
-@pytest.mark.skipif(sys.platform == "win32" or os.geteuid() == 0, reason="needs POSIX permissions enforced")
-def test_read_only_database_with_a_wal_but_no_shm_gets_no_side_file(db_path, caplog):
-    command.upgrade(db_module.get_alembic_config(), "0006_add_loader_path")
-    # A run that didn't shut down: its last write is still in the WAL.
-    script = "import sqlite3, sys, os; c = sqlite3.connect(sys.argv[1]); c.execute('PRAGMA journal_mode=WAL');" \
-             " c.execute('PRAGMA wal_autocheckpoint=0'); c.execute('CREATE TABLE unfinished (x)'); c.commit(); os._exit(0)"
-    subprocess.run([sys.executable, "-c", script, db_path], check=True)
-    os.remove(db_path + "-shm")
-    os.chmod(db_path, 0o444)
-
-    _startup_error(caplog, kind="not_writable")
-
-    assert not os.path.exists(db_path + "-shm")
-    os.chmod(db_path, 0o644)
-    main.setup_database(_AssetsOn())
-
-
-@pytest.mark.skipif(sys.platform == "win32" or os.geteuid() == 0, reason="needs POSIX permissions enforced")
-def test_read_only_wal_left_by_a_run_that_didnt_shut_down_is_named_before_an_upgrade(db_path, caplog):
-    command.upgrade(db_module.get_alembic_config(), "0006_add_loader_path")
-    script = "import sqlite3, sys, os; c = sqlite3.connect(sys.argv[1]); c.execute('PRAGMA journal_mode=WAL');" \
-             " c.execute('PRAGMA wal_autocheckpoint=0'); c.execute('CREATE TABLE unfinished (x)'); c.commit(); os._exit(0)"
-    subprocess.run([sys.executable, "-c", script, db_path], check=True)
-    os.chmod(db_path + "-wal", 0o444)
-
-    error = _startup_error(caplog, kind="not_writable")
-
-    assert f"[Errno 13] Permission denied: '{db_path}-wal'" in error
-    assert not os.path.exists(db_path + ".bkp")
-
-
-@pytest.mark.skipif(sys.platform == "win32" or os.geteuid() == 0, reason="needs POSIX permissions enforced")
-def test_read_only_backup_doesnt_matter_without_an_upgrade(db_path):
-    _start_and_stop(db_path)
-    open(db_path + ".bkp", "a").close()
-    os.chmod(db_path + ".bkp", 0o444)
-
-    main.setup_database(_AssetsOn())
 
 
 def test_file_held_open_by_another_process_on_windows(monkeypatch, db_path, caplog):
