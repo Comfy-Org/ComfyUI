@@ -180,14 +180,15 @@ def test_read_only_database_file_that_needs_an_upgrade(db_path, caplog):
 
 
 @pytest.mark.skipif(sys.platform == "win32" or os.geteuid() == 0, reason="needs POSIX permissions enforced")
-def test_read_only_sidecar_file_is_named(db_path, caplog):
+@pytest.mark.parametrize("suffix", ["-wal", "-shm"])
+def test_read_only_sidecar_file_is_named(db_path, caplog, suffix):
     _start_and_stop(db_path)
-    open(db_path + "-shm", "a").close()
-    os.chmod(db_path + "-shm", 0o444)
+    open(db_path + suffix, "a").close()
+    os.chmod(db_path + suffix, 0o444)
 
     error = _startup_error(caplog, kind="not_writable")
 
-    assert f"ComfyUI can't write '{db_path}-shm', beside the asset database '{db_path}'" in error
+    assert f"ComfyUI can't write '{db_path}{suffix}', beside the asset database '{db_path}'" in error
 
 
 def _start_and_stop(db_path):
@@ -233,11 +234,19 @@ def test_unwritable_database_the_permission_check_misses(db_path, monkeypatch, c
     assert "delete it" not in error
 
 
-def test_new_database_passes_the_write_check(db_path):
-    main.setup_database(_AssetsOn())
+@pytest.mark.skipif(sys.platform == "win32" or os.geteuid() == 0, reason="needs POSIX permissions enforced")
+def test_database_whose_folder_cant_take_a_journal(db_path, tmp_path, caplog):
+    # With a rollback journal, the file opens for writing; only a write needs the -journal beside it.
+    _start_and_stop(db_path)
+    with closing(sqlite3.connect(db_path)) as conn:
+        conn.execute("PRAGMA journal_mode=delete")
+    os.chmod(tmp_path, 0o555)
+    try:
+        error = _startup_error(caplog, kind="not_writable")
+    finally:
+        os.chmod(tmp_path, 0o755)
 
-    with sqlite3.connect(db_path) as conn:
-        assert conn.execute("SELECT version_num FROM alembic_version").fetchone()[0] == _head()
+    assert f"ComfyUI can't create, open or write the asset database '{db_path}' (attempt to write a readonly database)" in error
 
 
 def test_write_check_leaves_the_database_unchanged(db_path):
@@ -263,6 +272,7 @@ def test_another_reader_holding_the_database_open_doesnt_stop_startup(db_path, j
     reader.execute("SELECT count(*) FROM alembic_version").fetchone()
     try:
         main.setup_database(_AssetsOn())
+        assert reader.execute("PRAGMA journal_mode").fetchone()[0] == journal_mode
     finally:
         reader.close()
 

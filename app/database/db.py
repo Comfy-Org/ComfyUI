@@ -91,7 +91,7 @@ def get_database_url():
     import folder_paths
 
     db_path = os.path.join(folder_paths.get_user_directory(), "comfyui.db")
-    # SQLAlchemy quotes it, so a ? or %xx in the path stays part of the file name.
+    # SQLAlchemy 2.1+ quotes it, so a ? or %xx in the path stays part of the file name.
     url = URL.create("sqlite", database=db_path).render_as_string()
     if make_url(url).database != db_path:  # SQLAlchemy before 2.1 doesn't quote a ?
         raise DatabasePathError(
@@ -311,9 +311,7 @@ def _check_writable():
 
     Rolled back, not committed: a commit in rollback-journal mode waits for other readers to finish."""
     with WriteSession() as session:
-        connection = session.connection()
-        version = connection.exec_driver_sql("PRAGMA user_version").scalar_one()
-        connection.exec_driver_sql(f"PRAGMA user_version = {int(version)}")
+        session.connection().exec_driver_sql("PRAGMA user_version = 0")
         session.rollback()
 
 
