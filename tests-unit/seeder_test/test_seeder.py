@@ -205,7 +205,9 @@ def test_multi_root_scan_emits_one_started_and_completed_without_root(
     monkeypatch.setattr(seeder_module.time, "perf_counter", lambda: next(clock))
     cpu_clock = iter((2.0, 2.25))
     monkeypatch.setattr(seeder_module.time, "thread_time", lambda: next(cpu_clock))
-    monkeypatch.setattr(scan_seeder, "_run_fast_phase", lambda roots: (3, 2, 5))
+    # Models and input get a fast pass each; the completed event sums them.
+    passes = {("models",): (2, 1, 3), ("input",): (1, 1, 2)}
+    monkeypatch.setattr(scan_seeder, "_run_fast_phase", lambda roots: passes[roots])
     monkeypatch.setattr(scan_seeder, "_run_enrich_phase", lambda roots: (False, 4))
 
     with caplog.at_level(logging.INFO):
@@ -593,7 +595,7 @@ def test_scan_prune_failure_is_reported_and_the_scan_still_runs(
     assert scan_seeder._errors == [
         "Marking missing assets failed; scan continued with the prune incomplete"
     ]
-    assert fast_phase_roots == [("models", "input")]
+    assert fast_phase_roots == [("models",), ("input",)]
     assert events_named(caplog, "seeder.marked_missing") == []
 
 

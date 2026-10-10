@@ -56,6 +56,7 @@ def _scan(roots=OUTPUT_ONLY) -> tuple[int, int, int]:
     seeder = seeder_module._AssetSeeder()
     seeder._scan_state = seeder_module._ScanState()
     seeder._phase = seeder_module.ScanPhase.FAST
+    seeder._roots = roots
     seeder._run_gate.set()
     seeder._cancel_event.clear()
     return seeder._run_fast_phase(roots)
@@ -466,6 +467,7 @@ def test_output_rescan_counts_its_listings_and_row_stats(roots, session):
     seeder = seeder_module._AssetSeeder()
     seeder._scan_state = state = seeder_module._ScanState()
     seeder._phase = seeder_module.ScanPhase.FAST
+    seeder._roots = OUTPUT_ONLY
 
     seeder._run_fast_phase(OUTPUT_ONLY)
 

@@ -21,6 +21,7 @@ from app.assets.scanner_admission import _WATCH_LIST
 # More models than inputs, so input counts that restarted from 0 would go backwards.
 MODELS = 4
 INPUTS = 3
+OUTPUTS = 2
 
 
 @pytest.fixture
@@ -58,6 +59,8 @@ def layout(temp_dir: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, Path]:
         sub = dirs["input"] / f"d{i}"
         sub.mkdir()
         (sub / "a.png").write_bytes(b"i" * (i + 1))
+    for i in range(OUTPUTS):
+        (dirs["output"] / f"o{i}.png").write_bytes(b"o" * (i + 1))
     monkeypatch.setattr(folder_paths, "folder_names_and_paths", {
         "checkpoints": ([str(dirs["checkpoints"])], {".safetensors"}),
     })
@@ -242,3 +245,40 @@ def test_a_cancel_after_the_models_pass_skips_the_input_announcement(db_engine, 
     assert scan.named("assets.seed.cancelled")
     assert not scan.named("assets.seed.completed")
     assert _rows(db_engine, layout["input"]) == 0
+
+
+def test_with_output_in_the_roots_input_and_output_share_the_second_pass(
+    db_engine, layout, slow_input_walk
+):
+    started, release = slow_input_walk
+    scan = _Scan(db_engine, layout, ("models", "input", "output"))
+    worker = scan.run_in_thread()
+    try:
+        assert started.wait(10)
+        assert [e[1]["roots"] for e in scan.named("assets.seed.fast_complete")] == [["models"]]
+        assert _rows(db_engine, layout["checkpoints"]) == MODELS
+    finally:
+        release.set()
+        worker.join(10)
+
+    assert not worker.is_alive()
+    fast = scan.named("assets.seed.fast_complete")
+    assert [(e[1]["roots"], e[1]["created"]) for e in fast] == [
+        (["models"], MODELS), (["input", "output"], INPUTS + OUTPUTS),
+    ]
+    assert _rows(db_engine, layout["output"]) == OUTPUTS
+
+
+def test_the_output_pass_of_a_models_and_output_scan_is_not_the_output_only_rescan(
+    db_engine, layout, monkeypatch
+):
+    def listing():
+        raise AssertionError("the output-only rescan's listing ran")
+
+    monkeypatch.setattr(seeder_module, "list_output_for_rescan", listing)
+    scan = _Scan(db_engine, layout, ("models", "output"))
+    scan.seeder._run_scan()
+
+    assert [e[1]["roots"] for e in scan.named("assets.seed.fast_complete")] == [["models"], ["output"]]
+    assert scan.named("assets.seed.completed")
+    assert _rows(db_engine, layout["output"]) == OUTPUTS
