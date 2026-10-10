@@ -1,3 +1,4 @@
+import torch
 from typing_extensions import override
 from comfy_api.latest import ComfyExtension, io
 from comfy_api.torch_helpers import set_torch_compile_wrapper
@@ -15,8 +16,15 @@ class TorchCompileModel(io.ComfyNode):
                 io.Model.Input("model"),
                 io.Combo.Input(
                     "backend",
-                    options=["inductor", "cudagraphs"],
+                    options=sorted(torch.compiler.list_backends()),
+                    default="inductor",
                     advanced=True,
+                ),
+                io.String.Input(
+                    "mode",
+                    default="",
+                    advanced=True,
+                    tooltip="Backend-specific torch.compile mode, such as max-autotune-no-cudagraphs.",
                 ),
             ],
             outputs=[io.Model.Output()],
@@ -24,9 +32,15 @@ class TorchCompileModel(io.ComfyNode):
         )
 
     @classmethod
-    def execute(cls, model, backend) -> io.NodeOutput:
+    def execute(cls, model, backend, mode) -> io.NodeOutput:
         m = model.clone(disable_dynamic=True)
-        set_torch_compile_wrapper(model=m, backend=backend, options={"guard_filter_fn": skip_torch_compile_dict})
+        compile_options = None if mode else {"guard_filter_fn": skip_torch_compile_dict}
+        set_torch_compile_wrapper(
+            model=m,
+            backend=backend,
+            mode=mode or None,
+            options=compile_options,
+        )
         return io.NodeOutput(m)
 
 
