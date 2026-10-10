@@ -18,6 +18,7 @@ if not has_gpu():
 
 from comfy import ops
 from comfy.quant_ops import QUANT_ALGOS, QuantizedTensor
+import comfy.model_management as mm
 import comfy.utils
 
 
@@ -390,6 +391,23 @@ class TestMixedPrecisionOps(unittest.TestCase):
             self.assertFalse(mm.supports_int8_compute(None))
         finally:
             mm.cpu_state = orig_cpu_state
+
+    def test_nvidia_quant_capability_checks_reject_cpu_device_instead_of_raising(self):
+        """On NVIDIA systems where the text encoder is offloaded to CPU (e.g.
+        text_encoder_device() choosing CPU because should_use_fp16() is False),
+        comfy.sd.CLIP.generate() still calls use_quantized_matmul(model, cpu_device).
+        These checks used to call torch.cuda.get_device_properties(cpu_device)
+        unconditionally, which raises ValueError('Expected a cuda device, but
+        got: cpu') instead of just reporting the format unsupported on CPU
+        (see Comfy-Org/ComfyUI#16365)."""
+        cpu_device = torch.device("cpu")
+        with unittest.mock.patch.object(mm, "is_nvidia", return_value=True):
+            self.assertFalse(mm.supports_fp8_compute(cpu_device))
+            self.assertFalse(mm.supports_nvfp4_compute(cpu_device))
+            with unittest.mock.patch.object(mm, "torch_version_numeric", (2, 10)):
+                self.assertFalse(mm.supports_mxfp8_compute(cpu_device))
+            with unittest.mock.patch.object(mm, "SUPPORT_FP8_OPS", True):
+                self.assertFalse(mm.supports_fp8_compute(cpu_device))
 
     def test_convrot_w4a4_loads_into_params(self):
         """ConvRot W4A4 checkpoints must load as the dedicated kitchen layout."""
