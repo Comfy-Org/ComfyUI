@@ -7,6 +7,7 @@ from aiohttp import FormData
 from aiohttp.test_utils import TestClient, TestServer
 from PIL import Image
 
+from app.assets.database.queries.records import create_content, create_record
 from app.assets.manager import AssetsEnabled
 
 from .preview_helpers import duplicate_data_window, write_exr
@@ -157,8 +158,6 @@ async def test_clients_cannot_create_a_preview_tagged_asset(mock_create_session,
 
 
 def _plain_record(session, path, name, mime_type=None):
-    from app.assets.database.queries.records import create_content, create_record
-
     record = create_record(session, create_content(session, str(path)).id, name, mime_type=mime_type)
     session.commit()
     return record.id
