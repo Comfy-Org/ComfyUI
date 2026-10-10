@@ -13,6 +13,8 @@ import comfy.model_management
 from comfy_extras.nodes_latent import reshape_latent_to
 import node_helpers
 from comfy_api.latest import ComfyExtension, io
+from comfy_api.latest._input import VideoInput
+from comfy_api.latest._util import apply_spatial_ops
 from nodes import MAX_RESOLUTION
 
 class Blend(io.ComfyNode):
@@ -288,131 +290,94 @@ def finalize_image_mask_input(input: torch.Tensor, is_type_image: bool) -> torch
         input = input.squeeze(1)
     return input
 
-def scale_by(input: torch.Tensor, multiplier: float, scale_method: str) -> torch.Tensor:
-    is_type_image = is_image(input)
-    input = init_image_mask_input(input, is_type_image)
-    width = round(input.shape[-1] * multiplier)
-    height = round(input.shape[-2] * multiplier)
+def resolve_resize_ops(
+    width: int,
+    height: int,
+    scale_method: str,
+    resize_type: "ResizeImageMaskNode.ResizeTypedDict",
+    match_size: tuple[int, int] | None = None,
+) -> list[tuple]:
+    """Turn a resize mode and the source size into ordered spatial operations.
 
-    input = comfy.utils.common_upscale(input, width, height, scale_method, "disabled")
-    input = finalize_image_mask_input(input, is_type_image)
-    return input
+    Returns comfy_api spatial operations: one ("scale", width, height, method, crop)
+    step for most modes, followed by an exact ("crop", x, y, width, height) step for
+    "scale to multiple". An empty list means the input is left unchanged. IMAGE, MASK
+    and VIDEO all resize from this one result, so the geometry cannot drift apart.
+    """
+    selected_type = resize_type["resize_type"]
+    crop = "disabled"
 
-def scale_dimensions(input: torch.Tensor, width: int, height: int, scale_method: str, crop: str="disabled") -> torch.Tensor:
-    if width == 0 and height == 0:
-        return input
-    is_type_image = is_image(input)
-    input = init_image_mask_input(input, is_type_image)
-
-    if width == 0:
-        width = max(1, round(input.shape[-1] * height / input.shape[-2]))
-    elif height == 0:
-        height = max(1, round(input.shape[-2] * width / input.shape[-1]))
-
-    input = comfy.utils.common_upscale(input, width, height, scale_method, crop)
-    input = finalize_image_mask_input(input, is_type_image)
-    return input
-
-def scale_longer_dimension(input: torch.Tensor, longer_size: int, scale_method: str) -> torch.Tensor:
-    is_type_image = is_image(input)
-    input = init_image_mask_input(input, is_type_image)
-    width = input.shape[-1]
-    height = input.shape[-2]
-
-    if height > width:
-        width = round((width / height) * longer_size)
-        height = longer_size
-    elif width > height:
-        height = round((height / width) * longer_size)
-        width = longer_size
+    if selected_type == ResizeType.SCALE_BY:
+        multiplier = resize_type["multiplier"]
+        target_width = round(width * multiplier)
+        target_height = round(height * multiplier)
+    elif selected_type in (ResizeType.SCALE_DIMENSIONS, ResizeType.SCALE_WIDTH, ResizeType.SCALE_HEIGHT):
+        if selected_type == ResizeType.SCALE_DIMENSIONS:
+            target_width = resize_type["width"]
+            target_height = resize_type["height"]
+            crop = resize_type["crop"]
+        elif selected_type == ResizeType.SCALE_WIDTH:
+            target_width, target_height = resize_type["width"], 0
+        else:
+            target_width, target_height = 0, resize_type["height"]
+        if target_width == 0 and target_height == 0:
+            return []
+        if target_width == 0:
+            target_width = max(1, round(width * target_height / height))
+        elif target_height == 0:
+            target_height = max(1, round(height * target_width / width))
+    elif selected_type == ResizeType.SCALE_LONGER_DIMENSION:
+        longer_size = resize_type["longer_size"]
+        if height > width:
+            target_width, target_height = round((width / height) * longer_size), longer_size
+        elif width > height:
+            target_width, target_height = longer_size, round((height / width) * longer_size)
+        else:
+            target_width = target_height = longer_size
+    elif selected_type == ResizeType.SCALE_SHORTER_DIMENSION:
+        shorter_size = resize_type["shorter_size"]
+        if height < width:
+            target_width, target_height = round((width / height) * shorter_size), shorter_size
+        elif width < height:
+            target_width, target_height = shorter_size, round((height / width) * shorter_size)
+        else:
+            target_width = target_height = shorter_size
+    elif selected_type == ResizeType.SCALE_TOTAL_PIXELS:
+        total = int(resize_type["megapixels"] * 1024 * 1024)
+        scale = math.sqrt(total / (width * height))
+        target_width = round(width * scale)
+        target_height = round(height * scale)
+    elif selected_type == ResizeType.MATCH_SIZE:
+        target_width, target_height = match_size
+        crop = resize_type["crop"]
+    elif selected_type == ResizeType.SCALE_TO_MULTIPLE:
+        multiple = resize_type["multiple"]
+        if multiple <= 1:
+            return []
+        crop_width = (width // multiple) * multiple
+        crop_height = (height // multiple) * multiple
+        if crop_width == 0 or crop_height == 0:
+            return []
+        if crop_width == width and crop_height == height:
+            return []
+        scale_w = crop_width / width
+        scale_h = crop_height / height
+        if scale_w >= scale_h:
+            target_width = crop_width
+            target_height = max(crop_height, int(math.ceil(height * scale_w)))
+        else:
+            target_height = crop_height
+            target_width = max(crop_width, int(math.ceil(width * scale_h)))
+        # cover first, then take the centre; the crop is an exact slice, never
+        # even-aligned like the VIDEO as_cropped() contract
+        return [
+            ("scale", target_width, target_height, scale_method, "disabled"),
+            ("crop", (target_width - crop_width) // 2, (target_height - crop_height) // 2, crop_width, crop_height),
+        ]
     else:
-        height = longer_size
-        width = longer_size
+        raise ValueError(f"Unsupported resize type: {selected_type}")
 
-    input = comfy.utils.common_upscale(input, width, height, scale_method, "disabled")
-    input = finalize_image_mask_input(input, is_type_image)
-    return input
-
-def scale_shorter_dimension(input: torch.Tensor, shorter_size: int, scale_method: str) -> torch.Tensor:
-    is_type_image = is_image(input)
-    input = init_image_mask_input(input, is_type_image)
-    width = input.shape[-1]
-    height = input.shape[-2]
-
-    if height < width:
-        width = round((width / height) * shorter_size)
-        height = shorter_size
-    elif width < height:
-        height = round((height / width) * shorter_size)
-        width = shorter_size
-    else:
-        height = shorter_size
-        width = shorter_size
-
-    input = comfy.utils.common_upscale(input, width, height, scale_method, "disabled")
-    input = finalize_image_mask_input(input, is_type_image)
-    return input
-
-def scale_total_pixels(input: torch.Tensor, megapixels: float, scale_method: str) -> torch.Tensor:
-    is_type_image = is_image(input)
-    input = init_image_mask_input(input, is_type_image)
-    total = int(megapixels * 1024 * 1024)
-
-    scale_by = math.sqrt(total / (input.shape[-1] * input.shape[-2]))
-    width = round(input.shape[-1] * scale_by)
-    height = round(input.shape[-2] * scale_by)
-
-    input = comfy.utils.common_upscale(input, width, height, scale_method, "disabled")
-    input = finalize_image_mask_input(input, is_type_image)
-    return input
-
-def scale_match_size(input: torch.Tensor, match: torch.Tensor, scale_method: str, crop: str) -> torch.Tensor:
-    is_type_image = is_image(input)
-    input = init_image_mask_input(input, is_type_image)
-    match = init_image_mask_input(match, is_image(match))
-
-    width = match.shape[-1]
-    height = match.shape[-2]
-    input = comfy.utils.common_upscale(input, width, height, scale_method, crop)
-    input = finalize_image_mask_input(input, is_type_image)
-    return input
-
-def scale_to_multiple_cover(input: torch.Tensor, multiple: int, scale_method: str) -> torch.Tensor:
-    if multiple <= 1:
-        return input
-    is_type_image = is_image(input)
-    if is_type_image:
-        _, height, width, _ = input.shape
-    else:
-        _, height, width = input.shape
-    target_w = (width // multiple) * multiple
-    target_h = (height // multiple) * multiple
-    if target_w == 0 or target_h == 0:
-        return input
-    if target_w == width and target_h == height:
-        return input
-    s_w = target_w / width
-    s_h = target_h / height
-    if s_w >= s_h:
-        scaled_w = target_w
-        scaled_h = int(math.ceil(height * s_w))
-        if scaled_h < target_h:
-            scaled_h = target_h
-    else:
-        scaled_h = target_h
-        scaled_w = int(math.ceil(width * s_h))
-        if scaled_w < target_w:
-            scaled_w = target_w
-    input = init_image_mask_input(input, is_type_image)
-    input = comfy.utils.common_upscale(input, scaled_w, scaled_h, scale_method, "disabled")
-    input = finalize_image_mask_input(input, is_type_image)
-    x0 = (scaled_w - target_w) // 2
-    y0 = (scaled_h - target_h) // 2
-    x1 = x0 + target_w
-    y1 = y0 + target_h
-    if is_type_image:
-        return input[:, y0:y1, x0:x1, :]
-    return input[:, y0:y1, x0:x1]
+    return [("scale", int(target_width), int(target_height), scale_method, crop)]
 
 class ResizeImageMaskNode(io.ComfyNode):
     scale_methods = ["nearest-exact", "bilinear", "area", "bicubic", "lanczos"]
@@ -432,7 +397,7 @@ class ResizeImageMaskNode(io.ComfyNode):
 
     @classmethod
     def define_schema(cls):
-        template = io.MatchType.Template("input_type", [io.Image, io.Mask])
+        template = io.MatchType.Template("input_type", [io.Image, io.Mask, io.Video])
         crop_combo = io.Combo.Input(
             "crop",
             options=cls.crop_methods,
@@ -441,10 +406,10 @@ class ResizeImageMaskNode(io.ComfyNode):
         )
         return io.Schema(
             node_id="ResizeImageMaskNode",
-            display_name="Resize Image/Mask",
-            description="Resize an image or mask using various scaling methods.",
+            display_name="Resize Image/Mask/Video",
+            description="Resize an image, mask or video using various scaling methods.",
             category="image/transform",
-            search_aliases=["resize", "resize image", "resize mask", "scale", "scale image", "scale mask", "image resize", "change size", "dimensions", "shrink", "enlarge"],
+            search_aliases=["resize", "resize image", "resize mask", "resize video", "scale", "scale image", "scale mask", "scale video", "image resize", "change size", "dimensions", "shrink", "enlarge"],
             inputs=[
                 io.MatchType.Input("input", template=template),
                 io.DynamicCombo.Input(
@@ -475,7 +440,7 @@ class ResizeImageMaskNode(io.ComfyNode):
                             io.Float.Input("megapixels", default=1.0, min=0.01, max=16.0, step=0.01, tooltip="Target total megapixels (e.g., 1.0 ≈ 1024×1024). Aspect ratio is preserved."),
                         ]),
                         io.DynamicCombo.Option(ResizeType.MATCH_SIZE, [
-                            io.MultiType.Input("match", [io.Image, io.Mask], tooltip="Resize input to match the dimensions of this reference image or mask."),
+                            io.MultiType.Input("match", [io.Image, io.Mask, io.Video], tooltip="Resize input to match the dimensions of this reference image, mask or video."),
                             crop_combo,
                         ]),
                         io.DynamicCombo.Option(ResizeType.SCALE_TO_MULTIPLE, [
@@ -494,27 +459,35 @@ class ResizeImageMaskNode(io.ComfyNode):
         )
 
     @classmethod
-    def execute(cls, input: io.Image.Type | io.Mask.Type, scale_method: io.Combo.Type, resize_type: ResizeTypedDict) -> io.NodeOutput:
-        selected_type = resize_type["resize_type"]
-        if selected_type == ResizeType.SCALE_BY:
-            return io.NodeOutput(scale_by(input, resize_type["multiplier"], scale_method))
-        elif selected_type == ResizeType.SCALE_DIMENSIONS:
-            return io.NodeOutput(scale_dimensions(input, resize_type["width"], resize_type["height"], scale_method, resize_type["crop"]))
-        elif selected_type == ResizeType.SCALE_LONGER_DIMENSION:
-            return io.NodeOutput(scale_longer_dimension(input, resize_type["longer_size"], scale_method))
-        elif selected_type == ResizeType.SCALE_SHORTER_DIMENSION:
-            return io.NodeOutput(scale_shorter_dimension(input, resize_type["shorter_size"], scale_method))
-        elif selected_type == ResizeType.SCALE_WIDTH:
-            return io.NodeOutput(scale_dimensions(input, resize_type["width"], 0, scale_method))
-        elif selected_type == ResizeType.SCALE_HEIGHT:
-            return io.NodeOutput(scale_dimensions(input, 0, resize_type["height"], scale_method))
-        elif selected_type == ResizeType.SCALE_TOTAL_PIXELS:
-            return io.NodeOutput(scale_total_pixels(input, resize_type["megapixels"], scale_method))
-        elif selected_type == ResizeType.MATCH_SIZE:
-            return io.NodeOutput(scale_match_size(input, resize_type["match"], scale_method, resize_type["crop"]))
-        elif selected_type == ResizeType.SCALE_TO_MULTIPLE:
-            return io.NodeOutput(scale_to_multiple_cover(input, resize_type["multiple"], scale_method))
-        raise ValueError(f"Unsupported resize type: {selected_type}")
+    def execute(cls, input: io.Image.Type | io.Mask.Type | io.Video.Type, scale_method: io.Combo.Type, resize_type: ResizeTypedDict) -> io.NodeOutput:
+        is_video = isinstance(input, VideoInput)
+        if is_video:
+            # geometry follows the orientation the video is displayed at, which is
+            # not what get_dimensions() reports for container-rotated sources
+            width, height = input.get_display_dimensions()
+        elif is_image(input):
+            _, height, width, _ = input.shape
+        else:
+            _, height, width = input.shape
+
+        match_size = None
+        if resize_type["resize_type"] == ResizeType.MATCH_SIZE:
+            match = resize_type["match"]
+            if isinstance(match, VideoInput):
+                match_size = match.get_display_dimensions()
+            elif is_image(match):
+                match_size = (match.shape[-2], match.shape[-3])
+            else:
+                match_size = (match.shape[-1], match.shape[-2])
+
+        ops = resolve_resize_ops(width, height, scale_method, resize_type, match_size)
+        if not ops:
+            return io.NodeOutput(input)
+        if is_video:
+            _, target_width, target_height, method, crop = ops[0]
+            post_crop = ops[1][1:] if len(ops) > 1 else None
+            return io.NodeOutput(input.as_resized(target_width, target_height, method, crop, post_crop))
+        return io.NodeOutput(apply_spatial_ops(input, ops, is_mask=not is_image(input)))
 
 def batch_images(images: list[torch.Tensor]) -> torch.Tensor | None:
     if len(images) == 0:
