@@ -1,9 +1,6 @@
 """How an asset's preview is reported: a linked preview, the asset itself, or none."""
 import mimetypes
 import os
-import urllib.parse
-
-from app.assets.services.path_utils import compute_asset_response_paths
 
 
 # What a client can render from the bytes themselves; anything else needs a nominated preview.
@@ -28,29 +25,6 @@ def own_preview_kind(mime_type: str | None, path: str | None) -> str | None:
     return mime.split("/", 1)[0]
 
 
-# models is deliberately absent: /api/view has no directory type for it.
-VIEWABLE_NAMESPACES = frozenset({"input", "output", "temp"})
-
-
-def view_url(file_path: str | None) -> str | None:
-    # /api/view is a FileResponse: byte-range seeking, no user header, no access write.
-    if not file_path:
-        return None
-    paths = compute_asset_response_paths(file_path)
-    if not paths:
-        return None
-    logical_path, relative_path = paths
-    namespace = logical_path.split("/", 1)[0]
-    if namespace not in VIEWABLE_NAMESPACES or not relative_path:
-        return None
-
-    subfolder, _, filename = relative_path.rpartition("/")
-    url = f"/api/view?type={namespace}&filename={urllib.parse.quote(filename, safe='')}"
-    if subfolder:
-        url += f"&subfolder={urllib.parse.quote(subfolder, safe='')}"
-    return url
-
-
 def content_url(asset_id: str) -> str:
     # No query string: clients tell this form apart from /api/view?type=... by that.
     return f"/api/assets/{asset_id}/content"
@@ -69,15 +43,11 @@ def preview_fields(
     if preview_id and preview_id != asset_id:
         # A nominated preview is one whatever it holds, so no media check here.
         if preview_id in preview_paths:
-            # By id only where /api/view can't serve the file, such as previews/.
-            return preview_id, view_url(preview_paths[preview_id]) or content_url(preview_id)
+            return preview_id, content_url(preview_id)
         return None, None
     if is_missing or not file_path:
         return None, None
     kind = own_preview_kind(mime_type, file_path)
     if kind is None:
         return None, None
-    url = view_url(file_path)
-    if url is None:
-        return None, None
-    return (asset_id if kind == "image" else None), url
+    return (asset_id if kind == "image" else None), content_url(asset_id)
