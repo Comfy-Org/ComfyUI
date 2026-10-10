@@ -7,7 +7,7 @@ from collections.abc import Collection
 
 from comfy.cli_args import args
 
-supported_pt_extensions: set[str] = {'.ckpt', '.pt', '.pt2', '.bin', '.pth', '.safetensors', '.pkl', '.sft'}
+supported_pt_extensions: set[str] = {'.ckpt', '.pt', '.pt2', '.bin', '.pth', '.safetensors', '.pkl', '.sft', '.gguf'}
 
 folder_names_and_paths: dict[str, tuple[list[str], set[str]]] = {}
 
