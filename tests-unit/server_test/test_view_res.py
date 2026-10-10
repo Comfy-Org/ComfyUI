@@ -9,6 +9,7 @@ import numpy as np
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
 from PIL import Image
+from PIL.PngImagePlugin import PngInfo
 
 import folder_paths
 import server
@@ -68,7 +69,16 @@ async def test_without_res_serves_original(output_dir):
 async def test_filename_escaped_in_disposition(output_dir):
     save(output_dir / 'a\\"b.png')
     _, headers, _ = await view({"filename": 'a\\"b.png', "res": "64"})
+    assert headers["Content-Type"] == "image/jpeg"
     assert headers["Content-Disposition"] == 'filename="a\\\\\\"b.png"'
+
+
+@pytest.mark.asyncio
+async def test_portrait_capped_by_height(output_dir):
+    save(output_dir / "tall.png", size=(500, 1000))
+    _, _, body = await view({"filename": "tall.png", "res": "512"})
+    with Image.open(BytesIO(body)) as img:
+        assert img.size == (256, 512)
 
 
 @pytest.mark.asyncio
@@ -94,8 +104,10 @@ async def test_colour_key_transparency_not_blended(output_dir):
     stripes = Image.new("RGB", (200, 200), (0, 0, 0))
     stripes.paste((255, 255, 255), (0, 0, 200, 200), mask=Image.fromarray(np.tile([[255, 0]], (200, 100)).astype(np.uint8)))
     stripes.save(output_dir / "keyed.png", transparency=(255, 255, 255))
-    _, _, body = await view({"filename": "keyed.png", "res": "50"})
+    _, headers, body = await view({"filename": "keyed.png", "res": "50"})
+    assert headers["Content-Type"] == "image/jpeg"
     with Image.open(BytesIO(body)) as img:
+        assert img.size == (50, 50)
         assert max(img.getpixel((25, 25))) < 8
 
 
@@ -110,8 +122,9 @@ async def test_16_bit_grayscale_scaled(output_dir):
 
 
 @pytest.mark.asyncio
-async def test_palette_image_resampled_with_filter(output_dir):
-    checker = Image.fromarray((np.indices((200, 200)).sum(axis=0) % 2 * 255).astype(np.uint8)).convert("P")
+@pytest.mark.parametrize("mode", ["P", "1"])
+async def test_palette_and_bilevel_resampled_with_filter(output_dir, mode):
+    checker = Image.fromarray((np.indices((200, 200)).sum(axis=0) % 2 * 255).astype(np.uint8)).convert(mode)
     checker.save(output_dir / "checker.png")
     _, _, body = await view({"filename": "checker.png", "res": "50"})
     with Image.open(BytesIO(body)) as img:
@@ -119,13 +132,31 @@ async def test_palette_image_resampled_with_filter(output_dir):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("content", [b"not an image", b"\x89PNG\r\n\x1a\n" + b"\x00" * 20])
-async def test_undecodable_file_serves_original(output_dir, content):
+@pytest.mark.parametrize("kind", ["not an image", "truncated"])
+async def test_undecodable_file_serves_original(output_dir, kind):
+    if kind == "truncated":
+        noise = np.random.default_rng(0).integers(0, 256, (400, 400, 3), dtype=np.uint8)
+        Image.fromarray(noise).save(output_dir / "broken.png")
+        full = (output_dir / "broken.png").read_bytes()
+        content = full[: len(full) * 6 // 10]
+    else:
+        content = b"not an image"
     (output_dir / "broken.png").write_bytes(content)
     status, headers, body = await view({"filename": "broken.png", "res": "64"})
     assert status == 200
     assert headers["Content-Type"] == "image/png"
     assert body == content
+
+
+@pytest.mark.asyncio
+async def test_oversized_text_chunk_serves_original(output_dir):
+    info = PngInfo()
+    info.add_text("workflow", "x" * (2 * 1024 * 1024), zip=True)
+    original = save(output_dir / "meta.png", pnginfo=info)
+    status, headers, body = await view({"filename": "meta.png", "res": "64"})
+    assert status == 200
+    assert headers["Content-Type"] == "image/png"
+    assert body == original
 
 
 @pytest.mark.asyncio

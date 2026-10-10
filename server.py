@@ -645,7 +645,7 @@ class PromptServer():
                     if res > 0 and 'channel' not in request.rel_url.query and os.path.splitext(file)[1].lower() in ('.png', '.jpg', '.jpeg'):
                         try:
                             body = await asyncio.to_thread(_downscaled_jpeg, file, res)
-                        except (OSError, Image.DecompressionBombError):
+                        except (OSError, ValueError, Image.DecompressionBombError):
                             pass  # undecodable: serve the file as without res
                         else:
                             safe_filename = filename.replace("\\", "\\\\").replace('"', '\\"')
