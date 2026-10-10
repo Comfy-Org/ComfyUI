@@ -5,11 +5,13 @@ tag updates move ``updated_at`` only when the requested values differ. Other
 supplied metadata fields record a write.
 """
 
+import logging
 import mimetypes
 import os
 from typing import Sequence
 
 from sqlalchemy import delete, select, update
+from sqlalchemy.exc import OperationalError
 
 from app.assets.database.models import Asset, AssetContent, AssetTag
 from app.assets.database.queries import (
@@ -257,8 +259,14 @@ def resolve_asset_for_download(
         asset_mime = record.mime_type
         abs_path = content.path
 
-        update_record_access_time(session, reference_id)
-        session.commit()
+        # The access time is advisory: if a scan holds the write lock past the busy
+        # timeout, serve the file anyway rather than fail the download.
+        try:
+            update_record_access_time(session, reference_id)
+            session.commit()
+        except OperationalError as e:
+            session.rollback()
+            logging.warning("Skipped access-time update for %s: %s", reference_id, e)
 
         ctype = (
             asset_mime
