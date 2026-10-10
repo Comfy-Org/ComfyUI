@@ -1030,7 +1030,12 @@ class VAE:
                 minimax_ops = comfy.ops.disable_weight_init
                 minimax_quant = comfy.utils.detect_layer_quantization(sd, "")
                 if minimax_quant is not None:  # int8+convrot quantized decoder
-                    minimax_ops = comfy.ops.mixed_precision_ops(minimax_quant, dtype if dtype is not None else torch.float16)
+                    vae_load_device = device if device is not None else model_management.vae_device()
+                    minimax_ops = comfy.ops.mixed_precision_ops(
+                        minimax_quant,
+                        dtype if dtype is not None else torch.float16,
+                        full_precision_mm=not model_management.supports_int8_compute(vae_load_device),
+                    )
                 minimax_layers = sum(k.startswith("decoder.transformer_blocks.") and k.endswith(".scale1") for k in sd)
                 still_frame = None
                 if metadata is not None and metadata.get("h3_t1_direct") == "true":  # decoder fine-tuned for single-latent stills
