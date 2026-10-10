@@ -39,6 +39,18 @@ def test_previews_are_reclaimed_with_their_last_user_and_never_before(session, m
     session.expire_all()
     assert not (previews / "shared.webp").exists() and session.get(Asset, shared) is None
 
+    # A file another record also uses stays when one of them goes.
+    twin_a = _record(session, previews / "twin.webp", tags=["preview"])
+    _record(session, previews / "twin.webp", tags=["preview"])
+    delete_asset_reference(_record(session, roots / "output" / "d.exr", preview_id=twin_a))
+    assert (previews / "twin.webp").exists(), "the other record still uses the file"
+
+    # Deleting a preview itself reclaims its file.
+    direct = _record(session, previews / "direct.webp", tags=["preview"])
+    _record(session, roots / "output" / "e.exr", preview_id=direct)
+    delete_asset_reference(direct)
+    assert not (previews / "direct.webp").exists()
+
     # A missing row's path that a live preview now uses keeps its file.
     old = _record(session, previews / "again.webp", tags=["preview"])
     parent = _record(session, roots / "output" / "c.exr", preview_id=old)

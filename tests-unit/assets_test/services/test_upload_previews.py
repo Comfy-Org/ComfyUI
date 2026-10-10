@@ -101,9 +101,16 @@ async def _upload(route: str, exr: bytes, roots, session) -> dict:
 @pytest.mark.parametrize("route", ["/upload/image", "multipart", "from-hash"])
 @pytest.mark.parametrize(("value", "mode"), [((0.5, 0.5, 0.5), "RGB"), ((0.5, 0.5, 0.5, 0.25), "RGBA")])
 async def test_an_uploaded_exr_comes_back_with_its_preview(mock_create_session, roots, tmp_path, assets_routes_on, session, route, value, mode):
+    from app.assets import previews
+
     exr = write_exr(tmp_path / "src.exr", 64, 48, value=value).read_bytes()
 
-    asset = await _upload(route, exr, roots, session)
+    with patch.object(previews, "_make_preview", wraps=previews._make_preview) as make:
+        asset = await _upload(route, exr, roots, session)
+        if route == "/upload/image":
+            again = await _upload(route, exr, roots, session)
+            assert again["preview_id"] == asset["preview_id"], "the same bytes reuse their preview"
+            assert make.call_count == 1, "and aren't decoded again"
 
     assert asset["preview_id"] not in (None, asset["id"])
     assert asset["preview_url"] == f"/api/assets/{asset['preview_id']}/content"

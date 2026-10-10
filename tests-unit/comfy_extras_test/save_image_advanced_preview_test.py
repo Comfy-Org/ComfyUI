@@ -45,8 +45,8 @@ def _save(images: torch.Tensor, colorspace: str = "linear", bit_depth: str = "32
     return SaveImageAdvanced.execute(images, "t", fmt).ui["images"]
 
 
-def test_an_rgba_exr_gets_a_webp_with_straight_alpha(dirs):
-    rgba = torch.empty((1, 16, 16, 4))
+def test_an_rgba_exr_gets_a_webp_with_straight_alpha_within_one_megapixel(dirs):
+    rgba = torch.empty((1, 1000, 1200, 4))
     rgba[..., :3] = 0.1
     rgba[..., 3] = 0.2
 
@@ -54,7 +54,8 @@ def test_an_rgba_exr_gets_a_webp_with_straight_alpha(dirs):
 
     image = Image.open(dirs / "previews" / ref["filename"])
     assert ref["filename"].endswith(".webp") and image.mode == "RGBA"
-    pixel = np.asarray(image)[8, 8]
+    assert (ref["width"], ref["height"]) == image.size and image.width * image.height <= 1_000_000 < 1200 * 1000
+    pixel = np.asarray(image)[image.height // 2, image.width // 2]
     assert abs(int(pixel[0]) - 89) <= 3, "sRGB(0.1), not brightened by un-premultiplying"
     assert abs(int(pixel[3]) - 51) <= 3
 
