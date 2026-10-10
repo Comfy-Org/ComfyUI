@@ -662,6 +662,44 @@ def test_iteration_cache_policy_and_end_cache(cache_iterations, expected_calls):
     assert second_prompt["close"]["inputs"]["output_value"] == ["increment", 0]
 
 
+@pytest.mark.parametrize(
+    ("body", "first_iteration_runs"),
+    [
+        ({"class_type": "TestIncrement", "inputs": {"value": ["loop", 0]}}, 1),
+        (
+            {
+                "class_type": "TestCaptureLoopState",
+                "inputs": {"index": ["loop", 0], "is_first": ["loop", 1], "is_last": ["loop", 2], "item": ["loop", 3]},
+            },
+            2,
+        ),
+    ],
+)
+def test_shorter_loop_reuses_first_iteration_unless_body_reads_is_last(body, first_iteration_runs):
+    Increment.calls = []
+    CaptureLoopState.values = []
+    prompt = {
+        "loop": {
+            "class_type": "StartLoop",
+            "inputs": {"mode": "simple", "mode.num_iterations": 2, "cache_iterations": True},
+        },
+        "body": body,
+        "close": {
+            "class_type": "EndLoop",
+            "inputs": {"output_value": ["body", 0], "accumulate": True},
+        },
+    }
+    shorter = copy.deepcopy(prompt)
+    shorter["loop"]["inputs"]["mode.num_iterations"] = 1
+    executor = PromptExecutor(Server(), cache_type=False, cache_args={"ram": 0, "ram_inactive": 0})
+
+    executor.execute(prompt, "loop-length-first", execute_outputs=["close"])
+    executor.execute(shorter, "loop-length-second", execute_outputs=["close"])
+
+    assert executor.success
+    assert Increment.calls.count(1) + [values[0] for values in CaptureLoopState.values].count(0) == first_iteration_runs
+
+
 def test_iteration_cache_still_expands_when_only_termination_is_requested():
     Increment.calls = []
     CapturePassthrough.values = []
