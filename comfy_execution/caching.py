@@ -571,12 +571,12 @@ class RAMPressureCache(LRUCache):
                 nonlocal ram_usage, oom_ram_usage
                 if outputs is None:
                     return
-                if isinstance(outputs, Mapping):
+                if isinstance(outputs, dict):
                     outputs = outputs.values()
                 elif not isinstance(outputs, (list, tuple)):
                     outputs = (outputs,)
                 for output in outputs:
-                    if isinstance(output, (list, tuple, Mapping)):
+                    if isinstance(output, (list, tuple, dict)):
                         scan_list_for_ram_usage(output)
                     elif isinstance(output, torch.Tensor) and output.device.type == 'cpu':
                         storage = output.untyped_storage()
