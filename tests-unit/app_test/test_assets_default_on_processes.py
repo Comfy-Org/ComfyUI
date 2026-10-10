@@ -170,3 +170,29 @@ def test_default_server_reports_assets_off(default_server):
     assert disabled.status_code == 503
     assert "--enable-assets" in disabled.json()["error"]["message"]
     assert requests.get(f"{default_server}/features", timeout=10).json()["assets"] is False
+
+
+def _listed_names(base_url):
+    return [asset["name"] for asset in requests.get(f"{base_url}/api/assets", timeout=10).json()["assets"]]
+
+
+def test_running_a_prompt_rescans_the_output_folder(enabled_server, tmp_path):
+    deadline = time.monotonic() + 60
+    while requests.get(f"{enabled_server}/api/assets/seed/status", timeout=10).json()["state"] != "IDLE":
+        assert time.monotonic() < deadline, "startup scan did not finish"
+        time.sleep(0.25)
+    # Written behind ComfyUI's back, so only a scan of the output folder can find it.
+    (tmp_path / "output").mkdir(exist_ok=True)
+    (tmp_path / "output" / "undeclared.png").write_bytes(b"undeclared-bytes")
+    assert "undeclared.png" not in _listed_names(enabled_server)
+
+    prompt = {
+        "1": {"class_type": "EmptyImage", "inputs": {"width": 8, "height": 8, "batch_size": 1, "color": 0}},
+        "2": {"class_type": "PreviewImage", "inputs": {"images": ["1", 0]}},
+    }
+    assert requests.post(f"{enabled_server}/prompt", json={"prompt": prompt}, timeout=10).status_code == 200
+
+    deadline = time.monotonic() + 60
+    while "undeclared.png" not in _listed_names(enabled_server):
+        assert time.monotonic() < deadline, "the output folder was not rescanned after the prompt"
+        time.sleep(0.25)
