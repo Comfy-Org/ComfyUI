@@ -64,7 +64,7 @@ class LogInterceptor(io.TextIOWrapper):
 
             # Simple handling for cr to overwrite the last output if it isnt a full line
             # else logs just get full of progress messages
-            if isinstance(data, str) and data.startswith("\r") and not logs[-1]["m"].endswith("\n"):
+            if isinstance(data, str) and data.startswith("\r") and logs and not logs[-1]["m"].endswith("\n"):
                 logs.pop()
             logs.append(entry)
         super().write(data)
