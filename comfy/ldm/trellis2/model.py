@@ -674,7 +674,7 @@ class SparseStructureFlowModel(nn.Module):
             )
 
         pos_embedder = RotaryPositionEmbedder(self.model_channels // self.num_heads, 3, device=device)
-        coords = torch.meshgrid(*[torch.arange(res, device=self.device, dtype=dtype) for res in [resolution] * 3], indexing='ij')
+        coords = torch.meshgrid(*[torch.arange(res, device=self.device, dtype=torch.float32) for res in [resolution] * 3], indexing='ij')
         coords = torch.stack(coords, dim=-1).reshape(-1, 3)
         rope_phases = pos_embedder(coords)
         self.register_buffer("rope_phases", rope_phases, persistent=False)
