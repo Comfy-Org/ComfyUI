@@ -2460,7 +2460,9 @@ class SAM3(supported_models_base.BASE):
     unet_extra_prefix = ""
 
     def process_clip_state_dict(self, state_dict):
-        clip_keys = getattr(self, "_clip_stash", {})
+        if "_clip_stash" not in self.__dict__:  # CLIP-only load never runs process_unet_state_dict
+            self._clip_stash = {k: state_dict.pop(k) for k in list(state_dict.keys()) if "language_backbone" in k and "resizer" not in k}
+        clip_keys = self._clip_stash
         clip_keys = utils.state_dict_prefix_replace(clip_keys, {"detector.backbone.language_backbone.": "", "backbone.language_backbone.": ""}, filter_keys=True)
         clip_keys = utils.clip_text_transformers_convert(clip_keys, "encoder.", "sam3_clip.transformer.")
         return {k: v for k, v in clip_keys.items() if not k.startswith("resizer.")}
