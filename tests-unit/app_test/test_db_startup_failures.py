@@ -199,6 +199,18 @@ def test_newer_database_the_check_cannot_read_still_stops_as_newer_revision(db_p
 
     assert f"The asset database '{db_path}' was last used by a newer version of ComfyUI" in error
     assert "0099_from_a_newer_release" in error
+    assert "Update ComfyUI" in error
+
+
+def test_disable_assets_never_reads_the_database(db_path, monkeypatch, caplog):
+    _stamp(db_path, "0099_from_a_newer_release")
+    monkeypatch.setattr(main.args, "disable_assets", True)
+    monkeypatch.setattr(main, "newer_database", lambda: pytest.fail("checked the database with assets off"))
+
+    with caplog.at_level(logging.WARNING):
+        main.skip_assets_for_a_newer_database()
+
+    assert "ASSETS_DISABLED" not in caplog.text
 
 
 def test_newer_database_at_the_legacy_path_stays_where_the_newer_comfyui_left_it(tmp_path, monkeypatch, db_path, caplog):

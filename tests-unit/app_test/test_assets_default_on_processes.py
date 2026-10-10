@@ -196,6 +196,7 @@ def test_database_from_a_newer_comfyui_runs_without_assets_and_is_left_as_it_is(
             timeout=10,
         )
         assert upload.status_code == 200
+        assert "asset" not in upload.json()  # saved, but not registered as an asset
         assert requests.get(f"{base_url}/api/assets", timeout=10).status_code == 503
         assert requests.get(f"{base_url}/features", timeout=10).json()["assets"] is False
     finally:
