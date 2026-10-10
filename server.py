@@ -111,9 +111,11 @@ def _remove_sensitive_from_queue(queue: list) -> list:
     return [item[:5] for item in queue]
 
 
-def _downscaled_jpeg(path: str, res: int) -> bytes:
-    """Longest side capped at res (never upscaled), alpha flattened onto black, as quality 85 JPEG."""
+def _downscaled_jpeg(path: str, res: int) -> bytes | None:
+    """Longest side capped at res, alpha flattened onto black, as quality 85 JPEG; None if the original already fits."""
     with Image.open(path) as img:
+        if max(img.size) <= res and not img.mode.startswith("I") and "A" not in img.mode and "transparency" not in img.info:
+            return None
         if img.mode.startswith("I"):  # 16-bit grayscale
             img = img.convert("I").point(lambda v: v / 256).convert("L")
         elif img.mode in ("P", "1") or "transparency" in img.info:  # resample filtered, without hidden colours blending in
@@ -638,17 +640,15 @@ class PromptServer():
                     file = os.path.join(output_dir, filename)
 
                 if os.path.isfile(file):
-                    try:
-                        res = int(request.rel_url.query.get('res', ''))
-                    except ValueError:
-                        res = 0
+                    res = request.rel_url.query.get('res', '')
+                    res = int(res) if res.isascii() and res.isdigit() else 0
                     if res > 0 and 'channel' not in request.rel_url.query and os.path.splitext(file)[1].lower() in ('.png', '.jpg', '.jpeg'):
                         try:
                             body = await asyncio.to_thread(_downscaled_jpeg, file, res)
-                        except (OSError, ValueError, Image.DecompressionBombError):
-                            pass  # undecodable: serve the file as without res
-                        else:
-                            safe_filename = filename.replace("\\", "\\\\").replace('"', '\\"')
+                        except (OSError, SyntaxError, ValueError, Image.DecompressionBombError):
+                            body = None  # undecodable: serve the file as without res
+                        if body is not None:
+                            safe_filename = (os.path.splitext(filename)[0] + ".jpg").replace("\\", "\\\\").replace('"', '\\"')
                             return web.Response(body=body, content_type='image/jpeg',
                                                 headers={"Content-Disposition": f"filename=\"{safe_filename}\"", "X-Content-Type-Options": "nosniff"})
 

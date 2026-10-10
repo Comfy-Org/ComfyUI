@@ -1,6 +1,8 @@
 """Tests for /view?res=N downscaled JPEG previews"""
 
+import struct
 import sys
+import zlib
 from io import BytesIO
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -39,6 +41,21 @@ def save(path, size=(1000, 500), mode="RGB", color=(200, 30, 30), **kwargs):
     return path.read_bytes()
 
 
+def break_second_idat_chunk(png):
+    out, i, idat = png[:8], 8, 0
+    while i < len(png):
+        (length,) = struct.unpack(">I", png[i:i + 4])
+        ctype, data = png[i + 4:i + 8], png[i + 8:i + 8 + length]
+        i += 12 + length
+        parts = [(ctype, data)]
+        if ctype == b"IDAT" and idat == 0:
+            parts = [(b"IDAT", data[:length // 2]), (b"\x00\x01\x02\x03", data[length // 2:])]
+            idat += 1
+        for t, d in parts:
+            out += struct.pack(">I", len(d)) + t + d + struct.pack(">I", zlib.crc32(t + d))
+    return out
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("name", ["a.png", "a.jpg", "a.jpeg", "a.PNG", "a.JPG"])
 async def test_downscales_to_jpeg(output_dir, name):
@@ -70,7 +87,7 @@ async def test_filename_escaped_in_disposition(output_dir):
     save(output_dir / 'a\\"b.png')
     _, headers, _ = await view({"filename": 'a\\"b.png', "res": "64"})
     assert headers["Content-Type"] == "image/jpeg"
-    assert headers["Content-Disposition"] == 'filename="a\\\\\\"b.png"'
+    assert headers["Content-Disposition"] == 'filename="a\\\\\\"b.jpg"'
 
 
 @pytest.mark.asyncio
@@ -82,8 +99,21 @@ async def test_portrait_capped_by_height(output_dir):
 
 
 @pytest.mark.asyncio
-async def test_never_upscales(output_dir):
-    save(output_dir / "small.png", size=(100, 40))
+@pytest.mark.parametrize("name,fmt,content_type", [("small.png", "png", "image/png"), ("small.jpg", "jpeg", "image/jpeg")])
+async def test_already_fitting_image_serves_original(output_dir, name, fmt, content_type):
+    original = save(output_dir / name, size=(100, 40), format=fmt)
+    status, headers, body = await view({"filename": name, "res": "512"})
+    assert status == 200 and headers["Content-Type"] == content_type
+    assert body == original
+    _, _, exact = await view({"filename": name, "res": "100"})
+    assert exact == original
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode,kwargs", [("RGBA", {}), ("LA", {}), ("I;16", {}), ("RGB", {"transparency": (0, 0, 0)})])
+async def test_fitting_image_needing_flattening_is_converted(output_dir, mode, kwargs):
+    image = Image.fromarray(np.full((40, 100), 1000, np.uint16)) if mode == "I;16" else Image.new(mode, (100, 40))
+    image.save(output_dir / "small.png", **kwargs)
     status, headers, body = await view({"filename": "small.png", "res": "512"})
     assert status == 200 and headers["Content-Type"] == "image/jpeg"
     with Image.open(BytesIO(body)) as img:
@@ -132,9 +162,12 @@ async def test_palette_and_bilevel_resampled_with_filter(output_dir, mode):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("kind", ["not an image", "truncated"])
+@pytest.mark.parametrize("kind", ["not an image", "truncated", "broken chunk"])
 async def test_undecodable_file_serves_original(output_dir, kind):
-    if kind == "truncated":
+    if kind == "broken chunk":  # Pillow raises SyntaxError while decoding
+        save(output_dir / "broken.png", size=(64, 64))
+        content = break_second_idat_chunk((output_dir / "broken.png").read_bytes())
+    elif kind == "truncated":
         noise = np.random.default_rng(0).integers(0, 256, (400, 400, 3), dtype=np.uint8)
         Image.fromarray(noise).save(output_dir / "broken.png")
         full = (output_dir / "broken.png").read_bytes()
@@ -142,7 +175,7 @@ async def test_undecodable_file_serves_original(output_dir, kind):
     else:
         content = b"not an image"
     (output_dir / "broken.png").write_bytes(content)
-    status, headers, body = await view({"filename": "broken.png", "res": "64"})
+    status, headers, body = await view({"filename": "broken.png", "res": "16"})
     assert status == 200
     assert headers["Content-Type"] == "image/png"
     assert body == content
@@ -198,7 +231,7 @@ async def test_channel_disables_res(output_dir):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("res", ["abc", "0", "-1", ""])
+@pytest.mark.parametrize("res", ["abc", "0", "-1", "", " 64", "+64", "6_4", "\u0666\u0664", "\u00b2"])
 async def test_invalid_res_serves_original(output_dir, res):
     original = save(output_dir / "a.png")
     status, headers, body = await view({"filename": "a.png", "res": res})
@@ -234,11 +267,11 @@ async def test_hash_filename_resolves_then_downscales(tmp_path, monkeypatch):
     path = tmp_path / "stored.png"
     save(path)
     monkeypatch.setattr(server, "resolve_hash_to_path", lambda h: SimpleNamespace(
-        abs_path=str(path), download_name="pic", content_type="image/png"), raising=False)
+        abs_path=str(path), download_name="pic.png", content_type="image/png"), raising=False)
     status, headers, body = await view({"filename": "blake3:abc", "res": "512"}, MagicMock(enabled=True))
     assert status == 200
     assert headers["Content-Type"] == "image/jpeg"
-    assert headers["Content-Disposition"] == 'filename="pic"'
+    assert headers["Content-Disposition"] == 'filename="pic.jpg"'
     with Image.open(BytesIO(body)) as img:
         assert img.size == (512, 256)
 
