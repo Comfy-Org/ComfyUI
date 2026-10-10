@@ -961,6 +961,11 @@ class VAE:
                     self.memory_used_decode = lambda shape, dtype: ((260 * 16 * 16 + shape[1] * shape[-3]) * shape[-2] * shape[-1] * model_management.dtype_size(dtype))
                 elif self.latent_channels in [48, 128]: # Wan 2.2 and LTX2
                     self.first_stage_model = comfy.taesd.taehv.TAEHV(latent_channels=self.latent_channels, latent_format=None) # taehv doesn't need scaling
+                    if self.latent_channels == 128:
+                        self.upscale_ratio = (lambda a: max(0, a * 8 - 7), 32, 32)
+                        self.upscale_index_formula = (8, 32, 32)
+                        self.downscale_ratio = (lambda a: max(0, math.floor((a + 7) / 8)), 32, 32)
+                        self.downscale_index_formula = (8, 32, 32)
                     self.process_input = self.process_output = lambda image: image
                     self.process_output = lambda image: image
                     self.memory_used_decode = lambda shape, dtype: (1800 * (max(1, (shape[-3] ** 0.7 * 0.1)) * shape[-2] * shape[-1] * 16 * 16) * model_management.dtype_size(dtype))
