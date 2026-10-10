@@ -140,5 +140,16 @@ knowledge_base:
     filePatterns:
       - files: "AGENTS.md"
         applyTo: "**"
+  linked_repositories:
+    - repository: "Comfy-Org/ComfyUI_frontend"
+      instructions: |
+        Frontend consumer of Core APIs, routes, feature flags, asset behavior,
+        node metadata, and package-version rollouts. Check for compatibility
+        issues and changes that require coordinated rollout or merge ordering.
+    - repository: "Comfy-Org/comfy-kitchen"
+      instructions: |
+        Owns optimized inference operations and kernels used by ComfyUI. Check
+        whether new model math or backend-specific operations duplicate an
+        existing implementation or belong in comfy-kitchen instead of Core.
   learnings:
     scope: "auto"

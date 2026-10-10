@@ -32,6 +32,7 @@ from app.assets.database.queries import (
 from app.assets.database.models import Asset, AssetContent
 from app.assets.helpers import (
     PREFIX_BATCH_SIZE,
+    mtime_ns_to_utc,
     path_prefix_matcher,
     sql_path_under_prefix,
     sql_path_under_prefix_batches,
@@ -67,7 +68,7 @@ from app.assets.services.file_utils import (
     walk_listings,
 )
 from app.assets.services.gil import yield_gil
-from app.assets.services.image_dimensions import extract_image_dimensions
+from app.assets.services.media_metadata import extract_media_metadata
 from app.assets.services.metadata_extract import ExtractedMetadata, extract_file_metadata
 from app.assets.services.path_utils import (
     compute_loader_path,
@@ -765,6 +766,8 @@ def seed_asset_specs(
                     job_id=spec["job_id"],
                     loader_path=spec["fname"],
                     tags=spec["tags"],
+                    # Sorts files already on disk by when they were made, not by walk order.
+                    created_at=mtime_ns_to_utc(get_mtime_ns(stat_result), stat_result.st_ctime_ns),
                 )
                 created += 1
         except IntegrityError as error:
@@ -1011,10 +1014,9 @@ def enrich_asset(
 
     if extract_metadata and metadata:
         system_metadata = metadata.to_user_metadata()
-        if mime_type and mime_type.startswith("image/"):
-            dims = extract_image_dimensions(file_path, mime_type=mime_type)
-            if dims:
-                system_metadata.update(dims)
+        dims = extract_media_metadata(file_path, mime_type=mime_type)
+        if dims:
+            system_metadata.update(dims)
         record.system_metadata = {**(record.system_metadata or {}), **system_metadata}
 
     if stored_hash:
