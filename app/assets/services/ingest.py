@@ -606,13 +606,15 @@ def register_file_in_place(
                 None,
                 system_metadata,
             )
+            # Read back before committing, so a retry can never follow a committed record.
+            result = _record_to_upload_result(session, record, created_new=True)
             session.commit()
         except Exception:
             session.rollback()
             if created_content_id is not None:
                 _discard_unreferenced_content(session, created_content_id)
             raise
-        return _record_to_upload_result(session, record, created_new=True)
+        return result
 
 
 def create_from_hash(

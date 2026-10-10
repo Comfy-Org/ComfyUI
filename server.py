@@ -2,6 +2,7 @@ import errno
 import os
 import sys
 import asyncio
+import functools
 import traceback
 import time
 
@@ -46,7 +47,8 @@ from comfyui_version import __version__
 from app.frontend_management import FrontendManager, parse_version
 from comfy_api.internal import _ComfyNodeInternal
 from app.assets.event_log import emit
-from app.database.db import dependencies_available
+from app.assets.manager import AssetRegistrationError
+from app.database.db import dependencies_available, is_memory_db
 
 if dependencies_available():
     from app.assets.services.asset_management import (
@@ -455,7 +457,15 @@ class PromptServer():
                 return a.hexdigest() == b.hexdigest()
             return False
 
-        def image_upload(post, image_save_function=None):
+        # Uploads are handled one at a time, as when registration ran on the event loop: an
+        # overlapping overwrite of the same file could otherwise register the other upload's bytes.
+        upload_lock = asyncio.Lock()
+
+        async def image_upload(post, image_save_function=None):
+            async with upload_lock:
+                return await _image_upload(post, image_save_function)
+
+        async def _image_upload(post, image_save_function=None):
             image = post.get("image")
             overwrite = post.get("overwrite")
             image_is_duplicate = False
@@ -501,13 +511,28 @@ class PromptServer():
 
                 resp = {"name" : filename, "subfolder": subfolder, "type": image_upload_type}
 
-                view = self.asset_manager.register_upload(
+                register = functools.partial(
+                    self.asset_manager.register_upload,
                     abs_path=filepath,
                     name=filename,
                     upload_type=image_upload_type,
                     subfolder=subfolder,
                     content_written=not image_is_duplicate,
                 )
+                try:
+                    # Off the event loop, since a locked database makes this wait seconds. The in-memory
+                    # database shares one connection between all sessions and has nothing to wait for.
+                    view = register() if is_memory_db() else await asyncio.to_thread(register)
+                except AssetRegistrationError as e:
+                    view = None
+                    # A temp file is read back by name, so it is usable without an asset.
+                    if image_upload_type != "temp":
+                        # The saved file stays: an /upload/image retry with the same bytes reuses it.
+                        if e.locked:
+                            status, code, message = 503, "DATABASE_BUSY", "Saved, but couldn't add it to the library because the database is busy. Upload again to finish."
+                        else:
+                            status, code, message = 500, "ASSET_REGISTRATION_FAILED", "Asset registration failed"
+                        return web.json_response({"code": code, "message": message, "details": resp}, status=status, reason=message)
                 if view is not None:
                     resp["asset"] = {
                         "id": view.asset.id,
@@ -525,7 +550,7 @@ class PromptServer():
         @routes.post("/upload/image")
         async def upload_image(request):
             post = await request.post()
-            return image_upload(post)
+            return await image_upload(post)
 
 
         @routes.post("/upload/mask")
@@ -572,7 +597,7 @@ class PromptServer():
                         original_pil.putalpha(new_alpha)
                         original_pil.save(filepath, compress_level=4, pnginfo=metadata)
 
-            return image_upload(post, image_save_function)
+            return await image_upload(post, image_save_function)
 
         @routes.get("/view")
         async def view_image(request):
