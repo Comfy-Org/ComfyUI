@@ -66,9 +66,9 @@ async def test_without_res_serves_original(output_dir):
 @pytest.mark.skipif(sys.platform == "win32", reason='" is not allowed in Windows filenames')
 @pytest.mark.asyncio
 async def test_filename_escaped_in_disposition(output_dir):
-    save(output_dir / 'a"b.png')
-    _, headers, _ = await view({"filename": 'a"b.png', "res": "64"})
-    assert headers["Content-Disposition"] == 'filename="a\\"b.png"'
+    save(output_dir / 'a\\"b.png')
+    _, headers, _ = await view({"filename": 'a\\"b.png', "res": "64"})
+    assert headers["Content-Disposition"] == 'filename="a\\\\\\"b.png"'
 
 
 @pytest.mark.asyncio
@@ -107,6 +107,35 @@ async def test_16_bit_grayscale_scaled(output_dir):
     with Image.open(BytesIO(body)) as img:
         assert img.size == (100, 50)
         assert abs(img.getpixel((10, 10))[0] - 40000 // 256) <= 2
+
+
+@pytest.mark.asyncio
+async def test_palette_image_resampled_with_filter(output_dir):
+    checker = Image.fromarray((np.indices((200, 200)).sum(axis=0) % 2 * 255).astype(np.uint8)).convert("P")
+    checker.save(output_dir / "checker.png")
+    _, _, body = await view({"filename": "checker.png", "res": "50"})
+    with Image.open(BytesIO(body)) as img:
+        assert 100 < img.getpixel((25, 25))[0] < 156
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("content", [b"not an image", b"\x89PNG\r\n\x1a\n" + b"\x00" * 20])
+async def test_undecodable_file_serves_original(output_dir, content):
+    (output_dir / "broken.png").write_bytes(content)
+    status, headers, body = await view({"filename": "broken.png", "res": "64"})
+    assert status == 200
+    assert headers["Content-Type"] == "image/png"
+    assert body == content
+
+
+@pytest.mark.asyncio
+async def test_decompression_bomb_serves_original(output_dir, monkeypatch):
+    original = save(output_dir / "huge.png")
+    monkeypatch.setattr(Image, "MAX_IMAGE_PIXELS", 1000)
+    status, headers, body = await view({"filename": "huge.png", "res": "64"})
+    assert status == 200
+    assert headers["Content-Type"] == "image/png"
+    assert body == original
 
 
 @pytest.mark.asyncio
@@ -188,6 +217,7 @@ async def test_hash_filename_resolves_then_downscales(tmp_path, monkeypatch):
     ({"filename": "../secret.png"}, 400),
     ({"filename": "/etc/secret.png"}, 400),
     ({"filename": "secret.png", "subfolder": ".."}, 403),
+    ({"filename": "missing.png"}, 404),
 ])
 async def test_path_traversal_still_rejected(output_dir, params, expected):
     save(output_dir.parent / "secret.png")

@@ -116,7 +116,7 @@ def _downscaled_jpeg(path: str, res: int) -> bytes:
     with Image.open(path) as img:
         if img.mode.startswith("I"):  # 16-bit grayscale
             img = img.convert("I").point(lambda v: v / 256).convert("L")
-        elif "transparency" in img.info:  # expand before resampling so hidden colours don't blend in
+        elif img.mode in ("P", "1") or "transparency" in img.info:  # resample filtered, without hidden colours blending in
             img = img.convert("RGBA")
         img.thumbnail((res, res))
         img = ImageOps.exif_transpose(img).convert("RGBA")
@@ -643,10 +643,14 @@ class PromptServer():
                     except ValueError:
                         res = 0
                     if res > 0 and 'channel' not in request.rel_url.query and os.path.splitext(file)[1].lower() in ('.png', '.jpg', '.jpeg'):
-                        body = await asyncio.to_thread(_downscaled_jpeg, file, res)
-                        safe_filename = filename.replace("\\", "\\\\").replace('"', '\\"')
-                        return web.Response(body=body, content_type='image/jpeg',
-                                            headers={"Content-Disposition": f"filename=\"{safe_filename}\"", "X-Content-Type-Options": "nosniff"})
+                        try:
+                            body = await asyncio.to_thread(_downscaled_jpeg, file, res)
+                        except (OSError, Image.DecompressionBombError):
+                            pass  # undecodable: serve the file as without res
+                        else:
+                            safe_filename = filename.replace("\\", "\\\\").replace('"', '\\"')
+                            return web.Response(body=body, content_type='image/jpeg',
+                                                headers={"Content-Disposition": f"filename=\"{safe_filename}\"", "X-Content-Type-Options": "nosniff"})
 
                     if 'preview' in request.rel_url.query:
                         with Image.open(file) as img:
