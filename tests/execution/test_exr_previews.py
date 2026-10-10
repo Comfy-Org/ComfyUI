@@ -132,6 +132,7 @@ def test_a_cached_rerun_keeps_the_preview(server):
     replay, _ = _run(base, prompt)
     replay = replay[save_id]["images"][0]
 
+    assert replay["filename"] == first["filename"], "served from cache, not saved again"
     assert replay["id"] != first["id"], "a replay registers its own record"
     assert replay["preview_id"] == first["preview_id"], "and reuses the preview of the same bytes"
     assert "asset_preview" not in replay

@@ -246,6 +246,9 @@ def test_failures_are_logged_and_leave_no_preview(session, mock_create_session, 
 
     failed = _events(caplog, "previews.generation_failed")
     assert len(failed) == 1 and f"reason={reason}" in failed[0]
+    session.expire_all()
+    assert session.get(Asset, parent.id).preview_id is None
+    assert not previews_dir.exists() or not any(previews_dir.iterdir())
 
 
 def test_the_event_loop_keeps_running_while_an_upload_decodes(session, mock_create_session, previews_dir, tmp_path):
@@ -311,10 +314,16 @@ def test_at_most_two_uploads_decode_at_once(tmp_path):
     async def uploads():
         await asyncio.gather(*(previews.generate_upload_preview(f"id{i}", str(tmp_path / f"{i}.exr"), None) for i in range(6)))
 
-    with patch.object(previews, "_make_preview", make), patch.object(previews, "_store_and_link", return_value=None):
-        asyncio.run(uploads())
+    async def uploads_with_fresh_slots():
+        # A semaphore made inside the loop, so the module's stays unbound to this test's loop.
+        with patch.object(previews, "_DECODE_SLOTS", asyncio.Semaphore(previews._DECODE_SLOTS._value)):
+            await uploads()
+
+    with patch.object(previews, "_make_preview", make), patch.object(previews, "_store_and_link", return_value="linked") as store:
+        asyncio.run(uploads_with_fresh_slots())
 
     assert peak == 2, "each decode can hold ~0.5 GB, and waiting uploads must not hold executor threads"
+    assert store.call_count == 6, "every upload still gets its preview"
 
 
 def test_the_event_loop_keeps_running_while_an_upload_preview_is_stored(tmp_path):

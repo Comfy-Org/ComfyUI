@@ -171,6 +171,9 @@ def _drop_unused_content(session, content_id: str) -> None:
     content = session.get(AssetContent, content_id)
     session.delete(content)
     session.flush()
+    # A missing row's path may since belong to a live row: an identical preview saved again.
+    if content.is_missing or session.scalar(select(AssetContent.id).where(AssetContent.path == content.path).limit(1)):
+        return
     try:
         os.remove(content.path)
     except OSError:

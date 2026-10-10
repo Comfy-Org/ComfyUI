@@ -328,3 +328,18 @@ def test_the_temp_wipe_reclaims_a_temp_uploads_preview(session, mock_create_sess
     session.expire_all()
     assert session.get(Asset, preview_id) is None
     assert not (roots / "previews" / "p.webp").exists()
+
+
+def test_reclaiming_a_missing_preview_keeps_the_live_file_at_its_path(session, mock_create_session, roots):
+    old = _record(session, roots / "previews" / "p.webp", tags=["preview"])
+    old_id, old_content_id = old.id, old.content_id
+    parent_id = _record(session, roots / "output" / "a.exr", preview_id=old_id).id
+    mark_content_missing(session, old_content_id)
+    session.commit()
+    new_content = create_content(session, str(roots / "previews" / "p.webp"))  # the same preview, saved again
+    create_record(session, new_content.id, "p.webp", tags=["preview"])
+    session.commit()
+
+    delete_asset_reference(parent_id)
+
+    assert (roots / "previews" / "p.webp").exists(), "a newer output's preview still uses this file"

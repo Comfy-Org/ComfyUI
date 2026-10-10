@@ -652,7 +652,10 @@ async def test_scenario_26_view_forms(tmp_path):
         after = await view_form()
     engine.dispose()
 
-    assert before == (record_id, f"/api/assets/{record_id}/content")
+    assert before == (
+        record_id,
+        "/api/view?type=output&filename=view.png&subfolder=nested",
+    )
     assert after == before
 
 
