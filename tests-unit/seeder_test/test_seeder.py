@@ -73,6 +73,16 @@ def events_named(
     return [fields for event, fields in tagged_events(caplog) if event == event_name]
 
 
+def capture_completed(seeder: _AssetSeeder) -> list[dict]:
+    completed: list[dict] = []
+    seeder.set_event_sink(
+        lambda event_type, data: completed.append(data)
+        if event_type == "assets.seed.completed"
+        else None
+    )
+    return completed
+
+
 def _seed_spec(path: Path) -> SeedAssetSpec:
     stat_result = path.stat()
     return {
@@ -210,10 +220,25 @@ def test_multi_root_scan_emits_one_started_and_completed_without_root(
     monkeypatch.setattr(seeder_module.time, "thread_time", lambda: next(cpu_clock))
     monkeypatch.setattr(scan_seeder, "_run_fast_phase", lambda roots: (3, 2, 5))
     monkeypatch.setattr(scan_seeder, "_run_enrich_phase", lambda roots: (False, 4))
+    completed_events = capture_completed(scan_seeder)
 
     with caplog.at_level(logging.INFO):
         scan_seeder._run_scan()
 
+    assert completed_events == [
+        {
+            "phase": "full",
+            "total": 5,
+            "created": 3,
+            "enriched": 4,
+            "skipped": 2,
+            "elapsed": 0.813,
+            "roots": ["models", "input"],
+            "missing_marked_count": 0,
+            "recovered_count": 0,
+            "pruned_count": 0,
+        }
+    ]
     assert events_named(caplog, "seeder.scan_started") == [{"phase": "full"}]
     completed = events_named(caplog, "seeder.scan_completed")
     assert len(completed) == 1
@@ -251,10 +276,14 @@ def test_scan_completed_reports_per_scan_failure_counts(
     monkeypatch.setattr(seeder_module.time, "perf_counter", lambda: next(clock))
     monkeypatch.setattr(scan_seeder, "_run_fast_phase", lambda roots: (0, 0, 0))
     monkeypatch.setattr(scan_seeder, "_run_enrich_phase", lambda roots: (False, 0))
+    completed_events = capture_completed(scan_seeder)
 
     with caplog.at_level(logging.INFO):
         scan_seeder._run_scan()
 
+    [completed_event] = completed_events
+    assert completed_event["missing_marked_count"] == 10
+    assert completed_event["recovered_count"] == 7
     completed = events_named(caplog, "seeder.scan_completed")
     assert len(completed) == 1
     assert completed[0]["hash_failed"] == 2
@@ -330,10 +359,13 @@ def test_single_root_scan_emits_root_and_phase(
     scan_seeder._roots = ("output",)
     scan_seeder._phase = ScanPhase.FAST
     monkeypatch.setattr(scan_seeder, "_run_fast_phase", lambda roots: (0, 0, 0))
+    completed_events = capture_completed(scan_seeder)
 
     with caplog.at_level(logging.INFO):
         scan_seeder._run_scan()
 
+    [completed_event] = completed_events
+    assert completed_event["roots"] == ["output"]
     assert events_named(caplog, "seeder.scan_started") == [
         {"phase": "fast", "root": "output"}
     ]
@@ -515,7 +547,13 @@ def test_prune_before_scan_emits_marked_missing_with_pruning_stage(
     monkeypatch.setattr(
         seeder_module, "sync_temp_references_safely", lambda _progress, _should_stop=None: None
     )
-    monkeypatch.setattr(scan_seeder, "_run_fast_phase", lambda roots: (0, 0, 0))
+
+    def fast_phase_marking_two(roots) -> tuple[int, int, int]:
+        scan_seeder._scan_state.missing_marked += 2
+        return (0, 0, 0)
+
+    monkeypatch.setattr(scan_seeder, "_run_fast_phase", fast_phase_marking_two)
+    completed_events = capture_completed(scan_seeder)
 
     with caplog.at_level(logging.INFO):
         scan_seeder._run_scan()
@@ -523,6 +561,11 @@ def test_prune_before_scan_emits_marked_missing_with_pruning_stage(
     assert events_named(caplog, "seeder.marked_missing") == [
         {"count": 5, "stage": "pruning"}
     ]
+    [completed_event] = completed_events
+    assert completed_event["missing_marked_count"] == 2
+    assert completed_event["pruned_count"] == 5
+    [logged] = events_named(caplog, "seeder.scan_completed")
+    assert logged["missing_marked_count"] == 2
 
 
 def test_standalone_mark_missing_emits_count_with_mark_missing_stage(
