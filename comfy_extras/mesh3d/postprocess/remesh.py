@@ -706,7 +706,10 @@ def _filter_components(verts: torch.Tensor, faces: torch.Tensor,
     V = verts.shape[0]
 
     # Connected components via min-label propagation across faces (200-iter max)
-    label = torch.arange(V, dtype=torch.long, device=device)
+    # MPS does not implement scatter_reduce_ amin/amax on int64; labels are vertex
+    # indices < V, so int32 is lossless on any realistic mesh.
+    label_dtype = torch.int32 if device.type == "mps" else torch.long
+    label = torch.arange(V, dtype=label_dtype, device=device)
     for _ in range(200):
         f_min = torch.minimum(torch.minimum(label[faces[:, 0]], label[faces[:, 1]]),
                               label[faces[:, 2]])
