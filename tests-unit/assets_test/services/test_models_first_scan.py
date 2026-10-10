@@ -159,7 +159,6 @@ def test_each_pass_sends_its_own_fast_complete_in_order(db_engine, layout):
     scan = _Scan(db_engine, layout, ("models", "input"))
     scan.seeder._run_scan()
 
-    kinds = [e[0] for e in scan.events]
     fast = scan.named("assets.seed.fast_complete")
     assert [(e[1], e[2], e[3]) for e in fast] == [
         ({"roots": ["models"], "created": MODELS, "skipped": 0, "total": MODELS}, MODELS, 0),
@@ -169,7 +168,7 @@ def test_each_pass_sends_its_own_fast_complete_in_order(db_engine, layout):
         {"roots": ["models"], "total": MODELS, "phase": "fast"},
         {"roots": ["input"], "total": INPUTS, "phase": "fast"},
     ]
-    assert kinds.index("assets.seed.completed") > kinds.index("assets.seed.fast_complete")
+    assert scan.events[-1][0] == "assets.seed.completed"
     (completed,) = scan.named("assets.seed.completed")
     assert completed[1]["created"] == MODELS + INPUTS
     assert completed[1]["total"] == MODELS + INPUTS

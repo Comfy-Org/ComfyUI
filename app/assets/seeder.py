@@ -910,9 +910,7 @@ class _AssetSeeder:
                 root=root,
             )
 
-    def _run_fast_phase(
-        self, roots: tuple[RootType, ...], by_listing: bool | None = None
-    ) -> tuple[int, int, int]:
+    def _run_fast_phase(self, roots: tuple[RootType, ...], by_listing: bool) -> tuple[int, int, int]:
         """Run phase 1: fast scan to create stub records.
 
         Returns:
@@ -922,8 +920,6 @@ class _AssetSeeder:
         total_created = 0
         skipped_existing = 0
 
-        if by_listing is None:
-            by_listing = rescans_output_by_listing(roots)
         live_references: dict[str, list] = {}
         existing_paths: set[str] = set()
         t_sync = time.perf_counter()

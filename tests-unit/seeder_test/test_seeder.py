@@ -161,7 +161,7 @@ def _run_faulting_fast_phase(
     monkeypatch.setattr(scanner_module, "create_record", create_record_or_raise)
     monkeypatch.setattr(scanner_module.mode, "hashing_enabled", lambda: False)
     _configure_fast_phase(monkeypatch, paths, specs)
-    return engine, scan_seeder._run_fast_phase(("models",))
+    return engine, scan_seeder._run_fast_phase(("models",), False)
 
 
 def test_idle_status_returns_a_progress_snapshot() -> None:
@@ -328,11 +328,15 @@ def test_single_root_scan_emits_root_and_phase(
 ) -> None:
     scan_seeder._roots = ("output",)
     scan_seeder._phase = ScanPhase.FAST
-    monkeypatch.setattr(scan_seeder, "_run_fast_phase", lambda roots, by_listing=None: (0, 0, 0))
+    listing: list[bool] = []
+    monkeypatch.setattr(
+        scan_seeder, "_run_fast_phase", lambda roots, by_listing: listing.append(by_listing) or (0, 0, 0)
+    )
 
     with caplog.at_level(logging.INFO):
         scan_seeder._run_scan()
 
+    assert listing == [True]  # the output-only rescan diffs listings
     assert events_named(caplog, "seeder.scan_started") == [
         {"phase": "fast", "root": "output"}
     ]
@@ -631,7 +635,7 @@ def test_batch_insert_failure_emits_only_the_exception_type(
     monkeypatch.setattr(seeder_module, "tick_watch_list", lambda _progress=None: None)
 
     with caplog.at_level(logging.INFO):
-        scan_seeder._run_fast_phase(("models",))
+        scan_seeder._run_fast_phase(("models",), False)
 
     assert events_named(caplog, "seeder.batch_insert_failed") == [
         {"error_kind": "other", "error_type": "PermissionError"}

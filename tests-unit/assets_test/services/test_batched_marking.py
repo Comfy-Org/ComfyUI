@@ -313,7 +313,7 @@ def test_offline_rows_retired_across_batches_recover_when_the_drive_returns(
         return marked
 
     with patch("app.assets.scanner.mark_contents_missing", mark):
-        instance._run_fast_phase(("input", "output"))
+        instance._run_fast_phase(("input", "output"), False)
 
     session.expire_all()
     assert instance._scan_state.missing_marked == 700
