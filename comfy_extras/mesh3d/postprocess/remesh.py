@@ -864,8 +864,9 @@ def _min_cut(nbr: torch.Tensor, cap: torch.Tensor, s_cap: torch.Tensor, t_cap: t
 
 
 def _tet_locator(tet_pts: torch.Tensor, tets: torch.Tensor, nbr: torch.Tensor, max_steps: int = 1024):
-    """Returns locate(points) -> containing tet per point (-1 outside the hull), by stochastic visibility walks from the
-    nearest triangulated vertex. The per-tet setup is done once here, the points come in batches.
+    """Returns locate(points) -> containing tet per point (-1 outside the hull, or a walk not done in max_steps), by
+    stochastic visibility walks from the nearest triangulated vertex. The per-tet setup is done once here, the points
+    come in batches.
 
     Tests run in the float64 of `tet_pts`, on its device: in float32 the faces of near-flat hull tets enclose points far
     outside them. The tet ids come back on the points' device."""
@@ -925,7 +926,6 @@ def _tet_locator(tet_pts: torch.Tensor, tets: torch.Tensor, nbr: torch.Tensor, m
                 moving = ~inside & (step >= 0)
                 cur[todo[moving]] = step[moving]
                 todo = todo[moving]
-            found[todo] = cur[todo]
             out[s:s + q.shape[0]] = found
         return out
 
