@@ -336,8 +336,8 @@ def _migrate_and_bind(db_url, db_path, db_exists):
     script = ScriptDirectory.from_config(config)
     if current_rev is not None and current_rev not in {r.revision for r in script.walk_revisions()}:
         conn.close()
+        engine.dispose()  # closes the file now rather than at garbage collection
         raise NewerDatabaseError(current_rev)
-    conn.rollback()  # the read began a transaction, and the journal mode can't change inside one
 
     try:
         journal_mode = conn.exec_driver_sql("PRAGMA journal_mode=WAL").scalar_one()

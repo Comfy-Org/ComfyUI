@@ -57,10 +57,12 @@ def _startup_error(caplog, asset_manager=None, *, kind, level=logging.ERROR):
     return caplog.text
 
 
-def _stamp(path, revision):
-    with sqlite3.connect(path) as conn:
+def _stamp(path, revision, journal_mode="delete"):
+    with closing(sqlite3.connect(path)) as conn:
+        conn.execute(f"PRAGMA journal_mode={journal_mode}")
         conn.execute("CREATE TABLE alembic_version (version_num VARCHAR(32) NOT NULL)")
         conn.execute("INSERT INTO alembic_version VALUES (?)", (revision,))
+        conn.commit()
 
 
 def test_lock_held_by_another_comfyui(db_path, caplog):
@@ -111,8 +113,9 @@ def test_corrupt_read_only_database_is_reported_as_corrupt(db_path, caplog):
     assert f"The asset database '{db_path}' is corrupt" in error
 
 
-def test_database_from_a_newer_comfyui_turns_assets_off_and_is_left_as_it_is(db_path, caplog):
-    _stamp(db_path, "0099_from_a_newer_release")
+@pytest.mark.parametrize("journal_mode", ["delete", "wal"])
+def test_database_from_a_newer_comfyui_turns_assets_off_and_is_left_as_it_is(db_path, caplog, journal_mode):
+    _stamp(db_path, "0099_from_a_newer_release", journal_mode)
     before = Path(db_path).read_bytes()
 
     with caplog.at_level(logging.WARNING):
@@ -125,7 +128,8 @@ def test_database_from_a_newer_comfyui_turns_assets_off_and_is_left_as_it_is(db_
     assert "run the newer version again" in caplog.text
     assert "move or rename that database file" in caplog.text
     assert Path(db_path).read_bytes() == before  # not even switched to WAL
-    assert sorted(os.listdir(os.path.dirname(db_path))) == ["comfyui.db", "comfyui.db.lock"]  # no .bkp
+    # No backup and no WAL files left open; the released lock file stays on POSIX only.
+    assert set(os.listdir(os.path.dirname(db_path))) - {"comfyui.db.lock"} == {"comfyui.db"}
     assert db_module.Session is None
     released = FileLock(db_path + ".lock")
     released.acquire(timeout=0)

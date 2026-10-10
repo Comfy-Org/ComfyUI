@@ -205,7 +205,7 @@ def test_database_from_a_newer_comfyui_runs_without_assets_and_is_left_as_it_is(
     assert "ASSETS_STARTUP_FAILED" not in log
     assert "Traceback" not in log
     assert db.read_bytes() == before
-    assert sorted(os.listdir(user_dir)) == ["comfyui.db", "comfyui.db.lock"]
+    assert set(os.listdir(user_dir)) - {"comfyui.db.lock"} == {"comfyui.db"}  # the lock file stays on POSIX only
 
 
 def test_default_database_follows_the_user_directory_and_scans_extra_model_paths(tmp_path):
