@@ -333,7 +333,7 @@ def sandboxed_comfy_roots(tmp_path):
         yield tmp_path
 
 
-def test_temp_asset_gets_a_content_route_preview_url(sandboxed_comfy_roots):
+def test_temp_asset_preview_url_still_resolves_type_temp(sandboxed_comfy_roots):
     name = "ComfyUI_temp_abcde_00001_.png"
     result = AssetDetailResult(
         ref=ReferenceData(
@@ -353,4 +353,4 @@ def test_temp_asset_gets_a_content_route_preview_url(sandboxed_comfy_roots):
 
     resp = _build_asset_response(result, {})
 
-    assert resp.preview_url == "/api/assets/ref-temp/content"
+    assert resp.preview_url == f"/api/view?type=temp&filename={name}"
