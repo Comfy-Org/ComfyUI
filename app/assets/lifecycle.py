@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import shutil
 
 import folder_paths
@@ -19,7 +20,7 @@ from comfy.cli_args import args
 # Startup imports this module even without the database packages; the functions
 # that need these are only called when a session can be created.
 if dependencies_available():
-    from sqlalchemy import select
+    from sqlalchemy import or_, select
 
     from app.assets.database.models import Asset, AssetContent
     from app.assets.database.queries.records import delete_record
@@ -82,20 +83,29 @@ def wipe_temp_db_rows(session) -> tuple[int, int]:
     return records_deleted, contents_deleted
 
 
+# Names Core gives previews: a content hash from the save node, a uuid from uploads; plus a save's temp file.
+_PREVIEW_NAME = re.compile(r"(?:[0-9a-f]{64}\.(?:jpg|webp)|[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\.webp)(?:\.[0-9a-f]{32}\.tmp)?")
+
+
 def sweep_orphan_previews(session) -> int:
-    """Remove files in previews/ that no content row records: previews whose output never registered.
+    """Remove previews in previews/ that no content row records: previews whose output never registered.
 
     Startup only, before any prompt runs, so it can't race a save that hasn't registered yet.
+    Rows match by file name, which is unique, so a moved or symlinked install keeps its previews.
     """
-    directory = os.path.abspath(folder_paths.get_previews_directory())
+    directory = folder_paths.get_previews_directory()
     try:
-        names = os.listdir(directory)
+        names = [name for name in os.listdir(directory) if _PREVIEW_NAME.fullmatch(name)]
     except OSError:
         return 0
-    known = set(session.scalars(select(AssetContent.path).where(sql_path_under_prefix(AssetContent.path, directory))))
+    recorded = session.scalars(
+        select(AssetContent.path).where(or_(AssetContent.path.like("%.jpg"), AssetContent.path.like("%.webp")))
+    )
+    known = {os.path.basename(path) for path in recorded}
     removed = 0
-    for path in (os.path.join(directory, name) for name in names):
-        if path not in known and os.path.isfile(path):
+    for name in names:
+        path = os.path.join(directory, name)
+        if name not in known and os.path.isfile(path):
             try:
                 os.remove(path)
                 removed += 1
