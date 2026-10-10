@@ -82,6 +82,28 @@ def wipe_temp_db_rows(session) -> tuple[int, int]:
     return records_deleted, contents_deleted
 
 
+def sweep_orphan_previews(session) -> int:
+    """Remove files in previews/ that no content row records: previews whose output never registered.
+
+    Startup only, before any prompt runs, so it can't race a save that hasn't registered yet.
+    """
+    directory = os.path.abspath(folder_paths.get_previews_directory())
+    try:
+        names = os.listdir(directory)
+    except OSError:
+        return 0
+    known = set(session.scalars(select(AssetContent.path).where(sql_path_under_prefix(AssetContent.path, directory))))
+    removed = 0
+    for path in (os.path.join(directory, name) for name in names):
+        if path not in known and os.path.isfile(path):
+            try:
+                os.remove(path)
+                removed += 1
+            except OSError:
+                logging.warning("Could not remove orphaned preview %s", path, exc_info=True)
+    return removed
+
+
 def cleanup_temp_filesystem() -> bool:
     temp_dir = os.path.abspath(folder_paths.get_temp_directory())
     if not os.path.exists(temp_dir):
@@ -117,6 +139,7 @@ def run_asset_startup() -> None:
         with create_session() as session:
             wipe_temp_db_rows(session)
             session.commit()
+            sweep_orphan_previews(session)
     except Exception:
         logging.exception("Temp DB row wipe failed; skipping filesystem cleanup")
         enqueue_mode_transition_work()
