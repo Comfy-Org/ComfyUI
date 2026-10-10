@@ -26,7 +26,7 @@ from app.assets.database.queries.records import (
     ensure_tag_link,
     mark_content_missing,
 )
-from app.assets.scanner import SeedAssetSpec, insert_asset_specs, seed_asset_specs
+from app.assets.scanner import SeedAssetSpec, SeedCounts, insert_asset_specs, seed_asset_specs
 from app.assets.scanner_changes import recover_missing_content_by_stat
 from app.assets.scanner_admission import _WATCH_LIST
 
@@ -219,7 +219,9 @@ def test_a_genuinely_deleted_file_is_still_marked_missing(drive, session, caplog
     ]
 
 
-def test_a_returning_file_with_a_changed_mtime_gets_a_new_record(drive, session):
+def test_a_returning_file_with_a_changed_mtime_keeps_its_record(drive, session):
+    """Within the revive window a file back at the same path and size keeps its row, and
+    the user's history with it, whatever its mtime."""
     files = _populate(drive)
     _scan()
     target = files[0]
@@ -231,10 +233,10 @@ def test_a_returning_file_with_a_changed_mtime_gets_a_new_record(drive, session)
 
     state = _scan()
 
-    assert state.recovered == len(files) - 1
+    assert state.recovered == len(files)
     session.expire_all()
     rows = list(session.scalars(sa.select(AssetContent).where(AssetContent.path == str(target))))
-    assert sorted(row.is_missing for row in rows) == [False, True]
+    assert [(row.is_missing, row.mtime_ns) for row in rows] == [(False, target.stat().st_mtime_ns)]
 
 
 def test_hashing_on_recovers_through_the_hash_path(drive, session):
@@ -317,10 +319,11 @@ def test_stat_recovery_skips_a_path_a_live_row_already_occupies(session, temp_di
     create_record(session, content_id=live.id, name=path.name)
     session.commit()
 
-    created, error = seed_asset_specs(session, [_spec(path)])
+    counts = SeedCounts()
+    created, error = seed_asset_specs(session, [_spec(path)], counts=counts)
     session.commit()
 
-    assert (created, error) == (0, None)
+    assert (created, error, counts.recovered) == (0, None, 0)
     assert session.get(AssetContent, missing.id).is_missing is True
     assert session.get(AssetContent, live.id).is_missing is False
 

@@ -9,13 +9,13 @@ path, which is what lets other modules trust raw-column path predicates.
 from __future__ import annotations
 
 import os
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from datetime import datetime
 from typing import Any, Literal, NamedTuple, TypeAlias
 
 import sqlalchemy as sa
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.orm import Session, joinedload, noload
+from sqlalchemy.orm import Session, aliased, joinedload, noload
 from sqlalchemy.sql.elements import ColumnElement
 
 from app.assets.database.models import Asset, AssetContent, AssetTag, Tag
@@ -327,7 +327,8 @@ def mark_content_missing(session: Session, content_id: str) -> None:
 
 def mark_contents_missing(session: Session, content_ids: Sequence[str]) -> list[str]:
     """mark_content_missing for many rows in a few statements; returns the ids it marked.
-    A row that is gone or already missing is skipped."""
+    A row that is gone or already missing is skipped. Only scans mark this way, so the
+    rows are stamped missing_since, which lets a returning file revive them in bulk."""
     if not content_ids:
         return []
     # "= 0", not "IS 0": SQLite only uses the partial live-path index for "= 0". This
@@ -335,7 +336,7 @@ def mark_contents_missing(session: Session, content_ids: Sequence[str]) -> list[
     live = list(session.scalars(sa.select(AssetContent.id).where(AssetContent.id.in_(content_ids), AssetContent.is_missing == sa.false())))
     if not live:
         return []
-    session.execute(sa.update(AssetContent).where(AssetContent.id.in_(live)).values(is_missing=True))
+    session.execute(sa.update(AssetContent).where(AssetContent.id.in_(live)).values(is_missing=True, missing_since=get_utc_now()))
     ensure_tag(session, "missing")
     unlinked = sa.select(Asset.id, sa.literal("missing"), sa.literal("automatic"), sa.literal(get_utc_now(), sa.DateTime())).where(
         Asset.content_id.in_(live),
@@ -357,5 +358,43 @@ def unset_content_missing(session: Session, content_id: str) -> None:
     if content is None:
         raise LookupError(content_id)
     content.is_missing = False
+    content.missing_since = None
     session.execute(sa.delete(AssetTag).where(AssetTag.tag_name == "missing", AssetTag.asset_id.in_(sa.select(Asset.id).where(Asset.content_id == content_id))))
     session.flush()
+
+
+def revive_contents(session: Session, mtimes: Mapping[str, int]) -> list[str]:
+    """Unmark the missing rows in ``mtimes`` (content id -> the returned file's mtime_ns),
+    recording that mtime and, when it moved, dropping the hash, as a same-size mtime bump
+    on a live row does. Skips a row no longer missing, without a record (it would come back
+    invisible and hold the path), or whose path a live row now holds; returns the ids it
+    revived."""
+    if not mtimes:
+        return []
+    live = aliased(AssetContent)
+    revived = list(session.scalars(
+        sa.select(AssetContent.id).where(
+            AssetContent.id.in_(list(mtimes)),
+            AssetContent.is_missing.is_(True),
+            ~sa.exists().where(live.path == AssetContent.path, live.is_missing == sa.false()),
+            sa.exists().where(Asset.content_id == AssetContent.id),
+        )
+    ))
+    if not revived:
+        return []
+    mtime = sa.bindparam("new_mtime")
+    # One statement for the batch; SET reads the row as it was, so the CASE sees the old mtime.
+    session.connection().execute(
+        sa.update(AssetContent)
+        .where(AssetContent.id == sa.bindparam("content_id"))
+        .values(
+            is_missing=False,
+            missing_since=None,
+            mtime_ns=mtime,
+            hash=sa.case((AssetContent.mtime_ns == mtime, AssetContent.hash), else_=None),
+        ),
+        [{"content_id": content_id, "new_mtime": mtimes[content_id]} for content_id in revived],
+    )
+    session.execute(sa.delete(AssetTag).where(AssetTag.tag_name == "missing", AssetTag.asset_id.in_(sa.select(Asset.id).where(Asset.content_id.in_(revived)))))
+    session.flush()
+    return revived

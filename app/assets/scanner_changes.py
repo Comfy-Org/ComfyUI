@@ -3,13 +3,15 @@ whose file is gone, splitting a row whose bytes changed, and recovering one
 whose file came back. Recovery never fires for a path a live row already
 occupies, so a restored file can never leave two live rows describing one
 location. With hashing on, the returning file's hash must identify exactly one
-missing row; with hashing off, its size and modification time must match.
+missing row; with hashing off, its size must match, and its modification time too
+once REVIVE_WINDOW has passed since a scan marked the row missing.
 """
 
 from __future__ import annotations
 
 import os
 from collections.abc import Iterator
+from datetime import timedelta
 from typing import Literal
 
 import sqlalchemy as sa
@@ -20,12 +22,17 @@ from app.assets.database.queries.records import (
     create_content,
     create_record,
     mark_content_missing,
+    revive_contents,
     unset_content_missing,
 )
-from app.assets.helpers import path_prefix_matcher, sql_path_under_prefix_batches, to_stored_hash
+from app.assets.helpers import get_utc_now, path_prefix_matcher, sql_path_under_prefix_batches, to_stored_hash
 from app.assets.services.file_utils import get_mtime_ns
 from app.assets.services.path_utils import compute_loader_path, get_name_and_tags_from_asset_path
 from app.assets.services.snapshot_hash import snapshot_hash
+
+# Within this long of a scan marking a row missing, a file back at its path and size
+# revives it whatever its mtime; after that the mtime must match too.
+REVIVE_WINDOW = timedelta(days=7)
 
 _pending_verification_ids: list[str] = []
 _pending_recovery_paths: list[str] = []
@@ -131,8 +138,11 @@ def recover_missing_content_by_stat(
     candidate_ids: list[str],
 ) -> Literal["recovered", "no_match"]:
     """Hashing-off recovery: size and modification time are the identity a hashing-off
-    scan checks on a live row, so a returning file that matches them restores its row."""
+    scan checks on a live row, so a returning file that matches them restores its row.
+    Within REVIVE_WINDOW of a scan marking it, the size alone does, as the bulk revive
+    (scanner.revive_returned_references_safely) has it."""
     mtime_ns = get_mtime_ns(stat_result)
+    since = get_utc_now() - REVIVE_WINDOW
     candidates = [session.get(AssetContent, content_id) for content_id in candidate_ids]
     matches = [
         candidate
@@ -140,7 +150,8 @@ def recover_missing_content_by_stat(
         if candidate is not None
         and candidate.is_missing
         and candidate.path == path
-        and (candidate.size_bytes, candidate.mtime_ns) == (stat_result.st_size, mtime_ns)
+        and candidate.size_bytes == stat_result.st_size
+        and (candidate.mtime_ns == mtime_ns or (candidate.missing_since is not None and candidate.missing_since >= since))
         # A row whose records were all deleted while it was missing would come back
         # live with nothing to show it, and hold the path so no scan ever lists it.
         and session.scalar(sa.select(Asset.id).where(Asset.content_id == candidate.id).limit(1))
@@ -148,19 +159,13 @@ def recover_missing_content_by_stat(
     ]
     if not matches:
         return "no_match"
-    # "= 0", not "IS 0", so the partial live-path index serves it instead of a table scan.
-    occupied = session.scalar(
-        sa.select(AssetContent.id)
-        .where(AssetContent.path == path, AssetContent.is_missing == sa.false())
-        .limit(1)
-    )
-    if occupied is not None:
-        return "no_match"
     # Several match only when earlier offline cycles left copies of one file behind;
-    # the newest is the one that was live last.
+    # the newest is the one that was live last. The bulk revive's write does the rest,
+    # and skips it if a live row now holds the path.
     recovered = max(matches, key=lambda candidate: (candidate.created_at, candidate.id))
-    unset_content_missing(session, recovered.id)
-    return "recovered"
+    revived = revive_contents(session, {recovered.id: mtime_ns})
+    session.expire(recovered)
+    return "recovered" if revived else "no_match"
 
 
 def is_path_under_prefixes(path: str, prefixes: list[str]) -> bool:

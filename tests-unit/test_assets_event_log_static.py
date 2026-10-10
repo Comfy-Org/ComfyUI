@@ -55,6 +55,7 @@ EXPECTED_CALL_SITES: frozenset[CallSite] = frozenset(
         # todo 11 - scanner failure paths
         CallSite("app/assets/scanner.py", "sync_root_safely", "scanner.fast_scan_failed"),
         CallSite("app/assets/scanner.py", "live_references_safely", "scanner.fast_scan_failed"),
+        CallSite("app/assets/scanner.py", "revive_returned_references_safely", "scanner.fast_scan_failed"),
         CallSite(
             "app/assets/scanner.py", "mark_unlisted_references_missing_safely", "scanner.fast_scan_failed"
         ),

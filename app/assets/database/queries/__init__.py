@@ -18,6 +18,7 @@ from app.assets.database.queries.records import (
     mark_content_missing,
     mark_contents_missing,
     rename_record,
+    revive_contents,
     unset_content_missing,
     update_record_access_time,
 )
@@ -34,6 +35,7 @@ __all__ = [
     "mark_content_missing",
     "mark_contents_missing",
     "rename_record",
+    "revive_contents",
     "unset_content_missing",
     "update_record_access_time",
 ]

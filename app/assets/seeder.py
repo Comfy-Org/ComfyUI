@@ -29,6 +29,7 @@ from app.assets.scanner import (
     mark_missing_outside_prefixes_safely,
     mark_unlisted_references_missing_safely,
     rescans_output_by_listing,
+    revive_returned_references_safely,
     sync_root_safely,
     unlisted_references,
     sync_temp_references_safely,
@@ -132,8 +133,8 @@ class _ScanState:
     # models listing is not counted.
     dirs_listed: int = 0
     # os.stat calls on files in the reference sync, output-listing check, discovery,
-    # admission, seed, watch-list and enrich loops. Hashing's own stability stats are
-    # not counted.
+    # admission, seed, watch-list and enrich loops. Hashing's own stability stats and
+    # the bulk revive's are not counted.
     files_statted: int = 0
     # Time blocked at the pause gate.
     paused_s: float = 0.0
@@ -1001,6 +1002,11 @@ class _AssetSeeder:
                 len(vanished),
                 unlisted,
             )
+        walked = {os.path.abspath(p) for p in paths}
+        for r in roots:
+            existing_paths.update(revive_returned_references_safely(r, walked, scan_state, should_stop))
+            if should_stop():
+                return total_created, skipped_existing, 0
         total_paths = len(paths)
         self._update_progress(total=total_paths)
 
