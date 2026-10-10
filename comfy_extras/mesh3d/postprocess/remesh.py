@@ -867,7 +867,8 @@ def _tet_locator(tet_pts: torch.Tensor, tets: torch.Tensor, nbr: torch.Tensor, m
     """Returns locate(points) -> containing tet per point (-1 outside the hull), by stochastic visibility walks from the
     nearest triangulated vertex. The per-tet setup is done once here, the points come in batches.
 
-    Tests run in the float64 of `tet_pts`: in float32 the faces of near-flat hull tets enclose points far outside them."""
+    Tests run in the float64 of `tet_pts`, on its device: in float32 the faces of near-flat hull tets enclose points far
+    outside them. The tet ids come back on the points' device."""
     device = tet_pts.device
     N = tets.shape[0]
     tet_faces = torch.tensor(_TET_FACES, device=device)
@@ -905,9 +906,9 @@ def _tet_locator(tet_pts: torch.Tensor, tets: torch.Tensor, nbr: torch.Tensor, m
     gen = torch.Generator(device=device).manual_seed(0)
 
     def locate(points):
-        out = torch.full((points.shape[0],), -1, dtype=torch.long, device=device)
+        out = torch.full((points.shape[0],), -1, dtype=torch.long, device=points.device)
         for s in range(0, points.shape[0], _POINT_CHUNK):
-            q = points[s:s + _POINT_CHUNK].to(tet_pts.dtype)
+            q = points[s:s + _POINT_CHUNK].to(device).to(tet_pts.dtype)
             cur = vert_tet[used[_udf_exact(q.float(), start, k=1, tree=tree)[2]]]
             found = torch.full((q.shape[0],), -1, dtype=torch.long, device=device)
             todo = torch.arange(q.shape[0], device=device)
@@ -934,7 +935,8 @@ def _tet_locator(tet_pts: torch.Tensor, tets: torch.Tensor, nbr: torch.Tensor, m
 def _solid_partition(shell_v: torch.Tensor, tri_verts: torch.Tensor, tree, eps: float, fill: float):
     """Label the tets of a Delaunay tetrahedralization of shell sites solid or outside by a min cut.
 
-    Returns (tet points, tets, neighbours, solid per tet, outward boundary triangles (M, 3, 3))."""
+    Returns (tet points, tets, neighbours, solid per tet, outward boundary triangles (M, 3, 3)); the last two on the
+    device of shell_v, the tetrahedralization on the CPU when that device has no float64."""
     device = shell_v.device
     # sites: one shell vertex per block of 4 cells and offset direction, so both sides of a thin sheet keep theirs and
     # a corner gets one per facing; about the 5% a decimation kept, without its edges and quadrics
@@ -945,8 +947,8 @@ def _solid_partition(shell_v: torch.Tensor, tri_verts: torch.Tensor, tree, eps: 
     block -= block.amin(0)
     span = block.amax(0) + 1
     cluster = torch.unique(((block[:, 0] * span[1] + block[:, 1]) * span[2] + block[:, 2]) * 6 + facing, return_inverse=True)[1]
-    first = torch.full((int(cluster.max()) + 1,), shell_v.shape[0], dtype=torch.long, device=device)
-    dv = shell_v[first.scatter_reduce(0, cluster, torch.arange(shell_v.shape[0], device=device), "amin")]
+    first = torch.full((int(cluster.max()) + 1,), shell_v.shape[0], dtype=torch.int32, device=device)
+    dv = shell_v[first.scatter_reduce(0, cluster, torch.arange(shell_v.shape[0], dtype=torch.int32, device=device), "amin")]
     del away, axis, facing, block, cluster, first
     # jitter: grid-aligned flat regions give cocircular points that qhull is very slow to merge
     gen = torch.Generator(device=device).manual_seed(0)
@@ -958,22 +960,24 @@ def _solid_partition(shell_v: torch.Tensor, tri_verts: torch.Tensor, tree, eps: 
         tets, nbr = tets.long(), nbr.long()
         outside = (tets >= dv.shape[0]).any(1)
     else:
-        dt = scipy.spatial.Delaunay(dv.double().cpu().numpy(), qhull_options="Qbb Qc Qz Q12 Qt Q5")  # Q5: skip the final outer-plane check
-        tet_pts = torch.from_numpy(dt.points).to(device)
-        tets = torch.from_numpy(dt.simplices).to(device).long()
-        nbr = torch.from_numpy(dt.neighbors).to(device).long()
+        dt = scipy.spatial.Delaunay(dv.cpu().double().numpy(), qhull_options="Qbb Qc Qz Q12 Qt Q5")  # Q5: skip the final outer-plane check
+        # the float64 tets stay on the CPU unless the device is CUDA: MPS has no float64, other backends vary
+        tet_device = device if device.type == "cuda" else torch.device("cpu")
+        tet_pts = torch.from_numpy(dt.points).to(tet_device)
+        tets = torch.from_numpy(dt.simplices).to(tet_device).long()
+        nbr = torch.from_numpy(dt.neighbors).to(tet_device).long()
         outside = (nbr < 0).any(1)
 
     # per chunk: the four face areas and whether the centroid lies in the shell layer; all faces of all tets at
     # once would be the partition's largest array
-    tet_faces = torch.tensor(_TET_FACES, device=device)
-    area = torch.empty((tets.shape[0], 4), dtype=tet_pts.dtype, device=device)
-    shell = torch.empty(tets.shape[0], dtype=torch.bool, device=device)
+    tet_faces = torch.tensor(_TET_FACES, device=tets.device)
+    area = torch.empty((tets.shape[0], 4), dtype=tet_pts.dtype, device=tets.device)
+    shell = torch.empty(tets.shape[0], dtype=torch.bool, device=tets.device)
     for s in range(0, tets.shape[0], _VOXEL_CHUNK):
         chunk = tets[s:s + _VOXEL_CHUNK]
         fv = tet_pts[chunk[:, tet_faces]]                                     # (n, 4, 3, 3)
         area[s:s + _VOXEL_CHUNK] = 0.5 * torch.cross(fv[:, :, 1] - fv[:, :, 0], fv[:, :, 2] - fv[:, :, 0], dim=-1).norm(dim=-1)
-        shell[s:s + _VOXEL_CHUNK] = _udf_exact(tet_pts[chunk].mean(1).to(tri_verts.dtype), tri_verts, tree=tree)[0] < 0.95 * eps
+        shell[s:s + _VOXEL_CHUNK] = _udf_exact(tet_pts[chunk].mean(1).to(tri_verts.dtype).to(device), tri_verts, tree=tree)[0] < 0.95 * eps
         del chunk, fv
     hull = outside & ~shell
 
@@ -982,15 +986,17 @@ def _solid_partition(shell_v: torch.Tensor, tri_verts: torch.Tensor, tree, eps: 
     j = nbr.clamp(min=0)
     cap = torch.where(nbr >= 0, area * torch.where(shell[:, None] == shell[j], 1.0 + fill, 1.0), 0.0)
     free = ~shell & ~hull
-    free_idx = torch.full((tets.shape[0],), -1, dtype=torch.long, device=device)
-    free_idx[free] = torch.arange(int(free.sum()), device=device)
+    free_idx = torch.full((tets.shape[0],), -1, dtype=torch.long, device=tets.device)
+    free_idx[free] = torch.arange(int(free.sum()), device=tets.device)
     fn, fcap = nbr[free], cap[free]
     fj = fn.clamp(min=0)
     to_free = (fn >= 0) & free[fj]
     solid = shell.clone()
-    solid[free] = _min_cut(torch.where(to_free, free_idx[fj], -1), torch.where(to_free, fcap, 0.0),
-                           torch.where((fn >= 0) & shell[fj], fcap, 0.0).sum(1),
-                           torch.where((fn >= 0) & hull[fj], fcap, 0.0).sum(1))
+    # the cut needs no float64: it runs on the compute device in float32, as the kitchen op does
+    solid[free] = _min_cut(torch.where(to_free, free_idx[fj], -1).to(device),
+                           torch.where(to_free, fcap, 0.0).float().to(device),
+                           torch.where((fn >= 0) & shell[fj], fcap, 0.0).sum(1).float().to(device),
+                           torch.where((fn >= 0) & hull[fj], fcap, 0.0).sum(1).float().to(device)).to(tets.device)
 
     # boundary faces of solid tets, wound to face away from their tet
     bnd = solid[:, None] & ((nbr < 0) | ~solid[j])
@@ -999,7 +1005,7 @@ def _solid_partition(shell_v: torch.Tensor, tri_verts: torch.Tensor, tree, eps: 
     opp = tet_pts[tets[t, k]]
     inward = (torch.cross(tri[:, 1] - tri[:, 0], tri[:, 2] - tri[:, 0], dim=-1) * (opp - tri[:, 0])).sum(-1) > 0
     tri = torch.where(inward[:, None, None], tri[:, [0, 2, 1]], tri)
-    return tet_pts, tets, nbr, solid, tri.to(tri_verts.dtype)
+    return tet_pts, tets, nbr, solid.to(device), tri.to(tri_verts.dtype).to(device)
 
 
 def remesh_narrow_band_dc(

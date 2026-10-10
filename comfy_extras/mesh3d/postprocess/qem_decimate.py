@@ -660,8 +660,8 @@ def _drop_duplicate_faces(faces: torch.Tensor) -> torch.Tensor:
     groups, inv = torch.unique(torch.sort(faces, dim=1)[0], dim=0, return_inverse=True)
     if groups.shape[0] == faces.shape[0]:
         return faces
-    arange = torch.arange(faces.shape[0], device=faces.device)
-    first = torch.full((groups.shape[0],), faces.shape[0], dtype=torch.int64, device=faces.device)
+    arange = torch.arange(faces.shape[0], dtype=torch.int32, device=faces.device)
+    first = torch.full((groups.shape[0],), faces.shape[0], dtype=torch.int32, device=faces.device)
     first.scatter_reduce_(0, inv, arange, reduce="amin", include_self=True)
     return faces[first]
 
@@ -677,8 +677,8 @@ def _folded_faces(faces: torch.Tensor) -> torch.Tensor:
            + (order[:, 1] > order[:, 2]).long()) % 2
     n_odd = torch.zeros(n_groups, dtype=torch.long, device=faces.device).scatter_add_(0, inv, odd)
     mixed = (n_odd > 0) & (n_odd < torch.bincount(inv, minlength=n_groups))
-    arange = torch.arange(faces.shape[0], device=faces.device)
-    first = torch.full((n_groups,), faces.shape[0], dtype=torch.long, device=faces.device)
+    arange = torch.arange(faces.shape[0], dtype=torch.int32, device=faces.device)
+    first = torch.full((n_groups,), faces.shape[0], dtype=torch.int32, device=faces.device)
     first.scatter_reduce_(0, inv, arange, reduce="amin")
     return mixed[inv] | (first[inv] != arange)
 
@@ -843,7 +843,7 @@ def _connected_labels(edges: torch.Tensor, n: int) -> torch.Tensor:
     if connected_components is not None:
         return connected_components(edges, n)
     # min-label propagation with pointer jumping; stopping before convergence splits long components
-    label = torch.arange(n, device=edges.device)
+    label = torch.arange(n, dtype=torch.int32, device=edges.device)
     a, b = edges[:, 0], edges[:, 1]
     while True:
         low = torch.minimum(label[a], label[b])
@@ -852,7 +852,7 @@ def _connected_labels(edges: torch.Tensor, n: int) -> torch.Tensor:
         new.scatter_reduce_(0, b, low, "amin")
         new = new[new]
         if torch.equal(new, label):
-            return label
+            return label.long()
         label = new
 
 
