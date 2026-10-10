@@ -238,6 +238,18 @@ def load_bypass_lora_for_models(model, clip, lora, strength_model, strength_clip
     return (new_modelpatcher, new_clip)
 
 
+def _resolve_text_encoder_devices(clip, load_device, offload_device, initial_device):
+    if clip.__module__ != comfy.text_encoders.z_image.__name__:
+        return load_device, offload_device, initial_device
+
+    for device in (load_device, offload_device, initial_device):
+        if device.type == "cuda" and torch.cuda.get_device_capability(device) == (12, 0):
+            cpu = torch.device("cpu")
+            return cpu, cpu, cpu
+
+    return load_device, offload_device, initial_device
+
+
 class CLIP:
     def __init__(self, target=None, embedding_directory=None, no_init=False, tokenizer_data={}, parameters=0, state_dict=[], model_options={}, disable_dynamic=False):
         if no_init:
@@ -252,8 +264,11 @@ class CLIP:
         if dtype is None:
             dtype = model_management.text_encoder_dtype(load_device)
 
+        initial_device = model_options.get("initial_device", model_management.text_encoder_initial_device(load_device, offload_device, parameters * model_management.dtype_size(dtype)))
+        load_device, offload_device, initial_device = _resolve_text_encoder_devices(clip, load_device, offload_device, initial_device)
+
         params['dtype'] = dtype
-        params['device'] = model_options.get("initial_device", model_management.text_encoder_initial_device(load_device, offload_device, parameters * model_management.dtype_size(dtype)))
+        params['device'] = initial_device
         params['model_options'] = model_options
 
         self.cond_stage_model = clip(**(params))
