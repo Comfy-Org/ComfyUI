@@ -100,6 +100,7 @@ fpvae_group.add_argument("--fp32-vae", action="store_true", help="Run the VAE in
 fpvae_group.add_argument("--bf16-vae", action="store_true", help="Run the VAE in bf16.")
 
 parser.add_argument("--cpu-vae", action="store_true", help="Run the VAE on the CPU.")
+parser.add_argument("--disable-cudnn", action="store_true", help="Disable cuDNN entirely. Needed on backends that present as CUDA but have no working cuDNN, such as ZLUDA on gfx803.")
 
 fpte_group = parser.add_mutually_exclusive_group()
 fpte_group.add_argument("--fp8_e4m3fn-text-enc", action="store_true", help="Store text encoder weights in fp8 (e4m3fn variant).")
@@ -113,6 +114,7 @@ parser.add_argument("--fp16-intermediates", action="store_true", help="Experimen
 parser.add_argument("--force-channels-last", action="store_true", help="Force channels last format when inferencing the models.")
 
 parser.add_argument("--directml", type=int, nargs="?", metavar="DIRECTML_DEVICE", const=-1, help="Use torch-directml.")
+parser.add_argument("--directml-vram-gb", type=float, default=None, metavar="GB", help="Override the VRAM size ComfyUI assumes for DirectML, in GiB. By default this is read from DXGI.")
 
 parser.add_argument("--oneapi-device-selector", type=str, default=None, metavar="SELECTOR_STRING", help="Sets the oneAPI device(s) this instance will use.")
 parser.add_argument("--supports-fp8-compute", action="store_true", help="ComfyUI will act like if the device supports fp8 compute.")

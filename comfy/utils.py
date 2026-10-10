@@ -166,13 +166,25 @@ def load_torch_file(ckpt, safe_load=False, device=None, return_metadata=False):
                 sd, metadata = load_safetensors(ckpt)
                 if not return_metadata:
                     metadata = None
+            elif DISABLE_MMAP:
+                # safetensors.safe_open memory-maps the file, and the first
+                # get_tensor() can fault on stacks where the mapping is not
+                # usable (seen under ZLUDA on Windows). load_file() reads the
+                # whole file instead, which is slower but does not map it.
+                # --disable-mmap asked for exactly this, but the flag used to
+                # only copy *after* get_tensor had already faulted.
+                from safetensors.torch import load_file
+                sd = load_file(ckpt, device=device.type)
+                if return_metadata:
+                    with safetensors.safe_open(ckpt, framework="pt", device="cpu") as f:
+                        metadata = f.metadata()
+                else:
+                    metadata = None
             else:
                 with safetensors.safe_open(ckpt, framework="pt", device=device.type) as f:
                     sd = {}
                     for k in f.keys():
                         tensor = f.get_tensor(k)
-                        if DISABLE_MMAP:  # TODO: Not sure if this is the best way to bypass the mmap issues
-                            tensor = tensor.to(device=device, copy=True)
                         sd[k] = tensor
                     if return_metadata:
                         metadata = f.metadata()
