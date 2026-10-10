@@ -117,6 +117,10 @@ jobs:
           ./python.exe get-pip.py
           ./python.exe -s -m pip install ../${{ inputs.cache_tag }}_python_deps/*
 
+          if [ "${{ inputs.rel_name }}" = "amd" ]; then
+            ./python.exe ../ComfyUI/.ci/relocate_portable_launcher.py ./Scripts/offload-arch.exe
+          fi
+
           grep comfy ../ComfyUI/requirements.txt > ./requirements_comfyui.txt
           ./python.exe -s -m pip install -r requirements_comfyui.txt
           ./python.exe -s -m pip uninstall -y comfyui-workflow-templates-media-image comfyui-workflow-templates-media-video comfyui-workflow-templates-media-other
