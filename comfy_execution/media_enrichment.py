@@ -4,7 +4,7 @@ Attaches a ``metadata`` object (``kind``/``width``/``height``, plus
 ``duration``/``fps``/``frame_count`` for videos) to each file-type output
 entry at output-processing time, so consumers of the ``executed`` message
 and ``/history`` can read media properties without probing the files
-themselves. Unlike asset enrichment this is NOT gated on ``--enable-assets``:
+themselves. Unlike asset enrichment this still runs with ``--disable-assets``:
 the properties serve history/websocket consumers that don't run the assets
 system at all.
 """
