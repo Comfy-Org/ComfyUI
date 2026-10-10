@@ -23,7 +23,7 @@ console_log_level = get_console_log_level(args.verbose)
 file_log_outputs = get_file_log_outputs(args.verbose)
 setup_logger(log_level=console_log_level, file_outputs=file_log_outputs, use_stdout=args.log_stdout)
 
-from app.database.db import dependencies_available, get_database_url, get_db_path, init_db, lock_holder_db_path, missing_dependencies
+from app.database.db import DatabasePathError, dependencies_available, get_database_url, get_db_path, init_db, lock_holder_db_path, missing_dependencies
 from app.assets.event_log import error_kind
 from utils.install_util import get_missing_requirements_message
 from app.assets.lifecycle import cleanup_temp_filesystem
@@ -495,6 +495,8 @@ def setup_database(asset_manager):
         init_db()
         asset_manager.startup()
     except Exception as e:
+        if isinstance(e, DatabasePathError):
+            stop_startup("path_unsupported", f"{e}\n{WITHOUT_ASSETS}")
         failure, message = database_failure_message(e, get_database_url())
         if failure != "unsupported_url":  # that error repeats the URL, which can carry a password
             logging.debug("Asset database startup failed", exc_info=True)
@@ -536,9 +538,14 @@ def database_failure_message(error, db_url):
         fix = "Move that file, or choose another folder."
     elif kind in ("read_only", "unable_to_open") or isinstance(error, OSError):
         failure = "not_writable"
-        what = f"ComfyUI can't create, open or write the asset database '{location}' ({detail})."
-        fix = ("Make sure its folder is a writable directory, the database path is a writable file (or doesn't exist yet), "
-               "and no other program has it open.")
+        blocked = getattr(error, "filename", None)
+        if blocked in tuple(location + suffix for suffix in ("-wal", "-shm", ".bkp", ".bkp-wal", ".bkp-shm")):
+            what = f"ComfyUI can't write '{blocked}', beside the asset database '{location}' ({detail})."
+            fix = "Make that file writable, and start again."
+        else:
+            what = f"ComfyUI can't create, open or write the asset database '{location}' ({detail})."
+            fix = ("Make sure its folder is a writable directory, the database path is a writable file (or doesn't exist yet), "
+                   "and no other program has it open.")
     elif kind == "database_corrupt":
         failure = "corrupt"
         what = f"The asset database '{location}' is corrupt ({detail})."
