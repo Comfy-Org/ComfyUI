@@ -111,6 +111,18 @@ def _remove_sensitive_from_queue(queue: list) -> list:
     return [item[:5] for item in queue]
 
 
+def _downscaled_jpeg(path: str, res: int) -> bytes:
+    """Longest side capped at res (never upscaled), alpha flattened onto black, as quality 85 JPEG."""
+    with Image.open(path) as img:
+        img.thumbnail((res, res))
+        img = ImageOps.exif_transpose(img).convert("RGBA")
+        flat = Image.new("RGB", img.size)
+        flat.paste(img, mask=img.getchannel("A"))
+        buffer = BytesIO()
+        flat.save(buffer, format="jpeg", quality=85)
+        return buffer.getvalue()
+
+
 async def send_socket_catch_exception(function, message):
     try:
         await function(message)
@@ -622,6 +634,16 @@ class PromptServer():
                     file = os.path.join(output_dir, filename)
 
                 if os.path.isfile(file):
+                    try:
+                        res = int(request.rel_url.query.get('res', ''))
+                    except ValueError:
+                        res = 0
+                    if res > 0 and 'channel' not in request.rel_url.query and os.path.splitext(file)[1].lower() in ('.png', '.jpg', '.jpeg'):
+                        body = await asyncio.to_thread(_downscaled_jpeg, file, res)
+                        safe_filename = filename.replace("\\", "\\\\").replace('"', '\\"')
+                        return web.Response(body=body, content_type='image/jpeg',
+                                            headers={"Content-Disposition": f"filename=\"{safe_filename}\"", "X-Content-Type-Options": "nosniff"})
+
                     if 'preview' in request.rel_url.query:
                         with Image.open(file) as img:
                             preview_info = request.rel_url.query['preview'].split(';')
