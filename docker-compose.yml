@@ -1,0 +1,36 @@
+services:
+  comfyui:
+    image: comfyui-sos-comfyui:vision-fixed
+    build:
+      context: .
+      # Fast, reproducible compatibility layer over the locally validated base
+      # image. Dockerfile remains the clean full-build path.
+      dockerfile: Dockerfile.manager
+      args:
+        TORCH_INDEX_URL: https://download.pytorch.org/whl/cu128
+    container_name: comfyui-sos
+    restart: unless-stopped
+    gpus: all
+    ports:
+      - "0.0.0.0:8188:8188"
+    volumes:
+      - ./models:/app/models
+      - ./custom_nodes:/app/custom_nodes
+      - ./input:/app/input
+      - ./output:/app/output
+      - ./user:/app/user
+    environment:
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility
+      # HuggingFace 国内镜像：缺失模型走可达的镜像下载，而非被墙的官方域名
+      HF_ENDPOINT: https://hf-mirror.com
+      # 下载/元数据请求超时，避免连不上时无限阻塞 ComfyUI 执行队列
+      HF_HUB_DOWNLOAD_TIMEOUT: "30"
+      HF_HUB_ETAG_TIMEOUT: "10"
+    # Keep the container privileged for ComfyUI-Manager's automatic package
+    # installs, while making files created in the bind-mounted data folders
+    # group-writable by the host user (momo, gid 1000).
+    command:
+      - /bin/sh
+      - -lc
+      - umask 0002 && exec python main.py --listen 0.0.0.0 --port 8188 --enable-manager-legacy-ui --disable-cuda-malloc --reserve-vram 1.5
