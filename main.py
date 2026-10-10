@@ -23,7 +23,7 @@ console_log_level = get_console_log_level(args.verbose)
 file_log_outputs = get_file_log_outputs(args.verbose)
 setup_logger(log_level=console_log_level, file_outputs=file_log_outputs, use_stdout=args.log_stdout)
 
-from app.database.db import dependencies_available, get_database_url, get_db_path, init_db, lock_holder_db_path, missing_dependencies
+from app.database.db import dependencies_available, get_database_url, get_db_path, init_db, lock_holder_db_path, missing_dependencies, recover_from_corruption, start_daily_backup
 from app.assets.event_log import error_kind
 from utils.install_util import get_missing_requirements_message
 from app.assets.lifecycle import cleanup_temp_filesystem
@@ -493,7 +493,13 @@ def setup_database(asset_manager):
 
     try:
         init_db()
-        asset_manager.startup()
+        try:
+            asset_manager.startup()
+        except Exception as e:
+            if not recover_from_corruption(e):
+                raise
+            asset_manager.startup()
+        start_daily_backup()
     except Exception as e:
         failure, message = database_failure_message(e, get_database_url())
         if failure != "unsupported_url":  # that error repeats the URL, which can carry a password

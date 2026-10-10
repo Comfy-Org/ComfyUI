@@ -213,6 +213,7 @@ _SQLITE_MESSAGE_KINDS = (
     ("disk i/o error", "disk_io"),
     ("unable to open database file", "unable_to_open"),
     ("database disk image is malformed", "database_corrupt"),
+    ("malformed database schema", "database_corrupt"),
     ("file is not a database", "database_corrupt"),
     ("attempt to write a readonly database", "read_only"),
 )

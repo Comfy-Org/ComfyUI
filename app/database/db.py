@@ -3,8 +3,10 @@ import logging
 import os
 import shutil
 import sqlite3
+import threading
 import time
-from contextlib import closing
+from contextlib import closing, suppress
+from app.assets.event_log import error_kind
 from app.logger import log_startup_warning
 from filelock import FileLock, Timeout
 from comfy.cli_args import args, database_default_path
@@ -167,6 +169,8 @@ def _backup_database(source_path, destination_path):
 
 
 _db_lock = None
+_recovery_attempted = False  # once per launch: after that, asset startup logs corruption, as before
+_DAILY_BACKUP_INTERVAL_SECONDS = 24 * 60 * 60
 _LOCK_WAIT_SECONDS = 5.0
 
 def _acquire_file_lock(db_path):
@@ -271,11 +275,159 @@ def _init_file_db(db_url):
     _acquire_file_lock(db_path)
     try:
         copy_legacy_default_db(db_path)
-        db_exists = os.path.exists(db_path)
-        _migrate_and_bind(db_url, db_path, db_exists)
+        try:
+            _migrate_and_bind(db_url, db_path, os.path.exists(db_path))
+        except Exception as e:
+            if not is_recoverable_corruption(e):
+                raise
+            _quarantine_and_restore(db_path, e)
+            _migrate_and_bind(db_url, db_path, os.path.exists(db_path))
     except Exception:
         _db_lock.release()
         raise
+
+
+def _is_default_db():
+    """The default database file, also when --database-url names it; any other database may be managed elsewhere."""
+    import folder_paths
+
+    default_path = os.path.join(folder_paths.get_user_directory(), "comfyui.db")
+    try:
+        return os.path.normcase(os.path.abspath(get_db_path())) == os.path.normcase(os.path.abspath(default_path))
+    except ValueError:  # not a SQLite file URL
+        return False
+
+
+def is_recoverable_corruption(error):
+    # Only the default database (see _is_default_db).
+    # SQLITE_CORRUPT or SQLITE_NOTADB, never "database is locked". The error can come from
+    # another file (the pre-upgrade backup), so the live database must fail its check too.
+    if _recovery_attempted or not _is_default_db() or error_kind(error) != "database_corrupt":
+        return False
+    return not _passes_integrity_check(get_db_path())
+
+
+def recover_from_corruption(error):
+    """Replace a default database found corrupt after init_db. False for any other error."""
+    global _recovery_attempted
+    if not is_recoverable_corruption(error):
+        return False
+    _recovery_attempted = True
+    db_path = get_db_path()
+    for session_factory in (Session, WriteSession):
+        session_factory.kw["bind"].dispose()  # Windows refuses to rename an open file
+    try:
+        _quarantine_and_restore(db_path, error)
+    except Exception:  # e.g. held open on Windows: asset startup now logs the corruption, as before
+        logging.exception(f"Could not recover the corrupt database '{db_path}'; continuing without recovery")
+        if not os.path.exists(db_path):
+            raise  # a move that couldn't be undone: fail rather than run on a new empty file
+        return True
+    _migrate_and_bind(get_database_url(), db_path, os.path.exists(db_path))
+    return True
+
+
+def _connect_existing(path):  # sqlite3.connect would create a missing file
+    if not os.path.exists(path):
+        raise sqlite3.OperationalError("unable to open database file")
+    return sqlite3.connect(path)
+
+
+def _passes_integrity_check(path):
+    # Only after an error: unlike quick_check it also finds an index that disagrees with its table.
+    try:
+        with closing(_connect_existing(path)) as conn:
+            return conn.execute("PRAGMA integrity_check").fetchall() == [("ok",)]
+    except sqlite3.Error as e:
+        return error_kind(e) == "database_locked"  # another process has it: not shown to be corrupt
+
+
+def _quarantine_and_restore(db_path, error):
+    """Rename a corrupt database aside and restore the daily backup in its place if it is sound.
+    With no sound backup, no database file is left, so the caller creates a new one. On a failure,
+    every move is undone, so the corrupt database stays in place to be recovered next time."""
+    quarantine_path = f"{db_path}.corrupt-{time.strftime('%Y%m%d-%H%M%S')}"
+    backup_path, restore_path = db_path + ".daily-backup", db_path + ".restore-tmp"
+    outcome = "Database recreated empty: there was no sound daily backup"
+    try:
+        try:  # before anything moves: a kill during the slow copy and check leaves it to recover again
+            shutil.copyfile(backup_path, restore_path)
+            sound = _passes_integrity_check(restore_path)
+            taken = time.strftime("%Y-%m-%d %H:%M", time.localtime(os.path.getmtime(backup_path)))
+        except FileNotFoundError:
+            sound = False  # no backup; any other error stops here, before anything moves
+        moved = []
+        try:
+            # With its WAL and journal: when another connection keeps one, SQLite would replay it.
+            for suffix in ("-wal", "-shm", "-journal", ""):
+                if os.path.exists(db_path + suffix):
+                    os.replace(db_path + suffix, quarantine_path + suffix)
+                    moved.append((db_path + suffix, quarantine_path + suffix))
+            if sound:
+                # Atomic: a crash leaves either no database or the whole backup, never part of it.
+                os.replace(restore_path, db_path)
+                outcome = f"Database restored from the daily backup taken {taken}; later changes are lost"
+        except OSError:
+            logging.exception(f"Could not move the corrupt database '{db_path}' aside or restore the backup")
+            for src, dst in reversed(moved):
+                try:
+                    os.replace(dst, src)
+                except OSError:
+                    logging.exception(f"Could not move '{dst}' back to '{src}'")
+            raise error
+    finally:
+        with suppress(OSError):  # a leftover copy must not undo a finished restore
+            os.remove(restore_path)
+    log_startup_warning(
+        f"Database quarantined: '{db_path}' was corrupt ({getattr(error, 'orig', error)}) and was "
+        f"moved to '{quarantine_path}'. {outcome}. The asset catalog is rebuilt by rescanning your files."
+    )
+
+
+def start_daily_backup():
+    """Keep a compact copy of the default database, refreshed once a day, off the startup path."""
+    if not _is_default_db():
+        return
+    db_path = get_db_path()
+    threading.Thread(
+        target=_keep_daily_backup, args=(db_path, db_path + ".daily-backup"), name="database-daily-backup", daemon=True
+    ).start()
+
+
+def _keep_daily_backup(db_path, backup_path):
+    with closing(_connect_existing(db_path)) as conn:  # without WAL, copying it would block every write
+        if conn.execute("PRAGMA journal_mode").fetchone()[0] != "wal":
+            logging.warning(f"No daily backup of '{db_path}': it isn't in WAL mode, so a backup would block writes")
+            return
+    # A daemon thread: exiting mid-backup leaves only a .tmp file, which the next backup removes.
+    while True:
+        due_in = 0  # no backup yet
+        with suppress(OSError):
+            age = time.time() - os.path.getmtime(backup_path)
+            due_in = _DAILY_BACKUP_INTERVAL_SECONDS - age if age >= 0 else 0  # dated in the future: the clock moved back
+        if due_in <= 0:
+            _write_daily_backup(db_path, backup_path)
+            due_in = _DAILY_BACKUP_INTERVAL_SECONDS  # also the retry delay after a failure
+        time.sleep(due_in)
+
+
+def _write_daily_backup(db_path, backup_path):
+    tmp_path = backup_path + ".tmp"
+    try:
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)  # left by a process that exited mid-backup
+        with closing(_connect_existing(db_path)) as conn:  # a deleted database must not back up as empty
+            conn.execute("VACUUM INTO ?", (tmp_path,))
+        # VACUUM INTO copies a row that breaks a constraint; only a copy a restore accepts replaces the backup.
+        if not _passes_integrity_check(tmp_path):
+            raise sqlite3.DatabaseError("the new backup failed its integrity check")
+        os.replace(tmp_path, backup_path)
+        logging.info(f"Database daily backup written to '{backup_path}'")
+    except Exception:
+        logging.exception("Database daily backup failed; keeping the previous one")
+    finally:
+        with suppress(OSError):  # a failed copy is about as big as the database
+            os.remove(tmp_path)
 
 
 # NORMAL: commits skip the fsync that held the write lock. A power loss or OS crash can
@@ -326,7 +478,17 @@ def _migrate_and_bind(db_url, db_path, db_exists):
         connection.exec_driver_sql("BEGIN IMMEDIATE")
 
     conn = engine.connect()
+    try:
+        _migrate(conn, engine, write_engine, config, db_path, db_exists)
+    except BaseException:
+        # Close every handle: Windows refuses to rename the file aside while one is open.
+        conn.close()
+        engine.dispose()
+        write_engine.dispose()
+        raise
 
+
+def _migrate(conn, engine, write_engine, config, db_path, db_exists):
     try:
         journal_mode = conn.exec_driver_sql("PRAGMA journal_mode=WAL").scalar_one()
     except OperationalError:
