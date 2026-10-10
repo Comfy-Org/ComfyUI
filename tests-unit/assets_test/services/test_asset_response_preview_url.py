@@ -383,3 +383,51 @@ def test_record_response_has_no_self_preview_url_when_content_is_missing(
     assert resp.preview_url is None, (
         "the list surface must also withhold a missing record's self-preview URL"
     )
+
+
+def test_an_image_is_its_own_preview_id(sandboxed_comfy_roots: Path):
+    resp = _build_asset_response(
+        _make_result(file_path=str(sandboxed_comfy_roots / "output" / "a.png")), {}
+    )
+
+    assert (resp.preview_id, resp.preview_url) == ("ref-1", "/api/view?type=output&filename=a.png")
+
+
+@pytest.mark.parametrize(
+    ("name", "mime_type"),
+    [
+        ("frame.exr", "image/x-exr"),
+        ("frame.exr", None),
+        ("frame.exr", "image/png"),  # a client-supplied type
+        ("sky.hdr", "image/vnd.radiance"),
+        ("sky.hdr", None),
+        ("sky.HDR", "image/x-whatever-this-host-says"),
+        ("blake3-named-upload", "image/x-exr"),
+    ],
+)
+def test_exr_and_hdr_are_never_their_own_preview(
+    sandboxed_comfy_roots: Path, name: str, mime_type: str | None
+):
+    resp = _build_asset_response(
+        _make_result(name=name, file_path=str(sandboxed_comfy_roots / "output" / name), mime_type=mime_type),
+        {},
+    )
+
+    assert (resp.preview_id, resp.preview_url) == (None, None), (
+        "browsers can't display these, so the bytes must never be offered as a preview"
+    )
+
+
+def test_an_exr_with_a_generated_preview_shows_it(sandboxed_comfy_roots: Path):
+    result = _make_result(
+        name="frame.exr",
+        file_path=str(sandboxed_comfy_roots / "output" / "frame.exr"),
+        mime_type="image/x-exr",
+        preview_id="preview-ref",
+    )
+
+    resp = _build_asset_response(result, {"preview-ref": str(sandboxed_comfy_roots / "previews" / "p.webp")})
+
+    assert (resp.preview_id, resp.preview_url) == ("preview-ref", "/api/assets/preview-ref/content"), (
+        "/api/view can't serve previews/, so a generated preview is served by id"
+    )

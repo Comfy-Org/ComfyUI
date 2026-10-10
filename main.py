@@ -27,7 +27,6 @@ from app.database.db import dependencies_available, get_database_url, get_db_pat
 from app.assets.event_log import error_kind
 from utils.install_util import get_missing_requirements_message
 from app.assets.lifecycle import cleanup_temp_filesystem
-from app.assets.manager import AssetManager, default_asset_manager
 import itertools
 import utils.extra_config
 from utils.mime_types import init_mime_types
@@ -173,6 +172,11 @@ def apply_custom_paths():
         logging.info(f"Setting input directory to: {input_dir}")
         folder_paths.set_input_directory(input_dir)
 
+    if args.previews_directory:
+        previews_dir = os.path.abspath(args.previews_directory)
+        logging.info(f"Setting previews directory to: {previews_dir}")
+        folder_paths.set_previews_directory(previews_dir)
+
     if args.user_directory:
         user_dir = os.path.abspath(args.user_directory)
         logging.info(f"Setting user directory to: {user_dir}")
@@ -264,6 +268,7 @@ import comfy.utils
 
 import execution
 import server
+from app.assets.manager import AssetManager, default_asset_manager  # imports torch, so not before the check above
 from protocol import BinaryEventTypes
 import nodes
 import comfy.model_management

@@ -68,6 +68,7 @@ folder_names_and_paths["detection"] = ([os.path.join(models_dir, "detection")], 
 
 output_directory = os.path.join(base_path, "output")
 temp_directory = os.path.join(base_path, "temp")
+previews_directory = os.path.join(base_path, "previews")
 input_directory = os.path.join(base_path, "input")
 user_directory = os.path.join(base_path, "user")
 
@@ -131,6 +132,10 @@ def set_input_directory(input_dir: str) -> None:
     global input_directory
     input_directory = input_dir
 
+def set_previews_directory(previews_dir: str) -> None:
+    global previews_directory
+    previews_directory = previews_dir
+
 def get_output_directory() -> str:
     global output_directory
     return output_directory
@@ -142,6 +147,10 @@ def get_temp_directory() -> str:
 def get_input_directory() -> str:
     global input_directory
     return input_directory
+
+def get_previews_directory() -> str:
+    """Where generated asset previews are stored. Not served by type through /view."""
+    return previews_directory
 
 def get_user_directory() -> str:
     return user_directory

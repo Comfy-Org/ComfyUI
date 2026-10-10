@@ -137,7 +137,7 @@ Classification is fixed at record creation. A newly visible path receives the re
 
 Delete the target asset record. Leave its content row and file intact. Do not soft-delete the record or revive the deleted identity during later discovery. The retained content row is not a tombstone: it is ordinary live content describing bytes that are still there, and nothing records that a deletion happened.
 
-Deleting a record never deletes any other record. A preview record the deleted asset nominated stays untouched; references to a preview clear only when the preview record itself is deleted. The preview reference points from the deleted record to its target, so deleting the pointer must not destroy the target.
+Deleting a record deletes no other record, with one exception: a preview record tagged `preview` that no other record links goes with it, and so does its file when no record still uses that content and the file is under the previews directory (see Previews). The file is removed inside the same write transaction, so a registration linking the same preview can't interleave with it. Any other preview the deleted asset nominated, such as an `output` image, stays untouched; references to a preview clear only when the preview record itself is deleted.
 
 Content left behind after all its asset records are deleted can still be resolved by hash lookup, falling back to a generic name and a guessed content type when no record is left to supply one. There is currently no mechanism that reclaims or removes such orphaned content.
 
@@ -161,7 +161,7 @@ Uploads hash in both hashing modes, so this content-level dedup applies regardle
 
 An asset record's `updated_at` reflects only the last explicit user or API edit to that record: a rename, a user-metadata update, a MIME-type change, a preview nomination, or a manual tag add or remove.
 
-It never advances for serving or downloading the asset (access time is a separate concern from edit time), for scanner enrichment filling in extracted metadata, for the automatic missing or recovered tag projection, for a content split or content retire, or for the preview-deleted foreign-key cascade that clears a `preview_id`. Reading or downloading an asset's content instead updates a separate last-access marker on the record or records involved; that marker only ever moves forward, never backward. Minting a new record, whether from an upload, a cached rerun, or a content split, does not touch any other record's `updated_at`. The new record carries its own fresh timestamp from creation, and every existing record's last-explicit-edit time stays untouched.
+It never advances for serving or downloading the asset (access time is a separate concern from edit time), for scanner enrichment filling in extracted metadata, for the automatic missing or recovered tag projection, for a content split or content retire, or for the preview-deleted foreign-key cascade that clears a `preview_id`. Reading or downloading an asset's content instead updates a separate last-access marker on the record or records involved, except when a browser fetches it to display as an image, video or audio element (`Sec-Fetch-Dest`), which is how a generated preview renders; that marker only ever moves forward, never backward. Minting a new record, whether from an upload, a cached rerun, or a content split, does not touch any other record's `updated_at`. The new record carries its own fresh timestamp from creation, and every existing record's last-explicit-edit time stays untouched.
 
 ### Upload the same bytes with a different name
 
@@ -280,6 +280,18 @@ Create one asset record and one content row per location. Equal hashes may revea
 ### Byte-identical content from two local users
 
 The local asset system has global records and no owner field. It does not isolate or duplicate records by user.
+
+### Previews
+
+An asset's response carries `preview_url` and, for images, `preview_id`. `preview_url` is the path-based `/api/view` URL when the preview's file is under input, output or temp; a generated preview in the previews directory, which `/api/view` doesn't serve, is `/api/assets/{id}/content` with no query string. `preview_id` is only ever sent together with a working `preview_url`. A linked preview wins; otherwise an image, video, audio or text file previews itself, except EXR and Radiance HDR, which browsers can't display and which are never their own preview, matched by extension as well as MIME type. A stored link from an asset to itself is ignored, and `PUT /api/assets/{id}` refuses a link to the asset itself.
+
+An EXR output of `SaveImageAdvanced` gets its preview from the node itself, written from the image it saves: a JPEG, or a WebP with alpha when the image has an alpha channel, of at most one megapixel, named by the blake3 hash of its bytes and written once, so identical previews share one file. The node writes it only when assets are running. Execution registers the output's record already linked to it, in the same transaction, so a listing never shows that record waiting for its preview; an asset scan that runs while the node is still saving its batch can list the file first, without one. Outputs of other save nodes get no generated preview. An EXR saved from HDR (Rec.2020) input is previewed as if its primaries were Rec.709, so its preview looks desaturated and dark.
+
+An uploaded EXR (`/upload/image`, multipart `POST /api/assets`, from-hash creation) gets a preview decoded from the file, with the same tonemap, only when the record has no preview yet; a record over content another record already has a live preview for reuses that preview instead. A cached rerun of an output only ever reuses. Upload previews are WebP of at most one megapixel, with alpha when the EXR has an alpha channel. Files over 17 megapixels get none, checked from the EXR header before decoding.
+
+All previews are stored in the previews directory (`<base>/previews`, or `--previews-directory`), tagged `preview`, and never scanned; the directory is owned, so the startup prune keeps them. `preview` is a reserved tag the tag endpoints refuse. Previews are ordinary assets, so a listing with no tag filter includes them; filter by `input`, `output` or `models` to leave them out.
+
+The upload decodes on a worker thread, so the server stays responsive, and responds once its preview is stored. A failed decode leaves the upload without a preview. Each outcome is a `previews.generated` or `previews.generation_failed` event; previews the save node writes are logged only when they fail.
 
 ### `/view` routes
 

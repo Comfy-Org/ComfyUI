@@ -60,8 +60,37 @@ def _enrich_in_place(
                 result = register(abs_path, job_id)
                 if result is not None:
                     entry["id"] = result.id
+                    if result.preview_id:
+                        entry["preview_id"] = result.preview_id
+                    elif _is_own_image_preview(abs_path):
+                        entry["preview_id"] = result.id
             except Exception:
                 logging.warning("Asset registration failed for output: %s", entry.get("filename"), exc_info=True)
+
+
+def _is_own_image_preview(abs_path: str) -> bool:
+    from app.assets.services.preview_rules import own_preview_kind
+
+    return own_preview_kind(None, abs_path) == "image"
+
+
+def take_asset_previews(output_ui: dict) -> dict[str, dict]:
+    """Pop the previews save nodes named for their outputs, by output path, so none reaches clients or the cache."""
+    previews: dict[str, dict] = {}
+    for entries in output_ui.values():
+        if not isinstance(entries, list):
+            continue
+        for entry in entries:
+            if not isinstance(entry, dict) or "asset_preview" not in entry:
+                continue
+            preview = entry.pop("asset_preview")
+            try:
+                abs_path = _resolve_output_path(entry)
+            except Exception:
+                continue
+            if abs_path is not None:
+                previews[abs_path] = preview
+    return previews
 
 
 def _strip_ids(output_ui: dict) -> None:
@@ -71,14 +100,20 @@ def _strip_ids(output_ui: dict) -> None:
         for entry in entries:
             if isinstance(entry, dict):
                 entry.pop("id", None)
+                entry.pop("preview_id", None)
 
 
-def register_executed_outputs(output_ui: dict, job_id: str, asset_manager: "AssetManager") -> dict:
+def register_executed_outputs(output_ui: dict, job_id: str, asset_manager: "AssetManager", asset_previews: dict[str, dict] | None = None) -> dict:
     enriched = copy.deepcopy(output_ui)
     if not asset_manager.enabled:
         return enriched
 
-    _enrich_in_place(enriched, job_id, asset_manager.register_executed_output)
+    previews = asset_previews or {}
+    _enrich_in_place(
+        enriched,
+        job_id,
+        lambda path, job: asset_manager.register_executed_output(path, job, preview_ref=previews.get(path)),
+    )
     return enriched
 
 

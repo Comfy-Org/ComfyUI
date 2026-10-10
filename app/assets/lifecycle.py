@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import shutil
 
 import folder_paths
@@ -19,11 +20,12 @@ from comfy.cli_args import args
 # Startup imports this module even without the database packages; the functions
 # that need these are only called when a session can be created.
 if dependencies_available():
-    from sqlalchemy import select
+    from sqlalchemy import or_, select
 
     from app.assets.database.models import Asset, AssetContent
     from app.assets.database.queries.records import delete_record
     from app.assets.helpers import sql_path_under_prefix
+    from app.assets.services.asset_management import reclaim_preview
     from app.assets.services.hash_mode_state import enqueue_transition_work
     from app.assets.services.hash_mode_state import record_transition_intent
 
@@ -58,18 +60,19 @@ def wipe_temp_db_rows(session) -> tuple[int, int]:
     # case-different persistent directory destroys user assets.
     under_temp = sql_path_under_prefix(AssetContent.path, temp_root)
 
-    temp_record_ids = list(
-        session.scalars(
-            select(Asset.id)
-            .join(AssetContent, Asset.content_id == AssetContent.id)
-            .where(under_temp)
-        )
-    )
+    temp_records = session.execute(
+        select(Asset.id, Asset.preview_id)
+        .join(AssetContent, Asset.content_id == AssetContent.id)
+        .where(under_temp)
+    ).all()
 
     records_deleted = 0
-    for record_id in temp_record_ids:
+    for record_id, _ in temp_records:
         delete_record(session, record_id)
         records_deleted += 1
+    # Their previews live in previews/, not temp/, so the path predicate never reaches them.
+    for preview_id in {preview_id for _, preview_id in temp_records if preview_id}:
+        reclaim_preview(session, preview_id)
 
     contents_deleted = 0
     for content in session.scalars(select(AssetContent).where(under_temp)).all():
@@ -78,6 +81,37 @@ def wipe_temp_db_rows(session) -> tuple[int, int]:
 
     session.flush()
     return records_deleted, contents_deleted
+
+
+# Names Core gives previews: a content hash from the save node, a uuid from uploads; plus a save's temp file.
+_PREVIEW_NAME = re.compile(r"(?:[0-9a-f]{64}\.(?:jpg|webp)|[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\.webp)(?:\.[0-9a-f]{32}\.tmp)?")
+
+
+def sweep_orphan_previews(session) -> int:
+    """Remove previews in previews/ that no content row records: previews whose output never registered.
+
+    Startup only, before any prompt runs, so it can't race a save that hasn't registered yet.
+    Rows match by file name, which is unique, so a moved or symlinked install keeps its previews.
+    """
+    directory = folder_paths.get_previews_directory()
+    try:
+        names = [name for name in os.listdir(directory) if _PREVIEW_NAME.fullmatch(name)]
+    except OSError:
+        return 0
+    recorded = session.scalars(
+        select(AssetContent.path).where(or_(AssetContent.path.like("%.jpg"), AssetContent.path.like("%.webp")))
+    )
+    known = {os.path.basename(path) for path in recorded}
+    removed = 0
+    for name in names:
+        path = os.path.join(directory, name)
+        if name not in known and os.path.isfile(path):
+            try:
+                os.remove(path)
+                removed += 1
+            except OSError:
+                logging.warning("Could not remove orphaned preview %s", path, exc_info=True)
+    return removed
 
 
 def cleanup_temp_filesystem() -> bool:
@@ -115,6 +149,7 @@ def run_asset_startup() -> None:
         with create_session() as session:
             wipe_temp_db_rows(session)
             session.commit()
+            sweep_orphan_previews(session)
     except Exception:
         logging.exception("Temp DB row wipe failed; skipping filesystem cleanup")
         enqueue_mode_transition_work()

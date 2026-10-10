@@ -49,11 +49,14 @@ from app.assets.event_log import emit
 from app.database.db import dependencies_available
 
 if dependencies_available():
+    from app.assets.previews import generate_upload_preview
     from app.assets.services.asset_management import (
         get_export_file,
+        get_preview_file_paths,
         list_job_export_files,
         resolve_hash_to_path,
     )
+    from app.assets.services.preview_rules import preview_fields
     from app.asset_export import AssetExportManager
 
 from app.user_manager import UserManager
@@ -456,6 +459,11 @@ class PromptServer():
             return False
 
         def image_upload(post, image_save_function=None):
+            resp, _, _ = store_image_upload(post, image_save_function)
+            return resp if isinstance(resp, web.Response) else web.json_response(resp)
+
+        def store_image_upload(post, image_save_function=None):
+            """(response dict or error Response, registered asset view or None, file path)."""
             image = post.get("image")
             overwrite = post.get("overwrite")
             image_is_duplicate = False
@@ -466,14 +474,14 @@ class PromptServer():
             if image and image.file:
                 filename = image.filename
                 if not filename:
-                    return web.Response(status=400)
+                    return web.Response(status=400), None, None
 
                 subfolder = post.get("subfolder", "")
                 full_output_folder = os.path.join(upload_dir, os.path.normpath(subfolder))
                 filepath = os.path.abspath(os.path.join(full_output_folder, filename))
 
                 if os.path.commonpath((upload_dir, filepath)) != upload_dir:
-                    return web.Response(status=400)
+                    return web.Response(status=400), None, None
 
                 if not os.path.exists(full_output_folder):
                     os.makedirs(full_output_folder)
@@ -518,14 +526,25 @@ class PromptServer():
                         "tags": view.tags,
                     }
 
-                return web.json_response(resp)
+                return resp, view, filepath
             else:
-                return web.Response(status=400)
+                return web.Response(status=400), None, None
 
         @routes.post("/upload/image")
         async def upload_image(request):
             post = await request.post()
-            return image_upload(post)
+            resp, view, filepath = store_image_upload(post)
+            if view is not None:
+                preview_id = await generate_upload_preview(view.asset.id, filepath, view.asset.preview_id)
+                live_previews = get_preview_file_paths([preview_id]) if preview_id else {}
+                preview_id, preview_url = preview_fields(
+                    view.asset.id, preview_id, view.mime_type, filepath, False, live_previews
+                )
+                if preview_url is not None:
+                    resp["asset"]["preview_url"] = preview_url
+                if preview_id is not None:
+                    resp["asset"]["preview_id"] = preview_id
+            return resp if isinstance(resp, web.Response) else web.json_response(resp)
 
 
         @routes.post("/upload/mask")
