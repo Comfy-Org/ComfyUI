@@ -114,6 +114,10 @@ def _remove_sensitive_from_queue(queue: list) -> list:
 def _downscaled_jpeg(path: str, res: int) -> bytes:
     """Longest side capped at res (never upscaled), alpha flattened onto black, as quality 85 JPEG."""
     with Image.open(path) as img:
+        if img.mode.startswith("I"):  # 16-bit grayscale
+            img = img.convert("I").point(lambda v: v / 256).convert("L")
+        elif "transparency" in img.info:  # expand before resampling so hidden colours don't blend in
+            img = img.convert("RGBA")
         img.thumbnail((res, res))
         img = ImageOps.exif_transpose(img).convert("RGBA")
         flat = Image.new("RGB", img.size)

@@ -1,21 +1,28 @@
 """Tests for /view?res=N downscaled JPEG previews"""
 
+import sys
 from io import BytesIO
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+import numpy as np
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
 from PIL import Image
 
 import folder_paths
 import server
+from utils.mime_types import init_mime_types
+
+init_mime_types()
 
 
 @pytest.fixture
 def output_dir(tmp_path, monkeypatch):
-    monkeypatch.setattr(folder_paths, "output_directory", str(tmp_path))
-    return tmp_path
+    out = tmp_path / "output"
+    out.mkdir()
+    monkeypatch.setattr(folder_paths, "output_directory", str(out))
+    return out
 
 
 async def view(params, asset_manager=None):
@@ -38,9 +45,30 @@ async def test_downscales_to_jpeg(output_dir, name):
     status, headers, body = await view({"filename": name, "res": "512"})
     assert status == 200
     assert headers["Content-Type"] == "image/jpeg"
-    with Image.open(BytesIO(body)) as img:
+    assert headers["X-Content-Type-Options"] == "nosniff"
+    reference = BytesIO()
+    Image.new("RGB", (8, 8)).save(reference, format="jpeg", quality=85)
+    with Image.open(BytesIO(body)) as img, Image.open(reference) as ref:
         assert img.format == "JPEG"
         assert img.size == (512, 256)
+        assert img.quantization == ref.quantization
+
+
+@pytest.mark.asyncio
+async def test_without_res_serves_original(output_dir):
+    original = save(output_dir / "a.png")
+    status, headers, body = await view({"filename": "a.png"})
+    assert status == 200
+    assert headers["Content-Type"] == "image/png"
+    assert body == original
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason='" is not allowed in Windows filenames')
+@pytest.mark.asyncio
+async def test_filename_escaped_in_disposition(output_dir):
+    save(output_dir / 'a"b.png')
+    _, headers, _ = await view({"filename": 'a"b.png', "res": "64"})
+    assert headers["Content-Disposition"] == 'filename="a\\"b.png"'
 
 
 @pytest.mark.asyncio
@@ -59,6 +87,26 @@ async def test_alpha_flattened_onto_black(output_dir):
     _, _, body = await view({"filename": "cutout.png", "res": "512"})
     with Image.open(BytesIO(body)) as img:
         assert max(img.getpixel((10, 10))) < 8
+
+
+@pytest.mark.asyncio
+async def test_colour_key_transparency_not_blended(output_dir):
+    stripes = Image.new("RGB", (200, 200), (0, 0, 0))
+    stripes.paste((255, 255, 255), (0, 0, 200, 200), mask=Image.fromarray(np.tile([[255, 0]], (200, 100)).astype(np.uint8)))
+    stripes.save(output_dir / "keyed.png", transparency=(255, 255, 255))
+    _, _, body = await view({"filename": "keyed.png", "res": "50"})
+    with Image.open(BytesIO(body)) as img:
+        assert max(img.getpixel((25, 25))) < 8
+
+
+@pytest.mark.asyncio
+async def test_16_bit_grayscale_scaled(output_dir):
+    Image.fromarray(np.full((300, 600), 40000, np.uint16)).save(output_dir / "depth.png")
+    status, _, body = await view({"filename": "depth.png", "res": "100"})
+    assert status == 200
+    with Image.open(BytesIO(body)) as img:
+        assert img.size == (100, 50)
+        assert abs(img.getpixel((10, 10))[0] - 40000 // 256) <= 2
 
 
 @pytest.mark.asyncio
@@ -123,14 +171,14 @@ async def test_video_passes_through(output_dir):
 
 @pytest.mark.asyncio
 async def test_hash_filename_resolves_then_downscales(tmp_path, monkeypatch):
-    path = tmp_path / "stored_without_extension_in_url.png"
+    path = tmp_path / "stored.png"
     save(path)
     monkeypatch.setattr(server, "resolve_hash_to_path", lambda h: SimpleNamespace(
-        abs_path=str(path), download_name="pic.png", content_type="image/png"))
+        abs_path=str(path), download_name="pic", content_type="image/png"), raising=False)
     status, headers, body = await view({"filename": "blake3:abc", "res": "512"}, MagicMock(enabled=True))
     assert status == 200
     assert headers["Content-Type"] == "image/jpeg"
-    assert headers["Content-Disposition"] == 'filename="pic.png"'
+    assert headers["Content-Disposition"] == 'filename="pic"'
     with Image.open(BytesIO(body)) as img:
         assert img.size == (512, 256)
 
