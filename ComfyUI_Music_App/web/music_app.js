@@ -7,7 +7,9 @@ const maximumWait = 30 * 60 * 1000;
 
 const optionList = (node, input) => {
   const value = node?.input?.required?.[input] ?? node?.input?.optional?.[input];
-  return Array.isArray(value?.[0]) ? value[0] : [];
+  if (Array.isArray(value?.[0])) return value[0];
+  if (value?.[0] === "COMBO" && Array.isArray(value?.[1]?.options)) return value[1].options;
+  return Array.isArray(value?.options) ? value.options : [];
 };
 
 function field(parent, labelText, control) {
@@ -45,6 +47,16 @@ function generatedLyrics(theme) {
 }
 
 function createWorkflow(settings) {
+  const outputInputs = {
+    audio: ["9", 0],
+    filename_prefix: "ComfyUI_Music_App/song",
+  };
+  if (settings.audioOutputNode === "SaveAudioAdvanced") {
+    outputInputs.format = { format: "mp3", quality: "320k" };
+  } else if (settings.audioOutputNode === "SaveAudioMP3") {
+    outputInputs.quality = "320k";
+  }
+
   return {
     "1": {
       class_type: "UNETLoader",
@@ -115,12 +127,8 @@ function createWorkflow(settings) {
       inputs: { samples: ["8", 0], vae: ["3", 0] },
     },
     [outputNodeId]: {
-      class_type: "SaveAudioAdvanced",
-      inputs: {
-        audio: ["9", 0],
-        filename_prefix: "ComfyUI_Music_App/song",
-        format: { format: "mp3", quality: "320k" },
-      },
+      class_type: settings.audioOutputNode,
+      inputs: outputInputs,
     },
   };
 }
@@ -140,8 +148,25 @@ async function queueMusic(settings, status, audioPlayer, downloadLink, button) {
       }),
     });
     if (!response.ok) {
-      const failure = await response.json().catch(() => ({}));
-      throw new Error(failure.error?.message ?? "O ComfyUI recusou o fluxo.");
+      const body = await response.text();
+      let failure;
+      try {
+        failure = JSON.parse(body);
+      } catch {
+        failure = null;
+      }
+      if (failure?.error?.type === "prompt_no_outputs") {
+        throw new Error("O ComfyUI não reconheceu um nó de saída de áudio neste fluxo. Atualize o ComfyUI e a pasta ComfyUI_Music_App e confira se há um nó Save Audio marcado como saída.");
+      }
+      const messages = [];
+      if (failure?.error?.message) messages.push(failure.error.message);
+      if (failure?.error?.details) messages.push(failure.error.details);
+      for (const [nodeId, nodeError] of Object.entries(failure?.node_errors ?? {})) {
+        for (const error of nodeError.errors ?? []) {
+          messages.push(`#${nodeId} (${nodeError.class_type}): ${error.message}: ${error.details}`);
+        }
+      }
+      throw new Error(messages.join("\n") || body || "O ComfyUI recusou o fluxo.");
     }
     const result = await response.json();
 
@@ -203,7 +228,7 @@ function addStyles() {
     .comfy-music-app .comfy-music-mode input { width: auto; }
     .comfy-music-app button, .comfy-music-app a.comfy-music-download { display: inline-block; margin: 10px 10px 10px 0; padding: 10px 16px; border: 0; border-radius: 6px; color: var(--fg-color, #fff); background: var(--comfy-menu-bg, #3b78c8); font: inherit; font-weight: 600; cursor: pointer; text-decoration: none; }
     .comfy-music-app button:disabled { opacity: .55; cursor: wait; }
-    .comfy-music-app [role="status"] { min-height: 1.5em; margin: 12px 0; }
+    .comfy-music-app [role="status"] { min-height: 1.5em; margin: 12px 0; white-space: pre-wrap; }
     .comfy-music-app audio { display: block; width: 100%; margin: 18px 0; }
   `;
   document.head.append(style);
@@ -287,12 +312,21 @@ async function renderMusicApp(element) {
   const requiredNodes = [
     "UNETLoader", "DualCLIPLoader", "VAELoader", "TextEncodeAceStepAudio1.5",
     "ConditioningZeroOut", "EmptyAceStep1.5LatentAudio", "ModelSamplingAuraFlow",
-    "KSampler", "VAEDecodeAudio", "SaveAudioAdvanced",
+    "KSampler", "VAEDecodeAudio",
   ];
   const missingNodes = requiredNodes.filter((name) => !models[name]);
   if (missingNodes.length) {
     root.querySelector("[data-info]").textContent =
       `Este ComfyUI não oferece os nós ACE-Step necessários: ${missingNodes.join(", ")}. Atualize o ComfyUI.`;
+    return;
+  }
+
+  const audioOutputNodes = ["SaveAudioAdvanced", "SaveAudioMP3", "SaveAudio"];
+  const audioOutputNode = audioOutputNodes.find((name) => models[name]?.output_node === true)
+    ?? audioOutputNodes.find((name) => models[name] && models[name].output_node === undefined);
+  if (!audioOutputNode) {
+    root.querySelector("[data-info]").textContent =
+      "Este ComfyUI não disponibiliza um nó de saída de áudio reconhecido. Atualize o ComfyUI para uma versão com Save Audio.";
     return;
   }
 
@@ -304,6 +338,9 @@ async function renderMusicApp(element) {
   const clip2 = clip2Options.find((name) => /qwen_4b_ace15/i.test(name)) ?? clip2Options.find((name) => /ace15|ace_step/i.test(name));
   const vae = vaeOptions.find((name) => /ace_1\.5_vae/i.test(name)) ?? vaeOptions[0];
   const model = modelOptions.find((name) => /acestep_v1\.5_turbo/i.test(name)) ?? modelOptions[0];
+  const languageOptions = optionList(models["TextEncodeAceStepAudio1.5"], "language");
+  const timesignatureOptions = optionList(models["TextEncodeAceStepAudio1.5"], "timesignature");
+  const keyscaleOptions = optionList(models["TextEncodeAceStepAudio1.5"], "keyscale");
 
   if (!model || !clip1 || !clip2 || !vae) {
     root.querySelector("[data-info]").textContent =
@@ -316,9 +353,9 @@ async function renderMusicApp(element) {
   const clip2Select = field(root.querySelector("[data-clip2]"), "Text encoder maior", selectInput(clip2Options, clip2));
   const vaeSelect = field(root.querySelector("[data-vae]"), "VAE de áudio", selectInput(vaeOptions, vae));
   const tags = field(root.querySelector("[data-tags]"), "Estilo e instrumentos", textInput("Brazilian pop, melodic, warm, sung vocals"));
-  const language = field(root.querySelector("[data-language]"), "Idioma cantado", selectInput(optionList(models["TextEncodeAceStepAudio1.5"], "language"), "pt"));
-  const timesignature = field(root.querySelector("[data-timesignature]"), "Compasso", selectInput(optionList(models["TextEncodeAceStepAudio1.5"], "timesignature"), "4"));
-  const keyscale = field(root.querySelector("[data-keyscale]"), "Tonalidade", selectInput(optionList(models["TextEncodeAceStepAudio1.5"], "keyscale"), "C major"));
+  const language = field(root.querySelector("[data-language]"), "Idioma cantado", selectInput(languageOptions.length ? languageOptions : ["pt"], "pt"));
+  const timesignature = field(root.querySelector("[data-timesignature]"), "Compasso", selectInput(timesignatureOptions.length ? timesignatureOptions : ["4"], "4"));
+  const keyscale = field(root.querySelector("[data-keyscale]"), "Tonalidade", selectInput(keyscaleOptions.length ? keyscaleOptions : ["C major"], "C major"));
   const duration = field(root.querySelector("[data-duration]"), "Duração (segundos)", textInput("30", "number"));
   duration.required = true;
   duration.min = "1";
@@ -334,6 +371,10 @@ async function renderMusicApp(element) {
   seed.max = "4294967295";
   seed.step = "1";
   const info = root.querySelector("[data-info]");
+  if (!language.value || !timesignature.value || !keyscale.value) {
+    info.textContent = "Não foi possível ler as opções válidas de idioma, compasso e tonalidade deste ACE-Step. Atualize o ComfyUI.";
+    return;
+  }
   info.textContent = "Modelos ACE-Step encontrados localmente. A letra automática usa um modelo textual fixo local, não uma IA.";
   generateButton.disabled = false;
 
@@ -357,6 +398,7 @@ async function renderMusicApp(element) {
 
     queueMusic({
       model: modelSelect.value,
+      audioOutputNode,
       clip1: clip1Select.value,
       clip2: clip2Select.value,
       vae: vaeSelect.value,
