@@ -305,6 +305,9 @@ if args.offline:
 if not args.enable_assets:
     args.disable_assets = True
 
+if args.enable_asset_hashing and args.disable_assets:
+    parser.error("--enable-asset-hashing needs the assets system: add --enable-assets (and leave out --disable-assets).")
+
 if args.disable_auto_launch:
     args.auto_launch = False
 

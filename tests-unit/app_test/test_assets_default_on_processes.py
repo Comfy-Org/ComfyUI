@@ -66,6 +66,15 @@ def test_enable_assets_turns_assets_on_and_hashing_stays_opt_in(tmp_path, flags,
 
 
 @pytest.mark.parametrize("flags", [(), ("--disable-assets",), ("--enable-assets", "--disable-assets")])
+def test_hashing_with_assets_off_stops_startup_and_names_the_fix(tmp_path, flags):
+    result = _quick_start(tmp_path, "--enable-asset-hashing", *flags)
+
+    assert result.returncode == 2, result.stderr
+    assert "--enable-asset-hashing needs the assets system: add --enable-assets (and leave out --disable-assets)." in result.stderr
+    assert not _db(tmp_path).exists()
+
+
+@pytest.mark.parametrize("flags", [(), ("--disable-assets",), ("--enable-assets", "--disable-assets")])
 def test_assets_off_leaves_the_database_alone(tmp_path, flags):
     result = _quick_start(tmp_path, *flags)
 
