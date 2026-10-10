@@ -254,7 +254,39 @@ def test_ensure_scan_started_starts_the_lazy_object_info_scan(
 
     enabled_manager.ensure_scan_started()
 
-    seeder_start.assert_called_once_with(roots=("models", "input"))
+    seeder_start.assert_called_once_with(roots=("input",))
+
+
+def test_ensure_scan_started_does_not_scan_models(
+    enabled_manager: AssetsEnabled,
+    asset_roots: tuple[Path, Path, Path],
+    threaded_create_session: Callable[[], AbstractContextManager[Session]],
+    output_seeder: _OutputSeeder,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """GET /object_info runs this on every page load; models are left to startup and POST /seed."""
+    _, input_dir, _ = asset_roots
+    checkpoints = tmp_path / "models" / "checkpoints"
+    checkpoints.mkdir(parents=True)
+    model_path = checkpoints / "added_while_running.safetensors"
+    model_path.write_bytes(b"\0" * 16)
+    input_path = input_dir / "copied_in.png"
+    input_path.write_bytes(b"not really a png")
+    folders = [str(checkpoints)]
+    monkeypatch.setattr(
+        folder_paths, "folder_names_and_paths", {"checkpoints": (folders, {".safetensors"})}
+    )
+    monkeypatch.setattr(folder_paths, "filename_list_cache", {})
+    monkeypatch.setattr(seeder_module, "dependencies_available", lambda: True)
+
+    enabled_manager.ensure_scan_started()
+    assert output_seeder.wait(timeout=10)
+
+    with threaded_create_session() as session:
+        paths = set(session.scalars(select(AssetContent.path)))
+    assert str(input_path.resolve()) in paths
+    assert str(model_path.resolve()) not in paths
 
 
 def test_shutdown_runs_lifecycle_cleanup_when_seeder_shutdown_times_out(
