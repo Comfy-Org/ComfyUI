@@ -191,8 +191,6 @@ def Normalize(in_channels, dtype=None, device=None):
 
 
 class AttentionTensorContainer:
-    """Single-owner tensor input consumed by an optimized attention backend."""
-
     __slots__ = ("tensor",)
 
     def __init__(self, tensor: torch.Tensor):
@@ -207,6 +205,9 @@ class AttentionTensorContainer:
         tensor = self.peek()
         self.tensor = None
         return tensor
+
+    def consume(self) -> torch.Tensor:
+        return self.take()
 
 
 def wrap_attn(func):
