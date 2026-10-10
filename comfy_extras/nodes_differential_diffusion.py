@@ -21,7 +21,7 @@ class DifferentialDiffusion(io.ComfyNode):
                     default=1.0,
                     min=0.0,
                     max=1.0,
-                    step=0.01,
+                    step=0.0001,
                     optional=True,
                 ),
             ],
