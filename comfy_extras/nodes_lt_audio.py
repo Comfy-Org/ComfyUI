@@ -81,6 +81,7 @@ class LTXVAudioVAEDecode(io.ComfyNode):
         if audio_latent.is_nested:
             audio_latent = audio_latent.unbind()[-1]
         audio = audio_vae.decode(audio_latent).movedim(-1, 1).to(audio_latent.device)
+        audio = torch.nan_to_num(audio, nan=0.0, posinf=1.0, neginf=-1.0).clamp(-1.0, 1.0)
         output_audio_sample_rate = audio_vae.first_stage_model.output_sample_rate
         return io.NodeOutput(
             {
