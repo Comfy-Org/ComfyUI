@@ -417,7 +417,8 @@ class Qwen25_7BVLI_Config:
     k_norm = None
     rope_scale = None
     final_norm: bool = True
-    lm_head: bool = False
+    lm_head: bool = True
+    stop_tokens = [151643, 151645]
 
 @dataclass
 class Gemma2_2B_Config:
@@ -1406,20 +1407,17 @@ class Qwen25_7BVLI(BaseLlama, BaseGenerate, torch.nn.Module):
         self.visual = qwen_vl.Qwen2VLVisionTransformer(hidden_size=1280, output_hidden_size=config.hidden_size, device=device, dtype=dtype, ops=operations)
         self.dtype = dtype
 
-        # todo: should this be tied or not?
-        #self.lm_head = operations.Linear(config.hidden_size, config.vocab_size, bias=False, device=device, dtype=dtype)
-
     def preprocess_embed(self, embed, device):
         if embed["type"] == "image":
             image, grid = qwen_vl.process_qwen2vl_images(embed["data"])
             return self.visual(image.to(device, dtype=torch.float32), grid), grid
         return None, None
 
-    def forward(self, x, attention_mask=None, embeds=None, num_tokens=None, intermediate_output=None, final_layer_norm_intermediate=True, dtype=None, embeds_info=[]):
+    def build_position_ids(self, embeds, embeds_info=None, attention_mask=None):
         grid = None
         position_ids = None
         offset = 0
-        for e in embeds_info:
+        for e in embeds_info or []:
             if e.get("type") == "image":
                 grid = e.get("extra", None)
                 start = e.get("index")
@@ -1447,7 +1445,12 @@ class Qwen25_7BVLI(BaseLlama, BaseGenerate, torch.nn.Module):
         if grid is None:
             position_ids = None
 
-        return super().forward(x, attention_mask=attention_mask, embeds=embeds, num_tokens=num_tokens, intermediate_output=intermediate_output, final_layer_norm_intermediate=final_layer_norm_intermediate, dtype=dtype, position_ids=position_ids)
+        return position_ids
+
+    def forward(self, x, attention_mask=None, embeds=None, num_tokens=None, intermediate_output=None, final_layer_norm_intermediate=True, dtype=None, embeds_info=None, position_ids=None):
+        if position_ids is None:
+            position_ids = self.build_position_ids(embeds, embeds_info, attention_mask)
+        return super().forward(x, attention_mask=attention_mask, embeds=embeds, num_tokens=num_tokens, intermediate_output=intermediate_output, final_layer_norm_intermediate=final_layer_norm_intermediate, dtype=dtype, position_ids=position_ids, embeds_info=embeds_info)
 
 class Gemma2_2B(BaseLlama, BaseGenerate, torch.nn.Module):
     def __init__(self, config_dict, dtype, device, operations):
