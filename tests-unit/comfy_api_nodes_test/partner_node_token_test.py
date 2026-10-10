@@ -102,11 +102,11 @@ def _generate(node: type):
 
 @pytest.fixture(autouse=True)
 def _clear_renewed_tokens():
-    _helpers._renewed_partner_tokens.clear()
-    _helpers._partner_token_renewals.clear()
+    for cache in (_helpers._partner_token_lineages, _helpers._renewed_partner_tokens, _helpers._partner_token_renewals):
+        cache.clear()
     yield
-    _helpers._renewed_partner_tokens.clear()
-    _helpers._partner_token_renewals.clear()
+    for cache in (_helpers._partner_token_lineages, _helpers._renewed_partner_tokens, _helpers._partner_token_renewals):
+        cache.clear()
 
 
 @pytest.mark.parametrize(
@@ -227,19 +227,55 @@ def test_concurrent_requests_share_one_renewal(monkeypatch):
     assert [auth for auth, _ in api.partner_calls] == [f"Bearer {fresh}"] * 3
 
 
-def test_prompts_from_the_same_session_reuse_the_renewed_token(monkeypatch):
-    first_snapshot, fresh = _partner_token(60), _partner_token(5400, generation=1)
-    second_snapshot = _partner_token(30)
-    api = FakeComfyApi(accepted={first_snapshot}, renewed_token=fresh)
+def test_prompts_carrying_the_same_snapshot_reuse_the_renewed_token(monkeypatch):
+    snapshot, fresh = _partner_token(60), _partner_token(5400, generation=1)
+    api = FakeComfyApi(accepted={snapshot}, renewed_token=fresh)
 
     async def two_prompts():
-        await _generate(_node(first_snapshot))
-        await _generate(_node(second_snapshot))
+        await _generate(_node(snapshot))
+        await _generate(_node(snapshot))
 
     asyncio.run(_with_server(api, monkeypatch, two_prompts))
 
-    assert len(api.renew_calls) == 1
+    assert api.renew_calls == [f"Bearer {snapshot}"]
     assert [auth for auth, _ in api.partner_calls] == [f"Bearer {fresh}"] * 2
+
+
+def test_a_token_claiming_another_session_id_never_gets_its_renewed_token(monkeypatch):
+    victim, fresh = _partner_token(60), _partner_token(5400, generation=1)
+    forged = _partner_token(30, generation=99)
+    api = FakeComfyApi(accepted={victim}, renewed_token=fresh)
+
+    async def victim_then_forged():
+        await _generate(_node(victim))
+        api.renewed_token, api.renew_status = None, 401
+        with pytest.raises(Exception, match="Unauthorized: Please login first"):
+            await _generate(_node(forged))
+        api.renew_status = 200
+        await _generate(_node(victim))
+
+    asyncio.run(_with_server(api, monkeypatch, victim_then_forged))
+
+    assert api.renew_calls == [f"Bearer {victim}", f"Bearer {forged}", f"Bearer {forged}"]
+    assert [auth for auth, _ in api.partner_calls] == [f"Bearer {fresh}", f"Bearer {forged}", f"Bearer {fresh}"]
+
+
+def test_renewing_a_renewed_token_keeps_the_snapshot_on_the_newest_token(monkeypatch):
+    now = time.time()
+    snapshot = _partner_token(60, now=now)
+    first, second = _partner_token(200, generation=1, now=now), _partner_token(5400, generation=2, now=now)
+    api = FakeComfyApi(accepted={snapshot}, renewed_token=first)
+
+    async def renew_twice():
+        await _generate(_node(snapshot))
+        api.renewed_token = second
+        await _generate(_node(snapshot))
+        await _generate(_node(first))
+
+    asyncio.run(_with_server(api, monkeypatch, renew_twice))
+
+    assert api.renew_calls == [f"Bearer {snapshot}", f"Bearer {first}"]
+    assert [auth for auth, _ in api.partner_calls] == [f"Bearer {first}", f"Bearer {second}", f"Bearer {second}"]
 
 
 def test_result_download_uses_a_renewed_token(monkeypatch):

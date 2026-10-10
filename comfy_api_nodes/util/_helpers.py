@@ -45,8 +45,10 @@ PARTNER_NODE_TOKEN_AUDIENCE = "comfy-partner-node"
 PARTNER_NODE_TOKEN_RENEW_PATH = "/auth/partner-node/renew"
 _PARTNER_NODE_TOKEN_RENEW_MARGIN = 300.0  # renew a partner-node token this many seconds before it expires
 
+_partner_token_lineages: dict[str, str] = {}
+"""Renewed partner-node token -> the token it descends from. Only tokens comfy-api issued on renewal are entered."""
 _renewed_partner_tokens: dict[str, str] = {}
-"""Newest renewed partner-node token per session id (``sid``). In memory only; renewal does not rotate the token."""
+"""Newest renewed partner-node token per lineage. In memory only; renewal does not rotate the token."""
 _partner_token_renewals: dict[str, asyncio.Task] = {}
 
 
@@ -69,8 +71,16 @@ def _partner_token_claims(token: str) -> dict | None:
     return claims
 
 
+def _partner_token_lineage(token: str) -> str:
+    """The token a credential was first presented as.
+
+    Unverified claims such as ``sid`` can be forged, so a cached renewal is only shared with the token it was renewed from.
+    """
+    return _partner_token_lineages.get(token, token)
+
+
 def _newest_partner_token(token: str, claims: dict) -> tuple[str, float]:
-    renewed = _renewed_partner_tokens.get(claims["sid"])
+    renewed = _renewed_partner_tokens.get(_partner_token_lineage(token))
     if renewed is not None:
         renewed_exp = _partner_token_claims(renewed)["exp"]
         if renewed_exp >= claims["exp"]:
@@ -78,7 +88,7 @@ def _newest_partner_token(token: str, claims: dict) -> tuple[str, float]:
     return token, claims["exp"]
 
 
-async def _request_partner_token_renewal(sid: str, token: str) -> str | None:
+async def _request_partner_token_renewal(lineage: str, sid: str, token: str) -> str | None:
     url = urljoin(default_base_url().rstrip("/") + "/", PARTNER_NODE_TOKEN_RENEW_PATH.lstrip("/"))
     try:
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30.0)) as session:
@@ -86,7 +96,7 @@ async def _request_partner_token_renewal(sid: str, token: str) -> str | None:
                 if resp.status >= 400:
                     logging.warning("Comfy API refused to renew the sign-in token (HTTP %s).", resp.status)
                     if resp.status in (401, 403):
-                        _renewed_partner_tokens.pop(sid, None)
+                        _renewed_partner_tokens.pop(lineage, None)
                     return None
                 body = await resp.json(content_type=None)
     except (ClientError, OSError, asyncio.TimeoutError, ValueError) as e:
@@ -97,17 +107,21 @@ async def _request_partner_token_renewal(sid: str, token: str) -> str | None:
     if claims is None or claims["sid"] != sid:
         logging.warning("Comfy API returned an unusable renewed sign-in token.")
         return None
-    _renewed_partner_tokens[sid] = renewed
+    _partner_token_lineages[renewed] = lineage
+    _renewed_partner_tokens[lineage] = renewed
     return renewed
 
 
-async def _renew_partner_token(sid: str, token: str) -> str | None:
-    """Renew once per session at a time; concurrent callers share the in-flight renewal."""
-    task = _partner_token_renewals.get(sid)
+async def _renew_partner_token(token: str, claims: dict) -> str | None:
+    """Renew once per lineage at a time; concurrent callers share the in-flight renewal."""
+    lineage = _partner_token_lineage(token)
+    task = _partner_token_renewals.get(lineage)
     if task is None or task.done() or task.get_loop() is not asyncio.get_running_loop():
-        task = asyncio.create_task(_request_partner_token_renewal(sid, token))
-        _partner_token_renewals[sid] = task
-        task.add_done_callback(lambda t: _partner_token_renewals.pop(sid, None) if _partner_token_renewals.get(sid) is t else None)
+        task = asyncio.create_task(_request_partner_token_renewal(lineage, claims["sid"], token))
+        _partner_token_renewals[lineage] = task
+        task.add_done_callback(
+            lambda t: _partner_token_renewals.pop(lineage, None) if _partner_token_renewals.get(lineage) is t else None
+        )
     return await asyncio.shield(task)
 
 
@@ -119,7 +133,7 @@ async def refresh_partner_token(node_cls: type[IO.ComfyNode]) -> None:
         return
     newest, exp = _newest_partner_token(token, claims)
     if exp - time.time() < _PARTNER_NODE_TOKEN_RENEW_MARGIN:
-        await _renew_partner_token(claims["sid"], newest)
+        await _renew_partner_token(newest, claims)
 
 
 async def renew_rejected_partner_token(authorization: str | None) -> bool:
@@ -136,7 +150,7 @@ async def renew_rejected_partner_token(authorization: str | None) -> bool:
     newest, exp = _newest_partner_token(rejected, claims)
     if newest != rejected and exp - time.time() >= _PARTNER_NODE_TOKEN_RENEW_MARGIN:
         return True
-    return await _renew_partner_token(claims["sid"], newest) is not None
+    return await _renew_partner_token(newest, claims) is not None
 
 
 def get_auth_header(node_cls: type[IO.ComfyNode]) -> dict[str, str]:
