@@ -50,11 +50,17 @@ def db_path(tmp_path, monkeypatch):
 
 def _startup_error(caplog, asset_manager=None, *, kind, level=logging.ERROR):
     with caplog.at_level(level), pytest.raises(SystemExit) as stopped:
+        main.skip_assets_for_a_newer_database()  # as at startup: not newer, so assets stay on
+        assert not main.args.disable_assets
         main.setup_database(asset_manager or _AssetsOn())
     assert stopped.value.code == 1
     assert "--disable-assets" in caplog.text
     assert f"ASSETS_STARTUP_FAILED: {kind}\n" in caplog.text
     return caplog.text
+
+
+def _sqlalchemy_quotes_question_marks():
+    return make_url(URL.create("sqlite", database="/a?/b.db").render_as_string()).database == "/a?/b.db"
 
 
 def _stamp(path, revision, journal_mode="delete"):
@@ -158,7 +164,17 @@ def test_database_from_a_newer_comfyui_turns_assets_off_and_is_left_as_it_is(db_
 
 
 @pytest.mark.parametrize(
-    "folder", ["100%20x", pytest.param("a?b#c", marks=pytest.mark.skipif(sys.platform == "win32", reason="not a valid Windows path"))]
+    "folder",
+    [
+        "100%20x",
+        pytest.param(
+            "a?b#c",
+            marks=pytest.mark.skipif(
+                sys.platform == "win32" or not _sqlalchemy_quotes_question_marks(),
+                reason="? isn't allowed in Windows paths, and SQLAlchemy before 2.1 can't put one in a URL",
+            ),
+        ),
+    ],
 )
 def test_newer_database_in_a_folder_with_uri_characters(tmp_path, monkeypatch, db_path, caplog, folder):
     path = tmp_path / folder / "comfyui.db"
@@ -175,10 +191,11 @@ def test_newer_database_in_a_folder_with_uri_characters(tmp_path, monkeypatch, d
 
 def test_newer_database_the_check_cannot_read_still_stops_as_newer_revision(db_path, caplog, monkeypatch):
     _stamp(db_path, "0099_from_a_newer_release")
-    monkeypatch.setattr(db_module, "_raise_if_newer", lambda path: None)  # e.g. a hot rollback journal
+    monkeypatch.setattr(db_module, "_unknown_revisions", lambda path: None)  # e.g. a hot rollback journal
 
-    main.skip_assets_for_a_newer_database()
     error = _startup_error(caplog, kind="newer_revision")
+
+    assert "ASSETS_DISABLED" not in error
 
     assert f"The asset database '{db_path}' was last used by a newer version of ComfyUI" in error
     assert "0099_from_a_newer_release" in error
@@ -205,6 +222,45 @@ def test_newer_database_at_the_legacy_path_stays_where_the_newer_comfyui_left_it
     assert not (user_dir / "comfyui.db").exists()
 
 
+def test_database_at_this_versions_head_keeps_assets_on(db_path):
+    _stamp(db_path, ScriptDirectory.from_config(db_module.get_alembic_config()).get_current_head())
+
+    main.skip_assets_for_a_newer_database()
+
+    assert not main.args.disable_assets
+
+
+@pytest.mark.parametrize("beside_legacy", ["user_database", "legacy_backup"])
+def test_newer_legacy_database_that_will_not_be_moved_keeps_assets_on(tmp_path, monkeypatch, db_path, beside_legacy):
+    user_dir = tmp_path / "user"
+    user_dir.mkdir()
+    legacy = tmp_path / "install" / "user" / "comfyui.db"
+    legacy.parent.mkdir(parents=True)
+    _stamp(str(legacy), "0099_from_a_newer_release")
+    if beside_legacy == "user_database":
+        _stamp(str(user_dir / "comfyui.db"), ScriptDirectory.from_config(db_module.get_alembic_config()).get_current_head())
+    else:
+        legacy.with_name("comfyui.db.bak").write_bytes(b"")
+    monkeypatch.setattr(db_module.args, "database_url", None)
+    monkeypatch.setattr(db_module, "get_legacy_default_db_path", lambda: str(legacy))
+    monkeypatch.setattr(folder_paths, "get_user_directory", lambda: str(user_dir))
+
+    main.skip_assets_for_a_newer_database()
+
+    assert not main.args.disable_assets
+
+
+def test_newer_legacy_database_is_not_checked_with_an_explicit_database_url(tmp_path, monkeypatch, db_path):
+    legacy = tmp_path / "install" / "user" / "comfyui.db"
+    legacy.parent.mkdir(parents=True)
+    _stamp(str(legacy), "0099_from_a_newer_release")
+    monkeypatch.setattr(db_module, "get_legacy_default_db_path", lambda: str(legacy))
+
+    main.skip_assets_for_a_newer_database()
+
+    assert not main.args.disable_assets
+
+
 def test_any_unknown_revision_among_several_turns_assets_off(db_path, caplog):
     head = ScriptDirectory.from_config(db_module.get_alembic_config()).get_current_head()
     _stamp(db_path, head)
@@ -217,6 +273,7 @@ def test_any_unknown_revision_among_several_turns_assets_off(db_path, caplog):
 
     assert main.args.disable_assets
     assert "(revision '0099_from_a_newer_release')" in caplog.text
+    assert head not in caplog.text
 
 
 def test_revision_cannot_add_lines_to_the_log(db_path, caplog):
@@ -381,10 +438,6 @@ def test_opens_from_an_install_folder_with_a_percent_sign(tmp_path, monkeypatch,
 
     with sqlite3.connect(db_path) as conn:
         assert conn.execute("SELECT version_num FROM alembic_version").fetchone()[0] == _head()
-
-
-def _sqlalchemy_quotes_question_marks():
-    return make_url(URL.create("sqlite", database="/a?/b.db").render_as_string()).database == "/a?/b.db"
 
 
 @pytest.mark.parametrize(

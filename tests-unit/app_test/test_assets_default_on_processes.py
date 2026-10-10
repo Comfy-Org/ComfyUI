@@ -19,8 +19,10 @@ DEPRECATED = "--enable-assets is deprecated and does nothing"
 HEAD = ScriptDirectory(str(REPO_ROOT / "alembic_db")).get_current_head()
 
 
-def _comfy_args(base: Path, *flags: str, database_url: bool = True) -> list[str]:
-    # An explicit database unless asked: without one, startup relocates the checkout's own user/comfyui.db.
+def _comfy_args(base: Path, *flags: str) -> list[str]:
+    # An explicit database unless --user-directory is given, so the default one in it is tested: without
+    # either, startup relocates the checkout's own user/comfyui.db.
+    database_url = not any(flag.startswith("--user-directory") for flag in flags)
     if not database_url and (REPO_ROOT / "user" / "comfyui.db").exists():
         pytest.skip("this checkout has a user/comfyui.db that a start without --database-url would relocate")
     return [
@@ -110,12 +112,12 @@ def disabled_server(tmp_path):
     yield from _serve(tmp_path, "--disable-assets")
 
 
-def _serve(tmp_path, *flags, database_url=True):
+def _serve(tmp_path, *flags):
     port = _free_port()
     log_path = tmp_path / "server.log"
     with open(log_path, "w") as log:
         server = subprocess.Popen(
-            _comfy_args(tmp_path, *flags, "--listen", "127.0.0.1", "--port", str(port), database_url=database_url),
+            _comfy_args(tmp_path, *flags, "--listen", "127.0.0.1", "--port", str(port)),
             cwd=tmp_path,
             stdout=log,
             stderr=subprocess.STDOUT,
@@ -184,7 +186,7 @@ def test_database_from_a_newer_comfyui_runs_without_assets_and_is_left_as_it_is(
     _stamp_newer(db)
     before = db.read_bytes()
 
-    server = _serve(tmp_path, f"--user-directory={user_dir}", database_url=False)
+    server = _serve(tmp_path, f"--user-directory={user_dir}")
     base_url = next(server)
     try:
         upload = requests.post(
@@ -207,5 +209,6 @@ def test_database_from_a_newer_comfyui_runs_without_assets_and_is_left_as_it_is(
     assert db.read_bytes() == before
     wal = user_dir / "comfyui.db-wal"
     assert not wal.exists() or wal.stat().st_size == 0  # nothing written during the run either
-    # Reading a WAL database can add an empty -wal and the -shm index; the lock file stays on POSIX only.
-    assert set(os.listdir(user_dir)) - {"comfyui.db.lock", "comfyui.db-wal", "comfyui.db-shm"} == {"comfyui.db"}
+    # Reading a WAL database can add an empty -wal and the -shm index; nothing takes the lock.
+    assert "comfyui.db" in os.listdir(user_dir)
+    assert set(os.listdir(user_dir)) <= {"comfyui.db", "comfyui.db-wal", "comfyui.db-shm"}

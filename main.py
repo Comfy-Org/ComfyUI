@@ -23,7 +23,7 @@ console_log_level = get_console_log_level(args.verbose)
 file_log_outputs = get_file_log_outputs(args.verbose)
 setup_logger(log_level=console_log_level, file_outputs=file_log_outputs, use_stdout=args.log_stdout)
 
-from app.database.db import NewerDatabaseError, dependencies_available, get_database_url, get_db_path, init_db, lock_holder_db_path, missing_dependencies, raise_if_database_is_newer
+from app.database.db import dependencies_available, get_database_url, get_db_path, init_db, lock_holder_db_path, missing_dependencies, newer_database
 from app.assets.event_log import error_kind
 from utils.install_util import get_missing_requirements_message
 from app.assets.lifecycle import cleanup_temp_filesystem
@@ -504,13 +504,10 @@ def setup_database(asset_manager):
 def skip_assets_for_a_newer_database():
     """Runs before the asset manager is chosen, so a database a newer ComfyUI upgraded turns
     the assets system off for this run instead of stopping startup."""
-    if args.disable_assets:
-        return
-    try:
-        raise_if_database_is_newer()
-    except NewerDatabaseError as e:
+    newer = None if args.disable_assets else newer_database()
+    if newer is not None:
         args.disable_assets = True
-        db_path, revisions = e.args
+        db_path, revisions = newer
         app.logger.log_startup_warning(
             f"ASSETS_DISABLED: newer_revision\n"
             f"The asset database '{db_path}' was upgraded by a newer version of ComfyUI (revision {revisions}), "
@@ -585,7 +582,7 @@ WARNING WARNING WARNING WARNING WARNING
 
 Another ComfyUI is already using this install's asset database:
   {db_path}
-This ComfyUI was started with --disable-assets, so it doesn't use that database and will start anyway.
+This ComfyUI doesn't have the assets system on, so it doesn't use that database and will start anyway.
 ________________________________________________________________________
 """.strip()
     )
