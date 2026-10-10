@@ -139,11 +139,11 @@ async function queueMusic(settings, status, audioPlayer, downloadLink, button) {
         client_id: api.clientId,
       }),
     });
-    const result = await response.json();
     if (!response.ok) {
-      const reason = result.error?.message ?? "O ComfyUI recusou o fluxo.";
-      throw new Error(reason);
+      const failure = await response.json().catch(() => ({}));
+      throw new Error(failure.error?.message ?? "O ComfyUI recusou o fluxo.");
     }
+    const result = await response.json();
 
     const deadline = Date.now() + maximumWait;
     status.textContent = `Na fila. ID da tarefa: ${result.prompt_id}`;
@@ -163,11 +163,11 @@ async function queueMusic(settings, status, audioPlayer, downloadLink, button) {
 
       const savedAudio = completed.outputs?.[outputNodeId]?.audio?.[0];
       if (!savedAudio) continue;
-      const audioUrl = `/view?${new URLSearchParams({
+      const audioUrl = api.apiURL(`/view?${new URLSearchParams({
         filename: savedAudio.filename,
         subfolder: savedAudio.subfolder ?? "",
         type: savedAudio.type ?? "output",
-      })}`;
+      })}`);
       audioPlayer.src = audioUrl;
       audioPlayer.hidden = false;
       downloadLink.href = audioUrl;
