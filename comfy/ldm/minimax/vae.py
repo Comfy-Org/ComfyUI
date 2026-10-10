@@ -424,6 +424,7 @@ class MiniMaxH3VideoVAE(nn.Module):
         tiling=True,
         operations=ops,
         num_layers=36,
+        still_frame=None,
     ):
         super().__init__()
         self.vae_ratio = int(math.prod(space_down))
@@ -436,6 +437,11 @@ class MiniMaxH3VideoVAE(nn.Module):
         self.tokens_chunk_size = math.ceil(clip_length / self.vae_ratio_t)
         self.token_overlap = (-token_drop) % self.tokens_chunk_size
         self.frame_overlap = max(self.token_overlap * self.vae_ratio_t - self.frame_pre_padding, 0)
+
+        # a decoder fine-tuned to decode one latent directly keeps this output frame of it
+        if still_frame is not None and not 0 <= still_frame < self.vae_ratio_t:
+            raise ValueError(f"still_frame must be in [0, {self.vae_ratio_t}), got {still_frame}")
+        self.still_frame = still_frame
 
         # spatial tiling parameters
         self.tiling = tiling
@@ -498,10 +504,10 @@ class MiniMaxH3VideoVAE(nn.Module):
             return self.tiled_encode(x)
         return self._encode_moments(x)
 
-    def _adaptive_decode(self, z):
+    def _adaptive_decode(self, z, frames=slice(None)):
         if self.tiling:
-            return self.tiled_decode(z)
-        return self._decode_pixels(z)
+            return self.tiled_decode(z, frames)
+        return self._decode_pixels(z)[:, :, frames]
 
     # spatial tiling
 
@@ -595,7 +601,7 @@ class MiniMaxH3VideoVAE(nn.Module):
             group = slices[k:k + batch]
             yield from self._decode_pixels(torch.cat(group)).chunk(len(group))
 
-    def tiled_decode(self, z):
+    def tiled_decode(self, z, frames=slice(None)):
         height, width = z.shape[-2] * self.vae_ratio, z.shape[-1] * self.vae_ratio
         y_idx, y_len, y_overlap = self.split_tiles(height)
         x_idx, x_len, x_overlap = self.split_tiles(width)
@@ -613,7 +619,7 @@ class MiniMaxH3VideoVAE(nn.Module):
             out_x = 0
             # enumerate would retain the previous tile while the next batch decodes.
             for j in range(len(x_idx)):
-                tile = next(tiles)
+                tile = next(tiles)[:, :, frames]
                 if i > 0:
                     tile = self.blend(strip[..., :, x_idx[j]:x_idx[j] + x_len[j]], tile, y_overlap[i - 1], dim=-2)
                 if j > 0:
@@ -799,7 +805,14 @@ class MiniMaxH3VideoVAE(nn.Module):
         z = z * latents_std + latents_mean
 
         if z.shape[2] == 1:
-            dec = self._finalize_pixels(self._adaptive_decode(z)[:, :, -1:, :, :])
+            if self.still_frame is not None:
+                dec = self._adaptive_decode(z, slice(self.still_frame, self.still_frame + 1))
+            else:
+                # A still latent is the first latent of a clip and decodes badly alone: decode it as a
+                # full clip of copies and keep only its first real frame.
+                first = slice(self.frame_pre_padding, self.frame_pre_padding + 1)
+                dec = self._adaptive_decode(z.repeat(1, 1, self.tokens_chunk_size, 1, 1), first)
+            dec = self._finalize_pixels(dec)
             if output_buffer is None:
                 return dec
             output_buffer.copy_(dec)

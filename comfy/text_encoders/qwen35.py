@@ -750,7 +750,7 @@ class Qwen35(BaseLlama, BaseGenerate, torch.nn.Module):
 
     def generate(self, embeds=None, do_sample=True, max_length=256, temperature=1.0, top_k=50, top_p=0.9, min_p=0.0, repetition_penalty=1.0, seed=42, stop_tokens=None, **kwargs):
         mtp = kwargs.pop("mtp", True)
-        if self.mtp is None or not mtp or kwargs.get("position_ids") is not None or kwargs.get("initial_input_ids") is not None:
+        if self.mtp is None or not mtp or kwargs.get("initial_input_ids") is not None:
             return super().generate(embeds=embeds, do_sample=do_sample, max_length=max_length, temperature=temperature,
                                     top_k=top_k, top_p=top_p, min_p=min_p, repetition_penalty=repetition_penalty,
                                     seed=seed, stop_tokens=stop_tokens, **kwargs)
@@ -761,9 +761,9 @@ class Qwen35(BaseLlama, BaseGenerate, torch.nn.Module):
                         "presence_penalty": kwargs.get("presence_penalty", 0.0) or 0.0,
                         "seed": seed if seed is not None else 42}
         fixed_depth = None if mtp is True else max(2, min(5, int(mtp)))
-        return self._generate_mtp(embeds, max_length, stop_tokens, sampling=sampling, fixed_depth=fixed_depth)
+        return self._generate_mtp(embeds, max_length, stop_tokens, sampling=sampling, fixed_depth=fixed_depth, position_ids=kwargs.get("position_ids"))
 
-    def _generate_mtp(self, embeds, max_length, stop_tokens, sampling=None, fixed_depth=None):
+    def _generate_mtp(self, embeds, max_length, stop_tokens, sampling=None, fixed_depth=None, position_ids=None):
         device = embeds.device
         cfg = self.model.config
         if stop_tokens is None:
@@ -792,8 +792,11 @@ class Qwen35(BaseLlama, BaseGenerate, torch.nn.Module):
             generator = torch.Generator(device=device).manual_seed(sampling["seed"])
         penalized = sampling is not None and penalty_active(sampling["repetition_penalty"], sampling["presence_penalty"])
 
+        # after an image, text positions run behind the cache index (MRoPE); decode continues from the last prefill position
+        rope_offset = 0 if position_ids is None else int(position_ids[:, -1].max()) + 1 - embeds.shape[1]
+
         # rope table once per generate, sliced per draft
-        ftab = rope_matrix(self.model.compute_freqs_cis(torch.arange(cap, device=device, dtype=torch.float).unsqueeze(0), device))
+        ftab = rope_matrix(self.model.compute_freqs_cis(torch.arange(rope_offset, cap + rope_offset, device=device, dtype=torch.float).unsqueeze(0), device))
 
         def freqs_at(p, n=1):
             return ftab[:, :, p:p + n]
@@ -801,7 +804,7 @@ class Qwen35(BaseLlama, BaseGenerate, torch.nn.Module):
         # cross-step state lives in static carriers: nothing allocated inside a step may outlive it
         nt_buf = torch.empty((embeds.shape[0], 1), device=device, dtype=torch.long)
         h_buf = torch.empty((embeds.shape[0], 1, cfg.hidden_size), device=device, dtype=dt)
-        x, _, _ = self.model.forward(None, embeds=embeds, attention_mask=None, past_key_values=pkv)
+        x, _, _ = self.model.forward(None, embeds=embeds, attention_mask=None, past_key_values=pkv, position_ids=position_ids)
         lg0 = self.logits(x)[:, -1]
         if sampling is None:
             nt_buf.copy_(lg0.argmax(dim=-1, keepdim=True))
@@ -925,7 +928,8 @@ class Qwen35(BaseLlama, BaseGenerate, torch.nn.Module):
                 ev = embed.host_rows(tokens, out_dtype=dt)
             else:
                 ev = embed(tokens).to(dt)
-            x, _, _ = self.model.forward(None, embeds=ev, attention_mask=None, past_key_values=pkv, decode_buffers=verify_buffers)
+            verify_pos = torch.arange(pos + rope_offset, pos + rope_offset + depth + 1, device=device).unsqueeze(0)
+            x, _, _ = self.model.forward(None, embeds=ev, attention_mask=None, past_key_values=pkv, position_ids=verify_pos, decode_buffers=verify_buffers)
             # all verify positions in one lm_head GEMV, accept decided GPU-side, one sync
             lg = verify_logits(x)
             if sampling is None:
