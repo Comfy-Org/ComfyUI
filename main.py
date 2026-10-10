@@ -23,7 +23,7 @@ console_log_level = get_console_log_level(args.verbose)
 file_log_outputs = get_file_log_outputs(args.verbose)
 setup_logger(log_level=console_log_level, file_outputs=file_log_outputs, use_stdout=args.log_stdout)
 
-from app.database.db import dependencies_available, get_database_url, get_db_path, init_db, lock_holder_db_path, missing_dependencies
+from app.database.db import NewerDatabaseError, dependencies_available, get_database_url, get_db_path, init_db, lock_holder_db_path, missing_dependencies
 from app.assets.event_log import error_kind
 from utils.install_util import get_missing_requirements_message
 from app.assets.lifecycle import cleanup_temp_filesystem
@@ -492,13 +492,36 @@ def setup_database(asset_manager):
         return
 
     try:
-        init_db()
         asset_manager.startup()
     except Exception as e:
-        failure, message = database_failure_message(e, get_database_url())
-        if failure != "unsupported_url":  # that error repeats the URL, which can carry a password
-            logging.debug("Asset database startup failed", exc_info=True)
-        stop_startup(failure, message)
+        stop_for_database_failure(e)
+
+
+def open_database():
+    """Runs before the asset manager is chosen, so a database a newer ComfyUI upgraded turns
+    the assets system off for this run instead of stopping startup."""
+    if args.disable_assets:
+        return
+    try:
+        init_db()
+    except NewerDatabaseError as e:
+        args.disable_assets = True
+        app.logger.log_startup_warning(
+            f"ASSETS_DISABLED: newer_revision\n"
+            f"The asset database '{get_db_path()}' was upgraded by a newer version of ComfyUI (revision {e}), "
+            f"which this version can't use. ComfyUI is running without the assets system this time and has left the database as it is.\n"
+            f"To get assets back, run the newer version again. To stay on this version, move or rename that database file "
+            f"and start again: a new one is created and your files are scanned again."
+        )
+    except Exception as e:
+        stop_for_database_failure(e)
+
+
+def stop_for_database_failure(error):
+    failure, message = database_failure_message(error, get_database_url())
+    if failure != "unsupported_url":  # that error repeats the URL, which can carry a password
+        logging.debug("Asset database startup failed", exc_info=True)
+    stop_startup(failure, message)
 
 
 WITHOUT_ASSETS = "Or start ComfyUI without the assets system: --disable-assets"
@@ -526,10 +549,6 @@ def database_failure_message(error, db_url):
         failure = "locked"
         what = f"The asset database '{location}' is locked by another program ({detail})."
         fix = "Close any program that has it open, such as another ComfyUI or a database viewer, and start again."
-    elif "Can't locate revision" in str(error):
-        failure = "newer_revision"
-        what = f"The asset database '{location}' was last used by a newer version of ComfyUI ({detail})."
-        fix = "Update ComfyUI, or move that file aside and start again to create a new database."
     elif isinstance(error, (FileExistsError, NotADirectoryError)):
         failure = "path_blocked"
         what = f"A file is in the way of the folder for the asset database '{location}' ({detail})."
@@ -586,6 +605,7 @@ def start_comfyui(asyncio_loop=None):
         missing = ", ".join(missing_dependencies()) or "run with --verbose DEBUG to see the import error"
         stop_startup("missing_packages", f"The assets system needs packages that could not be imported: {missing}.\n"
                                          f"{get_missing_requirements_message()}\n{WITHOUT_ASSETS}")
+    open_database()
     asset_manager: AssetManager = default_asset_manager()
     feature_flags.SERVER_FEATURE_FLAGS["assets"] = asset_manager.enabled
     if not asset_manager.enabled:

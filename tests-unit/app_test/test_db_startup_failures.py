@@ -37,6 +37,7 @@ class _AssetsOn:
 def db_path(tmp_path, monkeypatch):
     path = str(tmp_path / "comfyui.db")
     monkeypatch.setattr(db_module.args, "database_url", f"sqlite:///{path}")
+    monkeypatch.setattr(db_module.args, "disable_assets", False)
     monkeypatch.setattr(db_module, "Session", None)
     monkeypatch.setattr(db_module, "WriteSession", None)
     monkeypatch.setattr(db_module, "_db_lock", None)
@@ -48,6 +49,7 @@ def db_path(tmp_path, monkeypatch):
 
 def _startup_error(caplog, asset_manager=None, *, kind, level=logging.ERROR):
     with caplog.at_level(level), pytest.raises(SystemExit) as stopped:
+        main.open_database()
         main.setup_database(asset_manager or _AssetsOn())
     assert stopped.value.code == 1
     assert "--disable-assets" in caplog.text
@@ -109,14 +111,25 @@ def test_corrupt_read_only_database_is_reported_as_corrupt(db_path, caplog):
     assert f"The asset database '{db_path}' is corrupt" in error
 
 
-def test_database_from_a_newer_comfyui(db_path, caplog):
+def test_database_from_a_newer_comfyui_turns_assets_off_and_is_left_as_it_is(db_path, caplog):
     _stamp(db_path, "0099_from_a_newer_release")
+    before = Path(db_path).read_bytes()
 
-    error = _startup_error(caplog, kind="newer_revision")
+    with caplog.at_level(logging.WARNING):
+        main.open_database()
 
-    assert f"The asset database '{db_path}' was last used by a newer version of ComfyUI" in error
-    assert "0099_from_a_newer_release" in error
-    assert "Update ComfyUI" in error
+    assert main.args.disable_assets
+    assert "ASSETS_DISABLED: newer_revision\n" in caplog.text
+    assert "ASSETS_STARTUP_FAILED" not in caplog.text
+    assert f"The asset database '{db_path}' was upgraded by a newer version of ComfyUI (revision 0099_from_a_newer_release)" in caplog.text
+    assert "run the newer version again" in caplog.text
+    assert "move or rename that database file" in caplog.text
+    assert Path(db_path).read_bytes() == before  # not even switched to WAL
+    assert sorted(os.listdir(os.path.dirname(db_path))) == ["comfyui.db", "comfyui.db.lock"]  # no .bkp
+    assert db_module.Session is None
+    released = FileLock(db_path + ".lock")
+    released.acquire(timeout=0)
+    released.release()
 
 
 def test_failed_upgrade(db_path, caplog):

@@ -1,7 +1,8 @@
-"""Real ComfyUI starts: assets are on unless --disable-assets, and a database that can't be
-opened stops startup."""
+"""Real ComfyUI starts: assets are on unless --disable-assets, a database that can't be
+opened stops startup, and one a newer ComfyUI upgraded turns assets off for the run."""
 
 import contextlib
+import os
 import socket
 import sqlite3
 import subprocess
@@ -18,8 +19,10 @@ DEPRECATED = "--enable-assets is deprecated and does nothing"
 HEAD = ScriptDirectory(str(REPO_ROOT / "alembic_db")).get_current_head()
 
 
-def _comfy_args(base: Path, *flags: str) -> list[str]:
-    # Always an explicit database: without one, startup relocates the checkout's own user/comfyui.db.
+def _comfy_args(base: Path, *flags: str, database_url: bool = True) -> list[str]:
+    # An explicit database unless asked: without one, startup relocates the checkout's own user/comfyui.db.
+    if not database_url and (REPO_ROOT / "user" / "comfyui.db").exists():
+        pytest.skip("this checkout has a user/comfyui.db that a start without --database-url would relocate")
     return [
         sys.executable,
         str(REPO_ROOT / "main.py"),
@@ -28,7 +31,7 @@ def _comfy_args(base: Path, *flags: str) -> list[str]:
         "--disable-partner-nodes",
         f"--base-directory={base}",
         f"--front-end-root={base}",
-        f"--database-url=sqlite:///{_db(base)}",
+        *([f"--database-url=sqlite:///{_db(base)}"] if database_url else []),
         *flags,
     ]
 
@@ -80,19 +83,6 @@ def test_disable_assets_leaves_the_database_alone(tmp_path):
     assert not _db(tmp_path).exists()
 
 
-def test_database_from_a_newer_comfyui_stops_startup_without_a_traceback(tmp_path):
-    _db(tmp_path).parent.mkdir()
-    with sqlite3.connect(_db(tmp_path)) as conn:
-        conn.execute("CREATE TABLE alembic_version (version_num VARCHAR(32) NOT NULL)")
-        conn.execute("INSERT INTO alembic_version VALUES ('0099_from_a_newer_release')")
-
-    result = _quick_start(tmp_path)
-
-    assert result.returncode == 1, result.stderr
-    assert "ASSETS_STARTUP_FAILED: newer_revision" in result.stderr
-    assert "Traceback" not in result.stderr
-
-
 def test_starts_with_a_percent_sign_in_the_database_path(tmp_path):
     # Alembic config values go through ConfigParser interpolation, where % is special.
     base = tmp_path / "50% data"
@@ -120,12 +110,12 @@ def disabled_server(tmp_path):
     yield from _serve(tmp_path, "--disable-assets")
 
 
-def _serve(tmp_path, *flags):
+def _serve(tmp_path, *flags, database_url=True):
     port = _free_port()
     log_path = tmp_path / "server.log"
     with open(log_path, "w") as log:
         server = subprocess.Popen(
-            _comfy_args(tmp_path, *flags, "--listen", "127.0.0.1", "--port", str(port)),
+            _comfy_args(tmp_path, *flags, "--listen", "127.0.0.1", "--port", str(port), database_url=database_url),
             cwd=tmp_path,
             stdout=log,
             stderr=subprocess.STDOUT,
@@ -176,3 +166,69 @@ def test_disabled_server_reports_assets_off(disabled_server):
     assert disabled.status_code == 503
     assert "--disable-assets" in disabled.json()["error"]["message"]
     assert requests.get(f"{disabled_server}/features", timeout=10).json()["assets"] is False
+
+
+def _stamp_newer(db: Path) -> None:
+    db.parent.mkdir(parents=True)
+    with contextlib.closing(sqlite3.connect(db)) as conn:
+        conn.execute("PRAGMA journal_mode=WAL")  # as a newer ComfyUI leaves it
+        conn.execute("CREATE TABLE alembic_version (version_num VARCHAR(32) NOT NULL)")
+        conn.execute("INSERT INTO alembic_version VALUES ('0099_from_a_newer_release')")
+        conn.commit()
+
+
+def test_database_from_a_newer_comfyui_runs_without_assets_and_is_left_as_it_is(tmp_path):
+    # The default database in a custom user directory: the directory must be known before it opens.
+    user_dir = tmp_path / "elsewhere" / "user"
+    db = user_dir / "comfyui.db"
+    _stamp_newer(db)
+    before = db.read_bytes()
+
+    server = _serve(tmp_path, f"--user-directory={user_dir}", database_url=False)
+    base_url = next(server)
+    try:
+        upload = requests.post(
+            f"{base_url}/upload/image",
+            files={"image": ("newer.png", b"newer-bytes", "image/png")},
+            data={"type": "input"},
+            timeout=10,
+        )
+        assert upload.status_code == 200
+        assert requests.get(f"{base_url}/api/assets", timeout=10).status_code == 503
+        assert requests.get(f"{base_url}/features", timeout=10).json()["assets"] is False
+    finally:
+        server.close()
+
+    log = (tmp_path / "server.log").read_text()
+    assert "ASSETS_DISABLED: newer_revision\n" in log
+    assert f"The asset database '{db}' was upgraded by a newer version of ComfyUI" in log
+    assert "ASSETS_STARTUP_FAILED" not in log
+    assert "Traceback" not in log
+    assert db.read_bytes() == before
+    assert sorted(os.listdir(user_dir)) == ["comfyui.db", "comfyui.db.lock"]
+
+
+def test_default_database_follows_the_user_directory_and_scans_extra_model_paths(tmp_path):
+    user_dir = tmp_path / "elsewhere" / "user"
+    user_dir.mkdir(parents=True)
+    extra = tmp_path / "extra"
+    (extra / "ckpts").mkdir(parents=True)
+    (extra / "ckpts" / "from-extra.safetensors").write_bytes(b"extra-model")
+    config = tmp_path / "extra_model_paths.yaml"
+    config.write_text(f"extra:\n  base_path: {extra}\n  checkpoints: ckpts\n")
+
+    server = _serve(tmp_path, f"--user-directory={user_dir}", f"--extra-model-paths-config={config}", database_url=False)
+    base_url = next(server)
+    try:
+        deadline = time.monotonic() + 60
+        names = []
+        while "from-extra.safetensors" not in names and time.monotonic() < deadline:
+            time.sleep(0.25)
+            listed = requests.get(f"{base_url}/api/assets", params={"include_tags": "models"}, timeout=10)
+            assert listed.status_code == 200
+            names = [asset["name"] for asset in listed.json()["assets"]]
+        assert "from-extra.safetensors" in names
+    finally:
+        server.close()
+
+    assert _revision(user_dir / "comfyui.db") == HEAD

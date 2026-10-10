@@ -166,6 +166,10 @@ def _backup_database(source_path, destination_path):
     shutil.copymode(source_path, destination_path)
 
 
+class NewerDatabaseError(Exception):
+    """The database is at a revision this ComfyUI doesn't have: a newer ComfyUI upgraded it."""
+
+
 _db_lock = None
 _LOCK_WAIT_SECONDS = 5.0
 
@@ -327,6 +331,14 @@ def _migrate_and_bind(db_url, db_path, db_exists):
 
     conn = engine.connect()
 
+    # Before anything writes: a database a newer ComfyUI upgraded is left exactly as it is.
+    current_rev = MigrationContext.configure(conn).get_current_revision()
+    script = ScriptDirectory.from_config(config)
+    if current_rev is not None and current_rev not in {r.revision for r in script.walk_revisions()}:
+        conn.close()
+        raise NewerDatabaseError(current_rev)
+    conn.rollback()  # the read began a transaction, and the journal mode can't change inside one
+
     try:
         journal_mode = conn.exec_driver_sql("PRAGMA journal_mode=WAL").scalar_one()
     except OperationalError:
@@ -340,10 +352,6 @@ def _migrate_and_bind(db_url, db_path, db_exists):
             event.listen(write_engine, "connect", _set_wal_synchronous)
             _set_wal_synchronous(conn.connection.dbapi_connection)  # opened before the hooks
 
-    context = MigrationContext.configure(conn)
-    current_rev = context.get_current_revision()
-
-    script = ScriptDirectory.from_config(config)
     target_rev = script.get_current_head()
 
     if target_rev is None:
