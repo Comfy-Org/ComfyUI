@@ -1,10 +1,13 @@
 import importlib
+import json
 import logging
 import os
 import shutil
 import sqlite3
+import subprocess
+import sys
 import time
-from contextlib import closing
+from contextlib import closing, suppress
 from app.logger import log_startup_warning
 from filelock import FileLock, Timeout
 from comfy.cli_args import args, database_default_path
@@ -193,6 +196,70 @@ def _acquire_file_lock(db_path):
                 "Another ComfyUI process may already be using it. "
                 "Use --database-url to specify a separate database file."
             )
+    _write_holder_record(db_path)
+
+
+def _process_start_token():
+    """An identifier of this process's start, so a reused pid does not match it.
+    Windows: the creation FILETIME in decimal. Linux: `<boot_id>:<starttime ticks>`.
+    macOS: `ps -o lstart=` with TZ=UTC and LC_ALL=C."""
+    if sys.platform == "win32":
+        import ctypes
+        from ctypes import wintypes
+
+        kernel32 = ctypes.WinDLL("kernel32")
+        kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+        kernel32.GetProcessTimes.argtypes = [wintypes.HANDLE] + [ctypes.POINTER(wintypes.FILETIME)] * 4
+        times = [wintypes.FILETIME() for _ in range(4)]
+        if not kernel32.GetProcessTimes(kernel32.GetCurrentProcess(), *(ctypes.byref(t) for t in times)):
+            return None
+        return str((times[0].dwHighDateTime << 32) | times[0].dwLowDateTime)
+    if sys.platform == "darwin":
+        env = {**os.environ, "TZ": "UTC", "LC_ALL": "C"}
+        result = subprocess.run(["/bin/ps", "-o", "lstart=", "-p", str(os.getpid())],
+                                capture_output=True, text=True, env=env, timeout=5, check=True)
+        return result.stdout.strip() or None
+    with open("/proc/sys/kernel/random/boot_id") as f:
+        boot_id = f.read().strip()
+    with open("/proc/self/stat") as f:
+        stat = f.read()
+    # The process name in field 2 may contain spaces and parentheses.
+    return f"{boot_id}:{stat[stat.rindex(')') + 2:].split()[19]}"
+
+
+def _write_holder_record(db_path):
+    """Record which process holds the lock in `<db>.lock.json`, so other processes can
+    identify it. It is never removed, so it is only valid while its pid runs with the same
+    start token; the next holder overwrites it. Best effort: startup never fails over it."""
+    path = db_path + ".lock.json"
+    tmp_path = path + ".tmp"
+    try:
+        started = _process_start_token()
+        if not started:
+            return
+        record = {
+            "version": 1,
+            "pid": os.getpid(),
+            "started": started,
+            "db": os.path.abspath(db_path),
+            "main": os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "main.py")),
+            "argv": sys.argv,
+        }
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(record, f)
+        # On Windows a reader holding the record open blocks the replace, so wait it out briefly.
+        for _ in range(10):
+            try:
+                os.replace(tmp_path, path)
+                break
+            except PermissionError:
+                time.sleep(0.02)
+        else:
+            os.replace(tmp_path, path)
+    except Exception as e:
+        logging.warning(f"Could not record the database lock holder in '{path}': {e}")
+        with suppress(OSError):
+            os.remove(tmp_path)
 
 
 def lock_holder_db_path():

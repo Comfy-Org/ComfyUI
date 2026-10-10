@@ -66,6 +66,7 @@ def test_probe_does_not_keep_a_free_lock(db_path, monkeypatch):
 
     assert db_module.lock_holder_db_path() is None
     assert len(probes) == 1
+    assert not os.path.exists(db_path + ".lock.json")
 
     contender = FileLock(db_path + ".lock")
     try:
@@ -106,6 +107,7 @@ def test_assets_off_leaves_the_database_alone(db_path, startup_warnings, monkeyp
     assert asset_manager.started
     assert not os.path.exists(db_path)
     assert not os.path.exists(db_path + ".lock")
+    assert not os.path.exists(db_path + ".lock.json")
     assert startup_warnings == []
 
 
@@ -117,12 +119,16 @@ def test_assets_off_warns_and_continues_when_another_process_holds_the_lock(
     asset_manager = _AssetsOff()
     holder = FileLock(db_path + ".lock")
     holder.acquire(timeout=0)
+    with open(db_path + ".lock.json", "w") as f:
+        f.write('{"pid": 1}')
     try:
         main.setup_database(asset_manager)
     finally:
         holder.release()
 
     assert asset_manager.started
+    with open(db_path + ".lock.json") as f:
+        assert f.read() == '{"pid": 1}'
     assert len(startup_warnings) == 1
     warning = startup_warnings[0]
     assert "Another ComfyUI is already using this install's asset database" in warning
