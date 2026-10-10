@@ -13,7 +13,7 @@ class SeedNode(io.ComfyNode):
             search_aliases=["seed", "random"],
             category="utilities",
             inputs=[
-                io.Int.Input("seed", min=0, max=sys.maxsize, control_after_generate=io.ControlAfterGenerate.fixed),
+                io.Int.Input("seed", min=0, max=sys.maxsize, control_after_generate=io.ControlAfterGenerate.fixed, component="SetRandomInt"),
             ],
             outputs=[io.Int.Output(display_name="seed")],
         )
