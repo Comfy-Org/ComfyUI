@@ -10,7 +10,7 @@ from unittest.mock import MagicMock
 import numpy as np
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
-from PIL import Image
+from PIL import Image, ImageFile
 from PIL.PngImagePlugin import PngInfo
 
 import folder_paths
@@ -187,6 +187,19 @@ async def test_oversized_text_chunk_serves_original(output_dir):
     info.add_text("workflow", "x" * (2 * 1024 * 1024), zip=True)
     original = save(output_dir / "meta.png", pnginfo=info)
     status, headers, body = await view({"filename": "meta.png", "res": "64"})
+    assert status == 200
+    assert headers["Content-Type"] == "image/png"
+    assert body == original
+
+
+@pytest.mark.asyncio
+async def test_over_40_megapixels_serves_original_without_decoding(output_dir, monkeypatch):
+    original = save(output_dir / "lineart.png", size=(7000, 7000), mode="1", color=1)
+
+    def fail(*args, **kwargs):
+        raise AssertionError("decoded")
+    monkeypatch.setattr(ImageFile.ImageFile, "load", fail)
+    status, headers, body = await view({"filename": "lineart.png", "res": "512"})
     assert status == 200
     assert headers["Content-Type"] == "image/png"
     assert body == original

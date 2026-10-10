@@ -114,6 +114,8 @@ def _remove_sensitive_from_queue(queue: list) -> list:
 def _downscaled_jpeg(path: str, res: int) -> bytes | None:
     """Longest side capped at res, alpha flattened onto black, as quality 85 JPEG; None if the original already fits."""
     with Image.open(path) as img:
+        if img.width * img.height > 40_000_000:  # too costly to decode for a preview
+            return None
         if max(img.size) <= res and not img.mode.startswith("I") and "A" not in img.mode and "transparency" not in img.info:
             return None
         if img.mode.startswith("I"):  # 16-bit grayscale
