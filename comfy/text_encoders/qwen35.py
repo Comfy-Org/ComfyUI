@@ -467,8 +467,9 @@ class Qwen35VisionPatchEmbed(nn.Module):
         self.proj = ops.Conv3d(self.in_channels, self.embed_dim, kernel_size=kernel_size, stride=kernel_size, bias=True, device=device, dtype=dtype)
 
     def forward(self, x):
-        x = x.view(-1, self.in_channels, self.temporal_patch_size, self.patch_size, self.patch_size)
-        return self.proj(x).view(-1, self.embed_dim)
+        # kernel == stride, so the conv is a matmul over flattened patches; conv3d without cudnn/MIOpen loops over every patch
+        with comfy.ops.CastBiasWeightContext(self.proj, x, offloadable=True) as (weight, bias):
+            return F.linear(x.reshape(-1, weight[0].numel()), weight.flatten(1), bias)
 
 
 class Qwen35VisionMLP(nn.Module):
