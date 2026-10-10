@@ -15,6 +15,7 @@ from unittest.mock import patch
 
 import pytest
 import sqlalchemy as sa
+from aiohttp import web
 from aiohttp.test_utils import make_mocked_request
 from sqlalchemy import event
 from sqlalchemy.orm import Session as SASession, sessionmaker
@@ -560,16 +561,25 @@ async def test_a_seed_request_during_an_api_prune_waits_for_it_then_starts(monke
 
 
 @pytest.mark.asyncio
-async def test_a_seed_request_during_a_scan_is_queued(monkeypatch):
+async def test_a_seed_request_during_a_scan_is_queued(monkeypatch, aiohttp_client):
+    """The frontend's model refresh sends this while GET /object_info's input scan may run."""
     instance, started = _seeder_with_recorded_starts(monkeypatch)
     instance._state = State.RUNNING
+    monkeypatch.setattr(routes.mode, "hashing_enabled", lambda: True)
+    app = web.Application()
+    app.router.add_post("/api/assets/seed", routes.seed_assets)
+    client = await aiohttp_client(app)
 
-    response = await routes.seed_assets.__wrapped__(make_mocked_request("POST", "/api/assets/seed"))
+    response = await client.post("/api/assets/seed", json={"roots": ["models"]})
 
     assert response.status == 202
+    assert await response.json() == {"status": "queued"}
     assert started == []
-    assert instance._pending_scan is not None
-    assert instance._pending_scan["roots"] == ("models", "input")
+    assert instance._pending_scan == {
+        "roots": ("models",),
+        "phase": seeder_module.ScanPhase.FULL,
+        "compute_hashes": True,
+    }
 
 
 @pytest.mark.asyncio

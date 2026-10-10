@@ -1042,8 +1042,8 @@ async def seed_assets(request: web.Request) -> web.Response:
         wait: If "true", block until scan completes (synchronous behavior for tests)
 
     Returns:
-        202 Accepted if scan started
-        409 Conflict if scan already running
+        202 Accepted if scan started, or queued behind a running scan
+        409 Conflict if a scan is running and wait=true
         200 OK with final stats if wait=true
     """
     try:

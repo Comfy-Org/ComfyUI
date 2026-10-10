@@ -322,6 +322,32 @@ async def test_seed_request_during_the_object_info_scan_still_scans_models(
     assert str(model_on_disk.resolve()) in _catalogued_paths(threaded_create_session)
 
 
+def test_shutdown_does_not_start_a_queued_scan(
+    asset_roots: tuple[Path, Path, Path],
+    threaded_create_session: Callable[[], AbstractContextManager[Session]],
+    output_seeder: _OutputSeeder,
+    model_on_disk: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A seed request queued behind a scan must not start once shutdown cancels that scan."""
+    seeder = cast(seeder_module._AssetSeeder, output_seeder)
+    assert seeder.start(roots=("input",), _start_paused=True)
+    assert not seeder.enqueue_scan(("models",), seeder_module.ScanPhase.FULL)
+    real_start = seeder.start
+    later_starts: list[bool] = []
+
+    def recording_start(**kwargs) -> bool:
+        later_starts.append(real_start(**kwargs))
+        return later_starts[-1]
+
+    monkeypatch.setattr(seeder, "start", recording_start)
+
+    assert seeder.shutdown(timeout=10)
+
+    assert later_starts == []
+    assert str(model_on_disk.resolve()) not in _catalogued_paths(threaded_create_session)
+
+
 def test_shutdown_runs_lifecycle_cleanup_when_seeder_shutdown_times_out(
     enabled_manager: AssetsEnabled,
     asset_roots: tuple[Path, Path, Path],
