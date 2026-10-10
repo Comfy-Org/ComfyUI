@@ -22,6 +22,61 @@ PRODUCER_CHUNK = 4096
 VSA_CUBE = (4, 4, 4)
 VSA_PLAN_CACHE = 4
 
+KEYLESS_H3_CONTRACT_KEY = "minimax_h3_keyless_contract_v1"
+KEYLESS_H3_ARCHITECTURE = "h3_keyless_core50_v1"
+
+
+def _keyless_h3_contract(diffusion_model):
+    """Validate the public Keyless-H3 marker without importing a custom node.
+
+    The native H3 sparse producer owns qkv_proj/k_norm and therefore must never
+    be installed on a core50 Keyless model.  A recognized Keyless model can
+    still use the generic optimized-attention override after it materializes its
+    logical route(V) tensor; retrieval V remains unchanged.
+    """
+    if diffusion_model is None or not hasattr(diffusion_model, KEYLESS_H3_CONTRACT_KEY):
+        return None
+
+    contract = getattr(diffusion_model, KEYLESS_H3_CONTRACT_KEY)
+    expected = {
+        "api": 1,
+        "architecture": KEYLESS_H3_ARCHITECTURE,
+        "core_blocks": 50,
+        "token_refiner": "native_qkv",
+        "token_refiner_blocks": 2,
+        "routing_source": "value",
+        "retrieval_source": "raw_projected_value",
+        "projection_attr": "qv_proj",
+        "qv_order": "q_effective;v",
+    }
+    mismatches = []
+    for name, wanted in expected.items():
+        if not hasattr(contract, name):
+            mismatches.append(f"missing {name}")
+            continue
+        actual = getattr(contract, name)
+        if actual != wanted:
+            mismatches.append(f"{name}={actual!r} (expected {wanted!r})")
+
+    blocks = getattr(diffusion_model, "blocks", None)
+    if blocks is None or len(blocks) != 50:
+        mismatches.append("core block topology is not exactly 50 blocks")
+    else:
+        for i, block in enumerate(blocks):
+            attn = getattr(block, "attn", None)
+            if attn is None or not hasattr(attn, "qv_proj") or not hasattr(attn, "route_norm"):
+                mismatches.append(f"block {i} is missing qv_proj/route_norm")
+                break
+            if hasattr(attn, "qkv_proj") or hasattr(attn, "k_norm"):
+                mismatches.append(f"block {i} exposes forbidden native QKV/K compatibility state")
+                break
+
+    if mismatches:
+        raise ValueError(
+            f"malformed {KEYLESS_H3_CONTRACT_KEY}: " + ", ".join(mismatches)
+        )
+    return contract
+
 
 def parse_block_list(text):
     """'0, 1, 47-49' -> {0, 1, 47, 48, 49}."""
@@ -327,6 +382,14 @@ def apply_block_sparse_attention(model, *, tau, topk_ratio, vsa, start_percent, 
         # VSA weights were trained against their sparse pattern, don't pull the attention toward dense
         logging.info("VSA: extra_tokens ignored (the trained sparse pattern is the target)")
         extra_tokens = 0
+    diffusion_model = model.get_model_object("diffusion_model")
+    keyless_contract = _keyless_h3_contract(diffusion_model)
+    if keyless_contract is not None and vsa:
+        raise ValueError(
+            "VSA selection is not compatible with h3_keyless_core50_v1: "
+            "the VSA MiniMax-H3 producer requires native qkv_proj/k_norm"
+        )
+
     patch = SparseAttnPatch(tau=tau, topk_ratio=topk_ratio, vsa=vsa,
                             sigma_start=float(model_sampling.percent_to_sigma(start_percent)),
                             sigma_end=float(model_sampling.percent_to_sigma(end_percent)),
@@ -339,8 +402,12 @@ def apply_block_sparse_attention(model, *, tau, topk_ratio, vsa, start_percent, 
     m.add_callback_with_key(comfy.patcher_extension.CallbacksMP.ON_CLEANUP,
                             "block_sparse_attention", lambda model_patcher: patch.reset())
 
-    diffusion_model = model.get_model_object("diffusion_model")
-    if isinstance(diffusion_model, MiniMaxH3Model):
+    if keyless_contract is not None:
+        logging.info(
+            "BlockSparseAttention: Keyless H3 detected; using the generic materialized "
+            "Q/route(V)/V attention override and leaving the QKV-only H3 chunked producer disabled"
+        )
+    elif isinstance(diffusion_model, MiniMaxH3Model):
         for i, block in enumerate(diffusion_model.blocks):
             m.set_model_patch_replace(make_h3_block_patch(block, i, patch), "dit", "double_block", i)
         if vsa and diffusion_model.blocks[0].attn.to_gate_compress is None:
