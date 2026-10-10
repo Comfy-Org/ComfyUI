@@ -154,3 +154,34 @@ async def test_clients_cannot_create_a_preview_tagged_asset(mock_create_session,
 
     assert [upload.status, from_hash.status] == [400, 400]
     assert [body["error"]["code"] for body in bodies] == ["SYSTEM_TAG_FORBIDDEN"] * 2
+
+
+def _plain_record(session, path, name, mime_type=None):
+    from app.assets.database.queries.records import create_content, create_record
+
+    record = create_record(session, create_content(session, str(path)).id, name, mime_type=mime_type)
+    session.commit()
+    return record.id
+
+
+@pytest.mark.asyncio
+async def test_the_content_route_serves_byte_ranges(mock_create_session, roots, assets_routes_on, session):
+    clip = roots / "output" / "clip.mp4"
+    clip.write_bytes(b"0123456789")
+    asset_id = _plain_record(session, clip, "clip.mp4", "video/mp4")
+    async with await _assets_client() as client:
+        resp = await client.get(f"/api/assets/{asset_id}/content", headers={"Range": "bytes=0-3"})
+        body = await resp.read()
+
+    assert (resp.status, body) == (206, b"0123"), "video previews must be able to seek"
+
+
+@pytest.mark.asyncio
+async def test_the_content_type_comes_from_the_path_when_the_name_has_none(mock_create_session, roots, assets_routes_on, session):
+    still = roots / "output" / "still.png"
+    still.write_bytes(_png())
+    asset_id = _plain_record(session, still, "untitled")
+    async with await _assets_client() as client:
+        resp = await client.get(f"/api/assets/{asset_id}/content")
+
+    assert resp.headers["Content-Type"] == "image/png"

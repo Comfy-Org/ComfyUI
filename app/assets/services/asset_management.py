@@ -311,7 +311,9 @@ def resolve_asset_for_download(
 
         ctype = (
             asset_mime
-            or mimetypes.guess_type(ref_name or abs_path)[0]
+            # The path first: the name is editable and may have no extension.
+            or mimetypes.guess_type(abs_path)[0]
+            or mimetypes.guess_type(ref_name or "")[0]
             or "application/octet-stream"
         )
         download_name = ref_name or os.path.basename(abs_path)

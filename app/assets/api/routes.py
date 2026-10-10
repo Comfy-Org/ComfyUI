@@ -546,6 +546,17 @@ async def get_asset_route(request: web.Request) -> web.Response:
     return web.json_response(payload.model_dump(mode="json", exclude_none=True), status=200)
 
 
+class _AssetFileResponse(web.FileResponse):
+    """Always the asset's own bytes: never a .gz/.br file aiohttp finds beside it."""
+
+    def _get_file_path_stat_encoding(self, accept_encoding: str):
+        return super()._get_file_path_stat_encoding("")
+
+
+if not hasattr(web.FileResponse, "_get_file_path_stat_encoding"):  # a private aiohttp method
+    logging.warning("aiohttp no longer has _get_file_path_stat_encoding; asset content may be served precompressed")
+
+
 @ROUTES.get(f"/api/assets/{{id:{UUID_RE}}}/content")
 @_require_assets_feature_enabled
 async def download_asset_content(request: web.Request) -> web.Response:
@@ -602,23 +613,13 @@ async def download_asset_content(request: web.Request) -> web.Response:
     # debug, not info: preview_url points here, so every thumbnail render is a fetch.
     logging.debug("download_asset_content: path=%s, type=%s, name=%s", abs_path, content_type, filename)
 
-    file_size = os.path.getsize(abs_path)
-
-    async def stream_file_chunks():
-        chunk_size = 64 * 1024
-        with open(abs_path, "rb") as f:
-            while True:
-                chunk = f.read(chunk_size)
-                if not chunk:
-                    break
-                yield chunk
-
-    return web.Response(
-        body=stream_file_chunks(),
-        content_type=content_type,
+    # FileResponse for Range requests (video seeking). Content-Type is set explicitly:
+    # FileResponse would otherwise guess it from the path and bypass the check above.
+    return _AssetFileResponse(
+        abs_path,
         headers={
+            "Content-Type": content_type,
             "Content-Disposition": cd,
-            "Content-Length": str(file_size),
             "X-Content-Type-Options": "nosniff",
             **extra_headers,
         },
