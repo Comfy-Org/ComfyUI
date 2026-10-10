@@ -556,7 +556,7 @@ async def test_a_seed_request_during_an_api_prune_waits_for_it_then_starts(monke
     await prune
 
     assert response.status == 202
-    assert started == [("models", "input", "output")]
+    assert started == [("models", "input")]
 
 
 @pytest.mark.asyncio

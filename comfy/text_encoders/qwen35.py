@@ -5,7 +5,6 @@ from dataclasses import dataclass, field
 from tqdm import tqdm
 import contextlib
 import os
-import warnings
 
 import comfy.model_management
 import comfy.model_prefetch
@@ -732,10 +731,11 @@ class Qwen35(BaseLlama, BaseGenerate, torch.nn.Module):
         # head and MTP draft weights run every decode step: fault them resident ahead of the body.
         # a separate embedding goes last: evicted, its rows are gathered from the host copy instead.
         # a tied table is the head, so it stays first.
-        hot = [] if self.mtp is None else [self.mtp]
+        head = self.model.lm_head if hasattr(self.model, "lm_head") else self.model.embed_tokens
+        hot = head if self.mtp is None else (head, self.mtp)
         if hasattr(self.model, "lm_head"):
-            return [self.model.lm_head, *hot, *units], [*last_units, self.model.embed_tokens]
-        return [self.model.embed_tokens, *hot, *units], last_units
+            return [hot, *units], [*last_units, self.model.embed_tokens]
+        return [hot, *units], last_units
 
     def preprocess_embed(self, embed, device):
         if embed["type"] == "image":
@@ -787,10 +787,6 @@ class Qwen35(BaseLlama, BaseGenerate, torch.nn.Module):
             with comfy.ops.CastBiasWeightContext(head, x, offloadable=True) as (w, _bias):
                 return F.linear(x, w)
 
-        # the draft graph bakes these weights' addresses: keep them resident for the generate
-        hot = list({id(m): m for m in [head, self.model.embed_tokens, *self.mtp.modules()]}.values())
-        pinned = [m for m in hot if hasattr(m, "_v")]
-
         generator = None
         if sampling is not None:
             generator = torch.Generator(device=device).manual_seed(sampling["seed"])
@@ -815,6 +811,10 @@ class Qwen35(BaseLlama, BaseGenerate, torch.nn.Module):
         pen_mask = torch.zeros((lg0.shape[-1],), device=device, dtype=torch.bool) if penalized else None
         h_buf.copy_(x[:, -1:, :])
         del x, lg0
+        if hasattr(self.model.embed_tokens, "_v"):
+            vbar = self.model.embed_tokens._v[0]
+            comfy.model_management.reset_cast_buffers()
+            vbar.set_watermark(vbar.max_size)
         ids = [nt_buf[0].item()]
         if penalized:
             pen_mask.index_fill_(0, nt_buf.reshape(-1), True)
@@ -827,12 +827,15 @@ class Qwen35(BaseLlama, BaseGenerate, torch.nn.Module):
             console.update(n)
 
         verify_buffers = None
+        drafts = None
         snapshot_bytes = sum(kv.recurrent_state.numel() * 4 + kv.conv_state.numel() * kv.conv_state.element_size()
                              for kv in pkv if isinstance(kv, LinearKV))
 
         def set_depth(d):
-            nonlocal depth, verify_buffers
+            nonlocal depth, verify_buffers, drafts
             depth = d
+            # Saved draft IDs must survive capture of later draft units.
+            drafts = [torch.empty_like(nt_buf) for _ in range(d)]
             for kv in pkv:
                 if isinstance(kv, LinearKV):
                     # snapshot views share one backing slab so the fused kernel can write them
@@ -843,63 +846,41 @@ class Qwen35(BaseLlama, BaseGenerate, torch.nn.Module):
             verify_buffers = (torch.empty((embeds.shape[0], d + 1, cfg.hidden_size), device=device, dtype=dt), freqs_at(pos, d + 1).clone())
 
         set_depth(depth)
-        use_graph = (device.type == "cuda"
-                     and comfy.model_management.NUM_STREAMS > 0
-                     and not comfy.model_management.args.disable_cuda_graphs)
-        compile_allocations = use_graph and self.model.graph_dynamic_vbar_blocks and comfy.model_prefetch.malloc_graph_enabled(device)
-        draft_state = {}
-
-        def drop_draft_graph():
-            # free inside torch API calls so the allocator's benign notices stay catchable
-            with warnings.catch_warnings():
-                warnings.simplefilter("ignore")
-                for t in (draft_state.get("d"), draft_state.get("r"), *draft_state.get("keep", ())):
-                    if t is not None:
-                        t.set_()
-                g = draft_state.pop("graph", None)
-                if g is not None:
-                    g.reset()
-                draft_state.clear()
-
-        def draft_capture():
-            # captured outside the compiler bracket; its static buffers live for the generate
-            ds = draft_state
-            mtp_kv.prepare(1)
-            ds["tok"] = nt_buf.clone()
-            ds["hid"] = h_buf.clone()
-            ds["f"] = freqs_at(pos).clone()
-            side = torch.cuda.Stream()
-            side.wait_stream(torch.cuda.current_stream())
-            with torch.cuda.stream(side):
-                for _ in range(2):
-                    n1, r1 = self.mtp(self.model.embed_tokens(ds["tok"]).to(dt), ds["hid"], ds["f"], mtp_kv)
-                    self.logits(n1)[:, -1].argmax(dim=-1, keepdim=True)
-            torch.cuda.current_stream().wait_stream(side)
-            del n1, r1  # freed before the capture, not shadowed inside it
-            g = torch.cuda.CUDAGraph()
-            with torch.cuda.graph(g, capture_error_mode="thread_local"):
-                n1, r1 = self.mtp(self.model.embed_tokens(ds["tok"]).to(dt), ds["hid"], ds["f"], mtp_kv)
-                lg1 = self.logits(n1)
-                ds["d"] = lg1[:, -1].argmax(dim=-1, keepdim=True)
-                ds["r"] = r1
-                ds["keep"] = (n1, lg1)  # captured allocations must outlive the graph
-            ds["graph"] = g
+        use_graph = self.model.graph_dynamic_vbar_blocks
+        compile_allocations = use_graph and comfy.model_prefetch.malloc_graph_enabled(device)
+        embed = self.model.embed_tokens
+        draft_token = torch.empty_like(nt_buf)
+        draft_emb = torch.empty_like(h_buf)
+        draft_hidden = torch.empty_like(h_buf)
+        draft_freqs = freqs_at(pos).clone()
 
         def draft(token, hidden, p):
-            # one drafted token: mtp head + lm_head argmax, graph-replayed on cuda
+            # one drafted token: mtp head + lm_head argmax, graph-replayed when resident
             mtp_kv.prepare(1)
-            f = freqs_at(p)
-            if not use_graph:
-                n1, r1 = self.mtp(self.model.embed_tokens(token).to(dt), hidden, f, mtp_kv)
-                mtp_kv.advance(1)
-                return self.logits(n1)[:, -1].argmax(dim=-1, keepdim=True), r1
-            ds = draft_state
-            ds["tok"].copy_(token)
-            ds["hid"].copy_(hidden)
-            ds["f"].copy_(f)
-            ds["graph"].replay()
+            draft_token.copy_(token)
+            draft_hidden.copy_(hidden)
+            draft_freqs.copy_(freqs_at(p))
+            host_rows = hasattr(embed, "_v") and embed.weight_lowvram_function is None and len(embed.weight_function) == 0 and comfy.ops.vbar_above_watermark(embed)
+            queue = comfy.model_prefetch.make_prefetch_queue(
+                [None if host_rows else embed, (head, self.mtp)], device,
+                {"prefetch_dynamic_vbars": self.model.prefetch_dynamic_vbars})
+
+            def embed_core():
+                draft_emb.copy_(embed.host_rows(draft_token, out_dtype=dt) if host_rows else embed(draft_token).to(dt))
+
+            def core():
+                n1, r1 = self.mtp(draft_emb, draft_hidden, draft_freqs, mtp_kv)
+                draft_hidden.copy_(r1)
+                draft_token.copy_(self.logits(n1)[:, -1].argmax(dim=-1, keepdim=True))
+
+            # Host rows stay eager; a tied table uses its graph slot for MTP + head.
+            comfy.model_prefetch.prefetch_queue_pop(queue, device, embed, dt, core=embed_core,
+                                                  enable_graph=use_graph and not host_rows and embed is not head, malloc_scope="mtp")
+            comfy.model_prefetch.prefetch_queue_pop(queue, device, head, dt, core=core,
+                                                  enable_graph=use_graph, malloc_scope="mtp")
+            comfy.model_prefetch.prefetch_queue_pop(queue, device, None, malloc_scope="mtp")
             mtp_kv.advance(1)
-            return ds["d"], ds["r"]
+            return draft_token, draft_hidden
 
         def verify_sample(lg, drafts):
             # accept draft i w.p. p_i(draft), else sample the residual; all depth+1 columns as one batch
@@ -933,15 +914,17 @@ class Qwen35(BaseLlama, BaseGenerate, torch.nn.Module):
         def step():
             # scoped so every temporary dies before the compiler bracket closes
             nonlocal pos
-            drafts = []
             tok_in, hid_in = nt_buf, h_buf
             for k in range(depth):
                 dk, rk = draft(tok_in, hid_in, pos + k)
-                if k < depth - 1:
-                    dk = dk.clone()  # later replays overwrite the static output
-                drafts.append(dk)
-                tok_in, hid_in = dk, rk
-            ev = self.model.embed_tokens(torch.cat([nt_buf] + drafts, dim=1)).to(dt)
+                drafts[k].copy_(dk)
+                tok_in, hid_in = drafts[k], rk
+            tokens = torch.cat([nt_buf] + drafts, dim=1)
+            embed = self.model.embed_tokens
+            if hasattr(embed, "_v") and embed.weight_lowvram_function is None and len(embed.weight_function) == 0 and comfy.ops.vbar_above_watermark(embed):
+                ev = embed.host_rows(tokens, out_dtype=dt)
+            else:
+                ev = embed(tokens).to(dt)
             x, _, _ = self.model.forward(None, embeds=ev, attention_mask=None, past_key_values=pkv, decode_buffers=verify_buffers)
             # all verify positions in one lm_head GEMV, accept decided GPU-side, one sync
             lg = verify_logits(x)
@@ -976,10 +959,6 @@ class Qwen35(BaseLlama, BaseGenerate, torch.nn.Module):
 
         probe = None if fixed_depth is not None else [0, 0]  # steps, accepted drafts
         try:
-            if pinned:
-                comfy.model_prefetch.pin_modules(pinned, device, dt)
-            if use_graph and len(ids) < max_length and ids[-1] not in stop_tokens:
-                draft_capture()
             while len(ids) < max_length and ids[-1] not in stop_tokens:
                 with (comfy.model_prefetch.malloc_graph_scope(device) if compile_allocations else contextlib.nullcontext()):
                     accepts, commit = step()
@@ -997,16 +976,11 @@ class Qwen35(BaseLlama, BaseGenerate, torch.nn.Module):
                         if (sampling is None and max_length - len(ids) > 512 and 1 + probe[1] / probe[0] >= 2.2
                                 and 5 * snapshot_bytes < comfy.model_management.get_free_memory(device)):
                             comfy.model_prefetch.cleanup_prefetch_queues()
-                            drop_draft_graph()
                             set_depth(5)
-                            if use_graph:
-                                draft_capture()
                         probe = None
         finally:
             console.close()
-            drop_draft_graph()
-            if pinned:
-                comfy.model_prefetch.cleanup_prefetched_modules(None, pinned)
+            comfy.model_prefetch.cleanup_prefetch_queues()
         return ids
 
     def init_kv_cache(self, batch, max_cache_len, device, execution_dtype):
