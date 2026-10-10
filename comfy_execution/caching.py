@@ -525,6 +525,7 @@ class RAMPressureCache(LRUCache):
     def __init__(self, key_class, enable_providers=False):
         super().__init__(key_class, 0, enable_providers=enable_providers)
         self.timestamps = {}
+        self.expanded = set()
         self.active_evictions = False
         self.full_evictions = False
 
@@ -537,7 +538,10 @@ class RAMPressureCache(LRUCache):
         self._clean_subcaches()
 
     async def set(self, node_id, value):
-        self.timestamps[self.cache_key_set.get_data_key(node_id)] = time.time()
+        cache_key = self.cache_key_set.get_data_key(node_id)
+        self.timestamps[cache_key] = time.time()
+        if self.dynprompt.get_parent_node_id(node_id) is not None:
+            self.expanded.add(cache_key)
         await super().set(node_id, value)
 
     async def get(self, node_id):
@@ -545,7 +549,10 @@ class RAMPressureCache(LRUCache):
         return await super().get(node_id)
 
     def set_local(self, node_id, value):
-        self.timestamps[self.cache_key_set.get_data_key(node_id)] = time.time()
+        cache_key = self.cache_key_set.get_data_key(node_id)
+        self.timestamps[cache_key] = time.time()
+        if self.dynprompt.get_parent_node_id(node_id) is not None:
+            self.expanded.add(cache_key)
         super().set_local(node_id, value)
 
     def ram_release(self, target, free_active=False, min_entry_size=0):
@@ -555,7 +562,10 @@ class RAMPressureCache(LRUCache):
         clean_list = []
 
         for key, cache_entry in self.cache.items():
-            if not free_active and self.used_generation[key] == self.generation:
+            # Expanded nodes are only marked used when their parent expands again,
+            # so the previous run's are kept until then.
+            if not free_active and (self.used_generation[key] == self.generation or
+                                    (self.used_generation[key] == self.generation - 1 and key in self.expanded)):
                 continue
 
             if all_outputs_dynamic(cache_entry.outputs) and self.used_generation[key] == self.generation:
@@ -611,6 +621,7 @@ class RAMPressureCache(LRUCache):
             del self.cache[key]
             self.used_generation.pop(key, None)
             self.timestamps.pop(key, None)
+            self.expanded.discard(key)
             self.children.pop(key, None)
             freed += ram_usage
         if freed and free_active:
