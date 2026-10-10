@@ -5,8 +5,8 @@ import pytest
 import folder_paths
 from app.assets.database.models import Asset, AssetContent
 from app.assets.database.queries.records import create_content, create_record, mark_content_missing
-from app.assets.lifecycle import wipe_temp_db_rows
-from app.assets.services.asset_management import delete_asset_reference
+from app.assets.lifecycle import sweep_orphan_previews, wipe_temp_db_rows
+from app.assets.services.asset_management import delete_asset_reference, update_asset_metadata
 
 
 @pytest.fixture
@@ -51,6 +51,13 @@ def test_previews_are_reclaimed_with_their_last_user_and_never_before(session, m
     delete_asset_reference(direct)
     assert not (previews / "direct.webp").exists()
 
+    # A preview replaced through PUT goes once nothing links it.
+    generated = _record(session, previews / "generated.webp", tags=["preview"])
+    chosen = _record(session, roots / "output" / "chosen.png")
+    update_asset_metadata(_record(session, roots / "output" / "f.exr", preview_id=generated), preview_id=chosen)
+    session.expire_all()
+    assert session.get(Asset, generated) is None and not (previews / "generated.webp").exists()
+
     # A missing row's path that a live preview now uses keeps its file.
     old = _record(session, previews / "again.webp", tags=["preview"])
     parent = _record(session, roots / "output" / "c.exr", preview_id=old)
@@ -72,3 +79,12 @@ def test_previews_are_reclaimed_with_their_last_user_and_never_before(session, m
         folder_paths.set_temp_directory(saved)
     session.expire_all()
     assert session.get(Asset, temp_preview) is None and not (previews / "temp.webp").exists()
+
+    # At startup, preview files no row records (an output that never registered) are removed.
+    (previews / "orphan.jpg").write_bytes(b"jpg")
+    (previews / "orphan.jpg.0123.tmp").write_bytes(b"tmp")
+    kept = _record(session, previews / "kept.webp", tags=["preview"])
+    assert sweep_orphan_previews(session) == 2
+    assert not (previews / "orphan.jpg").exists() and not (previews / "orphan.jpg.0123.tmp").exists()
+    assert (previews / "kept.webp").exists() and session.get(Asset, kept) is not None
+

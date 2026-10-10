@@ -98,10 +98,12 @@ def update_asset_metadata(
     mime_type: str | None = None,
     preview_id: str | None = None,
 ) -> AssetDetailResult:
-    with create_session() as session:
+    # A write session: reclaiming a replaced preview can't interleave with a registration linking it.
+    with create_write_session() as session:
         record = get_record_by_id(session, reference_id)
         if record is None:
             raise ValueError(f"Asset {reference_id} not found")
+        replaced_preview_id = record.preview_id
 
         if name is not None:
             rename_record(session, reference_id, name)
@@ -136,6 +138,9 @@ def update_asset_metadata(
                 .where(Asset.id == reference_id)
                 .values(preview_id=preview_id, updated_at=get_utc_now())
             )
+            if replaced_preview_id and replaced_preview_id != preview_id:
+                session.flush()
+                reclaim_preview(session, replaced_preview_id)
         if tags is not None:
             for tag_name in normalize_tags(list(tags)):
                 ensure_tag(session, tag_name)
