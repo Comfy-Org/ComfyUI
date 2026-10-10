@@ -264,7 +264,7 @@ class LoadImageTextDataSetFromFolderNode(io.ComfyNode):
                 )
 
         caption_file_path = [
-            f.replace(os.path.splitext(f)[1], ".txt") for f in image_files
+            os.path.splitext(f)[0] + ".txt" for f in image_files
         ]
         captions = []
         for caption_file in caption_file_path:
