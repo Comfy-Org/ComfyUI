@@ -394,7 +394,7 @@ class ModelPatcher:
         self.forced_hooks: Optional[comfy.hooks.HookGroup] = None  # NOTE: only used for CLIP at this time
         self.is_clip = False
         self.hook_mode = comfy.hooks.EnumHookMode.MaxSpeed
-        self._hook_async_offload_disabled = False
+        self._hook_offload_flags_applied = False
 
         self.cached_patcher_init: tuple[Callable, tuple] | tuple[Callable, tuple, int] | None = None
         self.is_multigpu_base_clone = False
@@ -1199,6 +1199,8 @@ class ModelPatcher:
                 if hasattr(m, "comfy_patched_weights"):
                     del m.comfy_patched_weights
 
+            self._restore_async_offload_after_hooks()
+
         keys = list(self.object_patches_backup.keys())
         for k in keys:
             comfy.utils.set_attr(self.model, k, self.object_patches_backup[k])
@@ -1633,6 +1635,7 @@ class ModelPatcher:
 
     def patch_hooks(self, hooks: comfy.hooks.HookGroup):
         with self.use_ejected():
+            self._hook_offload_flags_applied = False
             if hooks is not None:
                 model_sd_keys = list(self.model_state_dict().keys())
                 memory_counter = None
@@ -1686,18 +1689,47 @@ class ModelPatcher:
         self.patch_hooks(None)
 
     def _disable_async_offload_for_hooks(self):
-        if self._hook_async_offload_disabled:
+        if self._hook_offload_flags_applied:
             return
         # Hook writeback changes prepared weight storage after model loading.
-        # Keep this delegate's transfers synchronous and honor its model dtypes.
-        for module in self.model.modules():
+        # Keep transfers synchronous and honor model dtypes until the Hook
+        # session ends. Loading can reset these flags, so reapply them for each
+        # patch_hooks call; clones share the modules, so keep prior values on the model.
+        backup = getattr(self.model, "comfy_hook_offload_backup", None)
+        if backup is None:
+            backup = {}
+            self.model.comfy_hook_offload_backup = backup
+        for name, module in self.model.named_modules():
             if hasattr(module, "comfy_cast_weights"):
+                if name not in backup:
+                    backup[name] = [module.__dict__.get("comfy_disable_async_offload"), False]
                 module.comfy_disable_async_offload = True
                 for param_name, param in module.named_parameters(recurse=False):
                     model_dtype = getattr(module, param_name + "_comfy_model_dtype", None)
-                    if model_dtype is not None and param.dtype != model_dtype:
+                    if model_dtype is not None and param.dtype != model_dtype and not module.comfy_cast_weights:
                         module.comfy_cast_weights = True
-        self._hook_async_offload_disabled = True
+                        backup[name][1] = True
+        self._hook_offload_flags_applied = True
+
+    def _restore_async_offload_after_hooks(self):
+        backup = getattr(self.model, "comfy_hook_offload_backup", None)
+        if backup is None or self.hook_backup or getattr(self.model, "comfy_hook_delegate", False):
+            return
+        for name, module in self.model.named_modules():
+            if name not in backup:
+                continue
+            prior_disable_async_offload, cast_weights_changed = backup[name]
+            if prior_disable_async_offload is None:
+                module.__dict__.pop("comfy_disable_async_offload", None)
+            else:
+                module.comfy_disable_async_offload = prior_disable_async_offload
+            if cast_weights_changed:
+                # Lowvram loading may have saved the Hook value as its restore point.
+                if hasattr(module, "prev_comfy_cast_weights"):
+                    module.prev_comfy_cast_weights = False
+                else:
+                    module.comfy_cast_weights = False
+        del self.model.comfy_hook_offload_backup
 
     def patch_hook_weight_to_device(self, hooks: comfy.hooks.HookGroup, combined_patches: dict, key: str, original_weights: dict, memory_counter: MemoryCounter):
         if key not in combined_patches:
@@ -1761,6 +1793,7 @@ class ModelPatcher:
     def clean_hooks(self):
         self.unpatch_hooks()
         self.clear_cached_hook_weights()
+        self._restore_async_offload_after_hooks()
 
     def model_state_dict_for_saving(self, model=None, prefix=""):
         if model is None:
@@ -2241,6 +2274,8 @@ class ModelPatcherDynamic(ModelPatcher):
 
     def get_non_dynamic_delegate(self):
         model_patcher = self.clone(disable_dynamic=True, model_override=self.non_dynamic_delegate_model)
+        # The retained delegate only runs Hook sessions, so it stays on synchronous transfers.
+        model_patcher.model.comfy_hook_delegate = True
         self.non_dynamic_delegate_model = model_patcher.get_clone_model_override()
         return model_patcher
 

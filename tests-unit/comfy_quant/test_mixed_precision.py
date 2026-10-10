@@ -544,14 +544,109 @@ class TestMixedPrecisionOps(unittest.TestCase):
         self.assertEqual(output.dtype, torch.bfloat16)
         self.assertTrue(torch.isfinite(output).all())
         patcher.patch_hooks(None)
+        self.assertTrue(model.linear.comfy_disable_async_offload)
+        self.assertTrue(model.linear.comfy_cast_weights)
 
-        model.linear.comfy_disable_async_offload = False
-        model.other.comfy_disable_async_offload = False
-        patcher._hook_async_offload_disabled = False
+        patcher.unpatch_model()
+        self.assertNotIn("comfy_disable_async_offload", model.linear.__dict__)
+        self.assertFalse(model.other.comfy_disable_async_offload)
+        self.assertFalse(model.linear.comfy_cast_weights)
         patcher.patch_hooks(group)
         self.assertTrue(model.linear.comfy_disable_async_offload)
         self.assertTrue(model.other.comfy_disable_async_offload)
-        patcher.patch_hooks(None)
+        patcher.clean_hooks()
+        self.assertFalse(model.linear.comfy_disable_async_offload)
+        self.assertFalse(model.other.comfy_cast_weights)
+
+    def _hook_offload_model(self):
+        model = torch.nn.Module()
+        for name in ("target", "preset", "mismatch"):
+            setattr(model, name, ops.disable_weight_init.Linear(
+                4, 4, bias=False, device="cpu", dtype=torch.bfloat16
+            ))
+        model.preset.comfy_disable_async_offload = True
+        model.preset.comfy_cast_weights = True
+        model.mismatch.weight = torch.nn.Parameter(
+            model.mismatch.weight.float(), requires_grad=False
+        )
+        model.mismatch.weight_comfy_model_dtype = torch.bfloat16
+        patcher = ModelPatcher(model, torch.device("cpu"), torch.device("cpu"))
+
+        hook = hooks.WeightHook()
+        hook.need_weight_init = False
+        hook.weights = {
+            "target.weight": (torch.zeros_like(model.target.weight),)
+        }
+        group = hooks.HookGroup()
+        group.add(hook)
+        patcher.register_all_hook_patches(
+            group, hooks.create_target_dict(hooks.EnumWeightTarget.Model)
+        )
+        return model, patcher, group
+
+    @staticmethod
+    def _hook_offload_flags(model):
+        return {
+            name: (
+                getattr(model, name).__dict__.get("comfy_disable_async_offload"),
+                getattr(model, name).comfy_cast_weights,
+            )
+            for name in ("target", "preset", "mismatch")
+        }
+
+    def test_hook_offload_flags_restore_prior_values_after_session(self):
+        model, patcher, group = self._hook_offload_model()
+        before = self._hook_offload_flags(model)
+        for _ in range(2):
+            patcher.patch_hooks(group)
+            patcher.patch_hooks(None)
+            patcher.patch_hooks(group)
+            for name in before:
+                self.assertTrue(getattr(model, name).comfy_disable_async_offload)
+            self.assertTrue(model.mismatch.comfy_cast_weights)
+            patcher.clean_hooks()
+            self.assertEqual(self._hook_offload_flags(model), before)
+            self.assertFalse(hasattr(model, "comfy_hook_offload_backup"))
+
+    def test_hook_offload_flags_are_shared_by_clones(self):
+        model, patcher, group = self._hook_offload_model()
+        before = self._hook_offload_flags(model)
+        clone = patcher.clone()
+        patcher.patch_hooks(group)
+        clone.patch_hooks(group)
+        clone.clean_hooks()
+        self.assertEqual(self._hook_offload_flags(model), before)
+
+    def test_hook_offload_restore_respects_lowvram_and_delegate(self):
+        model, patcher, group = self._hook_offload_model()
+        patcher.patch_hooks(group)
+        model.mismatch.prev_comfy_cast_weights = model.mismatch.comfy_cast_weights
+        patcher.clean_hooks()
+        self.assertTrue(model.mismatch.comfy_cast_weights)
+        comfy.model_patcher.wipe_lowvram_weight(model.mismatch)
+        self.assertFalse(model.mismatch.comfy_cast_weights)
+
+        delegate, delegate_patcher, delegate_group = self._hook_offload_model()
+        delegate.comfy_hook_delegate = True
+        delegate_patcher.patch_hooks(delegate_group)
+        delegate_patcher.clean_hooks()
+        self.assertTrue(delegate.target.comfy_disable_async_offload)
+        self.assertTrue(delegate.mismatch.comfy_cast_weights)
+
+    def test_hook_offload_flags_reapply_after_reload(self):
+        model, patcher, group = self._hook_offload_model()
+        model.comfy_hook_delegate = True
+        patcher.patch_model(lowvram_model_memory=1)
+        patcher.patch_hooks(group)
+        patcher.clean_hooks()
+
+        second = patcher.clone()
+        second.partially_load(torch.device("cpu"), 1e32)
+        second.patch_hooks(group)
+        self.assertTrue(model.mismatch.comfy_cast_weights)
+        output = model.mismatch(torch.zeros(1, 4, dtype=torch.bfloat16))
+        self.assertEqual(output.dtype, torch.bfloat16)
+        second.clean_hooks()
 
     def test_cast_weight_honors_async_offload_disable(self):
         linear = ops.disable_weight_init.Linear(
@@ -634,6 +729,7 @@ class TestMixedPrecisionOps(unittest.TestCase):
         patcher.clone.assert_called_with(
             disable_dynamic=True, model_override=initial_override
         )
+        self.assertIs(first_delegate.model.comfy_hook_delegate, True)
         self.assertIs(patcher.non_dynamic_delegate_model, first_override)
 
         patcher.finalize_model_unload()
