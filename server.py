@@ -114,7 +114,7 @@ def _remove_sensitive_from_queue(queue: list) -> list:
 def _downscaled_jpeg(path: str, res: int) -> bytes | None:
     """Longest side capped at res, alpha flattened onto black, as quality 85 JPEG; None if the original already fits."""
     with Image.open(path) as img:
-        if img.width * img.height > 40_000_000:  # too costly to decode for a preview
+        if img.format != "JPEG" and img.width * img.height > 40_000_000:  # too costly to decode; JPEG decodes downscaled
             return None
         if max(img.size) <= res and not img.mode.startswith("I") and "A" not in img.mode and "transparency" not in img.info:
             return None
@@ -643,7 +643,7 @@ class PromptServer():
 
                 if os.path.isfile(file):
                     res = request.rel_url.query.get('res', '')
-                    res = int(res) if res.isascii() and res.isdigit() else 0
+                    res = int(res) if res.isascii() and res.isdigit() and len(res) < 10 else 0
                     if res > 0 and 'channel' not in request.rel_url.query and os.path.splitext(file)[1].lower() in ('.png', '.jpg', '.jpeg'):
                         try:
                             body = await asyncio.to_thread(_downscaled_jpeg, file, res)

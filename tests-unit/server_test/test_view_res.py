@@ -195,14 +195,32 @@ async def test_oversized_text_chunk_serves_original(output_dir):
 @pytest.mark.asyncio
 async def test_over_40_megapixels_serves_original_without_decoding(output_dir, monkeypatch):
     original = save(output_dir / "lineart.png", size=(7000, 7000), mode="1", color=1)
-
-    def fail(*args, **kwargs):
-        raise AssertionError("decoded")
-    monkeypatch.setattr(ImageFile.ImageFile, "load", fail)
+    loads = []
+    monkeypatch.setattr(ImageFile.ImageFile, "load", lambda self: loads.append(self))
     status, headers, body = await view({"filename": "lineart.png", "res": "512"})
     assert status == 200
     assert headers["Content-Type"] == "image/png"
     assert body == original
+    assert loads == []
+
+
+@pytest.mark.asyncio
+async def test_leading_zeros_accepted(output_dir):
+    save(output_dir / "a.png")
+    _, headers, body = await view({"filename": "a.png", "res": "000512"})
+    assert headers["Content-Type"] == "image/jpeg"
+    with Image.open(BytesIO(body)) as img:
+        assert img.size == (512, 256)
+
+
+@pytest.mark.asyncio
+async def test_large_jpeg_still_previewed(output_dir):
+    save(output_dir / "photo.jpg", size=(6400, 6400), mode="L", color=128, format="jpeg")
+    status, headers, body = await view({"filename": "photo.jpg", "res": "512"})
+    assert status == 200
+    assert headers["Content-Type"] == "image/jpeg"
+    with Image.open(BytesIO(body)) as img:
+        assert img.size == (512, 512)
 
 
 @pytest.mark.asyncio
@@ -244,7 +262,7 @@ async def test_channel_disables_res(output_dir):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("res", ["abc", "0", "-1", "", " 64", "+64", "6_4", "\u0666\u0664", "\u00b2"])
+@pytest.mark.parametrize("res", ["abc", "0", "-1", "", " 64", "+64", "6_4", "\u0666\u0664", "\u00b2", "9" * 5000])
 async def test_invalid_res_serves_original(output_dir, res):
     original = save(output_dir / "a.png")
     status, headers, body = await view({"filename": "a.png", "res": res})
