@@ -227,7 +227,7 @@ class _AssetSeeder:
 
     def start(
         self,
-        roots: tuple[RootType, ...] = ("models", "input", "output"),
+        roots: tuple[RootType, ...] = ("models", "input"),
         phase: ScanPhase = ScanPhase.FULL,
         progress_callback: ProgressCallback | None = None,
         prune_first: bool = False,
@@ -282,7 +282,7 @@ class _AssetSeeder:
 
     def start_fast(
         self,
-        roots: tuple[RootType, ...] = ("models", "input", "output"),
+        roots: tuple[RootType, ...] = ("models", "input"),
         progress_callback: ProgressCallback | None = None,
         prune_first: bool = False,
     ) -> bool:

@@ -89,7 +89,7 @@ def output_seeder(monkeypatch: pytest.MonkeyPatch) -> Iterator[_OutputSeeder]:
     _ = seeder.shutdown()
 
 
-def test_queue_output_scan_registers_undeclared_output(
+def test_queue_output_scan_does_not_register_undeclared_output(
     enabled_manager: AssetsEnabled,
     asset_roots: tuple[Path, Path, Path],
     threaded_create_session: Callable[[], AbstractContextManager[Session]],
@@ -110,8 +110,7 @@ def test_queue_output_scan_registers_undeclared_output(
                 .where(AssetContent.path == str(output_path.resolve()))
             )
         )
-        assert rows[0].job_id is None
-    assert len(rows) == 1
+    assert rows == []
 
 
 def test_queue_output_scan_does_not_duplicate_declared_output(
@@ -150,11 +149,8 @@ def test_queue_output_scan_does_not_duplicate_declared_output(
             )
         )
         assert rows[0].job_id == "declared-job"
-        assert undeclared_rows[0].job_id is None
     assert len(rows) == 1
-    assert len(undeclared_rows) == 1, (
-        "the undeclared sibling proves the walk ran, so the declared row's count of 1 is a real skip rather than a silently-failed scan"
-    )
+    assert undeclared_rows == []
 
 
 def test_executed_and_cached_outputs_share_unhashed_content(
@@ -262,7 +258,7 @@ def test_ensure_scan_started_hands_the_node_list_scan_to_the_seeder(
 
     AssetsEnabled(_Args()).ensure_scan_started()
 
-    after_node_list.assert_called_once_with(roots=("models", "input", "output"), compute_hashes=hashing)
+    after_node_list.assert_called_once_with(roots=("models", "input"), compute_hashes=hashing)
 
 
 def test_shutdown_runs_lifecycle_cleanup_when_seeder_shutdown_times_out(
