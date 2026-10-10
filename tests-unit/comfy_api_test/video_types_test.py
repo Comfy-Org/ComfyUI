@@ -279,6 +279,22 @@ def test_save_to_h264_crf_controls_quality(tmp_path):
     assert os.path.getsize(transcoded) < os.path.getsize(high_quality)
 
 
+@pytest.mark.parametrize("width,height", [(65, 64), (64, 65), (65, 65)])
+def test_save_to_h264_odd_dimensions(tmp_path, width, height):
+    components = VideoComponents(
+        images=torch.rand(3, height, width, 3, generator=torch.Generator().manual_seed(1)),
+        frame_rate=Fraction(30),
+    )
+    output = str(tmp_path / "odd.mp4")
+
+    VideoFromComponents(components).save_to(output, codec=VideoCodec.H264)
+
+    with av.open(output) as container:
+        stream = container.streams.video[0]
+        assert stream.width == width + width % 2
+        assert stream.height == height + height % 2
+
+
 def video_packet_bytes(path):
     with av.open(path) as container:
         return [bytes(packet) for packet in container.demux(container.streams.video[0]) if packet.size]
