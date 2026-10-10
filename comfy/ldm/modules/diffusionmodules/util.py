@@ -10,6 +10,7 @@
 
 import math
 import logging
+from contextlib import ExitStack
 import torch
 import torch.nn as nn
 import numpy as np
@@ -197,9 +198,14 @@ class CheckpointFunction(torch.autograd.Function):
         ctx.run_function = run_function
         ctx.input_tensors = list(args[:length])
         ctx.input_params = list(args[length:])
-        ctx.gpu_autocast_kwargs = {"enabled": torch.is_autocast_enabled(),
-                                   "dtype": torch.get_autocast_gpu_dtype(),
-                                   "cache_enabled": torch.is_autocast_cache_enabled()}
+        ctx.autocast_kwargs = {
+            device_type: {"enabled": torch.is_autocast_enabled(device_type),
+                          "dtype": torch.get_autocast_dtype(device_type),
+                          "cache_enabled": torch.is_autocast_cache_enabled()}
+            for device_type in {"cpu", "cuda"} | {x.device.type for x in args}
+            if torch.amp.is_autocast_available(device_type)
+            and (device_type != torch._C._get_privateuse1_backend_name() or torch.is_autocast_enabled(device_type))
+        }
         with torch.no_grad():
             output_tensors = ctx.run_function(*ctx.input_tensors)
         return output_tensors
@@ -207,8 +213,9 @@ class CheckpointFunction(torch.autograd.Function):
     @staticmethod
     def backward(ctx, *output_grads):
         ctx.input_tensors = [x.detach().requires_grad_(True) for x in ctx.input_tensors]
-        with torch.enable_grad(), \
-                torch.cuda.amp.autocast(**ctx.gpu_autocast_kwargs):
+        with torch.enable_grad(), ExitStack() as stack:
+            for device_type, kwargs in ctx.autocast_kwargs.items():
+                stack.enter_context(torch.autocast(device_type, **kwargs))
             # Fixes a bug where the first op in run_function modifies the
             # Tensor storage in place, which is not allowed for detach()'d
             # Tensors.
