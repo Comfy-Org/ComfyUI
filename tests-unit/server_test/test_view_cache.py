@@ -109,3 +109,14 @@ async def test_dangerous_type_keeps_no_store(output_dir, client):
     resp = await get(client, {"filename": "x.svg"})
     assert resp.headers["Cache-Control"] == "no-store"
     assert resp.headers["Vary"] == "Sec-Fetch-Dest"
+
+
+@pytest.mark.asyncio
+async def test_res_on_fitting_original_revalidates_as_the_file(output_dir, client):
+    Image.new("RGB", (50, 20)).save(output_dir / "small.png")
+    params = {"filename": "small.png", "res": "512"}
+    first = await get(client, params)
+    assert first.headers["Content-Type"] == "image/png"
+    assert first.headers["Cache-Control"] == "no-cache"
+    again = await get(client, params, {"If-None-Match": first.headers["ETag"]})
+    assert again.status == 304
