@@ -49,6 +49,7 @@ EXPECTED_CALL_SITES: frozenset[CallSite] = frozenset(
         CallSite("app/assets/seeder.py", "_run_scan", "seeder.scan_failed"),
         CallSite("app/assets/seeder.py", "_run_scan", "seeder.scan_cancelled"),
         CallSite("app/assets/seeder.py", "_run_scan", "seeder.marked_missing"),
+        CallSite("app/assets/seeder.py", "_run_scan", "scanner.name_not_utf8"),
         CallSite("app/assets/seeder.py", "mark_missing_outside_prefixes", "seeder.marked_missing"),
         CallSite("app/assets/seeder.py", "_run_fast_phase", "seeder.batch_insert_failed"),
         CallSite("app/assets/seeder.py", "_emit_marked_missing", "seeder.marked_missing"),
