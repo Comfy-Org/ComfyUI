@@ -125,13 +125,14 @@ def _downscaled_preview(path: str, res: int, webp_quality: int | None) -> bytes 
             img = img.convert("RGBA")
         img.thumbnail((res, res))
         img = ImageOps.exif_transpose(img).convert("RGBA")
+        icc = img.info.get("icc_profile") if (img.info.get("icc_profile") or b"")[16:20] == b"RGB " else None  # RGB output only
         buffer = BytesIO()
         if webp_quality is not None:  # keeps alpha
-            img.save(buffer, format="webp", quality=webp_quality, icc_profile=img.info.get("icc_profile"))
+            img.save(buffer, format="webp", quality=webp_quality, icc_profile=icc)
             return buffer.getvalue()
         flat = Image.new("RGB", img.size)
         flat.paste(img, mask=img.getchannel("A"))
-        flat.save(buffer, format="jpeg", quality=85, icc_profile=img.info.get("icc_profile"))
+        flat.save(buffer, format="jpeg", quality=85, icc_profile=icc)
         return buffer.getvalue()
 
 
@@ -651,11 +652,11 @@ class PromptServer():
                     body = False  # None after a res attempt: serve the original as is, skipping preview=
                     if res > 0 and 'channel' not in request.rel_url.query and os.path.splitext(file)[1].lower() in ('.png', '.jpg', '.jpeg'):
                         preview = request.rel_url.query.get('preview', '').split(';')
-                        webp_quality = None if preview[0] != 'webp' else int(preview[-1]) if preview[-1].isascii() and preview[-1].isdigit() and len(preview[-1]) < 4 else 90
+                        webp_quality = None if preview[0] != 'webp' else min(100, int(preview[-1])) if preview[-1].isascii() and preview[-1].isdigit() and len(preview[-1]) < 10 else 90
                         try:
                             body = await asyncio.to_thread(_downscaled_preview, file, res, webp_quality)
                         except Exception:
-                            body = False  # undecodable (corrupt data or metadata): handle as without res
+                            body = None  # undecodable (corrupt data or metadata): serve the original
                         if body:
                             safe_filename = (os.path.splitext(filename)[0] + (".jpg" if webp_quality is None else ".webp")).replace("\\", "\\\\").replace('"', '\\"')
                             return web.Response(body=body, content_type='image/jpeg' if webp_quality is None else 'image/webp',

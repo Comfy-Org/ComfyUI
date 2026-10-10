@@ -316,6 +316,35 @@ async def test_preview_without_res_unchanged(output_dir):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("name,content", [("broken.png", b"not an image"), ("actually_gif.png", None)])
+async def test_undecodable_with_preview_serves_original(output_dir, name, content):
+    if content is None:
+        content = save(output_dir / name, format="gif")
+    (output_dir / name).write_bytes(content)
+    status, _, body = await view({"filename": name, "res": "512", "preview": "webp;75"})
+    assert status == 200
+    assert body == content
+
+
+@pytest.mark.asyncio
+async def test_webp_quality_over_100_clamped(output_dir):
+    save(output_dir / "a.png")
+    status, headers, _ = await view({"filename": "a.png", "res": "512", "preview": "webp;101"})
+    assert status == 200 and headers["Content-Type"] == "image/webp"
+
+
+@pytest.mark.asyncio
+async def test_non_rgb_icc_profile_dropped(output_dir):
+    profile = bytearray(ImageCms.ImageCmsProfile(ImageCms.createProfile("sRGB")).tobytes())
+    profile[16:20] = b"GRAY"
+    save(output_dir / "gray.png", mode="L", color=100, icc_profile=bytes(profile))
+    _, headers, body = await view({"filename": "gray.png", "res": "64"})
+    assert headers["Content-Type"] == "image/jpeg"
+    with Image.open(BytesIO(body)) as img:
+        assert "icc_profile" not in img.info
+
+
+@pytest.mark.asyncio
 async def test_large_jpeg_still_previewed(output_dir):
     save(output_dir / "photo.jpg", size=(6400, 6400), mode="L", color=128, format="jpeg")
     status, headers, body = await view({"filename": "photo.jpg", "res": "512"})
