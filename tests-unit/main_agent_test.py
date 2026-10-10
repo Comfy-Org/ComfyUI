@@ -3,13 +3,11 @@ from __future__ import annotations
 import ast
 import importlib
 import logging
-import os
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
-import folder_paths
 from comfy.cli_args import parser
 
 
@@ -32,10 +30,8 @@ def _run_agent_check(monkeypatch, caplog, find_spec):
     args = SimpleNamespace(enable_agent=True)
     namespace = {
         "args": args,
-        "folder_paths": folder_paths,
         "importlib": importlib,
         "logging": logging,
-        "os": os,
     }
     monkeypatch.setattr(importlib.util, "find_spec", find_spec)
     with caplog.at_level(logging.INFO):
@@ -53,8 +49,9 @@ def test_missing_agent_package_disables_flag_without_install_command(monkeypatch
 
     assert args.enable_agent is False
     warning = next(record.getMessage() for record in caplog.records if record.levelno == logging.WARNING)
-    assert "agent_requirements.txt" in warning
+    assert "comfy-agent" in warning
     assert "pip install" not in warning
+    assert "agent_requirements.txt" not in warning
 
 
 def test_namespace_agent_package_counts_as_missing(monkeypatch, caplog):

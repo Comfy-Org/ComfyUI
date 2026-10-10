@@ -137,10 +137,10 @@ def handle_comfyui_manager_unavailable():
 
 
 def handle_comfy_agent_unavailable():
-    agent_req_path = os.path.join(os.path.dirname(os.path.abspath(folder_paths.__file__)), "agent_requirements.txt")
     logging.info("[agent-event] package_missing")
-    # No install command until comfy-agent is published: an unregistered PyPI name could be claimed by anyone.
-    logging.warning(f"\n\n`--enable-agent` was passed but the `comfy-agent` package is not installed, so the agent is disabled.\nThe agent requirements are listed in {agent_req_path}\n")
+    # No install path is published yet: `comfy-agent` is not a registered PyPI name, so we
+    # can't point users at a pip/uv command or a requirements file without risking a squatted package.
+    logging.warning("\n\n`--enable-agent` was passed but the `comfy-agent` package is not installed, so the agent is disabled.\n")
     args.enable_agent = False
 
 
