@@ -103,6 +103,14 @@ def test_startup_order_wipe_before_rmtree_before_seeder(mock_create_session):
     assert calls == ["wipe", "rmtree", "enqueue", "seeder"]
 
 
+def test_startup_scan_includes_models():
+    """Page loads no longer scan models, so startup and POST /seed are the only scans that do."""
+    with patch.object(asset_seeder, "start", return_value=False) as seeder_start:
+        lifecycle.start_asset_seeder()
+
+    assert seeder_start.call_args.kwargs["roots"] == ("models", "input")
+
+
 @pytest.mark.parametrize("wipe_fails", [False, True], ids=["wipe_succeeds", "wipe_fails"])
 def test_startup_defers_transition_drain_to_the_seeder(
     session, mock_create_session, tmp_path, monkeypatch, wipe_fails
