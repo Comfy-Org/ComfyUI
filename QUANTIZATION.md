@@ -207,3 +207,23 @@ Activation quantization (e.g., for FP8 Tensor Core operations) requires `input_s
 4. **Store in checkpoint**: Save `input_scale` parameters alongside weights
 
 The calibration dataset should be representative of your target use case. For diffusion models, this typically means a diverse set of prompts and generation parameters.
+
+## Optional Ascend W4A4 unpack cache
+
+With a matching Comfy Kitchen build providing `W4A4WeightCache` and the public
+`convrot_w4a4_linear(..., weight_cache=...)` interface, use
+`--npu-w4a4-cache-mib 16384` to request up to 16 GiB of temporary weight storage.
+The default is zero (disabled). This only targets ConvRot W4A4, not INT8 or BF16.
+
+The cache is created after model loading and discarded when sampling returns
+or raises. Its limit is reduced to leave twice the estimated inference memory
+plus ComfyUI's minimum inference reserve free. It never proactively unloads
+models to make room. The estimate is not an allocation guarantee; choose a
+smaller limit for memory-constrained workloads.
+
+Dynamic VRAM, low-VRAM model offloading, weight patches/LoRA, dynamic weight hooks and multi-device
+sampling use the original path. The initial implementation assumes one sampling
+operation at a time per model. Custom Linear overrides and compilation also
+retain their original path. The cache does not modify checkpoint data or persist
+across workflows. A cache hit validates packed weight contents; additional
+storage includes both packed snapshots and unpacked weights.
