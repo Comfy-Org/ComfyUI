@@ -1683,6 +1683,8 @@ def _encode_image(
         img_np = img_tensor.cpu().numpy().astype(np.float32)
     else:
         # PNG path: quantize to integer range.
+        if spec["dtype"] == np.uint16 and img_tensor.dtype in (torch.float16, torch.bfloat16):
+            img_tensor = img_tensor.float()
         scaled = (img_tensor * spec["scale"]).clamp(0, spec["scale"])
         img_np = scaled.to(torch.int32).cpu().numpy().astype(spec["dtype"])
 
@@ -1723,6 +1725,8 @@ def _avif_frame(image: torch.Tensor, bit_depth: str, colorspace: str, pixel_form
         raise ValueError("AVIF saving supports 1-channel grayscale and 3-channel RGB images; PyAV's SVT-AV1 encoder does not support alpha.")
 
     if bit_depth == "10-bit YUV420":
+        if image.dtype in (torch.float16, torch.bfloat16):
+            image = image.float()
         image_np = (image * 65535.0).clamp(0, 65535).to(torch.int32).cpu().numpy().astype(np.uint16)
         frame_format = "gray16le" if num_channels == 1 else "rgb48le"
     else:
