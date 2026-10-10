@@ -52,7 +52,8 @@ function createWorkflow(settings) {
     filename_prefix: "ComfyUI_Music_App/song",
   };
   if (settings.audioOutputNode === "SaveAudioAdvanced") {
-    outputInputs.format = { format: "mp3", quality: "320k" };
+    outputInputs.format = "mp3";
+    outputInputs["format.quality"] = "320k";
   } else if (settings.audioOutputNode === "SaveAudioMP3") {
     outputInputs.quality = "320k";
   }
