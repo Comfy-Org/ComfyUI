@@ -73,7 +73,7 @@ def _newest_partner_token(token: str, claims: dict) -> tuple[str, float]:
     renewed = _renewed_partner_tokens.get(claims["sid"])
     if renewed is not None:
         renewed_exp = _partner_token_claims(renewed)["exp"]
-        if renewed_exp > claims["exp"]:
+        if renewed_exp >= claims["exp"]:
             return renewed, renewed_exp
     return token, claims["exp"]
 

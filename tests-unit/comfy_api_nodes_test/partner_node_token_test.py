@@ -26,8 +26,9 @@ def _jwt(claims: dict) -> str:
     return f"{enc({'alg': 'ES256', 'typ': 'JWT'})}.{enc(claims)}.signature"
 
 
-def _partner_token(expires_in: float, sid: str = "session-1", generation: int = 0) -> str:
-    return _jwt({"aud": "comfy-partner-node", "sid": sid, "exp": time.time() + expires_in, "gen": generation})
+def _partner_token(expires_in: float, sid: str = "session-1", generation: int = 0, now: float | None = None) -> str:
+    exp = (time.time() if now is None else now) + expires_in
+    return _jwt({"aud": "comfy-partner-node", "sid": sid, "exp": exp, "gen": generation})
 
 
 def _node(auth_token: str | None = None, api_key: str | None = None) -> type:
@@ -148,7 +149,8 @@ def test_token_far_from_expiry_is_sent_as_is(monkeypatch):
 
 
 def test_401_renews_and_resends_the_post_once(monkeypatch):
-    rejected, fresh = _partner_token(5400), _partner_token(5400, generation=1)
+    now = time.time()
+    rejected, fresh = _partner_token(5400, now=now), _partner_token(5400, generation=1, now=now)
     api = FakeComfyApi(accepted=set(), renewed_token=fresh)
 
     result = asyncio.run(_with_server(api, monkeypatch, lambda: _generate(_node(rejected))))
