@@ -34,6 +34,8 @@ from ._helpers import (
     get_comfy_api_headers,
     get_node_id,
     is_processing_interrupted,
+    refresh_partner_token,
+    renew_rejected_partner_token,
     sleep_with_interrupt,
 )
 from .common_exceptions import ApiServerError, LocalNetworkError, ProcessingInterrupted
@@ -897,6 +899,7 @@ async def _request_base(cfg: _RequestConfig, expect_binary: bool):
     rate_limit_attempts = 0
     rate_limit_delay = cfg.retry_delay
     in_flight_waits = 0
+    auth_renewed = False
     operation_succeeded: bool = False
     final_elapsed_seconds: int | None = None
     extracted_price: float | None = None
@@ -912,6 +915,7 @@ async def _request_base(cfg: _RequestConfig, expect_binary: bool):
 
         payload_headers = {"Accept": "*/*"} if expect_binary else {"Accept": "application/json"}
         if is_comfy_api_request:
+            await refresh_partner_token(cfg.node_cls)
             payload_headers.update(get_comfy_api_headers(cfg.node_cls))
         if cfg.endpoint.headers:
             payload_headers.update(cfg.endpoint.headers)
@@ -993,6 +997,24 @@ async def _request_base(cfg: _RequestConfig, expect_binary: bool):
                             error_message=msg,
                         )
                         raise Exception(msg)
+                    # A request rejected by comfy-api authentication never reached a provider, so resending it is safe.
+                    if (
+                        resp.status == 401
+                        and is_comfy_api_request
+                        and not auth_renewed
+                        and await renew_rejected_partner_token(payload_headers.get("Authorization"))
+                    ):
+                        auth_renewed = True
+                        request_logger.log_request_response(
+                            operation_id=operation_id,
+                            request_method=method,
+                            request_url=url,
+                            response_status_code=resp.status,
+                            response_headers=dict(resp.headers),
+                            response_content=body,
+                            error_message="HTTP 401 (sign-in token renewed, resending once)",
+                        )
+                        continue
                     should_retry = False
                     in_flight = False
                     wait_time = 0.0

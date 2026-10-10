@@ -1,5 +1,9 @@
 import asyncio
+import base64
+import binascii
 import contextlib
+import json
+import logging
 import os
 import re
 import time
@@ -7,7 +11,7 @@ from collections.abc import Callable
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from io import BytesIO
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
 
 import aiohttp
 from aiohttp.client_exceptions import ClientError
@@ -37,9 +41,111 @@ def get_node_id(node_cls: type[IO.ComfyNode]) -> str:
     return node_cls.hidden.unique_id
 
 
+PARTNER_NODE_TOKEN_AUDIENCE = "comfy-partner-node"
+PARTNER_NODE_TOKEN_RENEW_PATH = "/auth/partner-node/renew"
+_PARTNER_NODE_TOKEN_RENEW_MARGIN = 300.0  # renew a partner-node token this many seconds before it expires
+
+_renewed_partner_tokens: dict[str, str] = {}
+"""Newest renewed partner-node token per session id (``sid``). In memory only; renewal does not rotate the token."""
+_partner_token_renewals: dict[str, asyncio.Task] = {}
+
+
+def _partner_token_claims(token: str) -> dict | None:
+    """Unverified JWT payload of a partner-node token, or None for any other credential.
+
+    The signature is not checked: the claims only decide when to renew, comfy-api still validates the token.
+    """
+    parts = token.split(".")
+    if len(parts) != 3:
+        return None
+    try:
+        claims = json.loads(base64.urlsafe_b64decode(parts[1] + "=" * (-len(parts[1]) % 4)))
+    except (ValueError, binascii.Error):
+        return None
+    if not isinstance(claims, dict) or claims.get("aud") not in (PARTNER_NODE_TOKEN_AUDIENCE, [PARTNER_NODE_TOKEN_AUDIENCE]):
+        return None
+    if not isinstance(claims.get("sid"), str) or not isinstance(claims.get("exp"), (int, float)):
+        return None
+    return claims
+
+
+def _newest_partner_token(token: str, claims: dict) -> tuple[str, float]:
+    renewed = _renewed_partner_tokens.get(claims["sid"])
+    if renewed is not None:
+        renewed_exp = _partner_token_claims(renewed)["exp"]
+        if renewed_exp > claims["exp"]:
+            return renewed, renewed_exp
+    return token, claims["exp"]
+
+
+async def _request_partner_token_renewal(sid: str, token: str) -> str | None:
+    url = urljoin(default_base_url().rstrip("/") + "/", PARTNER_NODE_TOKEN_RENEW_PATH.lstrip("/"))
+    try:
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30.0)) as session:
+            async with session.post(url, headers={"Authorization": f"Bearer {token}"}) as resp:
+                if resp.status >= 400:
+                    logging.warning("Comfy API refused to renew the sign-in token (HTTP %s).", resp.status)
+                    if resp.status in (401, 403):
+                        _renewed_partner_tokens.pop(sid, None)
+                    return None
+                body = await resp.json(content_type=None)
+    except (ClientError, OSError, asyncio.TimeoutError, ValueError) as e:
+        logging.warning("Could not renew the sign-in token: %s", type(e).__name__)
+        return None
+    renewed = body.get("token") if isinstance(body, dict) else None
+    claims = _partner_token_claims(renewed) if isinstance(renewed, str) else None
+    if claims is None or claims["sid"] != sid:
+        logging.warning("Comfy API returned an unusable renewed sign-in token.")
+        return None
+    _renewed_partner_tokens[sid] = renewed
+    return renewed
+
+
+async def _renew_partner_token(sid: str, token: str) -> str | None:
+    """Renew once per session at a time; concurrent callers share the in-flight renewal."""
+    task = _partner_token_renewals.get(sid)
+    if task is None or task.done() or task.get_loop() is not asyncio.get_running_loop():
+        task = asyncio.create_task(_request_partner_token_renewal(sid, token))
+        _partner_token_renewals[sid] = task
+        task.add_done_callback(lambda t: _partner_token_renewals.pop(sid, None) if _partner_token_renewals.get(sid) is t else None)
+    return await asyncio.shield(task)
+
+
+async def refresh_partner_token(node_cls: type[IO.ComfyNode]) -> None:
+    """Renew the node's partner-node token if it expires soon. Any other credential is left untouched."""
+    token = node_cls.hidden.auth_token_comfy_org
+    claims = _partner_token_claims(token) if token else None
+    if claims is None:
+        return
+    newest, exp = _newest_partner_token(token, claims)
+    if exp - time.time() < _PARTNER_NODE_TOKEN_RENEW_MARGIN:
+        await _renew_partner_token(claims["sid"], newest)
+
+
+async def renew_rejected_partner_token(authorization: str | None) -> bool:
+    """After comfy-api rejected ``authorization`` with a 401, make a fresh partner-node token current.
+
+    Returns True when a resend would carry a different, fresh token.
+    """
+    if not authorization or not authorization.startswith("Bearer "):
+        return False
+    rejected = authorization[len("Bearer "):]
+    claims = _partner_token_claims(rejected)
+    if claims is None:
+        return False
+    newest, exp = _newest_partner_token(rejected, claims)
+    if newest != rejected and exp - time.time() >= _PARTNER_NODE_TOKEN_RENEW_MARGIN:
+        return True
+    return await _renew_partner_token(claims["sid"], newest) is not None
+
+
 def get_auth_header(node_cls: type[IO.ComfyNode]) -> dict[str, str]:
-    if node_cls.hidden.auth_token_comfy_org:
-        return {"Authorization": f"Bearer {node_cls.hidden.auth_token_comfy_org}"}
+    token = node_cls.hidden.auth_token_comfy_org
+    if token:
+        claims = _partner_token_claims(token)
+        if claims is not None:
+            token = _newest_partner_token(token, claims)[0]
+        return {"Authorization": f"Bearer {token}"}
     if node_cls.hidden.api_key_comfy_org:
         return {"X-API-KEY": node_cls.hidden.api_key_comfy_org}
     return {}
