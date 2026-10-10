@@ -246,15 +246,19 @@ def test_startup_runs_against_memory_db_without_starting_a_scanner_thread(
     seeder_start.assert_called_once_with()
 
 
-def test_ensure_scan_started_starts_the_lazy_object_info_scan(
-    enabled_manager: AssetsEnabled, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("hashing", [False, True])
+def test_ensure_scan_started_hands_the_node_list_scan_to_the_seeder(
+    monkeypatch: pytest.MonkeyPatch, hashing: bool
 ) -> None:
-    seeder_start = MagicMock()
-    monkeypatch.setattr(asset_seeder, "start", seeder_start)
+    class _Args(_ArgsStub):
+        enable_asset_hashing = hashing
 
-    enabled_manager.ensure_scan_started()
+    after_node_list = MagicMock()
+    monkeypatch.setattr(asset_seeder, "start_after_node_list", after_node_list)
 
-    seeder_start.assert_called_once_with(roots=("models", "input"))
+    AssetsEnabled(_Args()).ensure_scan_started()
+
+    after_node_list.assert_called_once_with(roots=("models", "input"), compute_hashes=hashing)
 
 
 def test_shutdown_runs_lifecycle_cleanup_when_seeder_shutdown_times_out(
