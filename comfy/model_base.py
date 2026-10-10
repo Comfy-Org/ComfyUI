@@ -2200,12 +2200,10 @@ class MiniMaxH3(BaseModel):
         if keyframes is not None:
             payload["keyframes"] = keyframes
             payload["cond_video_latents"] = [kf["latent"] for kf in keyframes if kf.get("latent") is not None]
-            payload["cond_audio_latents"] = [kf["audio_latent"] for kf in keyframes if kf.get("audio_latent") is not None]
         refs = kwargs.get("minimax_refs", None)
         if refs is not None:
             payload["refs"] = refs
             payload["cond_video_latents"] = payload.get("cond_video_latents", []) + [r["latent"] for r in refs if "latent" in r]
-            payload["cond_audio_latents"] = payload.get("cond_audio_latents", []) + [r["audio_latent"] for r in refs if r.get("audio_latent") is not None]
         if kwargs.get("minimax_visual_cond_noise_aug", None) is not None:
             payload["visual_cond_noise_aug"] = kwargs["minimax_visual_cond_noise_aug"]
         if kwargs.get("minimax_audio_cond_noise_aug", None) is not None:
