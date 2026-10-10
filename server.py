@@ -45,6 +45,7 @@ import node_helpers
 from comfyui_version import __version__
 from app.frontend_management import FrontendManager, parse_version
 from comfy_api.internal import _ComfyNodeInternal
+from app.assets.downloads.routes import create_download_service, register_download_routes
 from app.assets.event_log import emit
 from app.database.db import dependencies_available
 
@@ -319,6 +320,15 @@ class PromptServer():
             self.asset_export_manager.register_routes(self.app)
         if self.asset_manager.enabled:
             emit("assets.enabled", hashing_enabled=args.enable_asset_hashing)
+        if not args.offline:
+            register_download_routes(
+                self.app,
+                create_download_service(
+                    folder_paths.base_path,
+                    self.send_sync,
+                    self.asset_manager.queue_model_scan,
+                ),
+            )
         routes = web.RouteTableDef()
         self.routes = routes
         self.last_node_id = None

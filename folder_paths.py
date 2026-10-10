@@ -11,6 +11,11 @@ supported_pt_extensions: set[str] = {'.ckpt', '.pt', '.pt2', '.bin', '.pth', '.s
 
 folder_names_and_paths: dict[str, tuple[list[str], set[str]]] = {}
 
+# Categories in folder_names_and_paths that do not hold loadable models.
+# custom_nodes is executable code ComfyUI imports at startup, so any code path
+# that writes a file into a category chosen by a caller must exclude these.
+non_model_folder_names: frozenset[str] = frozenset({"configs", "custom_nodes"})
+
 # --base-directory - Resets all default paths configured in folder_paths with a new base path
 if args.base_directory:
     base_path = os.path.abspath(args.base_directory)
@@ -516,6 +521,18 @@ def get_filename_list(folder_name: str) -> list[str]:
         filename_list_cache[folder_name] = out
     cache_helper.set(folder_name, out)
     return list(out[0])
+
+def invalidate_filename_list_cache(folder_name: str) -> None:
+    """Drop the persistent listing cache for one folder.
+
+    The cache validates itself on directory mtimes, which a coarse filesystem
+    timestamp can hide right after a file is written into a directory that was
+    already listed in the same second. The request-scoped strong cache is left
+    alone so a response already being built stays self-consistent.
+    """
+    folder_name = map_legacy(folder_name)
+    global filename_list_cache
+    filename_list_cache.pop(folder_name, None)
 
 def get_save_image_path(filename_prefix: str, output_dir: str, image_width=0, image_height=0) -> tuple[str, str, int, str, str]:
     def map_filename(filename: str) -> tuple[int, str]:

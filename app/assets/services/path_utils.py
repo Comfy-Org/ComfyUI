@@ -3,10 +3,10 @@ from pathlib import Path
 from typing import Literal
 
 import folder_paths
+from folder_paths import non_model_folder_names as _NON_MODEL_FOLDER_NAMES
 from app.assets.helpers import cached_prefix_matcher
 
 
-_NON_MODEL_FOLDER_NAMES = frozenset({"configs", "custom_nodes"})
 _KNOWN_SUBFOLDER_TAGS = frozenset({"3d", "pasted", "painter", "threed", "webcam"})
 
 

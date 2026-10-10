@@ -49,6 +49,8 @@ class AssetManager(Protocol):
 
     def queue_output_scan(self) -> None: ...
 
+    def queue_model_scan(self) -> None: ...
+
     def resume_background_scan(self) -> None: ...
 
     def register_upload(
@@ -115,6 +117,9 @@ class NoAssets:
     def queue_output_scan(self) -> None:
         return None
 
+    def queue_model_scan(self) -> None:
+        return None
+
     def resume_background_scan(self) -> None:
         return None
 
@@ -172,6 +177,16 @@ class AssetsEnabled:
 
     def queue_output_scan(self) -> None:
         return None
+
+    def queue_model_scan(self) -> None:
+        if not asset_seeder.is_disabled():
+            # FULL for the same reason as outputs: only a walk finds a file the
+            # catalog was never told about, which is what a finished download is.
+            asset_seeder.enqueue_scan(
+                roots=("models",),
+                phase=ScanPhase.FULL,
+                compute_hashes=self._args.enable_asset_hashing,
+            )
 
     def resume_background_scan(self) -> None:
         asset_seeder.resume()
