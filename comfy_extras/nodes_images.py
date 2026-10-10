@@ -1010,6 +1010,13 @@ _FORMAT_SPECS = {
     ("exr", "32-bit float", 4): {"scale": 1.0, "dtype": np.float32, "frame_fmt": "gbrapf32le", "stream_fmt": "gbrapf32le"},
 }
 
+_EXR_COMPRESSION_OPTIONS = {
+    "none": "none",
+    "rle": "rle",
+    "zips": "zip1",
+    "zip": "zip16",
+}
+
 _AVIF_COLOR_PROPERTIES = {
     "sRGB": (ColorPrimaries.BT709, ColorTrc.IEC61966_2_1, 1),
     "HDR": (ColorPrimaries.BT2020, ColorTrc.ARIB_STD_B67, 9),
@@ -1644,6 +1651,7 @@ def _encode_image(
     file_format: str,
     bit_depth: str,
     colorspace: str,
+    compression: str,
 ) -> bytes:
     """Encode a single HxWxC (or channel-less HxW grayscale) tensor to PNG or
     EXR bytes in memory. Grayscale is written as single-channel PNG / Y-only EXR.
@@ -1695,7 +1703,10 @@ def _encode_image(
     codec.pix_fmt = spec["stream_fmt"]
     codec.time_base = Fraction(1, 1)
     if file_format == "exr":
-        codec.options = {"format": "half" if bit_depth == "16-bit float" else "float"}
+        codec.options = {
+            "format": "half" if bit_depth == "16-bit float" else "float",
+            "compression": _EXR_COMPRESSION_OPTIONS[compression],
+        }
 
     frame = av.VideoFrame.from_ndarray(img_np, format=spec["frame_fmt"])
     if spec["frame_fmt"] != spec["stream_fmt"]:
@@ -1812,6 +1823,13 @@ class SaveImageAdvanced(IO.ComfyNode):
                                     "linear — input is already scene-linear (Rec.709 primaries); written through unchanged. Use this for renderer/compositor output."
                                 ),
                             ),
+                            IO.Combo.Input(
+                                "compression",
+                                options=["none", "rle", "zips", "zip"],
+                                default="zip",
+                                advanced=True,
+                                tooltip="EXR compression. ZIP, ZIPS, and RLE are lossless; none is uncompressed.",
+                            ),
                         ]),
                         IO.DynamicCombo.Option("avif", [
                             IO.Combo.Input(
@@ -1869,6 +1887,7 @@ class SaveImageAdvanced(IO.ComfyNode):
         file_format = format["format"]
         bit_depth = format["bit_depth"]
         colorspace = format.get("input_color_space", "sRGB")
+        compression = format.get("compression", "zip")
 
         output_dir = folder_paths.get_output_directory()
         full_output_folder, filename, counter, subfolder, filename_prefix = (
@@ -1914,7 +1933,7 @@ class SaveImageAdvanced(IO.ComfyNode):
             return IO.NodeOutput(images, ui=ui)
 
         for batch_number, image in enumerate(images):
-            encoded = _encode_image(image, file_format, bit_depth, colorspace)
+            encoded = _encode_image(image, file_format, bit_depth, colorspace, compression)
 
             if write_metadata:
                 if file_format == "png":
