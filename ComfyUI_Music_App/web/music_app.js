@@ -240,7 +240,7 @@ async function renderMusicApp(element) {
   const root = document.createElement("main");
   root.className = "comfy-music-app";
   root.innerHTML = `
-    <h2>Estúdio de música</h2>
+    <h2>VØLTR 7</h2>
     <p class="comfy-music-note">Gere uma faixa com voz cantada usando o ACE-Step 1.5 já integrado ao ComfyUI.</p>
     <div class="comfy-music-mode" role="radiogroup" aria-label="Como preparar a letra">
       <label><input type="radio" name="comfy-music-mode" value="write" checked> Escrever minha letra</label>
@@ -420,8 +420,8 @@ app.registerExtension({
     app.extensionManager.registerSidebarTab({
       id: "comfy-music-app",
       icon: "pi pi-headphones",
-      title: "Música",
-      tooltip: "Estúdio de música",
+      title: "VØLTR 7",
+      tooltip: "Estúdio de música VØLTR 7",
       type: "custom",
       render: renderMusicApp,
     });
