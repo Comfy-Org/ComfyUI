@@ -4,6 +4,7 @@ import io
 import json
 import socket
 import subprocess
+import threading
 import time
 import urllib.request
 import uuid
@@ -101,10 +102,29 @@ def _get(base: str, path: str):
 @pytest.mark.execution
 def test_saved_exr_frames_carry_their_preview(server):
     base, previews_dir = server
-    prompt, save_id = _exr_save_graph(f"exr_{uuid.uuid4().hex[:8]}", batch_size=3)
+    prefix = f"exr_{uuid.uuid4().hex[:8]}"
+    prompt, save_id = _exr_save_graph(prefix, batch_size=3)
+    unlinked, done = [], threading.Event()
 
-    executed, prompt_id = _run(base, prompt)
+    def poll_listing():
+        # Every listing while the job runs: an output is never visible without its preview.
+        while not done.is_set():
+            for asset in _get(base, "/api/assets?include_tags=output&limit=500")["assets"]:
+                if asset["name"].startswith(prefix) and not asset.get("preview_id"):
+                    unlinked.append(asset["name"])
+            time.sleep(0.01)
+
+    poller = threading.Thread(target=poll_listing)
+    poller.start()
+    try:
+        executed, prompt_id = _run(base, prompt)
+    finally:
+        done.set()
+        poller.join()
     entries = executed[save_id]["images"]
+    assert unlinked == [], "an output was listed before its preview was linked"
+    listed = [a for a in _get(base, "/api/assets?include_tags=output&limit=500")["assets"] if a["name"].startswith(prefix)]
+    assert len(listed) == 3 and all(a.get("preview_id") for a in listed), "the poll's query finds these outputs"
 
     assert len(entries) == 3
     for entry in entries:

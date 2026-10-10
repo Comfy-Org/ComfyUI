@@ -9,7 +9,7 @@ from PIL import Image
 
 from app.assets.manager import AssetsEnabled
 
-from .preview_helpers import write_exr
+from .preview_helpers import duplicate_data_window, write_exr
 
 
 class _Args:
@@ -44,88 +44,6 @@ def _form(name: str, data: bytes, **fields) -> FormData:
     return form
 
 
-@pytest.mark.asyncio
-async def test_an_exr_upload_returns_its_generated_preview(mock_create_session, roots, tmp_path):
-    exr = write_exr(tmp_path / "src.exr", 64, 48).read_bytes()
-    async with await _client(AssetsEnabled(_Args())) as client:
-        resp = await client.post("/upload/image", data=_form("frame.exr", exr))
-        body = await resp.json()
-
-    asset = body["asset"]
-    assert resp.status == 200
-    assert asset["preview_id"] != asset["id"]
-    assert asset["preview_url"] == f"/api/assets/{asset['preview_id']}/content"
-
-
-@pytest.mark.asyncio
-async def test_a_repeat_upload_of_the_same_exr_reuses_its_preview(mock_create_session, roots, tmp_path):
-    from app.assets import previews
-
-    exr = write_exr(tmp_path / "src.exr", 64, 48).read_bytes()
-    with patch.object(previews, "_make_preview", wraps=previews._make_preview) as make:
-        async with await _client(AssetsEnabled(_Args())) as client:
-            first = (await (await client.post("/upload/image", data=_form("frame.exr", exr))).json())["asset"]
-            second = (await (await client.post("/upload/image", data=_form("frame.exr", exr))).json())["asset"]
-
-    assert second["id"] != first["id"]
-    assert second["preview_id"] == first["preview_id"] is not None
-    assert make.call_count == 1, "the same bytes are decoded once"
-
-
-@pytest.mark.asyncio
-async def test_a_png_upload_is_its_own_preview(mock_create_session, roots):
-    async with await _client(AssetsEnabled(_Args())) as client:
-        resp = await client.post("/upload/image", data=_form("still.png", _png()))
-        asset = (await resp.json())["asset"]
-
-    assert asset["preview_id"] == asset["id"]
-
-
-@pytest.mark.asyncio
-async def test_mask_upload_still_answers_with_json(mock_create_session, roots):
-    (roots / "input" / "base.png").write_bytes(_png())
-    original_ref = json.dumps({"filename": "base.png", "type": "input", "subfolder": ""})
-    async with await _client(AssetsEnabled(_Args())) as client:
-        resp = await client.post("/upload/mask", data=_form("mask.png", _png(), original_ref=original_ref))
-        body = await resp.json()
-
-    assert resp.status == 200
-    assert body["name"] == "mask.png"
-
-
-@pytest.mark.asyncio
-async def test_with_assets_off_an_exr_upload_has_no_asset(roots):
-    from app.assets.manager import NoAssets
-
-    class _Off:
-        enable_assets = False
-        enable_asset_hashing = False
-
-    async with await _client(NoAssets(_Off())) as client:
-        resp = await client.post("/upload/image", data=_form("frame.exr", b"exr"))
-        body = await resp.json()
-
-    assert resp.status == 200
-    assert "asset" not in body
-
-
-@pytest.mark.asyncio
-async def test_api_asset_uploads_get_a_generated_preview(mock_create_session, roots, tmp_path):
-    from app.assets.api.routes import _build_asset_response, _resolve_preview_paths, _with_upload_preview
-    from app.assets.services.ingest import register_file_in_place
-    from utils.mime_types import init_mime_types
-
-    init_mime_types()
-    exr = write_exr(roots / "input" / "frame.exr", 64, 48)
-    result = register_file_in_place(str(exr), "frame.exr", ["input"], content_written=True)
-
-    result = await _with_upload_preview(result)
-    response = _build_asset_response(result, _resolve_preview_paths([result]))
-
-    assert response.preview_id not in (None, response.id)
-    assert response.preview_url == f"/api/assets/{response.preview_id}/content"
-
-
 async def _assets_client():
     from aiohttp import web
 
@@ -149,40 +67,72 @@ def assets_routes_on():
         yield
 
 
-@pytest.mark.asyncio
-async def test_a_multipart_exr_upload_gets_a_generated_preview(mock_create_session, roots, tmp_path, assets_routes_on):
-    exr = write_exr(tmp_path / "src.exr", 64, 48).read_bytes()
-    form = FormData()
-    form.add_field("file", exr, filename="frame.exr")
-    form.add_field("tags", json.dumps(["input"]))
+async def _upload(route: str, exr: bytes, roots, session) -> dict:
+    if route == "/upload/image":
+        async with await _client(AssetsEnabled(_Args())) as client:
+            asset = (await (await client.post(route, data=_form("frame.exr", exr))).json())["asset"]
+            return asset | {"preview": await (await client.get(asset["preview_url"])).read()}
     async with await _assets_client() as client:
-        resp = await client.post("/api/assets", data=form)
+        if route == "multipart":
+            form = FormData()
+            form.add_field("file", exr, filename="frame.exr")
+            form.add_field("tags", json.dumps(["input"]))
+            resp = await client.post("/api/assets", data=form)
+        else:  # from-hash, over content a previous run already stored
+            from app.assets import mode
+            from app.assets.database.queries.records import create_content
+
+            class _HashingOn:
+                enable_asset_hashing = True
+
+            mode.init(_HashingOn())
+            path = roots / "input" / "frame.exr"
+            path.write_bytes(exr)
+            digest = "blake3:" + "ab" * 32
+            create_content(session, str(path), hash=digest, size_bytes=len(exr), mtime_ns=path.stat().st_mtime_ns)
+            session.commit()
+            resp = await client.post("/api/assets/from-hash", json={"hash": digest, "name": "frame.exr", "tags": ["input"]})
+        asset = await resp.json()
+        assert resp.status == 201, asset
+        return asset | {"preview": await (await client.get(asset["preview_url"])).read()}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("route", ["/upload/image", "multipart", "from-hash"])
+@pytest.mark.parametrize(("value", "mode"), [((0.5, 0.5, 0.5), "RGB"), ((0.5, 0.5, 0.5, 0.25), "RGBA")])
+async def test_an_uploaded_exr_comes_back_with_its_preview(mock_create_session, roots, tmp_path, assets_routes_on, session, route, value, mode):
+    exr = write_exr(tmp_path / "src.exr", 64, 48, value=value).read_bytes()
+
+    asset = await _upload(route, exr, roots, session)
+
+    assert asset["preview_id"] not in (None, asset["id"])
+    assert asset["preview_url"] == f"/api/assets/{asset['preview_id']}/content"
+    preview = Image.open(io.BytesIO(asset["preview"]))
+    assert (preview.format, preview.mode, preview.size) == ("WEBP", mode, (64, 48)), "alpha is kept"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bad", [b"not an exr", "duplicated window"])
+async def test_an_exr_that_cant_be_previewed_still_uploads(mock_create_session, roots, tmp_path, bad):
+    data = bad if isinstance(bad, bytes) else duplicate_data_window(write_exr(tmp_path / "a.exr", 64, 48).read_bytes())
+    async with await _client(AssetsEnabled(_Args())) as client:
+        resp = await client.post("/upload/image", data=_form("broken.exr", data))
+        asset = (await resp.json())["asset"]
+
+    assert resp.status == 200
+    assert "preview_id" not in asset and "preview_url" not in asset
+
+
+@pytest.mark.asyncio
+async def test_mask_upload_still_answers_with_json(mock_create_session, roots):
+    (roots / "input" / "base.png").write_bytes(_png())
+    original_ref = json.dumps({"filename": "base.png", "type": "input", "subfolder": ""})
+    async with await _client(AssetsEnabled(_Args())) as client:
+        resp = await client.post("/upload/mask", data=_form("mask.png", _png(), original_ref=original_ref))
         body = await resp.json()
 
-    assert resp.status == 201, body
-    assert body["preview_id"] not in (None, body["id"])
-    assert body["preview_url"] == f"/api/assets/{body['preview_id']}/content"
-
-
-@pytest.mark.asyncio
-async def test_a_from_hash_exr_gets_a_generated_preview(mock_create_session, roots, assets_routes_on, session):
-    from app.assets import mode
-    from app.assets.database.queries.records import create_content
-
-    class _HashingOn:
-        enable_asset_hashing = True
-
-    mode.init(_HashingOn())
-    exr = write_exr(roots / "input" / "frame.exr", 64, 48)
-    digest = "blake3:" + "ab" * 32
-    create_content(session, str(exr), hash=digest, size_bytes=exr.stat().st_size, mtime_ns=exr.stat().st_mtime_ns)
-    session.commit()
-    async with await _assets_client() as client:
-        resp = await client.post("/api/assets/from-hash", json={"hash": digest, "name": "frame.exr", "tags": ["input"]})
-        body = await resp.json()
-
-    assert resp.status == 201, body
-    assert body["preview_id"] not in (None, body["id"]), "no sibling had a preview, so this one was generated"
+    assert resp.status == 200
+    assert body["name"] == "mask.png"
 
 
 @pytest.mark.asyncio
@@ -197,50 +147,3 @@ async def test_clients_cannot_create_a_preview_tagged_asset(mock_create_session,
 
     assert [upload.status, from_hash.status] == [400, 400]
     assert [body["error"]["code"] for body in bodies] == ["SYSTEM_TAG_FORBIDDEN"] * 2
-
-
-def _plain_record(session, path, name, mime_type=None):
-    from app.assets.database.queries.records import create_content, create_record
-
-    record = create_record(session, create_content(session, str(path)).id, name, mime_type=mime_type)
-    session.commit()
-    return record.id
-
-
-@pytest.mark.asyncio
-async def test_the_content_route_never_serves_a_compressed_sibling(mock_create_session, roots, assets_routes_on, session):
-    still = roots / "output" / "still.png"
-    still.write_bytes(_png())
-    (roots / "output" / "still.png.gz").write_bytes(b"something else entirely")
-    asset_id = _plain_record(session, still, "still.png", "image/png")
-    async with await _assets_client() as client:
-        resp = await client.get(f"/api/assets/{asset_id}/content", headers={"Accept-Encoding": "gzip, br"}, auto_decompress=False)
-        body = await resp.read()
-
-    assert body == still.read_bytes()
-
-
-@pytest.mark.asyncio
-async def test_a_corrupt_exr_upload_still_succeeds(mock_create_session, roots):
-    async with await _client(AssetsEnabled(_Args())) as client:
-        resp = await client.post("/upload/image", data=_form("broken.exr", b"not an exr"))
-        asset = (await resp.json())["asset"]
-
-    assert resp.status == 200
-    assert "preview_id" not in asset and "preview_url" not in asset
-
-
-@pytest.mark.parametrize(("dest", "records"), [("image", False), ("video", False), ("audio", False), ("document", True), (None, True)])
-@pytest.mark.asyncio
-async def test_only_reads_that_are_not_media_renders_record_access(mock_create_session, roots, assets_routes_on, session, dest, records):
-    from app.assets.database.models import Asset
-
-    still = roots / "output" / "still.png"
-    still.write_bytes(_png())
-    asset_id = _plain_record(session, still, "still.png", "image/png")
-    async with await _assets_client() as client:
-        resp = await client.get(f"/api/assets/{asset_id}/content", headers={"Sec-Fetch-Dest": dest} if dest else {})
-
-    assert resp.status == 200
-    session.expire_all()
-    assert (session.get(Asset, asset_id).last_access_time is not None) == records

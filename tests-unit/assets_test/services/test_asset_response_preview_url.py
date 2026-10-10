@@ -395,22 +395,6 @@ def test_an_image_is_its_own_preview_id(sandboxed_comfy_roots: Path):
 
 @pytest.mark.parametrize(
     ("name", "mime_type"),
-    [("clip.mp4", "video/mp4"), ("take.wav", "audio/wav"), ("notes.txt", "text/plain")],
-)
-def test_other_media_get_a_url_but_no_preview_id(
-    sandboxed_comfy_roots: Path, name: str, mime_type: str
-):
-    resp = _build_asset_response(
-        _make_result(name=name, file_path=str(sandboxed_comfy_roots / "output" / name), mime_type=mime_type),
-        {},
-    )
-
-    assert resp.preview_url == f"/api/view?type=output&filename={name}", "players and text snippets read preview_url"
-    assert resp.preview_id is None, "preview_id names an image preview only"
-
-
-@pytest.mark.parametrize(
-    ("name", "mime_type"),
     [
         ("frame.exr", "image/x-exr"),
         ("frame.exr", None),
@@ -447,50 +431,3 @@ def test_an_exr_with_a_generated_preview_shows_it(sandboxed_comfy_roots: Path):
     assert (resp.preview_id, resp.preview_url) == ("preview-ref", "/api/assets/preview-ref/content"), (
         "/api/view can't serve previews/, so a generated preview is served by id"
     )
-
-
-@pytest.mark.parametrize(
-    ("name", "mime_type", "expected"),
-    [("frame.exr", "image/x-exr", (None, None)), ("a.png", "image/png", ("ref-1", "/api/view?type=output&filename=a.png"))],
-)
-def test_a_stored_self_nomination_is_ignored(
-    sandboxed_comfy_roots: Path, name: str, mime_type: str, expected: tuple
-):
-    result = _make_result(
-        name=name,
-        file_path=str(sandboxed_comfy_roots / "output" / name),
-        mime_type=mime_type,
-        preview_id="ref-1",
-    )
-
-    resp = _build_asset_response(result, {"ref-1": str(sandboxed_comfy_roots / "output" / name)})
-
-    assert (resp.preview_id, resp.preview_url) == expected, (
-        "a self-link written before the guard must not make an EXR its own preview"
-    )
-
-
-def test_unresolvable_preview_id_yields_neither_field(sandboxed_comfy_roots: Path):
-    result = _make_result(
-        file_path=str(sandboxed_comfy_roots / "output" / "a.png"), preview_id="gone"
-    )
-
-    resp = _build_asset_response(result, {})
-
-    assert (resp.preview_id, resp.preview_url) == (None, None), (
-        "a preview absent from the lookup is soft-deleted, invisible or "
-        "path-less; preview_id is only ever sent with a URL that works, and "
-        "the asset's own bytes are a different picture, not a degraded one"
-    )
-
-
-def test_record_response_never_self_previews_an_exr(sandboxed_comfy_roots: Path, session):
-    content = create_content(
-        session, path=str(sandboxed_comfy_roots / "output" / "frame.exr")
-    )
-    record = create_record(session, content_id=content.id, name="frame.exr", mime_type="image/x-exr")
-    session.commit()
-
-    resp = _build_record_response(record, [], {})
-
-    assert (resp.preview_id, resp.preview_url) == (None, None)

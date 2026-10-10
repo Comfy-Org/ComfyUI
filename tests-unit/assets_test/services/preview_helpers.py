@@ -45,3 +45,11 @@ def write_preview(roots: Path, size=(4, 3), color=(200, 100, 50), alpha=False) -
     filename = f"{blake3(data).hexdigest()}.{'webp' if alpha else 'jpg'}"
     (roots / "previews" / filename).write_bytes(data)
     return {"filename": filename, "width": size[0], "height": size[1]}
+
+
+def duplicate_data_window(data: bytes) -> bytes:
+    """An EXR header with its dataWindow attribute repeated."""
+    key = b"dataWindow\x00box2i\x00"
+    at = data.find(key)
+    end = at + len(key) + 4 + 16
+    return data[:end] + data[at:end] + data[end:]

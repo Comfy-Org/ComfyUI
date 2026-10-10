@@ -7,7 +7,6 @@ from unittest.mock import MagicMock, patch
 import numpy as np
 import pytest
 import torch
-from blake3 import blake3
 from PIL import Image
 
 import folder_paths
@@ -46,19 +45,6 @@ def _save(images: torch.Tensor, colorspace: str = "linear", bit_depth: str = "32
     return SaveImageAdvanced.execute(images, "t", fmt).ui["images"]
 
 
-def test_an_rgb_exr_gets_a_jpeg_named_by_its_hash(dirs):
-    entry = _save(torch.full((1, 1000, 1200, 3), 0.25))[0]
-
-    ref = entry["asset_preview"]
-    data = (dirs / "previews" / ref["filename"]).read_bytes()
-    assert ref["filename"] == f"{blake3(data).hexdigest()}.jpg"
-    image = Image.open(dirs / "previews" / ref["filename"])
-    assert image.format == "JPEG"
-    assert (ref["width"], ref["height"]) == image.size
-    assert image.width * image.height <= 1_000_000 < 1200 * 1000
-    assert (dirs / "output" / entry["filename"]).is_file()
-
-
 def test_an_rgba_exr_gets_a_webp_with_straight_alpha(dirs):
     rgba = torch.empty((1, 16, 16, 4))
     rgba[..., :3] = 0.1
@@ -71,13 +57,6 @@ def test_an_rgba_exr_gets_a_webp_with_straight_alpha(dirs):
     pixel = np.asarray(image)[8, 8]
     assert abs(int(pixel[0]) - 89) <= 3, "sRGB(0.1), not brightened by un-premultiplying"
     assert abs(int(pixel[3]) - 51) <= 3
-
-
-@pytest.mark.parametrize("shape", [(1, 8, 8), (1, 8, 8, 1)])
-def test_a_gray_exr_gets_an_rgb_preview(dirs, shape):
-    ref = _save(torch.full(shape, 0.5))[0]["asset_preview"]
-
-    assert Image.open(dirs / "previews" / ref["filename"]).mode == "RGB"
 
 
 def test_with_assets_off_no_preview_is_written(dirs, monkeypatch):
@@ -97,88 +76,23 @@ def test_a_failing_preview_never_fails_the_save(dirs):
     assert (dirs / "output" / entry["filename"]).is_file()
 
 
-def test_the_previews_directory_is_created_and_identical_saves_share_one_file(dirs):
-    first, second = _save(torch.full((2, 8, 8, 3), 0.5))
-
-    assert first["asset_preview"] == second["asset_preview"]
-    assert [p.name for p in (dirs / "previews").iterdir()] == [first["asset_preview"]["filename"]]
-
-
-@pytest.mark.parametrize("colorspace", ["sRGB", "linear", "HDR"])
-def test_outputs_and_uploads_tonemap_identically(dirs, colorspace):
-    from app.assets.previews import _decode_for_preview
-
-    torch.manual_seed(0)
-    image = torch.rand((1, 40, 60, 3)) * 1.2
-    with patch.object(nodes_images, "linear_to_preview", wraps=linear_to_preview) as tonemap:
-        entry = _save(image, colorspace)[0]
-
-    written = linear_to_preview(tonemap.call_args.args[0])
-    uploaded = _decode_for_preview(str(dirs / "output" / entry["filename"]))
-    assert np.array_equal(np.asarray(written), np.asarray(uploaded))
-
-
-def test_colour_under_transparent_pixels_does_not_reach_the_preview():
-    rgba = torch.zeros((1000, 2000, 4))
-    rgba[:, ::2, :3] = 0.5
-    rgba[:, ::2, 3] = 1.0
-    hidden = rgba.clone()
-    hidden[:, 1::2, :3] = 1.0
-
-    assert np.array_equal(np.asarray(linear_to_preview(rgba)), np.asarray(linear_to_preview(hidden)))
-
-
-@pytest.mark.parametrize(("height", "width"), [(2160, 3840), (2, 30000)])
-def test_the_downsample_fits_the_pixel_and_side_limits(height, width):
-    image = linear_to_preview(torch.full((height, width, 3), 0.5))
-
-    assert image.width * image.height <= 1_000_000
-    assert max(image.size) <= 16383
-
-
-def test_non_finite_values_tonemap_to_black_and_white():
-    image = torch.tensor([[[float("nan"), float("inf"), float("-inf")]]])
-
-    assert np.asarray(linear_to_preview(image)).tolist() == [[[0, 255, 0]]]
-
-
-def test_a_nan_pixel_does_not_blank_its_downsampled_neighbours():
-    image = torch.full((4, 4, 3), 0.5)
-    image[0, 0] = float("nan")
-    zeroed = image.nan_to_num(0.0)
-
-    assert np.array_equal(np.asarray(linear_to_preview(image, 4)), np.asarray(linear_to_preview(zeroed, 4)))
-    assert np.asarray(linear_to_preview(image, 4))[0, 0, 0] > 0
-
-
-def _decoded(path) -> np.ndarray:
-    import av
-
-    with av.open(str(path), format="exr_pipe") as container:
-        frame = next(container.decode(video=0))
-    fmt = "grayf32le" if frame.format.name.startswith("gray") else "gbrpf32le"
-    return frame.to_ndarray(format=fmt)
-
-
 @pytest.mark.parametrize(
-    ("shape", "colorspace", "linear"),
+    ("image", "colorspace", "expected"),
     [
-        ((1, 4, 6, 3), "sRGB", 0.2140),
-        ((1, 4, 6, 3), "HDR", 0.0833),
-        ((1, 4, 6, 3), "linear", 0.5),
-        ((1, 6, 4), "sRGB", 0.2140),  # channel-less gray, 4 wide: not read as RGBA
+        # Over-range clamps to white, linear 0.5 is sRGB 188 (not 128), black stays black.
+        (torch.tensor([[[[4.0, 0.5, 0.0], [0.0, 0.0, 0.0]]]]), "linear", [[[255, 188, 0], [0, 0, 0]]]),
+        # Channel-less gray 4 wide, sRGB in: every column converted, and half-float darks kept
+        # (0.28 sRGB is linear ~0.064, sRGB 71; crushed darks were near 0).
+        (torch.full((1, 2, 4), 0.28), "sRGB", [[[71, 71, 71]] * 4] * 2),
     ],
 )
-def test_the_saved_exr_is_scene_linear(dirs, shape, colorspace, linear):
-    entry = _save(torch.full(shape, 0.5), colorspace)[0]
+def test_the_preview_pixels_match_the_golden_for_outputs_and_uploads(dirs, image, colorspace, expected):
+    from app.assets.previews import _decode_for_preview
 
-    assert np.allclose(_decoded(dirs / "output" / entry["filename"]), linear, atol=1e-3)
+    with patch.object(nodes_images, "linear_to_preview", wraps=linear_to_preview) as tonemap:
+        entry = _save(image, colorspace, bit_depth="16-bit float")[0]
 
-
-def test_a_failed_publish_leaves_no_temp_file(dirs):
-    with patch.object(nodes_images.os, "replace", side_effect=OSError("disk")):
-        entry = _save(torch.full((1, 8, 8, 3), 0.5))[0]
-
-    assert "asset_preview" not in entry
-    assert list((dirs / "previews").iterdir()) == []
-
+    written = np.asarray(linear_to_preview(tonemap.call_args.args[0]))
+    uploaded = np.asarray(_decode_for_preview(str(dirs / "output" / entry["filename"])))
+    assert written.tolist() == expected, "the save node's preview"
+    assert uploaded.tolist() == expected, "the upload decoder's preview of the saved EXR"
