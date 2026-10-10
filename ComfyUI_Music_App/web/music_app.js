@@ -188,7 +188,15 @@ async function queueMusic(settings, status, audioPlayer, downloadLink, button) {
       }
 
       const savedAudio = completed.outputs?.[outputNodeId]?.audio?.[0];
-      if (!savedAudio) continue;
+      if (!savedAudio) {
+        if (completed.status?.completed === true) {
+          throw new Error("A geração terminou, mas o nó de saída não retornou um arquivo de áudio. Confira os erros de execução no terminal do ComfyUI.");
+        }
+        continue;
+      }
+      if (!savedAudio.filename) {
+        throw new Error("O nó de saída do ComfyUI retornou um áudio sem nome de arquivo.");
+      }
       const audioUrl = api.apiURL(`/view?${new URLSearchParams({
         filename: savedAudio.filename,
         subfolder: savedAudio.subfolder ?? "",
