@@ -754,7 +754,8 @@ class _AssetSeeder:
                 rest = tuple(r for r in roots if r != "models")
                 passes = [("models",), rest] if "models" in roots and rest else [roots]
                 for pass_roots in passes:
-                    created, skipped, paths = self._run_fast_phase(pass_roots)
+                    # The output pass of a models+output scan is not the output-only rescan.
+                    created, skipped, paths = self._run_fast_phase(pass_roots, rescans_output_by_listing(roots))
                     total_created += created
                     skipped_existing += skipped
                     total_paths += paths
@@ -909,7 +910,9 @@ class _AssetSeeder:
                 root=root,
             )
 
-    def _run_fast_phase(self, roots: tuple[RootType, ...]) -> tuple[int, int, int]:
+    def _run_fast_phase(
+        self, roots: tuple[RootType, ...], by_listing: bool | None = None
+    ) -> tuple[int, int, int]:
         """Run phase 1: fast scan to create stub records.
 
         Returns:
@@ -919,7 +922,8 @@ class _AssetSeeder:
         total_created = 0
         skipped_existing = 0
 
-        by_listing = rescans_output_by_listing(roots)
+        if by_listing is None:
+            by_listing = rescans_output_by_listing(roots)
         live_references: dict[str, list] = {}
         existing_paths: set[str] = set()
         t_sync = time.perf_counter()

@@ -275,3 +275,17 @@ def test_with_output_in_the_roots_input_and_output_share_the_second_pass(
     ]
     assert _rows(db_engine, layout["output"]) == OUTPUTS
 
+
+def test_the_output_pass_of_a_models_and_output_scan_is_not_the_output_only_rescan(
+    db_engine, layout, monkeypatch
+):
+    def listing():
+        raise AssertionError("the output-only rescan's listing ran")
+
+    monkeypatch.setattr(seeder_module, "list_output_for_rescan", listing)
+    scan = _Scan(db_engine, layout, ("models", "output"))
+    scan.seeder._run_scan()
+
+    assert [e[1]["roots"] for e in scan.named("assets.seed.fast_complete")] == [["models"], ["output"]]
+    assert scan.named("assets.seed.completed")
+    assert _rows(db_engine, layout["output"]) == OUTPUTS
