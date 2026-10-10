@@ -527,7 +527,7 @@ try:
                 return False
 
         logging.info("AMD arch: {}".format(arch))
-        logging.info("ROCm version: {}".format(rocm_version))
+        logging.info("ROCm version: {}, HIP version: {}".format(getattr(torch.version, "rocm", None) or "unknown", torch.version.hip))
         if args.use_split_cross_attention == False and args.use_quad_cross_attention == False:
             if aotriton_supported():  # AMD efficient attention implementation depends on aotriton.
                 if torch_version_numeric >= (2, 7):  # works on 2.6 but doesn't actually seem to improve much
