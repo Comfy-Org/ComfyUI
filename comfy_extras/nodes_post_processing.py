@@ -359,8 +359,8 @@ def scale_total_pixels(input: torch.Tensor, megapixels: float, multiple: int, sc
     total = int(megapixels * 1024 * 1024)
 
     scale_by = math.sqrt(total / (input.shape[-1] * input.shape[-2]))
-    width = round(input.shape[-1] * scale_by / multiple) * multiple
-    height = round(input.shape[-2] * scale_by / multiple) * multiple
+    width = max(1, round(input.shape[-1] * scale_by / multiple)) * multiple
+    height = max(1, round(input.shape[-2] * scale_by / multiple)) * multiple
 
     input = comfy.utils.common_upscale(input, width, height, scale_method, "disabled")
     input = finalize_image_mask_input(input, is_type_image)
