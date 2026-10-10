@@ -8,6 +8,7 @@ __pycache__/
 /custom_nodes/
 !custom_nodes/example_node.py.example
 extra_model_paths.yaml
+extra_paths.yaml
 /.vs
 .vscode/
 .idea/

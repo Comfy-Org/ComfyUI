@@ -1,0 +1,84 @@
+#Rename this to extra_paths.yaml and ComfyUI will load it
+#This is the successor to extra_model_paths.yaml and supports all path configuration in one file.
+
+#config for comfyui
+#Set base_path to your ComfyUI install root. System directories (output, input, temp, user)
+#and custom_nodes are resolved relative to base_path.
+#
+#Model paths go under the 'models' block. If you only set models/base_path, all standard
+#subdirectories that exist on disk are automatically registered — no need to list them.
+#Explicit paths under models/ are optional and only needed to override a specific category
+#or point it to a non-standard location.
+
+#comfyui:
+#    base_path: path/to/comfyui/
+#    # System directories (relative to base_path, or absolute)
+#    output: output/
+#    input: input/
+#    temp: temp/
+#    user: user/
+#    # Custom nodes directory (not auto-scanned; explicit only)
+#    custom_nodes: custom_nodes/
+#    models:
+#        base_path: models/
+#        # You can use is_default to mark that these folders should be listed first,
+#        # and used as the default dirs for eg downloads
+#        #is_default: true
+#        checkpoints: checkpoints/
+#        text_encoders: |
+#             text_encoders/
+#             clip/  # legacy location still supported
+#        clip_vision: clip_vision/
+#        configs: configs/
+#        controlnet: |
+#             controlnet/
+#             t2i_adapter/
+#        diffusion_models: |
+#             diffusion_models/
+#             unet/
+#        diffusers: diffusers/
+#        embeddings: embeddings/
+#        frame_interpolation: frame_interpolation/
+#        gligen: gligen/
+#        hypernetworks: hypernetworks/
+#        latent_upscale_models: latent_upscale_models/
+#        loras: loras/
+#        model_patches: model_patches/
+#        photomaker: photomaker/
+#        style_models: style_models/
+#        upscale_models: upscale_models/
+#        vae: vae/
+#        vae_approx: vae_approx/
+#        audio_encoders: audio_encoders/
+#        classifiers: classifiers/
+
+
+#config for a1111 ui
+#all you have to do is uncomment this (remove the #) and change the base_path to where yours is installed
+
+#a111:
+#    models:
+#        base_path: path/to/stable-diffusion-webui/
+#        checkpoints: models/Stable-diffusion
+#        configs: models/Stable-diffusion
+#        vae: models/VAE
+#        loras: |
+#             models/Lora
+#             models/LyCORIS
+#        upscale_models: |
+#                      models/ESRGAN
+#                      models/RealESRGAN
+#                      models/SwinIR
+#        embeddings: embeddings
+#        hypernetworks: models/hypernetworks
+#        controlnet: models/ControlNet
+
+
+# For a full list of supported model category keys (style_models, vae_approx, hypernetworks,
+# photomaker, model_patches, audio_encoders, classifiers, etc.) see folder_paths.py.
+
+#other_ui:
+#    models:
+#        base_path: path/to/ui
+#        checkpoints: models/checkpoints
+#        gligen: models/gligen
