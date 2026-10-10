@@ -532,10 +532,25 @@ class VideoFromFile(VideoInput):
 
                             checked_alpha = True
 
-                        # Fix non-deterministic video decode when the video width is not a multiple of 32
-                        # For non-yuvj pixel formats: most H.264/H.265 video and static images (e.g. lossy WebP via LoadImage)
-                        # Pad both axes to a multiple of 32 and smear the border so the alignment padding never bleeds into the cropped edges
-                        if image_format in ('gbrpf32le', 'gbrapf32le') and frame.width % 32 != 0:
+                        if frame.format.name in (
+                            'gbrpf16le', 'gbrpf16be', 'gbrapf16le', 'gbrapf16be', 'grayf16le', 'grayf16be',
+                            'gbrpf32le', 'gbrpf32be', 'gbrapf32le', 'gbrapf32be', 'grayf32le', 'grayf32be',
+                        ):
+                            # Read float planes directly: swscale can clip HDR values when converting float formats.
+                            byte_order = '>' if frame.format.is_big_endian else '<'
+                            dtype = np.dtype(f'{byte_order}f{frame.format.components[0].bits // 8}')
+                            planes = []
+                            for component in frame.format.components:
+                                plane = frame.planes[component.plane]
+                                planes.append(np.ndarray(
+                                    (frame.height, frame.width), dtype=dtype, buffer=plane,
+                                    strides=(plane.line_size, dtype.itemsize),
+                                ))
+                            img = np.stack(planes * 3 if len(planes) == 1 else planes, axis=-1, dtype=np.float32)
+                        elif image_format in ('gbrpf32le', 'gbrapf32le') and frame.width % 32 != 0:
+                            # Fix non-deterministic video decode when the video width is not a multiple of 32
+                            # For non-yuvj pixel formats: most H.264/H.265 video and static images (e.g. lossy WebP via LoadImage)
+                            # Pad both axes to a multiple of 32 and smear the border so the alignment padding never bleeds into the cropped edges
                             if align_graph is None:
                                 pad_w = ((frame.width + 31) // 32) * 32
                                 pad_h = ((frame.height + 31) // 32) * 32
