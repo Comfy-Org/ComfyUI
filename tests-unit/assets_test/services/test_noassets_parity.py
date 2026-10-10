@@ -51,6 +51,24 @@ async def test_noassets_register_routes_returns_service_disabled_and_disables_se
     assert asset_seeder.is_disabled()
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path", ["/api/assets", "/api/assets/some-id"])
+async def test_noassets_without_database_packages_still_says_why(
+    aiohttp_client: AiohttpClient, monkeypatch: pytest.MonkeyPatch, path: str
+) -> None:
+    monkeypatch.setattr(manager, "dependencies_available", lambda: False)
+    app = web.Application()
+
+    _no_assets().register_routes(app, None)
+    client = await aiohttp_client(app)
+    response = await client.get(path)
+
+    assert response.status == 503
+    error = (await response.json())["error"]
+    assert error["code"] == "SERVICE_DISABLED"
+    assert "--disable-assets" in error["message"]
+
+
 def test_noassets_startup_applies_hash_mode_leaves_database_alone_and_cleans_temp_dir(
     mock_create_session: Callable[[], AbstractContextManager[Session]],
     session: Session,
