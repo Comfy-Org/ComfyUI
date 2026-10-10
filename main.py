@@ -136,6 +136,14 @@ def handle_comfyui_manager_unavailable():
     args.enable_manager = False
 
 
+def handle_comfy_agent_unavailable():
+    logging.info("[agent-event] package_missing")
+    # No install path is published yet: `comfy-agent` is not a registered PyPI name, so we
+    # can't point users at a pip/uv command or a requirements file without risking a squatted package.
+    logging.warning("\n\n`--enable-agent` was passed but the `comfy-agent` package is not installed, so the agent is disabled.\n")
+    args.enable_agent = False
+
+
 def apply_custom_paths():
     # extra model paths
     extra_model_paths_config_path = os.path.join(os.path.dirname(os.path.realpath(__file__)), "extra_model_paths.yaml")
@@ -247,6 +255,13 @@ if args.enable_manager:
 
 if args.enable_manager:
     comfyui_manager.prestartup()
+
+if args.enable_agent:
+    logging.info("[agent-event] flag_enabled")
+    agent_spec = importlib.util.find_spec("comfy_agent")
+    # A bare comfy_agent directory on sys.path resolves as a namespace package with no origin.
+    if agent_spec is None or agent_spec.origin is None:
+        handle_comfy_agent_unavailable()
 
 execute_prestartup_script()
 
