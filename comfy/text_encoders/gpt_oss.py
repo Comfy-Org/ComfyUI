@@ -117,7 +117,7 @@ def _attention_with_sinks(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, sin
     k = torch.cat([k, k.new_zeros(B, H_kv, 1, D)], dim=-2)
     v = torch.cat([v, v.new_zeros(B, H_kv, 1, D)], dim=-2)
 
-    sinks_col = sinks.to(q.dtype).view(1, num_heads, 1, 1).expand(B, num_heads, S_q, 1)
+    sinks_col = comfy.ops.cast_to_input(sinks, q).view(1, num_heads, 1, 1).expand(B, num_heads, S_q, 1)
     if attention_mask is not None:
         mask_left = attention_mask[..., :S_kv].expand(B, num_heads, S_q, S_kv)
     else:
