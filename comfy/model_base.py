@@ -69,6 +69,7 @@ import comfy.ldm.joyimage.model
 import comfy.ldm.ideogram4.model
 import comfy.ldm.krea2.model
 import comfy.ldm.kandinsky5.model
+import comfy.ldm.kandinsky6.model
 import comfy.ldm.anima.model
 import comfy.ldm.trellis2.model
 import comfy.ldm.ace.ace_step15
@@ -2949,6 +2950,61 @@ class Kandinsky5Image(Kandinsky5):
 
     def concat_cond(self, **kwargs):
         return None
+
+class Kandinsky6(Kandinsky5):
+    def __init__(self, model_config, model_type=ModelType.FLOW, device=None):
+        BaseModel.__init__(
+            self,
+            model_config,
+            model_type,
+            device=device,
+            unet_model=comfy.ldm.kandinsky6.model.Kandinsky6NativeAVDiT,
+        )
+
+    def concat_cond(self, **kwargs):
+        return None
+
+    def extra_conds(self, **kwargs):
+        out = super().extra_conds(**kwargs)
+        cross_attn = kwargs.get("cross_attn")
+        if cross_attn is not None:
+            out["c_crossattn"] = comfy.conds.CONDCrossAttn(cross_attn)
+        latent_shapes = kwargs.get("latent_shapes")
+        if latent_shapes is not None:
+            out["latent_shapes"] = comfy.conds.CONDConstant(latent_shapes)
+        reference = kwargs.get("k6_reference")
+        if reference is not None:
+            out["k6_reference"] = comfy.conds.CONDRegular(reference)
+        return out
+
+    def _process_video_stream(self, latent, process):
+        if getattr(latent, "is_nested", False):
+            streams = list(latent.unbind())
+            if not streams:
+                return latent
+            streams[0] = process(streams[0])
+            return comfy.nested_tensor.NestedTensor(streams)
+
+        shapes = self.latent_shapes
+        if shapes is not None and len(shapes) > 1:
+            video_elements = math.prod(shapes[0][1:])
+            if latent.shape[-1] < video_elements:
+                raise ValueError("Packed Kandinsky 6 latent is shorter than its video shape.")
+            output = latent.clone()
+            video = output[..., :video_elements].reshape(
+                [output.shape[0]] + list(shapes[0])[1:]
+            )
+            video = process(video)
+            output[..., :video_elements] = video.reshape(output.shape[0], 1, -1)
+            return output
+
+        return process(latent)
+
+    def process_latent_in(self, latent):
+        return self._process_video_stream(latent, self.latent_format.process_in)
+
+    def process_latent_out(self, latent):
+        return self._process_video_stream(latent, self.latent_format.process_out)
 
 class RT_DETR_v4(BaseModel):
     def __init__(self, model_config, model_type=ModelType.FLOW, device=None):
