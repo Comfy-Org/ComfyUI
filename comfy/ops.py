@@ -882,7 +882,8 @@ def fp8_linear(self, input):
     Legacy FP8 linear function for backward compatibility.
     Uses QuantizedTensor subclass for dispatch.
     """
-    dtype = self.weight.dtype
+    # With dynamic VRAM the weight is still in its file dtype here, use the dtype it gets cast to.
+    dtype = comfy.memory_management.tensors_to_geometries([self.weight])[0].dtype
     if dtype not in [torch.float8_e4m3fn]:
         return None
 
