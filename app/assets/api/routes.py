@@ -1036,7 +1036,7 @@ _PRUNE_POLL_SECONDS = 0.25
 @ROUTES.post("/api/assets/seed")
 @_require_assets_feature_enabled
 async def seed_assets(request: web.Request) -> web.Response:
-    """Trigger asset seeding for specified roots (models, input, output).
+    """Trigger asset seeding for specified roots (models, input).
 
     Query params:
         wait: If "true", block until scan completes (synchronous behavior for tests)
@@ -1048,11 +1048,11 @@ async def seed_assets(request: web.Request) -> web.Response:
     """
     try:
         payload = await request.json()
-        roots = payload.get("roots", ["models", "input", "output"])
+        roots = payload.get("roots", ["models", "input"])
     except Exception:
-        roots = ["models", "input", "output"]
+        roots = ["models", "input"]
 
-    valid_roots = tuple(r for r in roots if r in ("models", "input", "output"))
+    valid_roots = tuple(r for r in roots if r in ("models", "input"))
     if not valid_roots:
         return _build_error_response(400, "INVALID_BODY", "No valid roots specified")
 
