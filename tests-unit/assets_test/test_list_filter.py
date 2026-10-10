@@ -332,3 +332,95 @@ async def test_missing_content_is_reachable_via_tags_all_missing(
     body = _asset_list_body(response)
     assert {asset["id"] for asset in body["assets"]} == {missing.id}
     assert body["total"] == 1
+
+
+def _seed_hashed_record(session, name: str, digest_char: str) -> tuple[str, str]:
+    asset_hash = "blake3:" + digest_char * 64
+    content = create_content(
+        session, path=f"/output/{name}", hash=asset_hash, size_bytes=1
+    )
+    record = create_record(
+        session, content_id=content.id, name=name, tags=("hash-case",)
+    )
+    return record.id, asset_hash
+
+
+@pytest.mark.asyncio
+async def test_hash_filter_returns_exact_match(route_database: RouteDatabase) -> None:
+    _, session = route_database
+    match, match_hash = _seed_hashed_record(session, "a.png", "a")
+    _seed_hashed_record(session, "b.png", "b")
+    session.commit()
+
+    response = await _request_assets(urllib.parse.urlencode({"hash": match_hash}))
+
+    body = _asset_list_body(response)
+    assert [asset["id"] for asset in body["assets"]] == [match]
+    assert body["assets"][0]["hash"] == match_hash
+    assert body["total"] == 1
+
+
+@pytest.mark.asyncio
+async def test_hash_filter_unknown_hash_returns_empty_page(
+    route_database: RouteDatabase,
+) -> None:
+    _, session = route_database
+    _seed_hashed_record(session, "a.png", "a")
+    session.commit()
+
+    response = await _request_assets(
+        urllib.parse.urlencode({"hash": "blake3:" + "0" * 64})
+    )
+
+    body = _asset_list_body(response)
+    assert body["assets"] == []
+    assert body["total"] == 0
+
+
+@pytest.mark.asyncio
+async def test_hash_filter_normalizes_case_and_whitespace(
+    route_database: RouteDatabase,
+) -> None:
+    _, session = route_database
+    match, match_hash = _seed_hashed_record(session, "a.png", "a")
+    _seed_hashed_record(session, "b.png", "b")
+    session.commit()
+
+    response = await _request_assets(
+        urllib.parse.urlencode({"hash": f"  {match_hash.upper()}  "})
+    )
+
+    body = _asset_list_body(response)
+    assert [asset["id"] for asset in body["assets"]] == [match]
+    assert body["total"] == 1
+
+
+@pytest.mark.asyncio
+async def test_empty_hash_matches_nothing(route_database: RouteDatabase) -> None:
+    _, session = route_database
+    _seed_hashed_record(session, "a.png", "a")
+    session.commit()
+
+    response = await _request_assets("hash=")
+
+    body = _asset_list_body(response)
+    assert body["assets"] == []
+    assert body["total"] == 0
+
+
+@pytest.mark.parametrize("include_public", ("false", "true"))
+@pytest.mark.asyncio
+async def test_include_public_is_accepted_without_effect(
+    route_database: RouteDatabase,
+    include_public: str,
+) -> None:
+    _, session = route_database
+    record = _seed_record(session, RecordSeed("public.png", ("public-case",)))
+    session.commit()
+
+    response = await _request_assets(
+        f"tags_all=public-case&include_public={include_public}"
+    )
+
+    body = _asset_list_body(response)
+    assert [asset["id"] for asset in body["assets"]] == [record.id]
