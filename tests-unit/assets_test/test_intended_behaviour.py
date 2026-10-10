@@ -46,7 +46,7 @@ from app.assets.services.asset_management import (
     delete_asset_reference,
     resolve_hash_to_path,
 )
-from app.assets.services.file_utils import list_files_recursively
+from app.assets.services.file_utils import walk_listings
 from app.assets.services.ingest import register_cached_output, upload_from_temp_path
 from app.assets.services.lookup import (
     lookup_for_from_hash,
@@ -109,7 +109,7 @@ def _scan_pass(session, root: Path) -> int:
     observations, survivors = observe_references_on_filesystem(session, [str(root)])
     apply_reference_observations(session, observations)
     specs, _tag_pool, _skipped = build_asset_specs(
-        list_files_recursively(str(root)), survivors or set()
+        walk_listings(str(root)).files, survivors or set()
     )
     created, error = seed_asset_specs(session, specs)
     if error is not None:
