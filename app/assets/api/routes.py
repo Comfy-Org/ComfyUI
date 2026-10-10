@@ -43,7 +43,7 @@ from app.assets.database.queries.records import (
     get_preview_file_paths_by_ids,
     list_records_page,
 )
-from app.assets.seeder import PruneCancelledError, ScanInProgressError, asset_seeder
+from app.assets.seeder import PruneCancelledError, ScanInProgressError, ScanPhase, asset_seeder
 from app.assets.services import (
     DependencyMissingError,
     HashMismatchError,
@@ -1075,7 +1075,12 @@ async def seed_assets(request: web.Request) -> web.Response:
             roots=valid_roots, compute_hashes=mode.hashing_enabled()
         )
     if not started:
-        return web.json_response({"status": "already_running"}, status=409)
+        if should_wait:
+            return web.json_response({"status": "already_running"}, status=409)
+        # The running scan may not cover these roots (GET /object_info scans input only),
+        # and a client takes 409 as "a scan is coming", so queue them to run after it.
+        asset_seeder.enqueue_scan(valid_roots, ScanPhase.FULL, mode.hashing_enabled())
+        return web.json_response({"status": "queued"}, status=202)
 
     if should_wait:
         await asyncio.to_thread(asset_seeder.wait)

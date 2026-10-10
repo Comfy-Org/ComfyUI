@@ -3,16 +3,18 @@ import threading
 from collections.abc import Callable, Generator, Iterator
 from contextlib import AbstractContextManager, contextmanager
 from pathlib import Path
-from typing import Protocol
+from typing import Protocol, cast
 from unittest.mock import MagicMock, Mock, call
 
 import folder_paths
 import pytest
+from aiohttp.test_utils import make_mocked_request
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session, Session as SASession, sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from app.assets import lifecycle
+from app.assets.api import routes
 from app.assets import manager as manager_module
 from app.assets import scanner, seeder as seeder_module
 from app.assets.database.models import Asset, AssetContent
@@ -257,36 +259,67 @@ def test_ensure_scan_started_starts_the_lazy_object_info_scan(
     seeder_start.assert_called_once_with(roots=("input",))
 
 
-def test_ensure_scan_started_does_not_scan_models(
-    enabled_manager: AssetsEnabled,
-    asset_roots: tuple[Path, Path, Path],
-    threaded_create_session: Callable[[], AbstractContextManager[Session]],
-    output_seeder: _OutputSeeder,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """GET /object_info runs this on every page load; models are left to startup and POST /seed."""
-    _, input_dir, _ = asset_roots
+@pytest.fixture
+def model_on_disk(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """A checkpoint added on disk after startup, in a registered models folder."""
     checkpoints = tmp_path / "models" / "checkpoints"
     checkpoints.mkdir(parents=True)
     model_path = checkpoints / "added_while_running.safetensors"
     model_path.write_bytes(b"\0" * 16)
-    input_path = input_dir / "copied_in.png"
-    input_path.write_bytes(b"not really a png")
     folders = [str(checkpoints)]
     monkeypatch.setattr(
         folder_paths, "folder_names_and_paths", {"checkpoints": (folders, {".safetensors"})}
     )
     monkeypatch.setattr(folder_paths, "filename_list_cache", {})
     monkeypatch.setattr(seeder_module, "dependencies_available", lambda: True)
+    return model_path
+
+
+def _catalogued_paths(create_session: Callable[[], AbstractContextManager[Session]]) -> set[str]:
+    with create_session() as session:
+        return set(session.scalars(select(AssetContent.path)))
+
+
+def test_ensure_scan_started_does_not_scan_models(
+    enabled_manager: AssetsEnabled,
+    asset_roots: tuple[Path, Path, Path],
+    threaded_create_session: Callable[[], AbstractContextManager[Session]],
+    output_seeder: _OutputSeeder,
+    model_on_disk: Path,
+) -> None:
+    """GET /object_info runs this on every page load; models are left to startup and POST /seed."""
+    _, input_dir, _ = asset_roots
+    input_path = input_dir / "copied_in.png"
+    input_path.write_bytes(b"not really a png")
 
     enabled_manager.ensure_scan_started()
     assert output_seeder.wait(timeout=10)
 
-    with threaded_create_session() as session:
-        paths = set(session.scalars(select(AssetContent.path)))
+    paths = _catalogued_paths(threaded_create_session)
     assert str(input_path.resolve()) in paths
-    assert str(model_path.resolve()) not in paths
+    assert str(model_on_disk.resolve()) not in paths
+
+
+@pytest.mark.asyncio
+async def test_seed_request_during_the_object_info_scan_still_scans_models(
+    asset_roots: tuple[Path, Path, Path],
+    threaded_create_session: Callable[[], AbstractContextManager[Session]],
+    output_seeder: _OutputSeeder,
+    model_on_disk: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The frontend's node-definition refresh sends GET /object_info and POST /seed together."""
+    seeder = cast(seeder_module._AssetSeeder, output_seeder)
+    monkeypatch.setattr(routes, "asset_seeder", seeder)
+    assert seeder.start(roots=("input",), _start_paused=True)
+
+    response = await routes.seed_assets.__wrapped__(make_mocked_request("POST", "/api/assets/seed"))
+    assert response.status == 202
+    seeder.resume()
+    assert seeder.wait(timeout=10)  # the input scan, which starts the queued one
+    assert seeder.wait(timeout=10)
+
+    assert str(model_on_disk.resolve()) in _catalogued_paths(threaded_create_session)
 
 
 def test_shutdown_runs_lifecycle_cleanup_when_seeder_shutdown_times_out(

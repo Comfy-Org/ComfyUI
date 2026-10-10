@@ -560,14 +560,29 @@ async def test_a_seed_request_during_an_api_prune_waits_for_it_then_starts(monke
 
 
 @pytest.mark.asyncio
-async def test_a_seed_request_during_a_scan_still_gets_409(monkeypatch):
+async def test_a_seed_request_during_a_scan_is_queued(monkeypatch):
     instance, started = _seeder_with_recorded_starts(monkeypatch)
     instance._state = State.RUNNING
 
     response = await routes.seed_assets.__wrapped__(make_mocked_request("POST", "/api/assets/seed"))
 
-    assert response.status == 409
+    assert response.status == 202
     assert started == []
+    assert instance._pending_scan is not None
+    assert instance._pending_scan["roots"] == ("models", "input")
+
+
+@pytest.mark.asyncio
+async def test_a_waiting_seed_request_during_a_scan_still_gets_409(monkeypatch):
+    instance, started = _seeder_with_recorded_starts(monkeypatch)
+    instance._state = State.RUNNING
+
+    response = await routes.seed_assets.__wrapped__(
+        make_mocked_request("POST", "/api/assets/seed?wait=true")
+    )
+
+    assert response.status == 409
+    assert instance._pending_scan is None
 
 
 def test_a_cancel_stops_a_standalone_prune_and_shutdown_waits_for_it(session, catalog, temp_dir, monkeypatch):
