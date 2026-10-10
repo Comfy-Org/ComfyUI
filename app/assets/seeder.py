@@ -869,9 +869,8 @@ class _AssetSeeder:
                         )
             finally:
                 with self._lock:
-                    # Not after a cancel: shutdown cancels, and a queued scan started
-                    # here would run on into teardown. It stays queued.
-                    if self._cancel_event.is_set():
+                    # Not during shutdown: a queued scan started here would run on into teardown.
+                    if self._shutting_down:
                         self._reset_to_idle()
                     else:
                         self._finish_and_start_pending()

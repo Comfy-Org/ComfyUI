@@ -348,6 +348,24 @@ def test_shutdown_does_not_start_a_queued_scan(
     assert str(model_on_disk.resolve()) not in _catalogued_paths(threaded_create_session)
 
 
+def test_a_cancel_still_starts_the_queued_scan(
+    asset_roots: tuple[Path, Path, Path],
+    threaded_create_session: Callable[[], AbstractContextManager[Session]],
+    output_seeder: _OutputSeeder,
+    model_on_disk: Path,
+) -> None:
+    """POST /seed answered "queued", so cancelling the scan ahead of it must not strand it."""
+    seeder = cast(seeder_module._AssetSeeder, output_seeder)
+    assert seeder.start(roots=("input",), _start_paused=True)
+    assert not seeder.enqueue_scan(("models",), seeder_module.ScanPhase.FULL)
+
+    assert seeder.cancel()
+    assert seeder.wait(timeout=10)  # the cancelled scan, which starts the queued one
+    assert seeder.wait(timeout=10)
+
+    assert str(model_on_disk.resolve()) in _catalogued_paths(threaded_create_session)
+
+
 def test_shutdown_runs_lifecycle_cleanup_when_seeder_shutdown_times_out(
     enabled_manager: AssetsEnabled,
     asset_roots: tuple[Path, Path, Path],
