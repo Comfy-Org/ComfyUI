@@ -1,6 +1,25 @@
+import sys
+import types
+import weakref
 from unittest.mock import Mock, call
 
+import torch
+
+# Only stub comfy_aimdo.storage when it is genuinely unavailable.
+# Inserting an empty stub when the real package is installed would mask it
+# and break storage_test.py (comfy.storage.fast_storage -> AttributeError).
+if "comfy_aimdo.storage" not in sys.modules:
+    try:
+        import comfy_aimdo.storage  # noqa: F401
+    except ImportError:
+        sys.modules["comfy_aimdo.storage"] = types.ModuleType("comfy_aimdo.storage")
+
+if not torch.cuda.is_available():
+    import comfy.cli_args
+    comfy.cli_args.args.cpu = True
+
 import comfy.model_management as model_management
+
 
 
 class NPUDevice:
@@ -79,3 +98,85 @@ def test_npu_synchronize(monkeypatch):
     model_management.synchronize()
 
     npu.synchronize.assert_called_once_with()
+
+
+def test_free_memory_dynamic_model_partial_unload(monkeypatch):
+    device = torch.device("cuda:0")
+    mock_model = Mock()
+    mock_model.is_dynamic.return_value = True
+    mock_model.loaded_size.return_value = 10_000_000_000
+    mock_model.model_size.return_value = 10_000_000_000
+    mock_model.offload_device = torch.device("cpu")
+    mock_model.load_device = device
+    mock_model.parent = None
+    mock_model.current_loaded_device.return_value = device
+    mock_model.partially_unload.return_value = 1_000_000_000
+    real_inner = Mock()
+    mock_model.model = real_inner
+
+    loaded_m = model_management.LoadedModel(mock_model)
+    loaded_m.device = device
+    loaded_m.real_model = weakref.ref(real_inner)
+    loaded_m.model_finalizer = Mock()
+
+    monkeypatch.setattr(model_management, "current_loaded_models", [loaded_m])
+    monkeypatch.setattr(model_management, "get_free_memory", lambda dev=None, torch_free_too=False: 500_000_000 if not torch_free_too else (500_000_000, 0))
+    soft_empty_called = False
+    def mock_soft_empty(*args, **kwargs):
+        nonlocal soft_empty_called
+        soft_empty_called = True
+    monkeypatch.setattr(model_management, "soft_empty_cache", mock_soft_empty)
+
+    unloaded = model_management.free_memory(1_500_000_000, device, for_dynamic=True)
+    assert len(unloaded) == 0
+    assert len(model_management.current_loaded_models) == 1
+    mock_model.partially_unload.assert_called_once_with(torch.device("cpu"), 1_000_000_000)
+    assert soft_empty_called
+
+
+def test_load_models_gpu_dynamic_reentry_headroom(monkeypatch):
+    device = torch.device("cuda:0")
+    mock_model = Mock()
+    mock_model.is_dynamic.return_value = True
+    mock_model.loaded_size.return_value = 15_000_000_000
+    mock_model.model_size.return_value = 15_000_000_000
+    mock_model.load_device = device
+    mock_model.offload_device = torch.device("cpu")
+    mock_model.current_loaded_device.return_value = device
+    mock_model.model_patches_models.return_value = []
+    mock_model.model_dtype.return_value = torch.float32
+    mock_model.partially_load.return_value = None
+    mock_model.partially_unload.return_value = 1_500_000_000
+    real_inner = Mock()
+    mock_model.model = real_inner
+    real_inner.dynamic_pins = {device: {"weights": (Mock(size=0),), "weights-loaded": (Mock(size=0),), "weights-fast": (Mock(size=0),)}}
+    mock_model.loaded_ram_size.return_value = 0
+    mock_model.parent = None
+    mock_model.is_clone.return_value = True
+
+    loaded_m = model_management.LoadedModel(mock_model)
+    loaded_m.device = device
+    loaded_m.real_model = weakref.ref(real_inner)
+    loaded_m.model_finalizer = Mock()
+
+    monkeypatch.setattr(model_management, "current_loaded_models", [loaded_m])
+
+    free_mem_state = 500_000_000
+    def mock_get_free(dev=None, torch_free_too=False):
+        nonlocal free_mem_state
+        return free_mem_state if not torch_free_too else (free_mem_state, 0)
+
+    soft_empty_called = False
+    def mock_soft_empty(*args, **kwargs):
+        nonlocal soft_empty_called, free_mem_state
+        soft_empty_called = True
+        free_mem_state = 2_000_000_000
+
+    monkeypatch.setattr(model_management, "get_free_memory", mock_get_free)
+    monkeypatch.setattr(model_management, "soft_empty_cache", mock_soft_empty)
+
+    model_management.load_models_gpu([mock_model], minimum_memory_required=1_500_000_000)
+    expected_free = 1_500_000_000 + model_management.extra_reserved_memory() - 500_000_000
+    mock_model.partially_unload.assert_called_once_with(torch.device("cpu"), expected_free)
+    assert soft_empty_called
+
