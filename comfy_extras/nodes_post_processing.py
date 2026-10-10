@@ -353,14 +353,14 @@ def scale_shorter_dimension(input: torch.Tensor, shorter_size: int, scale_method
     input = finalize_image_mask_input(input, is_type_image)
     return input
 
-def scale_total_pixels(input: torch.Tensor, megapixels: float, scale_method: str) -> torch.Tensor:
+def scale_total_pixels(input: torch.Tensor, megapixels: float, multiple: int, scale_method: str) -> torch.Tensor:
     is_type_image = is_image(input)
     input = init_image_mask_input(input, is_type_image)
     total = int(megapixels * 1024 * 1024)
 
     scale_by = math.sqrt(total / (input.shape[-1] * input.shape[-2]))
-    width = round(input.shape[-1] * scale_by)
-    height = round(input.shape[-2] * scale_by)
+    width = round(input.shape[-1] * scale_by / multiple) * multiple
+    height = round(input.shape[-2] * scale_by / multiple) * multiple
 
     input = comfy.utils.common_upscale(input, width, height, scale_method, "disabled")
     input = finalize_image_mask_input(input, is_type_image)
@@ -473,6 +473,7 @@ class ResizeImageMaskNode(io.ComfyNode):
                         ]),
                         io.DynamicCombo.Option(ResizeType.SCALE_TOTAL_PIXELS, [
                             io.Float.Input("megapixels", default=1.0, min=0.01, max=16.0, step=0.01, tooltip="Target total megapixels (e.g., 1.0 ≈ 1024×1024). Aspect ratio is preserved."),
+                            io.Int.Input("multiple", default=1, min=1, max=MAX_RESOLUTION, step=1, tooltip="Round width and height to the nearest multiple of this number."),
                         ]),
                         io.DynamicCombo.Option(ResizeType.MATCH_SIZE, [
                             io.MultiType.Input("match", [io.Image, io.Mask], tooltip="Resize input to match the dimensions of this reference image or mask."),
@@ -509,7 +510,7 @@ class ResizeImageMaskNode(io.ComfyNode):
         elif selected_type == ResizeType.SCALE_HEIGHT:
             return io.NodeOutput(scale_dimensions(input, 0, resize_type["height"], scale_method))
         elif selected_type == ResizeType.SCALE_TOTAL_PIXELS:
-            return io.NodeOutput(scale_total_pixels(input, resize_type["megapixels"], scale_method))
+            return io.NodeOutput(scale_total_pixels(input, resize_type["megapixels"], resize_type["multiple"], scale_method))
         elif selected_type == ResizeType.MATCH_SIZE:
             return io.NodeOutput(scale_match_size(input, resize_type["match"], scale_method, resize_type["crop"]))
         elif selected_type == ResizeType.SCALE_TO_MULTIPLE:
