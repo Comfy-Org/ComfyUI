@@ -664,8 +664,10 @@ class PromptServer():
 
                     elif channel == 'a':
                         with Image.open(file) as img:
-                            if img.mode == "RGBA":
-                                _, _, _, a = img.split()
+                            if 'A' in img.getbands():
+                                a = img.getchannel('A')
+                            elif 'transparency' in img.info:
+                                a = img.convert('RGBA').getchannel('A')
                             else:
                                 a = Image.new('L', img.size, 255)
 
