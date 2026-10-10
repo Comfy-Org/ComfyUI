@@ -201,11 +201,12 @@ def test_database_from_a_newer_comfyui_runs_without_assets_and_is_left_as_it_is(
 
     log = (tmp_path / "server.log").read_text()
     assert "ASSETS_DISABLED: newer_revision\n" in log
-    assert f"The asset database '{db}' was upgraded by a newer version of ComfyUI" in log
+    assert f"The asset database '{db}' was upgraded by a newer version of ComfyUI (revision '0099_from_a_newer_release')" in log
     assert "ASSETS_STARTUP_FAILED" not in log
     assert "Traceback" not in log
     assert db.read_bytes() == before
-    assert set(os.listdir(user_dir)) - {"comfyui.db.lock"} == {"comfyui.db"}  # the lock file stays on POSIX only
+    # Reading a WAL database can add an empty -wal and the -shm index; the lock file stays on POSIX only.
+    assert set(os.listdir(user_dir)) - {"comfyui.db.lock", "comfyui.db-wal", "comfyui.db-shm"} == {"comfyui.db"}
 
 
 def test_default_database_follows_the_user_directory_and_scans_extra_model_paths(tmp_path):

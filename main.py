@@ -506,9 +506,10 @@ def open_database():
         init_db()
     except NewerDatabaseError as e:
         args.disable_assets = True
+        db_path, revisions = e.args
         app.logger.log_startup_warning(
             f"ASSETS_DISABLED: newer_revision\n"
-            f"The asset database '{get_db_path()}' was upgraded by a newer version of ComfyUI (revision {e}), "
+            f"The asset database '{db_path}' was upgraded by a newer version of ComfyUI (revision {revisions}), "
             f"which this version can't use. ComfyUI is running without the assets system this time and has left the database as it is.\n"
             f"To get assets back, run the newer version again. To stay on this version, move or rename that database file "
             f"and start again: a new one is created and your files are scanned again."

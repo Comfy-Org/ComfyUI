@@ -5,6 +5,7 @@ import shutil
 import sqlite3
 import time
 from contextlib import closing
+from pathlib import Path
 from app.logger import log_startup_warning
 from filelock import FileLock, Timeout
 from comfy.cli_args import args, database_default_path
@@ -119,6 +120,7 @@ def copy_legacy_default_db(db_path):
     backup_path = legacy_db_path + ".bak"
     if os.path.exists(backup_path):
         return
+    _raise_if_newer(legacy_db_path)
 
     if os.path.exists(legacy_db_path + "-wal"):
         # Fold committed WAL pages back into the file before it is renamed and copied.
@@ -168,6 +170,19 @@ def _backup_database(source_path, destination_path):
 
 class NewerDatabaseError(Exception):
     """The database is at a revision this ComfyUI doesn't have: a newer ComfyUI upgraded it."""
+
+
+def _raise_if_newer(db_path):
+    """Read-only, so a database a newer ComfyUI upgraded, and the WAL it left, stay as they are."""
+    try:
+        with closing(sqlite3.connect(Path(os.path.abspath(db_path)).as_uri() + "?mode=ro", uri=True)) as conn:
+            stored = [row[0] for row in conn.execute("SELECT version_num FROM alembic_version")]
+    except sqlite3.Error:
+        return  # no database or version table yet, or a damaged file: the migration reports it
+    known = {revision.revision for revision in ScriptDirectory.from_config(get_alembic_config()).walk_revisions()}
+    unknown = [revision for revision in stored if revision not in known]
+    if unknown:
+        raise NewerDatabaseError(db_path, ", ".join(map(repr, unknown)))
 
 
 _db_lock = None
@@ -275,6 +290,7 @@ def _init_file_db(db_url):
     _acquire_file_lock(db_path)
     try:
         copy_legacy_default_db(db_path)
+        _raise_if_newer(db_path)
         db_exists = os.path.exists(db_path)
         _migrate_and_bind(db_url, db_path, db_exists)
     except Exception:
@@ -331,14 +347,6 @@ def _migrate_and_bind(db_url, db_path, db_exists):
 
     conn = engine.connect()
 
-    # Before anything writes: a database a newer ComfyUI upgraded is left exactly as it is.
-    current_rev = MigrationContext.configure(conn).get_current_revision()
-    script = ScriptDirectory.from_config(config)
-    if current_rev is not None and current_rev not in {r.revision for r in script.walk_revisions()}:
-        conn.close()
-        engine.dispose()  # closes the file now rather than at garbage collection
-        raise NewerDatabaseError(current_rev)
-
     try:
         journal_mode = conn.exec_driver_sql("PRAGMA journal_mode=WAL").scalar_one()
     except OperationalError:
@@ -352,6 +360,10 @@ def _migrate_and_bind(db_url, db_path, db_exists):
             event.listen(write_engine, "connect", _set_wal_synchronous)
             _set_wal_synchronous(conn.connection.dbapi_connection)  # opened before the hooks
 
+    context = MigrationContext.configure(conn)
+    current_rev = context.get_current_revision()
+
+    script = ScriptDirectory.from_config(config)
     target_rev = script.get_current_head()
 
     if target_rev is None:
