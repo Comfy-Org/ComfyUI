@@ -101,12 +101,12 @@ def start_asset_seeder() -> bool:
     from app.assets.seeder import asset_seeder
 
     started = asset_seeder.start(
-        roots=("models", "input"),
+        roots=("models", "input", "output"),
         prune_first=True,
         compute_hashes=args.enable_asset_hashing,
     )
     if started:
-        logging.info("Background asset scan initiated for models, input")
+        logging.info("Background asset scan initiated for models, input, output")
     return started
 
 

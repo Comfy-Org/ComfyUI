@@ -58,9 +58,6 @@ if __name__ == "__main__":
     if args.disable_api_nodes:
         logging.warning("--disable-api-nodes is deprecated and will be removed in a future version. It currently behaves like --offline. Use --offline to keep the frontend offline, or --disable-partner-nodes to only disable partner nodes.")
 
-    if args.enable_assets:
-        logging.warning("--enable-assets is deprecated and does nothing: the assets system is on unless ComfyUI is started with --disable-assets.")
-
 faulthandler.enable(file=sys.stderr, all_threads=args.debug_hang)
 if __name__ == "__main__" and args.debug_hang:
     dumping_traceback = False
@@ -566,7 +563,7 @@ WARNING WARNING WARNING WARNING WARNING
 
 Another ComfyUI is already using this install's asset database:
   {db_path}
-This ComfyUI was started with --disable-assets, so it doesn't use that database and will start anyway.
+This ComfyUI doesn't have the assets system on, so it doesn't use that database and will start anyway.
 ________________________________________________________________________
 """.strip()
     )

@@ -18,6 +18,7 @@ from app.assets.lifecycle import (
     run_asset_shutdown_cleanup,
     run_asset_startup,
     run_startup,
+    start_asset_seeder,
     wipe_temp_db_rows,
 )
 from app.assets.scanner import get_temp_prefixes, sync_temp_references_safely
@@ -170,6 +171,13 @@ def test_run_startup_enabled_delegates_to_asset_startup_not_bare_sweep():
 
     asset_startup_mock.assert_called_once_with()
     cleanup_mock.assert_not_called()
+
+
+def test_startup_scan_covers_models_input_and_output():
+    with patch.object(asset_seeder, "start", return_value=True) as start_mock:
+        start_asset_seeder()
+
+    assert start_mock.call_args.kwargs["roots"] == ("models", "input", "output")
 
 
 def test_run_startup_logs_and_absorbs_disabled_filesystem_failure(caplog):

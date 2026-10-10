@@ -91,7 +91,7 @@ def _require_assets_feature_enabled(handler):
             return _build_error_response(
                 503,
                 "SERVICE_DISABLED",
-                "Assets system is disabled because the server was started with --disable-assets.",
+                "Assets system is disabled. Start the server with --enable-assets, and without --disable-assets, to use this feature.",
             )
         return await handler(request)
 
@@ -1036,7 +1036,7 @@ _PRUNE_POLL_SECONDS = 0.25
 @ROUTES.post("/api/assets/seed")
 @_require_assets_feature_enabled
 async def seed_assets(request: web.Request) -> web.Response:
-    """Trigger asset seeding for specified roots (models, input).
+    """Trigger asset seeding for specified roots (models, input, output).
 
     Query params:
         wait: If "true", block until scan completes (synchronous behavior for tests)
@@ -1048,11 +1048,11 @@ async def seed_assets(request: web.Request) -> web.Response:
     """
     try:
         payload = await request.json()
-        roots = payload.get("roots", ["models", "input"])
+        roots = payload.get("roots", ["models", "input", "output"])
     except Exception:
-        roots = ["models", "input"]
+        roots = ["models", "input", "output"]
 
-    valid_roots = tuple(r for r in roots if r in ("models", "input"))
+    valid_roots = tuple(r for r in roots if r in ("models", "input", "output"))
     if not valid_roots:
         return _build_error_response(400, "INVALID_BODY", "No valid roots specified")
 
