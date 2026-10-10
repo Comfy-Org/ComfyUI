@@ -1,4 +1,5 @@
 import torch
+import comfy.ldm.prism.quantization
 from . import model_base
 from . import utils
 
@@ -2573,7 +2574,34 @@ class CogVideoX_Inpaint(CogVideoX_T2V):
         return out
 
 
+class Prism(supported_models_base.BASE):
+    unet_config = {'image_model': 'prism_mova'}
+    unet_extra_config = {}
+    latent_format = latent_formats.Wan21
+    supported_inference_dtypes = [torch.bfloat16, torch.float32]
+    sampling_settings = {'shift': 9.0, 'audio_shift': 7.0}
+
+    def set_inference_dtype(self, dtype, manual_cast_dtype, device=None):
+        # Storage remains FP8 in quantized layers, computation does not. Stock
+        # UNETLoader may select an FP8 model dtype from the weight inventory.
+        """Select native mixed precision or the legacy row-scaled FP8 operations."""
+        if dtype in (torch.float8_e4m3fn, torch.float8_e5m2):
+            dtype = manual_cast_dtype or torch.bfloat16
+        super().set_inference_dtype(dtype, manual_cast_dtype, device=device)
+
+    def get_model(self, state_dict, prefix='', device=None):
+        """Construct the native Prism wrapper with the detected checkpoint configuration."""
+        native_quant = any(k.startswith(prefix) and k.endswith('.comfy_quant') for k in state_dict)
+        if native_quant and any(k.startswith(prefix) and k.endswith('.prism_scale') for k in state_dict):
+            raise ValueError('Prism native INT8 and legacy FP8 cannot be combined in one checkpoint.')
+        if any(k.startswith(prefix) and k.endswith('.prism_scale') for k in state_dict):
+            self.custom_operations = comfy.ldm.prism.quantization.RowScaledFP8Ops
+        # Checkpoint-owned weights are allocated by the native state-dict loader.
+        return model_base.Prism(self, device=torch.device('meta') if device is None else device)
+
+
 models = [
+    Prism,
     LotusD,
     Stable_Zero123,
     SD15_instructpix2pix,

@@ -20,6 +20,7 @@ import comfy.ldm.hunyuan3dv2_1
 import comfy.ldm.hunyuan3dv2_1.hunyuandit
 import torch
 import logging
+import json
 import comfy.ldm.lightricks.av_model
 import comfy.ldm.minimax.model
 import comfy.ldm.minimax_music.dit
@@ -47,6 +48,8 @@ import comfy.ldm.cosmos.model
 import comfy.ldm.cosmos.predict2
 import comfy.ldm.lumina.model
 import comfy.ldm.wan.model
+import comfy.ldm.prism.model
+import comfy.ldm.prism.quantization
 import comfy.ldm.wan.model_animate
 import comfy.ldm.wan.model_animate2
 import comfy.ldm.wan.ar_model
@@ -3030,3 +3033,193 @@ class CogVideoX(BaseModel):
                 ofs = torch.full((noise.shape[0],), 2.0, device=noise.device, dtype=noise.dtype)
             out['ofs'] = comfy.conds.CONDRegular(ofs)
         return out
+
+
+class Prism(BaseModel):
+    def __init__(self, model_config, device=None):
+        """Initialize native joint AV sampling and row-scaled checkpoint bookkeeping."""
+        super().__init__(model_config, ModelType.FLOW_AV, device=device,
+            unet_model=comfy.ldm.prism.model.Prism)
+        self.prism_row_scaled = False
+
+    def get_dynamic_vram__units(self):
+        """Delegate dynamic offload units to the Prism transformer."""
+        return self.diffusion_model.get_dynamic_units(), []
+
+    def load_model_weights(self, sd, unet_prefix="", assign=False):
+        """Load legacy row-scaled FP8 or native quantized weights with their metadata."""
+        to_load = {k[len(unet_prefix):]: sd.pop(k) for k in list(sd) if k.startswith(unet_prefix)}
+        scale_keys = {k for k in to_load if k.endswith('.prism_scale')}
+        quant_layers = {k[:-len('.comfy_quant')] for k in to_load if k.endswith('.comfy_quant')}
+        native_extras = {name + suffix for name in quant_layers for suffix in ('.comfy_quant', '.weight_scale')}
+        if scale_keys and quant_layers:
+            raise ValueError('Prism native INT8 and legacy FP8 cannot be combined in one checkpoint.')
+        actual = set(to_load) - scale_keys - native_extras
+        shapes = {k: tuple(v.shape) for k, v in self.diffusion_model.named_parameters()}
+        modules = dict(self.diffusion_model.named_modules())
+        for name, module in modules.items():
+            if isinstance(module, (torch.nn.Linear, comfy.ops.MixedPrecisionOp)):
+                shapes[name + '.weight'] = (module.out_features, module.in_features)
+                if module.bias is not None or getattr(module, 'comfy_need_lazy_init_bias', False):
+                    shapes[name + '.bias'] = (module.out_features,)
+        missing, extra = set(shapes) - actual, actual - set(shapes)
+        if missing or extra:
+            raise ValueError(f'Prism checkpoint mismatch: missing={sorted(missing)[:6]}, extra={sorted(extra)[:6]}')
+        scaled, native_layers = {}, set()
+        for key, shape in shapes.items():
+            value = to_load[key]
+            if tuple(value.shape) != shape:
+                raise ValueError(f'Prism checkpoint shape mismatch: {key}')
+            if value.dtype == torch.int8:
+                name, parameter = key.rsplit('.', 1)
+                target = modules[name]
+                if parameter != 'weight' or not isinstance(target, comfy.ops.MixedPrecisionOp) or name not in quant_layers:
+                    raise ValueError(f'Missing native Prism INT8 Linear metadata: {key}')
+                metadata = to_load[name + '.comfy_quant']
+                if metadata.dtype != torch.uint8 or metadata.ndim != 1 or metadata.numel() > 4096:
+                    raise ValueError(f'Invalid native Prism quantization metadata: {name}')
+                conf = json.loads(metadata.cpu().numpy().tobytes())
+                if not isinstance(conf, dict) or conf.get('format') != 'int8_tensorwise' or conf.get('convrot') is not True:
+                    raise ValueError(f'Prism supports native int8_tensorwise with ConvRot only: {name}')
+                group = conf.get('convrot_groupsize', 256)
+                if type(group) is not int or group <= 0 or group & (group - 1) or shape[1] % group:
+                    raise ValueError(f'Invalid Prism ConvRot group size: {name}')
+                scale = to_load.get(name + '.weight_scale')
+                if scale is None or tuple(scale.shape) != (shape[0], 1) or scale.dtype != torch.float32:
+                    raise ValueError(f'Missing or invalid native Prism INT8 row scale: {name}')
+                if not torch.isfinite(scale).all().item() or not (scale > 0).all().item():
+                    raise ValueError(f'Prism INT8 row scale must be finite and positive: {name}')
+                native_layers.add(name)
+            elif value.dtype in (torch.float8_e4m3fn, torch.float8_e5m2):
+                name, parameter = key.rsplit('.', 1)
+                target = modules[name]
+                if value.dtype != torch.float8_e4m3fn or parameter != 'weight' or not isinstance(
+                        target, comfy.ldm.prism.quantization.RowScaledFP8Ops.Linear):
+                    raise ValueError(f'Unsupported Prism FP8 layer: {key}; only row-scaled E4M3FN Linear is supported.')
+                scale = to_load.get(key + '.prism_scale')
+                if scale is None or tuple(scale.shape) != (shape[0], 1):
+                    raise ValueError(f'Missing or invalid Prism FP8 row scale: {key}')
+                if scale.dtype != torch.float32 or not torch.isfinite(scale).all().item() or not (scale > 0).all().item():
+                    raise ValueError(f'Prism FP8 row scale must be finite, positive FP32: {key}')
+                scaled[key] = (target, scale)
+            elif value.dtype not in (torch.float32, torch.float16, torch.bfloat16):
+                raise ValueError(f'Unsupported Prism weight dtype: {key} ({value.dtype})')
+        if quant_layers != native_layers:
+            raise ValueError(f'Unexpected Prism INT8 metadata: {sorted(quant_layers - native_layers)[:6]}')
+        required_scales = {key + '.prism_scale' for key in scaled}
+        if scale_keys != required_scales:
+            raise ValueError(f'Unexpected Prism FP8 scales: {sorted(scale_keys - required_scales)[:6]}')
+        # Validate every entry before attaching buffers or assigning parameters.
+        for key, (target, scale) in scaled.items():
+            to_load.pop(key + '.prism_scale')
+            target.prism_scale = scale
+        if native_layers:
+            # Structural meta initialization must not discard checkpoint data in
+            # the native mixed-op loader's .to(device=factory_kwargs["device"]).
+            for name, module in modules.items():
+                if isinstance(module, comfy.ops.MixedPrecisionOp):
+                    module.factory_kwargs['device'] = to_load[name + '.weight'].device
+        self.diffusion_model.load_state_dict(to_load, strict=True, assign=True)
+        self.prism_row_scaled = bool(scaled)
+        comfy.model_management.archive_model_dtypes(self.diffusion_model)
+        if scaled:
+            logging.info('Prism: loaded %d row-scaled FP8 layers.', len(scaled))
+        if native_layers:
+            logging.info('Prism: loaded %d native INT8 ConvRot layers.', len(native_layers))
+        return self
+
+    def _transform_streams(self, latent, into_model):
+        """Map video normalization and audio scale across the packed latent boundary."""
+        nested = latent.is_nested
+        if nested:
+            streams = latent.unbind()
+        else:
+            if self.latent_shapes is None or len(self.latent_shapes) != 2:
+                raise ValueError('Prism KSampler requires a joint video/audio LATENT from Prism Prepare AV.')
+            streams = comfy.utils.unpack_latents(latent, self.latent_shapes)
+        if len(streams) != 2:
+            raise ValueError('Prism requires exactly two latent streams.')
+        video, audio = streams
+        scale = self.model_sampling.audio_scale
+        if into_model:
+            video = self.latent_format.process_in(video)
+            audio = audio * scale
+        else:
+            video = self.latent_format.process_out(video)
+            audio = audio / scale
+        if nested:
+            return comfy.nested_tensor.NestedTensor((video, audio))
+        return comfy.utils.pack_latents((video, audio))[0]
+
+    def process_latent_in(self, latent):
+        """Convert external video/audio latents to Prism sampling coordinates."""
+        return self._transform_streams(latent, True)
+
+    def process_latent_out(self, latent):
+        """Restore decoded-model coordinates for both latent streams."""
+        return self._transform_streams(latent, False)
+
+    def extra_conds(self, **kwargs):
+        """Pass reference, text, audio timing, and latent shapes into the native guider."""
+        out = super().extra_conds(**kwargs)
+        if 'prism_reference' not in kwargs or 'prism_audio_context' not in kwargs:
+            raise ValueError('Use Prism Prepare AV conditioning for both KSampler positive and negative inputs.')
+        out['prism_reference'] = comfy.conds.CONDRegular(kwargs['prism_reference'])
+        out['prism_audio_context'] = comfy.conds.CONDRegular(kwargs['prism_audio_context'])
+        out['prism_fps'] = comfy.conds.CONDConstant(kwargs['prism_fps'])
+        out['latent_shapes'] = comfy.conds.CONDConstant(kwargs['latent_shapes'])
+        return out
+
+    def _apply_model(self, x, t, c_concat=None, c_crossattn=None, control=None,
+                     transformer_options={}, prism_reference=None, prism_audio_context=None,
+                     prism_fps=24.0, latent_shapes=None, **kwargs):
+        """Unpack AV latents, select the video expert, and repack denoised streams."""
+        if self.prism_row_scaled and self.current_patcher is not None and self.current_patcher.patches:
+            raise ValueError('Prism row-scaled FP8 LoRA patches are not implemented; use the unpatched model or BF16.')
+        if latent_shapes is None or len(latent_shapes) != 2:
+            raise ValueError('Prism needs exactly two packed streams: video and audio.')
+        if control is not None or c_concat is not None:
+            raise ValueError('Prism ControlNet/concat conditioning is not implemented.')
+        sigma_v = t.float()
+        if (sigma_v <= 0).any():
+            raise ValueError('Prism model evaluations require positive sigma; the sampler final step must not evaluate sigma=0.')
+        # sigma_a = sigma_v / r, with r affine in sigma_v. Carrying
+        # y_audio = r * x_audio makes the Euler finite update exactly match
+        # the two independently shifted flow updates for identical model calls.
+        scale = self.model_sampling.audio_scale
+        ratio = scale + (1.0 - scale) * sigma_v
+        sigma_a = sigma_v / ratio
+        video, carried_audio = comfy.utils.unpack_latents(x, latent_shapes)
+        audio = carried_audio / ratio.view(-1, 1, 1)
+        reference = prism_reference.to(device=x.device, dtype=torch.float32)
+        context = c_crossattn.to(device=x.device, dtype=self.get_dtype_inference())
+        audio_context = prism_audio_context.to(device=x.device, dtype=self.get_dtype_inference())
+        options = transformer_options
+        attention = options.get('prism_attention', 'dense')
+        if attention not in ('dense', 'prism_sparse', 'prism_sparse_tail_safe'):
+            raise ValueError('Unknown Prism attention mode')
+        bridge = self.diffusion_model
+        options = options.copy()
+        options['prefetch_dynamic_vbars'] = self.current_patcher is not None and self.current_patcher.is_dynamic()
+        # Native CFG may batch conditional and unconditional calls. They share
+        # the current video timestep, but have their own text/audio contexts.
+        low_noise = bool((sigma_v[0] < bridge.boundary_ratio).item())
+        if not torch.equal(sigma_v, sigma_v[:1].expand_as(sigma_v)):
+            raise ValueError('Mixed per-item Prism timesteps are not supported in a single model call.')
+        with torch.autocast(x.device.type, dtype=self.get_dtype_inference(), enabled=x.device.type == 'cuda' and self.get_dtype_inference() != torch.float32):
+            v_flow, a_flow = bridge(
+                video=video, audio=audio, reference=reference,
+                context=context, audio_context=audio_context,
+                video_time=sigma_v * 1000.0, audio_time=sigma_a * 1000.0,
+                fps=prism_fps, low_noise=low_noise, transformer_options=options,
+            )
+        audio_derivative = (1.0 - scale) * audio + (scale / ratio).view(-1,1,1) * a_flow.float()
+        flow, _ = comfy.utils.pack_latents((v_flow.float(), audio_derivative))
+        return self.model_sampling.calculate_denoised(sigma_v, flow, x)
+
+    def memory_required(self, input_shape, cond_shapes={}):
+        # Packed length contains both streams. Estimate activations, not all
+        # weights: native ModelPatcher accounts for resident/offloaded weights.
+        """Estimate the joint audio/video activation footprint for native offloading."""
+        tokens = max(1, input_shape[0] * math.prod(input_shape[1:]) // 64)
+        return 6 * 1024**3 + tokens * (20 * 5120 + 6 * 13824) * 2
