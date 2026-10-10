@@ -499,6 +499,7 @@ class TestExecution:
         if not assets_enabled:
             pargs.append('--disable-assets')
         else:
+            pargs.append('--enable-assets')
             assets_tmp_dir = tmp_path_factory.mktemp("execution-assets")
             database_path = assets_tmp_dir / "assets.db"
             capture_path = assets_tmp_dir / "server.log"

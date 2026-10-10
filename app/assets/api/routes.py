@@ -91,7 +91,7 @@ def _require_assets_feature_enabled(handler):
             return _build_error_response(
                 503,
                 "SERVICE_DISABLED",
-                "Assets system is disabled because the server was started with --disable-assets.",
+                "Assets system is disabled. Start the server with --enable-assets to use this feature.",
             )
         return await handler(request)
 

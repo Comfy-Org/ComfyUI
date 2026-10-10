@@ -1,6 +1,6 @@
 """Selects and implements the enabled and disabled asset managers.
 
-``default_asset_manager`` chooses ``NoAssets`` only for ``--disable-assets``; main.py
+``default_asset_manager`` chooses ``NoAssets`` unless assets are enabled (see cli_args); main.py
 stops startup before that if assets are on and the database packages are missing.
 """
 

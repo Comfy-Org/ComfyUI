@@ -1,6 +1,9 @@
+import subprocess
+import sys
 from collections.abc import Callable
 from contextlib import AbstractContextManager
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import pytest
@@ -18,7 +21,6 @@ from app.assets.manager import AssetsEnabled, NoAssets
 from app.assets.mode import hashing_enabled
 from app.assets.seeder import asset_seeder
 from app.assets.services.hash_mode_state import read_stored_mode
-from comfy.cli_args import parser
 
 
 class _Args:
@@ -47,7 +49,7 @@ async def test_noassets_register_routes_returns_service_disabled_and_disables_se
     assert response.status == 503
     error = (await response.json())["error"]
     assert error["code"] == "SERVICE_DISABLED"
-    assert "--disable-assets" in error["message"]
+    assert "--enable-assets" in error["message"]
     assert asset_seeder.is_disabled()
 
 
@@ -184,15 +186,25 @@ def test_noassets_is_disabled() -> None:
 @pytest.mark.parametrize(
     ("flags", "expected"),
     [
-        ([], AssetsEnabled),
+        ([], NoAssets),
         (["--enable-assets"], AssetsEnabled),
         (["--disable-assets"], NoAssets),
         (["--enable-assets", "--disable-assets"], NoAssets),
     ],
 )
-def test_assets_are_on_unless_disabled(
+def test_assets_are_off_unless_enabled(
     flags: list[str], expected: type, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(manager, "args", parser.parse_args(flags))
+    # A fresh interpreter, because the rules after parse_args only run when comfy.cli_args is imported.
+    parsed = subprocess.run(
+        [sys.executable, "-c", "import comfy.options; comfy.options.enable_args_parsing(); "
+         "from comfy.cli_args import args; print(args.disable_assets)", *flags],
+        cwd=Path(__file__).resolve().parents[3],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    disable_assets = {"True": True, "False": False}[parsed.stdout.strip()]
+    monkeypatch.setattr(manager, "args", SimpleNamespace(disable_assets=disable_assets, enable_asset_hashing=False))
 
     assert isinstance(manager.default_asset_manager(), expected)
