@@ -1122,6 +1122,8 @@ class VAE:
         self.patcher = mp(self.first_stage_model, load_device=self.device, offload_device=offload_device, fast_disk=fast_disk)
 
         m, u = self.first_stage_model.load_state_dict(sd, strict=False, assign=self.patcher.is_dynamic())
+        if isinstance(self.first_stage_model, comfy.ldm.minimax.vae.MiniMaxH3VideoVAE):
+            m = [key for key in m if key not in ("latents_mean", "latents_std")]
         if not self.patcher.is_dynamic():
             # Lazy parameters only exist after loading the state dict.
             self.first_stage_model.to(self.vae_dtype)
