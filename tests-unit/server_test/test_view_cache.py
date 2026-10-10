@@ -59,6 +59,8 @@ async def test_no_cache_with_etag_and_304(output_dir, client, variant):
     assert again.headers["Cache-Control"] == "no-cache"
 
     assert (await get(client, params, {"If-None-Match": "*"})).status == 304
+    assert (await get(client, params, {"If-None-Match": f"W/{etag}"})).status == 304
+    assert (await get(client, params, {"If-None-Match": f'"other", {etag}'})).status == 304
     assert (await get(client, params, {"If-None-Match": '"other"'})).status == 200
 
 
