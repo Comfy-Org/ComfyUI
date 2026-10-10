@@ -35,6 +35,7 @@ from aiohttp import web
 import logging
 
 import mimetypes
+import zlib
 from comfy.cli_args import args
 from comfy.deploy_environment import get_deploy_environment
 import comfy.utils
@@ -650,7 +651,17 @@ class PromptServer():
                     res = request.rel_url.query.get('res', '')
                     res = int(res) if res.isascii() and res.isdigit() and len(res) < 10 else 0
                     body = False  # None after a res attempt: serve the original as is, skipping preview=
-                    if res > 0 and 'channel' not in request.rel_url.query and os.path.splitext(file)[1].lower() in ('.png', '.jpg', '.jpeg'):
+                    resize = res > 0 and 'channel' not in request.rel_url.query and os.path.splitext(file)[1].lower() in ('.png', '.jpg', '.jpeg')
+                    cache_headers = {"Cache-Control": "no-cache"}
+                    if resize or 'preview' in request.rel_url.query or request.rel_url.query.get('channel') in ('rgb', 'a'):
+                        # Re-encoded responses get their own validator; the suffix keeps it distinct from the original's ETag.
+                        st = os.stat(file)
+                        variant = f"{res}|{request.rel_url.query.get('preview')}|{request.rel_url.query.get('channel')}"
+                        etag = f"{st.st_mtime_ns:x}-{st.st_size:x}-{zlib.crc32(variant.encode()):x}"
+                        cache_headers["ETag"] = f'"{etag}"'
+                        if any(e.value in (etag, "*") for e in request.if_none_match or ()):
+                            return web.Response(status=304, headers=cache_headers)
+                    if resize:
                         preview = request.rel_url.query.get('preview', '').split(';')
                         webp_quality = None if preview[0] != 'webp' else min(100, int(preview[-1])) if preview[-1].isascii() and preview[-1].isdigit() and len(preview[-1]) < 10 else 90
                         try:
@@ -660,7 +671,7 @@ class PromptServer():
                         if body:
                             safe_filename = (os.path.splitext(filename)[0] + (".jpg" if webp_quality is None else ".webp")).replace("\\", "\\\\").replace('"', '\\"')
                             return web.Response(body=body, content_type='image/jpeg' if webp_quality is None else 'image/webp',
-                                                headers={"Content-Disposition": f"filename=\"{safe_filename}\"", "X-Content-Type-Options": "nosniff"})
+                                                headers={"Content-Disposition": f"filename=\"{safe_filename}\"", "X-Content-Type-Options": "nosniff", **cache_headers})
 
                     if 'preview' in request.rel_url.query and body is not None:
                         with Image.open(file) as img:
@@ -680,7 +691,7 @@ class PromptServer():
                             buffer.seek(0)
 
                             return web.Response(body=buffer.read(), content_type=f'image/{image_format}',
-                                                headers={"Content-Disposition": f"filename=\"{filename}\""})
+                                                headers={"Content-Disposition": f"filename=\"{filename}\"", **cache_headers})
 
                     if 'channel' not in request.rel_url.query:
                         channel = 'rgba'
@@ -700,7 +711,7 @@ class PromptServer():
                             buffer.seek(0)
 
                             return web.Response(body=buffer.read(), content_type='image/png',
-                                                headers={"Content-Disposition": f"filename=\"{filename}\""})
+                                                headers={"Content-Disposition": f"filename=\"{filename}\"", **cache_headers})
 
                     elif channel == 'a':
                         with Image.open(file) as img:
@@ -717,7 +728,7 @@ class PromptServer():
                             alpha_buffer.seek(0)
 
                             return web.Response(body=alpha_buffer.read(), content_type='image/png',
-                                                headers={"Content-Disposition": f"filename=\"{filename}\""})
+                                                headers={"Content-Disposition": f"filename=\"{filename}\"", **cache_headers})
                     else:
                         # Use the content type from asset resolution if available,
                         # otherwise guess from the filename.
@@ -747,9 +758,9 @@ class PromptServer():
                         if folder_paths.is_dangerous_content_type(content_type):
                             # This response now depends on a request header, so
                             # it must not be reused across destinations.
-                            # FileResponse emits Last-Modified/ETag and nothing
-                            # sets Cache-Control on /view, which makes it
-                            # heuristically cacheable: without these headers a
+                            # FileResponse emits Last-Modified/ETag, and a
+                            # no-cache response is still stored and revalidated
+                            # (a 304 replays it): without these headers a
                             # cache could replay the inline SVG served to an
                             # <img> to a later document navigation of the same
                             # URL and re-enable the stored XSS, or replay the
@@ -760,6 +771,7 @@ class PromptServer():
                                 content_type = 'application/octet-stream'
                                 disposition = f"attachment; filename=\"{safe_filename}\""
 
+                        headers.setdefault("Cache-Control", "no-cache")
                         headers["Content-Disposition"] = disposition
                         headers["Content-Type"] = content_type
                         return web.FileResponse(file, headers=headers)
