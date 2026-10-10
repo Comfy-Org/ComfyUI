@@ -150,6 +150,7 @@ attn_group.add_argument("--use-pytorch-cross-attention", action="store_true", he
 attn_group.add_argument("--use-sage-attention", action="store_true", help="Use sage attention.")
 attn_group.add_argument("--use-flash-attention", action="store_true", help="Use FlashAttention.")
 attn_group.add_argument("--use-ck-attention", action="store_true", help="Use Comfy Kitchen attention.")
+attn_group.add_argument("--use-aiter-attention", action="store_true", help="Use Aiter attention on ROCm/HIP.")
 
 parser.add_argument("--disable-xformers", action="store_true", help="Disable xformers.")
 
