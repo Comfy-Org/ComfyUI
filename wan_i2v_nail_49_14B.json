@@ -1,0 +1,68 @@
+{
+  "37": {
+    "class_type": "UNETLoader",
+    "inputs": {"unet_name": "10Eros_Max_H3_FL2VA-NVFP4-HQ.safetensors", "weight_dtype": "default"}
+  },
+  "38": {
+    "class_type": "CLIPLoader",
+    "inputs": {"clip_name": "umt5_xxl_umt5-xxl-enc-bf16_comfy.safetensors", "type": "wan"}
+  },
+  "39": {
+    "class_type": "VAELoader",
+    "inputs": {"vae_name": "wan_2.1_vae.pth"}
+  },
+  "100": {
+    "class_type": "LoadImage",
+    "inputs": {"image": "jingtian_ref.png"}
+  },
+  "6": {
+    "class_type": "CLIPTextEncode",
+    "inputs": {
+      "text": "Cinematic extreme close-up, intimate and still, warm bedroom light. The same beautiful Chinese woman from the reference image gently holding a man's hand on her lap, carefully filing and polishing his nails one at a time with a small professional nail tool, lifting each finger to check against the soft light. Tender, unhurried, shallow depth of field, cinematic warmth, photorealistic, 8k, detailed hands and skin texture.",
+      "clip": ["38", 0]
+    }
+  },
+  "7": {
+    "class_type": "CLIPTextEncode",
+    "inputs": {
+      "text": "blurry, watermark, text, logo, low quality, deformed, distorted face, extra limbs, oversaturated, cartoon, anime, bad hands, mutated fingers",
+      "clip": ["38", 0]
+    }
+  },
+  "40": {
+    "class_type": "WanImageToVideo",
+    "inputs": {
+      "positive": ["6", 0],
+      "negative": ["7", 0],
+      "vae": ["39", 0],
+      "width": 832,
+      "height": 480,
+      "length": 49,
+      "batch_size": 1,
+      "start_image": ["100", 0]
+    }
+  },
+  "3": {
+    "class_type": "KSampler",
+    "inputs": {
+      "seed": 20260833,
+      "steps": 30,
+      "cfg": 6.0,
+      "sampler_name": "uni_pc",
+      "scheduler": "simple",
+      "denoise": 1.0,
+      "model": ["37", 0],
+      "positive": ["40", 0],
+      "negative": ["40", 1],
+      "latent_image": ["40", 2]
+    }
+  },
+  "8": {
+    "class_type": "VAEDecode",
+    "inputs": {"samples": ["3", 0], "vae": ["39", 0]}
+  },
+  "10": {
+    "class_type": "SaveImage",
+    "inputs": {"images": ["8", 0], "filename_prefix": "nail_49_14B"}
+  }
+}
