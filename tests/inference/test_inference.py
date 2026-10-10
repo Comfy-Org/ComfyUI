@@ -156,6 +156,7 @@ class TestInference:
                 '--output-directory', args_pytest["output_dir"],
                 '--listen', args_pytest["listen"],
                 '--port', str(args_pytest["port"]),
+                '--disable-assets',
                 ])
         yield
         p.kill()

@@ -30,6 +30,7 @@ def no_assets_server(tmp_path: Path):
             "--port",
             str(port),
             "--cpu",
+            "--disable-assets",
         ],
         cwd=Path(__file__).resolve().parents[2],
         stdout=subprocess.DEVNULL,
@@ -54,7 +55,9 @@ def no_assets_server(tmp_path: Path):
 
 
 def test_no_assets_keeps_legacy_upload_and_view(no_assets_server: str):
-    assert requests.get(f"{no_assets_server}/api/assets", timeout=10).status_code == 503
+    disabled = requests.get(f"{no_assets_server}/api/assets", timeout=10)
+    assert disabled.status_code == 503
+    assert "--disable-assets" in disabled.json()["error"]["message"]
 
     upload = requests.post(
         f"{no_assets_server}/upload/image",

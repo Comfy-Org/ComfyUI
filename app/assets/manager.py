@@ -1,7 +1,7 @@
 """Selects and implements the enabled and disabled asset managers.
 
-``default_asset_manager`` checks database dependencies before enabling assets
-and chooses ``NoAssets`` when the requested mode cannot run.
+``default_asset_manager`` chooses ``NoAssets`` only for ``--disable-assets``; main.py
+stops startup before that if assets are on and the database packages are missing.
 """
 
 from __future__ import annotations
@@ -13,16 +13,15 @@ from aiohttp import web
 
 from app.assets import mode
 from app.assets.lifecycle import record_hash_mode_transition_intent, run_shutdown, run_startup
-from app.database.db import dependencies_available, missing_dependencies
+from app.database.db import dependencies_available
 from app.user_manager import UserManager
 from comfy.cli_args import args
-from utils.install_util import get_missing_requirements_message
 
 # These need the database packages. Without them only NoAssets is used, and it
 # does not touch these names.
 if dependencies_available():
     from app.assets.api.routes import register_assets_routes
-    from app.assets.seeder import ScanPhase, asset_seeder
+    from app.assets.seeder import asset_seeder
     from app.assets.services.ingest import (
         register_cached_output as ingest_register_cached_output,
         register_executed_output as ingest_register_executed_output,
@@ -74,7 +73,7 @@ class AssetManager(Protocol):
 
 
 class _ArgsLike(Protocol):
-    enable_assets: bool
+    disable_assets: bool
     enable_asset_hashing: bool
 
 
@@ -166,19 +165,13 @@ class AssetsEnabled:
         register_assets_routes(app, user_manager)
 
     def ensure_scan_started(self) -> None:
-        asset_seeder.start(roots=("models", "input", "output"))
+        asset_seeder.start(roots=("models", "input"))
 
     def pause_background_scan(self) -> None:
         asset_seeder.pause()
 
     def queue_output_scan(self) -> None:
-        if not asset_seeder.is_disabled():
-            # FULL, not ENRICH: only a walk finds outputs a node never declared. Do not downgrade without re-weighing the cost.
-            asset_seeder.enqueue_scan(
-                roots=("output",),
-                phase=ScanPhase.FULL,
-                compute_hashes=self._args.enable_asset_hashing,
-            )
+        return None
 
     def resume_background_scan(self) -> None:
         asset_seeder.resume()
@@ -233,11 +226,4 @@ class AssetsEnabled:
 
 
 def default_asset_manager() -> AssetManager:
-    if args.enable_assets and not dependencies_available():
-        missing = ", ".join(missing_dependencies()) or "see the import error above"
-        logging.error(
-            f"--enable-assets requires packages that could not be imported: {missing}. "
-            f"Assets are disabled.\n{get_missing_requirements_message()}"
-        )
-        return NoAssets(args)
-    return AssetsEnabled(args) if args.enable_assets else NoAssets(args)
+    return NoAssets(args) if args.disable_assets else AssetsEnabled(args)
