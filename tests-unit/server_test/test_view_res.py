@@ -250,6 +250,72 @@ async def test_large_mpo_still_previewed(output_dir):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("side,res", [(1024, 512), (2048, 512), (2048, 256), (4096, 512)])
+async def test_jpeg_at_exact_multiple_of_res_is_downscaled(output_dir, side, res):
+    original = save(output_dir / "square.jpg", size=(side, side), format="jpeg")
+    _, headers, body = await view({"filename": "square.jpg", "res": str(res)})
+    assert headers["Content-Type"] == "image/jpeg"
+    assert body != original
+    with Image.open(BytesIO(body)) as img:
+        assert img.size == (res, res)
+
+
+@pytest.mark.asyncio
+async def test_png_content_restricted_to_png_and_jpeg_decoders(output_dir):
+    original = save(output_dir / "actually_gif.png", format="gif")
+    status, headers, body = await view({"filename": "actually_gif.png", "res": "64"})
+    assert status == 200
+    assert body == original
+
+
+@pytest.mark.asyncio
+async def test_over_budget_with_preview_serves_original_without_decoding(output_dir, monkeypatch):
+    original = save(output_dir / "lineart.png", size=(7000, 7000), mode="1", color=1)
+    loads = []
+    monkeypatch.setattr(ImageFile.ImageFile, "load", lambda self: loads.append(self))
+    status, headers, body = await view({"filename": "lineart.png", "res": "512", "preview": "webp;75"})
+    assert status == 200
+    assert headers["Content-Type"] == "image/png"
+    assert body == original
+    assert loads == []
+
+
+@pytest.mark.asyncio
+async def test_fitting_image_with_preview_serves_original(output_dir):
+    original = save(output_dir / "small.png", size=(100, 40))
+    _, headers, body = await view({"filename": "small.png", "res": "512", "preview": "webp;75"})
+    assert headers["Content-Type"] == "image/png"
+    assert body == original
+
+
+@pytest.mark.asyncio
+async def test_multi_megapixel_png_previewed(output_dir):
+    save(output_dir / "big.png", size=(3000, 2000))
+    _, headers, body = await view({"filename": "big.png", "res": "512"})
+    assert headers["Content-Type"] == "image/jpeg"
+    with Image.open(BytesIO(body)) as img:
+        assert img.size == (512, 341)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("preview", ["webp;abc", "webp;", "webp;\u00b2", "webp;1234"])
+async def test_odd_webp_quality_uses_default(output_dir, preview):
+    save(output_dir / "a.png")
+    status, headers, _ = await view({"filename": "a.png", "res": "512", "preview": preview})
+    assert status == 200
+    assert headers["Content-Type"] == "image/webp"
+
+
+@pytest.mark.asyncio
+async def test_preview_without_res_unchanged(output_dir):
+    save(output_dir / "a.png")
+    status, headers, body = await view({"filename": "a.png", "preview": "webp;75"})
+    assert status == 200 and headers["Content-Type"] == "image/webp"
+    with Image.open(BytesIO(body)) as img:
+        assert img.size == (1000, 500)
+
+
+@pytest.mark.asyncio
 async def test_large_jpeg_still_previewed(output_dir):
     save(output_dir / "photo.jpg", size=(6400, 6400), mode="L", color=128, format="jpeg")
     status, headers, body = await view({"filename": "photo.jpg", "res": "512"})
