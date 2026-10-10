@@ -1060,9 +1060,21 @@ class VideoFromFile(VideoInput):
     def as_trimmed(
         self, start_time: float = 0, duration: float = 0, strict_duration: bool = True
     ) -> VideoInput | None:
+        outer_start, outer_duration = self.get_active_trim_window()
+        if outer_duration or start_time < 0:
+            available = self.get_duration()
+            if start_time < 0:
+                start_time = max(available + start_time, 0)
+            available -= start_time
+            if available <= 0:
+                return None
+            if strict_duration and duration and duration > available and not math.isclose(duration, available, rel_tol=0, abs_tol=1e-9):
+                return None
+            if outer_duration:
+                duration = min(duration, available) if duration else available
         trimmed = VideoFromFile(
             self.get_stream_source(),
-            start_time=start_time + self.__start_time,
+            start_time=outer_start + start_time,
             duration=duration,
             crop=self.__crop,
         )
