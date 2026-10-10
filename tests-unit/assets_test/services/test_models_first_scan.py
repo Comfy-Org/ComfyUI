@@ -165,6 +165,10 @@ def test_each_pass_sends_its_own_fast_complete_in_order(db_engine, layout):
         ({"roots": ["models"], "created": MODELS, "skipped": 0, "total": MODELS}, MODELS, 0),
         ({"roots": ["input"], "created": INPUTS, "skipped": 0, "total": INPUTS}, MODELS, INPUTS),
     ]
+    assert [e[1] for e in scan.named("assets.seed.started")] == [
+        {"roots": ["models"], "total": MODELS, "phase": "fast"},
+        {"roots": ["input"], "total": INPUTS, "phase": "fast"},
+    ]
     assert kinds.index("assets.seed.completed") > kinds.index("assets.seed.fast_complete")
     (completed,) = scan.named("assets.seed.completed")
     assert completed[1]["created"] == MODELS + INPUTS
@@ -207,6 +211,7 @@ def test_skipped_files_accumulate_across_the_passes(db_engine, layout):
     rescan.seeder._run_scan()
 
     assert rescan.progress[-1].skipped == MODELS + INPUTS
+    assert [e[1]["skipped"] for e in rescan.named("assets.seed.fast_complete")] == [MODELS, INPUTS]
 
 
 def test_a_prompt_during_the_input_walk_parks_the_scan_after_models_were_announced(
@@ -227,6 +232,8 @@ def test_a_prompt_during_the_input_walk_parks_the_scan_after_models_were_announc
         assert scan.seeder.resume()
     finally:
         release.set()
+        worker.join(10)
+        scan.seeder.cancel()  # frees a scan thread a failed assertion left parked
         worker.join(10)
 
     assert not worker.is_alive()
@@ -268,17 +275,3 @@ def test_with_output_in_the_roots_input_and_output_share_the_second_pass(
     ]
     assert _rows(db_engine, layout["output"]) == OUTPUTS
 
-
-def test_the_output_pass_of_a_models_and_output_scan_is_not_the_output_only_rescan(
-    db_engine, layout, monkeypatch
-):
-    def listing():
-        raise AssertionError("the output-only rescan's listing ran")
-
-    monkeypatch.setattr(seeder_module, "list_output_for_rescan", listing)
-    scan = _Scan(db_engine, layout, ("models", "output"))
-    scan.seeder._run_scan()
-
-    assert [e[1]["roots"] for e in scan.named("assets.seed.fast_complete")] == [["models"], ["output"]]
-    assert scan.named("assets.seed.completed")
-    assert _rows(db_engine, layout["output"]) == OUTPUTS

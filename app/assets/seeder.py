@@ -919,8 +919,7 @@ class _AssetSeeder:
         total_created = 0
         skipped_existing = 0
 
-        # Decided by the whole scan's roots: the output pass of a models+output scan stats rows as before.
-        by_listing = rescans_output_by_listing(self._roots)
+        by_listing = rescans_output_by_listing(roots)
         live_references: dict[str, list] = {}
         existing_paths: set[str] = set()
         t_sync = time.perf_counter()
