@@ -1073,7 +1073,7 @@ def linear_input_act_(x, weight, bias, input_act=None, act_weight=None, act_eps=
             convrot=getattr(weight._params, "convrot", False),
             convrot_groupsize=getattr(weight._params, "convrot_groupsize", 256),
             input_act=input_act,
-            input_act_weight=act_weight,
+            input_act_weight=None if act_weight is None else comfy.model_management.cast_to(act_weight, None, x.device),
             input_act_eps=act_eps,
             residual=residual,
             residual_scale=residual_scale,

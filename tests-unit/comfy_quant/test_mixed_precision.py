@@ -377,6 +377,28 @@ class TestMixedPrecisionOps(unittest.TestCase):
         )
         torch.testing.assert_close(output, expected)
 
+    def test_linear_input_act_moves_rms_norm_weight_to_input_device(self):
+        """An offloaded pre-norm weight sits on the CPU while the activation is on the
+        compute device; the INT8 kernel does no device alignment."""
+        operations = ops.mixed_precision_ops({}, compute_dtype=torch.bfloat16)
+        layer = operations.Linear(64, 32, bias=False, device="cpu", dtype=torch.bfloat16)
+        layer.weight = torch.nn.Parameter(
+            QuantizedTensor.from_float(torch.randn(32, 64, dtype=torch.bfloat16), "TensorWiseINT8Layout"), requires_grad=False
+        )
+        layer.quant_format = "int8_tensorwise"
+
+        x = torch.randn(4, 64, dtype=torch.bfloat16, device="meta")
+        norm_weight = torch.ones(64, dtype=torch.bfloat16)
+
+        orig_int8_linear = ops.quant_ops.ck.int8_linear
+        int8_linear = ops.quant_ops.ck.int8_linear = unittest.mock.Mock(return_value=None)
+        try:
+            ops.linear_input_act(layer, x, "rms_norm", norm_weight, 1e-5)
+        finally:
+            ops.quant_ops.ck.int8_linear = orig_int8_linear
+
+        self.assertEqual(int8_linear.call_args.kwargs["input_act_weight"].device, x.device)
+
     def test_supports_int8_compute_treats_mps_mode_as_unsupported_when_device_is_none(self):
         """Call sites (like pick_operations' default) may omit load_device. On an
         MPS machine that must still report int8 as unsupported instead of
