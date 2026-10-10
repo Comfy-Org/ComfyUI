@@ -8,14 +8,14 @@ def test_missing_content_remains_in_list_after_rm_with_missing_tag(
     http, api_base, asset_factory, comfy_tmp_base_dir, make_asset_bytes
 ):
     record = asset_factory(
-        "missing.png", ["input", "unit-tests"], {}, make_asset_bytes("missing")
+        "missing.png", ["output", "unit-tests"], {}, make_asset_bytes("missing")
     )
-    next((comfy_tmp_base_dir / "input").glob("*.png")).unlink()
+    next((comfy_tmp_base_dir / "output").glob("*.png")).unlink()
 
     response = None
     for _attempt in range(5):
         response = http.post(
-            f"{api_base}/api/assets/seed?wait=true", json={"roots": ["input"]}
+            f"{api_base}/api/assets/seed?wait=true", json={"roots": ["output"]}
         )
         if response.status_code != 409:
             break

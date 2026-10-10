@@ -21,7 +21,7 @@ from comfy.cli_args import args
 # does not touch these names.
 if dependencies_available():
     from app.assets.api.routes import register_assets_routes
-    from app.assets.seeder import asset_seeder
+    from app.assets.seeder import ScanPhase, asset_seeder
     from app.assets.services.ingest import (
         register_cached_output as ingest_register_cached_output,
         register_executed_output as ingest_register_executed_output,
@@ -165,13 +165,19 @@ class AssetsEnabled:
         register_assets_routes(app, user_manager)
 
     def ensure_scan_started(self) -> None:
-        asset_seeder.start(roots=("models", "input"))
+        asset_seeder.start(roots=("models", "input", "output"))
 
     def pause_background_scan(self) -> None:
         asset_seeder.pause()
 
     def queue_output_scan(self) -> None:
-        return None
+        if not asset_seeder.is_disabled():
+            # FULL, not ENRICH: only a walk finds outputs a node never declared. Do not downgrade without re-weighing the cost.
+            asset_seeder.enqueue_scan(
+                roots=("output",),
+                phase=ScanPhase.FULL,
+                compute_hashes=self._args.enable_asset_hashing,
+            )
 
     def resume_background_scan(self) -> None:
         asset_seeder.resume()
