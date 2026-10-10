@@ -51,6 +51,25 @@ def test_upgrade_to_head(migration_db):
     command.upgrade(migration_db, "head")
 
 
+def test_upgrade_succeeds_when_tag_type_index_is_missing(migration_db):
+    """0004 must tolerate databases whose tags table lacks ix_tags_tag_type.
+
+    Databases created by older builds can be at revision 0003 without the
+    index; an unconditional drop_index aborted the whole upgrade (see #15022).
+    """
+    command.upgrade(migration_db, "0003_add_metadata_job_id")
+
+    db_path = _sqlite_path(migration_db)
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("DROP INDEX ix_tags_tag_type")
+
+    command.upgrade(migration_db, "head")
+
+    with sqlite3.connect(db_path) as conn:
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(tags)")}
+        assert "tag_type" not in columns
+
+
 def test_downgrade_to_baseline(migration_db):
     """Upgrade to head then downgrade back to baseline."""
     command.upgrade(migration_db, "head")
