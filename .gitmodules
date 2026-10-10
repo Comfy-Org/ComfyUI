@@ -1,0 +1,45 @@
+[submodule "submodules/lobehub"]
+	path = submodules/lobehub
+	url = https://github.com/vc301105-lab/lobehub.git
+[submodule "submodules/LibreChat"]
+	path = submodules/LibreChat
+	url = https://github.com/vc301105-lab/LibreChat.git
+[submodule "submodules/awesome-llm-apps"]
+	path = submodules/awesome-llm-apps
+	url = https://github.com/vc301105-lab/awesome-llm-apps.git
+[submodule "submodules/F5-TTS"]
+	path = submodules/F5-TTS
+	url = https://github.com/vc301105-lab/F5-TTS.git
+[submodule "submodules/HunyuanVideo"]
+	path = submodules/HunyuanVideo
+	url = https://github.com/vc301105-lab/HunyuanVideo.git
+[submodule "submodules/LivePortrait"]
+	path = submodules/LivePortrait
+	url = https://github.com/vc301105-lab/LivePortrait.git
+[submodule "submodules/Open-Sora"]
+	path = submodules/Open-Sora
+	url = https://github.com/vc301105-lab/Open-Sora.git
+[submodule "submodules/MoneyPrinter"]
+	path = submodules/MoneyPrinter
+	url = https://github.com/vc301105-lab/MoneyPrinter.git
+[submodule "submodules/audiocraft"]
+	path = submodules/audiocraft
+	url = https://github.com/vc301105-lab/audiocraft.git
+[submodule "submodules/ControlNet"]
+	path = submodules/ControlNet
+	url = https://github.com/vc301105-lab/ControlNet.git
+[submodule "submodules/Moore-AnimateAnyone"]
+	path = submodules/Moore-AnimateAnyone
+	url = https://github.com/vc301105-lab/Moore-AnimateAnyone.git
+[submodule "submodules/ShortGPT"]
+	path = submodules/ShortGPT
+	url = https://github.com/vc301105-lab/ShortGPT.git
+[submodule "submodules/gaussian-splatting"]
+	path = submodules/gaussian-splatting
+	url = https://github.com/vc301105-lab/gaussian-splatting.git
+[submodule "submodules/CogVideo"]
+	path = submodules/CogVideo
+	url = https://github.com/vc301105-lab/CogVideo.git
+[submodule "submodules/llm-course"]
+	path = submodules/llm-course
+	url = https://github.com/vc301105-lab/llm-course.git
