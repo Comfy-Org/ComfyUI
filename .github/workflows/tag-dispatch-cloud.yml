@@ -9,9 +9,18 @@ jobs:
   dispatch-cloud:
     runs-on: ubuntu-latest
     steps:
+      - name: Generate GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ vars.CLOUD_DISPATCH_APP_ID }}
+          private-key: ${{ secrets.CLOUD_DISPATCH_APP_PRIVATE_KEY }}
+          owner: Comfy-Org
+          repositories: cloud
+
       - name: Send repository dispatch to cloud
         env:
-          DISPATCH_TOKEN: ${{ secrets.CLOUD_REPO_DISPATCH_TOKEN }}
+          DISPATCH_TOKEN: ${{ steps.app-token.outputs.token }}
           RELEASE_TAG: ${{ github.ref_name }}
         run: |
           set -euo pipefail
@@ -43,3 +52,17 @@ jobs:
             -d "$PAYLOAD"
 
           echo "✅ Dispatched ComfyUI tag ${RELEASE_TAG} to Comfy-Org/cloud"
+
+      - name: Open an issue if the dispatch failed
+        if: failure()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ github.ref_name }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          gh issue create \
+            --title "Cloud tag dispatch failed for ${RELEASE_TAG}" \
+            --body "The dispatch to Comfy-Org/cloud failed for \`${RELEASE_TAG}\`, so the cloud ComfyUI bump PR was not opened automatically and must be triggered by hand (run the 'Bump ComfyUI on Upstream Tag' workflow in Comfy-Org/cloud).
+
+          Run: ${RUN_URL}" \
+            --label "bug" || echo "::warning::Could not open tracking issue" 
