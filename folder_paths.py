@@ -547,6 +547,12 @@ def get_save_image_path(filename_prefix: str, output_dir: str, image_width=0, im
     subfolder = os.path.dirname(os.path.normpath(filename_prefix))
     filename = os.path.basename(os.path.normpath(filename_prefix))
 
+    if args.date_based_output:
+        # Automatically organize outputs into a date-based subfolder.
+        # This keeps working across midnight without restarting the server.
+        date_subfolder = time.strftime(args.date_output_format, time.localtime())
+        subfolder = os.path.join(date_subfolder, subfolder) if subfolder else date_subfolder
+
     full_output_folder = os.path.join(output_dir, subfolder)
 
     if not is_within_directory(output_dir, full_output_folder):
