@@ -13,6 +13,7 @@ import asyncio
 import torch
 
 from comfy.cli_args import args, get_console_log_level
+import comfy.benchmark
 import comfy.memory_management
 import comfy.model_management
 import comfy.model_patcher
@@ -544,9 +545,17 @@ async def execute(server: "ExecutionServer", dynprompt, caches, current_item, ex
                 # TODO - How to handle this with async functions without contextvars (which requires Python 3.12)?
                 GraphBuilder.set_default_prefix(unique_id, call_index, 0)
 
+            _bench = comfy.benchmark.get_active()
+            _bench_t0 = time.perf_counter() if _bench is not None else None
             try:
                 output_data, output_ui, has_subgraph, has_pending_tasks = await get_output_data(prompt_id, unique_id, obj, input_data_all, execution_block_cb=execution_block_cb, pre_execute_cb=pre_execute_cb, v3_data=v3_data)
             finally:
+                if _bench is not None:
+                    # Best-effort: a capture bug must never break node execution (m4).
+                    try:
+                        _bench.record_node(unique_id, class_type, (time.perf_counter() - _bench_t0) * 1000.0)
+                    except Exception:
+                        logging.debug("benchmark: record_node failed", exc_info=True)
                 if comfy.memory_management.aimdo_enabled:
                     if get_console_log_level(args.verbose) == "DEBUG":
                         comfy_aimdo.control.analyze()
@@ -689,6 +698,15 @@ class PromptExecutor:
         node_id = error["node_id"]
         class_type = prompt[node_id]["class_type"]
 
+        # Record the run outcome for benchmark capture (no-op when off).
+        _bench = comfy.benchmark.get_active()
+        if _bench is not None:
+            _bench.set_status(
+                "interrupted"
+                if isinstance(ex, comfy.model_management.InterruptProcessingException)
+                else "error"
+            )
+
         # First, send back the status to the frontend depending
         # on the exception type
         if isinstance(ex, comfy.model_management.InterruptProcessingException):
@@ -742,6 +760,11 @@ class PromptExecutor:
 
         self.status_messages = []
         self.add_message("execution_start", { "prompt_id": prompt_id}, broadcast=False)
+
+        # Benchmark capture is a no-op unless this run opted in (extra_data["benchmark"])
+        # or the global --benchmark flag is set. When off, this returns None and
+        # installs nothing (no wrappers, no sampler thread, no context).
+        benchmark_ctx = comfy.benchmark.start(prompt_id, extra_data, prompt)
 
         self._notify_prompt_lifecycle("start", prompt_id)
         ram_headroom = int(self.cache_args["ram"] * (1024 ** 3))
@@ -843,6 +866,7 @@ class PromptExecutor:
             comfy.memory_management.set_ram_cache_release_state(None, 0)
             self.prompt_model_tracker.end()
             self._notify_prompt_lifecycle("end", prompt_id)
+            comfy.benchmark.finish(benchmark_ctx, self)
 
 
 async def validate_inputs(prompt_id, prompt, item, validated, visiting=None):

@@ -281,6 +281,9 @@ parser.add_argument("--enable-asset-hashing", action="store_true", help="Compute
 parser.add_argument("--feature-flag", type=str, action='append', default=[], metavar="KEY[=VALUE]", help="Set a server feature flag. Use KEY=VALUE to set an explicit value, or bare KEY to set it to true. Can be specified multiple times. Boolean values (true/false) and numbers are auto-converted. Examples: --feature-flag show_signin_button=true  or  --feature-flag show_signin_button")
 parser.add_argument("--list-feature-flags", action="store_true", help="Print the registry of known CLI-settable feature flags as JSON and exit.")
 
+parser.add_argument("--benchmark", action="store_true", help="Capture in-core benchmark metrics for every run (soak mode). Per-run opt-in is also available via extra_data['benchmark'] on /prompt. Whenever capture is active, the record is written to output/benchmarks/<prompt_id>.json. When neither is set, no benchmark code runs.")
+parser.add_argument("--benchmark-no-file", action="store_true", help="Disable the per-run benchmark JSON file sink (output/benchmarks/<prompt_id>.json) while still emitting the websocket 'benchmark' event. Use in cloud/ephemeral containers where the event is the canonical channel and the file is dead weight. Also settable via COMFYUI_BENCHMARK_NO_FILE=1. Off by default (Desktop's poller relies on the file).")
+
 if comfy.options.args_parsing:
     args = parser.parse_args()
 else:
