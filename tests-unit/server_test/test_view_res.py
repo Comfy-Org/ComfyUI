@@ -10,7 +10,7 @@ from unittest.mock import MagicMock
 import numpy as np
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
-from PIL import Image, ImageFile
+from PIL import Image, ImageCms, ImageFile
 from PIL.PngImagePlugin import PngInfo
 
 import folder_paths
@@ -214,6 +214,42 @@ async def test_leading_zeros_accepted(output_dir):
 
 
 @pytest.mark.asyncio
+async def test_malformed_exif_serves_original(output_dir):
+    exif = Image.Exif()
+    exif[0x0112] = 6
+    exif[0x011B] = 72.0
+    raw = exif.tobytes()
+    i = raw.find(b"\x01\x1b\x00\x05")  # YResolution, RATIONAL -> retyped as ASCII
+    original = save(output_dir / "bad_exif.jpg", size=(1000, 700), format="jpeg", exif=raw[:i + 2] + b"\x00\x02" + raw[i + 4:])
+    status, headers, body = await view({"filename": "bad_exif.jpg", "res": "512"})
+    assert status == 200
+    assert headers["Content-Type"] == "image/jpeg"
+    assert body == original
+
+
+@pytest.mark.asyncio
+async def test_large_res_on_large_jpeg_serves_original_without_decoding(output_dir, monkeypatch):
+    original = save(output_dir / "photo.jpg", size=(6400, 6400), mode="L", color=128, format="jpeg")
+    loads = []
+    monkeypatch.setattr(ImageFile.ImageFile, "load", lambda self: loads.append(self))
+    status, _, body = await view({"filename": "photo.jpg", "res": "6000"})
+    assert status == 200
+    assert body == original
+    assert loads == []
+
+
+@pytest.mark.asyncio
+async def test_large_mpo_still_previewed(output_dir):
+    frame = Image.new("RGB", (6400, 6400), (128, 128, 128))
+    frame.save(output_dir / "camera.jpg", format="mpo", save_all=True, append_images=[frame])
+    status, headers, body = await view({"filename": "camera.jpg", "res": "512"})
+    assert status == 200
+    assert headers["Content-Type"] == "image/jpeg"
+    with Image.open(BytesIO(body)) as img:
+        assert img.size == (512, 512)
+
+
+@pytest.mark.asyncio
 async def test_large_jpeg_still_previewed(output_dir):
     save(output_dir / "photo.jpg", size=(6400, 6400), mode="L", color=128, format="jpeg")
     status, headers, body = await view({"filename": "photo.jpg", "res": "512"})
@@ -244,12 +280,49 @@ async def test_exif_orientation_applied(output_dir):
 
 
 @pytest.mark.asyncio
-async def test_res_wins_over_preview(output_dir):
-    save(output_dir / "a.png")
-    _, headers, body = await view({"filename": "a.png", "res": "512", "preview": "webp;75"})
-    assert headers["Content-Type"] == "image/jpeg"
+async def test_preview_webp_keeps_format_and_alpha(output_dir):
+    save(output_dir / "cutout.png", mode="RGBA", color=(255, 0, 0, 0))
+    _, headers, body = await view({"filename": "cutout.png", "res": "512", "preview": "webp;75"})
+    assert headers["Content-Type"] == "image/webp"
+    assert headers["Content-Disposition"] == 'filename="cutout.webp"'
     with Image.open(BytesIO(body)) as img:
+        assert img.format == "WEBP"
         assert img.size == (512, 256)
+        assert img.convert("RGBA").getpixel((10, 10))[3] == 0
+
+
+@pytest.mark.asyncio
+async def test_preview_webp_quality_honoured(output_dir):
+    noise = np.random.default_rng(1).integers(0, 256, (500, 1000, 3), dtype=np.uint8)
+    Image.fromarray(noise).save(output_dir / "noise.png")
+    sizes = {}
+    for quality in ("10", "95"):
+        _, _, body = await view({"filename": "noise.png", "res": "512", "preview": f"webp;{quality}"})
+        sizes[quality] = len(body)
+    _, _, default = await view({"filename": "noise.png", "res": "512", "preview": "webp"})
+    assert sizes["10"] < len(default) < sizes["95"]
+
+
+@pytest.mark.asyncio
+async def test_res_wins_over_preview_jpeg(output_dir):
+    save(output_dir / "a.png")
+    _, headers, body = await view({"filename": "a.png", "res": "512", "preview": "jpeg;50"})
+    assert headers["Content-Type"] == "image/jpeg"
+    reference = BytesIO()
+    Image.new("RGB", (8, 8)).save(reference, format="jpeg", quality=85)
+    with Image.open(BytesIO(body)) as img, Image.open(reference) as ref:
+        assert img.size == (512, 256)
+        assert img.quantization == ref.quantization
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("preview", [None, "webp;75"])
+async def test_icc_profile_kept(output_dir, preview):
+    profile = ImageCms.ImageCmsProfile(ImageCms.createProfile("sRGB")).tobytes()
+    save(output_dir / "photo.jpg", format="jpeg", icc_profile=profile)
+    _, _, body = await view({"filename": "photo.jpg", "res": "64", **({"preview": preview} if preview else {})})
+    with Image.open(BytesIO(body)) as img:
+        assert img.info.get("icc_profile") == profile
 
 
 @pytest.mark.asyncio

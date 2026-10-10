@@ -111,10 +111,11 @@ def _remove_sensitive_from_queue(queue: list) -> list:
     return [item[:5] for item in queue]
 
 
-def _downscaled_jpeg(path: str, res: int) -> bytes | None:
-    """Longest side capped at res, alpha flattened onto black, as quality 85 JPEG; None if the original already fits."""
+def _downscaled_preview(path: str, res: int, webp_quality: int | None) -> bytes | None:
+    """Longest side capped at res, as WebP if asked for, else quality 85 JPEG on black; None if the original fits."""
     with Image.open(path) as img:
-        if img.format != "JPEG" and img.width * img.height > 40_000_000:  # too costly to decode; JPEG decodes downscaled
+        img.draft(img.mode, (res, res))  # JPEG decodes at reduced scale; no-op for other formats
+        if img.width * img.height > 40_000_000:  # too costly to decode for a preview
             return None
         if max(img.size) <= res and not img.mode.startswith("I") and "A" not in img.mode and "transparency" not in img.info:
             return None
@@ -124,10 +125,13 @@ def _downscaled_jpeg(path: str, res: int) -> bytes | None:
             img = img.convert("RGBA")
         img.thumbnail((res, res))
         img = ImageOps.exif_transpose(img).convert("RGBA")
+        buffer = BytesIO()
+        if webp_quality is not None:  # keeps alpha
+            img.save(buffer, format="webp", quality=webp_quality, icc_profile=img.info.get("icc_profile"))
+            return buffer.getvalue()
         flat = Image.new("RGB", img.size)
         flat.paste(img, mask=img.getchannel("A"))
-        buffer = BytesIO()
-        flat.save(buffer, format="jpeg", quality=85)
+        flat.save(buffer, format="jpeg", quality=85, icc_profile=img.info.get("icc_profile"))
         return buffer.getvalue()
 
 
@@ -645,13 +649,15 @@ class PromptServer():
                     res = request.rel_url.query.get('res', '')
                     res = int(res) if res.isascii() and res.isdigit() and len(res) < 10 else 0
                     if res > 0 and 'channel' not in request.rel_url.query and os.path.splitext(file)[1].lower() in ('.png', '.jpg', '.jpeg'):
+                        preview = request.rel_url.query.get('preview', '').split(';')
+                        webp_quality = None if preview[0] != 'webp' else int(preview[-1]) if preview[-1].isascii() and preview[-1].isdigit() and len(preview[-1]) < 4 else 90
                         try:
-                            body = await asyncio.to_thread(_downscaled_jpeg, file, res)
-                        except (OSError, SyntaxError, ValueError, Image.DecompressionBombError):
-                            body = None  # undecodable: serve the file as without res
+                            body = await asyncio.to_thread(_downscaled_preview, file, res, webp_quality)
+                        except Exception:
+                            body = None  # undecodable (corrupt data or metadata): serve the file as without res
                         if body is not None:
-                            safe_filename = (os.path.splitext(filename)[0] + ".jpg").replace("\\", "\\\\").replace('"', '\\"')
-                            return web.Response(body=body, content_type='image/jpeg',
+                            safe_filename = (os.path.splitext(filename)[0] + (".jpg" if webp_quality is None else ".webp")).replace("\\", "\\\\").replace('"', '\\"')
+                            return web.Response(body=body, content_type='image/jpeg' if webp_quality is None else 'image/webp',
                                                 headers={"Content-Disposition": f"filename=\"{safe_filename}\"", "X-Content-Type-Options": "nosniff"})
 
                     if 'preview' in request.rel_url.query:
