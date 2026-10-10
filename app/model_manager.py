@@ -190,7 +190,7 @@ class ModelFileManager:
             return []
 
         basename = os.path.splitext(filepath)[0]
-        match_files = glob.glob(f"{basename}.*", recursive=False)
+        match_files = glob.glob(f"{glob.escape(basename)}.*", recursive=False)
         image_files = filter_files_content_types(match_files, "image")
         safetensors_file = next(filter(lambda x: x.endswith(".safetensors"), match_files), None)
         safetensors_metadata = {}
