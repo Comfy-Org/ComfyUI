@@ -776,6 +776,7 @@ class LoadedModel:
         self.currently_used = True
         self.model_finalizer = None
         self._patcher_finalizer = None
+        self._unload_lock = threading.Lock()
 
     def _set_model(self, model: ModelPatcher):
         self._model = weakref.ref(model)
@@ -833,16 +834,19 @@ class LoadedModel:
         return False
 
     def model_unload(self, memory_to_free=None, unpatch_weights=True):
-        if memory_to_free is not None:
-            if memory_to_free < self.model.loaded_size():
-                freed = self.model.partially_unload(self.model.offload_device, memory_to_free)
-                if freed >= memory_to_free:
-                    return False
-        self.model.detach(unpatch_weights)
-        self.model_finalizer.detach()
-        self.model_finalizer = None
-        self.real_model = None
-        return True
+        with self._unload_lock:
+            if self.model_finalizer is None:
+                return True
+            if memory_to_free is not None:
+                if memory_to_free < self.model.loaded_size():
+                    freed = self.model.partially_unload(self.model.offload_device, memory_to_free)
+                    if freed >= memory_to_free:
+                        return False
+            self.model.detach(unpatch_weights)
+            self.model_finalizer.detach()
+            self.model_finalizer = None
+            self.real_model = None
+            return True
 
     def model_use_more_vram(self, extra_memory, force_patch_weights=False):
         return self.model.partially_load(self.device, extra_memory, force_patch_weights=force_patch_weights)
