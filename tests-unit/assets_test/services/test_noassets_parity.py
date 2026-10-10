@@ -190,6 +190,9 @@ def test_noassets_is_disabled() -> None:
         (["--enable-assets"], AssetsEnabled),
         (["--disable-assets"], NoAssets),
         (["--enable-assets", "--disable-assets"], NoAssets),
+        (["--windows-standalone-build"], AssetsEnabled),
+        (["--windows-standalone-build", "--disable-assets"], NoAssets),
+        (["--windows-standalone-build", "--enable-assets"], AssetsEnabled),
     ],
 )
 def test_assets_are_off_unless_enabled(
