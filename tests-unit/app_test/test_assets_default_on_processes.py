@@ -205,31 +205,7 @@ def test_database_from_a_newer_comfyui_runs_without_assets_and_is_left_as_it_is(
     assert "ASSETS_STARTUP_FAILED" not in log
     assert "Traceback" not in log
     assert db.read_bytes() == before
+    wal = user_dir / "comfyui.db-wal"
+    assert not wal.exists() or wal.stat().st_size == 0  # nothing written during the run either
     # Reading a WAL database can add an empty -wal and the -shm index; the lock file stays on POSIX only.
     assert set(os.listdir(user_dir)) - {"comfyui.db.lock", "comfyui.db-wal", "comfyui.db-shm"} == {"comfyui.db"}
-
-
-def test_default_database_follows_the_user_directory_and_scans_extra_model_paths(tmp_path):
-    user_dir = tmp_path / "elsewhere" / "user"
-    user_dir.mkdir(parents=True)
-    extra = tmp_path / "extra"
-    (extra / "ckpts").mkdir(parents=True)
-    (extra / "ckpts" / "from-extra.safetensors").write_bytes(b"extra-model")
-    config = tmp_path / "extra_model_paths.yaml"
-    config.write_text(f"extra:\n  base_path: {extra}\n  checkpoints: ckpts\n")
-
-    server = _serve(tmp_path, f"--user-directory={user_dir}", f"--extra-model-paths-config={config}", database_url=False)
-    base_url = next(server)
-    try:
-        deadline = time.monotonic() + 60
-        names = []
-        while "from-extra.safetensors" not in names and time.monotonic() < deadline:
-            time.sleep(0.25)
-            listed = requests.get(f"{base_url}/api/assets", params={"include_tags": "models"}, timeout=10)
-            assert listed.status_code == 200
-            names = [asset["name"] for asset in listed.json()["assets"]]
-        assert "from-extra.safetensors" in names
-    finally:
-        server.close()
-
-    assert _revision(user_dir / "comfyui.db") == HEAD

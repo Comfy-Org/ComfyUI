@@ -50,7 +50,6 @@ def db_path(tmp_path, monkeypatch):
 
 def _startup_error(caplog, asset_manager=None, *, kind, level=logging.ERROR):
     with caplog.at_level(level), pytest.raises(SystemExit) as stopped:
-        main.open_database()
         main.setup_database(asset_manager or _AssetsOn())
     assert stopped.value.code == 1
     assert "--disable-assets" in caplog.text
@@ -140,7 +139,7 @@ def test_database_from_a_newer_comfyui_turns_assets_off_and_is_left_as_it_is(db_
     before = _files(os.path.dirname(db_path))
 
     with caplog.at_level(logging.WARNING):
-        main.open_database()
+        main.skip_assets_for_a_newer_database()
 
     assert main.args.disable_assets
     assert "ASSETS_DISABLED: newer_revision\n" in caplog.text
@@ -154,10 +153,35 @@ def test_database_from_a_newer_comfyui_turns_assets_off_and_is_left_as_it_is(db_
     for name in ("comfyui.db", "comfyui.db-wal"):
         assert after.get(name) == before.get(name) or (name not in before and after[name] == b"")
     assert set(after) <= {"comfyui.db", "comfyui.db-wal", "comfyui.db-shm"}
+    assert not os.path.exists(db_path + ".lock")  # only init_db takes the lock, and it never ran
     assert db_module.Session is None
-    released = FileLock(db_path + ".lock")
-    released.acquire(timeout=0)
-    released.release()
+
+
+@pytest.mark.parametrize(
+    "folder", ["100%20x", pytest.param("a?b#c", marks=pytest.mark.skipif(sys.platform == "win32", reason="not a valid Windows path"))]
+)
+def test_newer_database_in_a_folder_with_uri_characters(tmp_path, monkeypatch, db_path, caplog, folder):
+    path = tmp_path / folder / "comfyui.db"
+    path.parent.mkdir()
+    _stamp(str(path), "0099_from_a_newer_release")
+    monkeypatch.setattr(db_module.args, "database_url", URL.create("sqlite", database=str(path)).render_as_string())
+
+    with caplog.at_level(logging.WARNING):
+        main.skip_assets_for_a_newer_database()
+
+    assert main.args.disable_assets
+    assert f"The asset database '{path}' was upgraded by a newer version of ComfyUI" in caplog.text
+
+
+def test_newer_database_the_check_cannot_read_still_stops_as_newer_revision(db_path, caplog, monkeypatch):
+    _stamp(db_path, "0099_from_a_newer_release")
+    monkeypatch.setattr(db_module, "_raise_if_newer", lambda path: None)  # e.g. a hot rollback journal
+
+    main.skip_assets_for_a_newer_database()
+    error = _startup_error(caplog, kind="newer_revision")
+
+    assert f"The asset database '{db_path}' was last used by a newer version of ComfyUI" in error
+    assert "0099_from_a_newer_release" in error
 
 
 def test_newer_database_at_the_legacy_path_stays_where_the_newer_comfyui_left_it(tmp_path, monkeypatch, db_path, caplog):
@@ -172,7 +196,7 @@ def test_newer_database_at_the_legacy_path_stays_where_the_newer_comfyui_left_it
     monkeypatch.setattr(folder_paths, "get_user_directory", lambda: str(user_dir))
 
     with caplog.at_level(logging.WARNING):
-        main.open_database()
+        main.skip_assets_for_a_newer_database()
 
     assert main.args.disable_assets
     assert f"The asset database '{legacy}' was upgraded by a newer version of ComfyUI" in caplog.text
@@ -189,21 +213,22 @@ def test_any_unknown_revision_among_several_turns_assets_off(db_path, caplog):
         conn.commit()
 
     with caplog.at_level(logging.WARNING):
-        main.open_database()
+        main.skip_assets_for_a_newer_database()
 
     assert main.args.disable_assets
     assert "(revision '0099_from_a_newer_release')" in caplog.text
 
 
 def test_revision_cannot_add_lines_to_the_log(db_path, caplog):
-    _stamp(db_path, "0099\n[ERROR] ASSETS_STARTUP_FAILED: corrupt")
+    _stamp(db_path, "0099\n[ERROR] ASSETS_STARTUP_FAILED: corrupt \u00e9")
 
     with caplog.at_level(logging.WARNING):
-        main.open_database()
+        main.skip_assets_for_a_newer_database()
 
     assert main.args.disable_assets
     assert "\n[ERROR] ASSETS_STARTUP_FAILED" not in caplog.text
-    assert "(revision '0099\\n[ERROR] ASSETS_STARTUP_FAILED: corrupt')" in caplog.text
+    # Escaped to ASCII, so it also survives a console that can't encode it.
+    assert "(revision '0099\\n[ERROR] ASSETS_STARTUP_FAILED: corrupt \\xe9')" in caplog.text
 
 
 def test_failed_upgrade(db_path, caplog):

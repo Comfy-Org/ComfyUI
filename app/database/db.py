@@ -4,8 +4,8 @@ import os
 import shutil
 import sqlite3
 import time
+import urllib.parse
 from contextlib import closing
-from pathlib import Path
 from app.logger import log_startup_warning
 from filelock import FileLock, Timeout
 from comfy.cli_args import args, database_default_path
@@ -120,7 +120,6 @@ def copy_legacy_default_db(db_path):
     backup_path = legacy_db_path + ".bak"
     if os.path.exists(backup_path):
         return
-    _raise_if_newer(legacy_db_path)
 
     if os.path.exists(legacy_db_path + "-wal"):
         # Fold committed WAL pages back into the file before it is renamed and copied.
@@ -174,15 +173,29 @@ class NewerDatabaseError(Exception):
 
 def _raise_if_newer(db_path):
     """Read-only, so a database a newer ComfyUI upgraded, and the WAL it left, stay as they are."""
+    path = os.path.abspath(db_path).replace(os.sep, "/")
+    uri = "file://" + ("" if path.startswith("/") else "/") + urllib.parse.quote(path, safe="/:") + "?mode=ro"
     try:
-        with closing(sqlite3.connect(Path(os.path.abspath(db_path)).as_uri() + "?mode=ro", uri=True)) as conn:
+        with closing(sqlite3.connect(uri, uri=True, timeout=0)) as conn:
             stored = [row[0] for row in conn.execute("SELECT version_num FROM alembic_version")]
     except sqlite3.Error:
-        return  # no database or version table yet, or a damaged file: the migration reports it
+        return  # no database or version table yet, or one it can't read: init_db reports it
     known = {revision.revision for revision in ScriptDirectory.from_config(get_alembic_config()).walk_revisions()}
     unknown = [revision for revision in stored if revision not in known]
     if unknown:
-        raise NewerDatabaseError(db_path, ", ".join(map(repr, unknown)))
+        raise NewerDatabaseError(db_path, ", ".join(map(ascii, unknown)))
+
+
+def raise_if_database_is_newer():
+    """Checks the database init_db would open, or the legacy one it would move into place."""
+    try:
+        db_path = get_db_path()
+    except ValueError:
+        return  # in-memory, or an unsupported URL that init_db reports
+    _raise_if_newer(db_path)
+    legacy_db_path = get_legacy_default_db_path()
+    if args.database_url is None and legacy_db_path is not None and not os.path.exists(db_path):
+        _raise_if_newer(legacy_db_path)
 
 
 _db_lock = None
@@ -290,7 +303,6 @@ def _init_file_db(db_url):
     _acquire_file_lock(db_path)
     try:
         copy_legacy_default_db(db_path)
-        _raise_if_newer(db_path)
         db_exists = os.path.exists(db_path)
         _migrate_and_bind(db_url, db_path, db_exists)
     except Exception:
