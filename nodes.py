@@ -734,6 +734,7 @@ class LoraLoader:
     FUNCTION = "load_lora"
 
     CATEGORY = "model/loaders"
+    DEPRECATED = True  # This node is superseded by the Load LoRA (Model) and Load LoRA (Text Encoder) nodes
     DESCRIPTION = "This LoRA loader is used to modify both diffusion and CLIP models, altering the way in which latents are denoised such as applying styles. Multiple LoRA nodes can be linked together."
     SEARCH_ALIASES = ["lora", "load lora", "apply lora", "lora loader", "lora model"]
 
@@ -766,6 +767,7 @@ class LoraLoaderModelOnly(LoraLoader):
                               "strength_model": ("FLOAT", {"default": 1.0, "min": -100.0, "max": 100.0, "step": 0.01}),
                             }}
     RETURN_TYPES = ("MODEL",)
+    DEPRECATED = True  # This node is superseded by the Load LoRA (Model) node
     DESCRIPTION = "This LoRAs loader is used to modify the diffusion model, altering the way in which latents are denoised such as applying styles. Multiple LoRA nodes can be linked together."
     SEARCH_ALIASES = ["lora", "load lora", "apply lora", "lora loader", "lora model"]
     FUNCTION = "load_lora_model_only"
@@ -2153,8 +2155,8 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "CheckpointLoader": "Load Checkpoint With Config (DEPRECATED)",
     "CheckpointLoaderSimple": "Load Checkpoint",
     "VAELoader": "Load VAE",
-    "LoraLoader": "Load LoRA (Model and CLIP)",
-    "LoraLoaderModelOnly": "Load LoRA",
+    "LoraLoader": "Load LoRA (Model and CLIP) (DEPRECATED)",
+    "LoraLoaderModelOnly": "Load LoRA (DEPRECATED)",
     "CLIPLoader": "Load CLIP",
     "DualCLIPLoader": "Load CLIP (Dual)",
     "ControlNetLoader": "Load ControlNet Model",
