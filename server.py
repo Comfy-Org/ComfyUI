@@ -1144,7 +1144,12 @@ class PromptServer():
             if "number" in json_data:
                 number = float(json_data['number'])
             else:
-                number = None
+                number = self.number
+                if "front" in json_data:
+                    if json_data['front']:
+                        number = -number
+
+                self.number += 1
 
             if "prompt" in json_data:
                 prompt = json_data["prompt"]
@@ -1190,10 +1195,6 @@ class PromptServer():
                     if usage_source:
                         extra_data["comfy_usage_source"] = usage_source
                 if valid[0]:
-                    if number is None:
-                        number = self.number
-                        if json_data.get("front", False):
-                            number = -number
                     outputs_to_execute = valid[2]
                     sensitive = {}
                     for sensitive_val in execution.SENSITIVE_EXTRA_DATA_KEYS:
@@ -1210,8 +1211,6 @@ class PromptServer():
                             "extra_info": {}
                         }
                         return web.json_response({"error": error, "node_errors": {}}, status=409)
-                    if "number" not in json_data:
-                        self.number += 1
                     response = {"prompt_id": prompt_id, "number": number, "node_errors": valid[3]}
                     return web.json_response(response)
                 else:

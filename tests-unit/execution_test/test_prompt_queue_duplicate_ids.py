@@ -77,6 +77,45 @@ def test_duplicate_pending_and_running_ids_are_rejected_without_mutating_the_hea
     assert queue.queue[0][1] == prompt_id
 
 
+def test_distinct_ids_with_equal_priority_are_accepted():
+    queue = _queue_types()["PromptQueue"](Server())
+    first = _item(7, "11111111-1111-1111-1111-111111111111", {"first": {}})
+    second = _item(7, "22222222-2222-2222-2222-222222222222", {"second": {}})
+
+    queue.put(first)
+    queue.put(second)
+
+    assert sorted(item[1] for item in queue.queue) == [first[1], second[1]]
+
+
+def test_concurrent_duplicate_pending_id_has_one_winner():
+    definitions = _queue_types()
+    duplicate_error = definitions["DuplicatePromptIdError"]
+    queue = definitions["PromptQueue"](Server())
+    prompt_id = "a1b2c3d4-e5f6-7a89-b0c1-d2e3f4a5b6c7"
+    barrier = threading.Barrier(8)
+    outcomes = []
+
+    def put(index):
+        barrier.wait()
+        try:
+            queue.put(_item(index, prompt_id, {str(index): {}}))
+            outcomes.append("accepted")
+        except duplicate_error:
+            outcomes.append("rejected")
+
+    threads = [threading.Thread(target=put, args=(index,)) for index in range(8)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert outcomes.count("accepted") == 1
+    assert outcomes.count("rejected") == 7
+    assert len(queue.queue) == 1
+    assert queue.queue[0][1] == prompt_id
+
+
 def _post_prompt_function():
     tree = ast.parse((ROOT / "server.py").read_text())
     post_prompt = next(
@@ -94,7 +133,7 @@ def _post_prompt_function():
     return factory
 
 
-def test_duplicate_route_returns_conflict_without_consuming_an_automatic_number():
+def test_duplicate_route_returns_conflict_after_consuming_the_automatic_number():
     definitions = _queue_types()
     duplicate_error = definitions["DuplicatePromptIdError"]
 
@@ -145,4 +184,4 @@ def test_duplicate_route_returns_conflict_without_consuming_an_automatic_number(
 
     assert response.status == 409
     assert response.payload["error"]["type"] == "duplicate_prompt_id"
-    assert server.number == 12
+    assert server.number == 13
