@@ -41,10 +41,18 @@ def _node(auth_token: str | None = None, api_key: str | None = None) -> type:
 class FakeComfyApi:
     """comfy-api stand-in: a partner route that accepts only ``accepted`` tokens, plus the renew route."""
 
-    def __init__(self, accepted: set[str], renewed_token: str | None, renew_status: int = 200, accept_renewed: bool = True):
+    def __init__(
+        self,
+        accepted: set[str],
+        renewed_token: str | None,
+        renew_status: int = 200,
+        accept_renewed: bool = True,
+        renew_headers: dict[str, str] | None = None,
+    ):
         self.accepted = accepted
         self.renewed_token = renewed_token
         self.renew_status = renew_status
+        self.renew_headers = renew_headers
         self.accept_renewed = accept_renewed
         self.partner_calls: list[tuple[str | None, dict]] = []
         self.renew_calls: list[str | None] = []
@@ -67,7 +75,7 @@ class FakeComfyApi:
         self.renew_calls.append(request.headers.get("Authorization"))
         await asyncio.sleep(0.05)
         if self.renew_status != 200:
-            return web.json_response({"message": "session revoked"}, status=self.renew_status)
+            return web.json_response({"message": "session revoked"}, status=self.renew_status, headers=self.renew_headers)
         if self.accept_renewed:
             self.accepted.add(self.renewed_token)
         return web.json_response({"token": self.renewed_token})
@@ -100,12 +108,21 @@ def _generate(node: type):
     )
 
 
+_CACHES = (
+    _helpers._partner_token_lineages,
+    _helpers._renewed_partner_tokens,
+    _helpers._partner_token_renewals,
+    _helpers._capped_partner_token_lineages,
+    _helpers._partner_token_renew_not_before,
+)
+
+
 @pytest.fixture(autouse=True)
 def _clear_renewed_tokens():
-    for cache in (_helpers._partner_token_lineages, _helpers._renewed_partner_tokens, _helpers._partner_token_renewals):
+    for cache in _CACHES:
         cache.clear()
     yield
-    for cache in (_helpers._partner_token_lineages, _helpers._renewed_partner_tokens, _helpers._partner_token_renewals):
+    for cache in _CACHES:
         cache.clear()
 
 
@@ -186,6 +203,39 @@ def test_renew_refusal_surfaces_the_original_auth_error_without_logging_tokens(m
     assert len(api.partner_calls) == 1
     assert rejected not in caplog.text
     assert rejected.split(".")[1] not in caplog.text
+
+
+@pytest.mark.parametrize(("renewed_exp_delta", "sent"), [(0, "renewed"), (-30, "snapshot")])
+def test_renewal_capped_at_session_end_is_not_repeated(monkeypatch, renewed_exp_delta, sent):
+    now = time.time()
+    snapshot = _partner_token(120, now=now)
+    renewed = _partner_token(120 + renewed_exp_delta, generation=1, now=now)
+    api = FakeComfyApi(accepted={snapshot}, renewed_token=renewed)
+
+    async def three_prompts():
+        for _ in range(3):
+            await _generate(_node(snapshot))
+
+    asyncio.run(_with_server(api, monkeypatch, three_prompts))
+
+    expected = renewed if sent == "renewed" else snapshot
+    assert api.renew_calls == [f"Bearer {snapshot}"]
+    assert [auth for auth, _ in api.partner_calls] == [f"Bearer {expected}"] * 3
+
+
+def test_rate_limited_renewal_surfaces_the_auth_error_and_waits_for_retry_after(monkeypatch):
+    rejected = _partner_token(5400)
+    api = FakeComfyApi(accepted=set(), renewed_token=None, renew_status=429, renew_headers={"Retry-After": "120"})
+
+    async def two_prompts():
+        for _ in range(2):
+            with pytest.raises(Exception, match="Unauthorized: Please login first"):
+                await _generate(_node(rejected))
+
+    asyncio.run(_with_server(api, monkeypatch, two_prompts))
+
+    assert api.renew_calls == [f"Bearer {rejected}"]
+    assert len(api.partner_calls) == 2
 
 
 @pytest.mark.parametrize(

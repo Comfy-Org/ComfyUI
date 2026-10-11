@@ -50,6 +50,10 @@ _partner_token_lineages: dict[str, str] = {}
 _renewed_partner_tokens: dict[str, str] = {}
 """Newest renewed partner-node token per lineage. In memory only; renewal does not rotate the token."""
 _partner_token_renewals: dict[str, asyncio.Task] = {}
+_capped_partner_token_lineages: set[str] = set()
+"""Lineages whose last renewal did not extend ``exp`` (session end reached): no pre-emptive renewal, only on a 401."""
+_partner_token_renew_not_before: dict[str, float] = {}
+"""Lineage -> wall-clock time before which comfy-api asked (HTTP 429) not to be sent another renewal."""
 
 
 def _partner_token_claims(token: str) -> dict | None:
@@ -97,6 +101,9 @@ async def _request_partner_token_renewal(lineage: str, sid: str, token: str) -> 
                     logging.warning("Comfy API refused to renew the sign-in token (HTTP %s).", resp.status)
                     if resp.status in (401, 403):
                         _renewed_partner_tokens.pop(lineage, None)
+                    if resp.status == 429:
+                        wait = _retry_after_wait(resp.headers.get("Retry-After"), 60.0, 600.0)
+                        _partner_token_renew_not_before[lineage] = time.time() + wait
                     return None
                 body = await resp.json(content_type=None)
     except (ClientError, OSError, asyncio.TimeoutError, ValueError) as e:
@@ -107,6 +114,10 @@ async def _request_partner_token_renewal(lineage: str, sid: str, token: str) -> 
     if claims is None or claims["sid"] != sid:
         logging.warning("Comfy API returned an unusable renewed sign-in token.")
         return None
+    if claims["exp"] <= _partner_token_claims(token)["exp"]:
+        _capped_partner_token_lineages.add(lineage)
+    else:
+        _capped_partner_token_lineages.discard(lineage)
     _partner_token_lineages[renewed] = lineage
     _renewed_partner_tokens[lineage] = renewed
     return renewed
@@ -115,6 +126,8 @@ async def _request_partner_token_renewal(lineage: str, sid: str, token: str) -> 
 async def _renew_partner_token(token: str, claims: dict) -> str | None:
     """Renew once per lineage at a time; concurrent callers share the in-flight renewal."""
     lineage = _partner_token_lineage(token)
+    if time.time() < _partner_token_renew_not_before.get(lineage, 0.0):
+        return None
     task = _partner_token_renewals.get(lineage)
     if task is None or task.done() or task.get_loop() is not asyncio.get_running_loop():
         task = asyncio.create_task(_request_partner_token_renewal(lineage, claims["sid"], token))
@@ -129,7 +142,7 @@ async def refresh_partner_token(node_cls: type[IO.ComfyNode]) -> None:
     """Renew the node's partner-node token if it expires soon. Any other credential is left untouched."""
     token = node_cls.hidden.auth_token_comfy_org
     claims = _partner_token_claims(token) if token else None
-    if claims is None:
+    if claims is None or _partner_token_lineage(token) in _capped_partner_token_lineages:
         return
     newest, exp = _newest_partner_token(token, claims)
     if exp - time.time() < _PARTNER_NODE_TOKEN_RENEW_MARGIN:
