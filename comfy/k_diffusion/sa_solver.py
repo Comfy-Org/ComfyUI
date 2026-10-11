@@ -116,6 +116,6 @@ def get_tau_interval_func(start_sigma: float, end_sigma: float, eta: float = 1.0
 
         if isinstance(sigma, torch.Tensor):
             sigma = sigma.item()
-        return eta if start_sigma >= sigma >= end_sigma else 0.0
+        return eta if start_sigma >= sigma > end_sigma else 0.0
 
     return tau_func
