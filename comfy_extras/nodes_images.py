@@ -1695,7 +1695,7 @@ def _encode_image(
     codec.pix_fmt = spec["stream_fmt"]
     codec.time_base = Fraction(1, 1)
     if file_format == "exr":
-        codec.options = {"format": "half" if bit_depth == "16-bit float" else "float"}
+        codec.options = {"format": "half" if bit_depth == "16-bit float" else "float", "compression": "zip16"}
 
     frame = av.VideoFrame.from_ndarray(img_np, format=spec["frame_fmt"])
     if spec["frame_fmt"] != spec["stream_fmt"]:
