@@ -1,4 +1,35 @@
 components:
+    responses:
+        SessionForbidden:
+            content:
+                application/json:
+                    schema:
+                        $ref: '#/components/schemas/ForbiddenError'
+            description: A refused request. For a web session, `code` is `workspace_access_denied` (the selected workspace is unknown, deleted, or the user is not a member; the three look the same), `no_workspace_access` (the account has no personal workspace and is a member of no live workspace), `origin_not_allowed` or `cross_site_request`; see the `WebSessionAuth` scheme. For any credential, `sso_required` means an SSO organization holds the account (its email is on the organization's verified domains) and the credential is not an SSO sign-in, or the workspace is an SSO organization's and the account is not on its domains or the credential is not an SSO sign-in; `organization_id`, when present, names the organization to sign in with. `FORBIDDEN` is the route's own authorization check failing, such as an unverified email. A credential this route does not take gets AuthTypeNotAllowedError instead, and so does the session while `web_session_enabled` is off for the user, unless the operation says it takes the session whatever `web_session_enabled` says.
+        SessionUnauthorized:
+            content:
+                application/json:
+                    schema:
+                        $ref: '#/components/schemas/ErrorResponse'
+            description: No valid credential, or an `Authorization` header, `X-API-Key` header or `?token=` next to the session cookie that could not be read, which is refused rather than answered with the session. `code` is `UNAUTHORIZED`.
+        SessionWorkspaceAccessDenied:
+            content:
+                application/json:
+                    schema:
+                        $ref: '#/components/schemas/ErrorResponse'
+            description: '`code` is `workspace_access_denied`: the selected workspace is unknown, deleted, or the user is not a member; the three look the same. This route also serves anonymous callers, so the session''s other refusals fall back to an anonymous request. See the `WebSessionAuth` scheme.'
+        SessionWorkspaceIDInvalid:
+            content:
+                application/json:
+                    schema:
+                        $ref: '#/components/schemas/ErrorResponse'
+            description: '`code` is `workspace_id_invalid`: the `X-Comfy-Workspace-ID` header or `workspace_id` query value is malformed, or conflicts with another value or with the workspace the credential resolves to. Answered only while `web_session_enabled` is on for the user. See the `WebSessionAuth` scheme.'
+        SessionWriteForbidden:
+            content:
+                application/json:
+                    schema:
+                        $ref: '#/components/schemas/ForbiddenError'
+            description: A refused request that changes data. For a web session, `code` is `csrf_invalid` (no `X-CSRF-Token`, or not the session's), `workspace_access_denied` (the selected workspace is unknown, deleted, or the user is not a member; the three look the same), `no_workspace_access` (the account has no personal workspace and is a member of no live workspace), `origin_not_allowed` or `cross_site_request`; see the `WebSessionAuth` scheme. For any credential, `sso_required` means an SSO organization holds the account (its email is on the organization's verified domains) and the credential is not an SSO sign-in, or the workspace is an SSO organization's and the account is not on its domains or the credential is not an SSO sign-in; `organization_id`, when present, names the organization to sign in with. `FORBIDDEN` is the route's own authorization check failing, such as an unverified email, or, on `POST /api/workspaces`, an account an SSO organization holds (its organization manages its workspaces; signing in again does not change it). A credential this route does not take gets AuthTypeNotAllowedError instead, and so does the session while `web_session_enabled` is off for the user, unless the operation says it takes the session whatever the flag.
     schemas:
         Asset:
             description: Represents a user-owned asset (image, video, or other generated output).
@@ -9,6 +40,10 @@ components:
                     type: string
                 display_name:
                     description: Display name of the asset. Mirrors name for backwards compatibility.
+                    nullable: true
+                    type: string
+                file_path:
+                    description: Relative path in global-namespace-root form (e.g. "models/checkpoints/flux.safetensors")
                     nullable: true
                     type: string
                 hash:
@@ -148,6 +183,10 @@ components:
                     description: Display name of the asset. Mirrors name for backwards compatibility.
                     nullable: true
                     type: string
+                file_path:
+                    description: Relative path in global-namespace-root form (e.g. "models/checkpoints/flux.safetensors")
+                    nullable: true
+                    type: string
                 hash:
                     description: Blake3 hash of the asset content.
                     pattern: ^blake3:[a-f0-9]{64}$
@@ -188,6 +227,29 @@ components:
                 - id
                 - updated_at
             type: object
+        AuthTypeNotAllowedError:
+            description: 403 for a credential the route does not take. `accepted` names the ones it does, as `WWW-Authenticate` does.
+            properties:
+                accepted:
+                    items:
+                        type: string
+                    type: array
+                error:
+                    properties:
+                        message:
+                            type: string
+                        type:
+                            enum:
+                                - auth_type_not_allowed
+                            type: string
+                    required:
+                        - message
+                        - type
+                    type: object
+            required:
+                - error
+                - accepted
+            type: object
         ChurnkeyAuthResponse:
             description: |
                 Credentials the Churnkey embed requires to launch the cancel flow.
@@ -207,6 +269,16 @@ components:
                         - live
                         - test
                         - sandbox
+                    type: string
+                offer_subscription_id:
+                    description: |
+                        Stripe subscription a native Churnkey retention offer may apply to.
+                        Present only when the caller is in the native-offer rollout and owns
+                        a Personal workspace on an active paid monthly plan with no billing
+                        change in flight; absent otherwise, and the client then keeps offers
+                        disabled. Present in any mode. Not a signed authorization: the HMAC
+                        covers only the customer ID.
+                    minLength: 1
                     type: string
             required:
                 - customer_id
@@ -265,6 +337,9 @@ components:
                     description: Optional open object carrying structured, machine-readable context about the error (e.g. offending field names, validation specifics). Absent for most errors; consumers must not assume any particular shape.
                     type: object
                 message:
+                    type: string
+                organization_id:
+                    description: 'On `sso_required`: the SSO organization the caller must sign in with (its WorkOS id, `org_...`), the value `GET /api/auth/sso/start?organization=` takes: the organization that owns the account''s email domain, else the workspace''s. Absent when no sign-in would admit the caller (an account another organization holds, in an SSO organization''s workspace), when unknown, and on every other code.'
                     type: string
             required:
                 - code
@@ -335,6 +410,11 @@ components:
         FeedbackResponse:
             description: Response after submitting feedback
             type: object
+        ForbiddenError:
+            description: 'A 403 body: ErrorResponse, or AuthTypeNotAllowedError for a credential the route does not take.'
+            oneOf:
+                - $ref: '#/components/schemas/ErrorResponse'
+                - $ref: '#/components/schemas/AuthTypeNotAllowedError'
         ForkWorkflowRequest:
             description: Request body for forking an existing workflow into the user's account.
             properties:
@@ -420,7 +500,7 @@ components:
                 - info
             type: object
         HistoryDetailEntry:
-            description: History entry with full prompt data
+            description: History entry with full prompt data. The workflow graph (extra_data.extra_pnginfo) is omitted from records persisted after it stopped being stored; older records may still contain it.
             properties:
                 meta:
                     additionalProperties: true
@@ -435,7 +515,7 @@ components:
                     properties:
                         extra_data:
                             additionalProperties: true
-                            description: Additional execution data
+                            description: Additional execution data. extra_pnginfo (the workflow graph) is omitted from records persisted after it stopped being stored; older records may still contain it.
                             type: object
                         outputs_to_execute:
                             description: Output nodes to execute
@@ -612,6 +692,48 @@ components:
                 previewable_outputs_count:
                     description: Count of outputs classified as previewable media types (images, video, audio, 3D, text) — a subset of outputs_count (omitted for non-terminal states)
                     type: integer
+                queue_position:
+                    description: |
+                        1-based position of this job among the caller's OWN jobs held
+                        behind the same concurrency cap (same user, workspace and auth
+                        method), in the dispatcher's admission order — i.e. the number of
+                        the caller's own capped jobs that will be admitted before this
+                        one, plus one. It is NOT a fleet-wide queue position and says
+                        nothing about other users' jobs. (For an admin reading someone
+                        else's job, the set is that job owner's, not the admin's — the
+                        same scoping `workspace_id`/`user_id` already describe.)
+
+                        Null unless `queue_reason` is `concurrency_limit`. May also be
+                        null in that state on the rare rows whose admission ordering
+                        cannot be determined (no recorded state-change timestamp), or if
+                        the count query fails — a missing position never fails the
+                        request.
+                    minimum: 1
+                    nullable: true
+                    type: integer
+                queue_reason:
+                    description: |
+                        Why a still-queued job has not started yet. Present only while
+                        `status` is `pending`; null for every other status.
+
+                        `status` deliberately folds every waiting state into `pending`
+                        (the frontend's filter categories depend on that), so this field
+                        is the one that tells the two kinds of waiting apart:
+
+                        - `concurrency_limit` — the job is held behind the caller's OWN
+                          per-user/per-auth-method concurrent-job cap. Nothing in the
+                          fleet is blocking it; the caller's other running jobs are.
+                        - `capacity` — the job is past that cap and admitted, and is now
+                          waiting for an inference worker to become free.
+
+                        Detail-only: this field is NOT present on the list view's
+                        `JobEntry`, because deriving `queue_position` for a page of jobs
+                        would cost one extra query per row.
+                    enum:
+                        - concurrency_limit
+                        - capacity
+                    nullable: true
+                    type: string
                 status:
                     description: User-friendly job status
                     enum:
@@ -1067,11 +1189,6 @@ components:
                 workflow_id:
                     description: UUID identifying the cloud workflow entity to associate with this job
                     type: string
-                workflow_metadata:
-                    additionalProperties:
-                        type: string
-                    description: 'Key/values echoed on the json websocket messages of this prompt that carry a `prompt_id`, so a client can tell which of its open workflows a message belongs to. Messages without a `prompt_id`, such as `status`, do not carry it, because a single socket serves every open workflow and such a message has no one owner. The server does not interpret the contents. Limited to 256 bytes serialised; a larger or non-object value is ignored. When this field is omitted, the server falls back to `{workflow_id: extra_data.extra_pnginfo.workflow.id}` if the submitted workflow carries an id, so a client that sends only the workflow gets the same messages. Note the `workflow_id` key a client typically sends here is the graph id from `extra_pnginfo.workflow.id`, which is not the same thing as the `workflow_id` field above.'
-                    type: object
                 workflow_version_id:
                     description: UUID identifying the workflow version to associate with this job
                     type: string
@@ -1195,6 +1312,112 @@ components:
                     items:
                         type: string
                     type: array
+            type: object
+        RetentionAcceptRequest:
+            additionalProperties: false
+            properties:
+                session_id:
+                    description: Server-issued session; carries no client-selected coupon or variant.
+                    format: uuid
+                    type: string
+            required:
+                - session_id
+            type: object
+        RetentionAcceptance:
+            properties:
+                billing_op_id:
+                    type: string
+                status:
+                    description: Show success only once this is succeeded; otherwise poll the billing operation.
+                    enum:
+                        - pending
+                        - succeeded
+                    type: string
+            required:
+                - billing_op_id
+                - status
+            type: object
+        RetentionFlowEventRequest:
+            additionalProperties: false
+            properties:
+                event:
+                    description: flow_opened is reported at the same point for every arm.
+                    enum:
+                        - flow_opened
+                        - offer_shown
+                    type: string
+                session_id:
+                    format: uuid
+                    type: string
+            required:
+                - session_id
+                - event
+            type: object
+        RetentionFlowResponse:
+            properties:
+                experiment_variant:
+                    description: |
+                        The PostHog arm: control or a retention offer ID. Absent when the
+                        subscription is ineligible or the owner is outside the experiment.
+                    type: string
+                expires_at:
+                    description: Unix seconds; reopen cancellation to refresh the offer after expiry.
+                    maximum: 9007199254740991
+                    type: integer
+                    x-go-type: int64
+                offer:
+                    $ref: '#/components/schemas/RetentionOffer'
+                session_id:
+                    format: uuid
+                    type: string
+                subscription:
+                    $ref: '#/components/schemas/RetentionFlowSubscription'
+            required:
+                - session_id
+                - expires_at
+                - subscription
+            type: object
+        RetentionFlowSubscription:
+            properties:
+                currency:
+                    type: string
+                period_end:
+                    description: Unix seconds of the next renewal.
+                    maximum: 9007199254740991
+                    type: integer
+                    x-go-type: int64
+                quantity:
+                    maximum: 9007199254740991
+                    type: integer
+                    x-go-type: int64
+                unit_amount:
+                    description: Recurring unit price in the currency's smallest unit.
+                    maximum: 9007199254740991
+                    type: integer
+                    x-go-type: int64
+            required:
+                - currency
+                - unit_amount
+                - quantity
+                - period_end
+            type: object
+        RetentionOffer:
+            description: Present only when the session's arm is an offer. Terms come from the server catalog.
+            properties:
+                duration_in_months:
+                    maximum: 9007199254740991
+                    type: integer
+                    x-go-type: int64
+                id:
+                    type: string
+                percent_off:
+                    maximum: 9007199254740991
+                    type: integer
+                    x-go-type: int64
+            required:
+                - id
+                - percent_off
+                - duration_in_months
             type: object
         SystemStatsResponse:
             description: System statistics response
@@ -1321,7 +1544,7 @@ components:
             description: Task data for list views
             properties:
                 completed_at:
-                    description: When task completed or failed (null if not finished)
+                    description: When task completed, failed, or was cancelled (null if not finished)
                     format: date-time
                     type: string
                 create_time:
@@ -1343,6 +1566,7 @@ components:
                         - running
                         - completed
                         - failed
+                        - cancelled
                     type: string
                 task_name:
                     description: Task type name (e.g., model_upload)
@@ -1393,6 +1617,7 @@ components:
                         - running
                         - completed
                         - failed
+                        - cancelled
                     type: string
                 task_name:
                     description: Task type name (e.g., model_upload)
@@ -1601,16 +1826,73 @@ components:
         BearerAuth:
             bearerFormat: JWT
             description: |
-                Firebase JWT token authentication. Obtain a token by authenticating
-                with Firebase and pass it in the Authorization header.
+                A token in the `Authorization: Bearer` header: a Firebase ID token, a
+                Cloud JWT from `POST /api/auth/token`, or an access token that
+                `POST /oauth/token` minted for a resource served here. A `comfyui-` key sent
+                here counts as `ApiKeyAuth`.
             scheme: bearer
             type: http
         CookieAuth:
             description: |
                 Session cookie authentication. Set automatically after successful
                 login via the /api/auth/session endpoint.
+
+                A POST, PUT, PATCH or DELETE with it is refused with 403 before the
+                handler runs unless the browser labels it same-origin, its `Origin`
+                is on the trusted-origins list, or, with no `Sec-Fetch-Site`, its
+                `Origin` is this host's own: `cross_site_request` for a cross-site
+                label, `origin_not_allowed` otherwise. The OAuth consent POST takes
+                it only with an `Origin` that is this host's own, never a trusted
+                one. This is not behind `web_session_enabled`.
             in: cookie
             name: session
+            type: apiKey
+        WebSessionAuth:
+            description: |
+                Server-side web session, set by `POST /api/auth/session`. The media
+                routes, the short-link redirect, OAuth consent, the custom-node proxy
+                and the admins' asynqmon UI accept it whatever `web_session_enabled`
+                says. The user-facing API groups accept it too, for users with the
+                flag on; machine, admin API and service-token routes never do. A credential in a header always wins and never falls back to
+                the cookie.
+
+                Wherever the cookie is accepted, the request is checked before the
+                handler runs (403 with the `code` shown):
+                - `cross_site_request`: the browser labels it `Sec-Fetch-Site:
+                  cross-site`, other than a top-level GET navigation to the short-link
+                  redirect or OAuth consent.
+                - `origin_not_allowed`: an `Origin` that is not on the trusted-origins
+                  list, unless the call is labelled same-origin; a POST, PUT, PATCH or
+                  DELETE with no `Origin`; or, on API routes, a request without
+                  `X-Comfy-Client`, which SDK clients send with their name and version.
+                  The OAuth consent POST takes the session only from this host's own
+                  origin, so a trusted `Origin` is refused there too.
+                - `csrf_invalid`: a POST, PUT, PATCH or DELETE without the session's
+                  CSRF token in `X-CSRF-Token`, except on OAuth consent, which checks
+                  its own token, and the asynqmon UI, which cannot send one and is
+                  not checked for it today.
+
+                With the flag on, `X-Comfy-Workspace-ID` (or `?workspace_id=` where a
+                header cannot go) selects the workspace; absent means the personal
+                workspace. A malformed or conflicting id is 400 `workspace_id_invalid`.
+                An unknown or deleted workspace, or one the user is not a member of, is
+                403 `workspace_access_denied`. An account with no personal workspace
+                (one SSO created) that is no longer a member of any live workspace,
+                for example after its directory removed its last membership, is 403
+                `no_workspace_access` on every route that reads the session. All
+                three are answered on routes that also
+                serve anonymous callers; there, the other refusals fall back to an
+                anonymous request, except on the OAuth consent POST, which answers
+                `origin_not_allowed` and `cross_site_request` too. Today the
+                short-link redirect and the OAuth consent GET, which a link may
+                open, do not select a workspace for the session.
+
+                A token or API key whose workspace selector names another workspace
+                than the one it resolves to is 400 `workspace_id_invalid` on these
+                routes, while the flag is on for its user. A service token, which has
+                no workspace, ignores the selector.
+            in: cookie
+            name: __Host-comfy_session
             type: apiKey
 info:
     description: |
@@ -1711,6 +1993,11 @@ paths:
                   name: name_contains
                   schema:
                     type: string
+                - description: JSON object for filtering by metadata fields
+                  in: query
+                  name: metadata_filter
+                  schema:
+                    type: string
                 - description: Maximum number of assets to return (1-500)
                   in: query
                   name: limit
@@ -1795,12 +2082,18 @@ paths:
                             schema:
                                 $ref: '#/components/schemas/ErrorResponse'
                     description: Unauthorized
+                "403":
+                    $ref: '#/components/responses/SessionForbidden'
                 "500":
                     content:
                         application/json:
                             schema:
                                 $ref: '#/components/schemas/ErrorResponse'
                     description: Internal server error
+            security:
+                - ApiKeyAuth: []
+                - BearerAuth: []
+                - WebSessionAuth: []
             summary: List user assets
             tags:
                 - file
@@ -1824,7 +2117,7 @@ paths:
                                     pattern: ^(blake3|sha256):[a-f0-9]{64}$
                                     type: string
                                 id:
-                                    description: Optional asset ID for idempotent creation. If provided and asset exists, returns existing asset.
+                                    description: Optional caller-chosen asset ID. If the upload's content matches an asset you already own in this workspace, that asset is returned and its `id` may differ from the one requested. Otherwise, an ID already taken by any asset is refused with 400 `ASSET_ID_UNAVAILABLE`.
                                     format: uuid
                                     type: string
                                 mime_type:
@@ -1834,7 +2127,7 @@ paths:
                                     description: Display name for the asset
                                     type: string
                                 preview_id:
-                                    description: Optional preview asset ID. If not provided, images will use their own ID as preview.
+                                    description: Optional preview asset ID. Must be your own asset in this workspace; anything else (including a catalog asset, another user's published asset, or an ID that does not exist) is refused with 400 `INVALID_PREVIEW_ID`. If not provided, images use their own ID as preview, except OpenEXR and Radiance HDR, which get no preview; a preview_id equal to the asset's own id is ignored for those.
                                     format: uuid
                                     type: string
                                 tags:
@@ -1867,13 +2160,15 @@ paths:
                         application/json:
                             schema:
                                 $ref: '#/components/schemas/ErrorResponse'
-                    description: Invalid request (bad file, invalid content type, etc.)
+                    description: Invalid request (bad file, invalid content type, etc.), `INVALID_PREVIEW_ID` when `preview_id` is not your own asset in this workspace, or `ASSET_ID_UNAVAILABLE` when a caller-chosen `id` is already taken
                 "401":
                     content:
                         application/json:
                             schema:
                                 $ref: '#/components/schemas/ErrorResponse'
                     description: Unauthorized
+                "403":
+                    $ref: '#/components/responses/SessionWriteForbidden'
                 "413":
                     content:
                         application/json:
@@ -1898,6 +2193,10 @@ paths:
                             schema:
                                 $ref: '#/components/schemas/ErrorResponse'
                     description: Internal server error
+            security:
+                - ApiKeyAuth: []
+                - BearerAuth: []
+                - WebSessionAuth: []
             summary: Create a new asset
             tags:
                 - file
@@ -1916,12 +2215,16 @@ paths:
             responses:
                 "204":
                     description: Asset record deleted successfully
+                "400":
+                    $ref: '#/components/responses/SessionWorkspaceIDInvalid'
                 "401":
                     content:
                         application/json:
                             schema:
                                 $ref: '#/components/schemas/ErrorResponse'
                     description: Unauthorized
+                "403":
+                    $ref: '#/components/responses/SessionWriteForbidden'
                 "404":
                     content:
                         application/json:
@@ -1940,6 +2243,10 @@ paths:
                             schema:
                                 $ref: '#/components/schemas/ErrorResponse'
                     description: Internal server error
+            security:
+                - ApiKeyAuth: []
+                - BearerAuth: []
+                - WebSessionAuth: []
             summary: Delete asset
             tags:
                 - file
@@ -1961,12 +2268,16 @@ paths:
                             schema:
                                 $ref: '#/components/schemas/Asset'
                     description: Asset details retrieved successfully
+                "400":
+                    $ref: '#/components/responses/SessionWorkspaceIDInvalid'
                 "401":
                     content:
                         application/json:
                             schema:
                                 $ref: '#/components/schemas/ErrorResponse'
                     description: Unauthorized
+                "403":
+                    $ref: '#/components/responses/SessionForbidden'
                 "404":
                     content:
                         application/json:
@@ -1979,6 +2290,10 @@ paths:
                             schema:
                                 $ref: '#/components/schemas/ErrorResponse'
                     description: Internal server error
+            security:
+                - ApiKeyAuth: []
+                - BearerAuth: []
+                - WebSessionAuth: []
             summary: Get asset details
             tags:
                 - file
@@ -2009,7 +2324,7 @@ paths:
                                     description: New display name for the asset
                                     type: string
                                 preview_id:
-                                    description: Updated preview asset ID
+                                    description: Updated preview asset ID. Must be your own asset in this workspace.
                                     format: uuid
                                     type: string
                                 user_metadata:
@@ -2039,6 +2354,8 @@ paths:
                             schema:
                                 $ref: '#/components/schemas/ErrorResponse'
                     description: Unauthorized
+                "403":
+                    $ref: '#/components/responses/SessionWriteForbidden'
                 "404":
                     content:
                         application/json:
@@ -2046,14 +2363,19 @@ paths:
                                 $ref: '#/components/schemas/ErrorResponse'
                     description: |
                         Asset not found — returned both when the asset being updated does
-                        not exist and when `preview_id` does not reference an asset
-                        accessible to the caller.
+                        not exist and when `preview_id` is not your own asset in this
+                        workspace (a catalog asset or another user's published asset
+                        does not qualify).
                 "500":
                     content:
                         application/json:
                             schema:
                                 $ref: '#/components/schemas/ErrorResponse'
                     description: Internal server error
+            security:
+                - ApiKeyAuth: []
+                - BearerAuth: []
+                - WebSessionAuth: []
             summary: Update asset metadata
             tags:
                 - file
@@ -2073,6 +2395,13 @@ paths:
 
                 Prefer this over the filename-addressed `/api/view` when you have an
                 asset ID.
+
+                An `<img>`, `<video>` or `<audio>` tag loads this with the
+                `WebSessionAuth` or `CookieAuth` cookie, both accepted whatever
+                `web_session_enabled` says; neither needs `X-CSRF-Token` or
+                `X-Comfy-Client`, which a media tag cannot send. A 403
+                AuthTypeNotAllowedError here is a credential the route never takes,
+                such as `X-ComfyAPI-Secret`, never the session.
             operationId: getAssetContent
             parameters:
                 - description: Asset ID
@@ -2092,6 +2421,13 @@ paths:
                         - inline
                         - attachment
                     type: string
+                - content:
+                    text/plain:
+                        schema:
+                            type: string
+                  description: The workspace a media request reads from, where a media tag cannot send `X-Comfy-Workspace-ID`; see the `MediaWorkspaceID` parameter.
+                  in: query
+                  name: workspace_id
             responses:
                 "200":
                     content:
@@ -2115,6 +2451,16 @@ paths:
                             description: Partitions any cached redirect by auth credentials so a private redirect is not reused across users
                             schema:
                                 type: string
+                "400":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/ErrorResponse'
+                    description: '`code` `workspace_id_invalid`: the `workspace_id` or `X-Comfy-Workspace-ID` value is malformed, the two disagree, or, with the flag on, a token or API key names another workspace than its own. Or `BAD_REQUEST` from the generated wrapper when a parameter does not bind, such as a repeated `disposition`.'
+                "401":
+                    $ref: '#/components/responses/SessionUnauthorized'
+                "403":
+                    $ref: '#/components/responses/SessionForbidden'
                 "404":
                     content:
                         application/json:
@@ -2131,6 +2477,7 @@ paths:
                 - ApiKeyAuth: []
                 - BearerAuth: []
                 - CookieAuth: []
+                - WebSessionAuth: []
             summary: Get asset content
             tags:
                 - file
@@ -2180,6 +2527,8 @@ paths:
                             schema:
                                 $ref: '#/components/schemas/ErrorResponse'
                     description: Unauthorized
+                "403":
+                    $ref: '#/components/responses/SessionWriteForbidden'
                 "404":
                     content:
                         application/json:
@@ -2198,6 +2547,10 @@ paths:
                             schema:
                                 $ref: '#/components/schemas/ErrorResponse'
                     description: Internal server error
+            security:
+                - ApiKeyAuth: []
+                - BearerAuth: []
+                - WebSessionAuth: []
             summary: Remove tags from asset
             tags:
                 - file
@@ -2246,6 +2599,8 @@ paths:
                             schema:
                                 $ref: '#/components/schemas/ErrorResponse'
                     description: Unauthorized
+                "403":
+                    $ref: '#/components/responses/SessionWriteForbidden'
                 "404":
                     content:
                         application/json:
@@ -2264,6 +2619,10 @@ paths:
                             schema:
                                 $ref: '#/components/schemas/ErrorResponse'
                     description: Internal server error
+            security:
+                - ApiKeyAuth: []
+                - BearerAuth: []
+                - WebSessionAuth: []
             summary: Add tags to asset
             tags:
                 - file
@@ -2331,6 +2690,8 @@ paths:
                             schema:
                                 $ref: '#/components/schemas/ErrorResponse'
                     description: Unauthorized
+                "403":
+                    $ref: '#/components/responses/SessionWriteForbidden'
                 "404":
                     content:
                         application/json:
@@ -2349,6 +2710,10 @@ paths:
                             schema:
                                 $ref: '#/components/schemas/ErrorResponse'
                     description: Internal server error
+            security:
+                - ApiKeyAuth: []
+                - BearerAuth: []
+                - WebSessionAuth: []
             summary: Create asset reference from existing hash
             tags:
                 - file
@@ -2377,11 +2742,9 @@ paths:
                                 $ref: '#/components/schemas/ErrorResponse'
                     description: Invalid hash format
                 "401":
-                    content:
-                        application/json:
-                            schema:
-                                $ref: '#/components/schemas/ErrorResponse'
-                    description: Unauthorized
+                    description: No valid credential (see SessionUnauthorized). No body.
+                "403":
+                    description: A refused web session request, or the route's own authorization check failing (see SessionForbidden). A HEAD response has no body, so the code is not sent.
                 "404":
                     description: Asset not found
                 "500":
@@ -2390,6 +2753,10 @@ paths:
                             schema:
                                 $ref: '#/components/schemas/ErrorResponse'
                     description: Internal server error
+            security:
+                - ApiKeyAuth: []
+                - BearerAuth: []
+                - WebSessionAuth: []
             summary: Check if asset exists by hash
             tags:
                 - file
@@ -2407,7 +2774,6 @@ paths:
                                         description: Number of assets marked as missing
                                         type: integer
                                     status:
-                                        description: '"completed", or "cancelled" when a cancel stopped the prune part way; the assets it marked before that stay marked'
                                         type: string
                                 type: object
                     description: Prune result
@@ -2545,6 +2911,11 @@ paths:
                   name: name_contains
                   schema:
                     type: string
+                - description: JSON object for filtering by metadata fields
+                  in: query
+                  name: metadata_filter
+                  schema:
+                    type: string
                 - description: Maximum number of tags to return (1-1000, default 100)
                   in: query
                   name: limit
@@ -2578,12 +2949,18 @@ paths:
                             schema:
                                 $ref: '#/components/schemas/ErrorResponse'
                     description: Unauthorized
+                "403":
+                    $ref: '#/components/responses/SessionForbidden'
                 "500":
                     content:
                         application/json:
                             schema:
                                 $ref: '#/components/schemas/ErrorResponse'
                     description: Internal server error
+            security:
+                - ApiKeyAuth: []
+                - BearerAuth: []
+                - WebSessionAuth: []
             summary: Get tag histogram for filtered assets
             tags:
                 - file
@@ -2601,12 +2978,16 @@ paths:
                             schema:
                                 $ref: '#/components/schemas/ChurnkeyAuthResponse'
                     description: Success
+                "400":
+                    $ref: '#/components/responses/SessionWorkspaceIDInvalid'
                 "401":
                     content:
                         application/json:
                             schema:
                                 $ref: '#/components/schemas/ErrorResponse'
                     description: Unauthorized
+                "403":
+                    $ref: '#/components/responses/SessionForbidden'
                 "404":
                     content:
                         application/json:
@@ -2627,7 +3008,177 @@ paths:
                     description: Churnkey is not configured on the server
             security:
                 - BearerAuth: []
+                - WebSessionAuth: []
             summary: Get Churnkey HMAC auth credentials
+            tags:
+                - billing
+    /api/billing/retention/accept:
+        post:
+            description: |
+                Owner-only, workspace-scoped cancellation flow. Cloud decides eligibility,
+                PostHog assigns the experiment arm, and billing-api binds any offer to a
+                server-issued session. The browser never sends coupon terms. A
+                non-owner gets `FORBIDDEN`, and accepting a session without an offer
+                gets `RETENTION_NOT_ALLOWED`.
+                Poll the returned billing operation until it settles.
+            operationId: acceptRetentionOffer
+            requestBody:
+                content:
+                    application/json:
+                        schema:
+                            $ref: '#/components/schemas/RetentionAcceptRequest'
+                required: true
+            responses:
+                "202":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/RetentionAcceptance'
+                    description: Success
+                "400":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/ErrorResponse'
+                    description: Invalid request
+                "401":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/ErrorResponse'
+                    description: Unauthorized
+                "403":
+                    $ref: '#/components/responses/SessionWriteForbidden'
+                "409":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/ErrorResponse'
+                    description: Session stale or a billing operation conflicts
+                "500":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/ErrorResponse'
+                    description: Internal server error
+                "503":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/ErrorResponse'
+                    description: Cancellation offers unavailable
+            security:
+                - BearerAuth: []
+                - WebSessionAuth: []
+            summary: Accept the retention offer for this cancellation session
+            tags:
+                - billing
+    /api/billing/retention/events:
+        post:
+            description: |
+                Owner-only, workspace-scoped cancellation flow. Cloud decides eligibility,
+                PostHog assigns the experiment arm, and billing-api binds any offer to a
+                server-issued session. The browser never sends coupon terms. A
+                non-owner gets `FORBIDDEN`, and accepting a session without an offer
+                gets `RETENTION_NOT_ALLOWED`.
+                Events are recorded only for sessions assigned an experiment arm.
+            operationId: recordRetentionFlowEvent
+            requestBody:
+                content:
+                    application/json:
+                        schema:
+                            $ref: '#/components/schemas/RetentionFlowEventRequest'
+                required: true
+            responses:
+                "204":
+                    description: Success
+                "400":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/ErrorResponse'
+                    description: Invalid request
+                "401":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/ErrorResponse'
+                    description: Unauthorized
+                "403":
+                    $ref: '#/components/responses/SessionWriteForbidden'
+                "409":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/ErrorResponse'
+                    description: Session stale or a billing operation conflicts
+                "500":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/ErrorResponse'
+                    description: Internal server error
+                "503":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/ErrorResponse'
+                    description: Cancellation offers unavailable
+            security:
+                - BearerAuth: []
+                - WebSessionAuth: []
+            summary: Record cancellation participation or an actual offer display
+            tags:
+                - billing
+    /api/billing/retention/prepare:
+        post:
+            description: |
+                Owner-only, workspace-scoped cancellation flow. Cloud decides eligibility,
+                PostHog assigns the experiment arm, and billing-api binds any offer to a
+                server-issued session. The browser never sends coupon terms. A
+                non-owner gets `FORBIDDEN`, and accepting a session without an offer
+                gets `RETENTION_NOT_ALLOWED`.
+                Preparing a session does not cancel the subscription.
+            operationId: prepareRetentionFlow
+            responses:
+                "200":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/RetentionFlowResponse'
+                    description: Success
+                "400":
+                    $ref: '#/components/responses/SessionWorkspaceIDInvalid'
+                "401":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/ErrorResponse'
+                    description: Unauthorized
+                "403":
+                    $ref: '#/components/responses/SessionWriteForbidden'
+                "422":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/ErrorResponse'
+                    description: Subscription does not support this flow
+                "500":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/ErrorResponse'
+                    description: Internal server error
+                "503":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/ErrorResponse'
+                    description: Cancellation offers unavailable
+            security:
+                - BearerAuth: []
+                - WebSessionAuth: []
+            summary: Prepare a cancellation session and any retention offer
             tags:
                 - billing
     /api/embeddings:
@@ -2664,6 +3215,10 @@ paths:
                                     $ref: '#/components/schemas/ModelFolder'
                                 type: array
                     description: Success - List of model folders
+                "400":
+                    $ref: '#/components/responses/SessionWorkspaceIDInvalid'
+                "403":
+                    $ref: '#/components/responses/SessionWorkspaceAccessDenied'
                 "500":
                     content:
                         application/json:
@@ -2673,6 +3228,7 @@ paths:
             security:
                 - ApiKeyAuth: []
                 - BearerAuth: []
+                - WebSessionAuth: []
                 - {}
             summary: Get available model folders
             tags:
@@ -2704,6 +3260,10 @@ paths:
                                     $ref: '#/components/schemas/ModelFile'
                                 type: array
                     description: Success - List of models in the folder
+                "400":
+                    $ref: '#/components/responses/SessionWorkspaceIDInvalid'
+                "403":
+                    $ref: '#/components/responses/SessionWorkspaceAccessDenied'
                 "404":
                     content:
                         application/json:
@@ -2719,6 +3279,7 @@ paths:
             security:
                 - ApiKeyAuth: []
                 - BearerAuth: []
+                - WebSessionAuth: []
                 - {}
             summary: Get models in a specific folder
             tags:
@@ -2728,7 +3289,21 @@ paths:
             description: |
                 Returns the list of custom node web extension JS files available for
                 loading by the ComfyUI frontend. Paths are relative to the web root
-                (e.g. `/extensions/VHS.core.js`).
+                (e.g. `/extensions/VHS.core.js`). For a browser that picked a
+                developer-platform deployment (the cookie PUT
+                /api/workspaces/{id}/deployment sets) the list is the files of the
+                Release that deployment runs now, each at a release-scoped path,
+                `/extensions/<pack>@<workspace id>@<release id>/<rel>`; otherwise, and
+                for anonymous callers, it is the static list.
+
+                The `/extensions/*` files the browser then imports carry no
+                Authorization header, and cookie authentication resolves only a
+                personal workspace, so the scoped path itself names the workspace and
+                the Release. A scoped path is served the Release's file, with
+                `Cache-Control: private, max-age=31536000, immutable` and
+                `Vary: Sec-Fetch-Site`, to a member of the workspace it names when the
+                Release is that workspace's, and is a 404 otherwise. A path with no scope is always the static file, whatever
+                the browser picked.
             operationId: getExtensions
             responses:
                 "200":
@@ -2740,7 +3315,15 @@ paths:
                                     type: string
                                 type: array
                     description: JSON array of extension file paths
-            security: []
+                "400":
+                    $ref: '#/components/responses/SessionWorkspaceIDInvalid'
+                "403":
+                    $ref: '#/components/responses/SessionWorkspaceAccessDenied'
+            security:
+                - ApiKeyAuth: []
+                - BearerAuth: []
+                - WebSessionAuth: []
+                - {}
             summary: List custom node JS extensions
             tags:
                 - node
@@ -2755,6 +3338,36 @@ paths:
                             schema:
                                 additionalProperties: true
                                 properties:
+                                    agent-free-use-message-placement:
+                                        default: control
+                                        description: Authenticated assignment for the Agent free-use notice placement experiment. Current Cloud responses include it and default to control when the caller is unauthenticated, evaluation is unavailable, or no treatment is assigned. It remains optional in the client contract, as agent-starter-prompt-set does, so older environments mid-rolling-deploy and partial feature fixtures fail closed rather than decoding an absent field as the empty string, which is not a member of this enum.
+                                        enum:
+                                            - control
+                                            - top-banner
+                                            - near-composer
+                                            - above-input
+                                            - inside-input
+                                        type: string
+                                    agent-starter-prompt-set:
+                                        default: control
+                                        description: Authenticated assignment for the Agent starter-prompt experiment. Current Cloud responses include it and default to control when the caller is unauthenticated, evaluation is unavailable, or no treatment is assigned. It remains optional in the client contract so older environments and partial feature fixtures fail closed. Reading this field does not constitute experiment exposure; the frontend emits the custom exposure event only after rendering the starter prompt surface.
+                                        enum:
+                                            - control
+                                            - test
+                                        type: string
+                                    billing_web_url:
+                                        description: Origin of the billing-web deployment paired with this Cloud environment (e.g. https://billing.comfy.org). Absent when BILLING_WEB_URL is not configured on the server, so a client can tell "not configured" from "configured as empty".
+                                        type: string
+                                    can_run_partner_nodes:
+                                        description: |-
+                                            Whether a partner/API-node workflow from THIS authenticated caller could run. It is ingest's own submit-time account-level decision published as a capability, resolved from the same authority ExecutePrompt uses, so a consumer never re-derives it from a tier table.
+                                            The two values are NOT symmetric, and a consumer that treats them as symmetric will be wrong.
+                                            false is sound: a partner-node submission from this caller would be refused. Usually that refusal is PARTNER_NODE_PAYMENT_REQUIRED, but a caller who is FREE for a further reason (an API key, a non-Google session under FreeTierRequireGoogleSignIn, or no job allowance on the legacy rail) is refused earlier and by a different code. Either way the workflow does not run, which is what the field answers.
+                                            true is narrower than it reads: the partner-node paywall is not what refuses this caller. Another gate still might — an inactive subscription, a blocked workspace and a BlockedSubscriptionTiers entry all report true, because their refusal is account-wide rather than about partner nodes, and so do the exemptions and the fail-open outcomes that make ExecutePrompt admit a submission at all (a partner-execution workspace, a disabled subscription check, a failed subscription lookup). Two per-prompt refusals are not modelled here at all, because this field is per-account and they are not: FreeTierBlockedModels (MODEL_PAYMENT_REQUIRED, named open-weights models) and the workspace partner-provider governance gate, which keys on which providers a prompt names and answers 403 for an enforcing workspace or 503 when its policy cannot be verified. A paid caller in a governance-restricted workspace therefore reads true here and is still refused at submit.
+                                            So: read false as "do not build with partner nodes" and true as "the partner gate will not stop you". Do not read true as "this caller can submit".
+                                            Absent for an unauthenticated caller (the decision is per-identity and there is none) and absent while AgentPartnerCapabilityEnabled is off, which is its default — resolving it costs an account-level authority read that this endpoint does not otherwise make. A consumer must treat absence as "unknown" and fail open, never as false.
+                                            Because absence carries that meaning, the field is only ever the authority's answer: unlike the flags beside it, it cannot be set from dynamic configuration, and it is removed from the response rather than left at a configured value when it is unresolvable. It is likewise absent from the WebSocket feature_flags push, which resolves no capability, so a client refreshing from the socket reads "unknown" and fails open rather than inheriting a stale answer.
+                                        type: boolean
                                     free_tier_balance:
                                         description: Free-tier job allowance for an authenticated non-paid (FREE-tier) user in the rollout. Absent for paid users and unauthenticated requests. Synthesized from config before a grant row exists so a brand-new user still sees their full allowance.
                                         properties:
@@ -2772,11 +3385,36 @@ paths:
                                             - used
                                             - remaining
                                         type: object
+                                    free_tier_offer:
+                                        description: The free-tier job allowance offered to new users, so a signed-out visitor sees the real offer before signing up. Same value for authenticated and unauthenticated requests. Absent when the free-tier allowance is disabled or zero.
+                                        properties:
+                                            job_allowance:
+                                                description: Number of free jobs granted to a new FREE-tier user
+                                                type: integer
+                                            requires_google_sign_in:
+                                                description: True when only Google-authenticated sessions receive the allowance; email/password signups get none.
+                                                type: boolean
+                                        required:
+                                            - job_allowance
+                                            - requires_google_sign_in
+                                        type: object
                                     max_upload_size:
                                         description: Maximum upload size in bytes
                                         type: integer
+                                    new_free_tier_subscriptions:
+                                        description: Whether new free-tier subscriptions are enabled for this caller. Current servers always emit a boolean; clients should tolerate absence when talking to older servers that predate this declared field.
+                                        type: boolean
+                                    sso_enabled:
+                                        description: Global switch, the same for every caller and readable without credentials. When true, the frontend shows enterprise single sign-on (the SSO sign-in entry and SSO workspace states); when false it shows today's app. It gates no backend behaviour. Defaults to false.
+                                        type: boolean
+                                    stripe_publishable_key:
+                                        description: Stripe publishable key (pk_...) for the environment's Stripe account. Public by design (the secret key is never exposed here). Absent when STRIPE_PUBLISHABLE_KEY is not configured on the server, so a client can tell "not configured" from "configured as empty".
+                                        type: string
                                     supports_preview_metadata:
                                         description: Whether the server supports preview metadata
+                                        type: boolean
+                                    web_session_probe:
+                                        description: Global switch, the same for every caller and readable without credentials. When true, first-party sites send the credentialed /api/features read and take behaviour from its per-user unified_web_session. It grants nothing itself. Defaults to false.
                                         type: boolean
                                 type: object
                     description: Success
@@ -2789,11 +3427,15 @@ paths:
                             description: Cache key includes auth headers so anonymous and authenticated responses are stored separately
                             schema:
                                 type: string
+                "400":
+                    $ref: '#/components/responses/SessionWorkspaceIDInvalid'
+                "403":
+                    $ref: '#/components/responses/SessionWorkspaceAccessDenied'
             security:
                 - ApiKeyAuth: []
                 - BearerAuth: []
-                - CookieAuth: []
                 - {}
+                - WebSessionAuth: []
             summary: Get server feature flags
             tags:
                 - node
@@ -2826,12 +3468,18 @@ paths:
                             schema:
                                 $ref: '#/components/schemas/ErrorResponse'
                     description: Unauthorized
+                "403":
+                    $ref: '#/components/responses/SessionWriteForbidden'
                 "500":
                     content:
                         application/json:
                             schema:
                                 $ref: '#/components/schemas/ErrorResponse'
                     description: Internal server error
+            security:
+                - ApiKeyAuth: []
+                - BearerAuth: []
+                - WebSessionAuth: []
             summary: Submit user feedback
             tags:
                 - feedback
@@ -2874,12 +3522,22 @@ paths:
                                         type: string
                                 type: object
                     description: Success - Related mask layers returned
+                "400":
+                    $ref: '#/components/responses/SessionWorkspaceIDInvalid'
+                "401":
+                    $ref: '#/components/responses/SessionUnauthorized'
+                "403":
+                    $ref: '#/components/responses/SessionForbidden'
                 "404":
                     content:
                         application/json:
                             schema:
                                 $ref: '#/components/schemas/ErrorResponse'
                     description: File not found or not a mask file
+            security:
+                - ApiKeyAuth: []
+                - BearerAuth: []
+                - WebSessionAuth: []
             summary: Get related mask layer files
             tags:
                 - file
@@ -2995,12 +3653,18 @@ paths:
                             schema:
                                 $ref: '#/components/schemas/ErrorResponse'
                     description: Unauthorized - Authentication required
+                "403":
+                    $ref: '#/components/responses/SessionWriteForbidden'
                 "500":
                     content:
                         application/json:
                             schema:
                                 $ref: '#/components/schemas/ErrorResponse'
                     description: Internal server error
+            security:
+                - ApiKeyAuth: []
+                - BearerAuth: []
+                - WebSessionAuth: []
             summary: Manage execution history
             tags:
                 - workflow
@@ -3034,18 +3698,26 @@ paths:
                             schema:
                                 $ref: '#/components/schemas/HistoryResponse'
                     description: Success - Execution history retrieved
+                "400":
+                    $ref: '#/components/responses/SessionWorkspaceIDInvalid'
                 "401":
                     content:
                         application/json:
                             schema:
                                 $ref: '#/components/schemas/ErrorResponse'
                     description: Unauthorized - Authentication required
+                "403":
+                    $ref: '#/components/responses/SessionForbidden'
                 "500":
                     content:
                         application/json:
                             schema:
                                 $ref: '#/components/schemas/ErrorResponse'
                     description: Internal server error
+            security:
+                - ApiKeyAuth: []
+                - BearerAuth: []
+                - WebSessionAuth: []
             summary: Get execution history (v2)
             tags:
                 - workflow
@@ -3058,7 +3730,13 @@ paths:
                 major release; sunset timeline TBD.
 
                 Retrieve detailed execution history for a specific prompt ID.
-                Returns full history data including complete prompt information.
+                Returns full history data for the recorded prompt, except the
+                canvas-format workflow graph: `extra_data.extra_pnginfo` is no longer
+                persisted, so it is not included in history records persisted after
+                that change (older records may still carry it). Callers that need the
+                workflow graph should use `GET /api/jobs/{job_id}`, which serves it
+                from the job's own stored workflow — `prompt_id` is the job ID, so it
+                can be passed straight through as `job_id`.
             operationId: getHistoryForPrompt
             parameters:
                 - description: The prompt ID to retrieve history for
@@ -3074,12 +3752,16 @@ paths:
                             schema:
                                 $ref: '#/components/schemas/HistoryDetailResponse'
                     description: Success - History for prompt retrieved
+                "400":
+                    $ref: '#/components/responses/SessionWorkspaceIDInvalid'
                 "401":
                     content:
                         application/json:
                             schema:
                                 $ref: '#/components/schemas/ErrorResponse'
                     description: Unauthorized - Authentication required
+                "403":
+                    $ref: '#/components/responses/SessionForbidden'
                 "404":
                     content:
                         application/json:
@@ -3092,6 +3774,10 @@ paths:
                             schema:
                                 $ref: '#/components/schemas/ErrorResponse'
                     description: Internal server error
+            security:
+                - ApiKeyAuth: []
+                - BearerAuth: []
+                - WebSessionAuth: []
             summary: Get history for specific prompt
             tags:
                 - workflow
@@ -3117,27 +3803,73 @@ paths:
                 POST /api/jobs/{job_id}/cancel for a single job, or
                 POST /api/jobs/cancel to cancel jobs by ID.
 
-                Cancels the first active job for the authenticated user (the currently
-                running job if there is one, otherwise the next pending job). Takes no
-                body and cannot target a specific job — use the jobs-namespace endpoints
-                for that.
+                Cancels one job of the authenticated user's. The body is optional, as
+                on ComfyUI's own /interrupt, and is never refused: it is read whatever
+                its Content-Type (a browser fetch with a string body sends text/plain),
+                up to 64 KiB, and never answers 400 or 415.
+
+                When the body is a JSON object whose `prompt_id` is a non-empty string
+                (the ComfyUI frontend sends `{"prompt_id": "<job id>"}` naming the job
+                it shows running), that job and no other, exactly as
+                POST /api/jobs/{job_id}/cancel acts on it: a pending or running job is
+                cancelled; one already finished or cancelling is left as it is (200,
+                nothing done); an ID that is not one of the
+                caller's jobs in this workspace, or is not a job ID (a 36-character
+                UUID) at all, returns 404 and cancels nothing.
+
+                In every other case the job is picked by queue order: no body, an
+                empty body, `{}`, a `prompt_id` that is absent, null, empty or not a
+                string, a body that is not a JSON object (malformed JSON, an array, a
+                non-JSON body), or a body longer than 64 KiB. The job, in order:
+
+                1. If a job is running on Cloud: the oldest such job.
+                2. Otherwise, if a job that runs on a Build's deployment (the platform
+                   gateway) is running: the oldest one.
+                3. Otherwise (nothing running) the oldest pending job on Cloud, even
+                   when an older pending job runs on a Build's deployment.
+                4. Otherwise the oldest pending job that runs on a Build's deployment.
+
+                The job is cancelled; for a job that runs on a Build's deployment, the
+                deployment is then asked to stop its run, best effort and after this
+                answers: not when the platform cannot be reached, or does not yet know
+                the API key the request was made with (the run then continues until it
+                ends on its own, and the job still ends cancelled).
             operationId: interruptJob
             responses:
                 "200":
-                    description: Success - first active job cancelled, or no active job found
+                    description: |
+                        Success - the job was cancelled, was already finished or
+                        cancelling, or (without `prompt_id`) no active job was found
+                "400":
+                    $ref: '#/components/responses/SessionWorkspaceIDInvalid'
                 "401":
                     content:
                         application/json:
                             schema:
                                 $ref: '#/components/schemas/ErrorResponse'
                     description: Unauthorized - Authentication required
+                "403":
+                    $ref: '#/components/responses/SessionWriteForbidden'
+                "404":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/ErrorResponse'
+                    description: |
+                        `prompt_id` is not one of the caller's jobs in this workspace, or
+                        is not a job ID (a 36-character UUID) at all. Code NOT_FOUND;
+                        nothing was cancelled.
                 "500":
                     content:
                         application/json:
                             schema:
                                 $ref: '#/components/schemas/ErrorResponse'
                     description: Internal server error
-            summary: Interrupt the first active job
+            security:
+                - ApiKeyAuth: []
+                - BearerAuth: []
+                - WebSessionAuth: []
+            summary: Interrupt a job, the named one or the first active one
             tags:
                 - queue
     /api/job/{job_id}/status:
@@ -3163,6 +3895,8 @@ paths:
                             schema:
                                 $ref: '#/components/schemas/JobStatusResponse'
                     description: Success - Job status returned
+                "400":
+                    $ref: '#/components/responses/SessionWorkspaceIDInvalid'
                 "401":
                     content:
                         application/json:
@@ -3187,6 +3921,10 @@ paths:
                             schema:
                                 $ref: '#/components/schemas/ErrorResponse'
                     description: Internal server error
+            security:
+                - ApiKeyAuth: []
+                - BearerAuth: []
+                - WebSessionAuth: []
             summary: Get job status (deprecated)
             tags:
                 - job
@@ -3288,16 +4026,98 @@ paths:
                             schema:
                                 $ref: '#/components/schemas/ErrorResponse'
                     description: Unauthorized - Authentication required
+                "403":
+                    $ref: '#/components/responses/SessionForbidden'
                 "500":
                     content:
                         application/json:
                             schema:
                                 $ref: '#/components/schemas/ErrorResponse'
                     description: Internal server error
+            security:
+                - ApiKeyAuth: []
+                - BearerAuth: []
+                - WebSessionAuth: []
             summary: List jobs with pagination and filtering
             tags:
                 - workflow
     /api/jobs/{job_id}:
+        delete:
+            description: |
+                Delete a single job and every asset linked to it in one call. The client
+                sends a job delete and the backend fans out to the job's assets — the
+                client must not enumerate and delete the assets itself.
+
+                The deletion is directional, not symmetric: deleting a job deletes both
+                the job and its assets, but deleting an asset directly (via
+                `DELETE /api/assets/{id}`) leaves the job and its history record intact.
+                Asset visibility is never derived from the job's deletion state.
+
+                The job soft-delete is scoped to user-deletable jobs — the finished,
+                failed and cancelled states the Job Queue trash icon acts on (this includes
+                still-settling failed and mid-cancellation states, not only strictly
+                terminal ones), mirroring the legacy `POST /api/history` delete path this
+                endpoint replaces. A pending, in-progress or already-deleted job is left in
+                place and returns `204` as a no-op. Idempotent: a job already deleted, or
+                an asset already gone, is treated as a successful no-op.
+
+                Asset deletion is a best-effort fan-out of independent hard deletes and is
+                NOT atomic: if it aborts partway — a `409` for an in-use asset, or a `500`
+                — the assets deleted before the failure stay deleted while the job remains
+                in place. A retry re-runs the fan-out and is a no-op for the assets already
+                gone.
+
+                If a linked asset cannot be deleted because it is still referenced by
+                another resource (e.g. a workflow version), the endpoint surfaces
+                `409 ASSET_IN_USE` and leaves the job in place rather than silently
+                skipping the asset.
+            operationId: deleteJob
+            parameters:
+                - description: Job identifier (UUID)
+                  in: path
+                  name: job_id
+                  required: true
+                  schema:
+                    format: uuid
+                    type: string
+            responses:
+                "204":
+                    description: Job and its assets deleted successfully, or the job was not in a deletable state (pending/in-progress/already-deleted) and no change was made (no-op)
+                "400":
+                    $ref: '#/components/responses/SessionWorkspaceIDInvalid'
+                "401":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/ErrorResponse'
+                    description: Unauthorized - Authentication required
+                "403":
+                    $ref: '#/components/responses/SessionWriteForbidden'
+                "404":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/ErrorResponse'
+                    description: Job not found or does not belong to the user
+                "409":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/ErrorResponse'
+                    description: 'A linked asset cannot be deleted because it is referenced by another resource, e.g. a workflow version (error code: ASSET_IN_USE); the job is left in place'
+                "500":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/ErrorResponse'
+                    description: Internal server error
+            security:
+                - ApiKeyAuth: []
+                - BearerAuth: []
+                - WebSessionAuth: []
+            summary: Delete a job and its assets
+            tags:
+                - workflow
         get:
             description: |
                 Retrieve complete details for a specific job including workflow and outputs.
@@ -3329,6 +4149,8 @@ paths:
                             schema:
                                 $ref: '#/components/schemas/JobDetailResponse'
                     description: Success - Job details retrieved
+                "400":
+                    $ref: '#/components/responses/SessionWorkspaceIDInvalid'
                 "401":
                     content:
                         application/json:
@@ -3353,6 +4175,10 @@ paths:
                             schema:
                                 $ref: '#/components/schemas/ErrorResponse'
                     description: Internal server error
+            security:
+                - ApiKeyAuth: []
+                - BearerAuth: []
+                - WebSessionAuth: []
             summary: Get full job details
             tags:
                 - workflow
@@ -3409,6 +4235,8 @@ paths:
                             schema:
                                 $ref: '#/components/schemas/ErrorResponse'
                     description: Unauthorized - Authentication required
+                "403":
+                    $ref: '#/components/responses/SessionForbidden'
                 "404":
                     content:
                         application/json:
@@ -3421,6 +4249,10 @@ paths:
                             schema:
                                 $ref: '#/components/schemas/ErrorResponse'
                     description: Internal server error
+            security:
+                - ApiKeyAuth: []
+                - BearerAuth: []
+                - WebSessionAuth: []
             summary: List a job's output assets
             tags:
                 - workflow
@@ -3432,6 +4264,15 @@ paths:
                 Idempotent: a job that is already in a terminal state (completed, failed,
                 cancelled) or already cancelling is treated as a successful no-op and
                 returns 200. Only truly missing or cross-user jobs return 404.
+
+                A job that runs on a Build's deployment (the platform gateway) is
+                cancelled the same way, and the deployment is then asked to stop its
+                run, best effort and after this answers: not when the platform cannot
+                be reached, or does not yet know the API key the request was made
+                with. The run then continues until it ends on its own, and the job
+                still ends cancelled.
+                A job whose run has finished and whose result is being saved is left
+                to finish, as a finished job is.
             operationId: cancelJob
             parameters:
                 - description: Job identifier (UUID)
@@ -3460,6 +4301,8 @@ paths:
                             schema:
                                 $ref: '#/components/schemas/ErrorResponse'
                     description: Unauthorized - Authentication required
+                "403":
+                    $ref: '#/components/responses/SessionWriteForbidden'
                 "404":
                     content:
                         application/json:
@@ -3472,6 +4315,10 @@ paths:
                             schema:
                                 $ref: '#/components/schemas/ErrorResponse'
                     description: Internal server error - cancellation failed
+            security:
+                - ApiKeyAuth: []
+                - BearerAuth: []
+                - WebSessionAuth: []
             summary: Cancel a job
             tags:
                 - workflow
@@ -3489,6 +4336,15 @@ paths:
                 Fail-fast on unknown IDs: if any provided job ID does not exist for this
                 user, the request returns 404 and no jobs are cancelled. This surfaces
                 bad IDs to the caller rather than silently dropping them.
+
+                A job that runs on a Build's deployment (the platform gateway) is
+                cancelled the same way, and the deployment is then asked to stop its
+                run, best effort and after this answers: not when the platform cannot
+                be reached, or does not yet know the API key the request was made
+                with. The run then continues until it ends on its own, and the job
+                still ends cancelled.
+                A job whose run has finished and whose result is being saved is left
+                to finish, as a finished job is.
 
                 This is the canonical batch-cancel endpoint. The delete operation on
                 POST /api/queue is deprecated in favour of this.
@@ -3518,6 +4374,8 @@ paths:
                             schema:
                                 $ref: '#/components/schemas/ErrorResponse'
                     description: Unauthorized - Authentication required
+                "403":
+                    $ref: '#/components/responses/SessionWriteForbidden'
                 "404":
                     content:
                         application/json:
@@ -3530,6 +4388,10 @@ paths:
                             schema:
                                 $ref: '#/components/schemas/ErrorResponse'
                     description: Internal server error - cancellation failed
+            security:
+                - ApiKeyAuth: []
+                - BearerAuth: []
+                - WebSessionAuth: []
             summary: Cancel multiple jobs
             tags:
                 - workflow
@@ -3559,8 +4421,27 @@ paths:
                 - node
     /api/object_info:
         get:
-            description: Returns information about all available nodes
+            description: |
+                Returns information about all available nodes. For a browser that
+                picked a developer-platform deployment (the cookie PUT
+                /api/workspaces/{id}/deployment sets) the catalog is that of the
+                Release the deployment runs now, fetched from comfy-builder; otherwise
+                it is Cloud's own.
             operationId: getNodeInfo
+            parameters:
+                - description: |
+                    Also list the models the caller can run that the models config
+                    does not: their own imported models and the public model assets the
+                    asset library shows them (assets tagged `models`), each in the model
+                    dropdown of the directory it installs under, so a client that
+                    validates widget values against this catalog accepts a model that
+                    would run. Off by default: the frontend reads these models through
+                    the asset browser instead.
+                  in: query
+                  name: include_user_models
+                  schema:
+                    default: false
+                    type: boolean
             responses:
                 "200":
                     content:
@@ -3570,6 +4451,16 @@ paths:
                                     $ref: '#/components/schemas/NodeInfo'
                                 type: object
                     description: Success
+                "400":
+                    $ref: '#/components/responses/SessionWorkspaceIDInvalid'
+                "401":
+                    $ref: '#/components/responses/SessionUnauthorized'
+                "403":
+                    $ref: '#/components/responses/SessionForbidden'
+            security:
+                - ApiKeyAuth: []
+                - BearerAuth: []
+                - WebSessionAuth: []
             summary: Get all node information
             tags:
                 - node
@@ -3584,18 +4475,26 @@ paths:
                             schema:
                                 $ref: '#/components/schemas/PromptInfo'
                     description: Success
+                "400":
+                    $ref: '#/components/responses/SessionWorkspaceIDInvalid'
                 "401":
                     content:
                         application/json:
                             schema:
                                 $ref: '#/components/schemas/ErrorResponse'
                     description: Unauthorized
+                "403":
+                    $ref: '#/components/responses/SessionForbidden'
                 "500":
                     content:
                         application/json:
                             schema:
                                 $ref: '#/components/schemas/ErrorResponse'
                     description: Internal server error
+            security:
+                - ApiKeyAuth: []
+                - BearerAuth: []
+                - WebSessionAuth: []
             summary: Get information about current prompt execution
             tags:
                 - workflow
@@ -3622,19 +4521,21 @@ paths:
                         application/json:
                             schema:
                                 $ref: '#/components/schemas/PromptErrorResponse'
-                    description: Invalid prompt
+                    description: Invalid prompt, or `code` `workspace_id_invalid` (see SessionWorkspaceIDInvalid).
+                "401":
+                    $ref: '#/components/responses/SessionUnauthorized'
                 "402":
                     content:
                         application/json:
                             schema:
                                 $ref: '#/components/schemas/PromptErrorResponse'
-                    description: Payment required - Insufficient credits
+                    description: 'The account''s plan does not allow this submission; nothing was queued and retrying without changing the plan never succeeds. Disambiguated by the body''s `error.type`, NOT by parsing `error.message`: `PAYMENT_REQUIRED` (no active subscription, no funds, blocked tier), `CLOUD_SUBSCRIPTION_REQUIRED`, `FREE_TIER_EXHAUSTED`, `PARTNER_NODE_PAYMENT_REQUIRED`, or `MODEL_PAYMENT_REQUIRED`.'
                 "403":
                     content:
                         application/json:
                             schema:
                                 $ref: '#/components/schemas/PromptErrorResponse'
-                    description: Workspace governance policy blocks one or more partner providers (error.type PARTNER_NODE_DISABLED; error.class_types lists the offending nodes, error.providers the disabled providers)
+                    description: Workspace governance policy blocks one or more partner providers (error.type PARTNER_NODE_DISABLED; error.class_types lists the offending nodes, error.providers the disabled providers), or a refused request with `code` and `message` (see SessionWriteForbidden).
                 "413":
                     content:
                         application/json:
@@ -3646,7 +4547,12 @@ paths:
                         application/json:
                             schema:
                                 $ref: '#/components/schemas/PromptErrorResponse'
-                    description: 'Retryable backpressure. Two distinct causes, disambiguated by the body''s `error.type`, NOT by parsing `error.message`: `PAYMENT_REQUIRED` / `FREE_TIER_UNAVAILABLE` / `FREE_TIER_EXHAUSTED` / `PARTNER_NODE_PAYMENT_REQUIRED` (a billing gate - retrying without paying never succeeds), or `QUEUE_LIMIT` (this workspace''s bounded job queue is full - retrying after some queued jobs complete will succeed).'
+                    description: 'Retryable backpressure, disambiguated by the body''s `error.type`: `QUEUE_LIMIT` (this workspace''s bounded job queue is full - retrying after some queued jobs complete will succeed) or `FREE_TIER_UNAVAILABLE` (the free tier is switched off for now - retrying once it is back will succeed), or `BILLING_UNAVAILABLE` with `error.reason` `funds_unavailable` (ingest got no billing verdict for the workspace because the billing service was unreachable or rejected the check, or the billing-status read behind a no-funds verdict failed - nothing was queued, and retrying the same submission after `Retry-After` seconds will succeed once billing answers). Of the billing outcomes, a plan or billing policy refusal is a 402; only billing being unavailable is a 429. For a browser that picked a developer-platform deployment, also `PLATFORM_REFUSED` with `error.details` `deployment_not_ready` (the deployment is on its way to ready - nothing was queued, and retrying after `Retry-After` seconds will succeed once it is ready) or another platform 429 passed through.'
+                    headers:
+                        Retry-After:
+                            description: Seconds to wait before retrying. Sent with `BILLING_UNAVAILABLE` and with a `deployment_not_ready` that ingest answers before any job is written.
+                            schema:
+                                type: integer
                 "500":
                     content:
                         application/json:
@@ -3659,6 +4565,10 @@ paths:
                             schema:
                                 $ref: '#/components/schemas/PromptErrorResponse'
                     description: Service unavailable
+            security:
+                - ApiKeyAuth: []
+                - BearerAuth: []
+                - WebSessionAuth: []
             summary: Submit a workflow for execution
             tags:
                 - workflow
@@ -3685,12 +4595,18 @@ paths:
                             schema:
                                 $ref: '#/components/schemas/ErrorResponse'
                     description: Unauthorized - Authentication required
+                "403":
+                    $ref: '#/components/responses/SessionForbidden'
                 "500":
                     content:
                         application/json:
                             schema:
                                 $ref: '#/components/schemas/ErrorResponse'
                     description: Invalid request parameters
+            security:
+                - ApiKeyAuth: []
+                - BearerAuth: []
+                - WebSessionAuth: []
             summary: Get queue information
             tags:
                 - queue
@@ -3707,6 +4623,13 @@ paths:
                 and `delete` cancels both pending and running jobs (not pending-only as
                 previously documented). Job-by-ID cancellation is superseded by
                 POST /api/jobs/cancel; `clear` has no jobs-namespace replacement yet.
+
+                Jobs that run on a Build's deployment (the platform gateway) are
+                cancelled the same way, by `delete` and by `clear`, and the deployment
+                is then asked to stop their runs, best effort and after this answers:
+                not when the platform cannot be reached, or does not yet know the API
+                key the request was made with. A run then continues until it ends on
+                its own, and its job still ends cancelled.
             operationId: manageQueue
             requestBody:
                 content:
@@ -3733,12 +4656,18 @@ paths:
                             schema:
                                 $ref: '#/components/schemas/ErrorResponse'
                     description: Unauthorized
+                "403":
+                    $ref: '#/components/responses/SessionWriteForbidden'
                 "500":
                     content:
                         application/json:
                             schema:
                                 $ref: '#/components/schemas/ErrorResponse'
                     description: Internal server error
+            security:
+                - ApiKeyAuth: []
+                - BearerAuth: []
+                - WebSessionAuth: []
             summary: Manage queue operations
             tags:
                 - queue
@@ -3755,12 +4684,20 @@ paths:
                                 description: User settings as key-value pairs
                                 type: object
                     description: Success
+                "400":
+                    $ref: '#/components/responses/SessionWorkspaceIDInvalid'
                 "401":
                     content:
                         application/json:
                             schema:
                                 $ref: '#/components/schemas/ErrorResponse'
                     description: Unauthorized
+                "403":
+                    $ref: '#/components/responses/SessionForbidden'
+            security:
+                - ApiKeyAuth: []
+                - BearerAuth: []
+                - WebSessionAuth: []
             summary: Get all user settings
             tags:
                 - settings
@@ -3800,6 +4737,12 @@ paths:
                             schema:
                                 $ref: '#/components/schemas/ErrorResponse'
                     description: Unauthorized
+                "403":
+                    $ref: '#/components/responses/SessionWriteForbidden'
+            security:
+                - ApiKeyAuth: []
+                - BearerAuth: []
+                - WebSessionAuth: []
             summary: Update multiple settings
             tags:
                 - settings
@@ -3825,18 +4768,26 @@ paths:
                                         description: The setting value
                                 type: object
                     description: Success
+                "400":
+                    $ref: '#/components/responses/SessionWorkspaceIDInvalid'
                 "401":
                     content:
                         application/json:
                             schema:
                                 $ref: '#/components/schemas/ErrorResponse'
                     description: Unauthorized
+                "403":
+                    $ref: '#/components/responses/SessionForbidden'
                 "404":
                     content:
                         application/json:
                             schema:
                                 $ref: '#/components/schemas/ErrorResponse'
                     description: Setting not found
+            security:
+                - ApiKeyAuth: []
+                - BearerAuth: []
+                - WebSessionAuth: []
             summary: Get a specific setting by id
             tags:
                 - settings
@@ -3883,6 +4834,12 @@ paths:
                             schema:
                                 $ref: '#/components/schemas/ErrorResponse'
                     description: Unauthorized
+                "403":
+                    $ref: '#/components/responses/SessionWriteForbidden'
+            security:
+                - ApiKeyAuth: []
+                - BearerAuth: []
+                - WebSessionAuth: []
             summary: Update a specific setting by id
             tags:
                 - settings
@@ -3974,12 +4931,18 @@ paths:
                             schema:
                                 $ref: '#/components/schemas/ErrorResponse'
                     description: Unauthorized
+                "403":
+                    $ref: '#/components/responses/SessionForbidden'
                 "500":
                     content:
                         application/json:
                             schema:
                                 $ref: '#/components/schemas/ErrorResponse'
                     description: Internal server error
+            security:
+                - ApiKeyAuth: []
+                - BearerAuth: []
+                - WebSessionAuth: []
             summary: List all tags
             tags:
                 - file
@@ -4053,12 +5016,16 @@ paths:
                             schema:
                                 $ref: '#/components/schemas/TasksListResponse'
                     description: Success - Tasks retrieved
+                "400":
+                    $ref: '#/components/responses/SessionWorkspaceIDInvalid'
                 "401":
                     content:
                         application/json:
                             schema:
                                 $ref: '#/components/schemas/ErrorResponse'
                     description: Unauthorized - Authentication required
+                "403":
+                    $ref: '#/components/responses/SessionForbidden'
                 "422":
                     content:
                         application/json:
@@ -4071,10 +5038,68 @@ paths:
                             schema:
                                 $ref: '#/components/schemas/ErrorResponse'
                     description: Internal server error
+            security:
+                - ApiKeyAuth: []
+                - BearerAuth: []
+                - WebSessionAuth: []
             summary: List background tasks
             tags:
                 - task
     /api/tasks/{task_id}:
+        delete:
+            description: Cancels an authenticated user's queued or running asset download.
+            operationId: cancelTask
+            parameters:
+                - in: path
+                  name: task_id
+                  required: true
+                  schema:
+                    format: uuid
+                    type: string
+            responses:
+                "204":
+                    description: Cancellation accepted
+                "400":
+                    $ref: '#/components/responses/SessionWorkspaceIDInvalid'
+                "401":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/ErrorResponse'
+                    description: Unauthorized
+                "403":
+                    $ref: '#/components/responses/SessionWriteForbidden'
+                "404":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/ErrorResponse'
+                    description: Task not found
+                "409":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/ErrorResponse'
+                    description: Task cannot be cancelled
+                "500":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/ErrorResponse'
+                    description: Cancellation failed
+                "503":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/ErrorResponse'
+                    description: Task queue unavailable
+            security:
+                - ApiKeyAuth: []
+                - BearerAuth: []
+                - WebSessionAuth: []
+            summary: Cancel an asset download task
+            tags:
+                - task
         get:
             description: |
                 Retrieve full details for a specific background task.
@@ -4094,12 +5119,16 @@ paths:
                             schema:
                                 $ref: '#/components/schemas/TaskResponse'
                     description: Success - Task details retrieved
+                "400":
+                    $ref: '#/components/responses/SessionWorkspaceIDInvalid'
                 "401":
                     content:
                         application/json:
                             schema:
                                 $ref: '#/components/schemas/ErrorResponse'
                     description: Unauthorized - Authentication required
+                "403":
+                    $ref: '#/components/responses/SessionForbidden'
                 "404":
                     content:
                         application/json:
@@ -4112,6 +5141,10 @@ paths:
                             schema:
                                 $ref: '#/components/schemas/ErrorResponse'
                     description: Internal server error
+            security:
+                - ApiKeyAuth: []
+                - BearerAuth: []
+                - WebSessionAuth: []
             summary: Get task details
             tags:
                 - task
@@ -4178,12 +5211,18 @@ paths:
                             schema:
                                 $ref: '#/components/schemas/ErrorResponse'
                     description: Unauthorized
+                "403":
+                    $ref: '#/components/responses/SessionWriteForbidden'
                 "500":
                     content:
                         application/json:
                             schema:
                                 $ref: '#/components/schemas/ErrorResponse'
                     description: Internal server error
+            security:
+                - ApiKeyAuth: []
+                - BearerAuth: []
+                - WebSessionAuth: []
             summary: Upload an image file
             tags:
                 - file
@@ -4246,12 +5285,18 @@ paths:
                             schema:
                                 $ref: '#/components/schemas/ErrorResponse'
                     description: Unauthorized
+                "403":
+                    $ref: '#/components/responses/SessionWriteForbidden'
                 "500":
                     content:
                         application/json:
                             schema:
                                 $ref: '#/components/schemas/ErrorResponse'
                     description: Internal server error
+            security:
+                - ApiKeyAuth: []
+                - BearerAuth: []
+                - WebSessionAuth: []
             summary: Upload a mask image
             tags:
                 - file
@@ -4266,12 +5311,20 @@ paths:
                             schema:
                                 $ref: '#/components/schemas/UserResponse'
                     description: Success
+                "400":
+                    $ref: '#/components/responses/SessionWorkspaceIDInvalid'
                 "401":
                     content:
                         application/json:
                             schema:
                                 $ref: '#/components/schemas/ErrorResponse'
                     description: Unauthorized
+                "403":
+                    $ref: '#/components/responses/SessionForbidden'
+            security:
+                - ApiKeyAuth: []
+                - BearerAuth: []
+                - WebSessionAuth: []
             summary: Get current user information
             tags:
                 - user
@@ -4312,16 +5365,24 @@ paths:
                     description: A list of user data files.
                 "400":
                     content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/ErrorResponse'
                         text/plain:
                             schema:
                                 type: string
                     description: Bad request (e.g., invalid filename).
                 "401":
                     content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/ErrorResponse'
                         text/plain:
                             schema:
                                 type: string
                     description: Unauthorized.
+                "403":
+                    $ref: '#/components/responses/SessionForbidden'
                 "404":
                     content:
                         text/plain:
@@ -4334,6 +5395,10 @@ paths:
                             schema:
                                 type: string
                     description: General error
+            security:
+                - ApiKeyAuth: []
+                - BearerAuth: []
+                - WebSessionAuth: []
             summary: List user data files
             tags:
                 - user
@@ -4353,12 +5418,19 @@ paths:
             responses:
                 "204":
                     description: File deleted successfully (No Content).
+                "400":
+                    $ref: '#/components/responses/SessionWorkspaceIDInvalid'
                 "401":
                     content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/ErrorResponse'
                         text/plain:
                             schema:
                                 type: string
                     description: Unauthorized.
+                "403":
+                    $ref: '#/components/responses/SessionWriteForbidden'
                 "404":
                     content:
                         text/plain:
@@ -4371,6 +5443,10 @@ paths:
                             schema:
                                 type: string
                     description: Internal server error.
+            security:
+                - ApiKeyAuth: []
+                - BearerAuth: []
+                - WebSessionAuth: []
             summary: Delete a user data file
             tags:
                 - user
@@ -4394,16 +5470,24 @@ paths:
                     description: Successfully retrieved the file.
                 "400":
                     content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/ErrorResponse'
                         text/plain:
                             schema:
                                 type: string
                     description: Bad request (e.g., invalid filename).
                 "401":
                     content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/ErrorResponse'
                         text/plain:
                             schema:
                                 type: string
                     description: Unauthorized.
+                "403":
+                    $ref: '#/components/responses/SessionForbidden'
                 "404":
                     content:
                         text/plain:
@@ -4416,6 +5500,10 @@ paths:
                             schema:
                                 type: string
                     description: General error
+            security:
+                - ApiKeyAuth: []
+                - BearerAuth: []
+                - WebSessionAuth: []
             summary: Get user data file
             tags:
                 - user
@@ -4465,18 +5553,27 @@ paths:
                     description: File uploaded successfully.
                 "400":
                     content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/ErrorResponse'
                         text/plain:
                             schema:
                                 type: string
                     description: Missing or invalid 'file' parameter.
                 "401":
                     content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/ErrorResponse'
                         text/plain:
                             schema:
                                 type: string
                     description: Unauthorized.
                 "403":
                     content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/ErrorResponse'
                         text/plain:
                             schema:
                                 type: string
@@ -4493,6 +5590,10 @@ paths:
                             schema:
                                 type: string
                     description: General error
+            security:
+                - ApiKeyAuth: []
+                - BearerAuth: []
+                - WebSessionAuth: []
             summary: Upload or update a user data file
             tags:
                 - user
@@ -4533,16 +5634,24 @@ paths:
                     description: File moved successfully.
                 "400":
                     content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/ErrorResponse'
                         text/plain:
                             schema:
                                 type: string
                     description: Missing or invalid parameters.
                 "401":
                     content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/ErrorResponse'
                         text/plain:
                             schema:
                                 type: string
                     description: Unauthorized.
+                "403":
+                    $ref: '#/components/responses/SessionWriteForbidden'
                 "404":
                     content:
                         text/plain:
@@ -4561,6 +5670,10 @@ paths:
                             schema:
                                 type: string
                     description: General error
+            security:
+                - ApiKeyAuth: []
+                - BearerAuth: []
+                - WebSessionAuth: []
             summary: Move or rename a user data file
             tags:
                 - user
@@ -4582,12 +5695,16 @@ paths:
                             schema:
                                 $ref: '#/components/schemas/WorkflowPublishInfo'
                     description: Publish info (publish_time is null if never published)
+                "400":
+                    $ref: '#/components/responses/SessionWorkspaceIDInvalid'
                 "401":
                     content:
                         application/json:
                             schema:
                                 $ref: '#/components/schemas/ErrorResponse'
                     description: Unauthorized
+                "403":
+                    $ref: '#/components/responses/SessionForbidden'
                 "404":
                     content:
                         application/json:
@@ -4600,6 +5717,10 @@ paths:
                             schema:
                                 $ref: '#/components/schemas/ErrorResponse'
                     description: Internal server error
+            security:
+                - ApiKeyAuth: []
+                - BearerAuth: []
+                - WebSessionAuth: []
             summary: Get publish info for a workflow file
             tags:
                 - workflows
@@ -4638,6 +5759,8 @@ paths:
                             schema:
                                 $ref: '#/components/schemas/ErrorResponse'
                     description: Unauthorized
+                "403":
+                    $ref: '#/components/responses/SessionWriteForbidden'
                 "404":
                     content:
                         application/json:
@@ -4650,6 +5773,10 @@ paths:
                             schema:
                                 $ref: '#/components/schemas/ErrorResponse'
                     description: Internal server error
+            security:
+                - ApiKeyAuth: []
+                - BearerAuth: []
+                - WebSessionAuth: []
             summary: Publish a workflow file
             tags:
                 - workflows
@@ -4677,12 +5804,20 @@ paths:
                                     - migrated
                                 type: object
                     description: Userdata storage information
+                "400":
+                    $ref: '#/components/responses/SessionWorkspaceIDInvalid'
                 "401":
                     content:
                         application/json:
                             schema:
                                 $ref: '#/components/schemas/ErrorResponse'
                     description: Unauthorized
+                "403":
+                    $ref: '#/components/responses/SessionForbidden'
+            security:
+                - ApiKeyAuth: []
+                - BearerAuth: []
+                - WebSessionAuth: []
             summary: ComfyUI userdata storage info
             tags:
                 - user
@@ -4692,6 +5827,13 @@ paths:
                 VHS custom node endpoint that returns metadata about a video file
                 (frame count, fps, resolution, duration). Currently returns default
                 placeholder values; real ffprobe integration is a follow-up.
+
+                An `<img>`, `<video>` or `<audio>` tag loads this with the
+                `WebSessionAuth` or `CookieAuth` cookie, both accepted whatever
+                `web_session_enabled` says; neither needs `X-CSRF-Token` or
+                `X-Comfy-Client`, which a media tag cannot send. A 403
+                AuthTypeNotAllowedError here is a credential the route never takes,
+                such as `X-ComfyAPI-Secret`, never the session.
             operationId: getVhsQueryVideo
             parameters:
                 - description: Name of the video file to query
@@ -4700,6 +5842,13 @@ paths:
                   required: true
                   schema:
                     type: string
+                - content:
+                    text/plain:
+                        schema:
+                            type: string
+                  description: The workspace a media request reads from, where a media tag cannot send `X-Comfy-Workspace-ID`; see the `MediaWorkspaceID` parameter.
+                  in: query
+                  name: workspace_id
             responses:
                 "200":
                     content:
@@ -4744,17 +5893,25 @@ paths:
                         Missing required query parameter. Produced by the oapi-codegen
                         wrapper via echo.NewHTTPError; the custom Echo HTTPErrorHandler
                         normalizes it to the standard ErrorResponse {code, message} shape
-                        (BE-1178).
+                        (BE-1178). Or `code` `workspace_id_invalid`: the `workspace_id` or
+                        `X-Comfy-Workspace-ID` value is malformed, the two disagree, or,
+                        with the flag on, a token or API key names another workspace than
+                        its own.
                 "401":
+                    $ref: '#/components/responses/SessionUnauthorized'
+                "403":
+                    $ref: '#/components/responses/SessionForbidden'
+                "500":
                     content:
                         application/json:
                             schema:
                                 $ref: '#/components/schemas/ErrorResponse'
-                    description: Unauthorized
+                    description: Internal server error, such as the auth policy failing to look up the workspace `workspace_id` names.
             security:
                 - ApiKeyAuth: []
                 - BearerAuth: []
                 - CookieAuth: []
+                - WebSessionAuth: []
             summary: Query VHS video metadata
             tags:
                 - file
@@ -4763,7 +5920,13 @@ paths:
             description: |
                 Retrieve and view a file from the ComfyUI file system.
                 This endpoint is typically used to view generated images or other output files.
-                Cookie auth is allowed on this endpoint because it's used by img/video tags in browsers.
+
+                An `<img>`, `<video>` or `<audio>` tag loads this with the
+                `WebSessionAuth` or `CookieAuth` cookie, both accepted whatever
+                `web_session_enabled` says; neither needs `X-CSRF-Token` or
+                `X-Comfy-Client`, which a media tag cannot send. A 403
+                AuthTypeNotAllowedError here is a credential the route never takes,
+                such as `X-ComfyAPI-Secret`, never the session.
             operationId: viewFile
             parameters:
                 - description: Name of the file to view
@@ -4832,6 +5995,13 @@ paths:
                     maximum: 1024
                     minimum: 64
                     type: integer
+                - content:
+                    text/plain:
+                        schema:
+                            type: string
+                  description: The workspace a media request reads from, where a media tag cannot send `X-Comfy-Workspace-ID`; see the `MediaWorkspaceID` parameter.
+                  in: query
+                  name: workspace_id
             responses:
                 "200":
                     content:
@@ -4866,7 +6036,11 @@ paths:
                         application/json:
                             schema:
                                 $ref: '#/components/schemas/ErrorResponse'
-                    description: Invalid request parameters
+                    description: 'Invalid request parameters, or `code` `workspace_id_invalid`: the `workspace_id` or `X-Comfy-Workspace-ID` value is malformed, the two disagree, or, with the flag on, a token or API key names another workspace than its own.'
+                "401":
+                    $ref: '#/components/responses/SessionUnauthorized'
+                "403":
+                    $ref: '#/components/responses/SessionForbidden'
                 "404":
                     content:
                         application/json:
@@ -4883,6 +6057,7 @@ paths:
                 - ApiKeyAuth: []
                 - BearerAuth: []
                 - CookieAuth: []
+                - WebSessionAuth: []
             summary: View a file
             tags:
                 - file
@@ -4957,18 +6132,26 @@ paths:
                             schema:
                                 $ref: '#/components/schemas/WorkflowListResponse'
                     description: Success
+                "400":
+                    $ref: '#/components/responses/SessionWorkspaceIDInvalid'
                 "401":
                     content:
                         application/json:
                             schema:
                                 $ref: '#/components/schemas/ErrorResponse'
                     description: Unauthorized
+                "403":
+                    $ref: '#/components/responses/SessionForbidden'
                 "500":
                     content:
                         application/json:
                             schema:
                                 $ref: '#/components/schemas/ErrorResponse'
                     description: Internal server error
+            security:
+                - ApiKeyAuth: []
+                - BearerAuth: []
+                - WebSessionAuth: []
             summary: List workflows
             tags:
                 - workflows
@@ -4988,12 +6171,16 @@ paths:
                             schema:
                                 $ref: '#/components/schemas/WorkflowResponse'
                     description: Workflow created successfully
+                "400":
+                    $ref: '#/components/responses/SessionWorkspaceIDInvalid'
                 "401":
                     content:
                         application/json:
                             schema:
                                 $ref: '#/components/schemas/ErrorResponse'
                     description: Unauthorized
+                "403":
+                    $ref: '#/components/responses/SessionWriteForbidden'
                 "422":
                     content:
                         application/json:
@@ -5006,6 +6193,10 @@ paths:
                             schema:
                                 $ref: '#/components/schemas/ErrorResponse'
                     description: Internal server error
+            security:
+                - ApiKeyAuth: []
+                - BearerAuth: []
+                - WebSessionAuth: []
             summary: Create a new workflow
             tags:
                 - workflows
@@ -5023,12 +6214,16 @@ paths:
             responses:
                 "204":
                     description: Workflow deleted successfully
+                "400":
+                    $ref: '#/components/responses/SessionWorkspaceIDInvalid'
                 "401":
                     content:
                         application/json:
                             schema:
                                 $ref: '#/components/schemas/ErrorResponse'
                     description: Unauthorized
+                "403":
+                    $ref: '#/components/responses/SessionWriteForbidden'
                 "404":
                     content:
                         application/json:
@@ -5041,6 +6236,10 @@ paths:
                             schema:
                                 $ref: '#/components/schemas/ErrorResponse'
                     description: Internal server error
+            security:
+                - ApiKeyAuth: []
+                - BearerAuth: []
+                - WebSessionAuth: []
             summary: Delete workflow
             tags:
                 - workflows
@@ -5061,6 +6260,8 @@ paths:
                             schema:
                                 $ref: '#/components/schemas/WorkflowResponse'
                     description: Success
+                "400":
+                    $ref: '#/components/responses/SessionWorkspaceIDInvalid'
                 "401":
                     content:
                         application/json:
@@ -5085,6 +6286,10 @@ paths:
                             schema:
                                 $ref: '#/components/schemas/ErrorResponse'
                     description: Internal server error
+            security:
+                - ApiKeyAuth: []
+                - BearerAuth: []
+                - WebSessionAuth: []
             summary: Get workflow
             tags:
                 - workflows
@@ -5111,12 +6316,16 @@ paths:
                             schema:
                                 $ref: '#/components/schemas/WorkflowResponse'
                     description: Success
+                "400":
+                    $ref: '#/components/responses/SessionWorkspaceIDInvalid'
                 "401":
                     content:
                         application/json:
                             schema:
                                 $ref: '#/components/schemas/ErrorResponse'
                     description: Unauthorized
+                "403":
+                    $ref: '#/components/responses/SessionWriteForbidden'
                 "404":
                     content:
                         application/json:
@@ -5135,6 +6344,10 @@ paths:
                             schema:
                                 $ref: '#/components/schemas/ErrorResponse'
                     description: Internal server error
+            security:
+                - ApiKeyAuth: []
+                - BearerAuth: []
+                - WebSessionAuth: []
             summary: Update workflow metadata
             tags:
                 - workflows
@@ -5156,6 +6369,8 @@ paths:
                             schema:
                                 $ref: '#/components/schemas/WorkflowVersionContentResponse'
                     description: Success
+                "400":
+                    $ref: '#/components/responses/SessionWorkspaceIDInvalid'
                 "401":
                     content:
                         application/json:
@@ -5180,6 +6395,10 @@ paths:
                             schema:
                                 $ref: '#/components/schemas/ErrorResponse'
                     description: Internal server error
+            security:
+                - ApiKeyAuth: []
+                - BearerAuth: []
+                - WebSessionAuth: []
             summary: Get workflow content
             tags:
                 - workflows
@@ -5207,6 +6426,8 @@ paths:
                             schema:
                                 $ref: '#/components/schemas/WorkflowResponse'
                     description: Workflow forked successfully
+                "400":
+                    $ref: '#/components/responses/SessionWorkspaceIDInvalid'
                 "401":
                     content:
                         application/json:
@@ -5237,6 +6458,10 @@ paths:
                             schema:
                                 $ref: '#/components/schemas/ErrorResponse'
                     description: Internal server error
+            security:
+                - ApiKeyAuth: []
+                - BearerAuth: []
+                - WebSessionAuth: []
             summary: Fork a workflow
             tags:
                 - workflows
@@ -5264,6 +6489,8 @@ paths:
                             schema:
                                 $ref: '#/components/schemas/WorkflowVersionResponse'
                     description: Version created successfully
+                "400":
+                    $ref: '#/components/responses/SessionWorkspaceIDInvalid'
                 "401":
                     content:
                         application/json:
@@ -5300,6 +6527,10 @@ paths:
                             schema:
                                 $ref: '#/components/schemas/ErrorResponse'
                     description: Internal server error
+            security:
+                - ApiKeyAuth: []
+                - BearerAuth: []
+                - WebSessionAuth: []
             summary: Create a new version
             tags:
                 - workflows
@@ -5323,12 +6554,16 @@ paths:
                             schema:
                                 $ref: '#/components/schemas/PublishedWorkflowDetail'
                     description: Published workflow details with asset statuses
+                "400":
+                    $ref: '#/components/responses/SessionWorkspaceIDInvalid'
                 "401":
                     content:
                         application/json:
                             schema:
                                 $ref: '#/components/schemas/ErrorResponse'
                     description: Unauthorized
+                "403":
+                    $ref: '#/components/responses/SessionForbidden'
                 "404":
                     content:
                         application/json:
@@ -5347,6 +6582,10 @@ paths:
                             schema:
                                 $ref: '#/components/schemas/ErrorResponse'
                     description: Internal server error
+            security:
+                - ApiKeyAuth: []
+                - BearerAuth: []
+                - WebSessionAuth: []
             summary: Get a published workflow by share ID
             tags:
                 - workflows
