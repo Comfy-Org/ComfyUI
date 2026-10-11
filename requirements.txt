@@ -29,6 +29,7 @@ blake3
 cryptography
 
 #non essential dependencies:
+OpenEXR>=3.3.0
 kornia>=0.7.1
 spandrel
 pydantic~=2.0
