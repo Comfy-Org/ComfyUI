@@ -810,6 +810,10 @@ class PromptServer():
                 features.update(overrides)
             return web.json_response(features)
 
+        @routes.get("/default_workflow")
+        async def get_default_workflow(request):
+            return web.FileResponse(os.path.join(os.path.dirname(os.path.realpath(__file__)), "default_workflow.json"), headers={"Cache-Control": "no-cache"})
+
         @routes.get("/prompt")
         async def get_prompt(request):
             return web.json_response(self.get_queue_info())
