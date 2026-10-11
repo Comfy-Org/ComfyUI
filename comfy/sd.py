@@ -735,7 +735,6 @@ class VAE:
                 self.process_output = lambda audio: audio
                 self.process_input = lambda audio: audio
                 self.working_dtypes = [torch.float16, torch.bfloat16, torch.float32]
-                self.disable_offload = True
                 if yue2_vae:
                     self.audio_sample_rate = 48000
                     self.upscale_ratio = self.downscale_ratio = 1920
