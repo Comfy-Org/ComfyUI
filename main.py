@@ -17,12 +17,15 @@ import importlib.metadata
 import folder_paths
 import time
 from comfy.cli_args import enables_dynamic_vram
+from app import governance
 from app.logger import setup_logger
 console_log_level = get_console_log_level(args.verbose)
 file_log_outputs = get_file_log_outputs(args.verbose)
 setup_logger(log_level=console_log_level, file_outputs=file_log_outputs, use_stdout=args.log_stdout)
 
-from app.database.db import dependencies_available, init_db
+from app.database.db import dependencies_available, get_database_url, get_db_path, init_db, lock_holder_db_path, missing_dependencies
+from app.assets.event_log import error_kind
+from utils.install_util import get_missing_requirements_message
 from app.assets.lifecycle import cleanup_temp_filesystem
 from app.assets.manager import AssetManager, default_asset_manager
 import itertools
@@ -51,6 +54,12 @@ if __name__ == "__main__":
     ):
         os.environ["CUDA_VISIBLE_DEVICES"] = "0"
         logging.warning("On windows we are currently forcing single GPU mode in ComfyUI due to a Nvidia related issue, if you want to disable this use: --cuda-device all")
+
+    if args.disable_api_nodes:
+        logging.warning("--disable-api-nodes is deprecated and will be removed in a future version. It currently behaves like --offline. Use --offline to keep the frontend offline, or --disable-partner-nodes to only disable partner nodes.")
+
+    if args.enable_assets:
+        logging.warning("--enable-assets is deprecated and does nothing: the assets system is on unless ComfyUI is started with --disable-assets.")
 
 faulthandler.enable(file=sys.stderr, all_threads=args.debug_hang)
 if __name__ == "__main__" and args.debug_hang:
@@ -127,16 +136,6 @@ def handle_comfyui_manager_unavailable():
     args.enable_manager = False
 
 
-if args.enable_manager:
-    if importlib.util.find_spec("comfyui_manager"):
-        import comfyui_manager
-
-        if not comfyui_manager.__file__ or not comfyui_manager.__file__.endswith('__init__.py'):
-            handle_comfyui_manager_unavailable()
-    else:
-        handle_comfyui_manager_unavailable()
-
-
 def apply_custom_paths():
     # extra model paths
     extra_model_paths_config_path = os.path.join(os.path.dirname(os.path.realpath(__file__)), "extra_model_paths.yaml")
@@ -187,7 +186,7 @@ def execute_prestartup_script():
     def execute_script(script_path):
         module_name = os.path.splitext(script_path)[0]
         try:
-            spec = importlib.util.spec_from_file_location(module_name, script_path)
+            spec = governance.pack_module_spec(module_name, script_path)
             module = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(module)
             return True
@@ -210,6 +209,11 @@ def execute_prestartup_script():
             if os.path.isfile(module_path) or module_path.endswith(".disabled") or module_path == "__pycache__":
                 continue
 
+            refusal = governance.pack_refusal(module_path)
+            if refusal is not None:
+                logging.warning(refusal)
+                continue
+
             script_path = os.path.join(module_path, "prestartup_script.py")
             if os.path.exists(script_path):
                 if args.disable_all_custom_nodes and possible_module not in args.whitelist_custom_nodes:
@@ -228,8 +232,18 @@ def execute_prestartup_script():
             logging.info("{:6.1f} seconds{}: {}".format(n[0], import_message, n[1]))
         logging.info("")
 
+governance.initialize()
 apply_custom_paths()
 init_mime_types()
+
+if args.enable_manager:
+    if importlib.util.find_spec("comfyui_manager"):
+        import comfyui_manager
+
+        if not comfyui_manager.__file__ or not comfyui_manager.__file__.endswith('__init__.py'):
+            handle_comfyui_manager_unavailable()
+    else:
+        handle_comfyui_manager_unavailable()
 
 if args.enable_manager:
     comfyui_manager.prestartup()
@@ -340,73 +354,91 @@ def prompt_worker(q, server_instance, asset_manager):
     last_gc_collect = 0
     need_gc = False
     gc_collect_interval = 10.0
+    background_scan_paused = False
 
     while True:
-        timeout = 1000.0
-        if need_gc:
-            timeout = max(gc_collect_interval - (current_time - last_gc_collect), 0.0)
+        try:
+            timeout = 1000.0
+            if need_gc:
+                timeout = max(gc_collect_interval - (current_time - last_gc_collect), 0.0)
 
-        queue_item = q.get(timeout=timeout)
-        if queue_item is not None:
-            item, item_id = queue_item
-            execution_start_time = time.perf_counter()
-            prompt_id = item[1]
-            server_instance.last_prompt_id = prompt_id
+            queue_item = q.get(timeout=timeout)
+            if queue_item is not None:
+                item, item_id = queue_item
+                execution_start_time = time.perf_counter()
+                prompt_id = item[1]
+                server_instance.last_prompt_id = prompt_id
+                server_instance.workflow_metadata = item[3].get("workflow_metadata", {})
 
-            sensitive = item[5]
-            extra_data = item[3].copy()
-            for k in sensitive:
-                extra_data[k] = sensitive[k]
+                sensitive = item[5]
+                extra_data = item[3].copy()
+                for k in sensitive:
+                    extra_data[k] = sensitive[k]
 
-            asset_manager.pause_background_scan()
-            e.execute(item[2], prompt_id, extra_data, item[4])
+                asset_manager.pause_background_scan()
+                background_scan_paused = True
+                e.execute(item[2], prompt_id, extra_data, item[4])
 
-            need_gc = True
+                need_gc = True
 
-            remove_sensitive = lambda prompt: prompt[:5] + prompt[6:]
-            q.task_done(item_id,
-                        e.history_result,
-                        status=execution.PromptQueue.ExecutionStatus(
-                            status_str='success' if e.success else 'error',
-                            completed=e.success,
-                            messages=e.status_messages), process_item=remove_sensitive)
-            if server_instance.client_id is not None:
-                server_instance.send_sync("executing", {"node": None, "prompt_id": prompt_id}, server_instance.client_id)
+                remove_sensitive = lambda prompt: prompt[:5] + prompt[6:]
+                q.task_done(item_id,
+                            e.history_result,
+                            status=execution.PromptQueue.ExecutionStatus(
+                                status_str='success' if e.success else 'error',
+                                completed=e.success,
+                                messages=e.status_messages), process_item=remove_sensitive)
+                if q.get_tasks_remaining() == 0:
+                    # Nothing else is queued, so let the background scan run now rather than on the next GC tick.
+                    asset_manager.resume_background_scan()
+                if server_instance.client_id is not None:
+                    server_instance.send_sync("executing", {"node": None, "prompt_id": prompt_id}, server_instance.client_id)
+                server_instance.workflow_metadata = {}
 
-            current_time = time.perf_counter()
-            execution_time = current_time - execution_start_time
+                current_time = time.perf_counter()
+                execution_time = current_time - execution_start_time
 
-            # Log Time in a more readable way after 10 minutes
-            if execution_time > 600:
-                execution_time = time.strftime("%H:%M:%S", time.gmtime(execution_time))
-                logging.info(f"Prompt executed in {execution_time}", extra={'color': 'green'})
-            else:
-                logging.info("Prompt executed in {:.2f} seconds".format(execution_time), extra={'color': 'green'})
+                # Log Time in a more readable way after 10 minutes
+                if execution_time > 600:
+                    execution_time = time.strftime("%H:%M:%S", time.gmtime(execution_time))
+                    logging.info(f"Prompt executed in {execution_time}", extra={'color': 'green'})
+                else:
+                    logging.info("Prompt executed in {:.2f} seconds".format(execution_time), extra={'color': 'green'})
 
-        flags = q.get_flags()
-        free_memory = flags.get("free_memory", False)
+            flags = q.get_flags()
+            free_memory = flags.get("free_memory", False)
 
-        if flags.get("unload_models", free_memory):
-            comfy.model_management.unload_all_models()
-            need_gc = True
-            last_gc_collect = 0
+            if flags.get("unload_models", free_memory):
+                comfy.model_management.unload_all_models()
+                need_gc = True
+                last_gc_collect = 0
 
-        if free_memory:
-            e.reset()
-            need_gc = True
-            last_gc_collect = 0
+            if free_memory:
+                e.reset()
+                need_gc = True
+                last_gc_collect = 0
 
-        if need_gc:
-            current_time = time.perf_counter()
-            if (current_time - last_gc_collect) > gc_collect_interval:
-                gc.collect()
-                comfy.model_management.soft_empty_cache()
-                last_gc_collect = current_time
-                need_gc = False
-                hook_breaker_ac10a0.restore_functions()
+            if need_gc:
+                current_time = time.perf_counter()
+                if (current_time - last_gc_collect) > gc_collect_interval:
+                    gc.collect()
+                    comfy.model_management.soft_empty_cache()
+                    last_gc_collect = current_time
+                    need_gc = False
+                    hook_breaker_ac10a0.restore_functions()
 
-                asset_manager.queue_output_scan()
-                asset_manager.resume_background_scan()
+                    asset_manager.queue_output_scan()
+                    asset_manager.resume_background_scan()
+                    background_scan_paused = False
+        # BaseException is deliberate. This runs on the worker thread, so Ctrl-C lands in
+        # the main thread instead, and resume only flips the seeder's pause state.
+        except BaseException:
+            if background_scan_paused:
+                try:
+                    asset_manager.resume_background_scan()
+                except Exception:
+                    logging.exception("Failed to resume background asset scanning after prompt worker failure")
+            raise
 
 
 async def run(server_instance, address='', port=8188, verbose=True, call_on_start=None):
@@ -453,37 +485,91 @@ def setup_database(asset_manager):
     if not dependencies_available():
         return
 
+    if not asset_manager.enabled:
+        # Only the asset system uses the database, so leave it, and its lock, to a process that has assets on.
+        warn_if_database_in_use()
+        asset_manager.startup()
+        return
+
     try:
         init_db()
         asset_manager.startup()
     except Exception as e:
-        if "database is locked" in str(e):
-            logging.error(
-                "Database is locked. Another ComfyUI process is already using this database.\n"
-                "To resolve this, specify a separate database file for this instance:\n"
-                "  --database-url sqlite:///path/to/another.db"
-            )
-            sys.exit(1)
-        if "Could not acquire lock on database" in str(e):
-            logging.error(
-                "Database is locked. Another ComfyUI process is already using this database.\n"
-                "To resolve this, specify a separate database file for this instance:\n"
-                "  --database-url sqlite:///path/to/another.db"
-            )
-            if args.enable_assets:
-                sys.exit(1)
-            return
-        if args.enable_assets:
-            logging.error(
-                f"Failed to initialize database: {e}\n"
-                "The --enable-assets flag requires a working database connection.\n"
-                "To resolve this, try one of the following:\n"
-                "  1. Install the latest requirements: pip install -r requirements.txt\n"
-                "  2. Specify an alternative database URL: --database-url sqlite:///path/to/your.db\n"
-                "  3. Use an in-memory database: --database-url sqlite:///:memory:"
-            )
-            sys.exit(1)
-        logging.error(f"Failed to initialize database. Please ensure you have installed the latest requirements. If the error persists, please report this as in future the database will be required: {e}")
+        failure, message = database_failure_message(e, get_database_url())
+        if failure != "unsupported_url":  # that error repeats the URL, which can carry a password
+            logging.debug("Asset database startup failed", exc_info=True)
+        stop_startup(failure, message)
+
+
+WITHOUT_ASSETS = "Or start ComfyUI without the assets system: --disable-assets"
+
+
+def stop_startup(kind, message):
+    """Exit after a line a launcher can match, then the message for the user."""
+    logging.error(f"ASSETS_STARTUP_FAILED: {kind}\n{message}")
+    sys.exit(1)
+
+
+def database_failure_message(error, db_url):
+    """The kind of failure that stopped the asset database from opening, and how to fix it."""
+    if not (db_url.startswith("sqlite:///") or db_url == "sqlite://"):
+        return "unsupported_url", ("--database-url must start with sqlite:///, like sqlite:///path/to/comfyui.db, "
+                                   f"or be left out to use the default database.\n{WITHOUT_ASSETS}")
+    location = get_db_path() if db_url.startswith("sqlite:///") else db_url
+    kind = error_kind(error)
+    detail = getattr(error, "orig", None) or error
+    if "Could not acquire lock on database" in str(error):
+        failure = "in_use"
+        what = f"Another ComfyUI is already using this database: '{location}'."
+        fix = "Close the other ComfyUI and start this one again."
+    elif kind in ("database_locked", "file_locked"):
+        failure = "locked"
+        what = f"The asset database '{location}' is locked by another program ({detail})."
+        fix = "Close any program that has it open, such as another ComfyUI or a database viewer, and start again."
+    elif "Can't locate revision" in str(error):
+        failure = "newer_revision"
+        what = f"The asset database '{location}' was last used by a newer version of ComfyUI ({detail})."
+        fix = "Update ComfyUI, or move that file aside and start again to create a new database."
+    elif isinstance(error, (FileExistsError, NotADirectoryError)):
+        failure = "path_blocked"
+        what = f"A file is in the way of the folder for the asset database '{location}' ({detail})."
+        fix = "Move that file, or choose another folder."
+    elif kind in ("read_only", "unable_to_open") or isinstance(error, OSError):
+        failure = "not_writable"
+        what = f"ComfyUI can't create, open or write the asset database '{location}' ({detail})."
+        fix = ("Make sure its folder is a writable directory, the database path is a writable file (or doesn't exist yet), "
+               "and no other program has it open.")
+    elif kind == "database_corrupt":
+        failure = "corrupt"
+        what = f"The asset database '{location}' is corrupt ({detail})."
+        fix = ("Move that file aside, or delete it, and start again: ComfyUI creates a new database "
+               "and rebuilds the asset catalog by rescanning your files.")
+    else:
+        failure = "other"
+        what = f"Could not open or upgrade the asset database '{location}': {detail}"
+        fix = ("If the database is damaged, move that file aside and start again: ComfyUI creates a new "
+               "database and rebuilds the asset catalog by rescanning your files. Run with --verbose DEBUG for the full error.")
+    lines = [what, fix]
+    if failure in ("in_use", "locked") and args.database_url is None:
+        lines.append("Or give this ComfyUI its own database: --database-url sqlite:///path/to/another.db")
+    return failure, "\n".join(lines + [WITHOUT_ASSETS])
+
+
+def warn_if_database_in_use():
+    db_path = lock_holder_db_path()
+    if db_path is None:
+        return
+    app.logger.log_startup_warning(
+        f"""
+________________________________________________________________________
+WARNING WARNING WARNING WARNING WARNING
+
+Another ComfyUI is already using this install's asset database:
+  {db_path}
+This ComfyUI was started with --disable-assets, so it doesn't use that database and will start anyway.
+________________________________________________________________________
+""".strip()
+    )
 
 
 def start_comfyui(asyncio_loop=None):
@@ -496,7 +582,12 @@ def start_comfyui(asyncio_loop=None):
         logging.info(f"Setting temp directory to: {temp_dir}")
         folder_paths.set_temp_directory(temp_dir)
 
+    if not args.disable_assets and not dependencies_available():
+        missing = ", ".join(missing_dependencies()) or "run with --verbose DEBUG to see the import error"
+        stop_startup("missing_packages", f"The assets system needs packages that could not be imported: {missing}.\n"
+                                         f"{get_missing_requirements_message()}\n{WITHOUT_ASSETS}")
     asset_manager: AssetManager = default_asset_manager()
+    feature_flags.SERVER_FEATURE_FLAGS["assets"] = asset_manager.enabled
     if not asset_manager.enabled:
         cleanup_temp_filesystem()
 
@@ -511,8 +602,10 @@ def start_comfyui(asyncio_loop=None):
     hook_breaker_ac10a0.save_functions()
     asyncio_loop.run_until_complete(nodes.init_extra_nodes(
         init_custom_nodes=(not args.disable_all_custom_nodes) or len(args.whitelist_custom_nodes) > 0,
-        init_api_nodes=not args.disable_api_nodes
+        init_api_nodes=not args.disable_partner_nodes
     ))
+    disabled_nodes = governance.load_disabled_nodes(args.disabled_nodes_config) if args.disabled_nodes_config else set()
+    governance.apply_disabled_nodes(disabled_nodes)
 
     # Re-apply Comfy's cuDNN benchmark policy after custom-node imports. Benchmark
     # mode can request near-card-sized autotune workspaces, and some custom nodes set it at import time.

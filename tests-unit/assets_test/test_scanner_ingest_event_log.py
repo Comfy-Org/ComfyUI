@@ -1,3 +1,4 @@
+import errno
 import logging
 import re
 from contextlib import nullcontext
@@ -86,9 +87,16 @@ def run_hash_failure(session: Mock, path: Path, progress: _ScanState) -> bool:
         pytest.param(
             lambda: scanner.sync_root_safely("models"),
             "scanner.fast_scan_failed",
-            {"error_type": "FileNotFoundError", "root": "models"},
+            {"error_kind": "other", "error_type": "FileNotFoundError", "root": "models"},
             set(),
             id="fast-scan",
+        ),
+        pytest.param(
+            lambda: scanner.sync_temp_references_safely(),
+            "scanner.temp_sync_failed",
+            {"error_kind": "other", "error_type": "FileNotFoundError", "root": "temp"},
+            None,
+            id="temp-sync",
         ),
     ],
 )
@@ -258,7 +266,7 @@ def test_locked_files_during_discovery_emit_stat_failed_exactly_once(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     def deny_stat(*_args, **_kwargs):
-        raise PermissionError("/private/assets/secret.bin")
+        raise PermissionError(errno.EACCES, "Permission denied", "/private/assets/secret.bin")
 
     monkeypatch.setattr(scanner, "os", SimpleNamespace(stat=deny_stat, path=scanner.os.path))
     progress = _ScanState()
@@ -269,7 +277,7 @@ def test_locked_files_during_discovery_emit_stat_failed_exactly_once(
 
     assert specs == []
     assert events_named(caplog, "scanner.stat_failed") == [
-        {"error_type": "PermissionError", "site": "discovery"}
+        {"error_kind": "permission_denied", "error_type": "PermissionError", "site": "discovery"}
     ]
     assert progress.permission_denied == 3
 
@@ -341,7 +349,7 @@ def test_locked_files_during_enrichment_emit_stat_failed_exactly_once(
     assert first is False
     assert second is False
     assert events_named(caplog, "scanner.stat_failed") == [
-        {"error_type": "PermissionError", "site": "enrich"}
+        {"error_kind": "other", "error_type": "PermissionError", "site": "enrich"}
     ]
     assert progress.permission_denied == 2
 
@@ -390,8 +398,8 @@ def test_enrich_failures_emit_once_per_scan_and_reset_with_new_scan(
         first_result = scanner.enrich_assets_batch(rows, progress=_ScanState())
         second_result = scanner.enrich_assets_batch(rows[:1], progress=_ScanState())
 
-    assert first_result == (0, ["record-1", "record-2"])
-    assert second_result == (0, ["record-1"])
+    assert first_result == (0, ["record-1", "record-2"], 2)
+    assert second_result == (0, ["record-1"], 1)
     assert events_named(caplog, "scanner.enrich_failed") == [
         {"error_type": "FileNotFoundError"},
         {"error_type": "FileNotFoundError"},
@@ -413,10 +421,13 @@ def test_enrich_exception_counts_one_failure_per_raising_row(
     monkeypatch.setattr(scanner, "enrich_asset", fail_enrich)
     progress = _ScanState()
 
-    enriched, failed_ids = scanner.enrich_assets_batch(rows, progress=progress)
+    enriched, failed_ids, consumed = scanner.enrich_assets_batch(
+        rows, progress=progress
+    )
 
     assert enriched == 0
     assert failed_ids == ["record-1", "record-2"]
+    assert consumed == 2
     assert progress.enrich_failed == 2
 
 
@@ -429,8 +440,11 @@ def test_benign_enrich_no_op_is_skipped_without_counting_a_failure(
     monkeypatch.setattr(scanner, "create_session", lambda: nullcontext(Mock()))
     progress = _ScanState()
 
-    enriched, failed_ids = scanner.enrich_assets_batch(rows, progress=progress)
+    enriched, failed_ids, consumed = scanner.enrich_assets_batch(
+        rows, progress=progress
+    )
 
     assert enriched == 0
     assert failed_ids == ["record-1"]
+    assert consumed == 1
     assert progress.enrich_failed == 0

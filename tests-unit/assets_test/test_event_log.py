@@ -1,13 +1,16 @@
 """Tests for the structured assets event log lines (``app/assets/event_log.py``)."""
 
+import errno
 import logging
 import re
+import sqlite3
 from pathlib import Path
 
 import pytest
+from sqlalchemy.exc import OperationalError
 
 from app.assets import event_log
-from app.assets.event_log import ALLOWED_FIELDS, TAG, EventLogError, emit, error_type
+from app.assets.event_log import ALLOWED_FIELDS, ERROR_KINDS, TAG, EventLogError, emit, error_kind, error_type
 
 # The line grammar below is the CONTRACT shared with the desktop launcher's log
 # tap: Comfy-Org/Comfy-Desktop `src/main/lib/assetsTap.ts` holds the equivalent
@@ -28,14 +31,21 @@ VALID_VALUES: dict[str, list[object]] = {
     "phase": ["fast", "enrich", "full"],
     "stage": ["mark_missing", "pruning", "fast_scan", "enrich", "finalize"],
     "elapsed_ms": [0, 8123],
+    "cpu_ms": [0, 2710],
+    "paused_ms": [0, 61250],
+    "dirs_listed_count": [0, 42],
+    "files_statted_count": [0, 9876],
     "created": [0, 12],
     "enriched": [4],
     "skipped": [3],
     "hash_failed": [2],
     "enrich_failed": [0],
     "permission_denied": [0],
+    "missing_marked_count": [0, 10],
+    "recovered_count": [10],
     "count": [1],
     "error_type": ["ValueError", "FileNotFoundError"],
+    "error_kind": sorted(ERROR_KINDS),
     "hashing_enabled": [True, False],
     "site": ["discovery", "enrich"],
 }
@@ -144,6 +154,101 @@ def test_error_type_is_the_class_name_and_the_path_never_reaches_the_line(caplog
     assert "model.safetensors" not in line
 
 
+# --- error_kind ---------------------------------------------------------------------
+
+
+def _wrapped(driver_error: BaseException) -> OperationalError:
+    # How SQLAlchemy surfaces a driver error: its str() carries the statement and params.
+    return OperationalError("SELECT * FROM c WHERE path = ?", ("/home/x/model.safetensors",), driver_error)
+
+
+@pytest.mark.parametrize(
+    ("exc", "kind"),
+    [
+        (_wrapped(sqlite3.OperationalError("Expression tree is too large (maximum depth 1000)")), "expression_tree_too_large"),
+        (_wrapped(sqlite3.OperationalError("too many SQL variables")), "too_many_variables"),
+        (_wrapped(sqlite3.OperationalError("database is locked")), "database_locked"),
+        (_wrapped(sqlite3.OperationalError("database table is locked: assets")), "database_locked"),
+        (_wrapped(sqlite3.OperationalError("database or disk is full")), "disk_full"),
+        (_wrapped(sqlite3.OperationalError("disk I/O error")), "disk_io"),
+        (_wrapped(sqlite3.OperationalError("unable to open database file")), "unable_to_open"),
+        (_wrapped(sqlite3.DatabaseError("database disk image is malformed")), "database_corrupt"),
+        (sqlite3.OperationalError("database is locked"), "database_locked"),
+        (_wrapped(sqlite3.OperationalError("no such table: assets")), "other"),
+        (OSError(errno.ENOSPC, "No space left on device", "/home/x/out.png"), "disk_full"),
+        (OSError(errno.EIO, "Input/output error"), "disk_io"),
+        (PermissionError(errno.EACCES, "Permission denied", "/home/x/out.png"), "permission_denied"),
+        (FileNotFoundError("/home/x/model.safetensors"), "other"),
+        (ValueError("database is locked"), "other"),
+    ],
+    ids=[
+        "expression-tree", "too-many-variables", "locked", "table-locked", "sqlite-full",
+        "sqlite-io", "unable-to-open", "corrupt", "unwrapped-sqlite", "unknown-sqlite",
+        "enospc", "eio", "eacces", "no-errno", "not-a-driver-error",
+    ],
+)
+def test_error_kind_classifies_without_reading_the_wrapped_statement(exc, kind):
+    assert error_kind(exc) == kind
+
+
+def _with_code(exc: sqlite3.Error, code: int) -> sqlite3.Error:
+    exc.sqlite_errorcode = code  # set by the driver itself on Python 3.11+
+    return exc
+
+
+def _windows_error(winerror: int) -> PermissionError:
+    exc = PermissionError(errno.EACCES, "Permission denied")
+    exc.winerror = winerror  # set by the OS layer on Windows only
+    return exc
+
+
+@pytest.mark.parametrize(
+    ("exc", "kind"),
+    [
+        (_wrapped(_with_code(sqlite3.OperationalError("unexpected wording"), 261)), "database_locked"),
+        (_wrapped(_with_code(sqlite3.OperationalError("unexpected wording"), 13)), "disk_full"),
+        (_wrapped(_with_code(sqlite3.DatabaseError("unexpected wording"), 26)), "database_corrupt"),
+        (_wrapped(_with_code(sqlite3.OperationalError("Expression tree is too large"), 1)), "expression_tree_too_large"),
+        (_wrapped(sqlite3.DatabaseError("file is not a database")), "database_corrupt"),
+        (_wrapped(_with_code(sqlite3.OperationalError("unexpected wording"), 8)), "read_only"),
+        (_wrapped(sqlite3.OperationalError("attempt to write a readonly database")), "read_only"),
+        (OSError(errno.EROFS, "Read-only file system"), "read_only"),
+        (_windows_error(32), "file_locked"),
+        (_windows_error(33), "file_locked"),
+        (_windows_error(5), "permission_denied"),
+    ],
+    ids=[
+        "busy-extended-code", "full-code", "notadb-code", "generic-code-falls-back-to-message",
+        "notadb-message", "readonly-code", "readonly-message", "erofs", "sharing-violation", "lock-violation", "access-denied",
+    ],
+)
+def test_error_kind_prefers_the_sqlite_code_and_windows_error(exc, kind):
+    assert error_kind(exc) == kind
+
+
+def test_error_kind_classifies_a_real_non_database_file(tmp_path: Path):
+    not_a_db = tmp_path / "assets.db"
+    not_a_db.write_bytes(b"this is not sqlite" * 100)
+    connection = sqlite3.connect(not_a_db)
+    try:
+        with pytest.raises(sqlite3.DatabaseError) as raised:
+            connection.execute("SELECT * FROM sqlite_master")
+    finally:
+        connection.close()
+
+    assert error_kind(raised.value) == "database_corrupt"
+
+
+def test_error_kind_never_carries_the_statement_or_params(caplog):
+    exc = _wrapped(sqlite3.OperationalError("database is locked"))
+    assert "/home/x/model.safetensors" in str(exc)
+
+    line = emit_line(caplog, "seeder.scan_failed", error_type=error_type(exc), error_kind=error_kind(exc))
+
+    assert "model.safetensors" not in line
+    assert "SELECT" not in line
+
+
 # --- the closed vocabulary ----------------------------------------------------------
 
 
@@ -168,7 +273,9 @@ def test_unknown_field_raises_under_pytest():
         emit("seeder.scan_started", path="/home/x/models")
 
 
-@pytest.mark.parametrize("value", ["a/b", "a\\b", "a:b", "a b", "a=b", 'a"b'])
+@pytest.mark.parametrize(
+    "value", ["a/b", "a\\b", "a:b", "a b", "a=b", 'a"b', "a\nb", "a\rb"]
+)
 def test_a_string_value_carrying_a_forbidden_character_raises(value):
     with pytest.raises(EventLogError):
         emit("seeder.scan_failed", error_type=value)
@@ -186,6 +293,7 @@ def test_a_string_value_carrying_a_forbidden_character_raises(value):
         ("error_type", "x" * 65),
         ("error_type", ""),
         ("error_type", 7),
+        ("error_kind", "sqlite_busy"),
         ("elapsed_ms", "8123"),
         ("count", 1.5),
         ("created", True),
@@ -202,6 +310,7 @@ def test_a_string_value_carrying_a_forbidden_character_raises(value):
         "oversized-string",
         "empty-string",
         "non-string-error-type",
+        "bad-error-kind",
         "string-into-int-field",
         "float-into-int-field",
         "bool-into-int-field",
@@ -278,3 +387,16 @@ def test_production_mode_still_emits_valid_events_after_a_dropped_one(caplog, mo
 
     tagged = [r.getMessage() for r in caplog.records if r.getMessage().startswith(TAG)]
     assert tagged == ["[assets-event] seeder.scan_started phase=fast"]
+
+
+def test_error_kind_classifies_a_real_read_only_database(tmp_path: Path):
+    db_path = tmp_path / "assets.db"
+    sqlite3.connect(db_path).execute("CREATE TABLE t (x)").connection.close()
+    connection = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    try:
+        with pytest.raises(sqlite3.OperationalError) as raised:
+            connection.execute("INSERT INTO t VALUES (1)")
+    finally:
+        connection.close()
+
+    assert error_kind(raised.value) == "read_only"

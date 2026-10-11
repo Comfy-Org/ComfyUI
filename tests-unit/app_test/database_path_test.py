@@ -14,7 +14,7 @@ def test_default_database_url_uses_effective_user_directory(monkeypatch, tmp_pat
     monkeypatch.setattr(db.args, "database_url", None)
     monkeypatch.setattr("folder_paths.get_user_directory", lambda: str(user_dir))
 
-    assert db.get_database_url() == f"sqlite:///{user_dir / 'comfyui.db'}"
+    assert db.get_db_path() == str(user_dir / "comfyui.db")
 
 
 def test_default_db_path_matches_legacy_default_without_custom_user_directory(monkeypatch):
@@ -119,7 +119,6 @@ def test_prepare_file_database_creates_parent_directory(monkeypatch, tmp_path):
     db_path = tmp_path / "nested" / "comfyui.db"
 
     monkeypatch.setattr(db.args, "database_url", None)
-    monkeypatch.setattr(db, "copy_legacy_default_db", lambda path: None)
 
     db.prepare_file_db_path(str(db_path))
 
@@ -129,7 +128,6 @@ def test_prepare_file_database_creates_parent_directory(monkeypatch, tmp_path):
 def test_prepare_file_database_accepts_relative_database_path(monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(db.args, "database_url", "sqlite:///relative.db")
-    monkeypatch.setattr(db, "copy_legacy_default_db", lambda path: None)
 
     db.prepare_file_db_path("relative.db")
 

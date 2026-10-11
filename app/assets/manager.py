@@ -1,22 +1,34 @@
+"""Selects and implements the enabled and disabled asset managers.
+
+``default_asset_manager`` chooses ``NoAssets`` only for ``--disable-assets``; main.py
+stops startup before that if assets are on and the database packages are missing.
+"""
+
+from __future__ import annotations
+
 import logging
 from typing import Any, Callable, Protocol
 
 from aiohttp import web
 
 from app.assets import mode
-from app.assets.api.routes import register_assets_routes
 from app.assets.lifecycle import record_hash_mode_transition_intent, run_shutdown, run_startup
-from app.assets.seeder import ScanPhase, asset_seeder
-from app.assets.services.ingest import (
-    register_cached_output as ingest_register_cached_output,
-    register_executed_output as ingest_register_executed_output,
-    register_file_in_place,
-)
-from app.assets.services.path_utils import get_known_subfolder_tags
-from app.assets.services.schemas import RegisteredAsset, UploadAssetView
 from app.database.db import dependencies_available
 from app.user_manager import UserManager
 from comfy.cli_args import args
+
+# These need the database packages. Without them only NoAssets is used, and it
+# does not touch these names.
+if dependencies_available():
+    from app.assets.api.routes import register_assets_routes
+    from app.assets.seeder import asset_seeder
+    from app.assets.services.ingest import (
+        register_cached_output as ingest_register_cached_output,
+        register_executed_output as ingest_register_executed_output,
+        register_file_in_place,
+    )
+    from app.assets.services.path_utils import get_known_subfolder_tags
+    from app.assets.services.schemas import RegisteredAsset, UploadAssetView
 
 
 class AssetManager(Protocol):
@@ -61,12 +73,13 @@ class AssetManager(Protocol):
 
 
 class _ArgsLike(Protocol):
-    enable_assets: bool
+    disable_assets: bool
     enable_asset_hashing: bool
 
 
 def _shutdown_assets() -> None:
-    asset_seeder.shutdown()
+    if dependencies_available():
+        asset_seeder.shutdown()
     run_shutdown()
 
 
@@ -80,7 +93,6 @@ class NoAssets:
 
     def startup(self) -> None:
         mode.init(self._args)
-        record_hash_mode_transition_intent()
         run_startup(enable_assets=False)
 
     def shutdown(self) -> None:
@@ -89,6 +101,8 @@ class NoAssets:
     def register_routes(
         self, app: web.Application, user_manager: UserManager | None
     ) -> None:
+        if not dependencies_available():
+            return
         register_assets_routes(app)
         asset_seeder.disable()
 
@@ -151,19 +165,13 @@ class AssetsEnabled:
         register_assets_routes(app, user_manager)
 
     def ensure_scan_started(self) -> None:
-        asset_seeder.start(roots=("models", "input", "output"))
+        asset_seeder.start(roots=("models", "input"))
 
     def pause_background_scan(self) -> None:
         asset_seeder.pause()
 
     def queue_output_scan(self) -> None:
-        if not asset_seeder.is_disabled():
-            # FULL, not ENRICH: only a walk finds outputs a node never declared. Do not downgrade without re-weighing the cost.
-            asset_seeder.enqueue_scan(
-                roots=("output",),
-                phase=ScanPhase.FULL,
-                compute_hashes=self._args.enable_asset_hashing,
-            )
+        return None
 
     def resume_background_scan(self) -> None:
         asset_seeder.resume()
@@ -218,10 +226,4 @@ class AssetsEnabled:
 
 
 def default_asset_manager() -> AssetManager:
-    if args.enable_assets and not dependencies_available():
-        logging.warning(
-            "Assets requested but database dependencies unavailable; asset endpoints "
-            "will answer 503. Please install the updated requirements.txt file."
-        )
-        return NoAssets(args)
-    return AssetsEnabled(args) if args.enable_assets else NoAssets(args)
+    return NoAssets(args) if args.disable_assets else AssetsEnabled(args)

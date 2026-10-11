@@ -3,18 +3,11 @@ import os
 import sqlite3
 
 import pytest
-import torch
 from alembic import command
 from alembic.config import Config
 from filelock import FileLock, Timeout
 
 from app.database import db as db_module
-from comfy.cli_args import args as cli_args
-
-if not torch.cuda.is_available():
-    cli_args.cpu = True
-
-import main  # noqa: E402
 
 _PRE_HEAD = "0006_add_loader_path"
 
@@ -76,14 +69,14 @@ def test_failed_init_releases_the_lock(stale_db, monkeypatch):
         contender.acquire(timeout=0)
     except Timeout:
         pytest.fail(
-            "a failed init stranded the lock; setup_database logs and CONTINUES when assets are "
-            "disabled, so this process would block every other instance for its whole lifetime "
-            "over a database it never opened"
+            "a failed init stranded the lock, so this process would block every other "
+            "instance for its whole lifetime over a database it never opened"
         )
     contender.release()
 
 
-def test_held_lock_blocks_before_any_migration_work(stale_db):
+def test_held_lock_blocks_before_any_migration_work(stale_db, monkeypatch):
+    monkeypatch.setattr(db_module, "_LOCK_WAIT_SECONDS", 0.1)
     holder = FileLock(stale_db + ".lock")
     holder.acquire(timeout=0)
     try:
@@ -97,62 +90,41 @@ def test_held_lock_blocks_before_any_migration_work(stale_db):
         holder.release()
 
 
-def test_setup_database_routes_file_lock_to_lock_guidance(monkeypatch, caplog):
-    monkeypatch.setattr(main, "dependencies_available", lambda: True)
+def test_legacy_database_copy_runs_under_file_lock(tmp_path, monkeypatch):
+    legacy_db = tmp_path / "legacy" / "comfyui.db"
+    target_db = tmp_path / "current" / "comfyui.db"
+    legacy_db.parent.mkdir()
+    legacy_db.write_bytes(b"legacy database")
+    copied: list[tuple[str, str]] = []
+    real_copy = db_module.shutil.copy
 
-    def _raise_file_lock():
-        raise RuntimeError(
-            "Could not acquire lock on database 'x.db'. "
-            "Another ComfyUI process may already be using it. "
-            "Use --database-url to specify a separate database file."
-        )
+    def _copy_while_locked(source: str, destination: str):
+        contender = FileLock(str(target_db) + ".lock")
+        try:
+            with pytest.raises(Timeout):
+                contender.acquire(timeout=0)
+        finally:
+            if contender.is_locked:
+                contender.release()
+        copied.append((source, destination))
+        return real_copy(source, destination)
 
-    monkeypatch.setattr(main, "init_db", _raise_file_lock)
-    monkeypatch.setattr(main.args, "enable_assets", False)
+    monkeypatch.setattr(db_module.args, "database_url", None)
+    monkeypatch.setattr(db_module, "get_db_path", lambda: str(target_db))
+    monkeypatch.setattr(
+        db_module, "get_legacy_default_db_path", lambda: str(legacy_db)
+    )
+    monkeypatch.setattr(db_module, "_migrate_and_bind", lambda *_args: None)
+    monkeypatch.setattr(db_module.shutil, "copy", _copy_while_locked)
+    monkeypatch.setattr(db_module, "_db_lock", None)
 
-    with caplog.at_level(logging.ERROR):
-        result = main.setup_database(None)
+    try:
+        db_module._init_file_db(f"sqlite:///{target_db}")
+    finally:
+        if db_module._db_lock is not None:
+            db_module._db_lock.release(force=True)
 
-    assert result is None
-    assert "Database is locked. Another ComfyUI process is already using this database." in caplog.text
-    assert "Failed to initialize database." not in caplog.text
-
-
-def test_setup_database_exits_for_file_lock_when_assets_are_enabled(monkeypatch, caplog):
-    monkeypatch.setattr(main, "dependencies_available", lambda: True)
-
-    def _raise_file_lock():
-        raise RuntimeError(
-            "Could not acquire lock on database 'x.db'. "
-            "Another ComfyUI process may already be using it. "
-            "Use --database-url to specify a separate database file."
-        )
-
-    monkeypatch.setattr(main, "init_db", _raise_file_lock)
-    monkeypatch.setattr(main.args, "enable_assets", True)
-
-    with caplog.at_level(logging.ERROR), pytest.raises(SystemExit) as error:
-        main.setup_database(None)
-
-    assert error.value.code == 1
-    assert "Database is locked. Another ComfyUI process is already using this database." in caplog.text
-    assert "The --enable-assets flag requires a working database connection." not in caplog.text
-
-
-def test_setup_database_exits_for_driver_lock_when_assets_are_disabled(monkeypatch, caplog):
-    monkeypatch.setattr(main, "dependencies_available", lambda: True)
-
-    def _raise_driver_lock():
-        raise Exception("sqlite3.OperationalError: database is locked")
-
-    monkeypatch.setattr(main, "init_db", _raise_driver_lock)
-    monkeypatch.setattr(main.args, "enable_assets", False)
-
-    with caplog.at_level(logging.ERROR), pytest.raises(SystemExit) as error:
-        main.setup_database(None)
-
-    assert error.value.code == 1
-    assert "Database is locked. Another ComfyUI process is already using this database." in caplog.text
+    assert copied == [(str(legacy_db) + ".bak", str(target_db))]
 
 
 def test_failed_restore_does_not_mask_the_upgrade_error(stale_db, monkeypatch, caplog):

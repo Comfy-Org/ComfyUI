@@ -1,6 +1,5 @@
 from collections.abc import Callable
 from contextlib import AbstractContextManager
-import logging
 from pathlib import Path
 from unittest.mock import Mock, patch
 
@@ -19,10 +18,11 @@ from app.assets.manager import AssetsEnabled, NoAssets
 from app.assets.mode import hashing_enabled
 from app.assets.seeder import asset_seeder
 from app.assets.services.hash_mode_state import read_stored_mode
+from comfy.cli_args import parser
 
 
 class _Args:
-    enable_assets = False
+    disable_assets = True
 
     def __init__(self, hashing: bool) -> None:
         self.enable_asset_hashing = hashing
@@ -45,11 +45,13 @@ async def test_noassets_register_routes_returns_service_disabled_and_disables_se
     response = await client.get("/api/assets")
 
     assert response.status == 503
-    assert (await response.json())["error"]["code"] == "SERVICE_DISABLED"
+    error = (await response.json())["error"]
+    assert error["code"] == "SERVICE_DISABLED"
+    assert "--disable-assets" in error["message"]
     assert asset_seeder.is_disabled()
 
 
-def test_noassets_startup_applies_hash_mode_persists_state_and_cleans_temp_dir(
+def test_noassets_startup_applies_hash_mode_leaves_database_alone_and_cleans_temp_dir(
     mock_create_session: Callable[[], AbstractContextManager[Session]],
     session: Session,
     tmp_path: Path,
@@ -63,7 +65,7 @@ def test_noassets_startup_applies_hash_mode_persists_state_and_cleans_temp_dir(
     _no_assets(hashing=True).startup()
 
     assert hashing_enabled() is True
-    assert read_stored_mode(session) == "on"
+    assert read_stored_mode(session) is None
     assert not temp_file.exists()
 
 
@@ -179,24 +181,18 @@ def test_noassets_is_disabled() -> None:
     assert _no_assets().enabled is False
 
 
-def test_default_asset_manager_disables_assets_when_dependencies_are_unavailable(
-    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+@pytest.mark.parametrize(
+    ("flags", "expected"),
+    [
+        ([], AssetsEnabled),
+        (["--enable-assets"], AssetsEnabled),
+        (["--disable-assets"], NoAssets),
+        (["--enable-assets", "--disable-assets"], NoAssets),
+    ],
+)
+def test_assets_are_on_unless_disabled(
+    flags: list[str], expected: type, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(manager.args, "enable_assets", True)
-    monkeypatch.setattr(manager, "dependencies_available", lambda: False)
+    monkeypatch.setattr(manager, "args", parser.parse_args(flags))
 
-    with caplog.at_level(logging.WARNING):
-        asset_manager = manager.default_asset_manager()
-
-    assert isinstance(asset_manager, NoAssets)
-    assert "asset endpoints will answer 503" in caplog.text
-    assert "requirements.txt" in caplog.text
-
-
-def test_default_asset_manager_enables_assets_when_dependencies_are_available(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(manager.args, "enable_assets", True)
-    monkeypatch.setattr(manager, "dependencies_available", lambda: True)
-
-    assert isinstance(manager.default_asset_manager(), AssetsEnabled)
+    assert isinstance(manager.default_asset_manager(), expected)
