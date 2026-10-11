@@ -152,6 +152,47 @@ Example:
 
 To create compatible checkpoints, use any quantization tool provided the output follows the checkpoint format described above and uses a layout defined in `QUANT_ALGOS`.
 
+### Diffusion attention preferences
+
+A diffusion attention module can have a `<module path>.comfy_attention.config` entry whose
+uint8 tensor contains UTF-8 JSON. Use a single preference:
+
+```json
+{"attention": "comfy_kitchen_int8"}
+```
+
+Or an ordered list of preferences, each with its own options:
+
+```json
+[
+  {"attention": "comfy_kitchen_sol", "tau": 1.0},
+  {"attention": "comfy_kitchen_int8"}
+]
+```
+
+Use the module that performs attention, such as `transformer_blocks.0.attn` for
+Qwen Image 2.1 or `blocks.0.attn` for MiniMax H3. The target must have a
+`ComfyAttention` child module.
+
+Only `comfy_kitchen_int8` and `comfy_kitchen_sol` are accepted. ComfyUI selects
+the first available preference during loading, checking support for the primary
+device. All other method names are skipped with a warning. Unavailable methods
+are skipped. If none are available, or the list is empty, normal attention
+selection remains in effect. Explicit attention overrides retain priority.
+
+`comfy_kitchen_sol` supports only `tau` as an optional field alongside
+`attention`. It defaults to `1.0` and sets the routing threshold; higher values
+route fewer blocks exactly. Other SOL options use Comfy Kitchen's defaults.
+
+Bake SOL preferences into modules with compatible inputs: matching FP16/BF16
+Q/K/V tensors with a head dimension of 128. ComfyUI trusts the checkpoint's
+choice; `low_precision_attention=False` does not disable SOL. Masked calls use
+PyTorch attention.
+
+The `ComfyAttention` child module loads and saves its metadata through normal
+state-dict loading and saving, preserving the full preference list and options,
+including unsupported entries. Preferences do not enable weight quantization.
+
 ### Weight Quantization
 
 Weight quantization is straightforward - compute the scaling factor directly from the weight tensor using the absolute maximum method described earlier. Each layer's weights are quantized independently and stored with their corresponding `weight_scale` parameter.

@@ -1,6 +1,7 @@
 import math
 import sys
 import inspect
+import json
 
 import torch
 import torch.nn.functional as F
@@ -16,6 +17,7 @@ from .diffusionmodules.util import AlphaBlender, timestep_embedding
 from .sub_quadratic_attention import efficient_dot_product_attention
 
 from comfy import model_management
+from comfy.configurable import ConfigurableModule
 
 if model_management.xformers_enabled():
     import xformers
@@ -70,6 +72,45 @@ def get_attention_function(name: str, default: Any=...) -> Union[Callable, None]
         else:
             return default
     return REGISTERED_ATTENTION_FUNCTIONS[name]
+
+
+class ComfyAttention(ConfigurableModule):
+    def __init__(self):
+        super().__init__()
+        self.config = None
+        self.function = None
+
+    def with_config(self, encoded_config):
+        attention = ComfyAttention()
+        attention.load_state_dict({"config": encoded_config})
+        return attention
+
+    def _load_from_state_dict(self, state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs):
+        self.config = None
+        self.function = None
+        metadata = state_dict.pop(prefix + "config", None)
+        if metadata is not None:
+            self.config = json.loads(metadata.numpy().tobytes())
+            configs = self.config if isinstance(self.config, list) else [self.config]
+            for config in configs:
+                method = config.get("attention")
+                if method == "comfy_kitchen_int8":
+                    if COMFY_KITCHEN_INT8_ATTENTION_IS_AVAILABLE and comfy_kitchen.int8_attention_is_available(model_management.get_torch_device()):
+                        self.function = attention_comfy_kitchen_int8
+                elif method == "comfy_kitchen_sol":
+                    if comfy_kitchen.sol_attn_is_available(model_management.get_torch_device()):
+                        self.function = functools.partial(attention_comfy_kitchen_sol, tau=config.get("tau", 1.0))
+                else:
+                    logging.warning(f"Ignoring unknown attention method {method!r} for {prefix.rstrip('.')}")
+                if self.function is not None:
+                    break
+        super()._load_from_state_dict(state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs)
+
+    def _save_to_state_dict(self, destination, prefix, keep_vars):
+        super()._save_to_state_dict(destination, prefix, keep_vars)
+        if self.config is not None:
+            destination[prefix + "config"] = torch.tensor(list(json.dumps(self.config).encode("utf-8")), dtype=torch.uint8)
+
 
 from comfy.cli_args import args
 import comfy.ops
@@ -171,6 +212,7 @@ class AttentionTensorContainer:
 def wrap_attn(func):
     @functools.wraps(func)
     def wrapper(*args, **kwargs):
+        preferred_attention = kwargs.pop("preferred_attention", None)
         containers = None
         if len(args) >= 3 and isinstance(args[0], AttentionTensorContainer):
             if not isinstance(args[1], AttentionTensorContainer) or not isinstance(args[2], AttentionTensorContainer):
@@ -191,6 +233,10 @@ def wrap_attn(func):
                                 return optimized_attention_override.container_function(*args, **kwargs)
                             args = tuple(container.take() for container in containers) + args[3:]
                         return optimized_attention_override(func, *args, **kwargs)
+                if preferred_attention is not None:
+                    attention = preferred_attention.function
+                    if attention is not None:
+                        return attention(*args, **kwargs)
 
             if containers is not None:
                 if wrapper.container_function is not None:
@@ -647,6 +693,23 @@ attention_comfy_kitchen_int8.container_function = _attention_comfy_kitchen_int8_
 
 
 @wrap_attn
+def attention_comfy_kitchen_sol(q, k, v, heads, mask=None, attn_precision=None, skip_reshape=False, skip_output_reshape=False, *, tau=1.0, **kwargs):
+    if mask is not None:
+        return attention_pytorch(q, k, v, heads, mask=mask, attn_precision=attn_precision, skip_reshape=skip_reshape, skip_output_reshape=skip_output_reshape, **kwargs)
+
+    dim_head = q.shape[-1] if skip_reshape else q.shape[-1] // heads
+    b = q.shape[0]
+    if skip_reshape:
+        q, k, v = map(lambda t: t.transpose(1, 2), (q, k, v))
+    else:
+        q, k, v = _reshape_qkv_to_heads(q, k, v, b, heads, dim_head)
+    out = comfy_kitchen.sol_attn(q, k, v, tau=tau, scale=kwargs.get("scale"))
+    if skip_output_reshape:
+        return out.transpose(1, 2)
+    return out.reshape(b, -1, heads * dim_head)
+
+
+@wrap_attn
 def attention_sage(q, k, v, heads, mask=None, attn_precision=None, skip_reshape=False, skip_output_reshape=False, **kwargs):
     if kwargs.get("low_precision_attention", True) is False or (mask is not None and not SAGE_ATTENTION_SUPPORTS_MASK):
         return attention_pytorch(q, k, v, heads, mask=mask, skip_reshape=skip_reshape, skip_output_reshape=skip_output_reshape, **kwargs)
@@ -922,6 +985,7 @@ def optimized_attention_for_device(device, mask=False, small_input=False):
 class CrossAttention(nn.Module):
     def __init__(self, query_dim, context_dim=None, heads=8, dim_head=64, dropout=0., attn_precision=None, dtype=None, device=None, operations=ops):
         super().__init__()
+        self.comfy_attention = ComfyAttention()
         inner_dim = dim_head * heads
         context_dim = default(context_dim, query_dim)
         self.attn_precision = attn_precision
@@ -945,10 +1009,11 @@ class CrossAttention(nn.Module):
         else:
             v = self.to_v(context)
 
+        q, k, v = AttentionTensorContainer(q), AttentionTensorContainer(k), AttentionTensorContainer(v)
         if mask is None:
-            out = optimized_attention(q, k, v, self.heads, attn_precision=self.attn_precision, transformer_options=transformer_options)
+            out = optimized_attention(q, k, v, self.heads, attn_precision=self.attn_precision, preferred_attention=self.comfy_attention, transformer_options=transformer_options)
         else:
-            out = optimized_attention_masked(q, k, v, self.heads, mask, attn_precision=self.attn_precision, transformer_options=transformer_options)
+            out = optimized_attention_masked(q, k, v, self.heads, mask, attn_precision=self.attn_precision, preferred_attention=self.comfy_attention, transformer_options=transformer_options)
         return self.to_out(out)
 
 

@@ -11,10 +11,6 @@ components:
                     description: Display name of the asset. Mirrors name for backwards compatibility.
                     nullable: true
                     type: string
-                file_path:
-                    description: Relative path in global-namespace-root form (e.g. "models/checkpoints/flux.safetensors")
-                    nullable: true
-                    type: string
                 hash:
                     description: Blake3 hash of the asset content.
                     pattern: ^blake3:[a-f0-9]{64}$
@@ -150,10 +146,6 @@ components:
             properties:
                 display_name:
                     description: Display name of the asset. Mirrors name for backwards compatibility.
-                    nullable: true
-                    type: string
-                file_path:
-                    description: Relative path in global-namespace-root form (e.g. "models/checkpoints/flux.safetensors")
                     nullable: true
                     type: string
                 hash:
@@ -1075,6 +1067,11 @@ components:
                 workflow_id:
                     description: UUID identifying the cloud workflow entity to associate with this job
                     type: string
+                workflow_metadata:
+                    additionalProperties:
+                        type: string
+                    description: 'Key/values echoed on the json websocket messages of this prompt that carry a `prompt_id`, so a client can tell which of its open workflows a message belongs to. Messages without a `prompt_id`, such as `status`, do not carry it, because a single socket serves every open workflow and such a message has no one owner. The server does not interpret the contents. Limited to 256 bytes serialised; a larger or non-object value is ignored. When this field is omitted, the server falls back to `{workflow_id: extra_data.extra_pnginfo.workflow.id}` if the submitted workflow carries an id, so a client that sends only the workflow gets the same messages. Note the `workflow_id` key a client typically sends here is the graph id from `extra_pnginfo.workflow.id`, which is not the same thing as the `workflow_id` field above.'
+                    type: object
                 workflow_version_id:
                     description: UUID identifying the workflow version to associate with this job
                     type: string
@@ -1712,11 +1709,6 @@ paths:
                 - description: Filter assets where name contains this substring (case-insensitive)
                   in: query
                   name: name_contains
-                  schema:
-                    type: string
-                - description: JSON object for filtering by metadata fields
-                  in: query
-                  name: metadata_filter
                   schema:
                     type: string
                 - description: Maximum number of assets to return (1-500)
@@ -2415,6 +2407,7 @@ paths:
                                         description: Number of assets marked as missing
                                         type: integer
                                     status:
+                                        description: '"completed", or "cancelled" when a cancel stopped the prune part way; the assets it marked before that stay marked'
                                         type: string
                                 type: object
                     description: Prune result
@@ -2550,11 +2543,6 @@ paths:
                 - description: Filter assets where name contains this substring (case-insensitive)
                   in: query
                   name: name_contains
-                  schema:
-                    type: string
-                - description: JSON object for filtering by metadata fields
-                  in: query
-                  name: metadata_filter
                   schema:
                     type: string
                 - description: Maximum number of tags to return (1-1000, default 100)

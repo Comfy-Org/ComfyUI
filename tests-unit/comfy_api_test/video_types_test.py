@@ -135,6 +135,44 @@ def test_video_from_file_get_dimensions(simple_video_file):
     assert height == 4
 
 
+@pytest.mark.parametrize("pixel_type,storage_dtype", [("half", np.float16), ("float", np.float32)])
+@pytest.mark.parametrize("channels,pixel_format", [(1, "grayf32le"), (3, "gbrpf32le"), (4, "gbrapf32le")])
+@pytest.mark.parametrize("width", [7, 32])
+@pytest.mark.parametrize("crop", [None, (2, 2, 4, 4)])
+def test_video_from_file_preserves_exr_float_pixels(tmp_path, pixel_type, storage_dtype, channels, pixel_format, width, crop):
+    values = [-3.0, -0.125, 0.0, 2 ** -24, 0.12345679, 0.5, 1.0, 2.0, 12.0, 65504.0]
+    pixels = np.resize(np.array(values), (19, width, channels))
+    if channels == 4:
+        pixels[..., 3] = np.linspace(0.0, 1.0, width)
+    pixels = pixels.astype(storage_dtype).astype(np.float32)
+
+    codec = av.CodecContext.create("exr", "w")
+    codec.width = width
+    codec.height = pixels.shape[0]
+    codec.pix_fmt = pixel_format
+    codec.time_base = Fraction(1, 1)
+    codec.options = {"format": pixel_type, "compression": "zip16"}
+    frame = av.VideoFrame.from_ndarray(pixels[..., 0] if channels == 1 else pixels, format=pixel_format)
+    frame.pts = 0
+    frame.time_base = codec.time_base
+    encoded = b"".join(bytes(packet) for packet in list(codec.encode(frame)) + list(codec.encode(None)))
+    path = tmp_path / "float.exr"
+    path.write_bytes(encoded)
+
+    components = VideoFromFile(str(path), crop=crop).get_components()
+    if crop is not None:
+        x, y, width, height = crop
+        pixels = pixels[y:y + height, x:x + width]
+    expected_rgb = np.repeat(pixels, 3, axis=-1) if channels == 1 else pixels[..., :3]
+    assert components.images.dtype == torch.float32
+    np.testing.assert_array_equal(components.images.numpy(), expected_rgb[None])
+    if channels == 4:
+        assert components.alpha.dtype == torch.float32
+        np.testing.assert_array_equal(components.alpha.numpy(), pixels[None, ..., 3:])
+    else:
+        assert components.alpha is None
+
+
 def test_video_color_space_defaults_to_srgb(simple_video_file, video_components):
     assert VideoFromFile(simple_video_file).get_color_space() == "sRGB"
     assert VideoFromComponents(video_components).get_color_space() == "sRGB"
@@ -1549,14 +1587,15 @@ def test_video_encoder_options_applies_h264_preset():
     from comfy_api.latest._input_impl.video_types import video_encoder_options
 
     assert video_encoder_options(VideoCodec.H264, None, "ultrafast") == {
-        "preset": "ultrafast"
+        "preset": "ultrafast",
+        "crf": "18",
     }
     assert video_encoder_options(VideoCodec.H264, 23.0, "ultrafast") == {
         "preset": "ultrafast",
         "crf": "23.0",
     }
     assert video_encoder_options(VideoCodec.H264, 23.0, None) == {"crf": "23.0"}
-    assert video_encoder_options(VideoCodec.AV1, None, "ultrafast") == {}
+    assert video_encoder_options(VideoCodec.AV1, None, "ultrafast") == {"crf": "24"}
     assert video_encoder_options(VideoCodec.AV1, 0, "ultrafast") == {
         "svtav1-params": "lossless=1"
     }

@@ -10,7 +10,7 @@ import comfy.model_prefetch
 import comfy.ops
 import comfy.utils
 from comfy.ldm.yue2.model import model_config
-from comfy.text_encoders.llama import FixedKV, Llama2_
+from comfy.text_encoders.llama import FixedKV, Llama2_, rope_matrix
 
 
 EOD = 151643
@@ -26,7 +26,7 @@ INSTRUCTIONS = {
 }
 
 
-def distribution(logits, history, step, phase, temperature, top_p, top_k, repetition_penalty, penalty_window, min_tokens, legacy_off=False):
+def distribution(logits, recent, step, phase, temperature, top_p, top_k, repetition_penalty, min_tokens, legacy_off=False):
     scores = logits.clone() if legacy_off else logits.float().clone()
     end = ABC_END if phase == "abc" else MUSIC_END
     allowed = torch.full_like(scores, -torch.inf)
@@ -38,8 +38,7 @@ def distribution(logits, history, step, phase, temperature, top_p, top_k, repeti
     scores += allowed
     if step < min_tokens:
         scores[..., end] = -torch.inf
-    if repetition_penalty != 1.0 and history:
-        recent = torch.tensor([history[-penalty_window:]], dtype=torch.long, device=scores.device)
+    if repetition_penalty != 1.0:
         counts = torch.zeros_like(scores)
         counts.scatter_add_(-1, recent, torch.ones_like(recent, dtype=scores.dtype))
         penalty = repetition_penalty ** counts
@@ -88,6 +87,7 @@ class YuE2Tokenizer:
             "top_p": kwargs.get("top_p", 0.95),
             "top_k": kwargs.get("top_k", 100),
             "repetition_penalty": kwargs.get("repetition_penalty", 1.2),
+            "penalty_window": kwargs.get("penalty_window", 100),
             "cfg_scale": kwargs.get("cfg_scale", 1.01 if cot == "off" else 1.0),
         }
 
@@ -113,7 +113,9 @@ class YuE2TEModel(torch.nn.Module):
         self.execution_device = device
 
     def get_dynamic_vram__units(self):
-        return self.model.get_dynamic_vram__units()
+        units, last_units = self.model.get_dynamic_vram__units()
+        # the sampling step is graphed as the embedding's unit
+        return [self.model.embed_tokens, *units], last_units
 
     def set_clip_options(self, options):
         self.execution_device = options.get("execution_device", self.execution_device)
@@ -158,43 +160,63 @@ class YuE2TEModel(torch.nn.Module):
         prefix_length = max(map(len, prefixes))
         logits, cache, mask = self._prefill(prefixes, prefix_length + max_tokens, dtype)
         fixed_kv = isinstance(cache[0], FixedKV)
-        decode_tokens = torch.empty((len(prefixes), 1), device=device, dtype=torch.long)
         positions = torch.tensor([[len(p)] for p in prefixes], device=device, dtype=torch.long)
+        # Decoder inputs and rotary tensors must keep their addresses across graph replays.
+        decode_buffers = (torch.empty((len(prefixes), 1, self.config.hidden_size), device=device, dtype=dtype),
+                          rope_matrix(self.model.compute_freqs_cis(positions, device)))
         history = []
         end = ABC_END if phase == "abc" else MUSIC_END
         progress = comfy.utils.ProgressBar(max_tokens)
+        # Sampling stays on the device (EOD is masked in both phases, so it pads the penalty window)
+        # and the host reads tokens back in batches instead of syncing on every step.
+        penalty_window = sampling.pop("penalty_window")
+        recent = torch.full((1, penalty_window), EOD, device=device, dtype=torch.long)
+        tokens = torch.empty((max_tokens,), device=device, dtype=torch.long)
+        step_index = torch.zeros((), device=device, dtype=torch.long)
+
+        def head():
+            guided = logits if cfg_scale == 1.0 else logits[1:] + cfg_scale * (logits[:1] - logits[1:])
+            scores = distribution(guided, recent, step, phase, legacy_off=legacy_off, **sampling)
+            if sampling["temperature"] == 0:
+                next_id = scores.argmax(-1, keepdim=True)
+            else:
+                probabilities = scores.softmax(-1).to(rng_device)
+                next_id = torch.multinomial(probabilities, 1, generator=generator).to(device)
+            tokens.index_copy_(0, step_index.view(1), next_id.view(1))
+            recent.scatter_(1, (step_index % penalty_window).view(1, 1), next_id)
+            step_index.add_(1)
+            decode_buffers[0].copy_(self.model.embed_tokens(next_id.expand(len(prefixes), 1), out_dtype=dtype))
+
         try:
             for step in comfy.utils.model_trange(max_tokens, desc="YuE2 ABC sampling" if phase == "abc" else "YuE2 music sampling", unit="token"):
                 comfy.model_management.throw_exception_if_processing_interrupted()
-                guided = logits if cfg_scale == 1.0 else logits[1:] + cfg_scale * (logits[:1] - logits[1:])
-                scores = distribution(guided, history, step, phase, legacy_off=legacy_off, **sampling)
-                if sampling["temperature"] == 0:
-                    next_id = scores.argmax(-1, keepdim=True)
-                else:
-                    probabilities = scores.softmax(-1).to(rng_device)
-                    next_id = torch.multinomial(probabilities, 1, generator=generator).to(device)
-                decode_tokens.copy_(next_id)
-                token = next_id.item()
+                # Keep decode allocations stable.
+                if fixed_kv:
+                    comfy.model_prefetch.malloc_graph_begin(device)
+                # `step` is baked into the head graph, so capture only once the end token is no longer blocked.
+                head_queue = comfy.model_prefetch.make_prefetch_queue([self.model.embed_tokens], device, {"prefetch_dynamic_vbars": self.model.prefetch_dynamic_vbars})
+                comfy.model_prefetch.prefetch_queue_pop(head_queue, device, self.model.embed_tokens, dtype, core=head,
+                                                        enable_graph=step >= sampling["min_tokens"], generator=generator, malloc_scope="head")
+                comfy.model_prefetch.prefetch_queue_pop(head_queue, device, None, malloc_scope="head")
                 progress.update_absolute(step + 1)
-                if token == end:
-                    return history, False
-                history.append(token)
-                if step + 1 < max_tokens:
-                    # Keep decode allocations stable; sampling has a changing history window.
-                    if fixed_kv:
-                        comfy.model_prefetch.malloc_graph_begin(device)
-                    output = self.model(decode_tokens, past_key_values=cache, dtype=dtype, position_ids=positions,
-                                        attention_mask=mask[:, :prefix_length + step + 1] if mask is not None and not fixed_kv else None)
-                    logits.copy_(self.model.lm_head(output[0][:, -1]))
-                    cache = output[2]
-                    del output
-                    if fixed_kv:
-                        comfy.model_prefetch.malloc_graph_end()
-                    positions.add_(1)
+                output = self.model(None, embeds=decode_buffers[0], past_key_values=cache, dtype=dtype, position_ids=positions,
+                                    attention_mask=mask[:, :prefix_length + step + 1] if mask is not None and not fixed_kv else None,
+                                    decode_buffers=decode_buffers)
+                logits.copy_(self.model.lm_head(output[0][:, -1]))
+                cache = output[2]
+                del output
+                if fixed_kv:
+                    comfy.model_prefetch.malloc_graph_end()
+                positions.add_(1)
+                if (step + 1) % 16 == 0 or step + 1 == max_tokens:
+                    for token in tokens[len(history):step + 1].tolist():
+                        if token == end:
+                            return history, False
+                        history.append(token)
         finally:
             # Each phase has different KV buffers and may change the CFG batch size.
             comfy.model_prefetch.cleanup_prefetch_queues()
-        logging.warning("YuE2 %s reached its token budget; increase the limit for a complete result.", phase)
+        logging.warning("YuE2 %s reached its token budget before the end token.", phase)
         return history, True
 
     def _acoustic_conditioning(self, prefix, tokens, dtype):
@@ -228,7 +250,7 @@ class YuE2TEModel(torch.nn.Module):
         ids, _ = self._generate(
             tokens["prefix"], tokens["seed"] if seed is None else seed, max_length, "abc", dtype,
             temperature=temperature if do_sample else 0, top_p=top_p, top_k=top_k,
-            repetition_penalty=repetition_penalty, penalty_window=100, min_tokens=min(32, max_length),
+            repetition_penalty=repetition_penalty, penalty_window=tokens.get("penalty_window", 100), min_tokens=min(32, max_length),
         )
         return ids
 
@@ -242,12 +264,19 @@ class YuE2TEModel(torch.nn.Module):
             abc_ids = []
         prefix = prefix + abc_ids + [ABC_END, MUSIC_START]
         negative = tokens["negative"] + ([MUSIC_START] if cot == "off" else [ABC_START] + abc_ids + [ABC_END, MUSIC_START])
+        context = self.config.max_position_embeddings
+        max_tokens = min(tokens["max_tokens"], context - max(len(prefix), len(negative)))
+        # One acoustic frame needs two positions plus three boundary tokens.
+        if max_tokens < 1 or len(prefix) + 5 > context:
+            raise ValueError("YuE2 prompt leaves no room for music; shorten the style, lyrics, or ABC.")
+        if max_tokens < tokens["max_tokens"]:
+            logging.info("YuE2 music budget reduced to %d tokens (%.2f seconds) to fit the prompt.", max_tokens, max_tokens / FRAMES_PER_SECOND)
         semantic, semantic_truncated = self._generate(
-            prefix, tokens["seed"], tokens["max_tokens"], "semantic", dtype,
+            prefix, tokens["seed"], max_tokens, "semantic", dtype,
             negative=negative, cfg_scale=tokens["cfg_scale"], legacy_off=cot == "off",
             temperature=tokens["temperature"], top_p=tokens["top_p"], top_k=tokens["top_k"],
             repetition_penalty=tokens["repetition_penalty"], penalty_window=50,
-            min_tokens=min(200, tokens["max_tokens"]),
+            min_tokens=min(200, max_tokens),
         )
         conditioning, chunks = self._acoustic_conditioning(prefix, semantic, dtype)
         return conditioning, None, {

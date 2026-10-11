@@ -109,10 +109,11 @@ _CORE_FEATURE_FLAGS: dict[str, Any] = {
     "max_upload_size": args.max_upload_size * 1024 * 1024, # Convert MB to bytes
     "extension": {"manager": {"supports_v4": True}},
     "node_replacements": True,
-    "assets": args.enable_assets,
+    # main.py replaces this at startup with the selected AssetManager's state.
+    "assets": not args.disable_assets,
 }
 
-# CLI-provided flags cannot overwrite core flags
+# CLI-provided flags cannot overwrite core flags. Startup code may: main.py sets "assets".
 _cli_flags = {k: v for k, v in _parse_cli_feature_flags().items() if k not in _CORE_FEATURE_FLAGS}
 
 SERVER_FEATURE_FLAGS: dict[str, Any] = {**_CORE_FEATURE_FLAGS, **_cli_flags}

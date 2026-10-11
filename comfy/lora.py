@@ -87,6 +87,11 @@ def load_lora(lora, to_load, log_missing=True):
             patch_dict[to_load[x]] = ("set", (set_weight,))
             loaded_keys.add(set_weight_name)
 
+    for key in lora:
+        if key.endswith(".config"):
+            patch_dict[key] = ("config", (lora[key],))
+            loaded_keys.add(key)
+
     if log_missing:
         for x in lora.keys():
             if x not in loaded_keys:
@@ -327,11 +332,16 @@ def model_lora_keys_unet(model, key_map={}):
         for k in sdk:
             if k.startswith("diffusion_model.") and k.endswith(".weight"): #QwenImage lora format
                 key_lora = k[len("diffusion_model."):-len(".weight")]
-                # Direct mapping for transformer_blocks format (QwenImage LoRA format)
-                key_map["{}".format(key_lora)] = k
-                # Support transformer prefix format
-                key_map["transformer.{}".format(key_lora)] = k
-                key_map["lycoris_{}".format(key_lora.replace(".", "_"))] = k #SimpleTuner lycoris format
+                targets = [(key_lora, k)]
+                if key_lora.endswith(".img_mlp.gate_up"):  # Qwen Image 2.1 fuses gate_layer/proj at load; LoRAs address the halves
+                    half = sd[k].shape[0] // 2
+                    targets = [(key_lora.replace(".gate_up", ".gate_layer"), (k, (0, 0, half))), (key_lora.replace(".gate_up", ".proj"), (k, (0, half, half)))]
+                for key_lora, to in targets:
+                    # Direct mapping for transformer_blocks format (QwenImage LoRA format)
+                    key_map["{}".format(key_lora)] = to
+                    # Support transformer prefix format
+                    key_map["transformer.{}".format(key_lora)] = to
+                    key_map["lycoris_{}".format(key_lora.replace(".", "_"))] = to #SimpleTuner lycoris format
 
     if isinstance(model, comfy.model_base.Krea2):
         diffusers_keys = comfy.utils.krea2_to_diffusers(model.model_config.unet_config, output_prefix="diffusion_model.")

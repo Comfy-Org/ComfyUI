@@ -180,22 +180,22 @@ def save_glb(vertices, faces, filepath=None, metadata=None,
     texture_png_bytes = None
     if texture_image is not None:
         buf = BytesIO()
-        texture_image.save(buf, format="PNG")
+        texture_image.save(buf, format="PNG", compress_level=4)
         texture_png_bytes = buf.getvalue()
     mr_png_bytes = None
     if metallic_roughness_image is not None:
         buf = BytesIO()
-        metallic_roughness_image.save(buf, format="PNG")
+        metallic_roughness_image.save(buf, format="PNG", compress_level=4)
         mr_png_bytes = buf.getvalue()
     nm_png_bytes = None
     if normal_map_image is not None:
         buf = BytesIO()
-        normal_map_image.save(buf, format="PNG")
+        normal_map_image.save(buf, format="PNG", compress_level=4)
         nm_png_bytes = buf.getvalue()
     em_png_bytes = None
     if emissive_image is not None:
         buf = BytesIO()
-        emissive_image.save(buf, format="PNG")
+        emissive_image.save(buf, format="PNG", compress_level=4)
         em_png_bytes = buf.getvalue()
 
     vertices_buffer = vertices_np.tobytes()
@@ -580,11 +580,7 @@ class SaveGLB(IO.ComfyNode):
             ext = mesh.format or "glb"
             f = f"{filename}_{counter:05}_.{ext}"
             mesh.save_to(os.path.join(full_output_folder, f))
-            results.append({
-                "filename": f,
-                "subfolder": subfolder,
-                "type": "output"
-            })
+            results.append(UI.SavedResult(f, subfolder, IO.FolderType.output))
             counter += 1
         else:
             # Handle Mesh input - save vertices and faces as GLB; carry optional UVs / colors / texture.
@@ -596,13 +592,9 @@ class SaveGLB(IO.ComfyNode):
                 f = f"{filename}_{counter:05}_.glb"
                 with open(os.path.join(full_output_folder, f), "wb") as fh:
                     fh.write(glb)
-                results.append({
-                    "filename": f,
-                    "subfolder": subfolder,
-                    "type": "output"
-                })
+                results.append(UI.SavedResult(f, subfolder, IO.FolderType.output))
                 counter += 1
-        return IO.NodeOutput(ui={"3d": results})
+        return IO.NodeOutput(ui=UI.Saved3DModels(results))
 
 
 class MeshToFile3D(IO.ComfyNode):
@@ -888,7 +880,6 @@ def _save_file3d_to_output(model_3d: Types.File3D, filename_prefix: str) -> UI.S
 
 def execute_save_3d_advanced(model_3d, viewport_state, width, height, filename_prefix, kwargs) -> IO.NodeOutput:
     saved = _save_file3d_to_output(model_3d, filename_prefix)
-    model_file = f"{saved.subfolder}/{saved.filename}" if saved.subfolder else saved.filename
     viewport_state = viewport_state if isinstance(viewport_state, dict) else {}
     camera_info_input = kwargs.get("camera_info", None)
     camera_info = camera_info_input if camera_info_input is not None else viewport_state.get('camera_info')
@@ -900,7 +891,7 @@ def execute_save_3d_advanced(model_3d, viewport_state, width, height, filename_p
         camera_info,
         width,
         height,
-        ui=UI.PreviewUI3DAdvanced(model_file, camera_info, model_3d_info, saved_result=saved),
+        ui=UI.Saved3DModels([saved], camera_info, model_3d_info),
     )
 
 
