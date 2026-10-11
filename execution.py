@@ -62,6 +62,9 @@ class ExecutionResult(Enum):
 class DuplicateNodeError(Exception):
     pass
 
+class DuplicatePromptIdError(Exception):
+    pass
+
 class IsChangedCache:
     def __init__(self, prompt_id: str, dynprompt: DynamicPrompt, outputs_cache: BasicCache):
         self.prompt_id = prompt_id
@@ -1314,6 +1317,11 @@ class PromptQueue:
 
     def put(self, item):
         with self.mutex:
+            prompt_id = item[1]
+            if any(queued[1] == prompt_id for queued in self.queue) or any(
+                running[1] == prompt_id for running in self.currently_running.values()
+            ):
+                raise DuplicatePromptIdError(prompt_id)
             heapq.heappush(self.queue, item)
             self.server.queue_updated()
             self.not_empty.notify()

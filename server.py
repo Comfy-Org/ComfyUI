@@ -1144,12 +1144,7 @@ class PromptServer():
             if "number" in json_data:
                 number = float(json_data['number'])
             else:
-                number = self.number
-                if "front" in json_data:
-                    if json_data['front']:
-                        number = -number
-
-                self.number += 1
+                number = None
 
             if "prompt" in json_data:
                 prompt = json_data["prompt"]
@@ -1195,13 +1190,28 @@ class PromptServer():
                     if usage_source:
                         extra_data["comfy_usage_source"] = usage_source
                 if valid[0]:
+                    if number is None:
+                        number = self.number
+                        if json_data.get("front", False):
+                            number = -number
                     outputs_to_execute = valid[2]
                     sensitive = {}
                     for sensitive_val in execution.SENSITIVE_EXTRA_DATA_KEYS:
                         if sensitive_val in extra_data:
                             sensitive[sensitive_val] = extra_data.pop(sensitive_val)
                     extra_data["create_time"] = int(time.time() * 1000)  # timestamp in milliseconds
-                    self.prompt_queue.put((number, prompt_id, prompt, extra_data, outputs_to_execute, sensitive))
+                    try:
+                        self.prompt_queue.put((number, prompt_id, prompt, extra_data, outputs_to_execute, sensitive))
+                    except execution.DuplicatePromptIdError:
+                        error = {
+                            "type": "duplicate_prompt_id",
+                            "message": "prompt_id is already queued or running",
+                            "details": "Use a unique prompt_id, or omit it to let the server generate one",
+                            "extra_info": {}
+                        }
+                        return web.json_response({"error": error, "node_errors": {}}, status=409)
+                    if "number" not in json_data:
+                        self.number += 1
                     response = {"prompt_id": prompt_id, "number": number, "node_errors": valid[3]}
                     return web.json_response(response)
                 else:
