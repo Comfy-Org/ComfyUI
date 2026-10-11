@@ -17,6 +17,7 @@ if not torch.cuda.is_available():
 
 from comfy_api_nodes.util import _helpers
 from comfy_api_nodes.util.client import ApiEndpoint, sync_op_raw
+from comfy_api_nodes.util.common_exceptions import ProcessingInterrupted
 from comfy_api_nodes.util.download_helpers import download_url_to_bytesio
 
 
@@ -114,6 +115,7 @@ _CACHES = (
     _helpers._partner_token_renewals,
     _helpers._capped_partner_token_lineages,
     _helpers._partner_token_renew_not_before,
+    _helpers._rejected_partner_tokens,
 )
 
 
@@ -178,6 +180,18 @@ def test_401_renews_and_resends_the_post_once(monkeypatch):
         (f"Bearer {rejected}", {"prompt": "fennec ears"}),
         (f"Bearer {fresh}", {"prompt": "fennec ears"}),
     ]
+
+
+def test_401_resends_with_a_renewed_token_that_expires_sooner(monkeypatch):
+    now = time.time()
+    rejected, shorter = _partner_token(5400, now=now), _partner_token(5000, generation=1, now=now)
+    api = FakeComfyApi(accepted=set(), renewed_token=shorter)
+
+    result = asyncio.run(_with_server(api, monkeypatch, lambda: _generate(_node(rejected))))
+
+    assert result == {"ok": True}
+    assert api.renew_calls == [f"Bearer {rejected}"]
+    assert [auth for auth, _ in api.partner_calls] == [f"Bearer {rejected}", f"Bearer {shorter}"]
 
 
 def test_401_after_renewal_is_not_resent_again(monkeypatch):
@@ -341,3 +355,22 @@ def test_result_download_uses_a_renewed_token(monkeypatch):
 
     assert buf.getvalue() == b"result-bytes"
     assert [auth for auth, _ in api.partner_calls] == [f"Bearer {fresh}"]
+
+
+def test_cancelling_a_download_during_token_renewal_raises_processing_interrupted(monkeypatch):
+    old, fresh = _partner_token(60), _partner_token(5400, generation=1)
+    api = FakeComfyApi(accepted={fresh}, renewed_token=fresh)
+
+    async def cancel_while_renewing():
+        download = asyncio.create_task(
+            download_url_to_bytesio("/proxy/partner/result", BytesIO(), cls=_node(old), max_retries=0)
+        )
+        while not api.renew_calls:
+            await asyncio.sleep(0.005)
+        download.cancel()
+        with pytest.raises(ProcessingInterrupted):
+            await download
+
+    asyncio.run(_with_server(api, monkeypatch, cancel_while_renewing))
+
+    assert api.partner_calls == []

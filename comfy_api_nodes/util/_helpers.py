@@ -54,6 +54,8 @@ _capped_partner_token_lineages: set[str] = set()
 """Lineages whose last renewal did not extend ``exp`` (session end reached): no pre-emptive renewal, only on a 401."""
 _partner_token_renew_not_before: dict[str, float] = {}
 """Lineage -> wall-clock time before which comfy-api asked (HTTP 429) not to be sent another renewal."""
+_rejected_partner_tokens: set[str] = set()
+"""Tokens comfy-api answered with a 401: a renewal replaces them even when it expires sooner."""
 
 
 def _partner_token_claims(token: str) -> dict | None:
@@ -87,7 +89,7 @@ def _newest_partner_token(token: str, claims: dict) -> tuple[str, float]:
     renewed = _renewed_partner_tokens.get(_partner_token_lineage(token))
     if renewed is not None:
         renewed_exp = _partner_token_claims(renewed)["exp"]
-        if renewed_exp >= claims["exp"]:
+        if renewed_exp >= claims["exp"] or token in _rejected_partner_tokens:
             return renewed, renewed_exp
     return token, claims["exp"]
 
@@ -160,6 +162,7 @@ async def renew_rejected_partner_token(authorization: str | None) -> bool:
     claims = _partner_token_claims(rejected)
     if claims is None:
         return False
+    _rejected_partner_tokens.add(rejected)
     newest, exp = _newest_partner_token(rejected, claims)
     if newest != rejected and exp - time.time() >= _PARTNER_NODE_TOKEN_RENEW_MARGIN:
         return True
