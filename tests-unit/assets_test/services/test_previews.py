@@ -1,7 +1,7 @@
 import asyncio
 import threading
 import time
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -41,3 +41,12 @@ def test_upload_decodes_are_bounded(tmp_path, height, skipped):
     with patch.object(previews, "_make_preview", make), patch.object(previews, "_store_and_link", return_value="linked") as store:
         asyncio.run(uploads())
     assert peak == 2 and store.call_count == 6
+
+
+def test_an_exr_with_no_frame_is_skipped(tmp_path):
+    # StopIteration out of to_thread would hang the upload on Python 3.10 and 3.11.
+    empty = MagicMock()
+    empty.__enter__.return_value.decode.return_value = iter(())
+    with patch.object(previews, "read_exr_windows", return_value=[(4, 4)]), patch.object(previews.av, "open", return_value=empty):
+        with pytest.raises(previews.PreviewSkipped, match="decode_failed"):
+            previews._decode_for_preview(str(tmp_path / "a.exr"))

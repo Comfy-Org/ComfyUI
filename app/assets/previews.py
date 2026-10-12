@@ -41,7 +41,10 @@ def _decode_for_preview(path: str) -> Image.Image:
         raise PreviewSkipped("too_large")
     # Name the demuxer: left to probe, FFmpeg picks one from the file's contents.
     with av.open(path, format="exr_pipe") as container:
-        frame = next(container.decode(video=0))
+        # A default, not StopIteration: Python before 3.12 never resumes to_thread's awaiter on one.
+        frame = next(container.decode(video=0), None)
+    if frame is None:
+        raise PreviewSkipped("decode_failed")
     if frame.format.name.startswith("gray"):
         # Exact; converting half-float gray to gbrpf32le crushes the darks.
         pixels = np.repeat(frame.to_ndarray(format="grayf32le")[..., None], 3, axis=-1)
