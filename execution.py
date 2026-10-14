@@ -47,6 +47,7 @@ from comfy_execution.asset_enrichment import register_executed_outputs, emit_cac
 from comfy_execution.media_enrichment import enrich_output_with_media_metadata
 from comfy_api.internal import _ComfyNodeInternal, _NodeOutputInternal, first_real_override, is_class, make_locked_method_func
 from comfy_api.latest import io, _io
+from comfy_api.latest import _execution_metadata
 from comfy_execution.cache_provider import _has_cache_providers, _get_cache_providers, _logger as _cache_logger
 from app.assets.manager import AssetManager, NoAssets
 
@@ -76,6 +77,9 @@ class IsChangedCache:
         node = self.dynprompt.get_node(node_id)
         class_type = node["class_type"]
         class_def = nodes.NODE_CLASS_MAPPINGS[class_type]
+        if "graph.metadata" in (getattr(class_def, "SDK_PERMISSIONS", ()) or ()):
+            self.is_changed[node_id] = float("nan")
+            return self.is_changed[node_id]
         has_is_changed = False
         is_changed_name = None
         if issubclass(class_def, _ComfyNodeInternal) and first_real_override(class_def, "fingerprint_inputs") is not None:
@@ -109,6 +113,14 @@ class IsChangedCache:
 class CacheEntry(NamedTuple):
     ui: dict
     outputs: list
+
+
+class _MetadataCacheView:
+    def __init__(self, entries):
+        self.entries = entries
+
+    def get_cache(self, node_id, _consumer_id):
+        return self.entries.get(node_id)
 
 
 class CacheType(Enum):
@@ -427,6 +439,7 @@ async def _async_map_node_over_list(prompt_id, unique_id, obj, input_data_all, f
                             class_clone.hidden, "extra_pnginfo", None),
                         dynamic_prompt=getattr(
                             class_clone.hidden, "dynprompt", None),
+                        execution_metadata=_execution_metadata.current(prompt_id),
                     )
                     _sdk_refs = _comfy_sdk.providers.ref_resolver_factory()
                     _sdk_runtime = _comfy_sdk.bind_runtime(
@@ -465,6 +478,7 @@ async def _async_map_node_over_list(prompt_id, unique_id, obj, input_data_all, f
                             getattr(type_obj, "SDK_PERMISSIONS", ()) or ()),
                         required_weights=tuple(getattr(
                             type_obj, "SDK_REQUIRED_WEIGHTS", ()) or ()),
+                        execution_metadata=_execution_metadata.current(prompt_id),
                     )
                     _sdk_refs = _comfy_sdk.providers.ref_resolver_factory()
                     _sdk_runtime = _comfy_sdk.bind_runtime(
@@ -646,6 +660,14 @@ async def execute(server: "ExecutionServer", dynprompt, caches, current_item, ex
     class_def = nodes.NODE_CLASS_MAPPINGS[class_type]
     cached = await caches.outputs.get(unique_id)
     if cached is not None:
+        metadata_owner = _execution_metadata.current(prompt_id)
+        if metadata_owner is not None and metadata_owner.observe:
+            cached_inputs, missing, _ = get_input_data(
+                inputs, class_def, unique_id, execution_list, dynprompt, extra_data)
+            if missing:
+                metadata_owner._fail(RuntimeError("cached metadata input is unavailable"))
+            else:
+                metadata_owner.record_cached(unique_id, class_def, cached_inputs, cached.outputs)
         emit_cached_output(server, unique_id, display_node_id, cached, prompt_id, ui_outputs, asset_manager)
         get_progress_state().finish_progress(unique_id)
         execution_list.cache_update(unique_id, cached)
@@ -745,6 +767,9 @@ async def execute(server: "ExecutionServer", dynprompt, caches, current_item, ex
                 GraphBuilder.set_default_prefix(unique_id, call_index, 0)
 
             try:
+                metadata_owner = _execution_metadata.current(prompt_id)
+                if metadata_owner is not None:
+                    metadata_owner.record_start(unique_id, class_def, input_data_all)
                 output_data, output_ui, has_subgraph, has_pending_tasks = await get_output_data(prompt_id, unique_id, obj, input_data_all, execution_block_cb=execution_block_cb, pre_execute_cb=pre_execute_cb, v3_data=v3_data)
             finally:
                 if comfy.memory_management.aimdo_enabled:
@@ -815,6 +840,9 @@ async def execute(server: "ExecutionServer", dynprompt, caches, current_item, ex
             return (ExecutionResult.PENDING, None, None)
 
         cache_entry = CacheEntry(ui=cache_ui_value, outputs=output_data)
+        metadata_owner = _execution_metadata.current(prompt_id)
+        if metadata_owner is not None:
+            metadata_owner.record_outputs(unique_id, class_def, output_data)
         execution_list.cache_update(unique_id, cache_entry)
         await caches.outputs.set(unique_id, cache_entry)
 
@@ -1014,6 +1042,7 @@ class PromptExecutor:
 
         self._notify_prompt_lifecycle("start", prompt_id)
         backend_reusable = False
+        metadata_scope = None
         try:
             await _notify_execution_backend_lifecycle(
                 "start",
@@ -1026,6 +1055,12 @@ class PromptExecutor:
             comfy.memory_management.set_ram_cache_release_state(ram_release_callback, ram_headroom)
             with torch.inference_mode():
                 dynamic_prompt = DynamicPrompt(prompt)
+                metadata_scope = _execution_metadata.ExecutionMetadataScope(
+                    prompt_id, dynamic_prompt, extra_data.get("extra_pnginfo"),
+                    observe=any("graph.metadata" in (
+                        getattr(nodes.NODE_CLASS_MAPPINGS[node["class_type"]], "SDK_PERMISSIONS", ()) or ())
+                        for node in prompt.values()))
+                metadata_scope.__enter__()
                 reset_progress_state(prompt_id, dynamic_prompt)
                 add_progress_handler(WebUIProgressHandler(self.server))
                 is_changed_cache = IsChangedCache(prompt_id, dynamic_prompt, self.caches.outputs)
@@ -1041,6 +1076,20 @@ class PromptExecutor:
                     node_id for node_id, result in zip(node_ids, cache_results)
                     if result is not None
                 ]
+                if metadata_scope.observe:
+                    metadata_cache = _MetadataCacheView(dict(zip(node_ids, cache_results)))
+                    for node_id, cached_entry in metadata_cache.entries.items():
+                        if cached_entry is None:
+                            continue
+                        node_info = dynamic_prompt.get_node(node_id)
+                        class_def = nodes.NODE_CLASS_MAPPINGS[node_info["class_type"]]
+                        cached_inputs, missing, _ = get_input_data(
+                            node_info["inputs"], class_def, node_id, metadata_cache,
+                            dynamic_prompt, extra_data)
+                        if missing:
+                            metadata_scope._fail(RuntimeError("cached metadata input is unavailable"))
+                            break
+                        metadata_scope.record_cached(node_id, class_def, cached_inputs, cached_entry.outputs)
 
                 comfy.model_management.cleanup_models_gc()
                 self.add_message("execution_cached",
@@ -1117,6 +1166,8 @@ class PromptExecutor:
                     comfy.model_management.unload_all_models()
                 backend_reusable = not execution_failed
         finally:
+            if metadata_scope is not None:
+                metadata_scope.__exit__()
             if self.cache_type == CacheType.RAM_PRESSURE:
                 detail("RAM cache evictions: prompt=%s active=%s full=%s", prompt_id, self.caches.outputs.active_evictions, self.caches.outputs.full_evictions)
             comfy.memory_management.set_ram_cache_release_state(None, 0)
