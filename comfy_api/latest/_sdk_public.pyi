@@ -18,6 +18,7 @@ If prose and this stub disagree, treat the stub + its implementation tests as
 authoritative.
 """
 from typing import Any, Awaitable, Callable, Mapping, Optional, Protocol, Sequence, TypeVar, runtime_checkable
+from dataclasses import dataclass
 
 # NOTE: the contract deliberately does NOT import torch or any backend module.
 # Node code has no direct access to torch/CUDA/filesystem; it works through
@@ -697,6 +698,17 @@ class InteractionDomain(Protocol):
         remember: bool = ...,
         timeout: float = ...,
     ) -> Any: ...
+
+@dataclass(frozen=True)
+class ModelConcatMetadata:
+    patch_input_channels: int
+    image_to_video: bool
+    device: str
+
+class ModelConcatInvocation(Protocol):
+    async def concat_latent_image(self) -> Any: ...
+    async def concat_mask(self) -> Any: ...
+    async def process_latent_in(self, tensor: Any) -> Any: ...
 
 class ModelsDomain(Protocol):
     async def create_sampling_model(
