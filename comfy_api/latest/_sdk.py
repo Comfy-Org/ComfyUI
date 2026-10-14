@@ -1933,6 +1933,7 @@ class AssetsDomain(Protocol):
     async def read_bytes(self, ref: AssetRef) -> bytes: ...
     async def load_state_dict(
         self, ref: AssetRef, return_metadata: bool = False,
+        *, member: Optional[str] = None,
     ) -> Any: ...
     async def load_image(self, ref: AssetRef) -> ImageRef: ...
     async def load_latent(self, ref: AssetRef) -> LatentRef: ...
@@ -2639,10 +2640,16 @@ class _InProcessAssets:
 
     async def load_state_dict(
         self, ref: AssetRef, return_metadata: bool = False,
+        *, member: Optional[str] = None,
     ) -> Any:
         import comfy.utils
 
+        if member is not None and ref.kind != AssetRef.KIND:
+            raise TypeError("weight member loading requires an ASSET ref")
         path = await self.path(ref)
+        if member is not None:
+            return comfy.utils.load_torch_file(
+                path, safe_load=True, return_metadata=bool(return_metadata), member=member)
         return comfy.utils.load_torch_file(
             path, safe_load=True, return_metadata=bool(return_metadata))
 
