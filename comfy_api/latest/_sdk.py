@@ -203,6 +203,9 @@ class ClosureRef(_TypedRef):
         invocation the host supplies a narrow broker for denoise, noise,
         preview, and model-schedule projections; the broker is dead as soon as
         that invocation returns.
+
+        A bounded, nonincreasing sigma table may end above zero when the
+        caller is sampling a partial stage rather than fully denoising.
         """
         return await current_runtime().ctx.closures.create_sampler(self)
 
@@ -8172,19 +8175,17 @@ class _InProcessClosures:
             ):
                 raise ValueError(
                     "custom-sampler sigmas must be a finite floating-point, "
-                    "nonnegative, nonincreasing 2..4097 vector ending at zero")
+                    "nonnegative, nonincreasing 2..4097 vector")
             sigma_values = sigmas.detach().to(
                 device="cpu", dtype=torch.float64)
             if (
                 not torch.isfinite(sigma_values).all()
                 or bool((sigma_values < 0).any())
                 or bool((sigma_values[:-1] < sigma_values[1:]).any())
-                or not math.isclose(
-                    float(sigma_values[-1]), 0.0, abs_tol=1e-8)
             ):
                 raise ValueError(
                     "custom-sampler sigmas must be a finite floating-point, "
-                    "nonnegative, nonincreasing 2..4097 vector ending at zero")
+                    "nonnegative, nonincreasing 2..4097 vector")
             if not (
                 isinstance(latent, torch.Tensor)
                 and torch.is_floating_point(latent)
