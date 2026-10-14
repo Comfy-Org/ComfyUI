@@ -1,9 +1,11 @@
 import asyncio
 import hashlib
+from io import BytesIO
 
 import pytest
 import torch
 from PIL import Image, UnidentifiedImageError
+from PIL.TiffImagePlugin import ImageFileDirectory_v2
 
 from comfy_api.latest._sdk import (
     AssetRef,
@@ -208,13 +210,13 @@ def test_a1111_png_parameters_round_trip_without_exif_limit(
 
 
 @pytest.mark.parametrize("image_format", ["jpeg", "webp"])
+@pytest.mark.parametrize("parameters", ["", "ordinary prompt: caf\u00e9 \u65e5\u672c\u8a9e \U0001f642", "x" * (30 * 1024)])
 def test_a1111_exif_parameters_keep_the_existing_payload_limit(
-    tmp_path, monkeypatch, image_format,
+    tmp_path, monkeypatch, image_format, parameters,
 ):
     import folder_paths
 
     monkeypatch.setattr(folder_paths, "get_output_directory", lambda: str(tmp_path))
-    parameters = "ordinary prompt: café 日本語"
 
     async def run():
         refs = InProcessRefResolver()
@@ -235,6 +237,17 @@ def test_a1111_exif_parameters_keep_the_existing_payload_limit(
     with Image.open(tmp_path / f"parameters.{image_format}") as saved:
         assert saved.getexif().get_ifd(0x8769)[0x9286] == (
             b"UNICODE\x00" + parameters.encode("utf-16-be"))
+        data = saved.info["exif"]
+        if data.startswith(b"Exif\x00\x00"):
+            data = data[6:]
+        stream = BytesIO(data)
+        root = ImageFileDirectory_v2(data[:8])
+        stream.seek(root.next)
+        root.load(stream)
+        comment = ImageFileDirectory_v2(data[:8], group=0x8769)
+        stream.seek(root[0x8769])
+        comment.load(stream)
+        assert comment.tagtype[0x9286] == 7
     assert not (tmp_path / f"oversized.{image_format}").exists()
 
 
