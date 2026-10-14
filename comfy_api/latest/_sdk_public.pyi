@@ -687,8 +687,16 @@ class OutputDomain(Protocol):
         *,
         png_text: Optional[dict[str, str]] = ...,
         overwrite: bool = ...,
+        webp_workflow_json: Optional[str] = ...,
     ) -> dict:
-        """Use png_text for a complete explicit PNG text block, independent of automatic metadata."""
+        """Explicit PNG text and WebP workflow JSON are independent of automatic metadata.
+
+        webp_workflow_json accepts ASCII json.dumps text and writes ImageDescription
+        as 'Workflow:' plus that exact text. The description including its NUL is
+        limited to 1 MiB. None preserves existing metadata; A1111 parameters remain
+        independent. Non-string, non-ASCII, invalid JSON, oversized or non-WebP
+        inputs raise before output paths are created.
+        """
         ...
     async def save_images_with_alpha(
         self,
