@@ -179,6 +179,92 @@ def test_exact_image_names_closed_codecs_metadata_and_workflow_sidecar(
     assert json.loads((output / sidecar).read_text()) == workflow
 
 
+@pytest.mark.parametrize("parameters", [
+    None, "ordinary prompt: café 日本語", "x" * 70017, "🙂" * 20000,
+], ids=["none", "small-unicode", "large-ascii", "large-unicode"])
+def test_a1111_png_parameters_round_trip_without_exif_limit(
+    tmp_path, monkeypatch, parameters,
+):
+    import folder_paths
+
+    monkeypatch.setattr(folder_paths, "get_output_directory", lambda: str(tmp_path))
+
+    async def run():
+        refs = InProcessRefResolver()
+        context = InProcessCtxProvider().build(_plan())
+        image = ImageRef._wrap(await refs.create(
+            "IMAGE", torch.full((1, 5, 7, 3), 0.25)))
+        with bind_runtime(refs, context, InProcessOps()):
+            await context.output.save_images(
+                image, filenames=["parameters.png"], image_format="png",
+                save_metadata=False, a1111_parameters=parameters)
+
+    asyncio.run(run())
+    with Image.open(tmp_path / "parameters.png") as saved:
+        saved.load()
+        assert saved.size == (7, 5)
+        assert saved.info.get("parameters") == parameters
+        assert "exif" not in saved.info
+
+
+@pytest.mark.parametrize("image_format", ["jpeg", "webp"])
+def test_a1111_exif_parameters_keep_the_existing_payload_limit(
+    tmp_path, monkeypatch, image_format,
+):
+    import folder_paths
+
+    monkeypatch.setattr(folder_paths, "get_output_directory", lambda: str(tmp_path))
+    parameters = "ordinary prompt: café 日本語"
+
+    async def run():
+        refs = InProcessRefResolver()
+        context = InProcessCtxProvider().build(_plan())
+        image = ImageRef._wrap(await refs.create(
+            "IMAGE", torch.zeros((1, 5, 7, 3))))
+        with bind_runtime(refs, context, InProcessOps()):
+            await context.output.save_images(
+                image, filenames=[f"parameters.{image_format}"],
+                image_format=image_format, save_metadata=False,
+                a1111_parameters=parameters)
+            with pytest.raises(ValueError, match="60 KiB EXIF payload limit"):
+                await context.output.save_images(
+                    image, filenames=[f"oversized.{image_format}"],
+                    image_format=image_format, a1111_parameters="x" * 70017)
+
+    asyncio.run(run())
+    with Image.open(tmp_path / f"parameters.{image_format}") as saved:
+        assert saved.getexif().get_ifd(0x8769)[0x9286] == (
+            b"UNICODE\x00" + parameters.encode("utf-16-be"))
+    assert not (tmp_path / f"oversized.{image_format}").exists()
+
+
+@pytest.mark.parametrize("image_format", ["png", "jpeg", "webp"])
+def test_a1111_parameters_reject_invalid_text_before_writing(
+    tmp_path, monkeypatch, image_format,
+):
+    import folder_paths
+
+    monkeypatch.setattr(folder_paths, "get_output_directory", lambda: str(tmp_path))
+
+    async def run():
+        refs = InProcessRefResolver()
+        context = InProcessCtxProvider().build(_plan())
+        image = ImageRef._wrap(await refs.create(
+            "IMAGE", torch.zeros((1, 5, 7, 3))))
+        with bind_runtime(refs, context, InProcessOps()):
+            for parameters, error, message in (
+                (123, TypeError, "must be a string"),
+                ("\ud800", ValueError, "must contain valid Unicode"),
+            ):
+                with pytest.raises(error, match=message):
+                    await context.output.save_images(
+                        image, filenames=[f"invalid.{image_format}"],
+                        image_format=image_format, a1111_parameters=parameters)
+
+    asyncio.run(run())
+    assert list(tmp_path.iterdir()) == []
+
+
 def test_exact_image_names_fail_closed_and_never_overwrite(tmp_path, monkeypatch):
     import folder_paths
 
