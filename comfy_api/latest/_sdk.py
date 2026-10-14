@@ -3695,8 +3695,12 @@ class _InProcessModels:
             import torch
 
             try:
+                # Torch's legacy format cannot be memory mapped. Keep restricted
+                # loading for both formats and mmap for the modern ZIP format.
+                with open(path, "rb") as file:
+                    use_mmap = file.read(4) == b"PK\x03\x04"
                 value = torch.load(
-                    path, map_location="cpu", mmap=True, weights_only=True)
+                    path, map_location="cpu", mmap=use_mmap, weights_only=True)
             except Exception as exc:
                 raise ValueError(
                     "download is not a restricted PyTorch weight archive"
