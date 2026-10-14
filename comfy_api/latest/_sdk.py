@@ -2258,6 +2258,7 @@ class OutputDomain(Protocol):
         lossless: bool = False, optimize: bool = False,
         *, png_text: Optional[dict[str, str]] = None,
         overwrite: bool = False,
+        webp_workflow_json: Optional[str] = None,
     ) -> dict: ...
     async def save_images_with_alpha(
         self, images: ImageRef, mask: MaskRef,
@@ -5650,6 +5651,29 @@ def _add_a1111_exif(exif: Any, payload: bytes) -> Any:
     return exif
 
 
+def _webp_workflow_description(value: Optional[str], image_format: str) -> Optional[str]:
+    import json
+
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise TypeError("webp_workflow_json must be a string or None")
+    if image_format != "WEBP":
+        raise ValueError("webp_workflow_json is supported only for WebP")
+    # ImageDescription is ASCII, including its prefix and terminating NUL.
+    if len(value) + len("Workflow:") + 1 > 1024 * 1024:
+        raise ValueError("webp_workflow_json exceeds the 1 MiB EXIF description limit")
+    try:
+        value.encode("ascii")
+    except UnicodeEncodeError as error:
+        raise ValueError("webp_workflow_json must use ASCII JSON text") from error
+    try:
+        json.loads(value)
+    except json.JSONDecodeError as error:
+        raise ValueError("webp_workflow_json must contain one JSON value") from error
+    return "Workflow:" + value
+
+
 class _InProcessUi:
     async def preview_video(self, ref: AssetRef):
         provider = providers.asset_media_provider
@@ -6037,8 +6061,8 @@ class _InProcessOutput:
         lossless: bool = False, optimize: bool = False,
         *, png_text: Optional[dict[str, str]] = None,
         overwrite: bool = False,
+        webp_workflow_json: Optional[str] = None,
     ) -> dict:
-        """Save images; explicit PNG text replaces automatic metadata, including its global switch."""
         if type(overwrite) is not bool:
             raise TypeError("image overwrite must be a boolean")
         if overwrite and (filenames is None or caption is not None):
@@ -6067,6 +6091,8 @@ class _InProcessOutput:
             image_format)
         a1111_text, a1111_exif = _a1111_parameters_payload(
             a1111_parameters, pil_format)
+        workflow_description = _webp_workflow_description(
+            webp_workflow_json, pil_format)
         if a1111_text is not None and pil_format not in {"PNG", "JPEG", "WEBP"}:
             raise ValueError(
                 "a1111_parameters is supported only for PNG, JPEG, and WebP")
@@ -6168,6 +6194,8 @@ class _InProcessOutput:
                     rendered, metadata_owner)
                 if pil_format == "WEBP":
                     exif = _add_a1111_exif(exif, a1111_exif)
+                    if workflow_description is not None:
+                        exif[0x010E] = workflow_description
                 if len(exif):
                     options["exif"] = exif.tobytes()
             if pil_format == "JPEG":
