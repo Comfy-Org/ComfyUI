@@ -617,8 +617,13 @@ class SamplerRef(_TypedRef):
             })
 
 
-class SigmasRef(_TypedRef):
-    """Opaque one-dimensional host-owned sampling schedule."""
+class SigmasRef(TensorRef):
+    """One-dimensional host-owned tensor, ordinarily a sampling schedule.
+
+    Automatic ref projection also uses this kind for generic vector metadata.
+    Like other tensor refs, it can be materialized only through the existing
+    permissioned ``raw()`` path. Schedule operations remain the default API.
+    """
 
     KIND = "SIGMAS"
 
