@@ -390,6 +390,17 @@ class AssetRef(Ref):
     """A file/model resolved by name+hash, tenant-scoped. Never a raw path."""
     KIND: str
 
+class Hooks:
+    @staticmethod
+    async def empty() -> "Ref": ...
+    @staticmethod
+    async def clone(group: "Ref") -> "Ref": ...
+    @staticmethod
+    async def clone_and_combine(group: "Ref", other: Optional["Ref"]) -> "Ref": ...
+    @staticmethod
+    async def create_lora(asset: "AssetRef", strength_model: float, strength_clip: float) -> "Ref": ...
+
+
 class ClipSegRef(Ref):
     KIND: str
 
