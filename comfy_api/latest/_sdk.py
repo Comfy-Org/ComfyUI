@@ -5041,7 +5041,8 @@ def _add_a1111_exif(exif: Any, payload: bytes) -> Any:
     if not payload:
         return exif
     exif_ifd = exif.get_ifd(0x8769)
-    exif_ifd[0x9286] = payload
+    # Pillow infers BYTE for bytes; UserComment must be TIFF UNDEFINED.
+    exif_ifd[0x9286] = (bytearray(payload),)
     exif[0x8769] = exif_ifd
     return exif
 
