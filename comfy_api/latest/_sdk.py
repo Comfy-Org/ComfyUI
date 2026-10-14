@@ -702,6 +702,11 @@ class TimestepKeyframeRef(_TypedRef):
 class ModelRef(_TypedRef):
     KIND = "MODEL"
 
+    async def fix_empty_latent_channels(self, latent: LatentRef) -> LatentRef:
+        """Normalize a latent for this model before preparing custom noise."""
+        return await current_runtime().ops.apply(
+            "sampling.fix_empty_latent_channels", self, {"latent": latent})
+
     # A MODEL crosses as a handle only. There is deliberately no `clone()`:
     # in the original API `model.clone()` is never the last line, it exists so
     # the next line can patch the copy, and a clone nothing can mutate has no
@@ -8986,6 +8991,8 @@ class InProcessOps:
             "model.apply_ltx2_lora": self._model_apply_ltx2_lora,
             "sampling.spatial_crop_inputs":
                 self._sampling_spatial_crop_inputs,
+            "sampling.fix_empty_latent_channels":
+                self._sampling_fix_empty_latent_channels,
             "model.patch": self._model_patch,
             "model.ground_image": self._model_ground_image,
             "model.transforms": self._model_transforms,
@@ -11369,6 +11376,33 @@ class InProcessOps:
                 "TENSOR", weight))  # type: ignore[assignment]
             item["tensor"] = state.current_ref
             return item
+
+    async def _sampling_fix_empty_latent_channels(
+        self, model: Ref, latent: Ref,
+    ) -> LatentRef:
+        if not isinstance(model, Ref) or model.kind != "MODEL":
+            raise TypeError("latent normalization requires a MODEL ref")
+        if not isinstance(latent, Ref) or latent.kind != "LATENT":
+            raise TypeError("latent normalization requires a LATENT ref")
+
+        import torch
+        import comfy.nested_tensor
+        import comfy.sample
+
+        runtime = current_runtime()
+        model_value = await runtime.refs.resolve(model)
+        latent_value = await runtime.refs.resolve(latent)
+        if not isinstance(latent_value, dict) or "samples" not in latent_value:
+            raise TypeError("LATENT ref has no samples")
+        samples = latent_value["samples"]
+        if not isinstance(samples, (torch.Tensor, comfy.nested_tensor.NestedTensor)):
+            raise TypeError("LATENT samples must be a tensor")
+        if isinstance(samples, torch.Tensor) and samples.ndim < 2:
+            raise TypeError("LATENT samples must be a batched tensor")
+        normalized = latent_value.copy()
+        normalized["samples"] = comfy.sample.fix_empty_latent_channels(
+            model_value, samples)
+        return LatentRef._wrap(await runtime.refs.create("LATENT", normalized))
 
     async def _model_latent_scale_factor(self, model: "ModelRef") -> float:
         value = await current_runtime().refs.resolve(model)
