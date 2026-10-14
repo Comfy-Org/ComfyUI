@@ -4892,21 +4892,24 @@ def _image_metadata_owner(
     return SimpleNamespace(hidden=hidden)
 
 
-def _a1111_parameters_payload(value: Optional[str]) -> tuple[Optional[str], bytes]:
+def _a1111_parameters_payload(value: Optional[str], image_format: str) -> tuple[Optional[str], bytes]:
     """Validate the closed Automatic1111 metadata profile.
 
     EXIF UserComment uses an eight-byte character-code prefix followed by
     UTF-16BE.  Keeping the payload below 60 KiB leaves deterministic room for
-    TIFF/EXIF structure inside JPEG's single APP1 segment.
+    TIFF/EXIF structure inside JPEG's single APP1 segment. PNG stores text
+    directly and does not use this EXIF profile.
     """
     if value is None:
         return None, b""
     if not isinstance(value, str):
         raise TypeError("a1111_parameters must be a string or None")
     try:
-        encoded = value.encode("utf-16-be")
+        encoded = value.encode("utf-8" if image_format == "PNG" else "utf-16-be")
     except UnicodeEncodeError as error:
         raise ValueError("a1111_parameters must contain valid Unicode") from error
+    if image_format == "PNG":
+        return value, b""
     if len(encoded) > 60 * 1024:
         raise ValueError("a1111_parameters exceeds the 60 KiB EXIF payload limit")
     return value, b"UNICODE\x00" + encoded
@@ -5283,7 +5286,7 @@ class _InProcessOutput:
         pil_format, allowed_suffixes, default_suffix = self._still_format(
             image_format)
         a1111_text, a1111_exif = _a1111_parameters_payload(
-            a1111_parameters)
+            a1111_parameters, pil_format)
         if a1111_text is not None and pil_format not in {"PNG", "JPEG", "WEBP"}:
             raise ValueError(
                 "a1111_parameters is supported only for PNG, JPEG, and WebP")
