@@ -25,6 +25,7 @@ import comfy.ldm.ace.vae.music_dcae_pipeline
 import comfy.ldm.cogvideo.vae
 import comfy.ldm.hunyuan_video.vae
 import comfy.ldm.mmaudio.vae.autoencoder
+import comfy.ldm.kandinsky6.audio_vae
 import comfy.ldm.audio.vae_sa3
 import comfy.ldm.minimax_music.dav
 import comfy.pixel_space_convert
@@ -73,6 +74,7 @@ import comfy.text_encoders.mage_flow
 import comfy.text_encoders.ideogram4
 import comfy.text_encoders.ovis
 import comfy.text_encoders.kandinsky5
+import comfy.text_encoders.kandinsky6
 import comfy.text_encoders.jina_clip_2
 import comfy.text_encoders.newbie
 import comfy.text_encoders.anima
@@ -926,6 +928,25 @@ class VAE:
                 self.latent_dim = 2
                 self.output_channels = 3
                 self.disable_offload = True
+            elif metadata is not None and metadata.get("kandinsky6_audio_vae"):  # Kandinsky 6 audio VAE
+                bigvgan_config = json.loads(metadata["bigvgan_config"])
+                self.first_stage_model = comfy.ldm.kandinsky6.audio_vae.Kandinsky6AudioVAE(bigvgan_config)
+                def _no_k6_encode(*args, **kwargs):
+                    raise RuntimeError("Kandinsky 6 audio VAE cannot encode audio")
+                self.memory_used_encode = _no_k6_encode
+                # Measured BigVGAN decode peak in fp32 elements: ~1.43 GB fixed overhead plus
+                # ~155 MB per latent frame, from RSS high-water marks of fresh decodes.
+                self.memory_used_decode = lambda shape, dtype: (shape[0] * 40_000_000 * shape[1] + 380_000_000) * model_management.dtype_size(dtype)
+                self.latent_channels = 40
+                self.output_channels = 1
+                self.upscale_ratio = 1024
+                self.downscale_ratio = 1024
+                self.latent_dim = 1
+                self.audio_sample_rate = 44100
+                self.process_output = lambda audio: audio
+                self.process_input = lambda audio: audio
+                self.working_dtypes = [torch.float32]
+                self.disable_offload = True
             elif "vocoder.activation_post.downsample.lowpass.filter" in sd: #MMAudio VAE
                 sample_rate = 16000
                 if sample_rate == 16000:
@@ -1196,6 +1217,12 @@ class VAE:
 
         return self.process_output(comfy.utils.tiled_scale_multidim(samples, decode_fn, tile=(tile_x,), overlap=overlap, upscale_amount=self.upscale_ratio, out_channels=self.output_channels, output_device=self.output_device))
 
+    def decode_tiled_1d_k6(self, samples, tile_x=256, overlap=32):
+        # K6 audio latents are time-first [B, T, C] while the generic 1D tiler slices the last
+        # dimension: tile the transposed latent along time so the decoded duration sizes the output.
+        decode_fn = lambda a: self.first_stage_model.decode(a.transpose(1, 2).to(self.vae_dtype).to(self.device)).to(dtype=self.vae_output_dtype())
+        return self.process_output(comfy.utils.tiled_scale_multidim(samples.transpose(1, 2), decode_fn, tile=(tile_x,), overlap=overlap, upscale_amount=self.upscale_ratio, out_channels=self.output_channels, output_device=self.output_device))
+
     def decode_tiled_3d(self, samples, tile_t=999, tile_x=32, tile_y=32, overlap=(1, 8, 8)):
         decode_fn = lambda a: self.first_stage_model.decode(a.to(self.vae_dtype).to(self.device)).to(dtype=self.vae_output_dtype())
         return self.process_output(comfy.utils.tiled_scale_multidim(samples, decode_fn, tile=(tile_t, tile_x, tile_y), overlap=overlap, upscale_amount=self.upscale_ratio, out_channels=self.output_channels, index_formulas=self.upscale_index_formula, output_device=self.output_device))
@@ -1316,7 +1343,17 @@ class VAE:
                 comfy.model_management.soft_empty_cache()
                 dims = samples_in.ndim - 2
                 if dims == 1 or self.extra_1d_channel is not None:
-                    pixel_samples = self.decode_tiled_1d(samples_in)
+                    if isinstance(self.first_stage_model, comfy.ldm.kandinsky6.audio_vae.Kandinsky6AudioVAE):
+                        # The generic 1D tiler slices the channel axis of K6's time-first latent, and a
+                        # full-length tile would OOM again: size the time tile to the free memory.
+                        budget = self.patcher.get_free_memory(self.device)
+                        est = lambda t: self.memory_used_decode(samples_in.shape[:1] + (t,) + samples_in.shape[2:], self.vae_dtype)
+                        tile = min(samples_in.shape[1], 256)
+                        while tile > 2 and est(tile) > budget:
+                            tile //= 2
+                        pixel_samples = self.decode_tiled_1d_k6(samples_in, tile_x=tile, overlap=tile // 4)
+                    else:
+                        pixel_samples = self.decode_tiled_1d(samples_in)
                 elif dims == 2:
                     if self.handles_tiling:
                         tile = 256 // self.spacial_compression_decode()
@@ -1382,7 +1419,14 @@ class VAE:
 
     def decode_tiled(self, samples, tile_x=None, tile_y=None, overlap=None, tile_t=None, overlap_t=None):
         self.throw_exception_if_invalid()
-        memory_used = self.memory_used_decode(self._tile_bounded_shape(samples.shape, tile_x, tile_y, tile_t), self.vae_dtype)
+        if isinstance(self.first_stage_model, comfy.ldm.kandinsky6.audio_vae.Kandinsky6AudioVAE):
+            # K6 audio latents are time-first [B, T, C]: bound the time axis by the effective
+            # tile size (decode_tiled_1d_k6's default when tile_x is omitted), not the channel axis.
+            shape = list(samples.shape)
+            shape[1] = min(shape[1], tile_x if tile_x is not None else 256)
+            memory_used = self.memory_used_decode(tuple(shape), self.vae_dtype)
+        else:
+            memory_used = self.memory_used_decode(self._tile_bounded_shape(samples.shape, tile_x, tile_y, tile_t), self.vae_dtype)
         model_management.load_models_gpu([self.patcher], memory_required=memory_used, force_full_load=self.disable_offload)
         dims = samples.ndim - 2
         args = {}
@@ -1398,7 +1442,10 @@ class VAE:
                 output = self._decode_tiled_owned(samples, **self._owned_tiled_args(tile_x, tile_y, overlap, tile_t, overlap_t))
             elif dims == 1 or self.extra_1d_channel is not None:
                 args.pop("tile_y")
-                output = self.decode_tiled_1d(samples, **args)
+                if isinstance(self.first_stage_model, comfy.ldm.kandinsky6.audio_vae.Kandinsky6AudioVAE):
+                    output = self.decode_tiled_1d_k6(samples, **args)
+                else:
+                    output = self.decode_tiled_1d(samples, **args)
             elif dims == 2:
                 output = self.decode_tiled_(samples, **args)
             elif dims == 3:
@@ -1606,6 +1653,7 @@ class CLIPType(Enum):
     MAGE = 34
     MINIMAX = 35
     YUE2 = 36
+    KANDINSKY6 = 37
 
 
 
@@ -2061,6 +2109,9 @@ def load_text_encoder_state_dicts(state_dicts=[], embedding_directory=None, clip
         elif clip_type == CLIPType.KANDINSKY5_IMAGE:
             clip_target.clip = comfy.text_encoders.kandinsky5.te(**llama_detect(clip_data))
             clip_target.tokenizer = comfy.text_encoders.kandinsky5.Kandinsky5TokenizerImage
+        elif clip_type == CLIPType.KANDINSKY6:
+            clip_target.clip = comfy.text_encoders.kandinsky6.te(**llama_detect(clip_data))
+            clip_target.tokenizer = comfy.text_encoders.kandinsky6.Kandinsky6Tokenizer
         elif clip_type == CLIPType.LTXV:
             te_models = [detect_te_model(sd) for sd in clip_data]
             gemma4_models = {
