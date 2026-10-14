@@ -491,7 +491,7 @@ def _block_swap(patcher, blocks_to_swap: int, offload_img_emb: bool,
 
 
 _ATTENTION_IMPLS = ("pytorch", "basic", "split", "sub_quad", "xformers",
-                    "sage", "flash")
+                    "sage", "flash", "comfy_kitchen_int8")
 
 
 def _attention_impl(patcher, mode: str, allow_compile: bool):
@@ -502,12 +502,20 @@ def _attention_impl(patcher, mode: str, allow_compile: bool):
     What was missing was a way to pick one PER MODEL rather than per process —
     which is exactly what the pack nodes were hand-rolling.
 
-    An implementation whose backing library is absent is refused HERE, by name,
-    rather than at the first attention call thirty seconds into a sample.
+    Unavailable libraries are refused here, except Comfy Kitchen INT8, which
+    follows ModelAttentionBackend's PyTorch fallback.
     """
     from comfy.ldm.modules import attention as _attn
 
-    fn = getattr(_attn, f"attention_{mode}", None)
+    if mode == "comfy_kitchen_int8":
+        fn = _attn.get_attention_function(mode, None)
+        if fn is None:
+            logging.warning(
+                "Attention backend '%s' is unavailable; using PyTorch attention.",
+                "comfy kitchen attention")
+            fn = _attn.get_attention_function("pytorch")
+    else:
+        fn = getattr(_attn, f"attention_{mode}", None)
     if fn is None:  # pragma: no cover - guarded by the OneOf spec
         raise TransformError(f"attention implementation {mode!r} is not built in")
     if mode == "sage" and not getattr(_attn, "SAGE_ATTENTION_IS_AVAILABLE", False):
@@ -529,12 +537,15 @@ def _attention_impl(patcher, mode: str, allow_compile: bool):
 
         fn = torch.compiler.disable()(fn)
 
-    def override(func, *args, **kwargs):
-        return fn(*args, **kwargs)
-
     m = patcher.clone()
-    m.model_options.setdefault("transformer_options", {})
-    m.model_options["transformer_options"]["optimized_attention_override"] = override
+    if mode == "comfy_kitchen_int8":
+        m.set_model_optimized_attention(fn)
+    else:
+        def override(func, *args, **kwargs):
+            return fn(*args, **kwargs)
+
+        m.model_options.setdefault("transformer_options", {})
+        m.model_options["transformer_options"]["optimized_attention_override"] = override
     return m
 
 
@@ -3870,7 +3881,8 @@ TRANSFORMS: dict[str, Transform] = {
             "Select which attention implementation this model uses.",
             {
                 "mode": OneOf(_ATTENTION_IMPLS,
-                              doc="Which of core's attention implementations to use."),
+                              doc="Which of core's attention implementations to use. "
+                                  "Comfy Kitchen INT8 falls back to PyTorch when unavailable."),
                 "allow_compile": Bool(default=False,
                                       doc="Let torch.compile trace into the attention "
                                           "function. Off by default, matching core."),
