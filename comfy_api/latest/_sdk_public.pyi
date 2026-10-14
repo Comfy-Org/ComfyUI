@@ -289,8 +289,8 @@ class ClipVisionRef(Ref):
 class VaeRef(Ref):
     KIND: str
     async def latent_layout(self) -> dict[str, Optional[int]]: ...
-    async def decode(self, latent: LatentRef) -> ImageRef: ...
-    async def decode_tensor(self, latent: LatentRef) -> TensorRef: ...
+    async def decode(self, latent: LatentRef, *, allow_extended_range: bool = ...) -> ImageRef: ...
+    async def decode_tensor(self, latent: LatentRef, *, allow_extended_range: bool = ...) -> TensorRef: ...
     async def decode_tiled(
         self,
         latent: LatentRef,
@@ -298,6 +298,7 @@ class VaeRef(Ref):
         overlap: int = ...,
         temporal_size: int = ...,
         temporal_overlap: int = ...,
+        *, allow_extended_range: bool = ...,
     ) -> ImageRef: ...
     async def decode_tensor_tiled(
         self,
@@ -306,6 +307,7 @@ class VaeRef(Ref):
         overlap: int = ...,
         temporal_size: int = ...,
         temporal_overlap: int = ...,
+        *, allow_extended_range: bool = ...,
     ) -> TensorRef: ...
     async def encode(self, image: ImageRef) -> LatentRef: ...
     async def encode_for_inpaint(
