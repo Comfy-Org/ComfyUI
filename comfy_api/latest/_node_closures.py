@@ -145,6 +145,17 @@ KINDS: dict[str, ClosureKind] = {
         arguments=("presence", "sigma"),
         returns="presence",
     ),
+    "model_concat_conditioning": ClosureKind(
+        phase="model_concat_conditioning",
+        doc=(
+            "Replaces concat preparation on the supplied canonical WAN21 MODEL. "
+            "Receives noise and closed model metadata, with invocation-only "
+            "image/mask access and canonical latent normalization."
+        ),
+        arguments=("invocation", "noise", "metadata"),
+        returns="native branch conditioning tensor or None",
+        capabilities=("concat_latent_image", "concat_mask", "process_latent_in"),
+    ),
     "conditioning_preprocess": ClosureKind(
         phase="conditioning_preprocess",
         doc=(
