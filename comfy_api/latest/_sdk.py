@@ -876,20 +876,29 @@ class ModelRef(_TypedRef):
 
     async def apply_lora(
         self, asset: "AssetRef", clip: Optional["ClipRef"],
-        strength_model: float, strength_clip: float,
+        strength_model: float, strength_clip: float, *,
+        skip_zero: bool = True, allow_extended_strengths: bool = False,
     ) -> tuple["ModelRef", Optional["ClipRef"]]:
         """Apply one resolved LoRA without exposing model weights or paths.
 
         ``asset`` must have been resolved from the host's ``loras`` catalogue.
         The trusted implementation confines its path again before loading it.
+        ``skip_zero=False`` retains native loading and cloning at zero strength.
+        ``allow_extended_strengths=True`` passes numeric strengths through to
+        the native loader, including values outside the default finite range.
         """
+        params = {
+            "asset": asset,
+            "clip": clip,
+            "strength_model": strength_model,
+            "strength_clip": strength_clip,
+        }
+        if skip_zero is not True:
+            params["skip_zero"] = skip_zero
+        if allow_extended_strengths is not False:
+            params["allow_extended_strengths"] = allow_extended_strengths
         result = await current_runtime().ops.apply(
-            "model.apply_lora", self, {
-                "asset": asset,
-                "clip": clip,
-                "strength_model": strength_model,
-                "strength_clip": strength_clip,
-            })
+            "model.apply_lora", self, params)
         return result[0], result[1]
 
     async def apply_dit_block_lora(
@@ -10994,7 +11003,8 @@ class InProcessOps:
     async def _model_apply_lora(
         self, model: "ModelRef", asset: "AssetRef",
         clip: Optional["ClipRef"], strength_model: float,
-        strength_clip: float,
+        strength_clip: float, *, skip_zero: bool = True,
+        allow_extended_strengths: bool = False,
     ) -> tuple["ModelRef", Optional["ClipRef"]]:
         import math
 
@@ -11002,6 +11012,10 @@ class InProcessOps:
         import comfy.utils
         import folder_paths
 
+        if type(skip_zero) is not bool:
+            raise TypeError("skip_zero must be a boolean")
+        if type(allow_extended_strengths) is not bool:
+            raise TypeError("allow_extended_strengths must be a boolean")
         strengths = {}
         for name, value in {
             "strength_model": strength_model,
@@ -11010,7 +11024,8 @@ class InProcessOps:
             if isinstance(value, bool) or not isinstance(value, (int, float)):
                 raise TypeError(f"{name} must be a number")
             checked = float(value)
-            if not math.isfinite(checked) or not -100.0 <= checked <= 100.0:
+            if not allow_extended_strengths and (
+                    not math.isfinite(checked) or not -100.0 <= checked <= 100.0):
                 raise ValueError(f"{name} must be finite and in [-100, 100]")
             strengths[name] = checked
 
@@ -11023,7 +11038,7 @@ class InProcessOps:
             raise TypeError("clip must be a CLIP ref or None")
         if clip is None and strengths["strength_clip"] != 0.0:
             raise ValueError("strength_clip must be zero when clip is None")
-        if (strengths["strength_model"] == 0.0
+        if (skip_zero and strengths["strength_model"] == 0.0
                 and strengths["strength_clip"] == 0.0):
             return model, clip
 
