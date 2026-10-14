@@ -207,6 +207,7 @@ class UpscaleModelRef(Ref):
 class ModelRef(Ref):
     """MODEL — patch/hook via ctx.models; weights never materialize in-node."""
     KIND: str
+    async def fix_empty_latent_channels(self, latent: LatentRef) -> LatentRef: ...
     async def patch(self, transform: str, **params: Any) -> "ModelRef": ...
     async def spatial_crop_inputs(
         self, *, regions: list[tuple[int, int, int, int]],
