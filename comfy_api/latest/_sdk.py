@@ -277,6 +277,13 @@ class TensorRef(_TypedRef):
 class ImageRef(TensorRef):
     KIND = "IMAGE"
 
+    @classmethod
+    async def from_value(cls, value: Any) -> "ImageRef":
+        """Create an owned IMAGE from bounded finite BHWC pixels (raw tier)."""
+        rt = current_runtime()
+        pixels = _image_from_value(value)
+        return ImageRef._wrap(await rt.refs.create("IMAGE", pixels))
+
     # --- PREFERRED INTERFACE: operations on the asset, by name. The heavy
     #     compute runs engine-side (trusted plane); the node never receives a
     #     buffer. `op` is generic dispatch — core ships a tiny built-in set and
@@ -1357,6 +1364,20 @@ class ClipVisionOutputRef(_TypedRef):
         return await current_runtime().ops.apply(
             "clip_vision_output.image_embeds", self, {})
 
+    async def last_hidden_state(
+        self, *, batch_start: int = 0, batch_count: Optional[int] = None,
+    ) -> TensorRef:
+        return await current_runtime().ops.apply(
+            "clip_vision_output.last_hidden_state", self,
+            {"batch_start": batch_start, "batch_count": batch_count})
+
+    async def penultimate_hidden_states(
+        self, *, batch_start: int = 0, batch_count: Optional[int] = None,
+    ) -> TensorRef:
+        return await current_runtime().ops.apply(
+            "clip_vision_output.penultimate_hidden_states", self,
+            {"batch_start": batch_start, "batch_count": batch_count})
+
 
 class ClipVisionRef(_TypedRef):
     KIND = "CLIP_VISION"
@@ -1367,6 +1388,10 @@ class ClipVisionRef(_TypedRef):
         return await current_runtime().ops.apply(
             "clip_vision.encode_image", self,
             {"image": image, "crop": bool(crop)})
+
+    async def offload(self) -> None:
+        """Offload this canonical vision model and its clones through host policy."""
+        await current_runtime().ops.apply("clip_vision.offload", self, {})
 
 
 class ControlNetRef(_TypedRef):
@@ -4989,6 +5014,39 @@ def _image_metadata_owner(
         extra_pnginfo=metadata or None,
     )
     return SimpleNamespace(hidden=hidden)
+
+
+def _image_buffer_shape(shape, nbytes: int) -> None:
+    if (len(shape) != 4 or any(type(size) is not int or size < 1 for size in shape)
+            or shape[0] > _InProcessOutput._IMAGE_BATCH_MAX
+            or shape[-1] not in (1, 2, 3, 4)
+            or shape[1] * shape[2] > _InProcessAssets._IMAGE_PIXELS_MAX):
+        raise ValueError("IMAGE requires a bounded non-empty BHWC buffer with 1..4 channels")
+    maximum = int(os.environ.get("COMFY_SECURE_MAX_STORE_BYTES", str(2 * 1024**3)))
+    if type(nbytes) is not int or not 1 <= nbytes <= maximum:
+        raise ValueError(f"IMAGE exceeds the {maximum}-byte raw buffer limit")
+
+
+def _image_from_value(value):
+    import numpy as np
+    import torch
+
+    if isinstance(value, torch.Tensor):
+        if (value.layout != torch.strided or value.device.type == "meta"
+                or value.dtype == torch.bool or value.is_complex()):
+            raise TypeError("IMAGE requires a dense numeric tensor")
+        _image_buffer_shape(tuple(value.shape), value.numel() * value.element_size())
+        pixels = value
+    elif isinstance(value, np.ndarray):
+        if value.dtype.kind not in "fiu":
+            raise TypeError("IMAGE requires a dense numeric array")
+        _image_buffer_shape(value.shape, value.nbytes)
+        pixels = torch.from_numpy(value)
+    else:
+        raise TypeError("IMAGE requires a tensor or numeric array")
+    if not torch.isfinite(pixels).all().item():
+        raise ValueError("IMAGE pixels must be finite")
+    return pixels
 
 
 def _png_text_metadata(values: dict[str, str]):
@@ -9158,8 +9216,13 @@ class InProcessOps:
             "guider.scheduled_cfg": self._guider_scheduled_cfg,
             "sampler.self_refine_video": self._sampler_self_refine_video,
             "clip_vision.encode_image": self._clip_vision_encode_image,
+            "clip_vision.offload": self._clip_vision_offload,
             "clip_vision_output.image_embeds":
                 self._clip_vision_output_image_embeds,
+            "clip_vision_output.last_hidden_state":
+                self._clip_vision_output_last_hidden_state,
+            "clip_vision_output.penultimate_hidden_states":
+                self._clip_vision_output_penultimate_hidden_states,
             "clip_vision_output.concat": self._clip_vision_output_concat,
             "controlnet.with_union_type": self._controlnet_with_union_type,
             "controlnet.apply": self._controlnet_apply,
@@ -11931,6 +11994,57 @@ class InProcessOps:
         output = encoder.encode_image(pixels, crop=bool(crop))
         return ClipVisionOutputRef._wrap(await rt.refs.create(
             "CLIP_VISION_OUTPUT", output))  # type: ignore[return-value]
+
+    async def _clip_vision_offload(self, clip_vision: "ClipVisionRef") -> None:
+        import comfy.clip_vision
+        import comfy.model_management
+
+        if not isinstance(clip_vision, ClipVisionRef) or clip_vision.kind != "CLIP_VISION":
+            raise TypeError("vision offload requires a CLIP_VISION ref")
+        encoder = await current_runtime().refs.resolve(clip_vision)
+        if not isinstance(encoder, comfy.clip_vision.ClipVisionModel):
+            raise TypeError("vision offload requires a canonical CLIP vision model")
+        comfy.model_management.unload_model_and_clones(
+            encoder.patcher, unload_additional_models=False, all_devices=True)
+
+    async def _clip_vision_tokens(self, output, field, batch_start, batch_count):
+        import torch
+        import comfy.clip_vision
+
+        if not isinstance(output, ClipVisionOutputRef) or output.kind != "CLIP_VISION_OUTPUT":
+            raise TypeError("vision tokens require a CLIP_VISION_OUTPUT ref")
+        rt = current_runtime()
+        value = await rt.refs.resolve(output)
+        if not isinstance(value, comfy.clip_vision.Output):
+            raise TypeError("vision tokens require a canonical CLIP vision output")
+        states = getattr(value, field, None)
+        if (not isinstance(states, torch.Tensor) or states.layout != torch.strided
+                or states.device.type == "meta" or states.ndim != 3):
+            raise ValueError(f"vision {field} must be a rank-three tensor")
+        if isinstance(batch_start, bool) or not isinstance(batch_start, int):
+            raise TypeError("vision batch_start must be an integer")
+        if not 0 <= batch_start < states.shape[0]:
+            raise ValueError("vision batch_start is out of range")
+        count = states.shape[0] - batch_start if batch_count is None else batch_count
+        if isinstance(count, bool) or not isinstance(count, int):
+            raise TypeError("vision batch_count must be an integer or None")
+        if not 1 <= count <= 64 or batch_start + count > states.shape[0]:
+            raise ValueError("vision batch_count must select 1..64 in-range rows")
+        selected = states[batch_start:batch_start + count]
+        maximum = int(os.environ.get("COMFY_SECURE_MAX_STORE_BYTES", str(2 * 1024**3)))
+        if selected.numel() < 1 or selected.numel() * selected.element_size() > maximum:
+            raise ValueError("vision token projection exceeds the raw buffer limit")
+        return TensorRef._wrap(await rt.refs.create("TENSOR", selected))
+
+    async def _clip_vision_output_last_hidden_state(
+        self, output, batch_start=0, batch_count=None,
+    ):
+        return await self._clip_vision_tokens(output, "last_hidden_state", batch_start, batch_count)
+
+    async def _clip_vision_output_penultimate_hidden_states(
+        self, output, batch_start=0, batch_count=None,
+    ):
+        return await self._clip_vision_tokens(output, "penultimate_hidden_states", batch_start, batch_count)
 
     async def _clip_vision_output_image_embeds(
         self, output: "ClipVisionOutputRef",

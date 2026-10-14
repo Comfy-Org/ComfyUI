@@ -74,6 +74,8 @@ class ImageRef(TensorRef):
     from the secure lib (e.g. ``comfy_secure_sdk.ops.desaturate(...)``) rather
     than passing op-name strings here directly."""
     KIND: str
+    @classmethod
+    async def from_value(cls, value: Any) -> "ImageRef": ...
     async def op(self, name: str, **params: Any) -> "ImageRef": ...
     async def invert(self) -> "ImageRef": ...     # built-in primitive
     async def scale(self, factor: float) -> "ImageRef": ...  # built-in primitive
@@ -283,12 +285,19 @@ class ClipVisionOutputRef(Ref):
         self, other: "ClipVisionOutputRef",
     ) -> "ClipVisionOutputRef": ...
     async def image_embeds(self) -> TensorRef: ...
+    async def last_hidden_state(
+        self, *, batch_start: int = ..., batch_count: Optional[int] = ...,
+    ) -> TensorRef: ...
+    async def penultimate_hidden_states(
+        self, *, batch_start: int = ..., batch_count: Optional[int] = ...,
+    ) -> TensorRef: ...
 
 class ClipVisionRef(Ref):
     KIND: str
     async def encode_image(
         self, image: ImageRef, crop: bool = ...,
     ) -> ClipVisionOutputRef: ...
+    async def offload(self) -> None: ...
 
 class VaeRef(Ref):
     KIND: str
