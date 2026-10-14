@@ -936,6 +936,24 @@ class ModelRef(_TypedRef):
 class ClipRef(_TypedRef):
     KIND = "CLIP"
 
+    async def apply_hooks(
+        self, hooks: Optional["Ref"], *, apply_to_conds: bool = True,
+        schedule_clip: bool = False,
+    ) -> "ClipRef":
+        """Apply native hooks while retaining their objects on the host.
+
+        ``None`` preserves this handle and the original CLIP. A group, even an
+        empty one, follows native CLIP cloning and hook scheduling semantics.
+        The operation still checks the current owner and models grant for the
+        no-op case; it never materializes a HookGroup in the node.
+        """
+        result = await current_runtime().ops.apply("clip.apply_hooks", self, {
+            "hooks": hooks,
+            "apply_to_conds": apply_to_conds,
+            "schedule_clip": schedule_clip,
+        })
+        return self if hooks is None else result
+
     async def set_last_layer(self, stop_at_clip_layer: int) -> "ClipRef":
         """Clone this CLIP and stop encoding at a bounded hidden layer."""
         return await current_runtime().ops.apply(
@@ -9080,6 +9098,7 @@ class InProcessOps:
             "clip.encode": self._clip_encode,
             "clip.set_last_layer": self._clip_set_last_layer,
             "clip.with_attention_impl": self._clip_with_attention_impl,
+            "clip.apply_hooks": self._clip_apply_hooks,
             "clip.describe_tokens": self._clip_describe_tokens,
             "clip.generate_text": self._clip_generate_text,
             "gligen.apply_batched": self._gligen_apply_batched,
@@ -10256,6 +10275,32 @@ class InProcessOps:
         return ClipRef._wrap(
             await rt.refs.create("CLIP", output)
         )  # type: ignore[return-value]
+
+    async def _clip_apply_hooks(
+        self, clip: "ClipRef", hooks: Optional["Ref"], *,
+        apply_to_conds: bool = True, schedule_clip: bool = False,
+    ) -> "ClipRef":
+        if not isinstance(clip, ClipRef) or clip.kind != "CLIP":
+            raise TypeError("CLIP hook application needs a CLIP ref")
+        for name, value in (("apply_to_conds", apply_to_conds),
+                            ("schedule_clip", schedule_clip)):
+            if type(value) is not bool:
+                raise TypeError(f"{name} must be a boolean")
+
+        rt = current_runtime()
+        source = await rt.refs.resolve(clip)
+        from comfy.sd import CLIP
+        from comfy_extras.nodes_hooks import SetClipHooks
+
+        if not isinstance(source, CLIP):
+            raise TypeError("CLIP ref does not contain a native CLIP")
+        group = None if hooks is None else await self._hooks_group(hooks)
+        output, = SetClipHooks().apply_hooks(
+            source, schedule_clip=schedule_clip,
+            apply_to_conds=apply_to_conds, hooks=group)
+        if output is source:
+            return clip
+        return ClipRef._wrap(await rt.refs.create("CLIP", output))
 
     async def _clip_with_attention_impl(
         self, clip: "ClipRef", mode: str,
