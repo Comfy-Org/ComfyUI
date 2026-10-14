@@ -2161,6 +2161,21 @@ class IntegrationsDomain(Protocol):
         ...
 
 
+@dataclass(frozen=True)
+class ModelConcatMetadata:
+    """Canonical scalar facts for one concat-conditioning invocation."""
+    patch_input_channels: int
+    image_to_video: bool
+    device: str
+
+
+class ModelConcatInvocation(Protocol):
+    """Invocation-only tensor operations; no model or host callable is exposed."""
+    async def concat_latent_image(self) -> Any: ...
+    async def concat_mask(self) -> Any: ...
+    async def process_latent_in(self, tensor: Any) -> Any: ...
+
+
 class ModelsDomain(Protocol):
     async def create_sampling_model(
         self, family: str, parameters: Optional[dict[str, float]] = None,
@@ -7078,7 +7093,7 @@ class _InProcessClosures:
         kind = entry.get("kind")
         if kind not in {
             "post_cfg", "pre_cfg", "conditioning_selection",
-            "conditioning_preprocess",
+            "conditioning_preprocess", "model_concat_conditioning",
             "model_input_block", "model_middle_block", "model_output_block",
             "regional_attention",
         }:
@@ -7086,6 +7101,11 @@ class _InProcessClosures:
                 "this node closure kind cannot attach to a model")
         model_obj = await current_runtime().refs.resolve(model)
         fn = entry["fn"]
+        if kind == "model_concat_conditioning":
+            from . import _model_concat
+
+            patched = _model_concat.attach(model_obj, fn)
+            return ModelRef._wrap(await current_runtime().refs.create("MODEL", patched))
         if kind == "regional_attention":
             import math
             import torch
