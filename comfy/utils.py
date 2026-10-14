@@ -189,11 +189,15 @@ def load_safetensors(ckpt):
     return sd, header.get("__metadata__", {}),
 
 
-def load_torch_file(ckpt, safe_load=False, device=None, return_metadata=False):
+def load_torch_file(ckpt, safe_load=False, device=None, return_metadata=False, *, member=None):
+    if member is not None and (type(member) is not str or not member):
+        raise TypeError("state dict member must be a non-empty string or None")
     if device is None:
         device = torch.device("cpu")
     metadata = None
     if ckpt.lower().endswith(".safetensors") or ckpt.lower().endswith(".sft"):
+        if member is not None:
+            raise ValueError("state dict member selection requires a Torch checkpoint")
         try:
             if comfy.memory_management.aimdo_enabled:
                 sd, metadata = load_safetensors(ckpt)
@@ -224,7 +228,16 @@ def load_torch_file(ckpt, safe_load=False, device=None, return_metadata=False):
 
         pl_sd = torch.load(ckpt, map_location=device, weights_only=True, **torch_args)
 
-        if "state_dict" in pl_sd:
+        if member is not None:
+            if not isinstance(pl_sd, dict):
+                raise ValueError("weight checkpoint did not contain a member dictionary")
+            sd = pl_sd[member]
+            if not isinstance(sd, dict) or not all(
+                isinstance(name, str) and isinstance(value, torch.Tensor)
+                for name, value in sd.items()
+            ):
+                raise ValueError("weight member did not contain a tensor state dict")
+        elif "state_dict" in pl_sd:
             sd = pl_sd["state_dict"]
         else:
             if len(pl_sd) == 1:
