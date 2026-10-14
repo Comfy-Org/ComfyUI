@@ -1666,6 +1666,29 @@ class AssetRef(_TypedRef):
     KIND = "ASSET"
 
 
+class Hooks:
+    """Native HookGroups retained on the host behind opaque references."""
+
+    @staticmethod
+    async def empty() -> "Ref":
+        return await current_runtime().ops.apply("hooks.empty", None, {})
+
+    @staticmethod
+    async def clone(group: "Ref") -> "Ref":
+        return await group.op("hooks.clone")
+
+    @staticmethod
+    async def clone_and_combine(group: "Ref", other: Optional["Ref"]) -> "Ref":
+        return await group.op("hooks.clone_and_combine", other=other)
+
+    @staticmethod
+    async def create_lora(
+        asset: "AssetRef", strength_model: float, strength_clip: float,
+    ) -> "Ref":
+        return await asset.op("hooks.create_lora", strength_model=strength_model,
+                              strength_clip=strength_clip)
+
+
 class OpaqueRef(_TypedRef):
     """A pass-through handle for a value with no sandbox materializer."""
 
@@ -9084,6 +9107,10 @@ class InProcessOps:
                 _vendor_ops.advanced_control_scaled_soft_weights,
             "lora.weight_differences": self._lora_weight_differences,
             "weight_diff.next": self._weight_diff_next,
+            "hooks.empty": self._hooks_empty,
+            "hooks.clone": self._hooks_clone,
+            "hooks.clone_and_combine": self._hooks_clone_and_combine,
+            "hooks.create_lora": self._hooks_create_lora,
             "model.apply_lora": self._model_apply_lora,
             "model.apply_dit_block_lora": self._model_apply_dit_block_lora,
             "model.apply_ltx2_lora": self._model_apply_ltx2_lora,
@@ -11062,6 +11089,63 @@ class InProcessOps:
         return CondRef._wrap(await rt.refs.create("CONDITIONING", out))  # type: ignore[return-value]
 
 
+
+    async def _hooks_group(self, ref: "Ref"):
+        import comfy.hooks
+
+        if not isinstance(ref, Ref) or ref.kind != "OPAQUE":
+            raise TypeError("hook operation needs an OPAQUE HookGroup ref")
+        group = await current_runtime().refs.resolve(ref)
+        if not isinstance(group, comfy.hooks.HookGroup):
+            raise TypeError("hook ref does not contain a native HookGroup")
+        return group
+
+    async def _hooks_empty(self, subject: Optional["Ref"]) -> "Ref":
+        import comfy.hooks
+
+        if subject is not None:
+            raise TypeError("empty hook constructor has no subject")
+        return OpaqueRef._wrap(await current_runtime().refs.create(
+            "OPAQUE", comfy.hooks.HookGroup()))
+
+    async def _hooks_clone(self, group: "Ref") -> "Ref":
+        value = await self._hooks_group(group)
+        return OpaqueRef._wrap(await current_runtime().refs.create(
+            "OPAQUE", value.clone()))
+
+    async def _hooks_clone_and_combine(
+        self, group: "Ref", other: Optional["Ref"],
+    ) -> "Ref":
+        value = await self._hooks_group(group)
+        other_value = None if other is None else await self._hooks_group(other)
+        return OpaqueRef._wrap(await current_runtime().refs.create(
+            "OPAQUE", value.clone_and_combine(other_value)))
+
+    async def _hooks_create_lora(
+        self, asset: "AssetRef", strength_model: float, strength_clip: float,
+    ) -> "Ref":
+        import comfy.hooks
+        import comfy.utils
+        import folder_paths
+
+        if not isinstance(asset, AssetRef) or asset.kind != "ASSET":
+            raise TypeError("hook LoRA creation needs an ASSET ref")
+        for name, value in {"strength_model": strength_model,
+                            "strength_clip": strength_clip}.items():
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise TypeError(f"{name} must be a number")
+        rt = current_runtime()
+        path = await rt.refs.resolve(asset)
+        if not isinstance(path, (str, os.PathLike)):
+            raise TypeError("hook LoRA ASSET ref does not contain a path")
+        path = _InProcessAssets._confined_resolved_path(
+            path, folder_paths.get_folder_paths("loras"), "loras")
+        weights = comfy.utils.load_torch_file(path, safe_load=True)
+        if not isinstance(weights, dict):
+            raise TypeError("hook LoRA asset must contain a state-dict mapping")
+        group = comfy.hooks.create_hook_lora(
+            weights, float(strength_model), float(strength_clip))
+        return OpaqueRef._wrap(await rt.refs.create("OPAQUE", group))
 
     async def _model_apply_lora(
         self, model: "ModelRef", asset: "AssetRef",
