@@ -699,6 +699,9 @@ class InteractionDomain(Protocol):
     ) -> Any: ...
 
 class ModelsDomain(Protocol):
+    async def create_sampling_model(
+        self, family: str, parameters: Optional[dict[str, float]] = ...,
+    ) -> ModelRef: ...
     async def download_huggingface_weights(
         self,
         repo_id: str,

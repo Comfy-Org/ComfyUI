@@ -2162,6 +2162,16 @@ class IntegrationsDomain(Protocol):
 
 
 class ModelsDomain(Protocol):
+    async def create_sampling_model(
+        self, family: str, parameters: Optional[dict[str, float]] = None,
+    ) -> ModelRef:
+        """Create a weightless MODEL for schedulers, not trained inference.
+
+        ``discrete_flow`` supports a finite ``shift`` in [-100, 100],
+        including negative and zero values. Its native schedule may be
+        nonfinite; this factory does not normalize scheduler results.
+        """
+        ...
     async def download_huggingface_weights(
         self, repo_id: str, filename: str, folder: str,
         revision: str = "main", sha256: Optional[str] = None,
@@ -3654,6 +3664,39 @@ def _fixed_gguf_node_module():
 
 
 class _InProcessModels:
+    async def create_sampling_model(
+        self, family: str, parameters: Optional[dict[str, float]] = None,
+    ) -> ModelRef:
+        import math
+
+        runtime = current_runtime()
+        if family != "discrete_flow":
+            raise ValueError("sampling model family must be discrete_flow")
+        if parameters is None:
+            parameters = {}
+        if not isinstance(parameters, dict):
+            raise TypeError("sampling model parameters must be a mapping")
+        if set(parameters) - {"shift"}:
+            raise ValueError("discrete_flow parameters only support shift")
+        shift = parameters.get("shift", 1.0)
+        if isinstance(shift, bool) or not isinstance(shift, (int, float)):
+            raise TypeError("sampling model shift must be numeric")
+        if not -100.0 <= shift <= 100.0 or not math.isfinite(shift):
+            raise ValueError("sampling model shift must be finite and in [-100, 100]")
+        shift = float(shift)
+
+        class SamplingModel:
+            def get_model_object(self, name):
+                if name == "model_sampling":
+                    from comfy.model_sampling import ModelSamplingDiscreteFlow
+
+                    sampling = ModelSamplingDiscreteFlow()
+                    sampling.set_parameters(shift=shift)
+                    return sampling
+                return None
+
+        return ModelRef._wrap(await runtime.refs.create("MODEL", SamplingModel()))
+
     _HF_ENDPOINT = "https://huggingface.co"
     _HF_PYTORCH_WEIGHT_EXTENSIONS = frozenset({
         ".bin", ".ckpt", ".patch", ".pt", ".pth",
