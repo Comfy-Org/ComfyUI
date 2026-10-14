@@ -618,6 +618,7 @@ class OutputDomain(Protocol):
 
 class GraphDomain(Protocol):
     async def current_node_id(self) -> str: ...
+    async def execution_metadata(self, *, include_observations: bool = False) -> dict[str, Any]: ...
     async def input_label(
         self, input_name: str, default: str = ...,
     ) -> str: ...
@@ -867,6 +868,7 @@ class ExecutionPlan:
     node_module: str
     inputs: Optional[dict]
     dynamic_prompt: Any
+    execution_metadata: Any
     def __init__(
         self,
         prompt_id: str,
@@ -878,6 +880,7 @@ class ExecutionPlan:
         node_module: str = ...,
         inputs: Optional[dict] = ...,
         dynamic_prompt: Any = ...,
+        execution_metadata: Any = ...,
     ) -> None: ...
 
 @runtime_checkable
