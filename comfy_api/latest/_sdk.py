@@ -44,6 +44,7 @@ from __future__ import annotations
 
 import asyncio
 import contextvars
+import copy
 import inspect
 import logging
 import os
@@ -1117,6 +1118,18 @@ class GligenRef(_TypedRef):
             })
 
 
+def _vae_decode_params(params: dict, allow_extended_range: bool) -> dict:
+    if type(allow_extended_range) is not bool:
+        raise TypeError("VAE allow_extended_range must be a boolean")
+    if allow_extended_range:
+        params["allow_extended_range"] = True
+    return params
+
+
+def _vae_unclamped_output(image):
+    return image.add_(1.0).div_(2.0)
+
+
 class VaeRef(_TypedRef):
     KIND = "VAE"
 
@@ -1125,11 +1138,15 @@ class VaeRef(_TypedRef):
         return dict(await current_runtime().ops.apply(
             "vae.latent_layout", self, {}))
 
-    async def decode(self, latent: "LatentRef") -> "ImageRef":
+    async def decode(
+        self, latent: "LatentRef", *, allow_extended_range: bool = False,
+    ) -> "ImageRef":
         return await current_runtime().ops.apply("vae.decode", self,
-                                                 {"latent": latent})
+            _vae_decode_params({"latent": latent}, allow_extended_range))
 
-    async def decode_tensor(self, latent: "LatentRef") -> "TensorRef":
+    async def decode_tensor(
+        self, latent: "LatentRef", *, allow_extended_range: bool = False,
+    ) -> "TensorRef":
         """Decode to an opaque BHWC tensor without assuming RGB channels.
 
         This is the raw-tier counterpart to :meth:`decode`.  It exists for
@@ -1139,12 +1156,14 @@ class VaeRef(_TypedRef):
         the ordinary ``raw`` capability.
         """
         return await current_runtime().ops.apply(
-            "vae.decode_tensor", self, {"latent": latent})
+            "vae.decode_tensor", self,
+            _vae_decode_params({"latent": latent}, allow_extended_range))
 
     async def decode_tiled(
         self, latent: "LatentRef", tile_size: int = 512,
         overlap: int = 64, temporal_size: int = 64,
         temporal_overlap: int = 8,
+        *, allow_extended_range: bool = False,
     ) -> "ImageRef":
         """Decode through ComfyUI's bounded, pixel-sized tiled operation.
 
@@ -1153,28 +1172,29 @@ class VaeRef(_TypedRef):
         needs to assume a latent compression ratio. Model state and execution
         remain on the trusted plane; the guest receives only an image handle.
         """
-        return await current_runtime().ops.apply("vae.decode_tiled", self, {
+        return await current_runtime().ops.apply("vae.decode_tiled", self, _vae_decode_params({
             "latent": latent,
             "tile_size": int(tile_size),
             "overlap": int(overlap),
             "temporal_size": int(temporal_size),
             "temporal_overlap": int(temporal_overlap),
-        })
+        }, allow_extended_range))
 
     async def decode_tensor_tiled(
         self, latent: "LatentRef", tile_size: int = 512,
         overlap: int = 64, temporal_size: int = 64,
         temporal_overlap: int = 8,
+        *, allow_extended_range: bool = False,
     ) -> "TensorRef":
         """Tiled :meth:`decode_tensor` with the canonical VAE tile options."""
         return await current_runtime().ops.apply(
-            "vae.decode_tensor_tiled", self, {
+            "vae.decode_tensor_tiled", self, _vae_decode_params({
                 "latent": latent,
                 "tile_size": int(tile_size),
                 "overlap": int(overlap),
                 "temporal_size": int(temporal_size),
                 "temporal_overlap": int(temporal_overlap),
-            })
+            }, allow_extended_range))
 
     async def encode(self, image: "ImageRef") -> "LatentRef":
         """Mirrors ``vae.encode`` exactly. The caller owns any channel slicing.
@@ -9269,6 +9289,18 @@ class InProcessOps:
             if not hasattr(value, name):
                 setattr(value, name, default)
 
+    def _vae_decode_owner(self, value: Any, allow_extended_range: bool) -> Any:
+        if type(allow_extended_range) is not bool:
+            raise TypeError("VAE allow_extended_range must be a boolean")
+        if allow_extended_range:
+            original = value
+            value = copy.copy(original)
+            if value is original or vars(value) is vars(original):
+                raise TypeError("VAE output policy requires an independent wrapper copy")
+            value.process_output = _vae_unclamped_output
+        self._ensure_vae_current_defaults(value)
+        return value
+
     @staticmethod
     def _normalize_decoded_tensor(value: Any) -> Any:
         import torch
@@ -9302,10 +9334,12 @@ class InProcessOps:
             raise ValueError(
                 "VAE decode temporal_overlap must be in [4, 4096]")
 
-    async def _vae_decode(self, vae: "VaeRef", latent: "LatentRef") -> "ImageRef":
+    async def _vae_decode(
+        self, vae: "VaeRef", latent: "LatentRef", allow_extended_range: bool = False,
+    ) -> "ImageRef":
         rt = current_runtime()
         v = await rt.refs.resolve(vae)
-        self._ensure_vae_current_defaults(v)
+        v = self._vae_decode_owner(v, allow_extended_range)
         samples = await rt.refs.resolve(latent)
         return ImageRef._wrap(await rt.refs.create("IMAGE", v.decode(samples["samples"])))  # type: ignore[return-value]
 
@@ -9352,10 +9386,11 @@ class InProcessOps:
 
     async def _vae_decode_tensor(
         self, vae: "VaeRef", latent: "LatentRef",
+        allow_extended_range: bool = False,
     ) -> "TensorRef":
         rt = current_runtime()
         value = await rt.refs.resolve(vae)
-        self._ensure_vae_current_defaults(value)
+        value = self._vae_decode_owner(value, allow_extended_range)
         latent_value = await rt.refs.resolve(latent)
         decoded = self._normalize_decoded_tensor(
             value.decode(latent_value["samples"]))
@@ -9366,6 +9401,7 @@ class InProcessOps:
         self, vae: "VaeRef", latent: "LatentRef", tile_size: int = 512,
         overlap: int = 64, temporal_size: int = 64,
         temporal_overlap: int = 8,
+        allow_extended_range: bool = False,
     ) -> "ImageRef":
         from nodes import VAEDecodeTiled
 
@@ -9373,7 +9409,7 @@ class InProcessOps:
             tile_size, overlap, temporal_size, temporal_overlap)
         rt = current_runtime()
         value = await rt.refs.resolve(vae)
-        self._ensure_vae_current_defaults(value)
+        value = self._vae_decode_owner(value, allow_extended_range)
         samples = await rt.refs.resolve(latent)
         pixels = VAEDecodeTiled().decode(
             value, samples, tile_size, overlap, temporal_size,
@@ -9385,6 +9421,7 @@ class InProcessOps:
         self, vae: "VaeRef", latent: "LatentRef", tile_size: int = 512,
         overlap: int = 64, temporal_size: int = 64,
         temporal_overlap: int = 8,
+        allow_extended_range: bool = False,
     ) -> "TensorRef":
         from nodes import VAEDecodeTiled
 
@@ -9392,7 +9429,7 @@ class InProcessOps:
             tile_size, overlap, temporal_size, temporal_overlap)
         rt = current_runtime()
         value = await rt.refs.resolve(vae)
-        self._ensure_vae_current_defaults(value)
+        value = self._vae_decode_owner(value, allow_extended_range)
         samples = await rt.refs.resolve(latent)
         decoded = VAEDecodeTiled().decode(
             value, samples, tile_size, overlap, temporal_size,
