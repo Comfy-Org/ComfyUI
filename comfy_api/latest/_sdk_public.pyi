@@ -531,12 +531,17 @@ class OutputDomain(Protocol):
         caption_extension: str = ...,
         save_metadata: bool = ...,
         extra_metadata: Optional[dict[str, Any]] = ...,
+        a1111_parameters: Optional[str] = ...,
         image_format: str = ...,
         quality: int = ...,
         filenames: Optional[list[str]] = ...,
         lossless: bool = ...,
         optimize: bool = ...,
-    ) -> dict: ...
+        *,
+        png_text: Optional[dict[str, str]] = ...,
+    ) -> dict:
+        """Use png_text for a complete explicit PNG text block, independent of automatic metadata."""
+        ...
     async def save_images_with_alpha(
         self,
         images: ImageRef,
