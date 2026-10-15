@@ -2164,6 +2164,10 @@ class GraphDomain(Protocol):
     async def expand_nodes(
         self, nodes: list[dict[str, Any]], outputs: list[dict[str, Any]],
     ) -> dict[str, Any]: ...
+    async def expand_upstream_variants(
+        self, input_name: str, variants: list[dict], nodes: list[dict],
+        outputs: list[dict],
+    ) -> dict: ...
     async def expand_loop(
         self, flow: Any, values: list[Any],
     ) -> dict[str, Any]: ...
@@ -6818,6 +6822,16 @@ class _InProcessGraph:
             raise RuntimeError(
                 "graph expansion requires ComfyUI's active dynamic prompt")
         return self._dynamic_prompt
+
+    async def expand_upstream_variants(
+        self, input_name: str, variants: list[dict], nodes: list[dict],
+        outputs: list[dict], *, _policy=None,
+    ) -> dict:
+        from ._upstream_variants import expand_upstream_variants
+
+        return await expand_upstream_variants(
+            self, self._require_dynamic_prompt(), self._current_node_id,
+            input_name, variants, nodes, outputs, _policy, ref_type=Ref)
 
     @staticmethod
     def _expansion_link(value: Any, created: dict[str, Any]) -> Any:
