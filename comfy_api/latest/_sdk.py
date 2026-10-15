@@ -1164,6 +1164,12 @@ def _vae_unclamped_output(image):
     return image.add_(1.0).div_(2.0)
 
 
+class AudioEncoderRef(_TypedRef):
+    """Opaque Core audio encoder, passed to AUDIO_ENCODER consumers."""
+
+    KIND = "AUDIO_ENCODER"
+
+
 class VaeRef(_TypedRef):
     KIND = "VAE"
 
@@ -2258,6 +2264,10 @@ class ModelsDomain(Protocol):
         self, name: str, device: str = "default",
         weight_dtype: str = "default",
     ) -> VaeRef: ...
+    async def vae_from_state_dict(self, state_dict: ValueRef) -> VaeRef: ...
+    async def audio_encoder_from_state_dict(
+        self, state_dict: ValueRef,
+    ) -> AudioEncoderRef: ...
     async def load_upscale_model(self, name: str) -> UpscaleModelRef: ...
     async def load_clip_vision(self, model: str) -> ClipVisionRef: ...
     async def load_text_encoder(
@@ -4602,6 +4612,39 @@ class _InProcessModels:
                 comfy.sd.load_vae_patcher,
                 (vae_path, metadata, devices[device]))
         return VaeRef._wrap(await current_runtime().refs.create("VAE", vae))  # type: ignore[return-value]
+
+    @staticmethod
+    async def _tensor_state_dict(state_dict: ValueRef):
+        if not isinstance(state_dict, ValueRef) or state_dict.kind != "VALUE":
+            raise TypeError("state_dict must be a ValueRef")
+        value = await current_runtime().refs.resolve(state_dict)
+        if not isinstance(value, dict):
+            raise TypeError("state_dict must resolve to a dictionary")
+        if any(not isinstance(key, str) for key in value):
+            raise TypeError("state_dict keys must be strings")
+        import torch
+
+        if any(not isinstance(tensor, torch.Tensor) for tensor in value.values()):
+            raise TypeError("state_dict values must be tensors")
+        return value
+
+    async def vae_from_state_dict(self, state_dict: ValueRef) -> VaeRef:
+        """Construct the native VAE from tensor state without loading a file."""
+        state = await self._tensor_state_dict(state_dict)
+        import comfy.sd
+
+        vae = comfy.sd.VAE(sd=state)
+        return await self._ref("VAE", VaeRef, vae)
+
+    async def audio_encoder_from_state_dict(
+        self, state_dict: ValueRef,
+    ) -> AudioEncoderRef:
+        """Construct Core's native audio encoder from tensor state."""
+        state = await self._tensor_state_dict(state_dict)
+        from comfy.audio_encoders.audio_encoders import load_audio_encoder_from_sd
+
+        encoder = load_audio_encoder_from_sd(state)
+        return await self._ref("AUDIO_ENCODER", AudioEncoderRef, encoder)
 
     async def load_clip_vision(self, model: str) -> ClipVisionRef:
         import comfy.clip_vision
@@ -13565,6 +13608,9 @@ def _ref_type_for(v: Any) -> tuple[type, str]:
         return ModelRef, "MODEL"          # ModelPatcher
     if hasattr(v, "encode_from_tokens") or hasattr(v, "tokenize"):
         return ClipRef, "CLIP"
+    if (type(v).__module__ == "comfy.audio_encoders.audio_encoders"
+            and type(v).__name__ in {"AudioEncoderModel", "SheetSage2AudioEncoder"}):
+        return AudioEncoderRef, "AUDIO_ENCODER"
     if hasattr(v, "decode") and hasattr(v, "encode"):
         return VaeRef, "VAE"
     if isinstance(v, dict):
