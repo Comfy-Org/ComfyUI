@@ -521,6 +521,12 @@ class HuggingFaceWeight:
 #     directly (allow-all); under the overlay they are policy-checked and
 #     tenant-scoped. Domains marked (overlay) raise NotImplementedError in the
 #     OSS in-process default until wired. --- #
+@runtime_checkable
+class AssetCatalogueMetadataProvider(Protocol):
+    async def catalogue_metadata(
+        self, ref: AssetRef,
+    ) -> Optional[dict[str, Any]]: ...
+
 class AssetsDomain(Protocol):
     async def resolve(self, folder: str, name: str) -> AssetRef: ...
     async def exists(self, folder: str, name: str) -> bool: ...
@@ -536,6 +542,9 @@ class AssetsDomain(Protocol):
     async def digest(
         self, ref: AssetRef, algorithm: str = ...,
     ) -> str: ...
+    async def catalogue_metadata(
+        self, ref: AssetRef,
+    ) -> Optional[dict[str, Any]]: ...
     async def read_range(
         self, ref: AssetRef, offset: int = ..., length: int = ...,
     ) -> bytes: ...
@@ -973,10 +982,14 @@ class _Providers:
     ctx_provider: CtxProvider
     ops_provider: OpsProvider
     ref_resolver_factory: Callable[[], RefResolver]
+    asset_catalogue_metadata_provider: Optional[AssetCatalogueMetadataProvider]
     @property
     def overlay_active(self) -> bool: ...
     def register_execution_backend(self, impl: ExecutionBackend) -> None: ...
     def register_ctx_provider(self, impl: CtxProvider) -> None: ...
+    def register_asset_catalogue_metadata_provider(
+        self, impl: Optional[AssetCatalogueMetadataProvider],
+    ) -> None: ...
     def register_ops_provider(self, impl: OpsProvider) -> None: ...
     def register_ref_resolver_factory(
         self, factory: Callable[[], RefResolver]
