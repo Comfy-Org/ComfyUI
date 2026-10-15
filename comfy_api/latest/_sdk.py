@@ -1954,6 +1954,24 @@ class OpsProvider(Protocol):
 # implement the important ones over real core. Domains not needed by the POC
 # are declared and stubbed so the shape is fixed.
 # --------------------------------------------------------------------------- #
+@runtime_checkable
+class AssetCatalogueMetadataProvider(Protocol):
+    """Trusted host source of current authored records for admitted assets.
+
+    Implementations use the active runtime's tenant/library admission and the
+    exact ref/source identity. They authorize every read, including absence;
+    they must not collapse records by weight digest or manufacture them from
+    weight headers. None means verified record absence, never unavailable
+    source support. Provider/backend/permission errors must propagate.
+    """
+
+    async def catalogue_metadata(
+        self, ref: AssetRef,
+    ) -> Optional[dict[str, Any]]:
+        raise NotImplementedError(
+            "authored asset catalogue metadata source is unavailable")
+
+
 class AssetsDomain(Protocol):
     async def resolve(self, folder: str, name: str) -> AssetRef: ...
     async def exists(self, folder: str, name: str) -> bool: ...
@@ -1969,6 +1987,18 @@ class AssetsDomain(Protocol):
     async def digest(
         self, ref: AssetRef, algorithm: str = "sha256",
     ) -> str: ...
+    async def catalogue_metadata(
+        self, ref: AssetRef,
+    ) -> Optional[dict[str, Any]]:
+        """Read a current authored catalogue record, bounded to 1 MiB JSON.
+
+        None means an authorized source confirmed no record. Unsupported
+        sources raise NotImplementedError; authorization/backend errors raise.
+        Model-container/header metadata remains a separate API.
+        """
+        raise NotImplementedError(
+            "authored asset catalogue metadata source is unavailable")
+
     async def read_range(
         self, ref: AssetRef, offset: int = 0,
         length: int = 8 * 1024 * 1024,
@@ -2422,6 +2452,28 @@ class _InProcessAssets:
     _DIGEST_LOCK = threading.Lock()
     _IMAGE_FILE_MAX = 64 * 1024 * 1024
     _IMAGE_PIXELS_MAX = 67_108_864
+
+    async def catalogue_metadata(
+        self, ref: AssetRef,
+    ) -> Optional[dict[str, Any]]:
+        from ._asset_metadata import (
+            decode_catalogue_metadata, encode_catalogue_metadata,
+        )
+
+        if not isinstance(ref, AssetRef) or ref.kind != "ASSET":
+            raise TypeError("catalogue_metadata requires an admitted AssetRef")
+        runtime = current_runtime()
+        await runtime.refs.resolve(ref)  # The live table checks kind and realm.
+        provider = providers.asset_catalogue_metadata_provider
+        if provider is None:
+            raise NotImplementedError(
+                "authored asset catalogue metadata source is unavailable")
+        value = await provider.catalogue_metadata(ref)
+        if (current_runtime() is not runtime or
+                providers.asset_catalogue_metadata_provider is not provider):
+            raise RuntimeError("asset metadata provider/runtime changed during read")
+        await runtime.refs.resolve(ref)  # Ref release/end while awaiting refuses.
+        return decode_catalogue_metadata(encode_catalogue_metadata(value))
 
     @staticmethod
     def _confined_path(base: str, name: str, folder: str) -> str:
@@ -13633,6 +13685,8 @@ class Providers:
         self.ctx_provider: CtxProvider = InProcessCtxProvider()
         self.ops_provider: OpsProvider = InProcessOps()
         self.ref_resolver_factory: Callable[[], RefResolver] = InProcessRefResolver
+        self.asset_catalogue_metadata_provider: Optional[
+            AssetCatalogueMetadataProvider] = None
         self._overlay_name: Optional[str] = None
         self._extension_host_module_url: Optional[str] = None
 
@@ -13644,6 +13698,15 @@ class Providers:
     def register_ctx_provider(self, impl: CtxProvider) -> None:
         logger.info("SDK: ctx provider -> %s", type(impl).__name__)
         self.ctx_provider = impl
+
+    def register_asset_catalogue_metadata_provider(
+        self, impl: Optional[AssetCatalogueMetadataProvider],
+    ) -> None:
+        """Host composition only; no source or absence is assumed by default."""
+        if (impl is not None and
+                not isinstance(impl, AssetCatalogueMetadataProvider)):
+            raise TypeError("asset metadata provider needs catalogue_metadata(ref)")
+        self.asset_catalogue_metadata_provider = impl
 
     def register_ops_provider(self, impl: OpsProvider) -> None:
         logger.info("SDK: ops provider -> %s", type(impl).__name__)

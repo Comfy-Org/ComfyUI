@@ -2,6 +2,7 @@
 custom nodes import from ``comfy_api.latest.sdk`` (or a pinned version), never
 from ``_sdk`` directly."""
 from ._sdk import (  # noqa: F401
+    AssetCatalogueMetadataProvider,
     AssetRef,
     AssetsDomain,
     AudioRef,
@@ -63,6 +64,7 @@ from ._sdk import (  # noqa: F401
 from ._sdk import current_context as ctx  # `sdk.ctx()` -> active Context
 
 __all__ = [
+    "AssetCatalogueMetadataProvider",
     "Ref",
     "ClosureRef",
     "ClosuresDomain",
