@@ -17,7 +17,7 @@ Two audiences, separated below:
 If prose and this stub disagree, treat the stub + its implementation tests as
 authoritative.
 """
-from typing import Any, Awaitable, Callable, Mapping, Optional, Protocol, Sequence, TypeVar, runtime_checkable
+from typing import Any, AsyncIterable, Awaitable, Callable, Mapping, Optional, Protocol, Sequence, TypeVar, runtime_checkable
 from dataclasses import dataclass
 
 # NOTE: the contract deliberately does NOT import torch or any backend module.
@@ -531,6 +531,9 @@ class AssetCatalogueMetadataProvider(Protocol):
     ) -> Optional[dict[str, Any]]: ...
 
 class AssetsDomain(Protocol):
+    async def gguf_tensor_state(
+        self, ref: AssetRef, table: dict[str, Any], *, max_bytes: int,
+    ) -> ValueRef: ...
     async def resolve(self, folder: str, name: str) -> AssetRef: ...
     async def exists(self, folder: str, name: str) -> bool: ...
     async def delete_input(self, name: str) -> bool: ...
@@ -559,6 +562,10 @@ class AssetsDomain(Protocol):
     async def load_latent(self, ref: AssetRef) -> LatentRef: ...
 
 class OutputDomain(Protocol):
+    async def save_binary(
+        self, chunks: AsyncIterable[bytes], filename_prefix: str,
+        *, max_bytes: int, extension: str = ...,
+    ) -> str: ...
     async def save_images(
         self,
         images: ImageRef,
