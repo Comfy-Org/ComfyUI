@@ -149,12 +149,20 @@ def _measure(value, limits, *, override=False, ref_type=()):
                 raise ValueError("variant integer exceeds metadata budget")
             size += len(str(item)) + 1
         elif kind is str:
-            # UTF-8 has at most four bytes per code point; bound before encoding.
             if len(item) > limits.max_request_bytes:
                 raise ValueError("variant string exceeds metadata budget")
-            size += len(item.encode('utf-8')) + 2
+            size += 2
+            for character in item:
+                point = ord(character)
+                if 0xD800 <= point <= 0xDFFF:
+                    raise ValueError("variant strings require valid Unicode")
+                size += (6 if point < 32 else 2 if character in {'"','\\'}
+                         else 1 if point < 128 else 2 if point < 2048
+                         else 3 if point < 65536 else 4)
+                if size > limits.max_request_bytes:
+                    raise ValueError("variant request exceeds metadata byte budget")
         elif kind in (dict, list):
-            size += 2 + len(item)
+            size += 2 + len(item) * (2 if kind is dict else 1)
             if count + len(pending) + len(item) > limits.max_items:
                 raise ValueError("variant metadata exceeds item budget")
             if kind is dict:
