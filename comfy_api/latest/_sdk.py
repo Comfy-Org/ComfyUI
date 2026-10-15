@@ -4682,10 +4682,12 @@ class _InProcessModels:
         *, dequant_dtype: Optional[str] = "default", patch_dtype: Optional[str] = "default",
         patch_on_device: Optional[bool] = False,
     ) -> ModelRef:
-        """Build a native diffusion model using the host GGML ops and patcher.
+        """Build a model with host-owned calcuis-compatible GGML semantics.
 
         The caller owns GGUF parsing, key transforms and container metadata.
         Unsupported quantization and dynamic patcher modes refuse explicitly.
+        Ternary compatibility retains the selected native unsigned wrapping;
+        this API does not silently replace it with signed ternary spec math.
         """
         state = await self._tensor_state_dict(state_dict)
         from . import _ggml
@@ -4714,7 +4716,7 @@ class _InProcessModels:
     async def ggml_text_encoders_from_state_dicts(
         self, state_dicts: Sequence[ValueRef], clip_type: str,
     ) -> ClipRef:
-        """Construct one to four native encoders with host-owned GGML ops.
+        """Construct one to four encoders with calcuis-compatible host GGML ops.
 
         Clip type is strict. A caller preserving a legacy fallback must choose
         its resolved type before this call. Initial placement is Core's normal

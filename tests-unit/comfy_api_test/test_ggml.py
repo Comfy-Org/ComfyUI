@@ -51,8 +51,8 @@ def test_bfloat_bits():
 
 
 def test_unknown_forward_type_refuses():
-    tensor = GGUFTensor(torch.zeros(32, dtype=torch.uint8), tensor_type=20, tensor_shape=(32,))
-    with pytest.raises(NotImplementedError, match='tensor type 20'):
+    tensor = GGUFTensor(torch.zeros(32, dtype=torch.uint8), tensor_type=10, tensor_shape=(32,))
+    with pytest.raises(NotImplementedError, match='tensor type 10'):
         dequantize(tensor)
 
 
