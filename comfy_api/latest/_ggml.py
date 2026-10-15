@@ -14,8 +14,10 @@ def is_quantized(tensor):
 
 
 def require_supported(state):
+    from ._ggml_a2 import TYPES
+
     allowed = {None, GGMLType.F32, GGMLType.F16, GGMLType.BF16,
-               GGMLType.Q8_0, GGMLType.Q4_K, GGMLType.Q5_K, GGMLType.Q6_K}
+               GGMLType.Q8_0, GGMLType.Q4_K, GGMLType.Q5_K, GGMLType.Q6_K} | TYPES
     for name, tensor in state.items():
         qtype = getattr(tensor, 'tensor_type', None)
         if qtype not in allowed:
@@ -37,15 +39,19 @@ def dequantize(tensor, dtype=None, dequant_dtype=None):
     qtype = getattr(tensor, 'tensor_type', None)
     if not is_quantized(tensor):
         return _plain(tensor).to(dtype=dtype)
+    from ._ggml_a2 import TYPES, dequantize_blocks
+
     if qtype not in {GGMLType.BF16, GGMLType.Q8_0, GGMLType.Q4_K,
-                     GGMLType.Q5_K, GGMLType.Q6_K}:
+                     GGMLType.Q5_K, GGMLType.Q6_K} | TYPES:
         raise NotImplementedError(f'unsupported GGML forward tensor type {qtype!r}')
     shape = tensor.tensor_shape
     raw = _plain(tensor).view(torch.uint8)
     _, block_bytes, _ = _LAYOUTS[qtype]
     blocks = raw.reshape(-1, block_bytes)
     compute = dtype if dequant_dtype == 'target' else dequant_dtype
-    if qtype == GGMLType.BF16:
+    if qtype in TYPES:
+        weights = dequantize_blocks(qtype, blocks, compute)
+    elif qtype == GGMLType.BF16:
         weights = (blocks.view(torch.int16).to(torch.int32) << 16).view(torch.float32)
     elif qtype == GGMLType.Q8_0:
         scales = blocks[:, :2].contiguous().view(torch.float16).to(dtype=compute)

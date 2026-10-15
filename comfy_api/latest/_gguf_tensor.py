@@ -17,12 +17,25 @@ class GGMLType(IntEnum):
     Q4_K = 12
     Q5_K = 13
     Q6_K = 14
+    IQ2_XXS = 16
+    IQ2_XS = 17
+    IQ3_XXS = 18
+    IQ1_S = 19
+    IQ4_NL = 20
+    IQ3_S = 21
+    IQ2_S = 22
+    IQ4_XS = 23
     I8 = 24
     I16 = 25
     I32 = 26
     I64 = 27
     F64 = 28
+    IQ1_M = 29
     BF16 = 30
+    TQ1_0 = 34
+    TQ2_0 = 35
+    MXFP4 = 39
+    NVFP4 = 40
 
 
 _LAYOUTS = {
@@ -32,6 +45,13 @@ _LAYOUTS = {
     GGMLType.I8: (1, 1, torch.int8), GGMLType.I16: (1, 2, torch.int16),
     GGMLType.I32: (1, 4, torch.int32), GGMLType.I64: (1, 8, torch.int64),
     GGMLType.F64: (1, 8, torch.float64), GGMLType.BF16: (1, 2, torch.uint8),
+    GGMLType.IQ2_XXS: (256, 66, torch.uint8), GGMLType.IQ2_XS: (256, 74, torch.uint8),
+    GGMLType.IQ3_XXS: (256, 98, torch.uint8), GGMLType.IQ1_S: (256, 50, torch.uint8),
+    GGMLType.IQ4_NL: (32, 18, torch.uint8), GGMLType.IQ3_S: (256, 110, torch.uint8),
+    GGMLType.IQ2_S: (256, 82, torch.uint8), GGMLType.IQ4_XS: (256, 136, torch.uint8),
+    GGMLType.IQ1_M: (256, 56, torch.uint8), GGMLType.TQ1_0: (256, 54, torch.uint8),
+    GGMLType.TQ2_0: (256, 66, torch.uint8), GGMLType.MXFP4: (32, 17, torch.uint8),
+    GGMLType.NVFP4: (64, 36, torch.uint8),
 }
 
 
