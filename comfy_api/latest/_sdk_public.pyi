@@ -210,6 +210,11 @@ class UpscaleModelRef(Ref):
 class ModelRef(Ref):
     """MODEL — patch/hook via ctx.models; weights never materialize in-node."""
     KIND: str
+    async def merge(self, other: "ModelRef", ratio: float = ...) -> "ModelRef": ...
+    async def weighted_add(
+        self, other: "ModelRef", *, strength_self: float,
+        strength_other: float,
+    ) -> "ModelRef": ...
     async def fix_empty_latent_channels(self, latent: LatentRef) -> LatentRef: ...
     async def patch(self, transform: str, **params: Any) -> "ModelRef": ...
     async def spatial_crop_inputs(
@@ -231,6 +236,11 @@ class ModelRef(Ref):
 
 class ClipRef(Ref):
     KIND: str
+    async def merge(self, other: "ClipRef", ratio: float = ...) -> "ClipRef": ...
+    async def weighted_add(
+        self, other: "ClipRef", *, strength_self: float,
+        strength_other: float,
+    ) -> "ClipRef": ...
     async def apply_hooks(
         self, hooks: Optional[Ref], *, apply_to_conds: bool = ...,
         schedule_clip: bool = ...,

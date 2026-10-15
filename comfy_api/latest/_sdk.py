@@ -47,6 +47,7 @@ import contextvars
 import copy
 import inspect
 import logging
+import math
 import os
 import re
 import sys
@@ -719,6 +720,25 @@ class TimestepKeyframeRef(_TypedRef):
 class ModelRef(_TypedRef):
     KIND = "MODEL"
 
+    async def merge(self, other: "ModelRef", ratio: float = 0.5) -> "ModelRef":
+        """Clone and merge diffusion weights; ratio weights this model."""
+        return await current_runtime().ops.apply(
+            "model.merge", self, {"other": other, "ratio": ratio})
+
+    async def weighted_add(
+        self, other: "ModelRef", *, strength_self: float,
+        strength_other: float,
+    ) -> "ModelRef":
+        """Clone and combine diffusion patches with independent strengths.
+
+        Receiver-only keys stay unchanged, following native patch semantics.
+        """
+        return await current_runtime().ops.apply(
+            "model.weighted_add", self, {
+                "other": other, "strength_self": strength_self,
+                "strength_other": strength_other,
+            })
+
     async def fix_empty_latent_channels(self, latent: LatentRef) -> LatentRef:
         """Normalize a latent for this model before preparing custom noise."""
         return await current_runtime().ops.apply(
@@ -943,6 +963,25 @@ class ModelRef(_TypedRef):
 
 class ClipRef(_TypedRef):
     KIND = "CLIP"
+
+    async def merge(self, other: "ClipRef", ratio: float = 0.5) -> "ClipRef":
+        """Clone and merge encoder weights, preserving position/logit buffers."""
+        return await current_runtime().ops.apply(
+            "clip.merge", self, {"other": other, "ratio": ratio})
+
+    async def weighted_add(
+        self, other: "ClipRef", *, strength_self: float,
+        strength_other: float,
+    ) -> "ClipRef":
+        """Clone and combine encoder patches with independent strengths.
+
+        Preserve position/logit buffers and receiver-only keys.
+        """
+        return await current_runtime().ops.apply(
+            "clip.weighted_add", self, {
+                "other": other, "strength_self": strength_self,
+                "strength_other": strength_other,
+            })
 
     async def apply_hooks(
         self, hooks: Optional["Ref"], *, apply_to_conds: bool = True,
@@ -9454,6 +9493,8 @@ class InProcessOps:
                 self._clip_encode_token_weights_component,
             "clip.encode": self._clip_encode,
             "clip.set_last_layer": self._clip_set_last_layer,
+            "clip.merge": self._clip_merge,
+            "clip.weighted_add": self._clip_weighted_add,
             "clip.with_attention_impl": self._clip_with_attention_impl,
             "clip.apply_hooks": self._clip_apply_hooks,
             "clip.describe_tokens": self._clip_describe_tokens,
@@ -9495,6 +9536,8 @@ class InProcessOps:
             "hooks.clone_and_combine": self._hooks_clone_and_combine,
             "hooks.create_lora": self._hooks_create_lora,
             "model.apply_lora": self._model_apply_lora,
+            "model.merge": self._model_merge,
+            "model.weighted_add": self._model_weighted_add,
             "model.apply_dit_block_lora": self._model_apply_dit_block_lora,
             "model.apply_ltx2_lora": self._model_apply_ltx2_lora,
             "sampling.spatial_crop_inputs":
@@ -11560,6 +11603,76 @@ class InProcessOps:
         group = comfy.hooks.create_hook_lora(
             weights, float(strength_model), float(strength_clip))
         return OpaqueRef._wrap(await rt.refs.create("OPAQUE", group))
+
+    async def _merge_patches(
+        self, first: Ref, other: Ref, ratio: float, kind: str,
+    ) -> Ref:
+        ref_type = ModelRef if kind == "MODEL" else ClipRef
+        if (not isinstance(first, ref_type) or first.kind != kind
+                or not isinstance(other, ref_type) or other.kind != kind):
+            raise TypeError(f"merge requires two {kind} refs")
+        if isinstance(ratio, bool) or not isinstance(ratio, (int, float)):
+            raise TypeError("merge ratio must be a number")
+        ratio = float(ratio)
+        if not math.isfinite(ratio):
+            raise ValueError("merge ratio must be finite")
+        return await self._weighted_add_patches(
+            first, other, ratio, 1.0 - ratio, kind)
+
+    async def _weighted_add_patches(
+        self, first: Ref, other: Ref, strength_self: float,
+        strength_other: float, kind: str,
+    ) -> Ref:
+        ref_type = ModelRef if kind == "MODEL" else ClipRef
+        if (not isinstance(first, ref_type) or first.kind != kind
+                or not isinstance(other, ref_type) or other.kind != kind):
+            raise TypeError(f"merge requires two {kind} refs")
+        for name, strength in (
+            ("strength_self", strength_self), ("strength_other", strength_other),
+        ):
+            if isinstance(strength, bool) or not isinstance(strength, (int, float)):
+                raise TypeError(f"{name} must be a number")
+            if not math.isfinite(strength):
+                raise ValueError(f"{name} must be finite")
+        strength_self, strength_other = float(strength_self), float(strength_other)
+        rt = current_runtime()
+        receiver = await rt.refs.resolve(first)
+        donor = await rt.refs.resolve(other)
+        patches = (donor.get_key_patches("diffusion_model.") if kind == "MODEL"
+                   else donor.get_key_patches())
+        if (not isinstance(patches, dict) or len(patches) > 65536
+                or any(not isinstance(key, str) or len(key) > 4096 for key in patches)):
+            raise ValueError("merge key patches exceed bounds")
+        result = receiver.clone()
+        for key, patch in patches.items():
+            if kind == "CLIP" and key.endswith((".position_ids", ".logit_scale")):
+                continue
+            result.add_patches({key: patch}, strength_other, strength_self)
+        return ref_type._wrap(await rt.refs.create(kind, result))
+
+    async def _model_merge(
+        self, model: ModelRef, other: ModelRef, ratio: float = 0.5,
+    ) -> ModelRef:
+        return await self._merge_patches(model, other, ratio, "MODEL")
+
+    async def _clip_merge(
+        self, clip: ClipRef, other: ClipRef, ratio: float = 0.5,
+    ) -> ClipRef:
+        return await self._merge_patches(clip, other, ratio, "CLIP")
+
+    async def _model_weighted_add(
+        self, model: ModelRef, other: ModelRef, *, strength_self: float,
+        strength_other: float,
+    ) -> ModelRef:
+        return await self._weighted_add_patches(
+            model, other, strength_self, strength_other, "MODEL")
+
+    async def _clip_weighted_add(
+        self, clip: ClipRef, other: ClipRef, *, strength_self: float,
+        strength_other: float,
+    ) -> ClipRef:
+        return await self._weighted_add_patches(
+            clip, other, strength_self, strength_other, "CLIP")
 
     async def _model_apply_lora(
         self, model: "ModelRef", asset: "AssetRef",
