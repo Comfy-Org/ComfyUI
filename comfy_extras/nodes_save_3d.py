@@ -578,7 +578,7 @@ class SaveGLB(IO.ComfyNode):
         if isinstance(mesh, Types.File3D):
             # Handle File3D input - save BytesIO data to output folder
             ext = mesh.format or "glb"
-            f = f"{filename}_{counter:05}_.{ext}"
+            f = f"{filename}_{counter:05}.{ext}"
             mesh.save_to(os.path.join(full_output_folder, f))
             results.append(UI.SavedResult(f, subfolder, IO.FolderType.output))
             counter += 1
@@ -589,7 +589,7 @@ class SaveGLB(IO.ComfyNode):
                 if glb is None:
                     logging.warning(f"SaveGLB: skipping empty mesh at batch index {i}")
                     continue
-                f = f"{filename}_{counter:05}_.glb"
+                f = f"{filename}_{counter:05}.glb"
                 with open(os.path.join(full_output_folder, f), "wb") as fh:
                     fh.write(glb)
                 results.append(UI.SavedResult(f, subfolder, IO.FolderType.output))
