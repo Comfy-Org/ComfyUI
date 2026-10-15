@@ -56,6 +56,7 @@ from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import (
     Any,
+    AsyncIterable,
     Awaitable,
     Callable,
     Mapping,
@@ -1979,6 +1980,15 @@ class AssetCatalogueMetadataProvider(Protocol):
 
 
 class AssetsDomain(Protocol):
+    async def gguf_tensor_state(
+        self, ref: AssetRef, table: dict[str, Any], *, max_bytes: int,
+    ) -> ValueRef:
+        """Map validated guest-parsed GGUF ranges into a host-owned state ref.
+
+        The table specifies names, GGML types, offsets, logical shapes and raw
+        storage shapes. This exposes neither a host path nor weight buffers.
+        """
+        ...
     async def resolve(self, folder: str, name: str) -> AssetRef: ...
     async def exists(self, folder: str, name: str) -> bool: ...
     async def delete_input(self, name: str) -> bool: ...
@@ -2106,6 +2116,16 @@ class OutputDomain(Protocol):
         self, state_dict: ValueRef, filename_prefix: str,
         metadata: Optional[dict[str, str]] = None,
     ) -> str: ...
+    async def save_binary(
+        self, chunks: AsyncIterable[bytes], filename_prefix: str,
+        *, max_bytes: int, extension: str = ".gguf",
+    ) -> str:
+        """Publish a bounded stream of 1..1 MiB chunks under output.
+
+        Returns a relative name after completion; failure removes the partial
+        file. Remote providers also enforce the operator's output byte limit.
+        """
+        ...
     async def save_model(
         self, model: ModelRef, filename_prefix: str,
         model_key_prefix: str = "model.diffusion_model.",
@@ -2455,6 +2475,19 @@ class InProcessRefResolver:
 
 
 class _InProcessAssets:
+    async def gguf_tensor_state(
+        self, ref: AssetRef, table: dict[str, Any], *, max_bytes: int,
+    ) -> ValueRef:
+        if not isinstance(ref, AssetRef) or ref.kind != AssetRef.KIND:
+            raise TypeError("gguf_tensor_state requires an ASSET ref")
+        path = await current_runtime().refs.resolve(ref)
+        if not isinstance(path, (str, os.PathLike)):
+            raise TypeError("ASSET ref does not contain a managed file")
+        from ._gguf_tensor import tensor_state
+
+        state = tensor_state(path, table, max_bytes)
+        return ValueRef._wrap(await current_runtime().refs.create("VALUE", state))
+
     _LIST_MAX = 4096
     _SCAN_MAX = 100000
     _DIGEST_CACHE_MAX = 256
@@ -5470,6 +5503,15 @@ class _InProcessOutput:
         self._prompt = prompt
         self._extra_pnginfo = extra_pnginfo
         self._metadata_owner = _image_metadata_owner(prompt, extra_pnginfo)
+
+    async def save_binary(
+        self, chunks: AsyncIterable[bytes], filename_prefix: str,
+        *, max_bytes: int, extension: str = ".gguf",
+    ) -> str:
+        from ._binary_output import save_binary
+
+        return await save_binary(
+            chunks, self._prefix(filename_prefix, ""), extension, max_bytes)
 
     @staticmethod
     def _prefix(filename_prefix: str, subfolder: str) -> str:
