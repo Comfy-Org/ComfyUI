@@ -2285,6 +2285,14 @@ class ModelsDomain(Protocol):
         weight_dtype: str = "default",
     ) -> VaeRef: ...
     async def vae_from_state_dict(self, state_dict: ValueRef) -> VaeRef: ...
+    async def ggml_diffusion_from_state_dict(
+        self, state_dict: ValueRef, metadata: Optional[dict[str, Any]] = None,
+        *, dequant_dtype: Optional[str] = "default", patch_dtype: Optional[str] = "default",
+        patch_on_device: Optional[bool] = False,
+    ) -> ModelRef: ...
+    async def ggml_text_encoders_from_state_dicts(
+        self, state_dicts: Sequence[ValueRef], clip_type: str,
+    ) -> ClipRef: ...
     async def audio_encoder_from_state_dict(
         self, state_dict: ValueRef,
     ) -> AudioEncoderRef: ...
@@ -4668,6 +4676,73 @@ class _InProcessModels:
 
         vae = comfy.sd.VAE(sd=state)
         return await self._ref("VAE", VaeRef, vae)
+
+    async def ggml_diffusion_from_state_dict(
+        self, state_dict: ValueRef, metadata: Optional[dict[str, Any]] = None,
+        *, dequant_dtype: Optional[str] = "default", patch_dtype: Optional[str] = "default",
+        patch_on_device: Optional[bool] = False,
+    ) -> ModelRef:
+        """Build a native diffusion model using the host GGML ops and patcher.
+
+        The caller owns GGUF parsing, key transforms and container metadata.
+        Unsupported quantization and dynamic patcher modes refuse explicitly.
+        """
+        state = await self._tensor_state_dict(state_dict)
+        from . import _ggml
+        from ._ggml_patcher import GGMLModelPatcher
+        import comfy.sd
+        import torch
+
+        _ggml.require_supported(state)
+        dtypes = {None: None, 'default': None, 'target': 'target', 'float32': torch.float32,
+                  'float16': torch.float16, 'bfloat16': torch.bfloat16}
+        if dequant_dtype not in dtypes or patch_dtype not in dtypes:
+            raise ValueError("unsupported GGML precision selection")
+        if patch_on_device is not None and type(patch_on_device) is not bool:
+            raise TypeError("patch_on_device must be bool or None")
+        if metadata is not None and not isinstance(metadata, dict):
+            raise TypeError("GGML metadata must be a dictionary or None")
+        ops = _ggml.make_ops(dtypes[dequant_dtype], dtypes[patch_dtype])
+        model = comfy.sd.load_diffusion_model_state_dict(
+            state, model_options={"custom_operations": ops}, metadata=metadata)
+        if model is None:
+            raise RuntimeError("could not detect GGML diffusion model type")
+        model = GGMLModelPatcher.from_patcher(model)
+        model.patch_on_device = patch_on_device
+        return await self._ref("MODEL", ModelRef, model)
+
+    async def ggml_text_encoders_from_state_dicts(
+        self, state_dicts: Sequence[ValueRef], clip_type: str,
+    ) -> ClipRef:
+        """Construct one to four native encoders with host-owned GGML ops.
+
+        Clip type is strict. A caller preserving a legacy fallback must choose
+        its resolved type before this call. Initial placement is Core's normal
+        text-encoder offload device, matching this GGML loading path.
+        """
+        if not isinstance(state_dicts, (list, tuple)) or not 1 <= len(state_dicts) <= 4:
+            raise ValueError("GGML text encoders require 1..4 state refs")
+        states = [await self._tensor_state_dict(ref) for ref in state_dicts]
+        from . import _ggml
+        from ._ggml_patcher import GGMLModelPatcher
+        import comfy.model_management
+        import comfy.sd
+        import folder_paths
+
+        for state in states:
+            _ggml.require_supported(state)
+        if not isinstance(clip_type, str) or not clip_type:
+            raise TypeError("clip_type must be a string")
+        resolved_type = getattr(comfy.sd.CLIPType, clip_type.upper().replace("-", "_"), None)
+        if resolved_type is None:
+            raise ValueError(f"unknown CLIP type {clip_type!r}")
+        clip = comfy.sd.load_text_encoder_state_dicts(
+            clip_type=resolved_type, state_dicts=states,
+            model_options={"custom_operations": _ggml.make_ops(),
+                           "initial_device": comfy.model_management.text_encoder_offload_device()},
+            embedding_directory=folder_paths.get_folder_paths("embeddings"))
+        clip.patcher = GGMLModelPatcher.from_patcher(clip.patcher)
+        return await self._ref("CLIP", ClipRef, clip)
 
     async def audio_encoder_from_state_dict(
         self, state_dict: ValueRef,
