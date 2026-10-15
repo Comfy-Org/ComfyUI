@@ -680,6 +680,13 @@ class GraphDomain(Protocol):
     async def expand_loop(
         self, flow: Any, values: list[Any],
     ) -> dict[str, Any]: ...
+    async def expand_upstream_variants(
+        self,
+        input_name: str,
+        variants: list[dict],
+        nodes: list[dict],
+        outputs: list[dict],
+    ) -> dict: ...
     async def widget_values(
         self,
         node_id: int | str = ...,
