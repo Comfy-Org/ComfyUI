@@ -71,7 +71,7 @@ def test_invalid_or_unsupported_state_precedes_native_build(monkeypatch, method,
     async def run():
         refs = _sdk.InProcessRefResolver()
         foreign = _sdk.InProcessRefResolver()
-        value = GGUFTensor(torch.zeros(32, dtype=torch.uint8), tensor_type=20, tensor_shape=(32,))
+        value = GGUFTensor(torch.zeros(32, dtype=torch.uint8), tensor_type=10, tensor_shape=(32,))
         owner = foreign if case == 'foreign' else refs
         raw = await owner.create('ASSET' if case == 'relabeled' else 'VALUE', {'weight': value})
         ref = _sdk.ValueRef(kind='VALUE', id=raw.id)
