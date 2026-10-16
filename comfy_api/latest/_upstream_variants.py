@@ -9,6 +9,7 @@ import hashlib
 import json
 import math
 import re
+import uuid
 
 
 class UpstreamVariantsPending(RuntimeError):
@@ -42,6 +43,14 @@ class VariantBudget:
         self.limits = limits
         self.used = dict(variants=0, cloned_nodes=0, overrides=0, literal_bytes=0,
                          retained_tickets=0, retained_nodes=0)
+        self.retained_image_bytes = 0
+
+    def charge_images(self, cost, limit):
+        if type(cost) is not int or cost < 0 or type(limit) is not int or limit <= 0:
+            raise PermissionError('variant IMAGE retention needs an explicit host byte budget')
+        if self.retained_image_bytes + cost > limit:
+            raise ValueError('job variant IMAGE retention budget exhausted')
+        self.retained_image_bytes += cost
 
     def charge(self, **cost):
         for name, value in cost.items():
@@ -65,6 +74,7 @@ class VariantPlan:
     direct_clones: dict
     outputs: tuple
     retained_nodes: int
+    continuation_prefix: str
 
 
 class UpstreamVariantPolicy:
@@ -79,7 +89,8 @@ class UpstreamVariantPolicy:
 
     def __init__(self, graph_owner, budget, *, assert_current, admit_target,
                  validate_override, schedule, external_node_types=frozenset(),
-                 scheduler_overhead_nodes=0):
+                 scheduler_overhead_nodes=0, deadline_monotonic=None,
+                 max_retained_image_bytes=None):
         if type(budget) is not VariantBudget:
             raise TypeError("variant budget must be host-owned")
         if any(not callable(fn) for fn in (assert_current, admit_target, validate_override)):
@@ -100,6 +111,8 @@ class UpstreamVariantPolicy:
         if type(scheduler_overhead_nodes) is not int or scheduler_overhead_nodes < 0:
             raise ValueError("invalid scheduler node accounting")
         self.scheduler_overhead_nodes = scheduler_overhead_nodes
+        self.deadline_monotonic = deadline_monotonic
+        self.max_retained_image_bytes = max_retained_image_bytes
         self._sources = []
 
     def current(self, graph_owner, stage):
@@ -108,6 +121,9 @@ class UpstreamVariantPolicy:
         for dynprompt, caller_id, node_ids, expected in self._sources:
             if _source_fingerprint(dynprompt, caller_id, node_ids, self.budget.limits) != expected:
                 raise PermissionError("upstream graph source changed after planning")
+
+    def measure_source(self, source):
+        return _measure(source,self.budget.limits)
 
 
 def _link(value):
@@ -191,13 +207,18 @@ def _measure(value, limits, *, override=False, ref_type=()):
 
 
 def _fingerprint(snapshot):
-    return hashlib.sha256(json.dumps(snapshot, sort_keys=True, separators=(',', ':'),
+    return hashlib.sha256(json.dumps(snapshot, sort_keys=False, separators=(',', ':'),
                                      ensure_ascii=False, allow_nan=False).encode()).hexdigest()
 
 
+def _source_node(node):
+    # IS_CHANGED is execution-owned cached state, not submitted graph source.
+    return {key:value for key,value in node.items() if key != 'is_changed'}
+
+
 def _source_fingerprint(dynprompt, caller_id, node_ids, limits):
-    snapshot = dict(caller=dynprompt.get_node(caller_id),
-                    nodes={key: dynprompt.get_node(key) for key in node_ids})
+    snapshot = dict(caller=_source_node(dynprompt.get_node(caller_id)),
+                    nodes={key: _source_node(dynprompt.get_node(key)) for key in node_ids})
     _measure(snapshot, limits)
     return _fingerprint(snapshot)
 
@@ -216,7 +237,7 @@ def plan_upstream_variants(graph_owner, dynprompt, caller_id, input_name, varian
     if type(outputs) is not list or len(outputs) > 128:
         raise ValueError("graph expansion has too many outputs")
     _measure([input_name, variants, nodes, outputs], limits, ref_type=ref_type)
-    caller = dynprompt.get_node(caller_id)
+    caller = _source_node(dynprompt.get_node(caller_id))
     source = caller.get('inputs', {}).get(input_name)
     if not _link(source):
         raise ValueError("selected current input must be a direct graph link")
@@ -236,7 +257,7 @@ def plan_upstream_variants(graph_owner, dynprompt, caller_id, input_name, varian
         if len(snapshot) + len(visiting) >= limits.max_upstream_nodes:
             raise ValueError("upstream branch exceeds node budget")
         visiting.add(node_id)
-        node = dynprompt.get_node(node_id)
+        node = _source_node(dynprompt.get_node(node_id))
         source_bytes += _measure(node, limits)
         if source_bytes > limits.max_request_bytes:
             raise ValueError("upstream snapshot exceeds metadata byte budget")
@@ -279,8 +300,6 @@ def plan_upstream_variants(graph_owner, dynprompt, caller_id, input_name, varian
                 raise ValueError("override fields must be node_id, input_name and value")
             node_id = _node_id(override['node_id'], limits)
             name = _name(override['input_name'], 'override input')
-            if name in {'prompt', 'extra_pnginfo', 'unique_id', 'my_unique_id', 'dynprompt'}:
-                raise PermissionError("hidden execution inputs cannot be overridden")
             if node_id not in snapshot or (node_id, name) in pairs:
                 raise ValueError("unrelated target or duplicate override")
             pairs.add((node_id, name))
@@ -293,6 +312,7 @@ def plan_upstream_variants(graph_owner, dynprompt, caller_id, input_name, varian
 
     continuation_ids = set()
     direct_clones = {}
+    direct_clone_sources = dict(snapshot)
     for spec in nodes:
         if type(spec) is not dict:
             raise TypeError("continuation node specs must be dictionaries")
@@ -306,11 +326,15 @@ def plan_upstream_variants(graph_owner, dynprompt, caller_id, input_name, varian
             link = caller.get('inputs', {}).get(_name(spec['clone_input'], 'cloned input'))
             if not _link(link) or link[0] == caller_id:
                 raise ValueError("clone input must be a direct nonrecursive current link")
-            target = dynprompt.get_node(link[0])
-            _measure(target, limits)
+            target = _source_node(dynprompt.get_node(link[0]))
             if policy.admit_target(link[0], target.get('class_type'), 'direct-clone') is not True:
                 raise UpstreamVariantsPending("direct cloned producer is not admitted")
-            direct_clones[identifier] = (link[0],copy.deepcopy(target))
+            if link[0] not in direct_clone_sources:
+                source_bytes += _measure(target, limits)
+                if source_bytes > limits.max_request_bytes:
+                    raise ValueError("direct-clone snapshot exceeds aggregate byte budget")
+                direct_clone_sources[link[0]] = copy.deepcopy(target)
+            direct_clones[identifier] = (link[0],direct_clone_sources[link[0]])
         else:
             if set(spec) - {'id', 'class_type', 'inputs'}:
                 raise ValueError("unknown continuation fields")
@@ -393,7 +417,8 @@ def plan_upstream_variants(graph_owner, dynprompt, caller_id, input_name, varian
     policy._sources.append((dynprompt, caller_id, tuple(watched_nodes), fingerprint))
     plan = VariantPlan(caller_id, fingerprint, producer_id, output_index,
                        {key: snapshot[key] for key in ordered}, tuple(copy.deepcopy(variants)),
-                       tuple(copy.deepcopy(nodes)), direct_clones, tuple(copy.deepcopy(outputs)), retained_nodes)
+                       tuple(copy.deepcopy(nodes)), direct_clones, tuple(copy.deepcopy(outputs)), retained_nodes,
+                       uuid.uuid4().hex + '.')
     return plan
 
 
@@ -413,4 +438,13 @@ async def expand_upstream_variants(graph_owner, dynprompt, caller_id, input_name
     for link in result['result']:
         if (not _link(link) or link[0] not in result['expand'] or link[1] > 1024):
             raise ValueError("variant scheduler must return only its own continuation output links")
+    expected = [[plan.continuation_prefix + output['node'],output['output']] for output in plan.outputs]
+    if list(result['result']) != expected:
+        raise ValueError("variant scheduler changed declared continuation output mapping or order")
+    for spec in plan.continuation:
+        target = result['expand'].get(plan.continuation_prefix + spec['id'])
+        expected_type = (plan.direct_clones[spec['id']][1]['class_type']
+                         if 'clone_input' in spec else spec['class_type'])
+        if type(target) is not dict or target.get('class_type') != expected_type:
+            raise ValueError("variant scheduler did not materialize the declared continuation")
     return result

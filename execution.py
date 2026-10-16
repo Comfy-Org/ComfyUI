@@ -48,6 +48,7 @@ from comfy_execution.media_enrichment import enrich_output_with_media_metadata
 from comfy_api.internal import _ComfyNodeInternal, _NodeOutputInternal, first_real_override, is_class, make_locked_method_func
 from comfy_api.latest import io, _io
 from comfy_api.latest import _execution_metadata
+from comfy_execution import upstream_variants as _upstream_variants
 from comfy_execution.cache_provider import _has_cache_providers, _get_cache_providers, _logger as _cache_logger
 from app.assets.manager import AssetManager, NoAssets
 
@@ -77,7 +78,8 @@ class IsChangedCache:
         node = self.dynprompt.get_node(node_id)
         class_type = node["class_type"]
         class_def = nodes.NODE_CLASS_MAPPINGS[class_type]
-        if "graph.metadata" in (getattr(class_def, "SDK_PERMISSIONS", ()) or ()):
+        if {"graph.metadata", "graph.expand.upstream"}.intersection(
+                getattr(class_def, "SDK_PERMISSIONS", ()) or ()):
             self.is_changed[node_id] = float("nan")
             return self.is_changed[node_id]
         has_is_changed = False
@@ -658,7 +660,8 @@ async def execute(server: "ExecutionServer", dynprompt, caches, current_item, ex
     inputs = dynprompt.get_node(unique_id)['inputs']
     class_type = dynprompt.get_node(unique_id)['class_type']
     class_def = nodes.NODE_CLASS_MAPPINGS[class_type]
-    cached = await caches.outputs.get(unique_id)
+    native_variant = _upstream_variants.native_control(dynprompt.get_node(unique_id))
+    cached = None if native_variant is not None else await caches.outputs.get(unique_id)
     if cached is not None:
         metadata_owner = _execution_metadata.current(prompt_id)
         if metadata_owner is not None and metadata_owner.observe:
@@ -675,6 +678,10 @@ async def execute(server: "ExecutionServer", dynprompt, caches, current_item, ex
 
     input_data_all = None
     try:
+        if native_variant is not None:
+            await _upstream_variants.execute_control(prompt_id,dynprompt,unique_id,caches,execution_list)
+            get_progress_state().finish_progress(unique_id)
+            return (ExecutionResult.SUCCESS,None,None)
         if unique_id in pending_async_nodes:
             results = []
             for r in pending_async_nodes[unique_id]:
@@ -786,7 +793,8 @@ async def execute(server: "ExecutionServer", dynprompt, caches, current_item, ex
                     tasks = [x for x in output_data if isinstance(x, asyncio.Task)]
                     await asyncio.gather(*tasks, return_exceptions=True)
                     unblock()
-                asyncio.create_task(await_completion())
+                completion_task = asyncio.create_task(await_completion())
+                _upstream_variants.track_completion(completion_task)
                 return (ExecutionResult.PENDING, None, None)
         cache_ui_value = ui_outputs.get(unique_id)
         if len(output_ui) > 0:
@@ -846,6 +854,15 @@ async def execute(server: "ExecutionServer", dynprompt, caches, current_item, ex
         execution_list.cache_update(unique_id, cache_entry)
         await caches.outputs.set(unique_id, cache_entry)
 
+    except _upstream_variants.VariantExecutionFailure as failure:
+        details = dict(failure.details)
+        upstream_id = details['node_id']
+        original_id = dynprompt.get_real_node_id(upstream_id)
+        if original_id not in dynprompt.original_prompt:
+            original_id = dynprompt.get_real_node_id(unique_id)
+        details['node_id'] = original_id
+        details['upstream_node_id'] = upstream_id
+        return (ExecutionResult.FAILURE,details,failure.error)
     except comfy.model_management.InterruptProcessingException as iex:
         logging.info("Processing interrupted")
 
@@ -944,6 +961,8 @@ class PromptExecutor:
                 "current_inputs": error["current_inputs"],
                 "current_outputs": list(current_outputs),
             }
+            for name in ('upstream_node_id','upstream_variant_id'):
+                if name in error:mes[name] = error[name]
             self.add_message("execution_error", mes, broadcast=False)
 
     def _notify_prompt_lifecycle(self, event: str, prompt_id: str):
@@ -1043,6 +1062,7 @@ class PromptExecutor:
         self._notify_prompt_lifecycle("start", prompt_id)
         backend_reusable = False
         metadata_scope = None
+        variant_owner = None
         try:
             await _notify_execution_backend_lifecycle(
                 "start",
@@ -1061,6 +1081,9 @@ class PromptExecutor:
                         getattr(nodes.NODE_CLASS_MAPPINGS[node["class_type"]], "SDK_PERMISSIONS", ()) or ())
                         for node in prompt.values()))
                 metadata_scope.__enter__()
+                variant_owner = _upstream_variants.CoreVariantExecutionOwner(
+                    prompt_id,dynamic_prompt,self.server,extra_data,self.asset_manager)
+                variant_owner.__enter__()
                 reset_progress_state(prompt_id, dynamic_prompt)
                 add_progress_handler(WebUIProgressHandler(self.server))
                 is_changed_cache = IsChangedCache(prompt_id, dynamic_prompt, self.caches.outputs)
@@ -1166,29 +1189,33 @@ class PromptExecutor:
                     comfy.model_management.unload_all_models()
                 backend_reusable = not execution_failed
         finally:
-            if metadata_scope is not None:
-                metadata_scope.__exit__()
-            if self.cache_type == CacheType.RAM_PRESSURE:
-                detail("RAM cache evictions: prompt=%s active=%s full=%s", prompt_id, self.caches.outputs.active_evictions, self.caches.outputs.full_evictions)
-            comfy.memory_management.set_ram_cache_release_state(None, 0)
-            self.prompt_model_tracker.end()
             try:
-                try:
-                    await _notify_execution_backend_lifecycle(
-                        "end" if backend_reusable else "abort",
-                        prompt_id,
-                        extra_data,
-                    )
-                except Exception:
-                    self.success = False
-                    logging.exception(
-                        "execution backend prompt cleanup failed"
-                    )
+                if variant_owner is not None:
+                    await variant_owner.close()
             finally:
-                self._notify_prompt_lifecycle("end", prompt_id)
+                if metadata_scope is not None:
+                    metadata_scope.__exit__()
+                if self.cache_type == CacheType.RAM_PRESSURE:
+                    detail("RAM cache evictions: prompt=%s active=%s full=%s", prompt_id, self.caches.outputs.active_evictions, self.caches.outputs.full_evictions)
+                comfy.memory_management.set_ram_cache_release_state(None, 0)
+                self.prompt_model_tracker.end()
+                try:
+                    try:
+                        await _notify_execution_backend_lifecycle(
+                            "end" if backend_reusable else "abort",
+                            prompt_id,
+                            extra_data,
+                        )
+                    except Exception:
+                        self.success = False
+                        logging.exception(
+                            "execution backend prompt cleanup failed"
+                        )
+                finally:
+                    self._notify_prompt_lifecycle("end", prompt_id)
 
 
-async def validate_inputs(prompt_id, prompt, item, validated, visiting=None):
+async def validate_inputs(prompt_id, prompt, item, validated, visiting=None, *, _ignore_numeric_hints=False):
     if visiting is None:
         visiting = []
 
@@ -1307,7 +1334,8 @@ async def validate_inputs(prompt_id, prompt, item, validated, visiting=None):
             try:
                 visiting.append(unique_id)
                 try:
-                    r = await validate_inputs(prompt_id, prompt, o_id, validated, visiting)
+                    r = await validate_inputs(prompt_id, prompt, o_id, validated, visiting,
+                                              _ignore_numeric_hints=_ignore_numeric_hints)
                 finally:
                     visiting.pop()
                 if r[0] is False:
@@ -1372,7 +1400,7 @@ async def validate_inputs(prompt_id, prompt, item, validated, visiting=None):
                 continue
 
             if x not in validate_function_inputs and not validate_has_kwargs:
-                if "min" in extra_info and val < extra_info["min"]:
+                if not _ignore_numeric_hints and "min" in extra_info and val < extra_info["min"]:
                     error = {
                         "type": "value_smaller_than_min",
                         "message": "Value {} smaller than min of {}".format(val, extra_info["min"]),
@@ -1385,7 +1413,7 @@ async def validate_inputs(prompt_id, prompt, item, validated, visiting=None):
                     }
                     errors.append(error)
                     continue
-                if "max" in extra_info and val > extra_info["max"]:
+                if not _ignore_numeric_hints and "max" in extra_info and val > extra_info["max"]:
                     error = {
                         "type": "value_bigger_than_max",
                         "message": "Value {} bigger than max of {}".format(val, extra_info["max"]),

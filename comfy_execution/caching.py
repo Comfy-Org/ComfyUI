@@ -13,6 +13,7 @@ from abc import ABC, abstractmethod
 import nodes
 
 from comfy_execution.graph_utils import is_link
+from comfy_execution.upstream_variants import cache_identity
 
 NODE_CLASS_CONTAINS_UNIQUE_ID: Dict[str, bool] = {}
 
@@ -115,6 +116,9 @@ class CacheKeySetInputSignature(CacheKeySet):
         class_type = node["class_type"]
         class_def = nodes.NODE_CLASS_MAPPINGS[class_type]
         signature = [class_type, await self.is_changed_cache.get(node_id)]
+        variant_identity = cache_identity(node)
+        if variant_identity is not None:
+            signature.append(("native-upstream-variant",variant_identity))
         if self.include_node_id_in_input() or (hasattr(class_def, "NOT_IDEMPOTENT") and class_def.NOT_IDEMPOTENT) or include_unique_id_in_input(class_type):
             signature.append(node_id)
         inputs = node["inputs"]
