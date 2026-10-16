@@ -97,7 +97,7 @@ class _CellCaches:
 @dataclass(frozen=True)
 class NativeVariantControl:
     state: object
-    index: int | None = None
+    index: int
 
 
 @dataclass(frozen=True)
@@ -211,15 +211,18 @@ class CoreVariantExecutionOwner:
                            if key != 'is_changed'} for node_id in node_ids
                   if _binding(self.dynamic_prompt.get_node(node_id)) is None}
         policy.measure_source(source)
+        barriers = _continuation_barriers(plan)
+        policy.measure_source(barriers)
         state = _VariantSeries(self, plan, policy, copy.deepcopy(source))
         self.states.append(state)
         graph = GraphBuilder(prefix=plan.continuation_prefix)
-        run = graph.node('CreateList', '#run')
         variant_nodes = {}
+        previous = None
         for index, variant in enumerate(plan.variants):
             target = graph.node('CreateList', '#variant-' + str(index))
-            target.set_input('input0',run.out(0))
+            if previous is not None:target.set_input('input0',previous.out(0))
             variant_nodes[variant['id']] = target
+            previous = target
         continuation = {}
         for spec in plan.continuation:
             class_type = (plan.direct_clones[spec['id']][1]['class_type']
@@ -247,14 +250,53 @@ class CoreVariantExecutionOwner:
             else:
                 for name,value in spec.get('inputs',{}).items():
                     target.set_input(name,resolve(value))
+                target.set_override_display_id(str(self.dynamic_prompt.get_display_node_id(plan.caller_id)))
+        for index,node_ids in barriers.items():
+            target = variant_nodes[plan.variants[int(index)]['id']]
+            for number,node_id in enumerate(node_ids,1):
+                target.set_input('input'+str(number),continuation[node_id].out(0))
         expansion = graph.finalize()
-        expansion[run.id][CONTROL_KEY] = NativeVariantControl(state)
         for index,variant in enumerate(plan.variants):
             expansion[variant_nodes[variant['id']].id][CONTROL_KEY] = NativeVariantControl(state,index)
         for target in continuation.values():
             expansion[target.id][CONTINUATION_KEY] = NativeVariantContinuation(state)
         result = [continuation[item['node']].out(item['output']) for item in plan.outputs]
         return {'result':result,'expand':expansion}
+
+
+def _continuation_barriers(plan):
+    """Order output-reachable continuations before the next variant they precede."""
+    indices = {variant['id']:index for index,variant in enumerate(plan.variants)}
+    specs = {spec['id']:spec for spec in plan.continuation}
+    active = set()
+    latest = {}
+    def visit(node_id):
+        if node_id in latest:return latest[node_id]
+        if node_id in active:raise ValueError('continuation barrier cycle')
+        active.add(node_id)
+        last = -1
+        def scan(value):
+            nonlocal last
+            if type(value) is dict:
+                if set(value) == {'variant'}:
+                    last = max(last,indices[value['variant']])
+                elif set(value) == {'node','output'}:
+                    last = max(last,visit(value['node']))
+                else:
+                    for child in value.values():scan(child)
+            elif type(value) is list:
+                for child in value:scan(child)
+        scan(specs[node_id].get('inputs',{}))
+        active.remove(node_id)
+        latest[node_id] = last
+        return last
+    for output in plan.outputs:visit(output['node'])
+    barriers = {}
+    for node_id,last in latest.items():
+        if 0 <= last < len(plan.variants)-1:
+            barriers.setdefault(str(last+1),[]).append(node_id)
+    # String keys keep accounting in the same bounded JSON domain as the plan.
+    return barriers
 
 
 class _VariantSeries:
@@ -269,6 +311,7 @@ class _VariantSeries:
         self.results = []
         self.tasks = set()
         self.completed = False
+        self.next_index = 0
         self.closed = False
 
     def assert_current(self):
@@ -393,21 +436,22 @@ class _VariantSeries:
                 self.tasks.clear()
             _active_cell.reset(token)
 
-    async def run(self):
-        if self.completed:
-            raise PermissionError('variant controller cannot be replayed')
+    async def run_cell(self,index):
         try:
             self.assert_current()
+            if index != self.next_index or self.completed:
+                raise PermissionError('variant cells must execute once in their original order')
             if self.policy.deadline_monotonic is None:
                 raise PermissionError('variant execution has no original job deadline')
+            variant = self.plan.variants[index]
             async with asyncio.timeout(max(0,self.policy.deadline_monotonic-time.monotonic())):
-                for variant in self.plan.variants:
-                    try:
-                        await self._run_cell(variant)
-                    except VariantExecutionFailure as failure:
-                        failure.details = {**failure.details,'upstream_variant_id':variant['id']}
-                        raise
-            self.completed = True
+                await self._run_cell(variant)
+            self.next_index += 1
+            self.completed = self.next_index == len(self.plan.variants)
+        except VariantExecutionFailure as failure:
+            failure.details = {**failure.details,'upstream_variant_id':variant['id']}
+            await self.close()
+            raise
         except BaseException:
             await self.close()
             raise
@@ -469,13 +513,12 @@ async def execute_control(prompt_id,dynamic_prompt,node_id,caches,queue):
         raise PermissionError('native variant control belongs to another execution owner')
     state = control.state
     state.assert_current()
-    if control.index is None:
-        await state.run()
-        outputs = [[None]]
-    else:
-        if not state.completed or not 0 <= control.index < len(state.results):
-            raise PermissionError('variant output is not complete')
-        outputs = [state.results[control.index]]
+    if control.index == state.next_index:
+        await state.run_cell(control.index)
+    elif not 0 <= control.index < state.next_index:
+        raise PermissionError('variant output is not complete')
+    state.assert_current()
+    outputs = [state.results[control.index]]
     entry = execution.CacheEntry(ui=None,outputs=outputs)
     queue.cache_update(node_id,entry)
     owner.record_output(caches.outputs,node_id)
