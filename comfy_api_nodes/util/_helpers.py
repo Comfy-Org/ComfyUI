@@ -153,14 +153,18 @@ async def _renew_partner_token(token: str, claims: dict) -> str | None:
         task.add_done_callback(
             lambda t: _partner_token_renewals.pop(lineage, None) if _partner_token_renewals.get(lineage) is t else None
         )
-    return await asyncio.shield(task)
+    while not task.done():
+        if is_processing_interrupted():
+            raise ProcessingInterrupted("Task cancelled")
+        await asyncio.wait({task}, timeout=1.0)
+    return task.result()
 
 
 async def refresh_partner_token(node_cls: type[IO.ComfyNode]) -> None:
     """Renew the node's partner-node token if it expires soon. Any other credential is left untouched."""
     token = node_cls.hidden.auth_token_comfy_org
     claims = _partner_token_claims(token) if token else None
-    if claims is None or _partner_token_lineage(token) in _capped_partner_token_lineages:
+    if claims is None or _partner_token_lineage(token) in _capped_partner_token_lineages or is_processing_interrupted():
         return
     newest, exp = _newest_partner_token(token, claims)
     if exp - time.time() < _PARTNER_NODE_TOKEN_RENEW_MARGIN:
