@@ -127,6 +127,22 @@ def assert_node_current(dynamic_prompt,node_id,cache=None):
     if cache is not None:state.owner.record_output(cache,node_id)
 
 
+def invocation_guard(prompt_id,node_id):
+    owner = current(prompt_id)
+    if owner is None:return None
+    cell = _active_cell.get()
+    if cell is not None and cell.owner is owner:
+        if node_id not in cell.plan.upstream:
+            raise PermissionError('variant invocation is outside the admitted upstream graph')
+        return cell.assert_current
+    if not owner.dynamic_prompt.has_node(node_id):return None
+    binding = _binding(owner.dynamic_prompt.get_node(node_id))
+    if binding is None:return None
+    if binding.state.owner is not owner:
+        raise PermissionError('variant invocation belongs to another execution owner')
+    return binding.state.assert_current
+
+
 def cache_identity(node_info):
     binding = _binding(node_info)
     if binding is None:return None
@@ -342,6 +358,7 @@ class _VariantSeries:
             while not queue.is_empty():
                 self.assert_current()
                 node_id,error,exception = await queue.stage_node_execution()
+                self.assert_current()
                 if error is not None:
                     raise VariantExecutionFailure(error,exception)
                 if node_id not in self.plan.upstream:
