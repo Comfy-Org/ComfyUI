@@ -44,6 +44,7 @@ def get_node_id(node_cls: type[IO.ComfyNode]) -> str:
 PARTNER_NODE_TOKEN_AUDIENCE = "comfy-partner-node"
 PARTNER_NODE_TOKEN_RENEW_PATH = "/auth/partner-node/renew"
 _PARTNER_NODE_TOKEN_RENEW_MARGIN = 300.0  # renew a partner-node token this many seconds before it expires
+_PARTNER_NODE_TOKEN_RENEW_RETRY_DELAYS = (1.0, 2.0)  # pauses between renewal retries
 
 _partner_token_lineages: dict[str, str] = {}
 """Renewed partner-node token -> the token it descends from. Only tokens comfy-api issued on renewal are entered."""
@@ -96,21 +97,36 @@ def _newest_partner_token(token: str, claims: dict) -> tuple[str, float]:
 
 async def _request_partner_token_renewal(lineage: str, sid: str, token: str) -> str | None:
     url = urljoin(default_base_url().rstrip("/") + "/", PARTNER_NODE_TOKEN_RENEW_PATH.lstrip("/"))
-    try:
-        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30.0)) as session:
-            async with session.post(url, headers={"Authorization": f"Bearer {token}"}) as resp:
-                if resp.status >= 400:
-                    logging.warning("Comfy API refused to renew the sign-in token (HTTP %s).", resp.status)
-                    if resp.status in (401, 403):
-                        _renewed_partner_tokens.pop(lineage, None)
-                    if resp.status == 429:
-                        wait = _retry_after_wait(resp.headers.get("Retry-After"), 60.0, 600.0)
-                        _partner_token_renew_not_before[lineage] = time.time() + wait
-                    return None
-                body = await resp.json(content_type=None)
-    except (ClientError, OSError, asyncio.TimeoutError, ValueError) as e:
-        logging.warning("Could not renew the sign-in token: %s", type(e).__name__)
-        return None
+    body = error = None
+    retry_delays = _PARTNER_NODE_TOKEN_RENEW_RETRY_DELAYS
+    if token not in _rejected_partner_tokens and _partner_token_claims(token)["exp"] > time.time():
+        retry_delays = ()
+    deadline = time.monotonic() + 30.0
+    for retry_delay in (*retry_delays, None):
+        try:
+            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=max(deadline - time.monotonic(), 1.0))) as session:
+                async with session.post(url, headers={"Authorization": f"Bearer {token}"}) as resp:
+                    if 400 <= resp.status < 500:
+                        logging.warning("Comfy API refused to renew the sign-in token (HTTP %s).", resp.status)
+                        if resp.status in (401, 403):
+                            _renewed_partner_tokens.pop(lineage, None)
+                        if resp.status == 429:
+                            wait = _retry_after_wait(resp.headers.get("Retry-After"), 60.0, 600.0)
+                            _partner_token_renew_not_before[lineage] = time.time() + wait
+                        return None
+                    if resp.status < 400:
+                        body = await resp.json(content_type=None)
+                        break
+                    error = f"HTTP {resp.status}"
+        except (ValueError, asyncio.TimeoutError) as e:
+            logging.warning("Could not renew the sign-in token: %s", type(e).__name__)
+            return None
+        except (ClientError, OSError) as e:
+            error = type(e).__name__
+        if retry_delay is None or time.monotonic() + 2 * retry_delay > deadline or is_processing_interrupted():
+            logging.warning("Could not renew the sign-in token: %s", error)
+            return None
+        await asyncio.sleep(retry_delay)
     renewed = body.get("token") if isinstance(body, dict) else None
     claims = _partner_token_claims(renewed) if isinstance(renewed, str) else None
     if claims is None or claims["sid"] != sid:
