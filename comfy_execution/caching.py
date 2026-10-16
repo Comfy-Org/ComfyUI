@@ -466,6 +466,15 @@ class LRUCache(BasicCache):
         self.used_generation = {}
         self.children = {}
 
+    def remove(self,node_id):
+        if not self.initialized:return
+        cache_key = self.cache_key_set.get_data_key(node_id)
+        super().remove(node_id)
+        self.used_generation.pop(cache_key,None)
+        self.children.pop(cache_key,None)
+        for children in self.children.values():
+            children[:] = [key for key in children if key != cache_key]
+
     async def set_prompt(self, dynprompt, node_ids, is_changed_cache):
         await super().set_prompt(dynprompt, node_ids, is_changed_cache)
         self.generation += 1
@@ -488,6 +497,7 @@ class LRUCache(BasicCache):
         return await self._get_immediate(node_id)
 
     def _mark_used(self, node_id):
+        assert_node_current(self.dynprompt,node_id,self)
         cache_key = self.cache_key_set.get_data_key(node_id)
         if cache_key is not None:
             self.used_generation[cache_key] = self.generation
@@ -548,6 +558,11 @@ class RAMPressureCache(LRUCache):
         self.active_evictions = False
         self.full_evictions = False
 
+    def remove(self,node_id):
+        if not self.initialized:return
+        self.timestamps.pop(self.cache_key_set.get_data_key(node_id),None)
+        super().remove(node_id)
+
     async def set_prompt(self, dynprompt, node_ids, is_changed_cache):
         self.active_evictions = False
         self.full_evictions = False
@@ -557,14 +572,17 @@ class RAMPressureCache(LRUCache):
         self._clean_subcaches()
 
     async def set(self, node_id, value):
+        assert_node_current(self.dynprompt,node_id,self)
         self.timestamps[self.cache_key_set.get_data_key(node_id)] = time.time()
         await super().set(node_id, value)
 
     async def get(self, node_id):
+        assert_node_current(self.dynprompt,node_id,self)
         self.timestamps[self.cache_key_set.get_data_key(node_id)] = time.time()
         return await super().get(node_id)
 
     def set_local(self, node_id, value):
+        assert_node_current(self.dynprompt,node_id,self)
         self.timestamps[self.cache_key_set.get_data_key(node_id)] = time.time()
         super().set_local(node_id, value)
 
