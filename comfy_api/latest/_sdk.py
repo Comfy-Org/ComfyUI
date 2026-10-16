@@ -6748,6 +6748,13 @@ class _InProcessGraph:
     def __init__(self, current_node_id: str, prompt: Any = None,
                  extra_pnginfo: Any = None, dynamic_prompt: Any = None, *,
                  execution_metadata: Any = None, permissions=(), prompt_id="") -> None:
+        self._execution_owner = None
+        if 'graph.expand.upstream' in permissions:
+            from comfy_execution.upstream_variants import current, active_dynamic_prompt
+
+            self._execution_owner = current(prompt_id)
+            if dynamic_prompt is None and self._execution_owner is not None:
+                dynamic_prompt = active_dynamic_prompt(self._execution_owner)
         self._current_node_id = str(current_node_id)
         self._prompt = prompt if isinstance(prompt, dict) else {}
         self._workflow = (
