@@ -13,6 +13,7 @@ from dataclasses import dataclass
 _active_owner = contextvars.ContextVar('comfy_upstream_variant_owner', default=None)
 _active_cell = contextvars.ContextVar('comfy_upstream_variant_cell', default=None)
 CONTROL_KEY = '_core_upstream_variants'
+CONTINUATION_KEY = '_core_upstream_variant_continuation'
 
 
 class VariantProfilePending(RuntimeError):
@@ -61,6 +62,9 @@ class _NodeCache:
     async def set(self, node_id, value):
         self.set_local(node_id, value)
 
+    def remove(self,node_id):
+        self.entries.pop(self._key(node_id),None)
+
     def all_node_ids(self):
         return {key[0] if self.objects else key for key in self.entries}
 
@@ -96,14 +100,38 @@ class NativeVariantControl:
     index: int | None = None
 
 
+@dataclass(frozen=True)
+class NativeVariantContinuation:
+    state: object
+
+
 def native_control(node_info):
     value = node_info.get(CONTROL_KEY)
     return value if type(value) is NativeVariantControl else None
 
 
-def cache_identity(node_info):
+def _binding(node_info):
     control = native_control(node_info)
-    return None if control is None else (control.state.cache_token, control.index)
+    if control is not None:return control
+    value = node_info.get(CONTINUATION_KEY)
+    return value if type(value) is NativeVariantContinuation else None
+
+
+def assert_node_current(dynamic_prompt,node_id,cache=None):
+    binding = _binding(dynamic_prompt.get_node(node_id))
+    if binding is None:return
+    state = binding.state
+    state.assert_current()
+    if dynamic_prompt is not state.owner.dynamic_prompt:
+        raise PermissionError('variant continuation belongs to another dynamic prompt')
+    if cache is not None:state.owner.record_output(cache,node_id)
+
+
+def cache_identity(node_info):
+    binding = _binding(node_info)
+    if binding is None:return None
+    slot = binding.index if type(binding) is NativeVariantControl else 'continuation'
+    return binding.state.cache_token,slot
 
 
 def track_completion(task):
@@ -120,7 +148,7 @@ class CoreVariantExecutionOwner:
         self.extra_data = extra_data
         self.asset_manager = asset_manager
         self.states = []
-        self.output_entries = []
+        self.output_entries = {}
         self.closed = False
         self._token = None
 
@@ -132,8 +160,8 @@ class CoreVariantExecutionOwner:
         self.closed = True
         try:
             try:
-                for cache,node_id in self.output_entries:
-                    await cache.set(node_id,None)
+                for cache,node_id in self.output_entries.values():
+                    cache.remove(node_id)
             finally:
                 for state in self.states:
                     await state.close()
@@ -147,6 +175,9 @@ class CoreVariantExecutionOwner:
             if self._token is not None:
                 _active_owner.reset(self._token)
                 self._token = None
+
+    def record_output(self,cache,node_id):
+        self.output_entries[(id(cache),node_id)] = cache,node_id
 
     async def materialize(self, plan, policy):
         policy.current(policy.graph_owner, 'materialize-deferred-variants')
@@ -162,7 +193,7 @@ class CoreVariantExecutionOwner:
             raise ValueError('variant job prompt exceeds node-accounting budget')
         source = {node_id:{key:value for key,value in self.dynamic_prompt.get_node(node_id).items()
                            if key != 'is_changed'} for node_id in node_ids
-                  if native_control(self.dynamic_prompt.get_node(node_id)) is None}
+                  if _binding(self.dynamic_prompt.get_node(node_id)) is None}
         policy.measure_source(source)
         state = _VariantSeries(self, plan, policy, copy.deepcopy(source))
         self.states.append(state)
@@ -204,6 +235,8 @@ class CoreVariantExecutionOwner:
         expansion[run.id][CONTROL_KEY] = NativeVariantControl(state)
         for index,variant in enumerate(plan.variants):
             expansion[variant_nodes[variant['id']].id][CONTROL_KEY] = NativeVariantControl(state,index)
+        for target in continuation.values():
+            expansion[target.id][CONTINUATION_KEY] = NativeVariantContinuation(state)
         result = [continuation[item['node']].out(item['output']) for item in plan.outputs]
         return {'result':result,'expand':expansion}
 
@@ -344,10 +377,10 @@ class _VariantSeries:
             _active_cell.reset(token)
 
     async def run(self):
-        self.assert_current()
         if self.completed:
             raise PermissionError('variant controller cannot be replayed')
         try:
+            self.assert_current()
             if self.policy.deadline_monotonic is None:
                 raise PermissionError('variant execution has no original job deadline')
             async with asyncio.timeout(max(0,self.policy.deadline_monotonic-time.monotonic())):
@@ -428,5 +461,5 @@ async def execute_control(prompt_id,dynamic_prompt,node_id,caches,queue):
         outputs = [state.results[control.index]]
     entry = execution.CacheEntry(ui=None,outputs=outputs)
     queue.cache_update(node_id,entry)
-    owner.output_entries.append((caches.outputs,node_id))
+    owner.record_output(caches.outputs,node_id)
     await caches.outputs.set(node_id,entry)

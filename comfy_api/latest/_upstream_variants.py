@@ -10,6 +10,7 @@ import json
 import math
 import re
 import uuid
+import time
 
 
 class UpstreamVariantsPending(RuntimeError):
@@ -116,6 +117,8 @@ class UpstreamVariantPolicy:
         self._sources = []
 
     def current(self, graph_owner, stage):
+        if self.deadline_monotonic is not None and time.monotonic() >= self.deadline_monotonic:
+            raise PermissionError('upstream variant original deadline expired')
         if graph_owner is not self.graph_owner or self.assert_current(stage) is not True:
             raise PermissionError("upstream variant selection is no longer current")
         for dynprompt, caller_id, node_ids, expected in self._sources:
