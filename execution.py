@@ -665,6 +665,12 @@ async def execute(server: "ExecutionServer", dynprompt, caches, current_item, ex
     unique_id = current_item
     real_node_id = dynprompt.get_real_node_id(unique_id)
     display_node_id = dynprompt.get_display_node_id(unique_id)
+    try:
+        _upstream_variants.assert_node_current(dynprompt,unique_id,caches.outputs)
+    except Exception as ex:
+        return (ExecutionResult.FAILURE,dict(node_id=real_node_id,
+            exception_message=str(ex),exception_type=full_type_name(type(ex)),
+            traceback=traceback.format_exc().splitlines(),current_inputs=[]),ex)
     inputs = dynprompt.get_node(unique_id)['inputs']
     class_type = dynprompt.get_node(unique_id)['class_type']
     class_def = nodes.NODE_CLASS_MAPPINGS[class_type]

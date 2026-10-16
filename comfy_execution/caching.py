@@ -13,7 +13,7 @@ from abc import ABC, abstractmethod
 import nodes
 
 from comfy_execution.graph_utils import is_link
-from comfy_execution.upstream_variants import cache_identity
+from comfy_execution.upstream_variants import cache_identity, assert_node_current
 
 NODE_CLASS_CONTAINS_UNIQUE_ID: Dict[str, bool] = {}
 
@@ -113,6 +113,7 @@ class CacheKeySetInputSignature(CacheKeySet):
             # This node doesn't exist -- we can't cache it.
             return [float("NaN")]
         node = dynprompt.get_node(node_id)
+        assert_node_current(dynprompt,node_id)
         class_type = node["class_type"]
         class_def = nodes.NODE_CLASS_MAPPINGS[class_type]
         signature = [class_type, await self.is_changed_cache.get(node_id)]
@@ -207,6 +208,7 @@ class BasicCache:
     def get_local(self, node_id):
         if not self.initialized:
             return None
+        assert_node_current(self.dynprompt,node_id)
         cache_key = self.cache_key_set.get_data_key(node_id)
         if cache_key in self.cache:
             return self.cache[cache_key]
@@ -214,11 +216,13 @@ class BasicCache:
 
     def set_local(self, node_id, value):
         assert self.initialized
+        assert_node_current(self.dynprompt,node_id,self)
         cache_key = self.cache_key_set.get_data_key(node_id)
         self.cache[cache_key] = value
 
     async def _set_immediate(self, node_id, value):
         assert self.initialized
+        assert_node_current(self.dynprompt,node_id,self)
         cache_key = self.cache_key_set.get_data_key(node_id)
         self.cache[cache_key] = value
 
@@ -227,6 +231,7 @@ class BasicCache:
     async def _get_immediate(self, node_id):
         if not self.initialized:
             return None
+        assert_node_current(self.dynprompt,node_id)
         cache_key = self.cache_key_set.get_data_key(node_id)
 
         if cache_key in self.cache:
@@ -238,6 +243,10 @@ class BasicCache:
             return external_result
 
         return None
+
+    def remove(self,node_id):
+        if self.initialized:
+            self.cache.pop(self.cache_key_set.get_data_key(node_id),None)
 
     async def _notify_providers_store(self, node_id, cache_key, value):
         from comfy_execution.cache_provider import (
@@ -412,7 +421,14 @@ class HierarchicalCache(BasicCache):
         assert cache is not None
         return await cache._ensure_subcache(node_id, children_ids)
 
+    def remove(self,node_id):
+        cache = self._get_cache_for(node_id)
+        if cache is not None:BasicCache.remove(cache,node_id)
+
 class NullCache:
+
+    def remove(self,node_id):
+        pass
 
     async def set_prompt(self, dynprompt, node_ids, is_changed_cache):
         pass
