@@ -120,6 +120,7 @@ class CoreVariantExecutionOwner:
         self.extra_data = extra_data
         self.asset_manager = asset_manager
         self.states = []
+        self.output_entries = []
         self.closed = False
         self._token = None
 
@@ -130,10 +131,15 @@ class CoreVariantExecutionOwner:
     async def close(self):
         self.closed = True
         try:
-            for state in self.states:
-                await state.close()
+            try:
+                for cache,node_id in self.output_entries:
+                    await cache.set(node_id,None)
+            finally:
+                for state in self.states:
+                    await state.close()
         finally:
             self.states.clear()
+            self.output_entries.clear()
             self.dynamic_prompt = None
             self.server = None
             self.extra_data = None
@@ -422,4 +428,5 @@ async def execute_control(prompt_id,dynamic_prompt,node_id,caches,queue):
         outputs = [state.results[control.index]]
     entry = execution.CacheEntry(ui=None,outputs=outputs)
     queue.cache_update(node_id,entry)
+    owner.output_entries.append((caches.outputs,node_id))
     await caches.outputs.set(node_id,entry)
