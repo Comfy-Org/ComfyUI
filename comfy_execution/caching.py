@@ -118,7 +118,7 @@ class CacheKeySetInputSignature(CacheKeySet):
         signature = [class_type, await self.is_changed_cache.get(node_id)]
         variant_identity = cache_identity(node)
         if variant_identity is not None:
-            signature.append(("native-upstream-variant",variant_identity))
+            signature.append(("native-upstream-variant",variant_identity,float('nan')))
         if self.include_node_id_in_input() or (hasattr(class_def, "NOT_IDEMPOTENT") and class_def.NOT_IDEMPOTENT) or include_unique_id_in_input(class_type):
             signature.append(node_id)
         inputs = node["inputs"]
