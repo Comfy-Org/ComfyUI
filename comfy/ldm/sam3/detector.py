@@ -9,11 +9,11 @@ from torchvision.ops import roi_align
 
 from comfy.ldm.modules.attention import optimized_attention
 from comfy.ldm.sam3.tracker import SAM3Tracker, SAM31Tracker
-from comfy.ldm.sam3.sam import SAM3VisionBackbone  # noqa: used in __init__
+from comfy.ldm.sam3.sam import SAM3VisionBackbone  # noqa: F401
 from comfy.ldm.sam3.sam import MLP, PositionEmbeddingSine
+from comfy.ops import cast_to_input
 
 TRACKER_CLASSES = {"SAM3": SAM3Tracker, "SAM31": SAM31Tracker}
-from comfy.ops import cast_to_input
 
 
 def box_cxcywh_to_xyxy(x):
