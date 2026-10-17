@@ -5,6 +5,7 @@ from comfy import sdxl_clip
 import comfy.model_management
 import torch
 import logging
+import folder_paths
 
 
 class HiDreamTokenizer:
@@ -91,6 +92,8 @@ class HiDreamTEModel(torch.nn.Module):
         token_weight_pairs_llama = token_weight_pairs["llama"]
         lg_out = None
         pooled = None
+        t5_out = None
+        ll_out = None
         extra = {}
 
         if len(token_weight_pairs_g) > 0 or len(token_weight_pairs_l) > 0:
@@ -104,8 +107,9 @@ class HiDreamTEModel(torch.nn.Module):
             else:
                 g_pooled = torch.zeros((1, 1280), device=comfy.model_management.intermediate_device())
 
-            pooled = torch.cat((l_pooled, g_pooled), dim=-1)
-
+            if self.clip_g is not None and self.clip_l is not None:
+                pooled = torch.cat((l_pooled, g_pooled), dim=-1)            
+                
         if self.t5xxl is not None:
             t5_output = self.t5xxl.encode_token_weights(token_weight_pairs_t5)
             t5_out, t5_pooled = t5_output[:2]
@@ -120,13 +124,15 @@ class HiDreamTEModel(torch.nn.Module):
             ll_out = None
 
         if t5_out is None:
-            t5_out = torch.zeros((1, 128, 4096), device=comfy.model_management.intermediate_device())
+            t5_path = folder_paths.get_full_path_or_raise("hidream_empty_latents", "t5_blank.pt")
+            t5_out = torch.load(t5_path, map_location=comfy.model_management.intermediate_device())
 
         if ll_out is None:
             ll_out = torch.zeros((1, 32, 1, 4096), device=comfy.model_management.intermediate_device())
 
         if pooled is None:
-            pooled = torch.zeros((1, 768 + 1280), device=comfy.model_management.intermediate_device())
+            pooled_path = folder_paths.get_full_path_or_raise("hidream_empty_latents", "pooled_blank.pt")
+            pooled = torch.load(pooled_path, map_location=comfy.model_management.intermediate_device())
 
         extra["conditioning_llama3"] = ll_out
         return t5_out, pooled, extra
