@@ -3,9 +3,11 @@ result is emitted. Each output is matched to a path inside its declared base
 directory and skipped when it escapes that directory or is not on disk, and a
 run served from cache replays the same registration so cached results still
 yield assets. Registering at emission rather than by inspecting the cache
-afterwards keeps this independent of any cache eviction policy.
+afterwards keeps this independent of any cache eviction policy. With assets on
+or off, each emitted file entry also gets a ``version`` for clients' /view URLs.
 """
 
+import contextlib
 import copy
 import logging
 import os
@@ -44,26 +46,32 @@ def _resolve_output_path(entry: dict) -> str | None:
 def _enrich_in_place(
     output_ui: dict,
     job_id: str | None,
-    register: Callable[[str, str | None], "RegisteredAsset | None"],
+    register: Callable[[str, str | None], "RegisteredAsset | None"] | None,
 ) -> None:
-    """S10.6: producers that write the same output path are not coalesced (unsupported)."""
+    """Register each file entry as an asset (when ``register`` is given) and stamp it with a
+    ``version`` that changes with the file's mtime or size.
+
+    S10.6: producers that write the same output path are not coalesced (unsupported)."""
     for entries in output_ui.values():
         if not isinstance(entries, list):
             continue
         for entry in entries:
             if not isinstance(entry, dict) or "filename" not in entry or "type" not in entry:
                 continue
+            entry.pop("version", None)
             try:
                 abs_path = _resolve_output_path(entry)
                 if abs_path is None:
                     continue
-                result = register(abs_path, job_id)
-                if result is not None:
+                with contextlib.suppress(OSError):
+                    st = os.stat(abs_path)
+                    entry["version"] = f"{st.st_mtime_ns:x}-{st.st_size:x}"
+                if register is not None and (result := register(abs_path, job_id)) is not None:
                     entry["id"] = result.id
                     if result.preview_id:
                         entry["preview_id"] = result.preview_id
             except Exception:
-                logging.warning("Asset registration failed for output: %s", entry.get("filename"), exc_info=True)
+                logging.warning("Output enrichment failed for output: %s", entry.get("filename"), exc_info=True)
 
 
 def take_asset_previews(output_ui: dict) -> dict[str, dict]:
@@ -97,14 +105,13 @@ def _strip_ids(output_ui: dict) -> None:
 
 def register_executed_outputs(output_ui: dict, job_id: str, asset_manager: "AssetManager", asset_previews: dict[str, dict] | None = None) -> dict:
     enriched = copy.deepcopy(output_ui)
-    if not asset_manager.enabled:
-        return enriched
-
     previews = asset_previews or {}
     _enrich_in_place(
         enriched,
         job_id,
-        lambda path, job: asset_manager.register_executed_output(path, job, preview_ref=previews.get(path)),
+        (lambda path, job: asset_manager.register_executed_output(path, job, preview_ref=previews.get(path)))
+        if asset_manager.enabled
+        else None,
     )
     return enriched
 
@@ -118,11 +125,7 @@ def register_cached_outputs(ui_wrapper: dict | None, job_id: str, asset_manager:
     if not isinstance(output_ui, dict):
         return enriched
     _strip_ids(output_ui)
-
-    if not asset_manager.enabled:
-        return enriched
-
-    _enrich_in_place(output_ui, job_id, asset_manager.register_cached_output)
+    _enrich_in_place(output_ui, job_id, asset_manager.register_cached_output if asset_manager.enabled else None)
     return enriched
 
 
