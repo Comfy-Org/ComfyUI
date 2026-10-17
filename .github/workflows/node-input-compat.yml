@@ -1,0 +1,41 @@
+name: Node Input Compatibility
+
+on:
+  pull_request:
+    branches: [ main, master, release/** ]
+
+jobs:
+  node-input-compat:
+    if: ${{ !contains(github.event.pull_request.labels.*.name, 'breaking-node-change') }}
+    runs-on: ubuntu-latest
+    env:
+      PYTHONPATH: .
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.12'
+    - name: Install requirements
+      run: |
+        python -m pip install --upgrade pip
+        pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
+        pip install -r requirements.txt
+    - name: Snapshot this branch
+      run: python .github/scripts/node_input_compat.py snapshot --output ${{ runner.temp }}/head.json
+    - name: Check optional inputs can be omitted
+      run: |
+        python .github/scripts/node_input_compat.py unsafe-optionals ${{ runner.temp }}/head.json \
+          --allowlist .github/scripts/node_optional_input_allowlist.json
+    - name: Snapshot the base branch
+      run: |
+        cp .github/scripts/node_input_compat.py ${{ runner.temp }}/
+        # A pinned dependency the PR bumps can leave the base checkout unimportable
+        git diff --quiet ${{ github.event.pull_request.base.sha }} HEAD -- requirements.txt && same_reqs=1 || same_reqs=0
+        git checkout ${{ github.event.pull_request.base.sha }}
+        if [ "$same_reqs" = "0" ]; then pip install -r requirements.txt; fi
+        python ${{ runner.temp }}/node_input_compat.py snapshot --output ${{ runner.temp }}/base.json
+    - name: Compare against the base branch
+      run: python ${{ runner.temp }}/node_input_compat.py diff ${{ runner.temp }}/base.json ${{ runner.temp }}/head.json
