@@ -78,10 +78,12 @@ class BOFTAdapter(WeightAdapterBase):
             # for Q = -Q^T
             q = blocks - blocks.transpose(-1, -2)
             normed_q = q
-            if alpha > 0:  # alpha in boft/bboft is for constraint
+            # alpha in boft/bboft is the constraint, lycoris stores it unscaled
+            constraint = alpha * block_num * boft_b
+            if constraint > 0:
                 q_norm = torch.norm(q) + 1e-8
-                if q_norm > alpha:
-                    normed_q = q * alpha / q_norm
+                if q_norm > constraint:
+                    normed_q = q * constraint / q_norm
             # use float() to prevent unsupported type in .inverse()
             r = (I + normed_q) @ (I - normed_q).float().inverse()
             r = r.to(weight)
@@ -146,11 +148,12 @@ class BOFTAdapter(WeightAdapterBase):
         q = blocks - blocks.transpose(-1, -2)
         normed_q = q
 
-        # Apply constraint if alpha > 0
-        if alpha > 0:
+        # Apply constraint, lycoris stores it unscaled
+        constraint = alpha * block_num * boft_b
+        if constraint > 0:
             q_norm = torch.norm(q) + 1e-8
-            if q_norm > alpha:
-                normed_q = q * alpha / q_norm
+            if q_norm > constraint:
+                normed_q = q * constraint / q_norm
 
         # Cayley transform: R = (I + Q)(I - Q)^-1
         r = (I + normed_q) @ (I - normed_q).float().inverse()
