@@ -492,6 +492,9 @@ class CLIP:
         return self.patcher.is_dynamic()
 
 class VAE:
+    _decode_temporal_tile_grid = None
+    _encode_temporal_tile_grid = None
+
     def __init__(self, sd=None, device=None, config=None, dtype=None, metadata=None):
         fast_disk = comfy.storage.state_dict_fast_disk(sd)
         is_seedvr2_vae = "decoder.up_blocks.2.upsamplers.0.upscale_conv.weight" in sd
@@ -958,6 +961,9 @@ class VAE:
                     self.process_input = self.process_output = lambda image: image
                     self.upscale_ratio = (lambda a: max(1, (a - 2) // 5 * 17 + 5), 16, 16)
                     self.downscale_ratio = (lambda a: max(1, (a - 1) // 17 * 5 + 2) if a > 1 else 1, 16, 16)
+                    self.upscale_index_formula = self.downscale_index_formula = (17 / 5, 16, 16)
+                    self._decode_temporal_tile_grid = (5, 2)
+                    self._encode_temporal_tile_grid = (17, 5)
                     self.memory_used_encode = lambda shape, dtype: (400 * ((shape[-3] + 16) // 17) * shape[-2] * shape[-1] * model_management.dtype_size(dtype))
                     self.memory_used_decode = lambda shape, dtype: ((260 * 16 * 16 + shape[1] * shape[-3]) * shape[-2] * shape[-1] * model_management.dtype_size(dtype))
                 elif self.latent_channels in [48, 128]: # Wan 2.2 and LTX2
@@ -1199,7 +1205,23 @@ class VAE:
 
         return self.process_output(comfy.utils.tiled_scale_multidim(samples, decode_fn, tile=(tile_x,), overlap=overlap, upscale_amount=self.upscale_ratio, out_channels=self.output_channels, output_device=self.output_device))
 
+    @staticmethod
+    def _align_temporal_tile(tile_t, overlap, grid):
+        if grid is None:
+            return tile_t, overlap
+
+        # Tile and overlap must share a phase so each stride spans whole codec groups.
+        period, tail = grid
+        tile_t = max(period + tail, (tile_t - tail) // period * period + tail)
+        if overlap is not None:
+            if not isinstance(overlap, (tuple, list)):
+                overlap = (overlap,) * 3
+            overlap_t = max(tail, min(tile_t - period, (overlap[0] - tail) // period * period + tail))
+            overlap = (overlap_t, *overlap[1:])
+        return tile_t, overlap
+
     def decode_tiled_3d(self, samples, tile_t=999, tile_x=32, tile_y=32, overlap=(1, 8, 8)):
+        tile_t, overlap = self._align_temporal_tile(tile_t, overlap, self._decode_temporal_tile_grid)
         decode_fn = lambda a: self.first_stage_model.decode(a.to(self.vae_dtype).to(self.device)).to(dtype=self.vae_output_dtype())
         return self.process_output(comfy.utils.tiled_scale_multidim(samples, decode_fn, tile=(tile_t, tile_x, tile_y), overlap=overlap, upscale_amount=self.upscale_ratio, out_channels=self.output_channels, index_formulas=self.upscale_index_formula, output_device=self.output_device))
 
@@ -1240,6 +1262,7 @@ class VAE:
             return out.reshape(samples.shape[0], self.latent_channels, extra_channel_size, -1)
 
     def encode_tiled_3d(self, samples, tile_t=9999, tile_x=512, tile_y=512, overlap=(1, 64, 64)):
+        tile_t, overlap = self._align_temporal_tile(tile_t, overlap, self._encode_temporal_tile_grid)
         encode_fn = lambda a: self.first_stage_model.encode((self.process_input(a)).to(self.vae_dtype).to(self.device)).to(dtype=self.vae_output_dtype())
         return comfy.utils.tiled_scale_multidim(samples, encode_fn, tile=(tile_t, tile_x, tile_y), overlap=overlap, upscale_amount=self.downscale_ratio, out_channels=self.latent_channels, downscale=True, index_formulas=self.downscale_index_formula, output_device=self.output_device)
 
@@ -1369,6 +1392,7 @@ class VAE:
         s = list(shape)
         if len(s) == 5:
             if tile_t is not None:
+                tile_t, _ = self._align_temporal_tile(tile_t, None, self._decode_temporal_tile_grid)
                 s[2] = min(s[2], tile_t)
             if tile_y is not None:
                 s[3] = min(s[3], tile_y)
