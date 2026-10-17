@@ -66,6 +66,7 @@ parser.add_argument("--tls-keyfile", type=str, help="Path to TLS (SSL) key file.
 parser.add_argument("--tls-certfile", type=str, help="Path to TLS (SSL) certificate file. Enables TLS, makes app accessible at https://... requires --tls-keyfile to function")
 parser.add_argument("--enable-cors-header", type=str, default=None, metavar="ORIGIN", nargs="?", const="*", help="Enable CORS (Cross-Origin Resource Sharing) with optional origin or allow all with default '*'.")
 parser.add_argument("--max-upload-size", type=float, default=100, help="Set the maximum upload size in MB.")
+parser.add_argument("--enable-api-docs", action="store_true", help="Serve the OpenAPI spec at /openapi.yaml and browsable API docs at /api-docs. The docs page loads its viewer from a CDN, so it needs outbound network access to render.")
 
 parser.add_argument("--base-directory", type=str, default=None, help="Set the ComfyUI base directory for models, custom_nodes, input, output, temp, and user directories.")
 parser.add_argument("--extra-model-paths-config", type=str, default=None, metavar="PATH", nargs='+', action='append', help="Load one or more extra_model_paths.yaml files.")
