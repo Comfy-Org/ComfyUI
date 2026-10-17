@@ -3,7 +3,7 @@ from comfy import sd1_clip
 
 SAM3_CLIP_CONFIG = {
     "architectures": ["CLIPTextModel"],
-    "hidden_act": "quick_gelu",
+    "hidden_act": "gelu",
     "hidden_size": 1024,
     "intermediate_size": 4096,
     "num_attention_heads": 16,
