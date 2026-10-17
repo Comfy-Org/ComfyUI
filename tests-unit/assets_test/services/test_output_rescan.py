@@ -58,7 +58,7 @@ def _scan(roots=OUTPUT_ONLY) -> tuple[int, int, int]:
     seeder._phase = seeder_module.ScanPhase.FAST
     seeder._run_gate.set()
     seeder._cancel_event.clear()
-    return seeder._run_fast_phase(roots)
+    return seeder._run_fast_phase(roots, scanner.rescans_output_by_listing(roots))
 
 
 def _write(path: Path, payload: bytes = b"png-bytes") -> Path:
@@ -467,7 +467,7 @@ def test_output_rescan_counts_its_listings_and_row_stats(roots, session):
     seeder._scan_state = state = seeder_module._ScanState()
     seeder._phase = seeder_module.ScanPhase.FAST
 
-    seeder._run_fast_phase(OUTPUT_ONLY)
+    seeder._run_fast_phase(OUTPUT_ONLY, True)
 
     assert state.dirs_listed == 4  # output, a, b, b/c
     assert state.files_statted == 1  # only the row its listing lacks is stat'ed

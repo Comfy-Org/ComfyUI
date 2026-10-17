@@ -67,7 +67,7 @@ def _scan(roots=ROOTS) -> seeder_module._ScanState:
     seeder._phase = seeder_module.ScanPhase.FAST
     seeder._run_gate.set()
     seeder._cancel_event.clear()
-    seeder._run_fast_phase(roots)
+    seeder._run_fast_phase(roots, scanner.rescans_output_by_listing(roots))
     return seeder._scan_state
 
 
