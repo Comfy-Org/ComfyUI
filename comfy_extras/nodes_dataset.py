@@ -32,13 +32,15 @@ def load_and_process_images(image_files, input_dir):
     for file in image_files:
         image_path = os.path.join(input_dir, file)
         img = node_helpers.pillow(Image.open, image_path)
-
-        if img.mode == "I":
-            img = img.point(lambda i: i * (1 / 255))
-        img = img.convert("RGB")
-        img_array = np.array(img).astype(np.float32) / 255.0
-        img_tensor = torch.from_numpy(img_array)[None,]
-        output_images.append(img_tensor)
+        try:
+            if img.mode == "I":
+                img = img.point(lambda i: i * (1 / 255))
+            img = img.convert("RGB")
+            img_array = np.array(img).astype(np.float32) / 255.0
+            img_tensor = torch.from_numpy(img_array)[None,]
+            output_images.append(img_tensor)
+        finally:
+            img.close()
 
     return output_images
 
