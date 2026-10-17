@@ -1315,9 +1315,23 @@ class PromptQueue:
 
     def put(self, item):
         with self.mutex:
-            heapq.heappush(self.queue, item)
-            self.server.queue_updated()
-            self.not_empty.notify()
+            if not self._in_flight_unlocked(item[1]):
+                heapq.heappush(self.queue, item)
+                self.server.queue_updated()
+                self.not_empty.notify()
+                return True
+        return False
+
+    def _in_flight_unlocked(self, prompt_id):
+        # Caller holds the mutex. Entries are (number, prompt_id, prompt, ...)
+        # tuples in both the pending heap and the running dict.
+        for entry in self.queue:
+            if entry[1] == prompt_id:
+                return True
+        for entry in self.currently_running.values():
+            if entry[1] == prompt_id:
+                return True
+        return False
 
     def get(self, timeout=None):
         with self.not_empty:

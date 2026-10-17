@@ -1224,7 +1224,15 @@ class PromptServer():
                         if sensitive_val in extra_data:
                             sensitive[sensitive_val] = extra_data.pop(sensitive_val)
                     extra_data["create_time"] = int(time.time() * 1000)  # timestamp in milliseconds
-                    self.prompt_queue.put((number, prompt_id, prompt, extra_data, outputs_to_execute, sensitive))
+                    queued = self.prompt_queue.put((number, prompt_id, prompt, extra_data, outputs_to_execute, sensitive))
+                    if not queued:
+                        error = {
+                            "type": "duplicate_prompt_id",
+                            "message": "Prompt ID already in flight",
+                            "details": f"Prompt ID {prompt_id} is already pending or running; wait for it to finish or submit with a new ID",
+                            "extra_info": {}
+                        }
+                        return web.json_response({"error": error, "node_errors": valid[3]}, status=409)
                     response = {"prompt_id": prompt_id, "number": number, "node_errors": valid[3]}
                     return web.json_response(response)
                 else:
