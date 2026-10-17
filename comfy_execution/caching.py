@@ -603,7 +603,7 @@ class RAMPressureCache(LRUCache):
             oom_score *= oom_ram_usage
             #In the case where we have no information on the node ram usage at all,
             #break OOM score ties on the last touch timestamp (pure LRU)
-            bisect.insort(clean_list, (oom_score, self.timestamps[key], key, ram_usage))
+            bisect.insort(clean_list, (oom_score, self.timestamps[key], key, ram_usage), key=lambda entry: entry[:2])
 
         freed = 0
         while virtual_memory_available() < target and clean_list:
