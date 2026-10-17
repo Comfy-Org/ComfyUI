@@ -97,7 +97,7 @@ jobs:
             ls
 
         - name: Upload binaries to release
-          uses: svenstaro/upload-release-action@v2
+          uses: svenstaro/upload-release-action@29e53e917877a24fad85510ded594ab3c9ca12de # v2
           with:
                 repo_token: ${{ secrets.GITHUB_TOKEN }}
                 file: new_ComfyUI_windows_portable_nvidia_cu${{ inputs.cu }}_or_cpu.7z
