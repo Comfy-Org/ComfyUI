@@ -276,6 +276,9 @@ class SelectCLIPDeviceNode(io.ComfyNode):
             clip.patcher = _apply_patcher_device(clip.patcher, resolved)
         except RuntimeError as e:
             logging.warning(f"Select CLIP Device: cannot retarget CLIP, passing through unchanged. ({e})")
+            return io.NodeOutput(clip)
+        # Keep CLIP wrapper in sync with the model the patcher now owns.
+        clip.cond_stage_model = clip.patcher.model
         return io.NodeOutput(clip)
 
 
