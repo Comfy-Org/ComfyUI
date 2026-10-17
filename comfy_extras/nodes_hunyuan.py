@@ -266,7 +266,10 @@ class HunyuanVideo15LatentUpscaleWithModel(io.ComfyNode):
                 height = max(64, height)
             s = comfy.utils.common_upscale(samples["samples"], width // 16, height // 16, upscale_method, crop)
             s = model.resample_latent(s)
-            return io.NodeOutput({"samples": s.cpu().float()})
+            out = samples.copy()
+            out["samples"] = s.cpu().float()
+            out.pop("noise_mask", None)
+            return io.NodeOutput(out)
 
 
 PROMPT_TEMPLATE_ENCODE_VIDEO_I2V = (
