@@ -410,18 +410,20 @@ class PackedLayout:
                     row += n
                     cursor += 1.0
                 elif kind == "audio":
-                    rt = blk["ref_audio_t"]
-                    if rt > 0:
+                    audio_latent = blk.get("audio_latent")
+                    if audio_latent is not None:
+                        rt = audio_latent.shape[-1]
                         segments.append(("ref_audio", rt * 2))
                         pos.append(_audio_grid(cursor, rt, *target_audio_w))
                         audio_pos.append(torch.arange(row, row + rt * 2))
                         audio_update.append(torch.zeros(rt * 2, dtype=torch.bool))
                         row += rt * 2
-                    cursor += float(rt)
+                    cursor += float(blk["ref_audio_t"])
                 elif kind in ("video", "video_audio"):
                     # the block's audio rows pack immediately before its video
                     # rows, both sharing the cursor origin
-                    rt = blk["ref_audio_t"]
+                    audio_latent = blk.get("audio_latent")
+                    rt = audio_latent.shape[-1] if audio_latent is not None else 0
                     vt = blk["latent_t"]
                     r_frame, r_w_grid = _frame_grid(blk["latent_h"], blk["latent_w"])
                     if rt > 0:
@@ -549,7 +551,11 @@ class MiniMaxH3Model(nn.Module):
         rows = []
         aug = payload.get("audio_cond_noise_aug", AUDIO_COND_TIMESTEP)
         seed = int(payload.get("seed", 0)) + 1
-        for z in payload.get("cond_audio_latents", []):
+        audio_latents = [kf["audio_latent"] for kf in payload.get("keyframes", [])
+                         if kf.get("audio_latent") is not None]
+        audio_latents.extend(ref["audio_latent"] for ref in payload.get("refs", [])
+                             if ref.get("audio_latent") is not None)
+        for z in audio_latents:
             r = pack_audio(z.to(torch.float32))
             if aug < 1.0:
                 gen = torch.Generator("cpu").manual_seed(seed)
