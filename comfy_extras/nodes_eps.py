@@ -133,11 +133,11 @@ class TemporalScoreRescaling(io.ComfyNode):
         def temporal_score_rescaling(args):
             denoised = args["denoised"]
             x = args["input"]
-            sigma = args["sigma"]
+            sigma = args["sigma"][0]
             curr_model = args["model"]
 
             # No rescaling (r = 1) or no noise
-            if tsr_k == 1 or sigma == 0:
+            if tsr_k == 1 or sigma.item() == 0:
                 return denoised
 
             model_sampling = curr_model.current_patcher.get_model_object("model_sampling")
@@ -145,7 +145,7 @@ class TemporalScoreRescaling(io.ComfyNode):
             snr = (2 * half_log_snr).exp()
 
             # No rescaling needed (r = 1)
-            if snr == 0:
+            if snr.item() == 0:
                 return denoised
 
             rescaling_r = compute_tsr_rescaling_factor(snr, tsr_k, tsr_variance)
