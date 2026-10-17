@@ -850,6 +850,10 @@ class ColorTransfer(io.ComfyNode):
         if strength == 0 or image_ref is None:
             return io.NodeOutput(image_target)
 
+        alpha = image_target[..., 3:] if image_target.shape[-1] == 4 else None
+        image_target = image_target[..., :3]
+        image_ref = image_ref[..., :3]
+
         device = comfy.model_management.get_torch_device()
         intermediate_device = comfy.model_management.intermediate_device()
         intermediate_dtype = comfy.model_management.intermediate_dtype()
@@ -890,6 +894,8 @@ class ColorTransfer(io.ComfyNode):
                 out[i] = result.squeeze(0).permute(1, 2, 0).clamp_(0, 1).to(device=intermediate_device, dtype=intermediate_dtype)
                 pbar.update(1)
 
+        if alpha is not None:
+            out = torch.cat((out, alpha.to(device=intermediate_device, dtype=intermediate_dtype)), dim=-1)
         return io.NodeOutput(out)
 
 
