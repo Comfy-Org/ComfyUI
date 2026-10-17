@@ -95,6 +95,7 @@ def get_supported_float8_types():
 FLOAT8_TYPES = get_supported_float8_types()
 
 xpu_available = False
+xpu_memory_query_warnings = set()
 torch_version = ""
 try:
     torch_version = torch.version.__version__
@@ -1824,7 +1825,18 @@ def get_free_memory(dev=None, torch_free_too=False):
             stats = torch.xpu.memory_stats(dev)
             mem_active = stats['active_bytes.all.current']
             mem_reserved = stats['reserved_bytes.all.current']
-            mem_free_xpu = torch.xpu.get_device_properties(dev).total_memory - mem_reserved
+            try:
+                mem_free_xpu, _ = torch.xpu.mem_get_info(dev)
+            except RuntimeError as e:
+                if "doesn't support querying the available free memory" not in str(e):
+                    raise
+                device_index = dev if isinstance(dev, int) else torch.device(dev).index
+                if device_index is None:
+                    device_index = torch.xpu.current_device()
+                if device_index not in xpu_memory_query_warnings:
+                    logging.warning("XPU %s cannot report free memory; VRAM estimates are approximate. Use --reserve-vram to leave additional headroom.", device_index)
+                    xpu_memory_query_warnings.add(device_index)
+                mem_free_xpu = torch.xpu.get_device_properties(dev).total_memory - mem_reserved
             mem_free_torch = mem_reserved - mem_active
             mem_free_total = mem_free_xpu + mem_free_torch
         elif is_ascend_npu():
