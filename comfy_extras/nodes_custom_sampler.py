@@ -74,8 +74,8 @@ class ExponentialScheduler(io.ComfyNode):
             category="model/sampling/schedulers",
             inputs=[
                 io.Int.Input("steps", default=20, min=1, max=10000),
-                io.Float.Input("sigma_max", default=14.614642, min=0.0, max=5000.0, step=0.01, round=False, advanced=True),
-                io.Float.Input("sigma_min", default=0.0291675, min=0.0, max=5000.0, step=0.01, round=False, advanced=True),
+                io.Float.Input("sigma_max", default=14.614642, min=0.0001, max=5000.0, step=0.01, round=False, advanced=True),
+                io.Float.Input("sigma_min", default=0.0291675, min=0.0001, max=5000.0, step=0.01, round=False, advanced=True),
             ],
             outputs=[io.Sigmas.Output()]
         )
@@ -95,8 +95,8 @@ class PolyexponentialScheduler(io.ComfyNode):
             category="model/sampling/schedulers",
             inputs=[
                 io.Int.Input("steps", default=20, min=1, max=10000),
-                io.Float.Input("sigma_max", default=14.614642, min=0.0, max=5000.0, step=0.01, round=False, advanced=True),
-                io.Float.Input("sigma_min", default=0.0291675, min=0.0, max=5000.0, step=0.01, round=False, advanced=True),
+                io.Float.Input("sigma_max", default=14.614642, min=0.0001, max=5000.0, step=0.01, round=False, advanced=True),
+                io.Float.Input("sigma_min", default=0.0291675, min=0.0001, max=5000.0, step=0.01, round=False, advanced=True),
                 io.Float.Input("rho", default=1.0, min=0.0, max=100.0, step=0.01, round=False, advanced=True),
             ],
             outputs=[io.Sigmas.Output()]
