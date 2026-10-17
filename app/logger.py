@@ -70,7 +70,10 @@ class LogInterceptor(io.TextIOWrapper):
         super().write(data)
 
     def flush(self):
-        super().flush()
+        try:
+            super().flush()
+        except (OSError, ValueError):
+            pass
         for cb in self._flush_callbacks:
             cb(self._logs_since_flush)
             self._logs_since_flush = []
