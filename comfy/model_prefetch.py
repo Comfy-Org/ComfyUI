@@ -3,7 +3,16 @@ import threading
 import warnings
 import weakref
 
-import comfy_kitchen as ck
+try:
+    import comfy_kitchen as ck
+except Exception as e:
+    # Same failure as in comfy.quant_ops: an incompatible comfy_kitchen raises from its
+    # own module body, not as an ImportError. quant_ops degrading is not enough on its
+    # own -- execution.py, latent_preview.py and comfy.sd all import this module during
+    # startup, so an unguarded import here kills the process just the same. The single
+    # use below is already behind a hasattr() check, which a None `ck` satisfies.
+    logging.warning(f"Failed to load comfy_kitchen, Error: {e}, allocation-context hints will not be available.")
+    ck = None
 import torch
 
 import comfy_aimdo.malloc_graph
