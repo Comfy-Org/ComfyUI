@@ -2,6 +2,7 @@ import torch
 import comfy.utils
 import comfy.model_management
 import numpy as np
+import nodes
 from tqdm import tqdm
 from typing_extensions import override
 from comfy_api.latest import ComfyExtension, io
@@ -384,6 +385,7 @@ class CropByBBoxes(io.ComfyNode):
             category="image/transform",
             search_aliases=["crop", "face crop", "bbox crop", "pose", "bounding box"],
             description="Crop and resize regions from the input image batch based on provided bounding boxes.",
+            has_intermediate_output=True,
             inputs=[
                 io.Image.Input("image"),
                 io.BoundingBox.Input("bboxes", force_input=True),
@@ -408,6 +410,14 @@ class CropByBBoxes(io.ComfyNode):
             bboxes = [[bboxes]]
         elif len(bboxes) == 0:
             return io.NodeOutput(image)
+
+        ui = {
+            "source_images": nodes.PreviewImage().save_images(image[:1], "comfy.crop_bboxes.source")["ui"]["images"],
+            "input_bboxes": [
+                {k: int(b[k]) for k in ("x", "y", "width", "height")}
+                for b in bboxes[0]
+            ],
+        }
 
         crops = []
 
@@ -462,10 +472,10 @@ class CropByBBoxes(io.ComfyNode):
             crops.append(resized)
 
         if not crops:
-            return io.NodeOutput(image)
+            return io.NodeOutput(image, ui=ui)
 
         out_images = torch.cat(crops, dim=0).permute(0, 2, 3, 1)  # (N, H, W, C)
-        return io.NodeOutput(out_images)
+        return io.NodeOutput(out_images, ui=ui)
 
 
 class SDPoseExtension(ComfyExtension):
