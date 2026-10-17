@@ -349,7 +349,11 @@ class RegexExtract(io.ComfyNode):
 
             elif mode == "First Group":
                 match = re.search(regex_pattern, string, flags)
-                if match and len(match.groups()) >= group_index:
+                if (
+                    match
+                    and len(match.groups()) >= group_index
+                    and match.group(group_index) is not None
+                ):
                     result = match.group(group_index)
                 else:
                     result = ""
@@ -358,7 +362,11 @@ class RegexExtract(io.ComfyNode):
                 matches = re.finditer(regex_pattern, string, flags)
                 results = []
                 for match in matches:
-                    if match.groups() and len(match.groups()) >= group_index:
+                    if (
+                        match.groups()
+                        and len(match.groups()) >= group_index
+                        and match.group(group_index) is not None
+                    ):
                         results.append(match.group(group_index))
                 result = join_delimiter.join(results)
             else:
