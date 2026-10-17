@@ -1,5 +1,7 @@
-import pytest
+import json
 import os
+
+import pytest
 from aiohttp import web
 from app.user_manager import UserManager
 from unittest.mock import patch
@@ -291,3 +293,56 @@ async def test_listuserdata_v2_url_encoded_path(aiohttp_client, app, tmp_path):
     assert entry["name"] == "file.txt"
     # Ensure the path is correctly decoded and uses forward slash
     assert entry["path"] == "my dir/file.txt"
+
+
+async def test_post_userdata_json_pretty_print(aiohttp_client, app, tmp_path):
+    client = await aiohttp_client(app)
+    workflow_data = {
+        "nodes": [
+            {"id": "1", "type": "LoadImage", "inputs": {"image": "test.png"}},
+            {"id": "2", "type": "SaveImage", "inputs": {"images": ["1", 0]}}
+        ],
+        "metadata": {"version": "1.0", "author": "test"}
+    }
+    compact_json = json.dumps(workflow_data).encode('utf-8')
+
+    resp = await client.post("/userdata/workflow.json", data=compact_json)
+    assert resp.status == 200
+
+    with open(tmp_path / "workflow.json", "r", encoding='utf-8') as f:
+        saved_content = f.read()
+
+    assert saved_content == json.dumps(workflow_data, indent=2)
+
+
+async def test_post_userdata_json_invalid_fallback(aiohttp_client, app, tmp_path):
+    client = await aiohttp_client(app)
+    invalid_json = b'{"invalid": json content}'
+
+    resp = await client.post("/userdata/invalid.json", data=invalid_json)
+    assert resp.status == 200
+
+    with open(tmp_path / "invalid.json", "rb") as f:
+        assert f.read() == invalid_json
+
+
+async def test_post_userdata_json_invalid_utf8_fallback(aiohttp_client, app, tmp_path):
+    client = await aiohttp_client(app)
+    invalid_utf8 = b'{"value":"\xff"}'
+
+    resp = await client.post("/userdata/invalid-utf8.json", data=invalid_utf8)
+    assert resp.status == 200
+
+    with open(tmp_path / "invalid-utf8.json", "rb") as f:
+        assert f.read() == invalid_utf8
+
+
+async def test_post_userdata_non_json_unchanged(aiohttp_client, app, tmp_path):
+    client = await aiohttp_client(app)
+    binary_content = b'\x00\x01\x02\x03\x04\x05'
+
+    resp = await client.post("/userdata/test.bin", data=binary_content)
+    assert resp.status == 200
+
+    with open(tmp_path / "test.bin", "rb") as f:
+        assert f.read() == binary_content
