@@ -1,5 +1,8 @@
 import unittest
 import unittest.mock
+import io
+import contextlib
+import logging
 import torch
 import sys
 import os
@@ -18,6 +21,7 @@ if not has_gpu():
 
 from comfy import ops
 from comfy.quant_ops import QUANT_ALGOS, QuantizedTensor
+import comfy.sd
 import comfy.utils
 
 
@@ -376,6 +380,94 @@ class TestMixedPrecisionOps(unittest.TestCase):
             ops.INPUT_ACT_EAGER["swiglu"](x), layer.weight.dequantize(), bias
         )
         torch.testing.assert_close(output, expected)
+
+    def test_minimax_h3_video_vae_uses_device_int8_capability(self):
+        """Unsupported backends dequantize; supported INT8 backends retain the fast path.
+
+        Abort at the ops factory so this VAE constructor check runs on CPU-only
+        CI without allocating the full video decoder or executing GPU kernels.
+        """
+        class _OpsCaptured(Exception):
+            pass
+
+        sd = {
+            "decoder.transformer_blocks.0.scale1": torch.empty(0),
+            "encoder.down.5.block.0.conv1.weight": torch.empty(0),
+        }
+        quant_config = {"decoder.transformer_blocks.0.attn.to_qkv": {"format": "int8_tensorwise"}}
+        for requested_device, resolved_device, supports_int8 in (
+            (torch.device("mps"), torch.device("mps"), False),
+            (torch.device("cuda"), torch.device("cuda"), True),
+            (None, torch.device("mps"), False),
+        ):
+            with self.subTest(requested_device=requested_device, supports_int8=supports_int8):
+                with (
+                    unittest.mock.patch.object(comfy.utils, "detect_layer_quantization", return_value=quant_config),
+                    unittest.mock.patch.object(comfy.model_management, "vae_device", return_value=resolved_device) as default_device,
+                    unittest.mock.patch.object(comfy.model_management, "supports_int8_compute", return_value=supports_int8) as int8_capability,
+                    unittest.mock.patch.object(comfy.ops, "mixed_precision_ops", side_effect=_OpsCaptured) as ops_factory,
+                ):
+                    with self.assertRaises(_OpsCaptured):
+                        comfy.sd.VAE(sd=sd, device=requested_device)
+
+                int8_capability.assert_called_once_with(resolved_device)
+                ops_factory.assert_called_once_with(
+                    quant_config, torch.float16, full_precision_mm=not supports_int8
+                )
+                if requested_device is None:
+                    default_device.assert_called_once_with()
+                else:
+                    default_device.assert_not_called()
+
+    def test_minimax_h3_video_vae_uses_full_precision_mm_on_mps(self):
+        """comfy.sd.VAE must construct the MiniMax H3 int8+convrot video decoder with
+        full_precision_mm=True. Without it the decoder's to_qkv layers keep their
+        quantized weights and reach quant_ops.ck.int8_linear -> torch._int_mm, which
+        PyTorch does not implement for MPS (pytorch#141287), crashing after the whole
+        video had already been sampled. Related: #16284, fixed in linear_input_act by
+        #16285; this call site in VAE.__init__ was missed."""
+        if not torch.backends.mps.is_available():
+            self.skipTest("MPS not available")
+
+        # Minimal key set that identifies the MiniMax H3 video VAE branch in
+        # comfy.sd.VAE.__init__ plus one int8+convrot decoder layer. Shapes match
+        # the real model (dim 2048) so the constructor's load_state_dict succeeds;
+        # a full-sized qkv weight quantized to INT8 keeps the test cheap.
+        dim = 2048
+        sd = {
+            "decoder.transformer_blocks.0.scale1": torch.zeros(dim),
+            "encoder.down.5.block.0.conv1.weight": torch.zeros(1024, 512, 3, 3, 3),
+            "decoder.x_embedder.weight": torch.zeros(dim, 24),
+            "decoder.x_embedder.bias": torch.zeros(dim),
+            "decoder.transformer_blocks.0.to_qkv.weight":
+                QuantizedTensor.from_float(torch.zeros(3 * dim, dim), "TensorWiseINT8Layout"),
+            "decoder.transformer_blocks.0.comfy_quant": torch.tensor(
+                list(json.dumps({"format": "int8_tensorwise", "convrot": True}).encode()), dtype=torch.uint8),
+        }
+
+        quant_config = comfy.utils.detect_layer_quantization(sd, "")
+        self.assertIsNotNone(quant_config, "int8+convrot quantization must be detected")
+
+        # End to end: the real VAE constructor path must mark decoder layers.
+        @contextlib.contextmanager
+        def _quiet_missing_keys():
+            # minimal state dicts log a huge "Missing VAE keys" dump; don't let it
+            # pollute test output but DO let real errors through.
+            h = logging.getLogger("ComfyUI")  # comfy logs via the root/ComfyUI logger
+            class _F(logging.Filter):
+                def filter(self, record):
+                    return "Missing VAE keys" not in record.getMessage()
+            f = _F(); h.addFilter(f)
+            try:
+                yield
+            finally:
+                h.removeFilter(f)
+
+        with _quiet_missing_keys(), contextlib.redirect_stderr(io.StringIO()):
+            vae = comfy.sd.VAE(sd=sd, device=torch.device("mps"))
+        qkv = vae.first_stage_model.decoder.transformer_blocks[0].attn.to_qkv
+        self.assertTrue(getattr(qkv, "_full_precision_mm", False),
+                        "MiniMax H3 video VAE decoder layers must have _full_precision_mm=True")
 
     def test_supports_int8_compute_treats_mps_mode_as_unsupported_when_device_is_none(self):
         """Call sites (like pick_operations' default) may omit load_device. On an
