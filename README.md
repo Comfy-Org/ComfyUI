@@ -215,6 +215,70 @@ This is the command to install the nightly with ROCm 7.2 which might have some p
 
 ```pip install --pre torch torchvision torchaudio --index-url https://download.pytorch.org/whl/nightly/rocm7.2```
 
+#### If ComfyUI segfaults on start before loading any model
+
+On some recent APUs the ROCm runtime a `torch` wheel actually loads has to agree with the driver and
+device library already on the machine, or the process dies the first time PyTorch loads a kernel. On
+a Ryzen AI Max+ 395 / Radeon 8060S (gfx1151) with ROCm 7.14.1 installed, a `+rocm7.1` wheel
+segfaulted at `torch.zeros(64, device="cuda")` — before ComfyUI reaches any model — and ComfyUI
+cannot report it, because a native segfault bypasses every Python handler and the log simply ends at
+`ROCm version:`. If you see that, check it is not this:
+
+```bash
+ldd -r "$(python -c "import torch,os;print(os.path.join(os.path.dirname(torch.__file__),'lib','libtorch_hip.so'))")" \
+    | grep -E "amdhip|hsa-runtime|not found"
+```
+
+The distinction that mattered here: the crashing wheel resolved `libhsa-runtime64.so` and
+`librocprofiler-sdk.so` to **copies bundled inside `torch/lib/`**, while the wheel that worked
+resolved them to the install's own ROCm package. `hipMalloc`/`hipMemcpy` succeeded on the *system*
+runtime in both cases, so the fault was in the bundled runtime's queue/scratch path rather than the
+kernel driver — which is why it looks like a GPU-support problem and is not one.
+
+Two things this check is **not**: `torch.version.hip` does not equal the system `libamdhip64.so.*`
+soname even on a working install (here `7.14.60850` versus `libamdhip64.so.7.14.60850-0000000`, a
+build suffix `torch` omits), so compare what `ldd` resolves rather than diffing version strings; and
+not every wheel bundles at all — current PyTorch on ROCm can take its runtime from a pip dependency
+instead of from `/opt/rocm`, in which case the system install may be unused entirely.
+
+Installing the wheel for your ROCm line resolved it here; indexes exist for `rocm7.1`, `rocm7.2` and
+`rocm7.14`, so a GPU missing from the command above is usually a matter of swapping the index:
+
+```pip install torch --index-url https://download.pytorch.org/whl/rocm7.14```
+
+AMD's own multi-architecture wheels are another route on Linux, and ship gfx1151 kernels for
+CPython 3.10-3.14:
+
+```pip install --index-url https://stable.repo.amd.com/rocm/whl-next/ "torch[device-gfx1151]==2.14.0+rocm10.1.0"```
+
+#### `torchaudio` has no cp312 x86_64 wheel on the stable ROCm indexes
+
+The install command at the top of this section asks for `torchaudio`, but the **stable** ROCm indexes
+publish no `cp312` `torchaudio` wheel for **x86_64** — checked on 2026-10-17 by counting wheel links
+per index: `rocm7.1` 2, `rocm7.2` 1, `rocm7.14` **0** (its one cp312 file is `linux_aarch64`), while
+`nightly/rocm7.14` has 15. So on Python 3.12 x86_64 the command above fails outright:
+
+```
+ERROR: Could not find a version that satisfies the requirement torchaudio (from versions: none)
+ERROR: No matching distribution found for torchaudio
+```
+
+This is independent of the GPU: `requirements.txt` lists `torch` and `torchvision` but **not**
+`torchaudio`, and no module in this repository imports it, so on ROCm it can simply be dropped:
+
+```pip install torch torchvision --index-url https://download.pytorch.org/whl/rocm7.14```
+
+That resolves and installs cleanly on cp312 x86_64 (`torch 2.14.1+rocm7.14` with
+`torchvision 0.29.1+rocm7.14`). If you do want audio, add `--pre` and use the matching nightly
+index, and keep `torch` and its companions on **one ROCm line and one index** — mixing lines loads
+and then fails inside the custom ops (observed: `nms_kernel ... not implemented for 'Long'` for a
+`+rocm7.14` `torchvision` against a `+rocm10.1.0` `torch`).
+
+`torchvision` itself is **not** the problem — stable `rocm7.14` publishes cp312 x86_64 wheels
+(`0.29.0`, `0.29.1`). Note they are tagged `manylinux_2_28_x86_64`, not `linux_x86_64`, so
+`grep linux_x86_64` over an index page returns nothing for them and can suggest a wheel is missing
+when pip installs it without complaint.
+
 
 ### AMD GPUs (Windows, ROCm 10.0)
 
