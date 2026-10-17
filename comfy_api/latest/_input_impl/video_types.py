@@ -566,9 +566,9 @@ class VideoFromFile(VideoInput):
                                 g.configure()
                                 align_graph = (g, g_src, g_sink)
                             align_graph[1].push(frame)
-                            img = np.ascontiguousarray(align_graph[2].pull().to_ndarray(format=image_format)[:frame.height, :frame.width])
+                            img = np.ascontiguousarray(align_graph[2].pull().to_ndarray(format=image_format, threads=4)[:frame.height, :frame.width])
                         else:
-                            img = frame.to_ndarray(format=image_format)
+                            img = frame.to_ndarray(format=image_format, threads=4)
                         rotation_quadrant = _rotation_quadrant(frame)
                         if rotation_quadrant:
                             img = np.rot90(img, k=rotation_quadrant, axes=(0, 1)).copy()
@@ -1163,6 +1163,7 @@ class VideoFromComponents(VideoInput):
             video_stream.width = self.__components.images.shape[2]
             video_stream.height = self.__components.images.shape[1]
             video_stream.pix_fmt = pix_fmt
+            video_stream.thread_type = "AUTO"
             video_stream.options = video_encoder_options(output_codec, crf, preset)
             if color_space is not None:
                 set_video_color_properties(video_stream.codec_context, color_space)
@@ -1196,7 +1197,7 @@ class VideoFromComponents(VideoInput):
                     dst_colorspace = BT709_NCL
                 elif color_space in HDR_COLOR_TRANSFERS:
                     dst_colorspace = BT2020_NCL
-                frame = frame.reformat(format=pix_fmt, dst_colorspace=dst_colorspace)
+                frame = frame.reformat(format=pix_fmt, dst_colorspace=dst_colorspace, threads=4)
                 if color_space is not None:
                     set_video_color_properties(frame, color_space)
                 packet = video_stream.encode(frame)
