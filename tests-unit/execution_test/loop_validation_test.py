@@ -452,3 +452,70 @@ def test_loop_error_does_not_reject_independent_output(monkeypatch):
     assert good_outputs == ["independent_output"]
     assert set(node_errors) == {"left", "right", "end"}
     assert all(value["dependent_outputs"] == ["loop_output"] for value in node_errors.values())
+
+
+def test_prompt_validation_reports_an_unpaired_end_that_reaches_no_output(monkeypatch):
+    """A loop error need not reach any output.
+
+    The reporting path took `dependent_outputs[0]` unconditionally, so a graph whose
+    loop problem terminates before any output raised `IndexError` out of
+    `validate_prompt` instead of answering with the error it had just built.
+    """
+    monkeypatch.setitem(nodes.NODE_CLASS_MAPPINGS, "StartLoop", StartLoop)
+    monkeypatch.setitem(nodes.NODE_CLASS_MAPPINGS, "EndLoop", EndLoop)
+    monkeypatch.setitem(nodes.NODE_CLASS_MAPPINGS, "Output", Output)
+    monkeypatch.setitem(nodes.NODE_CLASS_MAPPINGS, "Source", Source)
+    prompt = {
+        "start": node("StartLoop", cache_iterations=False),
+        "source": node("Source"),
+        "output": node("Output", value=["source", 0]),
+        "end": node("EndLoop", output_value=["output", 0], accumulate=False),
+    }
+
+    valid, error, good_outputs, node_errors = asyncio.run(validate_prompt("prompt", prompt, None))
+
+    assert valid
+    assert error is None
+    assert good_outputs == ["output"]
+    assert node_errors["end"]["errors"][0]["extra_info"]["input_name"] == "loop boundary"
+    assert node_errors["end"]["dependent_outputs"] == []
+
+
+def test_prompt_validation_reports_end_loops_that_depend_on_each_other(monkeypatch):
+    """Pairing takes the innermost End first, and there is none when the graph cycles
+    through them. The generator had no default, so the `StopIteration` escaped the
+    coroutine as a `RuntimeError` rather than being reported as a loop problem.
+
+    The dependency-cycle guard ahead of this call does not catch it: it reads the
+    outputs' own validation results, and here those failed for a different reason
+    before they could report the cycle.
+    """
+    monkeypatch.setitem(nodes.NODE_CLASS_MAPPINGS, "StartLoop", StartLoop)
+    monkeypatch.setitem(nodes.NODE_CLASS_MAPPINGS, "EndLoop", EndLoop)
+    monkeypatch.setitem(nodes.NODE_CLASS_MAPPINGS, "Body", Body)
+    monkeypatch.setitem(nodes.NODE_CLASS_MAPPINGS, "Output", Output)
+    prompt = {
+        "start": node("StartLoop", cache_iterations=False),
+        "body": node("Body", left=["start", 0], right=["start", 0]),
+        "cycle_output": node("Output", value=["ring", 0]),
+        "inner_end": node("EndLoop", output_value=["cycle_output", 0], accumulate=False),
+        "mid_output": node("Output", value=["cycle_output", 0]),
+        "outer_end": node("EndLoop", output_value=["mid_output", 0], accumulate=False),
+        "clean_output": node("Output", value=["body", 0]),
+        "ring": node("Body", left=["mid_output", 0], right=["inner_end", 0]),
+    }
+
+    valid, error, good_outputs, node_errors = asyncio.run(validate_prompt("prompt", prompt, None))
+
+    assert valid
+    assert error is None
+    assert good_outputs == ["clean_output"]
+    loop_errors = [
+        err
+        for value in node_errors.values()
+        for err in value["errors"]
+        if err["extra_info"].get("loop_error_type") == "loop_end_cycle"
+    ]
+    assert loop_errors
+    assert "inner_end" in loop_errors[0]["details"]
+    assert "outer_end" in loop_errors[0]["details"]
