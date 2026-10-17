@@ -1,4 +1,5 @@
 import logging
+import math
 import os
 
 import numpy as np
@@ -1429,6 +1430,15 @@ class LossGraphNode(io.ComfyNode):
             hidden=[io.Hidden.prompt, io.Hidden.extra_pnginfo],
         )
 
+    @staticmethod
+    def scale_loss(loss_values):
+        if not all(math.isfinite(l) for l in loss_values):
+            raise ValueError("loss values must be finite")
+        min_loss, max_loss = min(loss_values), max(loss_values)
+        if max_loss > min_loss:
+            return [(l - min_loss) / (max_loss - min_loss) for l in loss_values]
+        return [0.0] * len(loss_values)
+
     @classmethod
     def execute(cls, loss, filename_prefix, prompt=None, extra_pnginfo=None):
         loss_values = loss["loss"]
@@ -1441,7 +1451,7 @@ class LossGraphNode(io.ComfyNode):
         draw = ImageDraw.Draw(img)
 
         min_loss, max_loss = min(loss_values), max(loss_values)
-        scaled_loss = [(l - min_loss) / (max_loss - min_loss) for l in loss_values]
+        scaled_loss = cls.scale_loss(loss_values)
 
         steps = len(loss_values)
 
