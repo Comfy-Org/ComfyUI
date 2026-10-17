@@ -9,19 +9,25 @@ mock_nodes.MAX_RESOLUTION = 16384
 # Mock server module for PromptServer
 mock_server = MagicMock()
 
-previous_nodes = sys.modules.get("nodes")
-previous_server = sys.modules.get("server")
-sys.modules["nodes"] = mock_nodes
-sys.modules["server"] = mock_server
-from comfy_extras.nodes_images import ImageStitch
-if previous_nodes is None:
-    sys.modules.pop("nodes")
-else:
-    sys.modules["nodes"] = previous_nodes
-if previous_server is None:
-    sys.modules.pop("server")
-else:
-    sys.modules["server"] = previous_server
+# Stub only `nodes` and `server`, and put back only those two keys.
+#
+# `patch.dict("sys.modules", ...)` restores the mapping to its state on entry,
+# which also *evicts* every module this import pulled in for the first time. A
+# later import of one of those re-initialises an already-loaded C extension --
+# numpy raises "cannot load module more than once per process" -- aborting the
+# whole pytest run rather than failing one test.
+_MISSING = object()
+_stubs = {"nodes": mock_nodes, "server": mock_server}
+_originals = {name: sys.modules.get(name, _MISSING) for name in _stubs}
+sys.modules.update(_stubs)
+try:
+    from comfy_extras.nodes_images import ImageStitch
+finally:
+    for _name, _original in _originals.items():
+        if _original is _MISSING:
+            sys.modules.pop(_name, None)
+        else:
+            sys.modules[_name] = _original
 
 
 class TestImageStitch:
@@ -252,3 +258,4 @@ class TestImageStitch:
         expected_image2_width = int(64 * (32/32))  # Resized to height 64
         expected_total_width = 48 + 8 + expected_image2_width
         assert result[0].shape[2] == expected_total_width
+
