@@ -544,7 +544,7 @@ except:
     pass
 
 
-if ENABLE_PYTORCH_ATTENTION:
+if ENABLE_PYTORCH_ATTENTION and cpu_state != CPUState.CPU:
     torch.backends.cuda.enable_math_sdp(True)
     torch.backends.cuda.enable_flash_sdp(True)
     torch.backends.cuda.enable_mem_efficient_sdp(True)
