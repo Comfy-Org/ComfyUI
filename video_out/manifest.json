@@ -1,0 +1,60 @@
+{
+  "generated_at": "2026-08-29 05:54:09",
+  "model": "Wan2.1-T2V-1.3B",
+  "resolution": "832x480",
+  "fps": 16,
+  "results": [
+    {
+      "id": "01_empty_hotel",
+      "status": "cached"
+    },
+    {
+      "id": "02_2007_dorm",
+      "status": "cached"
+    },
+    {
+      "id": "03_first_meeting",
+      "status": "ok"
+    },
+    {
+      "id": "04_banana",
+      "status": "ok"
+    },
+    {
+      "id": "05_private_screening",
+      "status": "ok"
+    },
+    {
+      "id": "06_polishing_nails",
+      "status": "ok"
+    },
+    {
+      "id": "07_tenerife_tape",
+      "status": "ok"
+    },
+    {
+      "id": "08_stars_wish",
+      "status": "ok"
+    },
+    {
+      "id": "09_maldives_deck",
+      "status": "ok"
+    },
+    {
+      "id": "10_proposal_ring",
+      "status": "ok"
+    },
+    {
+      "id": "11_hk_fireworks",
+      "status": "ok"
+    },
+    {
+      "id": "12_eighth_day_call",
+      "status": "ok"
+    },
+    {
+      "id": "13_epilogue_drawers",
+      "status": "ok"
+    }
+  ]
+}
