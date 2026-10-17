@@ -31,6 +31,10 @@ def _steal_pin(module, stack, buckets, size, priority, subset):
     *_, victim = bucket.pop()
     module_pin = module._pins[subset]
     victim_pin = victim._pins[subset]
+    event = victim_pin.pop("copy_event", None)
+    if event is not None:
+        # The caller overwrites the pin next. Wait until the GPU has run the copies queued from it.
+        event.synchronize()
     module_pin["pin"] = victim_pin["pin"]
     module_pin["registered"] = victim_pin["registered"]
     module_pin["stack_index"] = victim_pin["stack_index"]

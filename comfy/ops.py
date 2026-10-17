@@ -244,11 +244,19 @@ def cast_modules_with_vbar(comfy_modules, dtype, device, bias_dtype, non_blockin
         def handle_pin(m, pin, source, dest, subset="weights", size=None):
             if pin is not None:
                 cast_maybe_lowvram_patch([pin], dest, offload_stream)
-                return
-            if signature is None or not fast_disk or args.high_ram:
-                comfy.pinned_memory.pin_memory(m, subset=subset, size=size)
-                pin = comfy.pinned_memory.get_pin(m, subset=subset)
-            cast_maybe_lowvram_patch(source, pin, offload_stream, xfer_dest2=dest)
+            else:
+                if signature is None or not fast_disk or args.high_ram:
+                    comfy.pinned_memory.pin_memory(m, subset=subset, size=size)
+                    pin = comfy.pinned_memory.get_pin(m, subset=subset)
+                cast_maybe_lowvram_patch(source, pin, offload_stream, xfer_dest2=dest)
+            if pin is not None:
+                # The copy from the pin is async. _steal_pin waits for this event before the pin is reused,
+                # so it also has to cover an earlier copy from the pin that may be queued on the other offload stream.
+                module_pin = m._pins[subset]
+                stream = offload_stream if offload_stream is not None else comfy.model_management.current_stream(device)
+                if "copy_event" in module_pin:
+                    stream.wait_event(module_pin["copy_event"])
+                module_pin["copy_event"] = stream.record_event()
 
         handle_pin(s, pin, xfer_source, xfer_dest, subset=subset, size=dest_size)
 
