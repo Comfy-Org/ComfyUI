@@ -132,7 +132,7 @@ def prepare_callback(model, steps, x0_output_dict=None):
             x0_output_dict["x0"] = x0
 
         preview_bytes = None
-        if previewer:
+        if previewer and (step % args.preview_interval == 0 or step + 1 == total_steps):
             if x0.is_nested:
                 x0 = x0.tensors[0]
             preview_bytes = previewer.decode_latent_to_preview_image(preview_format, x0)
