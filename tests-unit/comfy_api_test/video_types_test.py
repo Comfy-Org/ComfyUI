@@ -7,7 +7,7 @@ import av
 import io
 import numpy as np
 from fractions import Fraction
-from comfy_api.input_impl.video_types import VideoFromFile, VideoFromComponents
+from comfy_api.input_impl.video_types import VideoFromFile, VideoFromComponents, VideoFromList
 from comfy_api.latest._util.video_types import normalize_crop_rect
 from comfy_api.util.video_types import VideoComponents, VideoContainer, VideoCodec
 from comfy_api.input.basic_types import AudioInput
@@ -1315,6 +1315,21 @@ def test_save_to_transcode_trim_survives_missing_leading_pts():
             assert float(video_stream.duration * video_stream.time_base) == pytest.approx(2 / 30, abs=0.01)
     finally:
         os.unlink(file_path)
+
+
+def test_concatenation_compares_rotated_clips_by_their_displayed_size():
+    rotated = create_transcode_source(width=64, height=32, rotation=True)
+    portrait = create_transcode_source(width=32, height=64)
+    try:
+        video = VideoFromList([VideoFromFile(rotated), VideoFromFile(portrait)])
+
+        assert video.get_dimensions() == (32, 64)
+        result = transcode_and_probe(video)
+        assert (result["width"], result["height"]) == (32, 64)
+        assert result["frames"] == 60
+    finally:
+        os.unlink(rotated)
+        os.unlink(portrait)
 
 
 def test_save_to_transcode_bakes_rotation():
