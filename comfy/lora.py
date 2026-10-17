@@ -335,8 +335,10 @@ def model_lora_keys_unet(model, key_map={}):
                 targets = [(key_lora, k)]
                 if key_lora.endswith(".img_mlp.gate_up"):  # Qwen Image 2.1 fuses gate_layer/proj at load; LoRAs address the halves
                     half = sd[k].shape[0] // 2
-                    targets = [(key_lora.replace(".gate_up", ".gate_layer"), (k, (0, 0, half))), (key_lora.replace(".gate_up", ".proj"), (k, (0, half, half)))]
+                    targets.extend([(key_lora.replace(".gate_up", ".gate_layer"), (k, (0, 0, half))), (key_lora.replace(".gate_up", ".proj"), (k, (0, half, half)))])
                 for key_lora, to in targets:
+                    key_map["lora_unet_{}".format(key_lora.replace(".", "_"))] = to
+                    key_map["diffusion_model.{}".format(key_lora)] = to
                     # Direct mapping for transformer_blocks format (QwenImage LoRA format)
                     key_map["{}".format(key_lora)] = to
                     # Support transformer prefix format
