@@ -371,7 +371,6 @@ def test_music_node_sends_its_hidden_caption_cfg(monkeypatch):
     assert output == "audio-output"
 
 
-@pytest.mark.skip(reason="Disabled until the server-side issue is fixed")
 def test_reference_video_exposes_and_sends_multimodal_references(monkeypatch):
     node = nodes_comfy_cloud.ComfyCloudMiniMaxH3ReferenceToVideoNode
     run = AsyncMock(return_value="video-output")
@@ -395,12 +394,17 @@ def test_reference_video_exposes_and_sends_multimodal_references(monkeypatch):
     schema = node.define_schema()
     input_names = [input_spec.id for input_spec in schema.inputs]
     assert input_names == [
-        "reference_images", "ref_video", "ref_audio", "prompt", "seed",
+        "reference_images", "ref_videos", "ref_audio", "prompt", "seed",
         "aspect_ratio", "resolution", "duration_seconds", "ref_image_size",
     ]
-    assert next(input_spec for input_spec in schema.inputs if input_spec.id == "ref_video").optional is True
+    # The slot counts are the graph's, not ours: MiniMaxH3ReferenceToVideo in
+    # comfy_extras/nodes_minimax_h3.py grows ref_images to 9 and the other two
+    # to 3. reference_images starts at 1 because comfy-api's binding table makes
+    # reference_image_1 required, so a request without it is refused.
     image_template = next(input_spec for input_spec in schema.inputs if input_spec.id == "reference_images").template
-    assert (image_template.min, image_template.max) == (0, 4)
+    assert (image_template.min, image_template.max) == (1, 9)
+    video_template = next(input_spec for input_spec in schema.inputs if input_spec.id == "ref_videos").template
+    assert (video_template.min, video_template.max) == (0, 3)
     audio_template = next(input_spec for input_spec in schema.inputs if input_spec.id == "ref_audio").template
     assert (audio_template.min, audio_template.max) == (0, 3)
 
@@ -408,7 +412,7 @@ def test_reference_video_exposes_and_sends_multimodal_references(monkeypatch):
         node.execute(
             prompt="A glass forest",
             reference_images={"reference_image_1": "image"},
-            ref_video="video",
+            ref_videos={"ref_video_1": "video"},
             ref_audio={"ref_audio_1": "audio-1", "ref_audio_2": "audio-2"},
             ref_image_size="max",
         )
@@ -418,7 +422,7 @@ def test_reference_video_exposes_and_sends_multimodal_references(monkeypatch):
     assert inputs.ref_image_size == "max"
     assert inputs.assets == {
         "reference_image_1": nodes_comfy_cloud.ComfyCloudAssetInput(type="IMAGE", url="/uploads/reference.png"),
-        "ref_video": nodes_comfy_cloud.ComfyCloudAssetInput(type="VIDEO", url="/uploads/reference.mp4"),
+        "ref_video_1": nodes_comfy_cloud.ComfyCloudAssetInput(type="VIDEO", url="/uploads/reference.mp4"),
         "ref_audio_1": nodes_comfy_cloud.ComfyCloudAssetInput(type="AUDIO", url="/uploads/reference-1.m4a"),
         "ref_audio_2": nodes_comfy_cloud.ComfyCloudAssetInput(type="AUDIO", url="/uploads/reference-2.m4a"),
     }
@@ -426,17 +430,27 @@ def test_reference_video_exposes_and_sends_multimodal_references(monkeypatch):
     assert audio_asset.await_count == 2
 
 
-@pytest.mark.skip(reason="Disabled until the server-side issue is fixed")
-def test_reference_video_accepts_no_references(monkeypatch):
+def test_reference_video_sends_only_the_slots_that_were_connected(monkeypatch):
+    """One image and nothing else is the minimum comfy-api accepts, and it must
+    not carry empty video or audio keys: an asset name the binding table does
+    not know is refused outright, and one with a blank URL drops its loader."""
     run = AsyncMock(return_value="video-output")
+    asset = AsyncMock(
+        return_value=nodes_comfy_cloud.ComfyCloudAssetInput(type="IMAGE", url="/uploads/reference.png")
+    )
     monkeypatch.setattr(nodes_comfy_cloud, "_run_video_workflow", run)
+    monkeypatch.setattr(nodes_comfy_cloud, "_minimax_h3_asset", asset)
 
-    output = _execute_with_defaults(
-        nodes_comfy_cloud.ComfyCloudMiniMaxH3ReferenceToVideoNode,
-        "An empty desert",
+    output = asyncio.run(
+        nodes_comfy_cloud.ComfyCloudMiniMaxH3ReferenceToVideoNode.execute(
+            prompt="An empty desert",
+            reference_images={"reference_image_1": "image"},
+        )
     )
 
-    assert run.call_args.args[2].assets == {}
+    assert run.call_args.args[2].assets == {
+        "reference_image_1": nodes_comfy_cloud.ComfyCloudAssetInput(type="IMAGE", url="/uploads/reference.png"),
+    }
     assert output == "video-output"
 
 
@@ -486,7 +500,7 @@ PLAIN_CONTROLS = {
     # Video: the frame-size budget is a headline choice rather than a dial, and
     # reference-to-video's slots are its media inputs. ref_image_size is that
     # graph's one quality-against-speed switch.
-    "resolution", "reference_images", "ref_video", "ref_audio", "ref_image_size",
+    "resolution", "reference_images", "ref_videos", "ref_audio", "ref_image_size",
     # Mage Flow: a negative prompt is a second prompt rather than a dial, and the
     # pixel budget is how that graph is sized at all, so neither is "advanced".
     "negative_prompt", "megapixels",
@@ -733,6 +747,7 @@ def test_extension_registers_exactly_the_shipped_set():
         nodes_comfy_cloud.ComfyCloudMageFlowTurboTextToImageNode,
         nodes_comfy_cloud.ComfyCloudMiniMaxMusic3TextToAudioNode,
         nodes_comfy_cloud.ComfyCloudMiniMaxH3FirstLastFrameToVideoNode,
+        nodes_comfy_cloud.ComfyCloudMiniMaxH3ReferenceToVideoNode,
         nodes_comfy_cloud.ComfyCloudMiniMaxH3ImageToVideoNode,
     }
     registered = set(asyncio.run(nodes_comfy_cloud.ComfyCloudExtension().get_node_list()))
