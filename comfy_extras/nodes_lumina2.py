@@ -40,12 +40,13 @@ class RenormCFG(io.ComfyNode):
                     ori_pos_norm = torch.linalg.vector_norm(cond_eps
                             , dim=tuple(range(1, len(cond_eps.shape))), keepdim=True
                     )
-                    max_new_norm = ori_pos_norm * float(renorm_cfg)
-                    new_pos_norm = torch.linalg.vector_norm(
+                    max_new_norms = ori_pos_norm * float(renorm_cfg)
+                    new_pos_norms = torch.linalg.vector_norm(
                             half_eps, dim=tuple(range(1, len(half_eps.shape))), keepdim=True
                         )
-                    if new_pos_norm >= max_new_norm:
-                        half_eps = half_eps * (max_new_norm / new_pos_norm)
+                    for i, (max_new_norm, new_pos_norm) in enumerate(zip(max_new_norms, new_pos_norms)):
+                        if new_pos_norm >= max_new_norm:
+                            half_eps[i] = half_eps[i] * (max_new_norm / new_pos_norm)
             else:
                 cond_eps, uncond_eps = cond_denoised[:, :in_channels], uncond_denoised[:, :in_channels]
                 cond_rest, _ = cond_denoised[:, in_channels:], uncond_denoised[:, in_channels:]
