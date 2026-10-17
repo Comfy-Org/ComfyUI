@@ -85,9 +85,16 @@ def malloc_graph_end():
     thread_id = threading.get_ident()
     graph = MALLOC_GRAPHS.get(thread_id)
     if graph is not None and graph._comfy_active:
-        if graph.pop():
-            _malloc_graph_break()
+        try:
+            broken = graph.pop()
+        except Exception:
+            # the native frame is gone, so a later abort would touch freed state
+            MALLOC_GRAPHS.pop(thread_id, None)
+            graph._comfy_active = False
+            raise
         graph._comfy_active = False
+        if broken:
+            _malloc_graph_break()
 
 def cleanup_malloc_graph():
     global MALLOC_GRAPH_ROGUES
@@ -95,8 +102,11 @@ def cleanup_malloc_graph():
     graph = MALLOC_GRAPHS.pop(threading.get_ident(), None)
     if graph is not None:
         if graph._comfy_active:
-            graph.abort()
             graph._comfy_active = False
+            try:
+                graph.abort()
+            except Exception as e:
+                logging.warning("Comfy model compiler abort failed: %s", e)
         for module in graph._comfy_cuda_graph_modules:
             _drop_graph(module)
         MALLOC_GRAPH_ROGUES += graph.rogue_count
