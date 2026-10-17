@@ -1,6 +1,7 @@
 from unittest.mock import MagicMock, Mock
 
 import pytest
+import torch
 
 import latent_preview
 from comfy import latent_formats
@@ -16,7 +17,9 @@ def test_video_preview_compiles_decode(monkeypatch):
     taesd = Mock()
     taesd.device = "cuda:0"
     taesd.decode.return_value = [[Mock()]]
-    previewer = latent_preview.TAEHVPreviewerImpl(taesd, compile_preview=True)
+    latent_format = Mock()
+    latent_format.process_out = Mock(side_effect=lambda x: x)
+    previewer = latent_preview.TAEHVPreviewerImpl(taesd, latent_format, compile_preview=True)
     x0 = MagicMock()
     samples = Mock(shape=(1, 24, 1, 30, 52))
     x0.__getitem__.return_value = samples
@@ -42,7 +45,9 @@ def test_video_preview_leaves_failed_compiler_scope_for_execution_cleanup(monkey
     taesd = Mock()
     taesd.device = "cuda:0"
     taesd.decode.side_effect = RuntimeError("decode failed")
-    previewer = latent_preview.TAEHVPreviewerImpl(taesd, compile_preview=True)
+    latent_format = Mock()
+    latent_format.process_out = Mock(side_effect=lambda x: x)
+    previewer = latent_preview.TAEHVPreviewerImpl(taesd, latent_format, compile_preview=True)
     x0 = MagicMock()
 
     monkeypatch.setattr(latent_preview, "preview_to_image", Mock())
@@ -55,3 +60,26 @@ def test_video_preview_leaves_failed_compiler_scope_for_execution_cleanup(monkey
         previewer.decode_latent_to_preview(x0)
 
     end.assert_not_called()
+
+
+def test_video_preview_unnormalizes_wan21_latent_before_decode(monkeypatch):
+    # lighttaew2_1 is trained on raw Wan 2.1 latents (comfy.taesd.taehv.TAEHV
+    # is built with latent_format=None for it), but the sampler's x0 is in
+    # Wan21's mean/std-normalized model space, so it must be un-normalized
+    # with the model's own latent_format before decoding.
+    taesd = Mock()
+    taesd.device = "cpu"
+    taesd.decode.return_value = [[Mock()]]
+    monkeypatch.setattr(latent_preview, "preview_to_image", Mock())
+
+    latent_format = latent_formats.Wan21()
+    previewer = latent_preview.TAEHVPreviewerImpl(taesd, latent_format, compile_preview=False)
+
+    x0 = torch.randn(1, latent_format.latent_channels, 3, 4, 4)
+    previewer.decode_latent_to_preview(x0)
+
+    decoded_input = taesd.decode.call_args[0][0]
+    normalized = x0[:1, :, :1]
+    expected = latent_format.process_out(normalized)
+    assert torch.allclose(decoded_input, expected)
+    assert not torch.allclose(decoded_input, normalized)
