@@ -50,7 +50,7 @@ class VideoPositionEmb(nn.Module):
 
         return embeddings
 
-    def generate_embeddings(self, B_T_H_W_C: torch.Size, fps=Optional[torch.Tensor], device=None):
+    def generate_embeddings(self, B_T_H_W_C: torch.Size, fps=Optional[torch.Tensor], device=None, dtype=None):
         raise NotImplementedError
 
 
