@@ -162,12 +162,43 @@ def test_offline_drive_round_trip_keeps_every_record(drive, session, caplog, var
     assert session.scalar(sa.select(sa.func.count()).select_from(AssetContent)) == len(files)
 
 
-def test_output_listing_rescan_recovers_a_returning_output_drive(drive, session, caplog):
+def _content_ids(session) -> dict[str, str]:
+    session.expire_all()
+    return dict(session.execute(sa.select(AssetContent.path, AssetContent.id)).all())
+
+
+def test_output_listing_rescan_keeps_the_rows_of_an_absent_output_drive(drive, session, caplog):
     files = [path for path in _populate(drive) if path.parent.name == "output"]
     _scan(("output",))
     edits = _customise(session)
+    ids = _content_ids(session)
 
     parked = _take_offline(drive, "absent")
+    with caplog.at_level(logging.INFO):
+        offline = _scan(("output",))
+    assert offline.missing_marked == 0
+    assert _missing_count(session) == 0
+    assert _events(caplog, "seeder.marked_missing") == []
+
+    _bring_back(drive, parked)
+    back = _scan(("output",))
+
+    assert (back.missing_marked, back.recovered) == (0, 0)
+    assert _records(session) == edits
+    assert _content_ids(session) == ids
+    assert len(ids) == len(files)
+
+
+def test_output_listing_rescan_recovers_a_returning_output_drive(drive, session, caplog):
+    # An output folder that is itself an unmounted mount point lists as empty, so its
+    # rows retire like deleted files.
+    output = drive / "output"
+    files = [path for path in _populate(drive) if path.parent == output]
+    _scan(("output",))
+    edits = _customise(session)
+    ids = _content_ids(session)
+
+    parked = _take_offline(output, "empty")
     with caplog.at_level(logging.INFO):
         offline = _scan(("output",))
     assert offline.missing_marked == len(files)
@@ -175,12 +206,40 @@ def test_output_listing_rescan_recovers_a_returning_output_drive(drive, session,
         {"count": str(len(files)), "root": "output", "stage": "fast_scan"}
     ]
 
-    _bring_back(drive, parked)
+    _bring_back(output, parked)
     back = _scan(("output",))
 
     assert back.recovered == len(files)
     assert _records(session) == edits
+    assert _content_ids(session) == ids
     assert _missing_count(session) == 0
+
+
+def test_output_listing_rescan_retires_and_recovers_a_missing_subfolder(drive, session):
+    output = drive / "output"
+    kept = output / "kept.png"
+    kept.write_bytes(b"kept")
+    (output / "sub").mkdir()
+    moved = [output / "sub" / f"img_{i}.png" for i in range(3)]
+    for i, path in enumerate(moved):
+        path.write_bytes(f"sub-{i}".encode())
+    _scan(("output",))
+    edits = _customise(session)
+    ids = _content_ids(session)
+
+    parked = output.with_name("sub.away")
+    (output / "sub").rename(parked)
+    offline = _scan(("output",))
+    assert offline.missing_marked == len(moved)
+    assert _missing_count(session) == len(moved)
+
+    parked.rename(output / "sub")
+    back = _scan(("output",))
+
+    assert back.recovered == len(moved)
+    assert _missing_count(session) == 0
+    assert _records(session) == edits
+    assert _content_ids(session) == ids
 
 
 def test_an_io_error_leaves_rows_live(drive, session, monkeypatch):

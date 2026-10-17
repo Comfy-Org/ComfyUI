@@ -45,6 +45,7 @@ def isolated_state(db_engine):
             yield sess
 
     _WATCH_LIST.clear()
+    scanner._unlistable_root_warned = False
     with patch("app.assets.scanner.create_session", _create_session), \
          patch("app.assets.seeder.create_session", _create_session), \
          patch("app.database.db.WriteSession", sessionmaker(bind=db_engine)):
@@ -296,7 +297,7 @@ def test_deleted_output_under_a_hidden_path_is_retired(roots, session):
         assert row.is_missing is True
 
 
-def test_unlistable_output_root_stats_every_row(roots, session, monkeypatch):
+def test_unlistable_output_root_keeps_every_row(roots, session, monkeypatch, caplog):
     output = roots["output"]
     files = _warm_catalog(output)
     _scan()
@@ -309,9 +310,75 @@ def test_unlistable_output_root_stats_every_row(roots, session, monkeypatch):
         return real_list(dirpath)
 
     monkeypatch.setattr(file_utils, "_list_visible_entries", failing_root)
-    _scan()
+    _scan_logged(caplog)
 
+    # Even the deleted file's row stays: with no listing, nothing can tell it apart.
+    assert _live_paths(session) == {str(p) for p in files}
+    assert _listing_counts(caplog) == (0, 0, N_FILES)
+
+    monkeypatch.setattr(file_utils, "_list_visible_entries", real_list)
+    _scan()
     assert _live_paths(session) == {str(p) for p in files[1:]}
+
+
+def test_an_unlistable_output_root_warns_once_per_outage(roots, session, monkeypatch, caplog):
+    output = roots["output"]
+    _warm_catalog(output)
+    _scan()
+    parked = output.with_name("output-away")
+
+    def warnings() -> int:
+        return sum("can't be listed" in r.getMessage() for r in caplog.records)
+
+    output.rename(parked)
+    _scan_logged(caplog)
+    _scan()
+    assert warnings() == 1
+
+    parked.rename(output)
+    _scan()
+    output.rename(parked)
+    _scan_logged(caplog)
+    assert warnings() == 1
+
+
+@pytest.mark.skipif(os.name == "nt" or os.geteuid() == 0, reason="needs POSIX permissions and a non-root user")
+def test_output_root_without_read_permission_keeps_every_row(roots, session):
+    output = roots["output"]
+    files = _warm_catalog(output)
+    _scan()
+    mode = output.stat().st_mode
+    output.chmod(0)
+    try:
+        _scan()
+    finally:
+        output.chmod(stat_module.S_IMODE(mode))
+
+    assert _live_paths(session) == {str(p) for p in files}
+
+
+@pytest.mark.skipif(os.name == "nt", reason="a directory symlink needs a privilege on Windows")
+def test_output_root_link_whose_target_is_gone_keeps_every_row(roots, temp_dir, session, monkeypatch):
+    drive = temp_dir / "outdrive"
+    link = temp_dir / "outlink"
+    drive.mkdir()
+    _symlink_or_skip(link, drive)
+    monkeypatch.setattr("folder_paths.get_output_directory", lambda: str(link))
+    files = _warm_catalog(link)
+    _scan()
+    ids = {path: row.id for path in files for row in _rows(session, path)}
+
+    unplugged = drive.with_name("outdrive-away")
+    drive.rename(unplugged)
+    _scan()
+    assert _live_paths(session) == {str(p) for p in files}
+
+    unplugged.rename(drive)
+    created, _skipped, _total = _scan()
+
+    assert created == 0
+    assert {path: row.id for path in files for row in _rows(session, path)} == ids
+    assert _live_paths(session) == {str(p) for p in files}
 
 
 def test_row_under_an_unvisited_symlink_alias_is_stat_checked(roots, session):
