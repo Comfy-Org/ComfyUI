@@ -229,7 +229,10 @@ def validate_node_input(
         return True
 
     if isinstance(received_type, list) and isinstance(input_type, list):
-        return all(option in input_type for option in received_type)
+        try:
+            return set(received_type).issubset(input_type)
+        except TypeError:
+            return all(option in input_type for option in received_type)
 
     # Not equal, and not strings
     if not isinstance(received_type, str) or not isinstance(input_type, str):
