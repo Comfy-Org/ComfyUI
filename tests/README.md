@@ -39,7 +39,7 @@ pins live in `tests/custom_nodes/manifest.json`; CI runs this as
 Locally, against a server that has the pinned packs installed:
 ```
 python tests/custom_nodes/install_pinned_packs.py
-pip install -r custom_nodes/*/requirements.txt
+for r in custom_nodes/*/requirements.txt; do pip install -r "$r"; done
 python main.py --cpu 2>&1 | tee console_output.log
 ```
 then, in another shell:

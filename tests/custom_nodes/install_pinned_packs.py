@@ -5,7 +5,7 @@ Used by .github/workflows/test-custom-nodes.yml, and the same way to reproduce
 a CI failure locally:
 
     python tests/custom_nodes/install_pinned_packs.py
-    pip install -r custom_nodes/*/requirements.txt
+    for r in custom_nodes/*/requirements.txt; do pip install -r "$r"; done
     python main.py --cpu 2>&1 | tee console_output.log
     COMFYUI_URL=http://127.0.0.1:8188 COMFYUI_STARTUP_LOG=console_output.log \
         pytest tests/custom_nodes

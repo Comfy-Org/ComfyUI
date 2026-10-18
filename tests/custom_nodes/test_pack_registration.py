@@ -143,18 +143,22 @@ def test_every_node_the_pack_registers_is_well_formed(pack, object_info):
         if not isinstance(entry.get("output"), list):
             malformed.append(f"{name}: output is not a list")
             continue
-        declared = {
-            input_name
-            for section in entry["input"].values()
-            if isinstance(section, dict)
-            for input_name in section
-        }
+        # ComfyUI builds each order list from the matching INPUT_TYPES()
+        # section, and the frontend reads them per section too: an optional
+        # input listed under input_order.required is ignored, not honoured.
         for section, ordered in entry["input_order"].items():
+            declared = entry["input"].get(section)
+            if not isinstance(declared, dict):
+                malformed.append(
+                    f"{name}: input_order.{section} exists but input.{section} "
+                    "does not"
+                )
+                continue
             for input_name in ordered or []:
                 if input_name not in declared:
                     malformed.append(
                         f"{name}: input_order.{section} lists {input_name}, "
-                        "which the node does not declare"
+                        f"which is not one of the node's {section} inputs"
                     )
     assert not malformed, f"{pack['pack']} registered malformed nodes:\n" + "\n".join(
         malformed
