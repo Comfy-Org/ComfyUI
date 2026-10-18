@@ -114,14 +114,6 @@ def iter_nodes(graph: dict[str, Any]):
         yield scope
 
 
-def subgraphs_by_id(graph: dict[str, Any]) -> dict[str, dict[str, Any]]:
-    return {
-        subgraph["id"]: subgraph
-        for subgraph in (graph.get("definitions") or {}).get("subgraphs") or []
-        if "id" in subgraph
-    }
-
-
 SUBGRAPH_INPUT_ID = -10
 SUBGRAPH_OUTPUT_ID = -20
 
@@ -326,7 +318,7 @@ def test_no_template_link_leaves_an_output_a_node_no_longer_has(
 def produced_type(
     scope: dict[str, Any],
     by_id: dict[Any, dict[str, Any]],
-    instances: dict[str, dict[str, Any]],
+    instances: set[str],
     registry: dict[str, Any],
     node_id: Any,
     slot: Any,
@@ -351,7 +343,7 @@ def produced_type(
 def accepted_type(
     scope: dict[str, Any],
     by_id: dict[Any, dict[str, Any]],
-    instances: dict[str, dict[str, Any]],
+    instances: set[str],
     registry: dict[str, Any],
     node_id: Any,
     slot: Any,
@@ -390,7 +382,7 @@ def test_every_template_link_still_connects_types_that_match(
     """
     mismatched = set()
     for template_id, graph in shipped_templates:
-        instances = subgraphs_by_id(graph)
+        instances = subgraph_ids(graph)
         for scope in iter_nodes(graph):
             by_id = {node["id"]: node for node in scope.get("nodes") or []}
             for origin_id, origin_slot, target_id, target_slot in links_of(scope):
