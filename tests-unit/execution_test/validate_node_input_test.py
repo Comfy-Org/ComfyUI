@@ -65,6 +65,23 @@ def test_non_string():
     assert not validate_node_input(obj1, obj2)
 
 
+@pytest.mark.parametrize("strict", [False, True])
+@pytest.mark.parametrize(
+    "received_type,input_type,expected",
+    [
+        (["simple", "karras"], ["simple", "karras", "AYS SD1"], True),
+        (["karras", "simple"], ["simple", "karras"], True),
+        (["simple", "karras"], ["simple"], False),
+        (["simple", "karras"], ["karras", "exponential"], False),
+        (["simple"], ["exponential"], False),
+        (["a,b"], ["a", "b"], False),
+        ([1, 2], [1, 2, 3], True),
+    ],
+)
+def test_combo_options(received_type, input_type, strict, expected):
+    assert validate_node_input(received_type, input_type, strict) == expected
+
+
 class NotEqualsOverrideTest(str):
     """Test class for ``__ne__`` override."""
 
