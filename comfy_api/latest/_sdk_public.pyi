@@ -77,6 +77,8 @@ class ImageRef(TensorRef):
     KIND: str
     @classmethod
     async def from_value(cls, value: Any) -> "ImageRef": ...
+    @classmethod
+    async def from_tensor(cls, value: Any) -> "ImageRef": ...
     async def op(self, name: str, **params: Any) -> "ImageRef": ...
     async def invert(self) -> "ImageRef": ...     # built-in primitive
     async def scale(self, factor: float) -> "ImageRef": ...  # built-in primitive
@@ -89,6 +91,8 @@ class ImageRef(TensorRef):
 class MaskRef(TensorRef):
     """MASK asset."""
     KIND: str
+    @classmethod
+    async def from_value(cls, value: Any) -> "MaskRef": ...
     async def grow(
         self, amount: int, tapered_corners: bool = ...,
     ) -> "MaskRef": ...
