@@ -288,6 +288,12 @@ class ImageRef(TensorRef):
         pixels = _image_from_value(value)
         return ImageRef._wrap(await rt.refs.create("IMAGE", pixels))
 
+    @classmethod
+    async def from_tensor(cls, value: Any) -> "ImageRef":
+        """Publish a finite native BHW or BHWC IMAGE without reshaping (raw tier)."""
+        pixels = _image_from_tensor(value)
+        return ImageRef._wrap(await current_runtime().refs.create("IMAGE", pixels))
+
     # --- PREFERRED INTERFACE: operations on the asset, by name. The heavy
     #     compute runs engine-side (trusted plane); the node never receives a
     #     buffer. `op` is generic dispatch — core ships a tiny built-in set and
@@ -331,6 +337,12 @@ class ImageRef(TensorRef):
 
 class MaskRef(TensorRef):
     KIND = "MASK"
+
+    @classmethod
+    async def from_value(cls, value: Any) -> "MaskRef":
+        """Publish a finite native HW, BHW or BCHW MASK without reshaping (raw tier)."""
+        mask = _mask_from_value(value)
+        return MaskRef._wrap(await current_runtime().refs.create("MASK", mask))
 
     async def grow(
         self, amount: int, tapered_corners: bool = False,
@@ -5532,26 +5544,54 @@ def _image_buffer_shape(shape, nbytes: int) -> None:
         raise ValueError(f"IMAGE exceeds the {maximum}-byte raw buffer limit")
 
 
-def _image_from_value(value):
+def _image_tensor_shape(shape, nbytes: int) -> None:
+    _image_buffer_shape((*shape, 1) if len(shape) == 3 else shape, nbytes)
+
+
+def _mask_buffer_shape(shape, nbytes: int) -> None:
+    if (len(shape) not in (2, 3, 4)
+            or any(type(size) is not int or size < 1 for size in shape)
+            or len(shape) >= 3 and shape[0] > _InProcessOutput._IMAGE_BATCH_MAX
+            or len(shape) == 4 and shape[1] not in (1, 2, 3, 4)
+            or shape[-2] * shape[-1] > _InProcessAssets._IMAGE_PIXELS_MAX):
+        raise ValueError("MASK requires a bounded non-empty HW, BHW or BCHW buffer")
+    maximum = int(os.environ.get("COMFY_SECURE_MAX_STORE_BYTES", str(2 * 1024**3)))
+    if type(nbytes) is not int or not 1 <= nbytes <= maximum:
+        raise ValueError(f"MASK exceeds the {maximum}-byte raw buffer limit")
+
+
+def _tensor_from_value(value, kind, validate_shape):
     import numpy as np
     import torch
 
     if isinstance(value, torch.Tensor):
         if (value.layout != torch.strided or value.device.type == "meta"
-                or value.dtype == torch.bool or value.is_complex()):
-            raise TypeError("IMAGE requires a dense numeric tensor")
-        _image_buffer_shape(tuple(value.shape), value.numel() * value.element_size())
+                or kind == "IMAGE" and value.dtype == torch.bool or value.is_complex()):
+            raise TypeError(f"{kind} requires a dense numeric tensor")
+        validate_shape(tuple(value.shape), value.numel() * value.element_size())
         pixels = value
     elif isinstance(value, np.ndarray):
-        if value.dtype.kind not in "fiu":
-            raise TypeError("IMAGE requires a dense numeric array")
-        _image_buffer_shape(value.shape, value.nbytes)
+        if value.dtype.kind not in ("fiu" if kind == "IMAGE" else "bfiu"):
+            raise TypeError(f"{kind} requires a dense numeric array")
+        validate_shape(value.shape, value.nbytes)
         pixels = torch.from_numpy(value)
     else:
-        raise TypeError("IMAGE requires a tensor or numeric array")
+        raise TypeError(f"{kind} requires a tensor or numeric array")
     if not torch.isfinite(pixels).all().item():
-        raise ValueError("IMAGE pixels must be finite")
+        raise ValueError(f"{kind} pixels must be finite")
     return pixels
+
+
+def _image_from_value(value):
+    return _tensor_from_value(value, "IMAGE", _image_buffer_shape)
+
+
+def _image_from_tensor(value):
+    return _tensor_from_value(value, "IMAGE", _image_tensor_shape)
+
+
+def _mask_from_value(value):
+    return _tensor_from_value(value, "MASK", _mask_buffer_shape)
 
 
 def _png_text_metadata(values: dict[str, str]):
