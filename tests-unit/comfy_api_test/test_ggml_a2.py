@@ -26,9 +26,12 @@ def test_zero_index_codebook_vectors(qtype, dtype):
         expected = 0.0
     else:
         raw[:, :2] = one
-        if qtype == GGMLType.IQ1_S: expected = -0.875
-        if qtype == GGMLType.IQ4_NL: expected = -127.0
-        if qtype == GGMLType.IQ4_XS: expected = 4064.0
+        if qtype == GGMLType.IQ1_S:
+            expected = -0.875
+        if qtype == GGMLType.IQ4_NL:
+            expected = -127.0
+        if qtype == GGMLType.IQ4_XS:
+            expected = 4064.0
     tensor = GGUFTensor(raw, tensor_type=qtype, tensor_shape=(1, count))
     actual = _ggml.dequantize(tensor, dtype)
     assert torch.equal(actual, torch.full((1, count), expected, dtype=dtype))
