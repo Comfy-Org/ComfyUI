@@ -61,10 +61,23 @@ from ._sdk import (  # noqa: F401
     WeightDiffCursorRef,
     current_context,
     providers,
+    current_context as ctx,
+    AssetCopyResult,
+    VideoPreviewDescriptor,
+    AssetMediaProvider,
+    UiDomain,
+    AssetImportProvider,
+    AssetImportResult,
 )
 from ._sdk import current_context as ctx  # `sdk.ctx()` -> active Context
 
 __all__ = [
+    'AssetCopyResult',
+    'VideoPreviewDescriptor',
+    'AssetMediaProvider',
+    'UiDomain',
+    'AssetImportProvider',
+    'AssetImportResult',
     "AssetCatalogueMetadataProvider",
     "Ref",
     "ClosureRef",
