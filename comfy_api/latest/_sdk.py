@@ -66,6 +66,8 @@ from typing import (
     Sequence,
     TYPE_CHECKING,
     runtime_checkable,
+    Literal,
+    TypedDict,
 )
 
 from ._weight_cache import WeightCache
@@ -2018,7 +2020,57 @@ class AssetCatalogueMetadataProvider(Protocol):
             "authored asset catalogue metadata source is unavailable")
 
 
+@runtime_checkable
+class AssetImportProvider(Protocol):
+    async def import_url(
+        self, url: str, *, max_bytes: int, timeout_seconds: float,
+        follow_redirects: bool = False,
+        user_agent: Literal["default", "light_tool_browser"] = "default",
+    ) -> AssetImportResult: ...
+
+class AssetImportResult(TypedDict):
+    status_code: int
+    asset: Optional[AssetRef]
+    name: Optional[str]
+
+@runtime_checkable
+class AssetMediaProvider(Protocol):
+    async def copy_input(self, ref: AssetRef, *, name: str, max_bytes: int) -> AssetCopyResult: ...
+    async def copy_asset(self, ref: AssetRef, *, name: str, max_bytes: int) -> AssetCopyResult: ...
+    async def media_source(self, ref: AssetRef) -> str: ...
+    async def resolve_media_source(self, source: str) -> AssetRef: ...
+    async def preview_video(self, ref: AssetRef) -> dict: ...
+
+class VideoPreviewDescriptor(TypedDict):
+    kind: Literal["video"]
+    token: str
+
+class AssetCopyResult(TypedDict):
+    asset: AssetRef
+    name: str
+
+
 class AssetsDomain(Protocol):
+    async def copy_input(self, ref: AssetRef, *, name: str, max_bytes: int) -> AssetCopyResult: ...
+
+    async def media_source(self, ref: AssetRef) -> str: ...
+
+    async def resolve_media_source(self, source: str) -> AssetRef: ...
+
+    async def import_url(
+        self, url: str, *, max_bytes: int, timeout_seconds: float,
+        follow_redirects: bool = False,
+        user_agent: Literal["default", "light_tool_browser"] = "default",
+    ) -> AssetImportResult:
+        '''Import a bounded HTTP response entity through a trusted provider.
+
+        Complete 2xx responses produce an asset and a relative input name.
+        Other HTTP statuses return None for asset/name; policy and transport
+        errors raise. No decoding or reencoding of the media payload occurs.
+        Requested bounds cannot exceed the selected host policy.
+        '''
+        ...
+
     async def gguf_tensor_state(
         self, ref: AssetRef, table: dict[str, Any], *, max_bytes: int,
     ) -> ValueRef:
@@ -2102,6 +2154,10 @@ class CaptureDomain(Protocol):
 
 
 class UiDomain(Protocol):
+    async def preview_video(self, ref: AssetRef) -> dict:
+        '''Issue own-node host descriptors under video_url; never a media URL.'''
+        ...
+
     async def preview_images(self, images: ImageRef,
                              animated: bool = False) -> dict: ...
     async def preview_mask(self, mask: MaskRef,
@@ -2117,6 +2173,8 @@ class UiDomain(Protocol):
 
 
 class OutputDomain(Protocol):
+    async def copy_asset(self, ref: AssetRef, *, name: str, max_bytes: int) -> AssetCopyResult: ...
+
     async def save_images(
         self, images: ImageRef, filename_prefix: str = "ComfyUI",
         subfolder: str = "", compress_level: int = 4,
@@ -2526,6 +2584,36 @@ class InProcessRefResolver:
 
 
 class _InProcessAssets:
+    async def copy_input(self, ref: AssetRef, *, name: str, max_bytes: int):
+        provider = providers.asset_media_provider
+        if provider is None:
+            raise NotImplementedError("managed asset media provider is unavailable")
+        return await provider.copy_input(ref, name=name, max_bytes=max_bytes)
+
+    async def media_source(self, ref: AssetRef):
+        provider = providers.asset_media_provider
+        if provider is None:
+            raise NotImplementedError("managed asset media provider is unavailable")
+        return await provider.media_source(ref)
+
+    async def resolve_media_source(self, source: str):
+        provider = providers.asset_media_provider
+        if provider is None:
+            raise NotImplementedError("managed asset media provider is unavailable")
+        return await provider.resolve_media_source(source)
+
+    async def import_url(
+        self, url: str, *, max_bytes: int, timeout_seconds: float,
+        follow_redirects: bool = False,
+        user_agent: Literal["default", "light_tool_browser"] = "default",
+    ) -> AssetImportResult:
+        provider = providers.asset_import_provider
+        if provider is None:
+            raise NotImplementedError("bounded asset import provider is unavailable")
+        return await provider.import_url(
+            url, max_bytes=max_bytes, timeout_seconds=timeout_seconds,
+            follow_redirects=follow_redirects, user_agent=user_agent)
+
     async def gguf_tensor_state(
         self, ref: AssetRef, table: dict[str, Any], *, max_bytes: int,
     ) -> ValueRef:
@@ -5412,6 +5500,12 @@ def _add_a1111_exif(exif: Any, payload: bytes) -> Any:
 
 
 class _InProcessUi:
+    async def preview_video(self, ref: AssetRef):
+        provider = providers.asset_media_provider
+        if provider is None:
+            raise NotImplementedError("managed asset media provider is unavailable")
+        return await provider.preview_video(ref)
+
     def __init__(self, prompt: Any = None, extra_pnginfo: Any = None) -> None:
         self._metadata_owner = _image_metadata_owner(prompt, extra_pnginfo)
 
@@ -5601,6 +5695,12 @@ class _InProcessUi:
 
 
 class _InProcessOutput:
+    async def copy_asset(self, ref: AssetRef, *, name: str, max_bytes: int):
+        provider = providers.asset_media_provider
+        if provider is None:
+            raise NotImplementedError("managed asset media provider is unavailable")
+        return await provider.copy_asset(ref, name=name, max_bytes=max_bytes)
+
     _TEXT_EXTENSIONS = frozenset({
         ".txt", ".caption", ".json", ".yaml", ".yml", ".md", ".csv",
         ".tsv", ".xml", ".log", ".ini", ".toml",
@@ -13979,7 +14079,21 @@ from . import _vendor_ops  # noqa: E402
 
 
 class Providers:
+    def register_asset_media_provider(self, impl: Optional[AssetMediaProvider]) -> None:
+        if impl is not None and not isinstance(impl, AssetMediaProvider):
+            raise TypeError("asset media provider is incomplete")
+        self.asset_media_provider = impl
+
+    def register_asset_import_provider(
+        self, impl: Optional[AssetImportProvider],
+    ) -> None:
+        if impl is not None and not isinstance(impl, AssetImportProvider):
+            raise TypeError("asset import provider needs import_url")
+        self.asset_import_provider = impl
+
     def __init__(self) -> None:
+        self.asset_import_provider: Optional[AssetImportProvider] = None
+        self.asset_media_provider: Optional[AssetMediaProvider] = None
         self.execution_backend: ExecutionBackend = InProcessExecutionBackend()
         self.ctx_provider: CtxProvider = InProcessCtxProvider()
         self.ops_provider: OpsProvider = InProcessOps()
