@@ -75,7 +75,8 @@ def test_invalid_or_unsupported_state_precedes_native_build(monkeypatch, method,
         owner = foreign if case == 'foreign' else refs
         raw = await owner.create('ASSET' if case == 'relabeled' else 'VALUE', {'weight': value})
         ref = _sdk.ValueRef(kind='VALUE', id=raw.id)
-        if case == 'released': await refs.release(ref)
+        if case == 'released':
+            await refs.release(ref)
         with _sdk.bind_runtime(refs, context(), _sdk.InProcessOps()):
             with pytest.raises((KeyError, TypeError, ValueError, NotImplementedError)):
                 if method == 'ggml_diffusion_from_state_dict':

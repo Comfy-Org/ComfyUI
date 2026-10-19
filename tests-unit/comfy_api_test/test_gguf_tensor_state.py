@@ -1,14 +1,13 @@
 import asyncio
 import copy
 import gc
-from pathlib import Path
 import struct
 
 import pytest
 import torch
 
 from comfy_api.latest import _sdk
-from comfy_api.latest._gguf_tensor import GGMLType, GGUFTensor, tensor_state
+from comfy_api.latest._gguf_tensor import GGUFTensor, tensor_state
 
 
 def gguf(path, data, shape, qtype, storage):
@@ -87,16 +86,26 @@ def test_untrusted_table_refusals(tmp_path, case):
     path = tmp_path / 'invalid.gguf'
     table = gguf(path, b'\0' * 16, (2, 2), 0, (2, 2))
     row = table['tensors'][0]
-    if case == 'duplicate': table['tensors'].append(copy.deepcopy(row))
-    if case == 'negative-offset': row['offset'] = -1
-    if case == 'out-of-file': row['offset'] = path.stat().st_size
-    if case == 'storage-size': row['storage_shape'] = [2, 1]
-    if case == 'logical-shape': row['shape'] = [True, 2]
-    if case == 'block': row['tensor_type'] = 12
-    if case == 'unknown-type': row['tensor_type'] = 20
-    if case == 'extra-field': row['path'] = '/elsewhere'
-    if case == 'byteorder': table['byteorder'] = 'big'
-    if case == 'bool-type': row['tensor_type'] = True
+    if case == 'duplicate':
+        table['tensors'].append(copy.deepcopy(row))
+    if case == 'negative-offset':
+        row['offset'] = -1
+    if case == 'out-of-file':
+        row['offset'] = path.stat().st_size
+    if case == 'storage-size':
+        row['storage_shape'] = [2, 1]
+    if case == 'logical-shape':
+        row['shape'] = [True, 2]
+    if case == 'block':
+        row['tensor_type'] = 12
+    if case == 'unknown-type':
+        row['tensor_type'] = 20
+    if case == 'extra-field':
+        row['path'] = '/elsewhere'
+    if case == 'byteorder':
+        table['byteorder'] = 'big'
+    if case == 'bool-type':
+        row['tensor_type'] = True
     if case == 'overlap':
         other = dict(row, name='other', offset=row['offset'] + 4)
         table['tensors'].append(other)
@@ -122,7 +131,8 @@ def test_sdk_asset_ref_authority_precedes_mapping(tmp_path, case):
         owner = foreign if case == 'foreign' else refs
         base = await owner.create('VALUE' if case == 'relabeled' else 'ASSET', str(tmp_path / 'absent'))
         source = _sdk.AssetRef(kind='ASSET', id=base.id)
-        if case == 'released': await refs.release(source)
+        if case == 'released':
+            await refs.release(source)
         plan = _sdk.ExecutionPlan(prompt_id='gguf', node_id='1', node_type='GGUF',
                                   node_module=__name__, inputs={})
         with _sdk.bind_runtime(refs, _sdk.InProcessCtxProvider().build(plan), _sdk.InProcessOps()):

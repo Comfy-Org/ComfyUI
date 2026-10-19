@@ -377,7 +377,8 @@ async def _async_map_node_over_list(prompt_id, unique_id, obj, input_data_all, f
 
     results = []
     async def process_inputs(inputs, index=None, input_is_list=False):
-        if invocation_guard is not None:invocation_guard()
+        if invocation_guard is not None:
+            invocation_guard()
         if allow_interrupt:
             nodes.before_node_execution()
         execution_block = None
@@ -499,7 +500,8 @@ async def _async_map_node_over_list(prompt_id, unique_id, obj, input_data_all, f
                 if inspect.iscoroutinefunction(f):
                     async def async_wrapper(f, prompt_id, unique_id, list_index, args):
                         with CurrentNodeContext(prompt_id, unique_id, list_index), _invoke_scope():
-                            if invocation_guard is not None:invocation_guard()
+                            if invocation_guard is not None:
+                                invocation_guard()
                             return await f(**args)
                     task = asyncio.create_task(async_wrapper(f, prompt_id, unique_id, index, args=inputs))
                     # Give the task a chance to execute without yielding
@@ -509,12 +511,14 @@ async def _async_map_node_over_list(prompt_id, unique_id, obj, input_data_all, f
                     return task
                 else:
                     with CurrentNodeContext(prompt_id, unique_id, index), _invoke_scope():
-                        if invocation_guard is not None:invocation_guard()
+                        if invocation_guard is not None:
+                            invocation_guard()
                         return f(**inputs)
 
             if _sdk_plan is not None:
                 try:
-                    if invocation_guard is not None:invocation_guard()
+                    if invocation_guard is not None:
+                        invocation_guard()
                     result = await _comfy_sdk.providers.execution_backend.dispatch(
                         _sdk_plan, local_call, _sdk_runtime.runtime
                     )
@@ -675,7 +679,8 @@ async def execute(server: "ExecutionServer", dynprompt, caches, current_item, ex
     try:
         cached = None if native_variant is not None else await caches.outputs.get(unique_id)
         guard = _upstream_variants.invocation_guard(prompt_id,unique_id)
-        if guard is not None:guard()
+        if guard is not None:
+            guard()
     except Exception as ex:
         return (ExecutionResult.FAILURE,dict(node_id=real_node_id,
             exception_message=str(ex),exception_type=full_type_name(type(ex)),
@@ -744,11 +749,13 @@ async def execute(server: "ExecutionServer", dynprompt, caches, current_item, ex
                 server.send_sync("executing", { "node": unique_id, "display_node": display_node_id, "prompt_id": prompt_id }, server.client_id)
 
             obj = await caches.objects.get(unique_id)
-            if guard is not None:guard()
+            if guard is not None:
+                guard()
             if obj is None:
                 obj = class_def()
                 await caches.objects.set(unique_id, obj)
-                if guard is not None:guard()
+                if guard is not None:
+                    guard()
 
             if issubclass(class_def, _ComfyNodeInternal):
                 lazy_status_present = first_real_override(class_def, "check_lazy_status") is not None
@@ -760,7 +767,8 @@ async def execute(server: "ExecutionServer", dynprompt, caches, current_item, ex
                 v3_data_lazy["create_dynamic_tuple"] = True
                 required_inputs = await _async_map_node_over_list(prompt_id, unique_id, obj, input_data_all, "check_lazy_status", allow_interrupt=True, v3_data=v3_data_lazy)
                 required_inputs = await resolve_map_node_over_list_results(required_inputs)
-                if guard is not None:guard()
+                if guard is not None:
+                    guard()
                 required_inputs = set(sum([r for r in required_inputs if isinstance(r,list)], []))
                 required_inputs = [x for x in required_inputs if isinstance(x,str) and (
                     x not in input_data_all or x in missing_keys
@@ -795,7 +803,8 @@ async def execute(server: "ExecutionServer", dynprompt, caches, current_item, ex
                 GraphBuilder.set_default_prefix(unique_id, call_index, 0)
 
             try:
-                if guard is not None:guard()
+                if guard is not None:
+                    guard()
                 metadata_owner = _execution_metadata.current(prompt_id)
                 if metadata_owner is not None:
                     metadata_owner.record_start(unique_id, class_def, input_data_all)
@@ -984,7 +993,8 @@ class PromptExecutor:
                 "current_outputs": list(current_outputs),
             }
             for name in ('upstream_node_id','upstream_variant_id'):
-                if name in error:mes[name] = error[name]
+                if name in error:
+                    mes[name] = error[name]
             self.add_message("execution_error", mes, broadcast=False)
 
     def _notify_prompt_lifecycle(self, event: str, prompt_id: str):

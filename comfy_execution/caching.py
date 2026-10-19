@@ -423,7 +423,8 @@ class HierarchicalCache(BasicCache):
 
     def remove(self,node_id):
         cache = self._get_cache_for(node_id)
-        if cache is not None:BasicCache.remove(cache,node_id)
+        if cache is not None:
+            BasicCache.remove(cache,node_id)
 
 class NullCache:
 
@@ -467,7 +468,8 @@ class LRUCache(BasicCache):
         self.children = {}
 
     def remove(self,node_id):
-        if not self.initialized:return
+        if not self.initialized:
+            return
         cache_key = self.cache_key_set.get_data_key(node_id)
         super().remove(node_id)
         self.used_generation.pop(cache_key,None)
@@ -559,7 +561,8 @@ class RAMPressureCache(LRUCache):
         self.full_evictions = False
 
     def remove(self,node_id):
-        if not self.initialized:return
+        if not self.initialized:
+            return
         self.timestamps.pop(self.cache_key_set.get_data_key(node_id),None)
         super().remove(node_id)
 

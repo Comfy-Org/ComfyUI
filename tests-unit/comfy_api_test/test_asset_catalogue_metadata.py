@@ -1,6 +1,5 @@
 """Authored records remain bounded data and preserve live asset authority."""
 import asyncio
-import json
 import math
 from types import SimpleNamespace
 
