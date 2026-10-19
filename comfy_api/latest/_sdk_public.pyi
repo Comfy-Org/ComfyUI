@@ -17,7 +17,7 @@ Two audiences, separated below:
 If prose and this stub disagree, treat the stub + its implementation tests as
 authoritative.
 """
-from typing import Any, AsyncIterable, Awaitable, Callable, Mapping, Optional, Protocol, Sequence, TypeVar, runtime_checkable
+from typing import Any, AsyncIterable, Awaitable, Callable, Mapping, Optional, Protocol, Sequence, TypeVar, runtime_checkable, Literal, TypedDict
 from dataclasses import dataclass
 
 # NOTE: the contract deliberately does NOT import torch or any backend module.
@@ -540,7 +540,67 @@ class AssetCatalogueMetadataProvider(Protocol):
         self, ref: AssetRef,
     ) -> Optional[dict[str, Any]]: ...
 
+@runtime_checkable
+class AssetImportProvider(Protocol):
+    async def import_url(
+        self, url: str, *, max_bytes: int, timeout_seconds: float,
+        follow_redirects: bool = False,
+        user_agent: Literal["default", "light_tool_browser"] = "default",
+    ) -> AssetImportResult: ...
+
+class AssetImportResult(TypedDict):
+    status_code: int
+    asset: Optional[AssetRef]
+    name: Optional[str]
+
+@runtime_checkable
+class AssetMediaProvider(Protocol):
+    async def copy_input(self, ref: AssetRef, *, name: str, max_bytes: int) -> AssetCopyResult: ...
+    async def copy_asset(self, ref: AssetRef, *, name: str, max_bytes: int) -> AssetCopyResult: ...
+    async def media_source(self, ref: AssetRef) -> str: ...
+    async def resolve_media_source(self, source: str) -> AssetRef: ...
+    async def preview_video(self, ref: AssetRef) -> dict: ...
+
+class VideoPreviewDescriptor(TypedDict):
+    kind: Literal["video"]
+    token: str
+
+class AssetCopyResult(TypedDict):
+    asset: AssetRef
+    name: str
+
+class UiDomain(Protocol):
+    async def preview_video(self, ref: AssetRef) -> dict:
+        '''Issue own-node host descriptors under video_url; never a media URL.'''
+        ...
+
+    async def preview_images(self, images: ImageRef,
+                             animated: bool = False) -> dict: ...
+    async def preview_mask(self, mask: MaskRef,
+                           animated: bool = False) -> dict: ...
+    async def preview_audio(self, audio: AudioRef) -> dict: ...
+    async def preview_animation(
+        self, images: ImageRef, fps: float = 8.0,
+    ) -> dict: ...
+    async def preview_batch(
+        self, value: TensorRef, max_thumb_size: int = 512,
+        crf: int = 25, max_grid_frames: int = 1024,
+    ) -> dict: ...
+
+
 class AssetsDomain(Protocol):
+    async def copy_input(self, ref: AssetRef, *, name: str, max_bytes: int) -> AssetCopyResult: ...
+
+    async def media_source(self, ref: AssetRef) -> str: ...
+
+    async def resolve_media_source(self, source: str) -> AssetRef: ...
+
+    async def import_url(
+        self, url: str, *, max_bytes: int, timeout_seconds: float,
+        follow_redirects: bool = False,
+        user_agent: Literal["default", "light_tool_browser"] = "default",
+    ) -> AssetImportResult: ...
+
     async def gguf_tensor_state(
         self, ref: AssetRef, table: dict[str, Any], *, max_bytes: int,
     ) -> ValueRef: ...
@@ -572,6 +632,8 @@ class AssetsDomain(Protocol):
     async def load_latent(self, ref: AssetRef) -> LatentRef: ...
 
 class OutputDomain(Protocol):
+    async def copy_asset(self, ref: AssetRef, *, name: str, max_bytes: int) -> AssetCopyResult: ...
+
     async def save_binary(
         self, chunks: AsyncIterable[bytes], filename_prefix: str,
         *, max_bytes: int, extension: str = ...,
@@ -784,6 +846,9 @@ class ModelsDomain(Protocol):
         patch_dtype: str = ...,
         patch_on_device: bool = ...,
     ) -> ModelRef: ...
+    async def load_gguf_text_encoders(
+        self, names: Sequence[str], clip_type: str,
+    ) -> ClipRef: ...
     async def list_controlnet(self) -> list[str]: ...
     async def load_controlnet(
         self, name: str, model: Optional[ModelRef] = ...,
@@ -922,6 +987,8 @@ class ClosuresDomain(Protocol):
     async def create_sampler(self, closure: ClosureRef) -> SamplerRef: ...
 
 class Context(Protocol):
+    ui: UiDomain
+
     assets: AssetsDomain
     progress: ProgressDomain
     scratch: ScratchDomain
@@ -1017,6 +1084,14 @@ class CtxProvider(Protocol):
     def build(self, plan: ExecutionPlan) -> Context: ...
 
 class _Providers:
+    asset_import_provider: Optional[AssetImportProvider]
+
+    asset_media_provider: Optional[AssetMediaProvider]
+
+    def register_asset_media_provider(self, impl: Optional[AssetMediaProvider]) -> None: ...
+
+    def register_asset_import_provider(self, impl: Optional[AssetImportProvider]) -> None: ...
+
     execution_backend: ExecutionBackend
     ctx_provider: CtxProvider
     ops_provider: OpsProvider
