@@ -2026,12 +2026,31 @@ class AssetImportProvider(Protocol):
         self, url: str, *, max_bytes: int, timeout_seconds: float,
         follow_redirects: bool = False,
         user_agent: Literal["default", "light_tool_browser"] = "default",
+        publish_status: Literal["2xx", "200"] = "2xx",
     ) -> AssetImportResult: ...
 
 class AssetImportResult(TypedDict):
     status_code: int
     asset: Optional[AssetRef]
     name: Optional[str]
+    response_url: str
+    reason_phrase: str
+    redirect_location: Optional[str]
+
+class AssetFetchResult(TypedDict):
+    status_code: int
+    response_url: str
+    reason_phrase: str
+    redirect_location: Optional[str]
+    content: Optional[bytes]
+
+@runtime_checkable
+class AssetFetchProvider(Protocol):
+    async def fetch_bytes(
+        self, url: str, *, max_bytes: int, timeout_seconds: float,
+        follow_redirects: bool = False,
+        user_agent: Literal["default", "light_tool_browser"] = "default",
+    ) -> AssetFetchResult: ...
 
 @runtime_checkable
 class AssetMediaProvider(Protocol):
@@ -2051,7 +2070,30 @@ class AssetCopyResult(TypedDict):
 
 
 class AssetsDomain(Protocol):
-    async def copy_input(self, ref: AssetRef, *, name: str, max_bytes: int) -> AssetCopyResult: ...
+    async def fetch_bytes(
+        self, url: str, *, max_bytes: int, timeout_seconds: float,
+        follow_redirects: bool = False,
+        user_agent: Literal["default", "light_tool_browser"] = "default",
+    ) -> AssetFetchResult:
+        '''Fetch a bounded entity without publishing an input or creating a ref.
+
+        Only status 200 returns content bytes, including an empty entity.
+        Other statuses return content=None with actual terminal HTTP metadata.
+        All 2xx entities still pass complete transfer validation before return.
+        Requested bytes cannot exceed 64 MiB or the selected host policy.
+        Uses the same network permission and fixed user-agent profiles as import_url.
+        '''
+        ...
+
+    async def copy_input(self, ref: AssetRef, *, name: str, max_bytes: int) -> AssetCopyResult:
+        """Copy encoded input bytes without overwrite through the trusted provider.
+
+        A .imports destination is reserved to the current account and pack.
+        It requires assets, assets.import_url and assets.import_url.manage,
+        and a source imported input within that same owned prefix. Ordinary
+        input copies retain their existing assets permission and behavior.
+        """
+        ...
 
     async def media_source(self, ref: AssetRef) -> str: ...
 
@@ -2061,13 +2103,22 @@ class AssetsDomain(Protocol):
         self, url: str, *, max_bytes: int, timeout_seconds: float,
         follow_redirects: bool = False,
         user_agent: Literal["default", "light_tool_browser"] = "default",
+        publish_status: Literal["2xx", "200"] = "2xx",
     ) -> AssetImportResult:
         '''Import a bounded HTTP response entity through a trusted provider.
 
         Complete 2xx responses produce an asset and a relative input name.
+        With publish_status="200", other 2xx entities are fully validated,
+        then discarded without publication and return None for asset/name.
         Other HTTP statuses return None for asset/name; policy and transport
         errors raise. No decoding or reencoding of the media payload occurs.
         Requested bounds cannot exceed the selected host policy.
+        response_url is the terminal checked request URL, before client URL
+        rendering. reason_phrase is the response's ASCII-visible phrase,
+        preserving empty phrases and whitespace.
+        redirect_location is the decoded Location for redirect statuses;
+        None means absent, whereas an empty string means present-empty.
+        The default user-agent is the fixed HTTPX 0.28.1 compatibility profile.
         '''
         ...
 
@@ -2082,7 +2133,14 @@ class AssetsDomain(Protocol):
         ...
     async def resolve(self, folder: str, name: str) -> AssetRef: ...
     async def exists(self, folder: str, name: str) -> bool: ...
-    async def delete_input(self, name: str) -> bool: ...
+    async def delete_input(self, name: str) -> bool:
+        """Delete an input; owned .imports files require assets.import_url.manage.
+
+        Owned imports additionally require assets and assets.import_url plus a
+        trusted media provider and active authenticated execution. Other input
+        names retain the existing assets.delete permission and behavior.
+        """
+        ...
     async def path(self, ref: AssetRef) -> str: ...
     async def list(
         self, folder: str, prefix: str = "", recursive: bool = True,
@@ -2187,6 +2245,7 @@ class OutputDomain(Protocol):
         filenames: Optional[list[str]] = None,
         lossless: bool = False, optimize: bool = False,
         *, png_text: Optional[dict[str, str]] = None,
+        overwrite: bool = False,
     ) -> dict: ...
     async def save_images_with_alpha(
         self, images: ImageRef, mask: MaskRef,
@@ -2251,6 +2310,15 @@ class OutputDomain(Protocol):
 
 
 class GraphDomain(Protocol):
+    async def input_options(self, node_id: str, input_name: str) -> dict:
+        """Read a selected workflow target's scalar type or authorized enum choices.
+
+        Requires graph.input_options and a current host target selection. Ordered
+        choices contain only explicitly authorized values; this grants no writes.
+        The initial provider is selected Guest-broker dispatch. Ordinary direct
+        native calls have no provider binding and remain unsupported.
+        """
+        ...
     async def current_node_id(self) -> str: ...
     async def execution_metadata(
         self, *, include_observations: bool = False,
@@ -2258,12 +2326,22 @@ class GraphDomain(Protocol):
     async def input_label(
         self, input_name: str, default: str = "",
     ) -> str: ...
+    async def source_output_label(
+        self, input_name: str, default: str = "",
+    ) -> Optional[str]:
+        """Read the linked source output label for this node's named input.
+
+        Requires graph and the current execution context. Missing sources return
+        default; an existing unnamed output returns None. Labels and names must
+        be strings of at most 256 characters, or None.
+        """
+        ...
     async def expand_nodes(
         self, nodes: list[dict[str, Any]], outputs: list[dict[str, Any]],
     ) -> dict[str, Any]: ...
     async def expand_upstream_variants(
         self, input_name: str, variants: list[dict], nodes: list[dict],
-        outputs: list[dict],
+        outputs: list[dict], *, configuration_nodes: list[str] | None = None,
     ) -> dict: ...
     async def expand_loop(
         self, flow: Any, values: list[Any],
@@ -2584,6 +2662,18 @@ class InProcessRefResolver:
 
 
 class _InProcessAssets:
+    async def fetch_bytes(
+        self, url: str, *, max_bytes: int, timeout_seconds: float,
+        follow_redirects: bool = False,
+        user_agent: Literal["default", "light_tool_browser"] = "default",
+    ) -> AssetFetchResult:
+        provider = providers.asset_import_provider
+        if not isinstance(provider, AssetFetchProvider):
+            raise NotImplementedError("bounded asset fetch provider is unavailable")
+        return await provider.fetch_bytes(
+            url, max_bytes=max_bytes, timeout_seconds=timeout_seconds,
+            follow_redirects=follow_redirects, user_agent=user_agent)
+
     async def copy_input(self, ref: AssetRef, *, name: str, max_bytes: int):
         provider = providers.asset_media_provider
         if provider is None:
@@ -2606,13 +2696,15 @@ class _InProcessAssets:
         self, url: str, *, max_bytes: int, timeout_seconds: float,
         follow_redirects: bool = False,
         user_agent: Literal["default", "light_tool_browser"] = "default",
+        publish_status: Literal["2xx", "200"] = "2xx",
     ) -> AssetImportResult:
         provider = providers.asset_import_provider
         if provider is None:
             raise NotImplementedError("bounded asset import provider is unavailable")
         return await provider.import_url(
             url, max_bytes=max_bytes, timeout_seconds=timeout_seconds,
-            follow_redirects=follow_redirects, user_agent=user_agent)
+            follow_redirects=follow_redirects, user_agent=user_agent,
+            publish_status=publish_status)
 
     async def gguf_tensor_state(
         self, ref: AssetRef, table: dict[str, Any], *, max_bytes: int,
@@ -2732,6 +2824,25 @@ class _InProcessAssets:
         )
 
     async def delete_input(self, name: str) -> bool:
+        # Reserve aliases of the first logical .imports component as well.
+        # The provider accepts only its strict canonical logical name; an
+        # invalid spelling must never fall through to general input deletion.
+        parts = [p for p in str(name or "").replace("\\", "/").split("/")
+                 if p not in ("", ".")]
+        if parts and parts[0] == ".imports":
+            runtime = current_runtime()
+            provider = providers.asset_media_provider
+            delete = getattr(provider, "delete_imported_input", None)
+            if not callable(delete):
+                raise NotImplementedError("owned input deletion provider is unavailable")
+            result = await delete(name)
+            if (current_runtime() is not runtime or
+                    providers.asset_media_provider is not provider):
+                raise RuntimeError("owned input deletion provider/runtime changed")
+            if type(result) is not bool:
+                raise TypeError("owned input deletion provider returned a non-boolean result")
+            return result
+
         import folder_paths
 
         path = self._confined_path(
@@ -5703,7 +5814,7 @@ class _InProcessOutput:
 
     _TEXT_EXTENSIONS = frozenset({
         ".txt", ".caption", ".json", ".yaml", ".yml", ".md", ".csv",
-        ".tsv", ".xml", ".log", ".ini", ".toml",
+        ".tsv", ".xml", ".log", ".ini", ".toml", ".rtf",
     })
     _STILL_FORMATS = {
         "png": ("PNG", frozenset({".png"}), ".png"),
@@ -5713,7 +5824,8 @@ class _InProcessOutput:
         "j2k": ("JPEG2000", frozenset({".j2k", ".jp2"}), ".j2k"),
         "jp2": ("JPEG2000", frozenset({".j2k", ".jp2"}), ".jp2"),
         "gif": ("GIF", frozenset({".gif"}), ".gif"),
-        "tiff": ("TIFF", frozenset({".tiff"}), ".tiff"),
+        "tiff": ("TIFF", frozenset({".tiff", ".tif"}), ".tiff"),
+        "tif": ("TIFF", frozenset({".tiff", ".tif"}), ".tif"),
         "bmp": ("BMP", frozenset({".bmp"}), ".bmp"),
         "avif": ("AVIF", frozenset({".avif"}), ".avif"),
     }
@@ -5849,6 +5961,29 @@ class _InProcessOutput:
             except FileNotFoundError:
                 pass
 
+    @staticmethod
+    def _save_pil_replace(rendered: Any, target: str, format: str,
+                          options: dict[str, Any]) -> None:
+        """Encode beside the destination, then atomically replace its image."""
+        import tempfile
+
+        descriptor, temporary = tempfile.mkstemp(
+            prefix=".comfy-image-", suffix=".tmp", dir=os.path.dirname(target))
+        try:
+            with os.fdopen(descriptor, "wb") as stream:
+                descriptor = -1
+                rendered.save(stream, format=format, **options)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, target)
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
+            try:
+                os.unlink(temporary)
+            except FileNotFoundError:
+                pass
+
     async def save_images(
         self, images: ImageRef, filename_prefix: str = "ComfyUI",
         subfolder: str = "", compress_level: int = 4,
@@ -5861,8 +5996,13 @@ class _InProcessOutput:
         filenames: Optional[list[str]] = None,
         lossless: bool = False, optimize: bool = False,
         *, png_text: Optional[dict[str, str]] = None,
+        overwrite: bool = False,
     ) -> dict:
         """Save images; explicit PNG text replaces automatic metadata, including its global switch."""
+        if type(overwrite) is not bool:
+            raise TypeError("image overwrite must be a boolean")
+        if overwrite and (filenames is None or caption is not None):
+            raise ValueError("image overwrite requires explicit filenames and no caption")
         import numpy as np
         from PIL import Image as PILImage
         import folder_paths
@@ -5927,7 +6067,7 @@ class _InProcessOutput:
             targets = [entry[0] for entry in requested]
             if len(set(targets)) != len(targets):
                 raise ValueError("image filenames must be unique within a batch")
-            if any(os.path.lexists(target) for target in targets):
+            if not overwrite and any(os.path.lexists(target) for target in targets):
                 raise FileExistsError("an exact output image already exists")
         else:
             prefix = self._prefix(filename_prefix, subfolder)
@@ -5946,6 +6086,7 @@ class _InProcessOutput:
                     output_dir, logical, allowed_suffixes))
                 counter += 1
 
+        save_pil = self._save_pil_replace if overwrite else self._save_pil_exclusive
         results = []
         if png_text is None:
             png_metadata = ImageSaveHelper._create_png_metadata(metadata_owner)
@@ -6023,7 +6164,7 @@ class _InProcessOutput:
                         exif = _add_a1111_exif(exif, a1111_exif)
                         if len(exif):
                             jpeg_options["exif"] = exif.tobytes()
-                        self._save_pil_exclusive(
+                        save_pil(
                             rendered, target, pil_format, jpeg_options)
                         break
                     except ValueError as error:
@@ -6032,7 +6173,7 @@ class _InProcessOutput:
                 else:  # the final no-EXIF attempt should make this unreachable
                     raise RuntimeError("JPEG image could not be encoded")
             else:
-                self._save_pil_exclusive(
+                save_pil(
                     rendered, target, pil_format, options)
             results.append(SavedResult(
                 file, saved_subfolder, FolderType.output))
@@ -6888,7 +7029,7 @@ class _InProcessGraph:
                  extra_pnginfo: Any = None, dynamic_prompt: Any = None, *,
                  execution_metadata: Any = None, permissions=(), prompt_id="") -> None:
         self._execution_owner = None
-        if 'graph.expand.upstream' in permissions:
+        if {'graph.expand.upstream', 'graph.input_options'}.intersection(permissions):
             from comfy_execution.upstream_variants import current, active_dynamic_prompt
 
             self._execution_owner = current(prompt_id)
@@ -6903,6 +7044,14 @@ class _InProcessGraph:
         self._execution_metadata = execution_metadata
         self._metadata_permission = "graph.metadata" in permissions
         self._metadata_prompt_id = str(prompt_id)
+        self._source_label_permission = "graph" in permissions
+
+    async def input_options(self, node_id: str, input_name: str, *, _provider=None) -> dict:
+        if current_context().graph is not self:
+            raise PermissionError('input options context is not current')
+        if _provider is None:
+            raise PermissionError('no host input-options selection is bound')
+        return _provider(self, node_id, input_name)
 
     async def execution_metadata(self, *, include_observations=False):
         if current_context().graph is not self:
@@ -6963,6 +7112,82 @@ class _InProcessGraph:
                 return default
         return default
 
+    async def source_output_label(
+        self, input_name: str, default: str = "",
+    ) -> Optional[str]:
+        """Return one source output label, without exposing workflow metadata."""
+        if current_context().graph is not self:
+            raise PermissionError("source output label context is not current")
+        if not self._source_label_permission:
+            raise PermissionError("graph was not declared for this node")
+        if type(input_name) is not str or type(default) is not str:
+            raise TypeError("graph input name and default label must be strings")
+        if not 1 <= len(input_name) <= 256 or len(default) > 256 or "\x00" in input_name:
+            raise ValueError("graph input name and default label are limited to 256 characters")
+        current = self._prompt.get(self._current_node_id)
+        if type(current) is not dict or type(current.get("inputs")) is not dict:
+            return default
+        link = current["inputs"].get(input_name)
+        if (type(link) not in (list, tuple) or len(link) != 2
+                or type(link[0]) is not str or not 1 <= len(link[0]) <= 256
+                or type(link[1]) is not int or link[1] < 0):
+            return default
+        if type(self._workflow) is not dict:
+            return default
+        # Match the same root/definitions subgraph view as input_label, with a
+        # finite total scan. No node ID, registry key or workflow is supplied by
+        # the caller; the source link comes only from this execution's prompt.
+        groups = [self._workflow.get("nodes", [])]
+        definitions = self._workflow.get("definitions", {})
+        if type(definitions) is not dict:
+            raise TypeError("workflow definitions must be an object")
+        subgraphs = definitions.get("subgraphs", [])
+        if type(subgraphs) is not list or len(subgraphs) > 64:
+            raise ValueError("source output label supports at most 64 workflow subgraphs")
+        for subgraph in subgraphs:
+            if type(subgraph) is not dict:
+                raise TypeError("workflow subgraph must be an object")
+            groups.append(subgraph.get("nodes", []))
+        source_ids = {link[0], link[0].rsplit(":", 1)[-1]}
+        matches = []
+        count = 0
+        for group in groups:
+            if type(group) is not list:
+                raise TypeError("workflow nodes must be a list")
+            count += len(group)
+            if count > 4096:
+                raise ValueError("source output label supports at most 4096 workflow nodes")
+            for node in group:
+                if type(node) is not dict:
+                    continue
+                identifier = node.get("id")
+                if type(identifier) not in (str, int):
+                    continue
+                if type(identifier) is str and len(identifier) > 256:
+                    continue
+                if type(identifier) is int and identifier.bit_length() > 1024:
+                    continue
+                if str(identifier) in source_ids:
+                    matches.append(node)
+        if len(matches) != 1:
+            return default
+        outputs = matches[0].get("outputs", [])
+        if type(outputs) is not list or len(outputs) > 4096:
+            raise ValueError("source output label supports at most 4096 output slots")
+        if link[1] >= len(outputs):
+            return default
+        output = outputs[link[1]]
+        if type(output) is not dict:
+            raise TypeError("workflow output slot must be an object")
+        # Preserve the original distinction: an existing unnamed output is
+        # None (and prints 'None'); a missing source uses the supplied default.
+        label = output.get("label") or output.get("name")
+        if label is not None and type(label) is not str:
+            raise TypeError("source output label or name must be a string or None")
+        if label is not None and len(label) > 256:
+            raise ValueError("source output label is limited to 256 characters")
+        return label
+
     def _require_dynamic_prompt(self):
         if self._dynamic_prompt is None:
             raise RuntimeError(
@@ -6971,13 +7196,14 @@ class _InProcessGraph:
 
     async def expand_upstream_variants(
         self, input_name: str, variants: list[dict], nodes: list[dict],
-        outputs: list[dict], *, _policy=None,
+        outputs: list[dict], *, configuration_nodes: list[str] | None = None, _policy=None,
     ) -> dict:
         from ._upstream_variants import expand_upstream_variants
 
         return await expand_upstream_variants(
             self, self._require_dynamic_prompt(), self._current_node_id,
-            input_name, variants, nodes, outputs, _policy, ref_type=Ref)
+            input_name, variants, nodes, outputs, _policy, ref_type=Ref,
+            configuration_nodes=configuration_nodes)
 
     @staticmethod
     def _expansion_link(value: Any, created: dict[str, Any]) -> Any:

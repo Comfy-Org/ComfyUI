@@ -68,6 +68,8 @@ from ._sdk import (  # noqa: F401
     UiDomain,
     AssetImportProvider,
     AssetImportResult,
+    AssetFetchProvider,
+    AssetFetchResult,
 )
 from ._sdk import current_context as ctx  # `sdk.ctx()` -> active Context
 
@@ -78,6 +80,8 @@ __all__ = [
     'UiDomain',
     'AssetImportProvider',
     'AssetImportResult',
+    'AssetFetchProvider',
+    'AssetFetchResult',
     "AssetCatalogueMetadataProvider",
     "Ref",
     "ClosureRef",

@@ -406,6 +406,21 @@ class _VariantSeries:
                     raise VariantExecutionFailure(error,exception)
                 if node_id not in self.plan.upstream:
                     raise VariantProfilePending('variant scheduler encountered an unadmitted dynamic target')
+                if node_id in self.plan.configuration_nodes:
+                    # stage_node_execution has already waited for every linked
+                    # ancestor. Keep original IDs/dependency order and cache the
+                    # native ttN_Plotting result, without calling the config body.
+                    if self.policy.validate_configuration(node_id,
+                            self.dynamic_prompt.get_node(node_id)['class_type']) is not True:
+                        raise PermissionError('configuration substitution was not reauthorized')
+                    self.assert_current()
+                    entry = execution.CacheEntry(ui=None,outputs=[[None]])
+                    queue.cache_update(node_id,entry)
+                    await self.caches.outputs.set(node_id,entry)
+                    self.assert_current()
+                    executed.add(node_id)
+                    queue.complete_node_execution()
+                    continue
                 result,error,exception = await execution.execute(self.owner.server,self.dynamic_prompt,
                     self.caches,node_id,self.owner.extra_data,executed,self.owner.prompt_id,
                     queue,pending_subgraphs,pending,ui,self.owner.asset_manager)

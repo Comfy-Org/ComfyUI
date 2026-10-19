@@ -76,6 +76,7 @@ class VariantPlan:
     outputs: tuple
     retained_nodes: int
     continuation_prefix: str
+    configuration_nodes: tuple[str, ...] = ()
 
 
 class UpstreamVariantPolicy:
@@ -91,7 +92,7 @@ class UpstreamVariantPolicy:
     def __init__(self, graph_owner, budget, *, assert_current, admit_target,
                  validate_override, schedule, external_node_types=frozenset(),
                  scheduler_overhead_nodes=0, deadline_monotonic=None,
-                 max_retained_image_bytes=None):
+                 max_retained_image_bytes=None, validate_configuration=None):
         if type(budget) is not VariantBudget:
             raise TypeError("variant budget must be host-owned")
         if any(not callable(fn) for fn in (assert_current, admit_target, validate_override)):
@@ -107,6 +108,9 @@ class UpstreamVariantPolicy:
         self.assert_current = assert_current
         self.admit_target = admit_target
         self.validate_override = validate_override
+        if validate_configuration is not None and not callable(validate_configuration):
+            raise TypeError("configuration validation must be host-owned")
+        self.validate_configuration = validate_configuration
         self.schedule = schedule
         self.external_node_types = external_node_types
         if type(scheduler_overhead_nodes) is not int or scheduler_overhead_nodes < 0:
@@ -227,7 +231,7 @@ def _source_fingerprint(dynprompt, caller_id, node_ids, limits):
 
 
 def plan_upstream_variants(graph_owner, dynprompt, caller_id, input_name, variants,
-                           nodes, outputs, policy, *, ref_type=()):
+                           nodes, outputs, policy, *, ref_type=(), configuration_nodes=None):
     if type(policy) is not UpstreamVariantPolicy:
         raise UpstreamVariantsPending("no host upstream-variant policy is selected")
     policy.current(graph_owner, 'before-parse')
@@ -239,7 +243,13 @@ def plan_upstream_variants(graph_owner, dynprompt, caller_id, input_name, varian
         raise ValueError("graph expansion must contain 1..128 continuation nodes")
     if type(outputs) is not list or len(outputs) > 128:
         raise ValueError("graph expansion has too many outputs")
-    _measure([input_name, variants, nodes, outputs], limits, ref_type=ref_type)
+    if configuration_nodes is None:configuration_nodes = []
+    if (type(configuration_nodes) is not list
+            or len(configuration_nodes) > limits.max_upstream_nodes
+            or any(type(item) is not str for item in configuration_nodes)
+            or len(set(configuration_nodes)) != len(configuration_nodes)):
+        raise ValueError('configuration nodes must be bounded unique upstream IDs')
+    _measure([input_name, variants, nodes, outputs, configuration_nodes], limits, ref_type=ref_type)
     caller = _source_node(dynprompt.get_node(caller_id))
     source = caller.get('inputs', {}).get(input_name)
     if not _link(source):
@@ -280,6 +290,13 @@ def plan_upstream_variants(graph_owner, dynprompt, caller_id, input_name, varian
         ordered.append(node_id)
 
     visit(producer_id, 0)
+    for identifier in configuration_nodes:
+        _node_id(identifier, limits)
+        if identifier not in snapshot or identifier == producer_id:
+            raise PermissionError('configuration substitution requires a non-producer upstream node')
+        if (policy.validate_configuration is None or
+                policy.validate_configuration(identifier, snapshot[identifier]['class_type']) is not True):
+            raise PermissionError('configuration substitution has no host selection')
     caller_type = _name(caller.get('class_type'), 'current class')
     namespace = caller_type.split(' ', 1)[0]
     variant_ids = set()
@@ -421,14 +438,15 @@ def plan_upstream_variants(graph_owner, dynprompt, caller_id, input_name, varian
     plan = VariantPlan(caller_id, fingerprint, producer_id, output_index,
                        {key: snapshot[key] for key in ordered}, tuple(copy.deepcopy(variants)),
                        tuple(copy.deepcopy(nodes)), direct_clones, tuple(copy.deepcopy(outputs)), retained_nodes,
-                       uuid.uuid4().hex + '.')
+                       uuid.uuid4().hex + '.', tuple(configuration_nodes))
     return plan
 
 
 async def expand_upstream_variants(graph_owner, dynprompt, caller_id, input_name,
-                                   variants, nodes, outputs, policy, *, ref_type=()):
+                                   variants, nodes, outputs, policy, *, ref_type=(), configuration_nodes=None):
     plan = plan_upstream_variants(graph_owner, dynprompt, caller_id, input_name,
-                                  variants, nodes, outputs, policy, ref_type=ref_type)
+                                  variants, nodes, outputs, policy, ref_type=ref_type,
+                                  configuration_nodes=configuration_nodes)
     if policy.schedule is None:
         raise UpstreamVariantsPending("ordered cache/object-preserving scheduler is not selected")
     policy.current(graph_owner, 'before-schedule')
