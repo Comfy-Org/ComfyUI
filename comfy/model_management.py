@@ -2281,7 +2281,11 @@ def unload_model_and_clones(model: ModelPatcher, unload_additional_models=True, 
     if not all_devices:
         free_memory(1e30, get_torch_device(), keep_loaded)
     else:
-        for device in get_all_torch_devices():
+        devices = list(get_all_torch_devices())
+        for loaded_model in initial_keep_loaded:
+            if loaded_model not in keep_loaded and loaded_model.device not in devices:
+                devices.append(loaded_model.device)
+        for device in devices:
             free_memory(1e30, device, keep_loaded)
 
 def debug_memory_summary():

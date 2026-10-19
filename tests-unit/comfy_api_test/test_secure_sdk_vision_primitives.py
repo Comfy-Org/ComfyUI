@@ -81,13 +81,18 @@ def test_token_projection_refuses_invalid_native_inputs(case):
     async def run():
         refs = _sdk.InProcessRefResolver()
         output = native_output()
-        if case == "rank": output.last_hidden_state = torch.zeros(3, 4)
-        if case == "missing": del output.last_hidden_state
-        if case == "meta": output.last_hidden_state = torch.empty(3, 5, 4, device="meta")
-        if case == "object": output = object()
+        if case == "rank":
+            output.last_hidden_state = torch.zeros(3, 4)
+        if case == "missing":
+            del output.last_hidden_state
+        if case == "meta":
+            output.last_hidden_state = torch.empty(3, 5, 4, device="meta")
+        if case == "object":
+            output = object()
         ref = await refs.create("CLIP_VISION_OUTPUT", output)
         source = _sdk.TensorRef._wrap(ref) if case == "wrong-kind" else _sdk.ClipVisionOutputRef._wrap(ref)
-        if case == "stale": await refs.release(ref)
+        if case == "stale":
+            await refs.release(ref)
         with _sdk.bind_runtime(refs, None, _sdk.InProcessOps()):
             with pytest.raises((TypeError, ValueError, KeyError)):
                 await _sdk.current_runtime().ops.apply("clip_vision_output.last_hidden_state", source, {})
@@ -142,7 +147,13 @@ def test_image_constructor_checks_existing_byte_ceiling_and_fixed_kind(monkeypat
     asyncio.run(run())
 
 
-def test_offload_uses_native_clone_family_and_keeps_unrelated_model_loaded():
+@pytest.mark.parametrize("enumerated_devices", ["native", "empty"])
+def test_offload_uses_native_clone_family_and_keeps_unrelated_model_loaded(
+    monkeypatch, enumerated_devices,
+):
+    monkeypatch.setattr(mm, "text_encoder_device", lambda: torch.device("cpu"))
+    if enumerated_devices == "empty":
+        monkeypatch.setattr(mm, "get_all_torch_devices", lambda: [])
     vision = comfy.clip_vision.ClipVisionModel(CONFIG)
     other = comfy.clip_vision.ClipVisionModel(CONFIG)
     clone = vision.patcher.clone()
@@ -162,7 +173,8 @@ def test_offload_uses_native_clone_family_and_keeps_unrelated_model_loaded():
                 assert any(model.model is vision.patcher for model in mm.current_loaded_models)
                 await selected.offload()
                 await refs.release(selected)
-                with pytest.raises(KeyError): await selected.offload()
+                with pytest.raises(KeyError):
+                    await selected.offload()
         asyncio.run(run())
     finally:
         mm.unload_model_and_clones(vision.patcher, unload_additional_models=False, all_devices=True)
