@@ -243,7 +243,8 @@ def plan_upstream_variants(graph_owner, dynprompt, caller_id, input_name, varian
         raise ValueError("graph expansion must contain 1..128 continuation nodes")
     if type(outputs) is not list or len(outputs) > 128:
         raise ValueError("graph expansion has too many outputs")
-    if configuration_nodes is None:configuration_nodes = []
+    if configuration_nodes is None:
+        configuration_nodes = []
     if (type(configuration_nodes) is not list
             or len(configuration_nodes) > limits.max_upstream_nodes
             or any(type(item) is not str for item in configuration_nodes)

@@ -112,32 +112,38 @@ def native_control(node_info):
 
 def _binding(node_info):
     control = native_control(node_info)
-    if control is not None:return control
+    if control is not None:
+        return control
     value = node_info.get(CONTINUATION_KEY)
     return value if type(value) is NativeVariantContinuation else None
 
 
 def assert_node_current(dynamic_prompt,node_id,cache=None):
     binding = _binding(dynamic_prompt.get_node(node_id))
-    if binding is None:return
+    if binding is None:
+        return
     state = binding.state
     state.assert_current()
     if dynamic_prompt is not state.owner.dynamic_prompt:
         raise PermissionError('variant continuation belongs to another dynamic prompt')
-    if cache is not None:state.owner.record_output(cache,node_id)
+    if cache is not None:
+        state.owner.record_output(cache,node_id)
 
 
 def invocation_guard(prompt_id,node_id):
     owner = current(prompt_id)
-    if owner is None:return None
+    if owner is None:
+        return None
     cell = _active_cell.get()
     if cell is not None and cell.owner is owner:
         if node_id not in cell.plan.upstream:
             raise PermissionError('variant invocation is outside the admitted upstream graph')
         return cell.assert_current
-    if not owner.dynamic_prompt.has_node(node_id):return None
+    if not owner.dynamic_prompt.has_node(node_id):
+        return None
     binding = _binding(owner.dynamic_prompt.get_node(node_id))
-    if binding is None:return None
+    if binding is None:
+        return None
     if binding.state.owner is not owner:
         raise PermissionError('variant invocation belongs to another execution owner')
     return binding.state.assert_current
@@ -145,7 +151,8 @@ def invocation_guard(prompt_id,node_id):
 
 def cache_identity(node_info):
     binding = _binding(node_info)
-    if binding is None:return None
+    if binding is None:
+        return None
     slot = binding.index if type(binding) is NativeVariantControl else 'continuation'
     return binding.state.cache_token,slot
 
@@ -220,7 +227,8 @@ class CoreVariantExecutionOwner:
         previous = None
         for index, variant in enumerate(plan.variants):
             target = graph.node('CreateList', '#variant-' + str(index))
-            if previous is not None:target.set_input('input0',previous.out(0))
+            if previous is not None:
+                target.set_input('input0',previous.out(0))
             variant_nodes[variant['id']] = target
             previous = target
         continuation = {}
@@ -271,8 +279,10 @@ def _continuation_barriers(plan):
     active = set()
     latest = {}
     def visit(node_id):
-        if node_id in latest:return latest[node_id]
-        if node_id in active:raise ValueError('continuation barrier cycle')
+        if node_id in latest:
+            return latest[node_id]
+        if node_id in active:
+            raise ValueError('continuation barrier cycle')
         active.add(node_id)
         last = -1
         def scan(value):
@@ -283,14 +293,17 @@ def _continuation_barriers(plan):
                 elif set(value) == {'node','output'}:
                     last = max(last,visit(value['node']))
                 else:
-                    for child in value.values():scan(child)
+                    for child in value.values():
+                        scan(child)
             elif type(value) is list:
-                for child in value:scan(child)
+                for child in value:
+                    scan(child)
         scan(specs[node_id].get('inputs',{}))
         active.remove(node_id)
         latest[node_id] = last
         return last
-    for output in plan.outputs:visit(output['node'])
+    for output in plan.outputs:
+        visit(output['node'])
     barriers = {}
     for node_id,last in latest.items():
         if 0 <= last < len(plan.variants)-1:
@@ -446,7 +459,8 @@ class _VariantSeries:
             if self.tasks:
                 tasks = tuple(self.tasks)
                 for task in tasks:
-                    if not task.done():task.cancel()
+                    if not task.done():
+                        task.cancel()
                 await asyncio.gather(*tasks,return_exceptions=True)
                 self.tasks.clear()
             _active_cell.reset(token)
@@ -474,8 +488,10 @@ class _VariantSeries:
     async def close(self):
         self.closed = True
         for task in self.tasks:
-            if not task.done():task.cancel()
-        if self.tasks:await asyncio.gather(*self.tasks,return_exceptions=True)
+            if not task.done():
+                task.cancel()
+        if self.tasks:
+            await asyncio.gather(*self.tasks,return_exceptions=True)
         self.tasks.clear()
         self.results.clear()
         self.caches.clear()

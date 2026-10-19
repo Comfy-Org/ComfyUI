@@ -71,7 +71,6 @@ from ._sdk import (  # noqa: F401
     AssetFetchProvider,
     AssetFetchResult,
 )
-from ._sdk import current_context as ctx  # `sdk.ctx()` -> active Context
 
 __all__ = [
     'AssetCopyResult',
