@@ -10,6 +10,8 @@ from __future__ import annotations
 import logging
 from typing import Any, Callable, Iterable
 
+from comfy_extras.nodes_model_advanced import ModelSamplingDiscrete, RescaleCFG
+
 _MISSING = object()
 
 
@@ -3853,8 +3855,37 @@ def _spatial_tiled_evaluation(
     return model
 
 
+def _model_sampling_discrete(patcher, sampling: str, zsnr: bool):
+    return ModelSamplingDiscrete().patch(patcher, sampling, zsnr)[0]
+
+
+def _rescale_cfg(patcher, multiplier: float):
+    return RescaleCFG().patch(patcher, multiplier)[0]
+
+
 TRANSFORMS: dict[str, Transform] = {
     t.name: t for t in (
+        Transform(
+            "model_sampling_discrete",
+            "Apply core's canonical discrete sampling mode and zero-terminal SNR.",
+            {
+                "sampling": OneOf(
+                    ("eps", "v_prediction", "lcm", "x0", "img_to_img", "img_to_img_flow"),
+                    doc="Core discrete sampling prediction mode."),
+                "zsnr": Bool(
+                    default=False, doc="Use zero-terminal signal-to-noise ratio."),
+            },
+            _model_sampling_discrete,
+        ),
+        Transform(
+            "rescale_cfg",
+            "Apply core's canonical CFG rescaling patch.",
+            {
+                "multiplier": Float(
+                    0.0, 1.0, doc="Native CFG rescaling multiplier."),
+            },
+            _rescale_cfg,
+        ),
         Transform(
             "block_swap",
             "Keep only some transformer blocks on the compute device, "

@@ -546,12 +546,31 @@ class AssetImportProvider(Protocol):
         self, url: str, *, max_bytes: int, timeout_seconds: float,
         follow_redirects: bool = False,
         user_agent: Literal["default", "light_tool_browser"] = "default",
+        publish_status: Literal["2xx", "200"] = "2xx",
     ) -> AssetImportResult: ...
 
 class AssetImportResult(TypedDict):
     status_code: int
     asset: Optional[AssetRef]
     name: Optional[str]
+    response_url: str
+    reason_phrase: str
+    redirect_location: Optional[str]
+
+class AssetFetchResult(TypedDict):
+    status_code: int
+    response_url: str
+    reason_phrase: str
+    redirect_location: Optional[str]
+    content: Optional[bytes]
+
+@runtime_checkable
+class AssetFetchProvider(Protocol):
+    async def fetch_bytes(
+        self, url: str, *, max_bytes: int, timeout_seconds: float,
+        follow_redirects: bool = False,
+        user_agent: Literal["default", "light_tool_browser"] = "default",
+    ) -> AssetFetchResult: ...
 
 @runtime_checkable
 class AssetMediaProvider(Protocol):
@@ -589,6 +608,12 @@ class UiDomain(Protocol):
 
 
 class AssetsDomain(Protocol):
+    async def fetch_bytes(
+        self, url: str, *, max_bytes: int, timeout_seconds: float,
+        follow_redirects: bool = False,
+        user_agent: Literal["default", "light_tool_browser"] = "default",
+    ) -> AssetFetchResult: ...
+
     async def copy_input(self, ref: AssetRef, *, name: str, max_bytes: int) -> AssetCopyResult: ...
 
     async def media_source(self, ref: AssetRef) -> str: ...
@@ -599,6 +624,7 @@ class AssetsDomain(Protocol):
         self, url: str, *, max_bytes: int, timeout_seconds: float,
         follow_redirects: bool = False,
         user_agent: Literal["default", "light_tool_browser"] = "default",
+        publish_status: Literal["2xx", "200"] = "2xx",
     ) -> AssetImportResult: ...
 
     async def gguf_tensor_state(
@@ -656,6 +682,7 @@ class OutputDomain(Protocol):
         optimize: bool = ...,
         *,
         png_text: Optional[dict[str, str]] = ...,
+        overwrite: bool = ...,
     ) -> dict:
         """Use png_text for a complete explicit PNG text block, independent of automatic metadata."""
         ...
@@ -739,11 +766,23 @@ class OutputDomain(Protocol):
     ) -> dict: ...
 
 class GraphDomain(Protocol):
+    async def input_options(self, node_id: str, input_name: str) -> dict:
+        """Read a selected workflow target's scalar type or authorized enum choices.
+
+        Requires graph.input_options and a current host target selection. Ordered
+        choices contain only explicitly authorized values; this grants no writes.
+        The initial provider is selected Guest-broker dispatch. Ordinary direct
+        native calls have no provider binding and remain unsupported.
+        """
+        ...
     async def current_node_id(self) -> str: ...
     async def execution_metadata(self, *, include_observations: bool = False) -> dict[str, Any]: ...
     async def input_label(
         self, input_name: str, default: str = ...,
     ) -> str: ...
+    async def source_output_label(
+        self, input_name: str, default: str = ...,
+    ) -> Optional[str]: ...
     async def expand_nodes(
         self,
         nodes: list[dict[str, Any]],
@@ -757,7 +796,7 @@ class GraphDomain(Protocol):
         input_name: str,
         variants: list[dict],
         nodes: list[dict],
-        outputs: list[dict],
+        outputs: list[dict], *, configuration_nodes: list[str] | None = None,
     ) -> dict: ...
     async def widget_values(
         self,
