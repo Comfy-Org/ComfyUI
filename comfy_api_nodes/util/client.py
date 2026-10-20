@@ -104,8 +104,8 @@ ASSET_FORMAT_HEADER = "Comfy-Asset-Format"
 ASSET_FORMAT_URL = "url"
 _IDEMPOTENT_REPLAYED_HEADER = "Idempotent-Replayed"
 _ERROR_TYPE_HEADER = "X-Comfy-Error-Type"
-_IDEMPOTENCY_IN_FLIGHT = "idempotency_in_flight"
-_IDEMPOTENCY_TERMINAL = frozenset({"idempotency_consumed", "idempotency_mismatch"})
+_IDEMPOTENCY_IN_FLIGHT = frozenset({"idempotency_in_flight", "concurrency_limit_exceeded"})
+_IDEMPOTENCY_TERMINAL = frozenset({"idempotency_consumed", "idempotency_mismatch", "invalid_input"})
 _IDEMPOTENCY_IN_FLIGHT_WAIT = 2.0
 _IDEMPOTENCY_IN_FLIGHT_MAX_WAIT = 30.0
 
@@ -793,6 +793,8 @@ def _idempotency_error_message(error_type: str, body: Any) -> str:
             f"Run the node again. ({error_type})"
         )
     detail = _response_detail(body)
+    if error_type == "invalid_input" and detail:
+        return f"{detail} ({error_type})"
     suffix = f"{error_type}: {detail}" if detail else error_type
     return f"The server rejected the retry of this request as different from the original attempt. ({suffix})"
 
@@ -1023,7 +1025,7 @@ async def _request_base(cfg: _RequestConfig, expect_binary: bool):
                     is_rl = resp.status == 429 or (
                         cfg.is_rate_limited is not None and cfg.is_rate_limited(resp.status, body)
                     )
-                    if keyed and resp.status == 409 and error_type == _IDEMPOTENCY_IN_FLIGHT:
+                    if keyed and resp.status == 409 and error_type in _IDEMPOTENCY_IN_FLIGHT:
                         remaining = cfg.timeout - (time.monotonic() - first_attempt_ts)
                         if remaining <= 0:
                             msg = (
