@@ -264,6 +264,18 @@ class InterpolationStatesRef(_TypedRef):
 class TensorRef(_TypedRef):
     KIND = "TENSOR"
 
+    @classmethod
+    async def from_value(cls, value: Any) -> "TensorRef":
+        """Publish bounded numeric data under the existing raw authority.
+
+        Preserve dtype, device, values, and native views; no finite-value
+        normalization is imposed on generic numeric tensors. This helper's
+        64 MiB admission bound does not replace the host raw-store grant.
+        """
+        value = _numeric_tensor_from_value(value)
+        return TensorRef._wrap(await current_runtime().refs.create(
+            "TENSOR", value))
+
     # --- RAW ESCAPE HATCH (permissioned, discouraged) -------------------- #
     # `raw()` returns the underlying buffer object. It is NOT the preferred
     # interface: prefer operations on the asset (see ImageRef below). Raw
@@ -357,6 +369,10 @@ class MaskRef(TensorRef):
 
 class LatentRef(ValueRef):
     KIND = "LATENT"
+
+    async def samples(self) -> "TensorRef":
+        """Project only samples, leaving unrelated latent metadata host-side."""
+        return await current_runtime().ops.apply("latent.samples", self, {})
 
     @classmethod
     async def empty(
@@ -458,6 +474,11 @@ class LatentRef(ValueRef):
 # --------------------------------------------------------------------------- #
 class CondRef(ValueRef):
     KIND = "CONDITIONING"
+
+    async def embedding(self, index: int = 0) -> "TensorRef":
+        """Project one scheduled embedding without exporting its metadata."""
+        return await current_runtime().ops.apply(
+            "cond.embedding", self, {"index": index})
 
     async def sequence_length(self) -> int:
         return int(await current_runtime().ops.apply(
@@ -1105,15 +1126,21 @@ class ClipRef(_TypedRef):
         )
         return result[0], result[1]
 
-    async def encode(self, text: str) -> "CondRef":
-        """The two steps above in one call, for the common case.
+    async def encode(
+        self, text: str, *, images: Optional[list["ImageRef"]] = None,
+        llama_template: Optional[str] = None,
+    ) -> "CondRef":
+        """Encode text, optionally with host-owned tokenizer image inputs.
 
-        Exactly what ``CLIPTextEncode`` does, and it saves a wire round trip.
-        A convenience over the pair, not a replacement: anything that inspects
-        or edits tokens uses ``tokenize`` + ``encode_from_tokens_scheduled``.
+        Keep image-bearing tokens entirely on the trusted plane. An old
+        text-only call sends precisely its original parameter dictionary.
         """
-        return await current_runtime().ops.apply("clip.encode", self,
-                                                 {"text": text})
+        params = {"text": text}
+        if images is not None:
+            params["images"] = images
+        if llama_template is not None:
+            params["llama_template"] = llama_template
+        return await current_runtime().ops.apply("clip.encode", self, params)
 
     async def generate_text(
         self, prompt: str, image: Optional[ImageRef] = None,
@@ -5561,6 +5588,39 @@ def _mask_buffer_shape(shape, nbytes: int) -> None:
         raise ValueError(f"MASK exceeds the {maximum}-byte raw buffer limit")
 
 
+def _numeric_tensor_shape(shape, nbytes: int) -> None:
+    # Generic numeric data, not an IMAGE/MASK field alias. Empty samples are
+    # legal for a zero-reference Bindweave input and keep their logical shape.
+    if (len(shape) > 8 or any(type(d) is not int or not 0 <= d <= 16384
+                              for d in shape)
+            or math.prod(shape) > 16_777_216
+            or type(nbytes) is not int or not 0 <= nbytes <= 64 * 1024**2):
+        raise ValueError("numeric tensor exceeds rank/shape/16M-element/64MiB bounds")
+
+
+def _numeric_tensor_from_value(value):
+    import numpy as np
+    import torch
+
+    if isinstance(value, torch.Tensor):
+        if value.layout != torch.strided or value.device.type == "meta" or value.is_complex():
+            raise TypeError("numeric tensor requires dense real data")
+        _numeric_tensor_shape(tuple(value.shape), value.numel() * value.element_size())
+        return value
+    if isinstance(value, np.ndarray) and value.dtype.kind in "bfiu":
+        _numeric_tensor_shape(tuple(value.shape), value.nbytes)
+        return torch.from_numpy(value)
+    raise TypeError("numeric tensor requires a real tensor or numeric array")
+
+
+def _numeric_tensor_projection(value):
+    import torch
+
+    if not isinstance(value, torch.Tensor):
+        raise TypeError("projection requires an existing host tensor")
+    return _numeric_tensor_from_value(value)
+
+
 def _tensor_from_value(value, kind, validate_shape):
     import numpy as np
     import torch
@@ -9895,6 +9955,7 @@ class InProcessOps:
             "clip.generate_text": self._clip_generate_text,
             "gligen.apply_batched": self._gligen_apply_batched,
             "latent.noise_mask": self._latent_noise_mask,
+            "latent.samples": self._latent_samples,
             "latent.repeat_batch": self._latent_repeat_batch,
             "latent.minimax_h3_token_count":
                 self._latent_minimax_h3_token_count,
@@ -9903,6 +9964,7 @@ class InProcessOps:
             "sigmas.value_at": self._sigmas_value_at,
             "sampler.named": self._sampler_named,
             "cond.sequence_length": self._cond_sequence_length,
+            "cond.embedding": self._cond_embedding,
             "cond.combine": self._cond_combine,
             "cond.concat": self._cond_concat,
             "cond.zero_out": self._cond_zero_out,
@@ -10832,11 +10894,38 @@ class InProcessOps:
             ))
         return embedding_ref, pooled_ref
 
-    async def _clip_encode(self, clip: "ClipRef", text: str) -> "CondRef":
+    async def _clip_encode(
+        self, clip: "ClipRef", text: str, *,
+        images: Optional[list["ImageRef"]] = None,
+        llama_template: Optional[str] = None,
+    ) -> "CondRef":
         rt = current_runtime()
         c = await rt.refs.resolve(clip)
-        tokens = c.tokenize(text)
-        return CondRef._wrap(await rt.refs.create(  # type: ignore[return-value]
+        if images is None and llama_template is None:
+            # Preserve the complete old text-only tokenize/scheduled path.
+            tokens = c.tokenize(text)
+        else:
+            if type(text) is not str or len(text) > 32768 or len(text.encode("utf-8", errors="surrogatepass")) > 65536:
+                raise ValueError("multimodal encode text exceeds 32768 chars/64KiB")
+            if images is None:
+                images = []
+            if type(images) is not list or len(images) > 1:
+                raise ValueError("multimodal encode accepts at most one IMAGE ref")
+            if llama_template is not None and (type(llama_template) is not str or len(llama_template) > 4096):
+                raise ValueError("tokenizer template exceeds 4096 characters")
+            input_images = []
+            for image in images:
+                if not isinstance(image, ImageRef) or image.kind != "IMAGE":
+                    raise TypeError("multimodal encode needs owned IMAGE refs")
+                pixels = await rt.refs.resolve(image)
+                pixels = _numeric_tensor_projection(pixels)
+                _image_tensor_shape(tuple(pixels.shape), pixels.numel() * pixels.element_size())
+                if pixels.ndim != 4:
+                    raise ValueError("multimodal encode IMAGE must remain BHWC")
+                input_images.append(pixels)
+            # These are the genuine Core CLIP/tokenizer kwargs used upstream.
+            tokens = c.tokenize(text, images=input_images, llama_template=llama_template)
+        return CondRef._wrap(await rt.refs.create(
             "CONDITIONING", c.encode_from_tokens_scheduled(tokens)))
 
     async def _clip_generate_text(
@@ -12732,6 +12821,34 @@ class InProcessOps:
         noise = noise.to(device="cpu")
         return TensorRef._wrap(await rt.refs.create(
             "TENSOR", noise))  # type: ignore[return-value]
+
+    async def _latent_samples(self, latent: "LatentRef") -> "TensorRef":
+        if not isinstance(latent, LatentRef) or latent.kind != "LATENT":
+            raise TypeError("latent.samples needs an owned LATENT ref")
+        rt = current_runtime()
+        value = await rt.refs.resolve(latent)
+        if type(value) is not dict:
+            raise TypeError("LATENT must contain its samples mapping")
+        # Deliberately do not iterate, copy, or resolve any other field.
+        samples = _numeric_tensor_projection(value["samples"])
+        return TensorRef._wrap(await rt.refs.create("TENSOR", samples))
+
+    async def _cond_embedding(
+        self, conditioning: "CondRef", index: int = 0,
+    ) -> "TensorRef":
+        if not isinstance(conditioning, CondRef) or conditioning.kind != "CONDITIONING":
+            raise TypeError("cond.embedding needs an owned CONDITIONING ref")
+        if type(index) is not int or not 0 <= index < 256:
+            raise ValueError("conditioning index must be in [0,255]")
+        rt = current_runtime()
+        value = await rt.refs.resolve(conditioning)
+        if type(value) not in (list, tuple) or len(value) > 256:
+            raise TypeError("CONDITIONING needs at most 256 scheduled rows")
+        row = value[index]
+        if type(row) not in (list, tuple):
+            raise TypeError("CONDITIONING row must contain its embedding")
+        embedding = _numeric_tensor_projection(row[0])
+        return TensorRef._wrap(await rt.refs.create("TENSOR", embedding))
 
     async def _latent_noise_mask(
         self, latent: "LatentRef",
