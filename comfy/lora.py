@@ -286,6 +286,8 @@ def model_lora_keys_unet(model, key_map={}):
             hidden_size = model.model_config.unet_config.get("hidden_size", 0)
             if k.endswith(".weight") and ".linear1." in k:
                 key_map["{}".format(k.replace(".linear1.weight", ".linear1_qkv"))] = (k, (0, 0, hidden_size * 3))
+            if k.startswith("diffusion_model.") and k.endswith(".weight"):
+                key_map["base_model.model.{}".format(k[len("diffusion_model."):-len(".weight")])] = k  # PEFT on the original BFL modules (UltraTex)
 
     if isinstance(model, comfy.model_base.GenmoMochi):
         for k in sdk:
