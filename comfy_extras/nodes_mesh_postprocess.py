@@ -6,8 +6,9 @@ from comfy_api.latest import ComfyExtension, IO, Types
 import copy
 import comfy.utils
 import comfy.model_management
+import comfy.quant_ops
 from server import PromptServer
-from comfy_extras.mesh3d.postprocess.qem_decimate import QEMConfig, qem_simplify, qem_cluster_decimate, _compute_vertex_normals, _connected_labels
+from comfy_extras.mesh3d.postprocess.qem_decimate import QEMConfig, qem_simplify, qem_cluster_decimate, _compute_vertex_normals, _connected_labels, _kitchen_op
 from comfy_extras.mesh3d.postprocess.remesh import remesh_narrow_band_dc, _point_tri_closest
 from comfy_extras.nodes_save_3d import get_mesh_batch_item, pack_variable_mesh_batch
 from comfy_extras.nodes_gaussian_splat import _orbit_camera_info_yaw
@@ -476,6 +477,15 @@ def _morton_expand21(v):
 
 
 def _build_triangle_bvh(tri):
+    """BVH over `tri` [F,3,3] for the *_bvh queries: comfy-kitchen's ("ck") when available. A query kitchen
+    can't run builds the pure-torch BVH on first use."""
+    mesh_bvh = _kitchen_op("mesh_bvh", tri)
+    if mesh_bvh is not None:
+        return {"ck": mesh_bvh(tri.contiguous())}
+    return _torch_triangle_bvh(tri)
+
+
+def _torch_triangle_bvh(tri):
     """Linear BVH (Karras 2012) over triangle AABBs, pure torch, no external deps
     (the cuMesh approach, in torch). Internal nodes 0..T-2; leaves encoded LEAF+i,
     leaf i holds triangle order[i]. Returns dict(LEAF, left, right, nmin, nmax over
@@ -579,10 +589,13 @@ def _build_triangle_bvh(tri):
 
 
 def _closest_points_on_mesh_bvh(Q, tri, bvh, max_stack=64, return_face=False):
-    """Exact closest surface point per query via per-query BVH stack traversal
-    (nearest-child-first), pure torch. Returns [N,3], or (points [N,3], face_idx [N])
-    when return_face=True (face_idx indexes `tri`). `max_stack` bounds the stack
+    """Exact closest surface point per query: comfy-kitchen's, else per-query BVH stack traversal
+    (nearest-child-first) in pure torch. Returns [N,3], or (points [N,3], face_idx [N])
+    when return_face=True (face_idx indexes `tri`). `max_stack` bounds the torch stack
     (= tree height); overflow is counted+warned, not silently wrong."""
+    if "ck" in bvh:
+        _, bestp, bestf = comfy.quant_ops.ck.closest_point_on_mesh(bvh["ck"], Q.contiguous())
+        return (bestp, bestf) if return_face else bestp
     dev = Q.device
     N = Q.shape[0]
     LEAF = bvh['LEAF']
@@ -650,9 +663,9 @@ def _closest_points_on_mesh_bvh(Q, tri, bvh, max_stack=64, return_face=False):
 
 
 def _back_project_positions(position_map, mask, ref_v, ref_f, max_query_res=1024):
-    """Snap covered texels onto the reference mesh's true surface (pure-torch BVH, no
-    cumesh/scipy/trimesh) so the voxel field is sampled at full detail, not along flat
-    triangle chords. Returns a new position_map.
+    """Snap covered texels onto the reference mesh's true surface (no cumesh/scipy/trimesh) so
+    the voxel field is sampled at full detail, not along flat triangle chords. Returns a new
+    position_map.
 """
     if not mask.any():
         return position_map
@@ -710,15 +723,20 @@ def _ray_tri_hit(o, d, tri, tmin, tmax):
 
 
 def _any_hit_rays_bvh(orig, dirs, tri, bvh, tmin=0.0, tmax=1e30, max_stack=64):
-    """Any-hit ray test over the BVH (slab cull + Möller-Trumbore), pure torch. Returns bool
-    [N]: True if the ray hits any triangle in (tmin, tmax). Rays early-out once they hit."""
+    """Any-hit ray test over the BVH: comfy-kitchen's closest hit, else pure torch (slab cull + Möller-Trumbore,
+    rays stop at their first hit). Returns bool [N]: True if the ray hits any triangle in (tmin, tmax)."""
+    closest_hit = _kitchen_op("closest_hit_on_mesh", orig) if "ck" in bvh else None
+    if closest_hit is not None:
+        return closest_hit(bvh["ck"], orig.contiguous(), dirs.contiguous(), tmin=float(tmin), tmax=float(tmax))[1] >= 0
+    if "LEAF" not in bvh:
+        bvh.update(_torch_triangle_bvh(tri))
     dev = orig.device
     N = orig.shape[0]
     LEAF = bvh['LEAF']
     nmin, nmax = bvh['nmin'], bvh['nmax']
     left, right, order = bvh['left'], bvh['right'], bvh['order']
     inv = 1.0 / torch.where(dirs.abs() < 1e-20, torch.full_like(dirs, 1e-20), dirs)
-    tmaxN = tmax if torch.is_tensor(tmax) else torch.full((N,), float(tmax), device=dev)   # per-ray far bound
+    tmaxN = torch.full((N,), float(tmax), device=dev)
     hit = torch.zeros(N, dtype=torch.bool, device=dev)
     # int32 stack: node indices fit in 31 bits and this [N, max_stack] array dominates memory.
     stack = torch.full((N, max_stack), -1, dtype=torch.int32, device=dev)
@@ -779,8 +797,15 @@ def _ray_tri_intersect(o, d, tri, tmin, tmax, cull_backface=False):
 
 
 def _closest_hit_rays_bvh(orig, dirs, tri, bvh, tmin=0.0, tmax=1e30, max_stack=64, cull_backface=False):
-    """Nearest-hit ray cast over the BVH, pure torch. Returns (t [N], face [N] long, -1 on
-    miss; hit [N] bool) — the closest intersection in (tmin, tmax), pruning nodes past best_t."""
+    """Nearest-hit ray cast over the BVH: comfy-kitchen's, else pure torch. Returns (t [N], face [N]
+    long, -1 on miss; hit [N] bool) — the closest intersection in (tmin, tmax), pruning nodes past best_t."""
+    closest_hit = _kitchen_op("closest_hit_on_mesh", orig) if "ck" in bvh else None
+    if closest_hit is not None:
+        t, face = closest_hit(bvh["ck"], orig.contiguous(), dirs.contiguous(), tmin=float(tmin), tmax=float(tmax),
+                              cull_backface=cull_backface)
+        return t, face, face >= 0
+    if "LEAF" not in bvh:
+        bvh.update(_torch_triangle_bvh(tri))
     dev = orig.device
     N = orig.shape[0]
     LEAF = bvh['LEAF']
