@@ -44,6 +44,28 @@ class FluxParams:
     txt_norm: bool = False
 
 
+def views_to_grid(x, grid):
+    """[B*n, C, h, w] views -> [B, C, rows*h, cols*w]: view i of every n-group is the tile at grid[i] = (row, col)."""
+    n = len(grid)
+    b, c, h, w = x.shape
+    rows, cols = max(r for r, _ in grid) + 1, max(col for _, col in grid) + 1
+    out = x.new_zeros((b // n, c, rows * h, cols * w))
+    for i, (r, col) in enumerate(grid):
+        out[:, :, r * h:(r + 1) * h, col * w:(col + 1) * w] = x[i::n]
+    return out
+
+
+def grid_to_views(x, grid, h, w):
+    return torch.stack([x[:, :, r * h:(r + 1) * h, col * w:(col + 1) * w] for r, col in grid], dim=1).flatten(0, 1)
+
+
+def foreground_tokens(mask, h, w):
+    """Token-grid foreground [n, 1, h, w] of masks [n, H, W] (UltraTex): any coverage after an antialiased resize,
+    dilated by one token right and down."""
+    m = torch.nn.functional.interpolate(mask[:, None].float(), size=(h, w), mode="bilinear", antialias=True) > 0.5 / 255
+    return torch.nn.functional.max_pool2d(torch.nn.functional.pad(m.float(), (1, 0, 1, 0)), 2, stride=1) > 0
+
+
 def invert_slices(slices, length):
     sorted_slices = sorted(slices)
     result = []
@@ -349,12 +371,36 @@ class Flux(nn.Module):
         ).execute(x, timestep, context, y, guidance, ref_latents, control, transformer_options, **kwargs)
 
     def _forward(self, x, timestep, context, y=None, guidance=None, ref_latents=None, control=None, transformer_options={}, **kwargs):
+        view_grid = kwargs.get("view_grid", None)
+        if view_grid is not None:
+            # Consecutive batch items are the views of one sample, attended jointly as the tiles of one image.
+            n = len(view_grid)
+            if x.shape[0] % n:
+                raise ValueError(f"view_grid: the latent batch ({x.shape[0]}) must hold all {n} views of each sample.")
+            h_view, w_view = x.shape[-2:]
+            x = views_to_grid(x, view_grid)
+            timestep, context = timestep[::n], context[::n]
+            y = y[::n] if y is not None else None
+            guidance = guidance[::n] if guidance is not None else None
+            ref_latents = [r[::n] for r in ref_latents] if ref_latents is not None else None
         bs, c, h_orig, w_orig = x.shape
         patch_size = self.patch_size
 
         h_len = ((h_orig + (patch_size // 2)) // patch_size)
         w_len = ((w_orig + (patch_size // 2)) // patch_size)
         img, img_ids = self.process_img(x, transformer_options=transformer_options)
+
+        # Background token dropping: only foreground tokens of the target and the references enter the transformer.
+        token_masks = kwargs.get("token_masks", None)
+        if token_masks is not None:
+            target = token_masks["target"].to(x.device)
+            if view_grid is not None:
+                keep = views_to_grid(foreground_tokens(target, h_view // patch_size, w_view // patch_size), view_grid)
+            else:
+                keep = foreground_tokens(target, h_len, w_len)
+            keep = keep.flatten().nonzero().flatten()
+            img_full = img
+            img, img_ids = img[:, keep], img_ids[:, keep]
         img_tokens = img.shape[1]
         timestep_zero_index = None
         if ref_latents is not None:
@@ -364,7 +410,7 @@ class Flux(nn.Module):
             index = 0
             ref_latents_method = kwargs.get("ref_latents_method", self.params.default_ref_method)
             timestep_zero = ref_latents_method == "index_timestep_zero"
-            for ref in ref_latents:
+            for i, ref in enumerate(ref_latents):
                 if ref_latents_method in ("index", "index_timestep_zero"):
                     index += self.params.ref_index_scale
                     h_offset = 0
@@ -387,6 +433,10 @@ class Flux(nn.Module):
                     w = max(w, ref.shape[-1] + w_offset)
 
                 kontext, kontext_ids = self.process_img(ref, index=index, h_offset=h_offset, w_offset=w_offset, transformer_options=transformer_options)
+                if token_masks is not None and token_masks["refs"][i] is not None:
+                    ref_keep = foreground_tokens(token_masks["refs"][i].to(x.device), (ref.shape[-2] + patch_size // 2) // patch_size, (ref.shape[-1] + patch_size // 2) // patch_size)
+                    ref_keep = ref_keep.flatten().nonzero().flatten()
+                    kontext, kontext_ids = kontext[:, ref_keep], kontext_ids[:, ref_keep]
                 img = torch.cat([img, kontext], dim=1)
                 img_ids = torch.cat([img_ids, kontext_ids], dim=1)
                 ref_num_tokens.append(kontext.shape[1])
@@ -405,4 +455,16 @@ class Flux(nn.Module):
 
         out = self.forward_orig(img, img_ids, context, txt_ids, timestep, y, guidance, control, timestep_zero_index=timestep_zero_index, transformer_options=transformer_options, attn_mask=kwargs.get("attention_mask", None))
         out = out[:, :img_tokens]
-        return rearrange(out, "b (h w) (c ph pw) -> b c (h ph) (w pw)", h=h_len, w=w_len, ph=self.patch_size, pw=self.patch_size)[:,:,:h_orig,:w_orig]
+        if token_masks is not None:
+            # Dropped target tokens predict the background latent, so sampling lands on it there.
+            sigma = timestep[:bs].float()[:, None, None]
+            background = kwargs["background_latent"].to(x)
+            if view_grid is not None:
+                background = views_to_grid(background.expand(n, -1, -1, -1), view_grid)
+            full = ((img_full.float() - self.process_img(background)[0].float()) / sigma).to(out.dtype)
+            full[:, keep] = out
+            out = full
+        out = rearrange(out, "b (h w) (c ph pw) -> b c (h ph) (w pw)", h=h_len, w=w_len, ph=self.patch_size, pw=self.patch_size)[:,:,:h_orig,:w_orig]
+        if view_grid is not None:
+            out = grid_to_views(out, view_grid, h_view, w_view)
+        return out

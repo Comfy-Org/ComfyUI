@@ -1068,6 +1068,17 @@ class Flux(BaseModel):
             ref_latents_method = kwargs.get("reference_latents_method", None)
             if ref_latents_method is not None:
                 out['ref_latents_method'] = comfy.conds.CONDConstant(ref_latents_method)
+
+        # Multi-view (UltraTex): batch items as tiles of one image, and background token dropping.
+        view_grid = kwargs.get("view_grid", None)
+        if view_grid is not None:
+            out['view_grid'] = comfy.conds.CONDConstant(view_grid)
+        token_masks = kwargs.get("token_masks", None)
+        if token_masks is not None:
+            out['token_masks'] = comfy.conds.CONDConstant(token_masks)
+        background_latent = kwargs.get("background_latent", None)
+        if background_latent is not None:
+            out['background_latent'] = comfy.conds.CONDConstant(self.process_latent_in(background_latent))
         return out
 
     def extra_conds_shapes(self, **kwargs):
