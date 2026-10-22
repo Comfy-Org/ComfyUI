@@ -10,6 +10,7 @@ from server import PromptServer
 from comfy_extras.mesh3d.postprocess.qem_decimate import QEMConfig, qem_simplify, qem_cluster_decimate, _compute_vertex_normals, _connected_labels
 from comfy_extras.mesh3d.postprocess.remesh import remesh_narrow_band_dc, _point_tri_closest
 from comfy_extras.nodes_save_3d import get_mesh_batch_item, pack_variable_mesh_batch
+from comfy_extras.nodes_gaussian_splat import _orbit_camera_info_yaw
 from comfy_extras.mesh3d.uv_unwrap import mesh as _uv_mesh
 from comfy_extras.mesh3d.uv_unwrap import segment as _uv_seg
 from comfy_extras.mesh3d.uv_unwrap import parameterize as _uv_param
@@ -946,22 +947,31 @@ def _sample_image01(img_hwc, uv01):
     return s[0, :, 0, :].t()
 
 
-def _render_view(tri, bvh, uv, faces, texture_hwc, eye, f, r, u, fov, H, W, ray_chunk=1 << 22,
-                 vertex_colors=None, vertex_normals=None, render_normal=False):
-    """Ray-cast render: per pixel, nearest-hit triangle → colour it. With `render_normal`, output the
-    view-space normal (OpenGL: x=right, y=up, z=toward camera; smooth `vertex_normals` if given, else
-    the face normal). Otherwise colour source in order: `texture_hwc` (sampled via interpolated UVs),
-    else `vertex_colors` (barycentric), else neutral clay shaded by facing angle. Returns
-    (img, hit_mask, depth)."""
-    dev = tri.device
-    ys = 1.0 - (torch.arange(H, device=dev, dtype=torch.float32) + 0.5) / H * 2.0   # row 0 = +up
+def _view_rays(eye, f, r, u, fov, H, W, ortho_half=None):
+    """Per-pixel (origins, unit dirs) [H*W,3] through pixel centres, row 0 = +up. Perspective from
+    `eye` with vertical `fov`, or with `ortho_half` parallel along `f` from the image plane at `eye`."""
+    dev = eye.device
+    ys = 1.0 - (torch.arange(H, device=dev, dtype=torch.float32) + 0.5) / H * 2.0
     xs = (torch.arange(W, device=dev, dtype=torch.float32) + 0.5) / W * 2.0 - 1.0
     gy, gx = torch.meshgrid(ys, xs, indexing="ij")
-    tn = math.tan(0.5 * fov)
     aspect = W / H
+    if ortho_half is not None:
+        o = eye + r * (gx * ortho_half * aspect)[..., None] + u * (gy * ortho_half)[..., None]
+        return o.reshape(-1, 3), f[None, :].expand(H * W, 3)
+    tn = math.tan(0.5 * fov)
     d = torch.nn.functional.normalize(
         (r * (gx * tn * aspect)[..., None] + u * (gy * tn)[..., None] + f).reshape(-1, 3), dim=-1, eps=1e-6)
-    o = eye[None, :].expand(H * W, 3)
+    return eye[None, :].expand(H * W, 3), d
+
+
+def _render_view(tri, bvh, uv, faces, texture_hwc, eye, f, r, u, fov, H, W, ray_chunk=1 << 22,
+                 vertex_colors=None, vertex_normals=None, render_normal=None, ortho_half=None):
+    """Ray-cast render: each pixel shows its nearest-hit triangle. With `render_normal` [3,3], the normal in that
+    basis (rows = output x, y, z) encoded n * 0.5 + 0.5: smooth `vertex_normals` if given, else the face normal
+    facing the camera. Otherwise `texture_hwc` via interpolated UVs, else `vertex_colors`, else clay shaded by
+    facing angle. Returns (img, hit_mask, depth)."""
+    dev = tri.device
+    o, d = _view_rays(eye, f, r, u, fov, H, W, ortho_half)
     img = torch.zeros((H * W, 3), device=dev)
     depth = torch.full((H * W,), float("inf"), device=dev)
     hit_all = torch.zeros(H * W, dtype=torch.bool, device=dev)
@@ -973,7 +983,7 @@ def _render_view(tri, bvh, uv, faces, texture_hwc, eye, f, r, u, fov, H, W, ray_
             P = o[s:e][hit] + t_hit[hit, None] * d[s:e][hit]
             bary = _barycentric(P, tri[fh])
             local = torch.zeros((e - s, 3), device=dev)
-            if render_normal:
+            if render_normal is not None:
                 if vertex_normals is not None:
                     nrm = torch.nn.functional.normalize(
                         (bary[:, :, None] * vertex_normals[faces[fh]]).sum(1), dim=-1, eps=1e-6)
@@ -982,8 +992,7 @@ def _render_view(tri, bvh, uv, faces, texture_hwc, eye, f, r, u, fov, H, W, ray_
                         torch.cross(tri[fh][:, 1] - tri[fh][:, 0], tri[fh][:, 2] - tri[fh][:, 0], dim=-1),
                         dim=-1, eps=1e-6)
                     nrm = torch.where((nrm * -d[s:e][hit]).sum(-1, keepdim=True) < 0, -nrm, nrm)
-                nv = torch.stack([(nrm * r).sum(-1), (nrm * u).sum(-1), (nrm * -f).sum(-1)], dim=-1)
-                local[hit] = (nv * 0.5 + 0.5).clamp(0.0, 1.0)      # view-space OpenGL normal encode
+                local[hit] = (nrm @ render_normal.T * 0.5 + 0.5).clamp(0.0, 1.0)
             elif texture_hwc is not None and uv is not None:
                 uvh = (bary[:, :, None] * uv[faces[fh]]).sum(1)
                 local[hit] = _sample_image01(texture_hwc, uvh)
@@ -1001,14 +1010,7 @@ def _render_view(tri, bvh, uv, faces, texture_hwc, eye, f, r, u, fov, H, W, ray_
             dloc[hit] = t_hit[hit]
             depth[s:e] = dloc
             hit_all[s:e] = hit
-    img = img.reshape(H, W, 3)
-    depth = depth.reshape(H, W)
-    hit_all = hit_all.reshape(H, W)
-    # Dilate the object color into the background so bilinear sampling near the silhouette doesn't
-    # bleed black (a cross-view seam source) — and gives the upscaler a coherent, edge-free image.
-    if bool(hit_all.any()) and not bool(hit_all.all()):
-        img = torch.from_numpy(_jfa_fill_gpu(img.cpu().numpy(), hit_all.cpu().numpy())).to(dev)
-    return img, hit_all, depth
+    return img.reshape(H, W, 3), hit_all.reshape(H, W), depth.reshape(H, W)
 
 
 def _smooth_vertex_normals(vertices_np, faces_np, weld=True):
@@ -1807,25 +1809,85 @@ class BakeAmbientOcclusion(IO.ComfyNode):
         return IO.NodeOutput(ao_img)
 
 
+MeshCameras = IO.Custom("MESH_CAMERAS")
+
+
+def _xyz_dict(v):
+    return {"x": float(v[0]), "y": float(v[1]), "z": float(v[2])}
+
+
+def _mesh_view_cameras(camera_info, center, radius, views, top_bottom, dev):
+    """Cameras RenderMesh renders, in order: the given camera (target defaulting to the mesh centre) or an
+    auto-framed front view, turned in `views` turntable steps about world +Y, then with `top_bottom` straight
+    down and up onto the target with the first camera's back at the image top (TexVerse's canonical views)."""
+    if camera_info is None:
+        dist = radius / math.tan(math.radians(20.0)) * 1.04
+        base = {"position": _xyz_dict(center + center.new_tensor([0.0, 0.0, dist])), "target": _xyz_dict(center),
+                "fov": 40.0, "zoom": 1.0, "cameraType": "perspective"}
+    else:
+        base = dict(camera_info)
+        if not base.get("target"):
+            base["target"] = _xyz_dict(center)
+    cams = [base] + [_orbit_camera_info_yaw(base, 360.0 * k / views, dev) for k in range(1, views)]
+    if top_bottom:
+        tgt = [float(base["target"].get(k, 0.0)) for k in "xyz"]
+        dist = math.dist([float(base.get("position", {}).get(k, 0.0)) for k in "xyz"], tgt)
+        r = _mesh_view_camera(base, dev)[2]
+        back = torch.cross(r.new_tensor([0.0, 1.0, 0.0]), r, dim=-1)
+        for sign in (1.0, -1.0):
+            cam = {k: v for k, v in base.items() if k not in ("quaternion", "useCustomUp")}
+            cam["position"] = _xyz_dict([tgt[0], tgt[1] + sign * dist, tgt[2]])
+            cam["up"] = _xyz_dict(back)
+            cams.append(cam)
+    return cams
+
+
+def _mesh_view_camera(camera_info, dev):
+    """(eye, f, r, u, fov_rad, ortho_half) of a camera_info with a target: look-at towards its three.js "up"
+    (default +Y), fov narrowed by zoom; ortho_half is half the visible height of orthographic cameras."""
+    def _vec(d):
+        return torch.tensor([float(d.get("x", 0.0)), float(d.get("y", 0.0)), float(d.get("z", 0.0))], device=dev)
+    eye, target = _vec(camera_info.get("position", {})), _vec(camera_info["target"])
+    f, r, u = _camera_basis(eye, target, _vec(camera_info.get("up", {"y": 1.0})))
+    zoom = max(float(camera_info.get("zoom", 1.0) or 1.0), 1e-3)  # three.js digital zoom scales focal length
+    half_tan = math.tan(math.radians(float(camera_info.get("fov", 0) or 0) or 40.0) * 0.5) / zoom
+    ortho_half = None
+    if str(camera_info.get("cameraType", "")).lower().startswith("ortho"):
+        # Viewer cameras carry their frustum; others frame like a perspective camera at the target distance.
+        frustum = camera_info.get("frustum")
+        ortho_half = ((float(frustum["top"]) - float(frustum["bottom"])) * 0.5 / zoom if frustum
+                      else float((target - eye).norm()) * half_tan)
+    return eye, f, r, u, 2.0 * math.atan(half_tan), ortho_half
+
+
 class RenderMesh(IO.ComfyNode):
     @classmethod
     def define_schema(cls):
         return IO.Schema(
             node_id="RenderMesh",
             display_name="Render Mesh",
-            search_aliases=["mesh to image", "render mesh", "preview textured mesh"],
+            search_aliases=["mesh to image", "render mesh", "preview textured mesh", "multiview render"],
             category="3d/mesh",
             description=(
-                "Ray-casts a single view of a mesh. The camera and optional model transform can come "
-                "from a Load3D / Preview3D viewer."
+                "Ray-casts views of a mesh. The camera and optional model transform can come "
+                "from a Load3D / Preview3D viewer. The cameras output lets Bake Texture From Views "
+                "project edited renders back onto the mesh."
             ),
             inputs=[
                 IO.Mesh.Input("mesh"),
-                IO.Combo.Input("mode", options=["auto", "texture", "vertex colors", "solid", "normal", "depth"],
-                               tooltip="What to render. auto: texture if present, else vertex colours, else shaded clay."),
+                IO.Combo.Input("mode", options=["auto", "texture", "vertex colors", "solid", "normal", "world normal", "depth"],
+                               tooltip="What to render. auto: texture if present, else vertex colours, else shaded clay. "
+                                       "normal: view-space normals. world normal: world-space normals turned with the first "
+                                       "camera's yaw, as if the mesh turned instead of the camera."),
                 IO.Int.Input("width", default=1024, min=64, max=4096, step=8),
                 IO.Int.Input("height", default=1024, min=64, max=4096, step=8),
                 IO.Color.Input("background", default="#000000"),
+                IO.Int.Input("views", default=1, min=1, max=64,
+                             tooltip="1 = single view; >1 = that many views evenly spaced in a turntable orbit "
+                                     "around the camera target, starting at the camera."),
+                IO.Boolean.Input("top_bottom", default=False,
+                                 tooltip="Also render straight down and straight up onto the camera target "
+                                         "(after the orbit views), so a re-bake covers the top and bottom."),
                 IO.Load3DModelInfo.Input("model_3d_info", optional=True,
                                          tooltip="Model transform from the same Load3D / Preview3D viewer. "
                                                  "Connect it with camera_info to match the viewer framing."),
@@ -1833,11 +1895,17 @@ class RenderMesh(IO.ComfyNode):
                                       tooltip="Camera from a Load3D / Preview3D viewer or a Create Camera Info "
                                               "node. If none is connected, a default front view is auto-framed."),
             ],
-            outputs=[IO.Image.Output(display_name="image"), IO.Mask.Output(display_name="mask")],
+            outputs=[
+                IO.Image.Output(display_name="image"),
+                IO.Mask.Output(display_name="mask"),
+                MeshCameras.Output(display_name="cameras",
+                                   tooltip="The rendered cameras (and model transform), for Bake Texture From Views."),
+            ],
         )
 
     @classmethod
-    def execute(cls, mesh, mode, width, height, background, model_3d_info=None, camera_info=None):
+    def execute(cls, mesh, mode, width, height, background, views=1, top_bottom=False,
+                model_3d_info=None, camera_info=None):
         if int(mesh.vertices.shape[0]) > 1:
             logging.warning("RenderMesh: one item per batch only; using the first of %d.", int(mesh.vertices.shape[0]))
         dev = comfy.model_management.get_torch_device()
@@ -1863,15 +1931,14 @@ class RenderMesh(IO.ComfyNode):
             resolved = "texture" if have_tex else ("vertex colors" if have_vc else "solid")
 
         uv = texture_hwc = vcols = vnorms = None
-        render_normal = False
+        render_normal = None
         if resolved == "texture" and have_tex:
             uv = (uvs[0, :n] if uvs.ndim == 3 else uvs[:n]).to(dev).float()
             texture_hwc = tex[0].to(dev).float()
         elif resolved == "vertex colors" and have_vc:
             # glTF COLOR_0 is linear (PaintMesh stores pow(srgb, 2.2)); to sRGB so it isn't dark.
             vcols = _item("vertex_colors")[:, :3].clamp(0.0, 1.0).pow(1.0 / 2.2)
-        elif resolved == "normal":
-            render_normal = True
+        elif resolved in ("normal", "world normal"):
             vnorms = _item("normals")  # smooth if present, else face normals
             if vnorms is not None and model_transform is not None:
                 vnorms = _apply_model_transform(vnorms, model_transform, is_normal=True)
@@ -1879,45 +1946,373 @@ class RenderMesh(IO.ComfyNode):
         tri = lv[lf]
         bvh = _build_triangle_bvh(tri)
         center = (lv.amax(0) + lv.amin(0)) * 0.5
-        up_hint = torch.tensor([0.0, 1.0, 0.0], device=dev)
-
-        if camera_info is not None:
-            # Explicit camera from a Load3D / Preview3D viewer (three.js Y-up, same frame as the mesh).
-            def _vec(d):
-                return torch.tensor([float(d.get("x", 0.0)), float(d.get("y", 0.0)), float(d.get("z", 0.0))],
-                                    device=dev)
-            eye = _vec(camera_info.get("position", {}))
-            tgt = camera_info.get("target")
-            target = _vec(tgt) if tgt else center
-            f, r, u = _camera_basis(eye, target, up_hint)  # look-at (roll-free)
-            cam_fov = float(camera_info.get("fov", 0) or 0) or 40.0
-            cam_zoom = float(camera_info.get("zoom", 1.0) or 1.0)  # three.js digital zoom scales focal length
-            fov_rad = 2.0 * math.atan(math.tan(math.radians(cam_fov) * 0.5) / max(cam_zoom, 1e-3))
-        else:
-            # No camera connected, auto-framed default front view.
-            fov_rad = math.radians(40.0)
-            r_sphere = float((lv - center).norm(dim=-1).amax().clamp_min(1e-6))
-            radius = r_sphere / math.tan(fov_rad * 0.5) * 1.04
-            eye = center + torch.tensor([0.0, 0.0, 1.0], device=dev) * radius
-            f, r, u = _camera_basis(eye, center, up_hint)
+        radius = float((lv - center).norm(dim=-1).amax().clamp_min(1e-6))
+        # Camera from a Load3D / Preview3D viewer (three.js Y-up, same frame as the mesh), else auto-framed front view.
+        cameras = _mesh_view_cameras(camera_info, center, radius, int(views), top_bottom, dev)
+        if resolved == "world normal":
+            r = _mesh_view_camera(cameras[0], dev)[2]
+            y = r.new_tensor([0.0, 1.0, 0.0])
+            render_normal = torch.stack([r, y, torch.cross(r, y, dim=-1)])
 
         H, W = int(height), int(width)
-        img, hit, depth = _render_view(tri, bvh, uv, lf, texture_hwc, eye, f, r, u, fov_rad, H, W,
-                                       vertex_colors=vcols, vertex_normals=vnorms, render_normal=render_normal)
-
-        if resolved == "depth":
-            img = torch.zeros_like(img)
-            if bool(hit.any()):
-                dh = depth[hit]
-                rng = max(float(dh.max()) - float(dh.min()), 1e-6)
-                norm = ((float(dh.max()) - depth) / rng).clamp(0.0, 1.0)  # near (small depth) = white
-                img = torch.where(hit[..., None], norm[..., None].expand(-1, -1, 3), img)
-
         bg = background.lstrip("#")
         bg_rgb = torch.tensor([int(bg[i:i + 2], 16) / 255.0 for i in (0, 2, 4)], device=dev)
-        out = torch.where(hit[..., None], img.clamp(0.0, 1.0), bg_rgb)
         idev, idtype = comfy.model_management.intermediate_device(), comfy.model_management.intermediate_dtype()
-        return IO.NodeOutput(out[None].to(idev, idtype), hit.float()[None].to(idev, idtype))
+        pbar = comfy.utils.ProgressBar(len(cameras))
+        imgs, masks = [], []
+        for cam in cameras:
+            eye, f, r, u, fov_rad, ortho_half = _mesh_view_camera(cam, dev)
+            if resolved == "normal":
+                render_normal = torch.stack([r, u, -f])
+            img, hit, depth = _render_view(tri, bvh, uv, lf, texture_hwc, eye, f, r, u, fov_rad, H, W,
+                                           vertex_colors=vcols, vertex_normals=vnorms, render_normal=render_normal,
+                                           ortho_half=ortho_half)
+
+            if resolved == "depth":
+                img = torch.zeros_like(img)
+                if bool(hit.any()):
+                    dh = depth[hit]
+                    rng = max(float(dh.max()) - float(dh.min()), 1e-6)
+                    norm = ((float(dh.max()) - depth) / rng).clamp(0.0, 1.0)  # near (small depth) = white
+                    img = torch.where(hit[..., None], norm[..., None].expand(-1, -1, 3), img)
+
+            imgs.append(torch.where(hit[..., None], img.clamp(0.0, 1.0), bg_rgb).to(idev, idtype))
+            masks.append(hit.to(idev, idtype))
+            pbar.update(1)
+        return IO.NodeOutput(torch.stack(imgs), torch.stack(masks),
+                             {"cameras": cameras, "model_transform": model_transform})
+
+
+def _views_depth(tri, bvh, views, H, W, ray_chunk=1 << 22):
+    """[V,H,W] hit distance along each pixel ray of `views` (eye, f, r, u, fov, ortho_half), inf on background.
+    Small views are cast together: the torch BVH walk is launch-bound."""
+    per = max(1, ray_chunk // (H * W))
+    out = []
+    for g in range(0, len(views), per):
+        rays = [_view_rays(eye, f, r, u, fov, H, W, oh) for eye, f, r, u, fov, oh in views[g:g + per]]
+        o, d = torch.cat([ray[0] for ray in rays]), torch.cat([ray[1] for ray in rays])
+        depth = torch.full((o.shape[0],), float("inf"), device=tri.device)
+        for s in range(0, o.shape[0], ray_chunk):
+            e = min(s + ray_chunk, o.shape[0])
+            t_hit, _, hit = _closest_hit_rays_bvh(o[s:e], d[s:e], tri, bvh, tmin=1e-5, tmax=1e30)
+            depth[s:e] = torch.where(hit, t_hit, depth[s:e])
+        out.append(depth.view(-1, H, W))
+    return torch.cat(out)
+
+
+def _surface_sample(view, view_depth, fx, fy, dist, tol, keep=None):
+    """Sample view [H,W,C] at pixel coords (fx, fy), pixel centres on integers, from only the taps whose
+    `view_depth` [Hd,Wd] is within `tol` of `dist` (they show this surface), so occluders and background never
+    bleed in: bicubic where the whole 4x4 footprint does, else bilinear renormalised over those taps. `keep`
+    [H,W] bool also drops pixels. Returns (values [K,C], coverage [K]), coverage being the bilinear weight on
+    surface taps."""
+    H, W, C = view.shape
+    Hd, Wd = view_depth.shape
+    flat, dflat = view.reshape(-1, C), view_depth.reshape(-1)
+    kflat = keep.reshape(-1) if keep is not None else None
+    x0, y0 = fx.floor(), fy.floor()
+    tx, ty = fx - x0, fy - y0
+    x0, y0 = x0.long(), y0.long()
+
+    def cubic(t):                                 # torch's bicubic kernel (A = -0.75), taps -1..2
+        a = -0.75
+        w0 = ((a * (t + 1) - 5 * a) * (t + 1) + 8 * a) * (t + 1) - 4 * a
+        w1 = ((a + 2) * t - (a + 3)) * t * t + 1
+        w2 = ((a + 2) * (1 - t) - (a + 3)) * (1 - t) * (1 - t) + 1
+        return w0, w1, w2, 1 - w0 - w1 - w2
+
+    cx, cy = cubic(tx), cubic(ty)
+    bic = torch.zeros((fx.shape[0], C), device=view.device)
+    lin = torch.zeros_like(bic)
+    cov = torch.zeros_like(fx)
+    clean = torch.ones_like(fx, dtype=torch.bool)
+    for j, oy in enumerate((-1, 0, 1, 2)):
+        iy = (y0 + oy).clamp(0, H - 1)
+        dy = ((iy + 0.5) * (Hd / H)).long().clamp_(max=Hd - 1)
+        for k, ox in enumerate((-1, 0, 1, 2)):
+            ix = (x0 + ox).clamp(0, W - 1)
+            dx = ((ix + 0.5) * (Wd / W)).long().clamp_(max=Wd - 1)
+            same = (dflat[dy * Wd + dx] - dist).abs() <= tol
+            if kflat is not None:
+                same &= kflat[iy * W + ix]
+            v = flat[iy * W + ix]
+            bic.addcmul_((cy[j] * cx[k])[:, None], v)
+            clean &= same
+            if oy in (0, 1) and ox in (0, 1):
+                wl = (ty if oy else 1 - ty) * (tx if ox else 1 - tx) * same
+                lin.addcmul_(wl[:, None], v)
+                cov += wl
+    return torch.where(clean[:, None], bic, lin / cov.clamp_min(1e-6)[:, None]), cov
+
+
+def _depth_edges(depth, px):
+    """[V,H,W] bool: the background and both sides of depth jumps (silhouettes, occlusion edges) of `depth`
+    [V,H,W]. `px` [V,H,W] is the world size of a pixel at each depth."""
+    edge = ~torch.isfinite(depth)
+    jump_y = (depth[:, 1:] - depth[:, :-1]).abs() > 8.0 * torch.maximum(px[:, 1:], px[:, :-1])
+    jump_x = (depth[:, :, 1:] - depth[:, :, :-1]).abs() > 8.0 * torch.maximum(px[:, :, 1:], px[:, :, :-1])
+    edge[:, 1:] |= jump_y
+    edge[:, :-1] |= jump_y
+    edge[:, :, 1:] |= jump_x
+    edge[:, :, :-1] |= jump_x
+    return edge
+
+
+def _background_rim_keep(view, outside, edge, rim=0.012):
+    """[H,W] bool of `view` [H,W,3], False on background-coloured pixels within `rim` (fraction of the height) of
+    `edge` [Hd,Wd] and inside the silhouette: edit models often draw outlines a little inside the true ones and
+    leave the gap as background. The background colour is the ring just outside the silhouette (`outside`
+    [Hd,Wd]); None when that ring is not uniform or there is no silhouette."""
+    H, W, _ = view.shape
+    if not bool(outside.any()) or bool(outside.all()):
+        return None
+    k = 2 * max(1, round(rim * outside.shape[0])) + 1
+
+    def near(m):
+        m = torch.nn.functional.max_pool2d(m[None, None].float(), k, stride=1, padding=k // 2)
+        return torch.nn.functional.interpolate(m, size=(H, W), mode="nearest")[0, 0] > 0
+
+    out = torch.nn.functional.interpolate(outside[None, None].float(), size=(H, W), mode="nearest")[0, 0] > 0
+    ring = view[near(~outside) & out]
+    bg = ring.median(0).values
+    if float(((ring - bg).abs().amax(-1) < 0.1).float().mean()) < 0.75:
+        return None
+    return ~(near(edge) & ~out & ((view - bg).abs().amax(-1) < 0.1))
+
+
+def _edge_fade(edge, width):
+    """[V,H,W] weight easing from 0 to 1 over `width` px away from `edge` [V,H,W], where edited or upscaled
+    views tend to halo or shift."""
+    e = edge[:, None].float()
+    acc = torch.zeros_like(e)
+    for _ in range(width):                        # chessboard distance to the nearest edge, capped at width
+        e = torch.nn.functional.max_pool2d(e, 3, stride=1, padding=1)
+        acc += 1.0 - e
+    w = acc[:, 0] / width
+    return w * w * (3.0 - 2.0 * w)
+
+
+def _fill_vertex_colors(lv, lf, col, known):
+    """Grow per-vertex colours [N,3] from `known` vertices across mesh edges, one ring at a time, each new
+    vertex taking the mean of its coloured neighbours. Coincident vertices (UV-seam copies) share a colour.
+    Returns (col, known); vertices in components with no known vertex stay unknown."""
+    lo = lv.amin(0)
+    q = ((lv - lo) / (float((lv.amax(0) - lo).max().clamp_min(1e-9)) * 1e-5)).round().long()
+    _, g = torch.unique(q, dim=0, return_inverse=True)
+    G = int(g.max()) + 1
+    gcnt = torch.zeros(G, device=lv.device).index_add_(0, g[known], torch.ones_like(col[known, 0]))
+    gcol = torch.zeros((G, 3), device=lv.device).index_add_(0, g[known], col[known]) / gcnt.clamp_min(1.0)[:, None]
+    gk = gcnt > 0
+    e = g[lf]
+    src = torch.cat([e[:, 0], e[:, 1], e[:, 2], e[:, 1], e[:, 2], e[:, 0]])
+    dst = torch.cat([e[:, 1], e[:, 2], e[:, 0], e[:, 0], e[:, 1], e[:, 2]])
+    keep = ~gk[dst]
+    src, dst = src[keep], dst[keep]
+    while True:
+        m = gk[src] & ~gk[dst]
+        if not bool(m.any()):
+            break
+        s, d = src[m], dst[m]
+        cnt = torch.zeros(G, device=lv.device).index_add_(0, d, torch.ones_like(d, dtype=torch.float32))
+        acc = torch.zeros((G, 3), device=lv.device).index_add_(0, d, gcol[s])
+        new = cnt > 0
+        gcol[new] = acc[new] / cnt[new, None]
+        gk |= new
+        keep = ~gk[dst]
+        src, dst = src[keep], dst[keep]
+    return gcol[g], gk[g]
+
+
+def _bake_texture_from_views(lv, lf, uv, normals, base_texture, base_vcol, images, masks, cameras, resolution,
+                             blend_exponent, pbar=None, chunk=1 << 22, depth_res=2048):
+    """Back-project views into the UV atlas. Each texel's surface point samples every view that shows it (not
+    from background-coloured gaps an edit left along edges), weighted by coverage * edge fade * cos(view angle)^blend_exponent * mask, and the blend is composited over
+    the base colour (texture, else vertex colours) by the best view's coverage. Without a base, texels no view
+    sees get colour grown over the surface from the seen vertices. Returns the [H,W,3] texture and the [H,W]
+    confidence (best view's coverage * edge fade * cos) as numpy."""
+    dev = lv.device
+    uv_np = _normalize_uvs_to_unit(uv.cpu().numpy(), log_prefix="[BakeTextureFromViews]  ")
+    face_idx, bary, cov = _rasterize_uv_barycentric(lf.cpu().numpy(), uv_np, resolution)
+    fv = lf[face_idx[cov]]                        # [K,3] vertex ids of each covered texel's face
+    b = bary[cov][:, :, None]
+    del face_idx, bary
+    P = (b * lv[fv]).sum(1)
+    N = torch.nn.functional.normalize((b * normals[fv]).sum(1), dim=-1, eps=1e-6)
+    Kt = P.shape[0]
+    if base_texture is not None or base_vcol is not None:
+        base = (_sample_image01(base_texture, (b * uv[fv]).sum(1)) if base_texture is not None
+                else (b * base_vcol[fv]).sum(1))
+        del fv, b
+    else:
+        base = None
+        # Project the vertices too: their colours seed the surface fill of texels no view sees.
+        P = torch.cat([P, lv])
+        N = torch.cat([N, torch.nn.functional.normalize(normals, dim=-1, eps=1e-6)])
+
+    K = P.shape[0]
+    num = torch.zeros((K, 3), device=dev)
+    den = torch.zeros(K, device=dev)
+    alpha = torch.zeros(K, device=dev)
+    conf = torch.zeros(K, device=dev)
+    tri = lv[lf]
+    bvh = _build_triangle_bvh(tri)
+    H, W = int(images.shape[1]), int(images.shape[2])
+    views = [_mesh_view_camera(cam, dev) for cam in cameras]
+    # Visibility is cast at most depth_res px: upscaled views add colour detail, not geometry.
+    ds = min(1.0, depth_res / max(H, W))
+    Hd, Wd = max(1, round(H * ds)), max(1, round(W * ds))
+    depth = _views_depth(tri, bvh, views, Hd, Wd)
+    # Views lose weight near their own silhouettes and occlusion edges (never to zero: a texel only one
+    # view sees keeps it), so overlapping views take over where an edit's edges may not line up.
+    px = torch.stack([d * (2.0 * math.tan(0.5 * fov) / Hd) if oh is None else torch.full_like(d, 2.0 * oh / Hd)
+                      for d, (_, _, _, _, fov, oh) in zip(depth, views)])
+    edges = _depth_edges(depth, px)
+    fades = _edge_fade(edges, 12).clamp_min_(1e-3)
+    for i, (eye, f, r, u, fov, ortho_half) in enumerate(views):
+        tn = math.tan(0.5 * fov)
+        view = images[i, ..., :3].to(dev).float()
+        keep = _background_rim_keep(view, ~torch.isfinite(depth[i]), edges[i])
+        if masks is not None:
+            m = torch.nn.functional.interpolate(masks[i][None, None].to(dev).float(), size=(H, W), mode="bilinear")
+            view = torch.cat([view, m[0, 0, :, :, None]], dim=-1)
+
+        for s in range(0, K, chunk):
+            e = min(s + chunk, K)
+            rel = P[s:e] - eye
+            z = rel @ f
+            if ortho_half is None:
+                dist = rel.norm(dim=-1)
+                gx = (rel @ r) / (z * tn * W / H)
+                gy = (rel @ u) / (z * tn)
+                cos = -(N[s:e] * rel).sum(-1) / dist
+                px_p = z * (2.0 * tn / Hd)
+            else:
+                dist = z
+                gx = (rel @ r) / (ortho_half * W / H)
+                gy = (rel @ u) / ortho_half
+                cos = -(N[s:e] @ f)
+                px_p = torch.full_like(z, 2.0 * ortho_half / Hd)
+            sel = ((z > 0) & (gx.abs() < 1.0) & (gy.abs() < 1.0) & (cos > 0)).nonzero(as_tuple=True)[0]
+            cs = cos[sel]
+            # Depth tolerance: the surface's depth change across the bicubic footprint at this view angle.
+            tan = (1.0 - cs.square()).clamp_min(0.0).sqrt() / cs.clamp_min(0.05)
+            vals, gate = _surface_sample(view, depth[i], (gx[sel] + 1.0) * (0.5 * W) - 0.5, (1.0 - gy[sel]) * (0.5 * H) - 0.5,
+                                         dist[sel], 2.5 * px_p[sel] * (1.0 + tan) + 1e-4 * dist[sel], keep)
+            if masks is not None:
+                gate = gate * vals[:, 3].clamp(0.0, 1.0)
+            faded = gate * torch.nn.functional.grid_sample(fades[i][None, None], torch.stack([gx[sel], -gy[sel]], dim=-1).view(1, 1, -1, 2),
+                                                           mode="bilinear", align_corners=False, padding_mode="border")[0, 0, 0]
+            w = faded * cs.pow(blend_exponent)
+            idx = sel + s
+            num.index_add_(0, idx, w[:, None] * vals[:, :3])
+            den.index_add_(0, idx, w)
+            ramp = ((cs - 0.1) / 0.4).clamp(0.0, 1.0)     # grazing views fade back to the base
+            alpha[idx] = torch.maximum(alpha[idx], gate * ramp * ramp * (3.0 - 2.0 * ramp))
+            conf[idx] = torch.maximum(conf[idx], faded * cs)
+        if pbar is not None:
+            pbar.update(1)
+
+    seen = den > 0
+    proj = num / torch.where(seen, den, 1.0)[:, None]     # cos^k weights get tiny at grazing views; no clamp
+    fill = cov.clone()
+    if base is not None:
+        out = torch.where(seen[:, None], torch.lerp(base, proj, alpha[:, None]), base)
+    else:
+        vcol, vknown = _fill_vertex_colors(lv, lf, proj[Kt:], seen[Kt:])
+        out, filled = proj[:Kt], seen[:Kt].clone()
+        un = ~filled
+        w = b[un, :, 0] * vknown[fv[un]]
+        out[un] = (w[:, :, None] * vcol[fv[un]]).sum(1) / w.sum(1, keepdim=True).clamp_min(1e-12)
+        filled[un] = w.sum(1) > 0
+        fill[cov] = filled                            # the rest (unseen components) and the gutter: nearest texel
+    tex = torch.zeros((resolution, resolution, 4), device=dev)
+    tex[cov] = torch.cat([out.clamp(0.0, 1.0), conf[:Kt, None]], dim=-1)
+    tex = _seam_fill(tex.cpu().numpy(), fill.cpu().numpy())
+    return tex[..., :3], tex[..., 3]
+
+
+class BakeTextureFromViews(IO.ComfyNode):
+    @classmethod
+    def define_schema(cls):
+        return IO.Schema(
+            node_id="BakeTextureFromViews",
+            display_name="Bake Texture From Views",
+            search_aliases=["project texture", "reproject views", "multiview bake", "texture projection", "rebake texture"],
+            category="3d/texturing",
+            description=(
+                "Projects (edited) renders back onto the mesh's UV layout. Render the mesh with Render Mesh, "
+                "edit the images, then connect them here with the same mesh and Render Mesh's cameras. Areas "
+                "no view covers, or outside the mask, keep the mesh's texture (else vertex colours). Outputs a "
+                "base_color IMAGE for Apply Texture to Mesh and a confidence MASK of how well the views saw each texel."
+            ),
+            inputs=[
+                IO.Mesh.Input("mesh", tooltip="The UV-unwrapped mesh that was rendered."),
+                IO.Image.Input("images", tooltip="One image per camera, in Render Mesh's order, camera sets one after "
+                                                 "another (Batch Images). Any resolution with the render's aspect "
+                                                 "ratio; higher gives a sharper bake."),
+                IO.Autogrow.Input("cameras", template=IO.Autogrow.TemplatePrefix(
+                    MeshCameras.Input("cameras", tooltip="The cameras output of a Render Mesh whose views are in images. "
+                                                         "Several sets (e.g. a second orbit turned 45 degrees) bake together."),
+                    prefix="cameras", min=1, max=50)),
+                IO.Int.Input("resolution", default=0, min=0, max=8192, step=64,
+                             tooltip="Square texture resolution. 0 = the mesh's current texture size (2048 if it "
+                                     "has none); otherwise the current texture is resampled to it."),
+                IO.Float.Input("blend_exponent", default=4.0, min=0.0, max=32.0, step=0.5, advanced=True,
+                               tooltip="Views are weighted by cos(view angle)^exponent. Higher favours the most "
+                                       "head-on view (sharper, harder seams); lower averages more views (softer)."),
+                IO.Mask.Input("mask", optional=True,
+                              tooltip="Edited areas per view; only masked pixels are projected. A single mask "
+                                      "applies to every view."),
+            ],
+            outputs=[
+                IO.Image.Output(display_name="base_color"),
+                IO.Mask.Output(display_name="confidence",
+                               tooltip="Per texel, cos(view angle) of the best view that saw it clear of edges (0 = "
+                                       "unseen). Applied as a texture and rendered from another camera set, it marks "
+                                       "what these views already cover well."),
+            ],
+        )
+
+    @classmethod
+    def execute(cls, mesh, images, cameras, resolution, blend_exponent, mask=None):
+        sets = list(cameras.values())
+        views = [cam for c in sets for cam in c["cameras"]]
+        transform = sets[0]["model_transform"]
+        if any(c["model_transform"] != transform for c in sets[1:]):
+            raise ValueError("BakeTextureFromViews: the camera sets were rendered with different model transforms.")
+        if int(images.shape[0]) != len(views):
+            raise ValueError(f"BakeTextureFromViews: {int(images.shape[0])} images for {len(views)} cameras; "
+                             "connect one image per rendered view, in Render Mesh's order.")
+        if mask is not None:
+            mask = mask if mask.ndim == 3 else mask[None]
+            if int(mask.shape[0]) == 1:
+                mask = mask.expand(len(views), -1, -1)
+            elif int(mask.shape[0]) != len(views):
+                raise ValueError(f"BakeTextureFromViews: {int(mask.shape[0])} masks for {len(views)} cameras.")
+        if mesh.uvs is None:
+            raise ValueError("BakeTextureFromViews: mesh has no UVs. Connect the UV-unwrapped mesh that was rendered.")
+        if int(mesh.vertices.shape[0]) > 1:
+            logging.warning("BakeTextureFromViews: one item per batch only; using the first of %d.", int(mesh.vertices.shape[0]))
+
+        if resolution == 0:
+            resolution = max(int(mesh.texture.shape[1]), int(mesh.texture.shape[2])) if mesh.texture is not None else 2048
+        v_i, f_i, colors_i, uvs_i, normals_i = get_mesh_batch_item(mesh, 0)
+        dev = comfy.model_management.get_torch_device()
+        _prepare_gpu_mesh_processing(dev, max(resolution * resolution * 512, int(f_i.shape[0]) * 512))
+        lv, lf = v_i.to(dev).float(), f_i.to(dev).long()
+        normals = normals_i.to(dev).float() if normals_i is not None else _compute_vertex_normals(lv, lf)
+        if transform is not None:
+            lv = _apply_model_transform(lv, transform)
+            normals = _apply_model_transform(normals, transform, is_normal=True)
+        base_texture = mesh.texture[0].to(dev).float() if mesh.texture is not None else None
+        # glTF COLOR_0 is linear (PaintMesh stores pow(srgb, 2.2)); back to sRGB like RenderMesh shows it.
+        base_vcol = colors_i[:, :3].to(dev).float().clamp(0.0, 1.0).pow(1.0 / 2.2) if colors_i is not None else None
+
+        tex, conf = _bake_texture_from_views(lv, lf, uvs_i.to(dev).float(), normals, base_texture, base_vcol, images, mask,
+                                             views, int(resolution), float(blend_exponent),
+                                             pbar=comfy.utils.ProgressBar(len(views)))
+        return IO.NodeOutput(torch.from_numpy(np.ascontiguousarray(tex)).float()[None],
+                             torch.from_numpy(np.ascontiguousarray(conf)).float()[None])
 
 
 def _fill_holes_v2_gpu(verts, faces, max_perimeter, colors=None, fill_chains=False, max_verts=16):
@@ -3189,6 +3584,7 @@ class PostProcessMeshExtension(ComfyExtension):
             BakeNormalMapFromMesh,
             BakeAmbientOcclusion,
             RenderMesh,
+            BakeTextureFromViews,
             MeshSmoothNormals,
         ]
 
