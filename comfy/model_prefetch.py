@@ -144,9 +144,11 @@ def pin_modules(comfy_modules, device, dtype=None):
             relayout.append(group)
         relayout.append(s)
     for s in relayout:
-        # FIXME: Make this non_gemv_specific.
-        if isinstance(s, (comfy.ops.MixedPrecisionOp, comfy.ops.CombinedLinear)) and s.comfy_gemv_optimized and isinstance(s._v_weight, QuantizedTensor) and not s._full_precision_mm:
-            s._v_weight = s._v_weight.optimize_for_gemv(comfy_aimdo.torch.aimdo_to_tensor(s._v, device))
+        if isinstance(s, (comfy.ops.MixedPrecisionOp, comfy.ops.CombinedLinear)) and isinstance(s._v_weight, QuantizedTensor) and not s._full_precision_mm:
+            storage = comfy_aimdo.torch.aimdo_to_tensor(s._v, device)
+            if s.comfy_gemv_optimized:
+                s._v_weight = s._v_weight.optimize_for_gemv(storage)
+            s._v_weight = s._v_weight.optimize_for_gemm(storage)
     return offload_stream, fully_faulted
 
 def cleanup_prefetched_modules(module, comfy_modules):
