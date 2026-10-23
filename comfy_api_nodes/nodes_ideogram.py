@@ -14,17 +14,24 @@ from comfy_api_nodes.apis.ideogram import (
     IdeogramV3Request,
     IdeogramV3EditRequest,
     IdeogramV4Request,
+    IdeogramVectorGenerateRequest,
+    IdeogramVectorGenerationResponse,
+    IdeogramVectorizeRequest,
+    IdeogramVectorSubmitResponse,
 )
 from comfy_api_nodes.util import (
     ApiEndpoint,
     bytesio_to_image_tensor,
     download_url_as_bytesio,
     download_url_to_image_tensor,
+    downscale_image_tensor_by_max_side,
+    poll_op,
     resize_mask_to_image,
     sync_op,
     tensor_to_bytesio,
     validate_string,
 )
+from comfy_extras.nodes_images import SVG
 
 
 V3_RATIO_MAP = {
@@ -164,6 +171,13 @@ IDEOGRAM_45_SIZES = [
 ]
 IDEOGRAM_45_EDIT_SIZES = [
     s for s in IDEOGRAM_45_SIZES if all(int(v) % 32 == 0 for v in s.split(" ")[1].split("x"))
+]
+IDEOGRAM_VECTOR_GENERATE_PATH = "/proxy/ideogram/v2/svg/generate/ideogram-vector-1"
+IDEOGRAM_VECTOR_VECTORIZE_PATH = "/proxy/ideogram/v2/svg/vectorize/ideogram-vector-1"
+IDEOGRAM_VECTOR_MODELS = ["ideogram-vector-1"]
+IDEOGRAM_VECTOR_MAX_SIDE = 2048
+IDEOGRAM_VECTOR_ASPECT_RATIOS = [
+    "auto", "1:3", "1:2", "9:16", "10:16", "2:3", "3:4", "4:5", "1:1", "5:4", "4:3", "3:2", "16:10", "16:9", "2:1", "3:1",
 ]
 _IMAGE_REF_RE = re.compile(r"@image(?P<idx>\d*)(?!\w)", re.IGNORECASE | re.ASCII)
 
@@ -725,7 +739,7 @@ def _resolve_image_refs(prompt: str, total_images: int) -> str:
     prev_end = -1
     for match in _IMAGE_REF_RE.finditer(prompt):
         start = match.start()
-        if start > 0 and start != prev_end and (prompt[start - 1].isalnum() or prompt[start - 1] == "_"):
+        if start > 0 and start != prev_end and prompt[start - 1].isascii() and (prompt[start - 1].isalnum() or prompt[start - 1] == "_"):
             continue
         idx = int(match.group("idx") or 1)
         if not 1 <= idx <= total_images:
@@ -1080,6 +1094,184 @@ class IdeogramPreciseEditApi(IO.ComfyNode):
         return IO.NodeOutput(await _ideogram_45_output(cls, response))
 
 
+def _ideogram_vector_image_file(image: torch.Tensor) -> BytesIO:
+    image = downscale_image_tensor_by_max_side(image.unsqueeze(0), max_side=IDEOGRAM_VECTOR_MAX_SIDE)
+    return tensor_to_bytesio(image, total_pixels=None, mime_type="image/png")
+
+
+async def _ideogram_vector_svgs(cls: type[IO.ComfyNode], generation_id: str) -> list[BytesIO]:
+    response = await poll_op(
+        cls,
+        ApiEndpoint(path=f"/proxy/ideogram/v1/generations/{generation_id}"),
+        response_model=IdeogramVectorGenerationResponse,
+        status_extractor=lambda r: r.status,
+    )
+    urls = [item.url for item in response.data or [] if item.url]
+    if not urls:
+        raise Exception("No SVGs were generated in the response")
+    return [await download_url_as_bytesio(url, cls=cls) for url in urls]
+
+
+class IdeogramVectorGenerateApi(IO.ComfyNode):
+
+    @classmethod
+    def define_schema(cls):
+        return IO.Schema(
+            node_id="IdeogramVectorGenerateApi",
+            display_name="Ideogram Vector Generate SVG",
+            category="partner/image/Ideogram",
+            description="Generates an editable SVG from a text prompt, optionally guided by up to 5 images, "
+            "using Ideogram Vector.",
+            inputs=[
+                IO.DynamicCombo.Input(
+                    "model",
+                    options=[
+                        IO.DynamicCombo.Option(
+                            model_id,
+                            [
+                                IO.Autogrow.Input(
+                                    "images",
+                                    template=IO.Autogrow.TemplateNames(
+                                        IO.Image.Input("ref_image"),
+                                        names=[f"ref_image_{i}" for i in range(1, IDEOGRAM_45_MAX_IMAGES + 1)],
+                                        min=0,
+                                    ),
+                                    tooltip="Optional. Image 1 is the main source; images 2-5 are extra references. "
+                                    "Refer to them in the prompt as @Image1, @Image2, ...; "
+                                    "a batched input counts once per image.",
+                                ),
+                                IO.String.Input(
+                                    "prompt",
+                                    multiline=True,
+                                    default="",
+                                    tooltip="Description of the SVG. Supports @Image1-style references to the input images.",
+                                ),
+                                IO.Combo.Input(
+                                    "aspect_ratio",
+                                    options=IDEOGRAM_VECTOR_ASPECT_RATIOS,
+                                    default="auto",
+                                    tooltip="auto follows image 1, or the prompt when no image is connected.",
+                                ),
+                                _ideogram_45_quality_input(["low", "medium", "high"]),
+                                _ideogram_45_seed_input(
+                                    "Seed for generation. The same prompt, images, settings and seed give the same SVG."
+                                ),
+                            ],
+                        )
+                        for model_id in IDEOGRAM_VECTOR_MODELS
+                    ],
+                    tooltip="Model to use.",
+                ),
+            ],
+            outputs=[
+                IO.SVG.Output(),
+            ],
+            hidden=[
+                IO.Hidden.auth_token_comfy_org,
+                IO.Hidden.api_key_comfy_org,
+                IO.Hidden.unique_id,
+            ],
+            is_api_node=True,
+            price_badge=IO.PriceBadge(
+                depends_on=IO.PriceBadgeDepends(widgets=["model", "model.quality"], input_groups=["model.images"]),
+                expr="""
+                (
+                  $q := $lookup(widgets, "model.quality");
+                  $refs := $lookup(inputGroups, "model.images");
+                  {"type": "usd", "usd": $q = "low" ? 0.1859 : $q = "high" ? ($refs > 0 ? 0.4576 : 0.286) : 0.2288}
+                )
+                """,
+            ),
+        )
+
+    @classmethod
+    async def execute(cls, model: dict):
+        validate_string(model["prompt"], strip_whitespace=True, min_length=1, max_length=9500)
+        images = _ideogram_45_images(model)
+        prompt = _resolve_image_refs(model["prompt"], len(images))
+        aspect_ratio = model["aspect_ratio"]
+        response = await sync_op(
+            cls,
+            ApiEndpoint(path=IDEOGRAM_VECTOR_GENERATE_PATH, method="POST"),
+            response_model=IdeogramVectorSubmitResponse,
+            data=IdeogramVectorGenerateRequest(
+                prompt=prompt,
+                quality=model["quality"],
+                seed=model["seed"],
+                aspect_ratio=None if aspect_ratio == "auto" else aspect_ratio.replace(":", "x"),
+            ),
+            files=[
+                ("images", (f"image_{i}.png", _ideogram_vector_image_file(image), "image/png"))
+                for i, image in enumerate(images, start=1)
+            ],
+            content_type="multipart/form-data",
+        )
+        return IO.NodeOutput(SVG(await _ideogram_vector_svgs(cls, response.generation_id)))
+
+
+class IdeogramVectorImageToSVGApi(IO.ComfyNode):
+
+    @classmethod
+    def define_schema(cls):
+        return IO.Schema(
+            node_id="IdeogramVectorImageToSVGApi",
+            display_name="Ideogram Vector Image to SVG",
+            category="partner/image/Ideogram",
+            description="Converts an image into an editable SVG using Ideogram Vector. "
+            "Transparent areas of an image with alpha stay transparent.",
+            inputs=[
+                IO.DynamicCombo.Input(
+                    "model",
+                    options=[
+                        IO.DynamicCombo.Option(
+                            model_id,
+                            [
+                                IO.Image.Input("image"),
+                                IO.Combo.Input(
+                                    "mode",
+                                    options=["simple", "default"],
+                                    default="default",
+                                    tooltip="simple traces fewer, larger shapes; "
+                                    "default keeps finer detail.",
+                                ),
+                            ],
+                        )
+                        for model_id in IDEOGRAM_VECTOR_MODELS
+                    ],
+                    tooltip="Model to use.",
+                ),
+            ],
+            outputs=[
+                IO.SVG.Output(),
+            ],
+            hidden=[
+                IO.Hidden.auth_token_comfy_org,
+                IO.Hidden.api_key_comfy_org,
+                IO.Hidden.unique_id,
+            ],
+            is_api_node=True,
+            price_badge=IO.PriceBadge(
+                depends_on=IO.PriceBadgeDepends(),
+                expr="""{"type":"usd","usd": 0.143}""",
+            ),
+        )
+
+    @classmethod
+    async def execute(cls, model: dict):
+        svgs = []
+        for image in model["image"]:
+            response = await sync_op(
+                cls,
+                ApiEndpoint(path=IDEOGRAM_VECTOR_VECTORIZE_PATH, method="POST"),
+                response_model=IdeogramVectorSubmitResponse,
+                data=IdeogramVectorizeRequest(mode=model["mode"]),
+                files=[("image", ("image.png", _ideogram_vector_image_file(image), "image/png"))],
+                content_type="multipart/form-data",
+            )
+            svgs.extend(await _ideogram_vector_svgs(cls, response.generation_id))
+        return IO.NodeOutput(SVG(svgs))
+
+
 class IdeogramExtension(ComfyExtension):
     @override
     async def get_node_list(self) -> list[type[IO.ComfyNode]]:
@@ -1090,6 +1282,8 @@ class IdeogramExtension(ComfyExtension):
             IdeogramTextToImageApi,
             IdeogramEditApi,
             IdeogramPreciseEditApi,
+            IdeogramVectorGenerateApi,
+            IdeogramVectorImageToSVGApi,
         ]
 
 

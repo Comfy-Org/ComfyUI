@@ -7,7 +7,7 @@ import copy
 import comfy.utils
 import comfy.model_management
 from server import PromptServer
-from comfy_extras.mesh3d.postprocess.qem_decimate import QEMConfig, qem_decimate_simplify, qem_cluster_decimate, _compute_vertex_normals
+from comfy_extras.mesh3d.postprocess.qem_decimate import QEMConfig, qem_simplify, qem_cluster_decimate, _compute_vertex_normals, _connected_labels
 from comfy_extras.mesh3d.postprocess.remesh import remesh_narrow_band_dc, _point_tri_closest
 from comfy_extras.nodes_save_3d import get_mesh_batch_item, pack_variable_mesh_batch
 from comfy_extras.mesh3d.uv_unwrap import mesh as _uv_mesh
@@ -1940,19 +1940,8 @@ def _fill_holes_v2_gpu(verts, faces, max_perimeter, colors=None, fill_chains=Fal
     src = b_directed[:, 0].long()
     tgt = b_directed[:, 1].long()
 
-    # Undirected bidirectional min-prop with path compression.
-    labels = torch.arange(V, dtype=torch.long, device=device)
-    for _ in range(64):
-        edge_min = torch.minimum(labels[src], labels[tgt])
-        new_labels = labels.clone()
-        new_labels.scatter_reduce_(0, src, edge_min, reduce="amin", include_self=True)
-        new_labels.scatter_reduce_(0, tgt, edge_min, reduce="amin", include_self=True)
-        new_labels = new_labels[new_labels]  # path compression
-        if torch.equal(new_labels, labels):
-            break
-        labels = new_labels
-
-    # After bidir-prop, labels[src] == labels[tgt], so labels[src] is the edge's component.
+    labels = _connected_labels(torch.stack([src, tgt], 1), V)
+    # labels[src] == labels[tgt], so labels[src] is the edge's component
     edge_component = labels[src]
     unique_components, component_idx = torch.unique(edge_component, return_inverse=True)
     L = unique_components.shape[0]
@@ -2349,7 +2338,7 @@ class DecimateMesh(IO.ComfyNode):
             counts["in"] += int(f.shape[0])
             if target_face_count > 0 and f.shape[0] > target_face_count:
                 src_device = v.device
-                rv, rf, rc, _rn, _rs = qem_decimate_simplify(
+                rv, rf, rc = qem_simplify(
                     v.to(compute_device), f.to(compute_device), int(target_face_count),
                     colors=(c.to(compute_device) if c is not None else None),
                     config=cfg)
@@ -2377,7 +2366,8 @@ class RemeshMesh(IO.ComfyNode):
         sign_mode_options = [
             IO.DynamicCombo.Option(key="udf", inputs=[
                 IO.Boolean.Input("qef", default=False, advanced=True,
-                                 tooltip="QEF (Quadratic Error Function) dual-vertex placement for sharper edges."),
+                                 tooltip="QEF (Quadratic Error Function) vertex placement: sharp edges on hard-surface input, "
+                                         "jagged creases on organic input."),
                 IO.Boolean.Input("drop_inverted_components", default=False, advanced=True,
                                  tooltip="Drop inward-normal (negative-volume) closed components — the UDF inner shell."),
                 IO.Boolean.Input("drop_enclosed_components", default=False, advanced=True,
@@ -2388,6 +2378,14 @@ class RemeshMesh(IO.ComfyNode):
                                  tooltip="QEF (Quadratic Error Function) dual-vertex placement (recovers sharp features) vs edge-crossing centroid."),
                 IO.Boolean.Input("manifold", default=False,
                                  tooltip="Manifold Dual Contouring: 1-4 dual verts/voxel for multi-sheet cases. Slower."),
+            ]),
+            IO.DynamicCombo.Option(key="solid", inputs=[
+                IO.Float.Input("fill", default=20.0, min=0.0, max=1000.0, step=1.0,
+                               tooltip="Cost of closing an opening relative to following the surface. Lower closes "
+                                       "larger openings (0 puts a lid on a cup); higher only closes small holes and cracks."),
+                IO.Boolean.Input("qef", default=False, advanced=True,
+                                 tooltip="QEF (Quadratic Error Function) vertex placement: sharp edges on hard-surface input, "
+                                         "jagged creases on organic input."),
             ]),
         ]
         return IO.Schema(
@@ -2407,9 +2405,12 @@ class RemeshMesh(IO.ComfyNode):
                                      "For an exact face count, follow with Decimate Mesh."),
                 IO.DynamicCombo.Input("sign_mode", options=sign_mode_options, display_name="sign_mode",
                                       tooltip="udf: robust to messy/non-manifold input. sdf: clean single "
-                                              "surface with QEF (Quadratic Error Function) sharp-feature recovery, but needs consistent winding."),
+                                              "surface with QEF (Quadratic Error Function) sharp-feature recovery, but needs consistent winding. "
+                                              "solid: one watertight solid from messy input: a global inside/outside graph cut "
+                                              "(CelloCut) removes double shells and closes small holes. Slower."),
                 IO.Float.Input("band", default=1.0, min=0.5, max=4.0, step=0.1, advanced=True,
-                               tooltip="Narrow-band width in voxel units. In UDF mode also offsets the surface."),
+                               tooltip="Narrow-band width in voxel units. In udf mode also offsets the surface; in solid mode it is the "
+                                       "closing radius: creases are filleted and gaps bridged at this size, the surface sits half a voxel out."),
                 IO.Float.Input("project_back", default=0.0, min=0.0, max=1.0, step=0.05, advanced=True,
                                tooltip="Linearly interpolate vertices toward the original surface (0 = pure DC, 1 = snapped)."),
                 IO.Boolean.Input("fix_poles", default=False, advanced=True,
@@ -2431,10 +2432,11 @@ class RemeshMesh(IO.ComfyNode):
                 drop_small_components, precluster_max_verts):
         mode = sign_mode.get("sign_mode", "udf")
         # mode-specific sub-widgets (absent → defaults)
-        qef = bool(sign_mode.get("qef", True))
+        qef = bool(sign_mode.get("qef", mode == "sdf"))
         manifold = bool(sign_mode.get("manifold", False))
         drop_inverted_components = bool(sign_mode.get("drop_inverted_components", False))
         drop_enclosed_components = bool(sign_mode.get("drop_enclosed_components", False))
+        fill = float(sign_mode.get("fill", 20.0))
 
         # ComfyUI passes meshes on CPU (remesh far faster on GPU); compute on device, return on original.
         compute_device = comfy.model_management.get_torch_device()
@@ -2463,7 +2465,7 @@ class RemeshMesh(IO.ComfyNode):
                 resolution=int(resolution),
                 band=float(band), project_back=float(project_back),
                 qef=qef, sign_mode=mode,
-                manifold=manifold, fix_poles=bool(fix_poles),
+                manifold=manifold, fill=fill, fix_poles=bool(fix_poles),
                 smooth_iters=int(smooth_iters),
                 drop_small_components=float(drop_small_components),
                 drop_inverted_components=drop_inverted_components,

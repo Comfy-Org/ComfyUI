@@ -62,7 +62,10 @@ ALLOWED_EVENTS = frozenset({
     "scanner.watch_stat_failed",
     "scanner.watch_spec_failed",
     "scanner.watch_seed_failed",
+    "previews.generated",
+    "previews.generation_failed",
 })
+PREVIEW_FAILURE_REASONS = frozenset({"too_large", "decode_failed", "write_failed"})
 
 
 class EventLogError(ValueError):
@@ -115,6 +118,7 @@ ALLOWED_FIELDS: dict[str, Callable[[Any], bool]] = {
     "error_kind": _one_of(ERROR_KINDS),
     "hashing_enabled": _is_flag,
     "site": _one_of(STAT_SITES),
+    "reason": _one_of(PREVIEW_FAILURE_REASONS),
 }
 
 _warned_call_sites: set[tuple[str, int]] = set()

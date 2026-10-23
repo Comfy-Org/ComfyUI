@@ -39,7 +39,7 @@ class TextGenerate(io.ComfyNode):
                 io.DynamicCombo.Input("sampling_mode", options=sampling_options, display_name="Sampling Mode"),
                 io.Boolean.Input("thinking", optional=True, default=False, tooltip="Operate in thinking mode if the model supports it."),
                 io.Boolean.Input("use_default_template", optional=True, default=True, tooltip="Use the built in system prompt/template if the model has one.", advanced=True),
-                io.Combo.Input("mtp", options=["auto", "off", "2", "3", "4", "5"], default="auto", optional=True, tooltip="Speculative decoding with the checkpoint's multi-token-prediction head. No effect without MTP weights. auto adapts the draft depth; 2-5 pins it. Sampled output stays correctly distributed but differs from non-MTP output for the same seed."),
+                io.Combo.Input("mtp", options=["auto", "off", "2", "3", "4", "5", "tree2s1", "tree2s2", "tree3s1", "tree4s1m8"], default="auto", optional=True, tooltip="Speculative decoding with the checkpoint's multi-token-prediction head. No effect without MTP weights. auto adapts the draft depth and breadth to observed token matches and execution cost; 2-5 pins a constant draft depth; tree modes pin both breadth and depth. Sampled output stays correctly distributed but differs from non-MTP output for the same seed."),
                 io.String.Input("system_prompt", force_input=True, optional=True, tooltip="Replaces the system prompt in the model's chat template. Ignored when the default template is not used."),
             ],
             outputs=[
@@ -51,7 +51,7 @@ class TextGenerate(io.ComfyNode):
     @classmethod
     def execute(cls, clip, prompt, max_length, sampling_mode, image=None, thinking=False, use_default_template=True, video=None, audio=None, mtp="auto", system_prompt="") -> io.NodeOutput:
 
-        mtp = False if mtp == "off" else (True if mtp == "auto" else int(mtp))
+        mtp = {"off": False, "auto": True}.get(mtp, mtp)
 
         tokens = clip.tokenize(prompt, image=image, skip_template=not use_default_template, min_length=1, thinking=thinking, video=video, audio=audio, system_prompt=system_prompt if use_default_template else "")
 
@@ -81,10 +81,14 @@ class TextGenerate(io.ComfyNode):
 
         generated_text = clip.decode(generated_ids)
 
-        # Reasoning opens in the generated text or at the end of a raw prompt, and has no close when max_length cut it short.
-        reasoning, _, text = generated_text.partition("</think>")
-        if not reasoning.lstrip().startswith("<think>") and not prompt.rstrip().endswith("<think>"):
-            reasoning, text = "", generated_text
+        # </think> ends reasoning; without one, reasoning opened by the output or prompt was cut off by max_length
+        reasoning, sep, text = generated_text.partition("</think>")
+        if not sep and not reasoning.lstrip().startswith("<think>"):
+            if isinstance(tokens, dict):
+                tokens = next(iter(tokens.values()))
+            prompt_ids = [t[0] for t in tokens[-1] if isinstance(t, tuple) and isinstance(t[0], int)]
+            if not prompt.rstrip().endswith("<think>") and not clip.decode(prompt_ids[-4:]).rstrip().endswith("<think>"):
+                reasoning, text = "", generated_text
 
         return io.NodeOutput(text.strip(), reasoning.replace("<think>", "", 1).strip())
 

@@ -97,6 +97,8 @@ def cleanup_malloc_graph():
         if graph._comfy_active:
             graph.abort()
             graph._comfy_active = False
+        else:
+            comfy.model_management.synchronize()
         for module in graph._comfy_cuda_graph_modules:
             _drop_graph(module)
         MALLOC_GRAPH_ROGUES += graph.rogue_count
@@ -156,13 +158,10 @@ def cleanup_prefetch_queues():
 
     cleanup_malloc_graph()
     for queue in PREFETCH_QUEUES:
-        for entry in queue:
-            if entry is None or not isinstance(entry, tuple):
-                continue
-            _, prefetch_state = entry
-            prefetched_module, comfy_modules = prefetch_state
-            if comfy_modules is not None:
-                cleanup_prefetched_modules(prefetched_module, comfy_modules)
+        # Only the head has been prefetched; later entries are raw module groups.
+        if queue[0] is not None:
+            _, (prefetched_module, comfy_modules) = queue[0]
+            cleanup_prefetched_modules(prefetched_module, comfy_modules)
     PREFETCH_QUEUES = []
     GRAPH_WARMED_MODULES.clear()
     if MALLOC_GRAPH_USED:
@@ -235,6 +234,8 @@ def prefetch_queue_pop(queue, device, module, dtype=None, core=None, enable_grap
                 if hasattr(s, "_v"):
                     comfy_modules.append(s)
 
+        # Keep partially pinned groups reachable if pinning raises.
+        queue[0] = (None, (module, comfy_modules))
         offload_stream, fully_faulted = pin_modules(comfy_modules, device, dtype)
         queue[0] = (offload_stream, (module, comfy_modules))
 

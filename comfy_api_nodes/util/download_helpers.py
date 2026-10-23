@@ -20,6 +20,7 @@ from ._helpers import (
     diagnose_connectivity,
     get_comfy_api_headers,
     is_processing_interrupted,
+    refresh_partner_token,
     sleep_with_interrupt,
     to_aiohttp_url,
 )
@@ -69,6 +70,10 @@ async def download_url_to_bytesio(
         if cls is None:
             raise ValueError("For relative 'cloud' paths, the `cls` parameter is required.")
         url = urljoin(default_base_url().rstrip("/") + "/", url.lstrip("/"))
+        try:
+            await refresh_partner_token(cls)
+        except asyncio.CancelledError:
+            raise ProcessingInterrupted("Task cancelled") from None
         headers = get_comfy_api_headers(cls)
 
     while True:

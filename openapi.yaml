@@ -2630,6 +2630,22 @@ paths:
             summary: Get Churnkey HMAC auth credentials
             tags:
                 - billing
+    /api/default_workflow:
+        get:
+            description: Returns the workflow the frontend loads when no other workflow is open.
+            operationId: getDefaultWorkflow
+            responses:
+                "200":
+                    content:
+                        application/json:
+                            schema:
+                                additionalProperties: true
+                                type: object
+                    description: Default workflow JSON
+            security: []
+            summary: Get the default workflow
+            tags:
+                - workflow
     /api/embeddings:
         get:
             description: Returns the list of text-encoder embeddings available on disk.

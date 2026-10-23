@@ -21,6 +21,8 @@ from app.assets.services.file_utils import list_files_recursively
 
 
 ASSET_HEALTH_TIMEOUT_SECONDS = 120
+ASSET_SEED_RETRY_ATTEMPTS = 10
+ASSET_SEED_RETRY_DELAY_SECONDS = 3
 ASSET_STATUS_POLL_DELAY_SECONDS = 1
 ASSET_CAPTURE_TAIL_LINES = 80
 
@@ -51,14 +53,16 @@ ASSET_FATAL_LOG_PREFIXES = (
 )
 
 
-def _asset_json_request(url, deadline):
+def _asset_json_request(url, deadline, data=None):
     remaining = deadline - time.monotonic()
     if remaining <= 0:
         raise AssertionError(
             f"Asset health check failure (i): deadline/transport failure before requesting {url}"
         )
 
-    request = urllib.request.Request(url)
+    request = urllib.request.Request(url, data=data)
+    if data is not None:
+        request.add_header("Content-Type", "application/json")
 
     try:
         with urllib.request.urlopen(request, timeout=max(0.01, remaining)) as response:
@@ -86,6 +90,64 @@ def _asset_json_request(url, deadline):
             f"from {url}: status={status}, payload={payload!r}"
         )
     return status, payload
+
+
+def _seed_output_assets(base_url, deadline):
+    request_data = json.dumps({"roots": ["output"]}).encode("utf-8")
+    last_conflict_payload = None
+    for attempt in range(1, ASSET_SEED_RETRY_ATTEMPTS + 1):
+        if last_conflict_payload is not None and deadline - time.monotonic() <= 0:
+            raise AssertionError(
+                "Asset health check failure (ii): 409-retries-exhausted before the deadline; "
+                f"last payload={last_conflict_payload!r}"
+            )
+
+        url = f"{base_url}/api/assets/seed?wait=true"
+        status, payload = _asset_json_request(url, deadline, request_data)
+        if status == 409:
+            if payload.get("status") != "already_running":
+                raise AssertionError(
+                    "Asset health check failure (iv): malformed JSON/schema "
+                    f"from {url}: status={status}, payload={payload!r}"
+                )
+            last_conflict_payload = payload
+            if attempt == ASSET_SEED_RETRY_ATTEMPTS:
+                raise AssertionError(
+                    "Asset health check failure (ii): 409-retries-exhausted after "
+                    f"{attempt} attempts; last payload={payload!r}"
+                )
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise AssertionError(
+                    "Asset health check failure (ii): 409-retries-exhausted before the deadline; "
+                    f"last payload={payload!r}"
+                )
+            time.sleep(min(ASSET_SEED_RETRY_DELAY_SECONDS, remaining))
+            continue
+        if status != 200:
+            raise AssertionError(
+                "Asset health check failure (iv): unexpected-HTTP-status "
+                f"from {url}: status={status}, payload={payload!r}"
+            )
+
+        progress = payload.get("progress")
+        errors = payload.get("errors")
+        progress_fields = ("scanned", "total", "created", "skipped")
+        if (
+            payload.get("status") != "completed"
+            or not isinstance(progress, dict)
+            or any(type(progress.get(field)) is not int for field in progress_fields)
+            or not isinstance(errors, list)
+        ):
+            raise AssertionError(
+                "Asset health check failure (iv): malformed JSON/schema "
+                f"from {url}: status={status}, payload={payload!r}"
+            )
+        if errors:
+            raise AssertionError(
+                f"Asset health check failure (iii): scan-completed-with-errors: errors={errors!r}"
+            )
+        return
 
 
 def _wait_for_stable_asset_idle(base_url, deadline):
@@ -218,13 +280,14 @@ def _assert_no_fatal_asset_logs(capture_path):
         )
 
 
-def _assert_assets_healthy(listen, port, output_dir, capture_path, initial_output_paths):
+def _assert_assets_healthy(listen, port, output_dir, capture_path):
     deadline = time.monotonic() + ASSET_HEALTH_TIMEOUT_SECONDS
     base_url = f"http://{listen}:{port}"
+    _seed_output_assets(base_url, deadline)
     _wait_for_stable_asset_idle(base_url, deadline)
 
     api_paths = _fetch_output_asset_paths(base_url, deadline)
-    disk_paths = _list_output_files_on_disk(output_dir) - initial_output_paths
+    disk_paths = _list_output_files_on_disk(output_dir)
     if not api_paths or not disk_paths:
         raise AssertionError(
             "Asset health check reconcile failure: expected non-empty sets: "
@@ -436,10 +499,10 @@ class TestExecution:
         if not assets_enabled:
             pargs.append('--disable-assets')
         else:
+            pargs.append('--enable-assets')
             assets_tmp_dir = tmp_path_factory.mktemp("execution-assets")
             database_path = assets_tmp_dir / "assets.db"
             capture_path = assets_tmp_dir / "server.log"
-            initial_output_paths = _list_output_files_on_disk(args_pytest["output_dir"])
             pargs += ["--database-url", f"sqlite:///{database_path}"]
         print("Running server with args:", pargs)  # noqa: T201
         if assets_enabled:
@@ -467,7 +530,6 @@ class TestExecution:
                     args_pytest["port"],
                     args_pytest["output_dir"],
                     capture_path,
-                    initial_output_paths,
                 )
             except AssertionError as error:
                 health_failure = error

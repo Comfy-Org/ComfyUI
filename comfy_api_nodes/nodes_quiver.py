@@ -19,13 +19,11 @@ from comfy_api_nodes.util import (
 )
 from comfy_extras.nodes_images import SVG
 
-_ARROW_MODELS = ["arrow-2", "arrow-2-telos", "arrow-1.1", "arrow-1.1-max", "arrow-preview"]
+_ARROW_MODELS = ["arrow-2", "arrow-2-telos"]
 _EFFORT_LEVELS = ["low", "medium", "high", "xhigh"]
 _TOKEN_MODEL_RATES = {"arrow-2": (4, 20), "arrow-2-telos": (6, 30)}
 _NO_SAMPLING_MODELS = ("arrow-2-telos",)
-_REFERENCE_CAPS = {"arrow-2": 14, "arrow-2-telos": 14, "arrow-1.1": 4, "arrow-1.1-max": 14, "arrow-preview": 4}
-_FIXED_GENERATION_USD = {"arrow-1.1": 0.286, "arrow-1.1-max": 0.3575, "arrow-preview": 0.429}
-_FIXED_VECTORIZATION_USD = {"arrow-1.1": 0.2145, "arrow-1.1-max": 0.286, "arrow-preview": 0.429}
+_REFERENCE_CAPS = {"arrow-2": 14, "arrow-2-telos": 14}
 
 _GENERATION_TOKENS = {
     "arrow-2": {
@@ -73,13 +71,12 @@ def _effort_bands(model, tokens, effort):
     return " : ".join([*levels, band("high")])
 
 
-def _arrow_price_badge(tokens, fixed_usd, effort="widgets.reasoning_effort", effort_widget="reasoning_effort"):
-    branches = [f'widgets.model = "{model}" ? {{"type":"usd","usd":{usd}}}' for model, usd in fixed_usd.items()]
-    branches.append(f'widgets.model = "arrow-2-telos" ? ({_effort_bands("arrow-2-telos", tokens, effort)})')
-    branches.append(f'({_effort_bands("arrow-2", tokens, effort)})')
+def _arrow_price_badge(tokens, effort="widgets.reasoning_effort", effort_widget="reasoning_effort"):
+    telos = _effort_bands("arrow-2-telos", tokens, effort)
+    arrow_2 = _effort_bands("arrow-2", tokens, effort)
     return IO.PriceBadge(
         depends_on=IO.PriceBadgeDepends(widgets=["model", effort_widget]),
-        expr="(" + " : ".join(branches) + ")",
+        expr=f'(widgets.model = "arrow-2-telos" ? ({telos}) : ({arrow_2}))',
     )
 
 
@@ -90,7 +87,7 @@ def _reasoning_effort_input():
         default="high",
         optional=True,
         tooltip="How much reasoning the model spends before drawing. Higher levels improve "
-        "detail and cost more tokens. Only used by the Arrow 2 models.",
+        "detail and cost more tokens.",
     )
 
 
@@ -168,17 +165,15 @@ def _v2_seed_input():
 
 
 def _v2_model_tail(model):
-    inputs = []
-    if model in _TOKEN_MODEL_RATES:
-        inputs.append(
-            IO.Combo.Input(
-                "reasoning_effort",
-                options=_EFFORT_LEVELS,
-                default="high",
-                tooltip="How much reasoning the model spends before drawing. Higher levels improve "
-                "detail and cost more tokens.",
-            )
+    inputs = [
+        IO.Combo.Input(
+            "reasoning_effort",
+            options=_EFFORT_LEVELS,
+            default="high",
+            tooltip="How much reasoning the model spends before drawing. Higher levels improve "
+            "detail and cost more tokens.",
         )
+    ]
     if model not in _NO_SAMPLING_MODELS:
         inputs.extend(_arrow_sampling_inputs())
     inputs.extend(_v2_view_box_inputs())
@@ -260,10 +255,9 @@ def _view_box_attributes(model):
     return None
 
 
-def _v2_price_badge(tokens, fixed_usd):
+def _v2_price_badge(tokens):
     return _arrow_price_badge(
         tokens,
-        fixed_usd,
         effort='$lookup(widgets, "model.reasoning_effort")',
         effort_widget="model.reasoning_effort",
     )
@@ -329,7 +323,7 @@ class QuiverTextToSVGNode(IO.ComfyNode):
             ],
             is_api_node=True,
             is_deprecated=True,
-            price_badge=_arrow_price_badge(_GENERATION_TOKENS, _FIXED_GENERATION_USD),
+            price_badge=_arrow_price_badge(_GENERATION_TOKENS),
         )
 
     @classmethod
@@ -361,7 +355,7 @@ class QuiverTextToSVGNode(IO.ComfyNode):
             response_model=QuiverSVGResponse,
             data=QuiverTextToSVGRequest(
                 model=model["model"],
-                reasoning_effort=reasoning_effort if model["model"] in _TOKEN_MODEL_RATES else None,
+                reasoning_effort=reasoning_effort,
                 prompt=prompt,
                 instructions=instructions_val,
                 references=references,
@@ -437,7 +431,7 @@ class QuiverImageToSVGNode(IO.ComfyNode):
             ],
             is_api_node=True,
             is_deprecated=True,
-            price_badge=_arrow_price_badge(_VECTORIZATION_TOKENS, _FIXED_VECTORIZATION_USD),
+            price_badge=_arrow_price_badge(_VECTORIZATION_TOKENS),
         )
 
     @classmethod
@@ -457,7 +451,7 @@ class QuiverImageToSVGNode(IO.ComfyNode):
             response_model=QuiverSVGResponse,
             data=QuiverImageToSVGRequest(
                 model=model["model"],
-                reasoning_effort=reasoning_effort if model["model"] in _TOKEN_MODEL_RATES else None,
+                reasoning_effort=reasoning_effort,
                 image=QuiverImageObject(url=image_url),
                 auto_crop=auto_crop if auto_crop else None,
                 target_size=model.get("target_size") or None,
@@ -495,7 +489,7 @@ class QuiverTextToSVGNodeV2(IO.ComfyNode):
                 IO.Hidden.unique_id,
             ],
             is_api_node=True,
-            price_badge=_v2_price_badge(_GENERATION_TOKENS, _FIXED_GENERATION_USD),
+            price_badge=_v2_price_badge(_GENERATION_TOKENS),
         )
 
     @classmethod
@@ -557,7 +551,7 @@ class QuiverImageToSVGNodeV2(IO.ComfyNode):
                 IO.Hidden.unique_id,
             ],
             is_api_node=True,
-            price_badge=_v2_price_badge(_VECTORIZATION_TOKENS, _FIXED_VECTORIZATION_USD),
+            price_badge=_v2_price_badge(_VECTORIZATION_TOKENS),
         )
 
     @classmethod

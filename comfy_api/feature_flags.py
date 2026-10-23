@@ -35,6 +35,16 @@ CLI_FEATURE_FLAG_REGISTRY: dict[str, FeatureFlagInfo] = {
         "default": True,
         "description": "Gate the local Run button behind sign-in when the graph contains partner nodes",
     },
+    "partner_node_token": {
+        "type": "bool",
+        "default": False,
+        "description": "Queue Local API-node prompts with a renewable partner-node token instead of the workspace token",
+    },
+    "local_web_sso": {
+        "type": "bool",
+        "default": False,
+        "description": "Offer Sign in with browser (Cloud OAuth + PKCE) on Local ComfyUI opened at localhost or 127.0.0.1",
+    },
 }
 
 

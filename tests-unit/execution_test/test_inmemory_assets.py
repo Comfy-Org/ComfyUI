@@ -77,7 +77,7 @@ class InMemoryAssets:
         return None
 
     def register_executed_output(
-        self, abs_path: str, job_id: str | None
+        self, abs_path: str, job_id: str | None, preview_ref: dict | None = None
     ) -> RegisteredAsset | None:
         self._record("register_executed_output", abs_path, job_id)
         deliveries = self.deliveries_by_path.setdefault(abs_path, [])

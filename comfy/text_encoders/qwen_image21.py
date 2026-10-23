@@ -15,14 +15,14 @@ class QwenImage21Tokenizer(comfy.text_encoders.qwen3vl.Qwen3VLTokenizer):
         super().__init__(embedding_directory=embedding_directory, tokenizer_data=tokenizer_data, model_type="qwen3vl_8b")
         self.llama_template = T2I_TEMPLATE
 
-    def tokenize_with_weights(self, text, return_word_ids=False, llama_template=None, images=[], prevent_empty_text=False, thinking=True, keep_vision=False, **kwargs):
+    def tokenize_with_weights(self, text, return_word_ids=False, llama_template=None, images=[], prevent_empty_text=False, keep_vision=False, **kwargs):
         image = kwargs.get("image", None)
         if image is not None and len(images) == 0:
             images = [image[i:i + 1] for i in range(image.shape[0])]
         if llama_template is None and len(images) > 0:
             refs = " ".join("<image{}>{}".format(i + 1, VISION_BLOCK) for i in range(len(images)))
             llama_template = T2I_TEMPLATE.replace("{}", refs + "{}", 1)
-        out = super().tokenize_with_weights(text, return_word_ids=return_word_ids, llama_template=llama_template, images=images, prevent_empty_text=prevent_empty_text, thinking=thinking, **kwargs)
+        out = super().tokenize_with_weights(text, return_word_ids=return_word_ids, llama_template=llama_template, images=images, prevent_empty_text=prevent_empty_text, **kwargs)
         out["keep_vision"] = keep_vision
         return out
 

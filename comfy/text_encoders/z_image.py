@@ -14,9 +14,11 @@ class ZImageTokenizer(sd1_clip.SD1Tokenizer):
         super().__init__(embedding_directory=embedding_directory, tokenizer_data=tokenizer_data, name="qwen3_4b", tokenizer=Qwen3Tokenizer)
         self.llama_template = "<|im_start|>user\n{}<|im_end|>\n<|im_start|>assistant\n"
 
-    def tokenize_with_weights(self, text, return_word_ids=False, llama_template=None, system_prompt="", **kwargs):
+    def tokenize_with_weights(self, text, return_word_ids=False, llama_template=None, system_prompt="", thinking=True, **kwargs):
         if llama_template is None:
             llama_text = self.llama_template.format(text)
+            if not thinking:  # hybrid Qwen3 chat template: conditioning uses the thinking form, an empty block disables reasoning
+                llama_text += "<think>\n\n</think>\n\n"
         else:
             llama_text = llama_template.format(text)
         if system_prompt:

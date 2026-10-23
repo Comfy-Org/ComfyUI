@@ -272,3 +272,27 @@ class Ideogram45Request(BaseModel):
     seed: int = Field(..., ge=0, le=2147483647)
     size: str | None = None
     magic_prompt: str | None = None
+
+
+class IdeogramVectorGenerateRequest(BaseModel):
+    prompt: str
+    quality: str
+    seed: int = Field(..., ge=0, le=2147483647)
+    aspect_ratio: str | None = None
+
+
+class IdeogramVectorizeRequest(BaseModel):
+    mode: str
+
+
+class IdeogramVectorSubmitResponse(BaseModel):
+    generation_id: str
+
+
+class IdeogramVectorSvg(BaseModel):
+    url: str | None = None
+
+
+class IdeogramVectorGenerationResponse(BaseModel):
+    status: str | None = None
+    data: list[IdeogramVectorSvg] | None = None

@@ -15,6 +15,26 @@ class TensorFileSlice(NamedTuple):
     size: int
 
 
+def write_tensor_file_slice(tensor, source, stream=None):
+    """Write one complete tensor; missing or incompatible file backing is an error."""
+    info = getattr(tensor.untyped_storage(), "_comfy_tensor_file_slice", None)
+    size = source.numel() * source.element_size()
+    if (info is None or tensor.storage_offset() != 0 or not tensor.is_contiguous()
+            or tensor.numel() * tensor.element_size() != info.size or not source.is_contiguous()
+            or size != info.size):
+        raise ValueError("Writable tensors require an exact file descriptor and a complete contiguous source")
+
+    with info.lock:
+        if source.device.type == "cuda":
+            stream = torch.cuda.current_stream(source.device) if stream is None else stream
+            comfy_aimdo.host_buffer.write_device_to_file(info.file_ref, info.offset, size,
+                                                        stream.cuda_stream, source.data_ptr(), source.device.index)
+        elif source.device.type == "cpu":
+            comfy_aimdo.host_buffer.write_host_to_file(info.file_ref, info.offset, size, source.data_ptr())
+        else:
+            raise ValueError("Tensor file writes require a CPU or CUDA source")
+
+
 def read_tensor_file_slice_into(tensor, destination, stream=None, destination2=None):
 
     if isinstance(tensor, QuantizedTensor):
