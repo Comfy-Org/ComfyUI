@@ -132,7 +132,7 @@ def copy_legacy_default_db(db_path):
                 f"Not relocating legacy database '{legacy_db_path}': its WAL could not be "
                 f"checkpointed, so it may still be in use."
             )
-            return
+            raise RuntimeError("Legacy database is in use; refusing to initialize a new database")
     os.replace(legacy_db_path, backup_path)
     shutil.copy(backup_path, db_path)
     logging.info(

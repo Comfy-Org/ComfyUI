@@ -1,4 +1,4 @@
-from comfy_execution.history import HistoryStorageError
+from comfy_execution.history import HistoryStorageError, unavailable_history_record
 import copy
 import heapq
 import inspect
@@ -1375,8 +1375,7 @@ class PromptQueue:
                 try:
                     record, removed = self.history_store.save(prompt[1], record)
                 except HistoryStorageError as error:
-                    if error.record is not None:
-                        record = error.record
+                    record = error.record if error.record is not None else unavailable_history_record(prompt[1], status)
                     failure = error
             with self.mutex:
                 self.currently_running.pop(item_id)

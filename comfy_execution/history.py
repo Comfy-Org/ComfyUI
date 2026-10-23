@@ -33,3 +33,19 @@ class HistoryStorageError(RuntimeError):
             if type(reason) is str and reason in self.REASONS
             else "storage_error"
         )
+
+
+def unavailable_history_record(prompt_id, status):
+    """Keep terminal identity when no safe history payload could be projected."""
+    safe_status = None
+    if status is not None:
+        state = status.status_str
+        completed = status.completed
+        safe_status = {
+            "status_str": state
+            if type(state) is str and state in ("success", "error")
+            else "error",
+            "completed": completed if type(completed) is bool else False,
+            "messages": [],
+        }
+    return {"prompt": [0, prompt_id, {}, {}, []], "outputs": {}, "status": safe_status}

@@ -1,6 +1,7 @@
 import os
 import shutil
 import sqlite3
+import pytest
 from contextlib import closing
 
 from app.database import db
@@ -162,7 +163,7 @@ def test_legacy_copy_includes_rows_still_in_the_wal(monkeypatch, tmp_path):
         assert copied.execute("SELECT x FROM t").fetchall() == [(1,)]
 
 
-def test_legacy_copy_skipped_when_its_wal_cannot_be_checkpointed(monkeypatch, tmp_path):
+def test_legacy_copy_fails_when_its_wal_cannot_be_checkpointed(monkeypatch, tmp_path):
     legacy_db = tmp_path / "install" / "user" / "comfyui.db"
     user_db = tmp_path / "custom_user" / "comfyui.db"
     legacy_db.parent.mkdir(parents=True)
@@ -181,7 +182,8 @@ def test_legacy_copy_skipped_when_its_wal_cannot_be_checkpointed(monkeypatch, tm
     monkeypatch.setattr(db, "get_legacy_default_db_path", lambda: str(legacy_db))
 
     try:
-        db.copy_legacy_default_db(str(user_db))
+        with pytest.raises(RuntimeError, match="Legacy database is in use"):
+            db.copy_legacy_default_db(str(user_db))
     finally:
         reader.close()
         writer.close()

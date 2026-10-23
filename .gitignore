@@ -9,7 +9,6 @@ __pycache__/
 !custom_nodes/example_node.py.example
 extra_model_paths.yaml
 /.vs
-.vscode/
 .idea/
 venv*/
 .venv/
@@ -25,3 +24,5 @@ filtered-openapi.yaml
 uv.lock
 .comfy_environment
 /previews/
+config.bat
+node_modules

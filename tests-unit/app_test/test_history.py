@@ -1,3 +1,4 @@
+import asyncio
 import copy
 import json
 import logging
@@ -6,6 +7,8 @@ import threading
 import time
 from enum import IntEnum
 from types import SimpleNamespace
+from unittest.mock import MagicMock
+from aiohttp.test_utils import TestClient, TestServer
 import pytest
 from sqlalchemy import text
 from sqlalchemy.exc import OperationalError
@@ -16,6 +19,7 @@ from comfy.cli_args import args
 args.cpu = True
 from execution import PromptQueue
 import main  # noqa: E402
+import server  # noqa: E402
 
 
 def record(id="one"):
@@ -480,3 +484,154 @@ def test_history_startup_reason_omits_exception_payload(monkeypatch, caplog):
     assert "reason=database_locked" in caplog.text
     assert "PRIVATE" not in caplog.text
     assert all(entry.exc_info is None for entry in caplog.records)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["size", "workflow", "cycle", "object", "nan"])
+async def test_projection_failure_history_api_is_safe(
+    file_db, monkeypatch, tmp_path, failure
+):
+    monkeypatch.setattr(args, "front_end_root", str(tmp_path))
+    monkeypatch.setattr("folder_paths.get_user_directory", lambda: str(tmp_path))
+    monkeypatch.setattr(server.PromptServer, "instance", None, raising=False)
+    prompt_server = server.PromptServer(
+        asyncio.get_running_loop(), MagicMock(enabled=False)
+    )
+    prompt_server.app.add_routes(
+        [route for route in prompt_server.routes if route.path.startswith("/history")]
+    )
+    q = prompt_server.prompt_queue
+    q.initialize_history(HistoryStore(2))
+    r = record("failed")
+    if failure == "workflow":
+        r["prompt"][3]["extra_pnginfo"]["workflow"] = "invalid"
+    elif failure == "cycle":
+        r["outputs"]["cycle"] = r["outputs"]
+    elif failure == "object":
+        r["outputs"]["custom"] = object()
+    elif failure == "nan":
+        r["outputs"]["custom"] = float("nan")
+    q.put(r["prompt"])
+    _, item = q.get()
+    with monkeypatch.context() as m:
+        if failure == "size":
+            m.setattr("app.history.MAX_RECORD_BYTES", 10)
+        q.task_done(
+            item, {"outputs": r["outputs"]}, PromptQueue.ExecutionStatus(**r["status"])
+        )
+    assert q.get_current_queue()[0] == []
+    assert q.history_store.load() == {}
+    async with TestClient(TestServer(prompt_server.app)) as client:
+        for path in ("/history", "/history/failed"):
+            response = await client.get(path)
+            assert response.status == 200
+            value = await response.json()
+            encoded = json.dumps(value, allow_nan=False)
+            assert all(
+                secret not in encoded
+                for secret in (
+                    "secret",
+                    "hidden",
+                    "private",
+                    "trace",
+                    "api_key_comfy_org",
+                    "auth_token_comfy_org",
+                )
+            )
+            assert value["failed"]["prompt"] == [0, "failed", {}, {}, []]
+            assert value["failed"]["outputs"] == {}
+            assert value["failed"]["status"] == {
+                "status_str": "error",
+                "completed": False,
+                "messages": [],
+            }
+    # Neither the successful projection path nor the fallback may mutate caller data.
+    assert r["prompt"][2]["1"]["inputs"]["api_key_comfy_org"] == "secret"
+    assert r["status"]["messages"][1][1]["exception_message"] == "secret"
+    complete(q, "good")
+    assert list(q.history_store.load()) == ["good"]
+    assert q.history_persistence_status()["failure_count"] == 1
+
+
+def test_history_startup_busy_legacy_wal_aborts_then_retries(
+    file_db, monkeypatch, tmp_path, caplog
+):
+    store = HistoryStore(2)
+    store.save("saved", record("saved"))
+    db.Session.kw["bind"].dispose()
+    db.WriteSession.kw["bind"].dispose()
+    db._db_lock.release(force=True)
+    monkeypatch.setattr(db, "_db_lock", None)
+    target_dir = tmp_path / "new-user"
+    target = target_dir / "comfyui.db"
+    monkeypatch.setattr(args, "database_url", None)
+    monkeypatch.setattr(args, "enable_history", True)
+    monkeypatch.setattr("folder_paths.get_user_directory", lambda: str(target_dir))
+    monkeypatch.setattr(db, "get_legacy_default_db_path", lambda: file_db)
+    started = []
+    manager = SimpleNamespace(enabled=False, startup=lambda: started.append(True))
+    writer = sqlite3.connect(file_db)
+    writer.execute("PRAGMA journal_mode=WAL")
+    writer.execute("PRAGMA wal_autocheckpoint=0")
+    writer.execute("CREATE TABLE authored_marker (value INTEGER)")
+    writer.commit()
+    reader = sqlite3.connect(file_db, isolation_level=None)
+    reader.execute("BEGIN")
+    reader.execute("SELECT * FROM execution_history").fetchall()
+    writer.execute("INSERT INTO authored_marker VALUES (1)")
+    writer.commit()
+    try:
+        with pytest.raises(SystemExit) as error:
+            main.setup_database(manager)
+        assert error.value.code == 1
+        assert "HISTORY_STARTUP_FAILED" in caplog.text
+        assert not target.exists()
+        assert not (tmp_path / "comfyui.db.bak").exists()
+        assert not db._db_lock.is_locked
+        assert started == []
+        assert writer.execute("SELECT prompt_id FROM execution_history").fetchall() == [
+            ("saved",)
+        ]
+    finally:
+        reader.close()
+        writer.close()
+    main.setup_database(manager)
+    assert started == [True]
+    assert target.exists()
+    assert list(HistoryStore(2).load()) == ["saved"]
+
+
+@pytest.mark.parametrize(
+    "status, expected",
+    [
+        (None, None),
+        (
+            PromptQueue.ExecutionStatus("success", True, []),
+            {"status_str": "success", "completed": True, "messages": []},
+        ),
+        (
+            PromptQueue.ExecutionStatus("PRIVATE state", "PRIVATE completed", []),
+            {"status_str": "error", "completed": False, "messages": []},
+        ),
+    ],
+)
+def test_unavailable_history_uses_only_original_safe_status(file_db, status, expected):
+    q = PromptQueue(SimpleNamespace(queue_updated=lambda: None))
+    q.initialize_history(HistoryStore(2))
+    r = record("accepted")
+    q.put(r["prompt"])
+    _, item = q.get()
+    q.task_done(
+        item,
+        {
+            "outputs": {},
+            "prompt": [0, "untrusted", {}, {}, []],
+            "status": {"secret": "PRIVATE"},
+        },
+        status,
+    )
+    stored = q.get_history()["accepted"]
+    assert stored["prompt"] == [0, "accepted", {}, {}, []]
+    assert stored["status"] == expected
+    assert "PRIVATE" not in json.dumps(stored, allow_nan=False)
+    assert q.history_store.load() == {}
