@@ -26,6 +26,7 @@ import comfy.text_encoders.qwen_image
 import comfy.text_encoders.qwen_image21
 import comfy.text_encoders.hunyuan_image
 import comfy.text_encoders.kandinsky5
+import comfy.text_encoders.kandinsky6
 import comfy.text_encoders.z_image
 import comfy.text_encoders.ming_image
 import comfy.text_encoders.ideogram4
@@ -2378,6 +2379,11 @@ class Kandinsky6(Kandinsky5):
 
     def process_unet_state_dict(self, state_dict):
         return to_native_state_dict(state_dict)
+
+    def clip_target(self, state_dict={}):
+        pref = self.text_encoder_key_prefix[0]
+        hunyuan_detect = comfy.text_encoders.hunyuan_video.llama_detect(state_dict, "{}qwen25_7b.transformer.".format(pref))
+        return supported_models_base.ClipTarget(comfy.text_encoders.kandinsky6.Kandinsky6Tokenizer, comfy.text_encoders.kandinsky6.te(**hunyuan_detect))
 
 
 class ACEStep15(supported_models_base.BASE):
