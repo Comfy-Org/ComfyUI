@@ -62,7 +62,6 @@ class Kandinsky6AudioVAE(nn.Module):
         self.scaling_factor = scaling_factor
         self.mean_value = mean_value
         self.vae = VAE(data_dim=128, embed_dim=40, hidden_dim=512, with_encoder=with_encoder)
-        self.vae.remove_weight_norm()
         self.vocoder = build_bigvgan(bigvgan_config)
         if with_encoder:
             self.mel_converter = MelConverter()

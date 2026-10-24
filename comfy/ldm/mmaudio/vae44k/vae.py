@@ -97,12 +97,6 @@ class VAE(nn.Module):
     def unnormalize(self, x: torch.Tensor) -> torch.Tensor:
         return x * self.data_std + self.data_mean
 
-    def remove_weight_norm(self):
-        for module in self.modules():
-            if isinstance(module, MPConv1D):
-                module.remove_weight_norm()
-        return self
-
 
 class Encoder1D(nn.Module):
 
@@ -255,7 +249,7 @@ class Decoder1D(nn.Module):
 
         # end
         self.conv_out = MPConv1D(block_in, out_dim, kernel_size=kernel_size)
-        self.learnable_gain = nn.Parameter(torch.zeros([]))
+        self.learnable_gain = nn.Parameter(torch.empty([]))
 
     def forward(self, z):
         # z to block_in

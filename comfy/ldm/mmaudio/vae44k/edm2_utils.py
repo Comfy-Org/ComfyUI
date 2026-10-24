@@ -23,21 +23,8 @@ class MPConv1D(torch.nn.Module):
 
     def __init__(self, in_channels, out_channels, kernel_size):
         super().__init__()
-        self.weight = torch.nn.Parameter(torch.randn(out_channels, in_channels, kernel_size))
+        self.weight = torch.nn.Parameter(torch.empty(out_channels, in_channels, kernel_size))
 
-        self.weight_norm_removed = False
-
-    def forward(self, x, gain=1):
-        assert self.weight_norm_removed, 'call remove_weight_norm() before inference'
-        weight = self.weight * gain
+    def forward(self, x, gain=None):
+        weight = self.weight if gain is None else self.weight * gain
         return torch.nn.functional.conv1d(x, weight, padding=(weight.shape[-1] // 2, ))
-
-    def remove_weight_norm(self):
-        w = self.weight.to(torch.float32)
-        w = normalize(w)
-        w = w / math.sqrt(w[0].numel())
-        w = w.to(self.weight.dtype)
-        self.weight.data.copy_(w)
-
-        self.weight_norm_removed = True
-        return self

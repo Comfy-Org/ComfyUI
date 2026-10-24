@@ -33,7 +33,7 @@ def kaiser_sinc_filter1d(
     else:
         time = torch.arange(kernel_size) - half_size
     if cutoff == 0:
-        filter_ = torch.zeros_like(time)
+        filter = torch.zeros(1, 1, kernel_size)
     else:
         filter_ = 2 * cutoff * window * sinc(2 * cutoff * time)
         # Normalize filter to unit sum to avoid constant-component leakage.

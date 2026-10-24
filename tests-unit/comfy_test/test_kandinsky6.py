@@ -211,8 +211,17 @@ _SMALL_BIGVGAN_CONFIG = {
 }
 
 
+def _seeded_audio_vae(with_encoder=False):
+    # torch.empty params stay NaN without a checkpoint load; seed them so forward
+    # tests exercise real values.
+    model = Kandinsky6AudioVAE(_SMALL_BIGVGAN_CONFIG, with_encoder=with_encoder)
+    for param in model.parameters():
+        torch.nn.init.normal_(param, std=0.02)
+    return model
+
+
 def test_audio_vae_decodes_to_comfy_audio_layout():
-    model = Kandinsky6AudioVAE(_SMALL_BIGVGAN_CONFIG)
+    model = _seeded_audio_vae()
     latent_frames = 3
     out = model.decode(torch.randn(1, latent_frames, 40))
     # The VAE decoder yields 2 mel frames per latent frame, then BigVGAN
@@ -226,7 +235,7 @@ def _k6_audio_tiling_wrapper():
     # Minimal stand-in for comfy.sd.VAE carrying the attributes decode_tiled_1d reads.
     # upscale_ratio is the small config's real 2x VAE times 4x4 BigVGAN upsampling.
     return types.SimpleNamespace(
-        first_stage_model=Kandinsky6AudioVAE(_SMALL_BIGVGAN_CONFIG),
+        first_stage_model=_seeded_audio_vae(),
         vae_dtype=torch.float32,
         device=torch.device("cpu"),
         vae_output_dtype=lambda: torch.float32,
@@ -239,7 +248,7 @@ def _k6_audio_tiling_wrapper():
 
 
 def _k6_audio_vae():
-    model = Kandinsky6AudioVAE(_SMALL_BIGVGAN_CONFIG)
+    model = _seeded_audio_vae()
     metadata = {"kandinsky6_audio_vae": "1", "bigvgan_config": json.dumps(_SMALL_BIGVGAN_CONFIG)}
     vae = comfy.sd.VAE(sd=model.state_dict(), metadata=metadata, device=torch.device("cpu"))
     # Match the tiler's output sizing to the small config's real upsampling.
@@ -317,7 +326,7 @@ def test_audio_vae_uses_contract_scaling_factor():
     assert model.mean_value == 0.0
 
     torch.manual_seed(0)
-    model = Kandinsky6AudioVAE(_SMALL_BIGVGAN_CONFIG)
+    model = _seeded_audio_vae()
     z = torch.randn(1, 2, 40)
     expected = model.vocoder(model.vae.decode((z / model.scaling_factor).transpose(1, 2)))
     assert torch.equal(model.decode(z), expected)
@@ -333,7 +342,7 @@ def test_mel_converter_maps_waveform_to_mel_shape():
 
 def test_audio_vae_full_encodes_waveform_to_latent():
     torch.manual_seed(0)
-    model = Kandinsky6AudioVAE(_SMALL_BIGVGAN_CONFIG, with_encoder=True)
+    model = _seeded_audio_vae(with_encoder=True)
     latent = model.encode(torch.randn(1, 1, 20000))
     # The encoder halves the 512-hop mel frames: 1024 samples per latent frame.
     assert tuple(latent.shape) == (1, 20000 // 1024, 40)
@@ -351,7 +360,7 @@ def test_audio_vae_full_state_dict_round_trips():
 
 def test_vae_build_detects_k6_audio_encoder():
     torch.manual_seed(0)
-    full = Kandinsky6AudioVAE(_SMALL_BIGVGAN_CONFIG, with_encoder=True)
+    full = _seeded_audio_vae(with_encoder=True)
     metadata = {"kandinsky6_audio_vae": "1", "bigvgan_config": json.dumps(_SMALL_BIGVGAN_CONFIG)}
     vae = comfy.sd.VAE(sd=full.state_dict(), metadata=metadata, device=torch.device("cpu"))
     assert vae.first_stage_model.mel_converter is not None

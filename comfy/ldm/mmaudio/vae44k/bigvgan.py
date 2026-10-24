@@ -6,8 +6,6 @@
 import torch
 import torch.nn as nn
 from torch.nn import Conv1d, ConvTranspose1d
-from torch.nn.utils.parametrizations import weight_norm
-from torch.nn.utils.parametrize import remove_parametrizations
 
 from . import activations
 from .alias_free_torch import Activation1d
@@ -17,12 +15,6 @@ class AttrDict(dict):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.__dict__ = self
-
-
-def init_weights(m, mean=0.0, std=0.01):
-    classname = m.__class__.__name__
-    if classname.find("Conv") != -1:
-        m.weight.data.normal_(mean, std)
 
 
 def get_padding(kernel_size, dilation=1):
@@ -44,30 +36,26 @@ class AMPBlock1(torch.nn.Module):
         self.h = h
 
         self.convs1 = nn.ModuleList([
-            weight_norm(
-                Conv1d(
-                    channels,
-                    channels,
-                    kernel_size,
-                    stride=1,
-                    dilation=d,
-                    padding=get_padding(kernel_size, d),
-                )) for d in dilation
+            Conv1d(
+                channels,
+                channels,
+                kernel_size,
+                stride=1,
+                dilation=d,
+                padding=get_padding(kernel_size, d),
+            ) for d in dilation
         ])
-        self.convs1.apply(init_weights)
 
         self.convs2 = nn.ModuleList([
-            weight_norm(
-                Conv1d(
-                    channels,
-                    channels,
-                    kernel_size,
-                    stride=1,
-                    dilation=1,
-                    padding=get_padding(kernel_size, 1),
-                )) for _ in range(len(dilation))
+            Conv1d(
+                channels,
+                channels,
+                kernel_size,
+                stride=1,
+                dilation=1,
+                padding=get_padding(kernel_size, 1),
+            ) for _ in range(len(dilation))
         ])
-        self.convs2.apply(init_weights)
 
         self.num_layers = len(self.convs1) + len(self.convs2)  # Total number of conv layers
 
@@ -100,12 +88,6 @@ class AMPBlock1(torch.nn.Module):
 
         return x
 
-    def remove_weight_norm(self):
-        for l in self.convs1:
-            remove_parametrizations(l, 'weight')
-        for l in self.convs2:
-            remove_parametrizations(l, 'weight')
-
 
 class AMPBlock2(torch.nn.Module):
 
@@ -122,17 +104,15 @@ class AMPBlock2(torch.nn.Module):
         self.h = h
 
         self.convs = nn.ModuleList([
-            weight_norm(
-                Conv1d(
-                    channels,
-                    channels,
-                    kernel_size,
-                    stride=1,
-                    dilation=d,
-                    padding=get_padding(kernel_size, d),
-                )) for d in dilation
+            Conv1d(
+                channels,
+                channels,
+                kernel_size,
+                stride=1,
+                dilation=d,
+                padding=get_padding(kernel_size, d),
+            ) for d in dilation
         ])
-        self.convs.apply(init_weights)
 
         self.num_layers = len(self.convs)  # Total number of conv layers
 
@@ -161,10 +141,6 @@ class AMPBlock2(torch.nn.Module):
             x = xt + x
         return x
 
-    def remove_weight_norm(self):
-        for l in self.convs:
-            remove_parametrizations(l, "weight")
-
 
 class BigVGAN(torch.nn.Module):
 
@@ -176,7 +152,7 @@ class BigVGAN(torch.nn.Module):
         self.num_upsamples = len(h.upsample_rates)
 
         # Pre-conv
-        self.conv_pre = weight_norm(Conv1d(h.num_mels, h.upsample_initial_channel, 7, 1, padding=3))
+        self.conv_pre = Conv1d(h.num_mels, h.upsample_initial_channel, 7, 1, padding=3)
 
         # Define which AMPBlock to use. BigVGAN uses AMPBlock1 as default
         if h.resblock == "1":
@@ -192,14 +168,13 @@ class BigVGAN(torch.nn.Module):
         for i, (u, k) in enumerate(zip(h.upsample_rates, h.upsample_kernel_sizes)):
             self.ups.append(
                 nn.ModuleList([
-                    weight_norm(
-                        ConvTranspose1d(
-                            h.upsample_initial_channel // (2**i),
-                            h.upsample_initial_channel // (2**(i + 1)),
-                            k,
-                            u,
-                            padding=(k - u) // 2,
-                        ))
+                    ConvTranspose1d(
+                        h.upsample_initial_channel // (2**i),
+                        h.upsample_initial_channel // (2**(i + 1)),
+                        k,
+                        u,
+                        padding=(k - u) // 2,
+                    )
                 ]))
 
         # Residual blocks using anti-aliased multi-periodicity composition modules (AMP)
@@ -223,12 +198,7 @@ class BigVGAN(torch.nn.Module):
 
         # Whether to use bias for the final conv_post. Default to True for backward compatibility
         self.use_bias_at_final = h.get("use_bias_at_final", True)
-        self.conv_post = weight_norm(Conv1d(ch, 1, 7, 1, padding=3, bias=self.use_bias_at_final))
-
-        # Weight initialization
-        for i in range(len(self.ups)):
-            self.ups[i].apply(init_weights)
-        self.conv_post.apply(init_weights)
+        self.conv_post = Conv1d(ch, 1, 7, 1, padding=3, bias=self.use_bias_at_final)
 
         # Final tanh activation. Defaults to True for backward compatibility
         self.use_tanh_at_final = h.get("use_tanh_at_final", True)
@@ -261,18 +231,7 @@ class BigVGAN(torch.nn.Module):
 
         return x
 
-    def remove_weight_norm(self):
-        for l in self.ups:
-            for l_i in l:
-                remove_parametrizations(l_i, 'weight')
-        for l in self.resblocks:
-            l.remove_weight_norm()
-        remove_parametrizations(self.conv_pre, 'weight')
-        remove_parametrizations(self.conv_post, 'weight')
-
 
 def build_bigvgan(config):
     """Build an inference-ready BigVGAN-v2 from its serialized configuration."""
-    model = BigVGAN(config if isinstance(config, AttrDict) else AttrDict(config))
-    model.remove_weight_norm()
-    return model
+    return BigVGAN(config if isinstance(config, AttrDict) else AttrDict(config))
