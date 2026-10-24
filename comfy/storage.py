@@ -3,6 +3,7 @@ import logging
 import os
 import platform
 import re
+import tempfile
 
 import comfy_aimdo.storage
 from comfy.cli_args import args
@@ -78,6 +79,14 @@ def fast_storage(path):
     if system == "Windows":
         return comfy_aimdo.storage.fast_disk(path)
     return None
+
+
+@functools.lru_cache(maxsize=None)
+def anonymous_fast_disk():
+    # Linux anonymous files are memfds and already live in RAM.
+    if os.name != "nt":
+        return not args.disable_fast_disk
+    return model_fast_disk([tempfile.gettempdir()])
 
 
 def annotate_state_dict(state_dict, path):
