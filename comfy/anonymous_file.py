@@ -20,7 +20,8 @@ if os.name == "nt":
 def create_anonymous_file(size=0):
     """Return an unbuffered binary file owned by the caller, initially sized in bytes.
 
-    Uses Linux memfd or a Windows temporary-cache/delete-on-close file.
+    Uses Linux memfd, a Windows temporary-cache/delete-on-close file, or an
+    unlinked temporary file elsewhere.
     Windows may still write to disk; Linux memfd may be swapped.
     Initial sizing is sparse with zero-filled holes; Windows requires a filesystem
     supporting sparse files. Keep the file open through all I/O and close
@@ -39,7 +40,7 @@ def create_anonymous_file(size=0):
         file = open("aimdo", "w+b", buffering=0,
                     opener=lambda name, mode: os.memfd_create(name, os.MFD_CLOEXEC))
     else:
-        raise NotImplementedError("anonymous files require Linux or Windows")
+        file = tempfile.TemporaryFile(buffering=0)
 
     try:
         if os.name == "nt":
