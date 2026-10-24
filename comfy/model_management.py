@@ -634,6 +634,8 @@ except:
 
 current_loaded_models: list[LoadedModel] = []
 
+EPHEMERAL_MODELS = []
+
 DIRTY_MMAPS = set()
 
 PIN_PRESSURE_HYSTERESIS = 256 * 1024 * 1024
@@ -1079,6 +1081,17 @@ def archive_model_dtypes(model):
         for buf_name, buf in module.named_buffers(recurse=False):
             setattr(module, f"{buf_name}_comfy_model_dtype", buf.dtype)
 
+
+def register_ephemeral_model(patcher, model):
+    """Keep a writable model loaded until the node ends, then drop its patcher before its weights."""
+    EPHEMERAL_MODELS.append((patcher, model))
+
+def cleanup_ephemeral_models():
+    while EPHEMERAL_MODELS:
+        patcher, model = EPHEMERAL_MODELS.pop()
+        patcher.discard_writes()
+        del patcher
+        del model
 
 def cleanup_models():
     to_delete = []
