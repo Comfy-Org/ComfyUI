@@ -2808,7 +2808,11 @@ class Krea2(BaseModel):
     def extra_conds(self, **kwargs):
         out = super().extra_conds(**kwargs)
         cross_attn = kwargs.get("cross_attn", None)
-        if cross_attn is not None:
+        if cross_attn is not None and torch.is_inference_mode_enabled() and kwargs.get("hooks") is None:
+            # the text fusion adapter depends on the conditioning alone: run it once, not every step
+            del out['c_crossattn']
+            out['txt_states'] = comfy.conds.CONDRegular(self.diffusion_model.preprocess_text(cross_attn.to(device=kwargs["device"], dtype=self.get_dtype_inference())))
+        elif cross_attn is not None:
             out['c_crossattn'] = comfy.conds.CONDRegular(cross_attn)
         ref_latents = kwargs.get("reference_latents", None)
         if ref_latents is not None:
