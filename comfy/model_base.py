@@ -3101,9 +3101,6 @@ class Kandinsky6(Kandinsky5):
 
     def extra_conds(self, **kwargs):
         out = super().extra_conds(**kwargs)
-        cross_attn = kwargs.get("cross_attn")
-        if cross_attn is not None:
-            out["c_crossattn"] = comfy.conds.CONDCrossAttn(cross_attn)
         latent_shapes = kwargs.get("latent_shapes")
         if latent_shapes is not None:
             out["latent_shapes"] = comfy.conds.CONDConstant(latent_shapes)
