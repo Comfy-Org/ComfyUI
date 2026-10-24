@@ -1,5 +1,6 @@
 import json
 import types
+import uuid
 
 import pytest
 import torch
@@ -16,6 +17,7 @@ from comfy.ldm.kandinsky6.audio_vae import Kandinsky6AudioVAE, MelConverter
 from comfy.ldm.kandinsky6.core_contract import AUDIO_DEFAULTS
 from comfy.ldm.kandinsky6.detection import detect_kandinsky6, to_native_state_dict
 from comfy.ldm.kandinsky6.model import Kandinsky6NativeAVDiT
+from comfy_extras import nodes_kandinsky6 as k6_nodes
 from comfy_extras.nodes_kandinsky6 import (
     Kandinsky6EmptyLatent,
     Kandinsky6PiFlowGuider,
@@ -673,8 +675,6 @@ def test_piflow_guider_is_a_basic_guider():
 def test_piflow_guider_drives_cli_progress_bar(monkeypatch):
     # PiFlow runs its own segment loop, so it must create the CLI progress bar
     # the k_diffusion samplers do; the preview callback alone only feeds the UI.
-    from comfy_extras import nodes_kandinsky6 as k6_nodes
-
     steps = 4
     video = torch.randn(1, 16, 2, 4, 4)
     audio = torch.randn(1, 4, 40)
@@ -687,7 +687,8 @@ def test_piflow_guider_drives_cli_progress_bar(monkeypatch):
         process_latent_out=lambda x: x,
     )
     guider.conds = {"positive": [{"cross_attn": torch.randn(1, 4, 32),
-                                  "pooled_output": torch.randn(1, 32)}]}
+                                  "pooled_output": torch.randn(1, 32),
+                                  "uuid": uuid.uuid4()}]}
     guider.model_options = {"transformer_options": {}}
 
     # The rollout hands back to the per-segment callback once per segment.

@@ -244,6 +244,11 @@ class Kandinsky6PiFlowGuider(comfy.samplers.CFGGuider):
             _, audio_clean = comfy.utils.unpack_latents(latent_image, latent_shapes)
         steps = max(int(sigmas.shape[-1]) - 1, 1)
 
+        options = dict(self.model_options.get("transformer_options", {}))
+        # The rollout evaluates the DiT per segment, outside the sampler's cond
+        # batch: carry the cond uuid so model wrappers can key their state on it.
+        options["uuids"] = [cond["uuid"]]
+
         # PiFlow drives its own loop, so it owns the CLI progress bar the way the
         # k_diffusion samplers do; the preview callback only feeds the UI.
         with tqdm(total=steps, disable=disable_pbar) as pbar:
@@ -264,7 +269,7 @@ class Kandinsky6PiFlowGuider(comfy.samplers.CFGGuider):
                 steps=steps,
                 dtype=dtype,
                 reference=reference,
-                transformer_options=self.model_options.get("transformer_options", {}),
+                transformer_options=options,
                 callback=segment_callback,
                 audio_mask=audio_mask,
                 audio_clean=audio_clean,

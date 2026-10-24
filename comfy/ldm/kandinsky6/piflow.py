@@ -60,32 +60,23 @@ def shift_timesteps(t, shift):
     return shift * t / (1 + (shift - 1) * t)
 
 
-def policy_rollout_fm(x_t_start, sigma_t_start, raw_t_start, raw_t_end, total_substeps, policy):
+def policy_rollout_fm(x_t_start, sigma_t_start, raw_t_start, raw_t_end, num_substeps, policy):
     """Integrate ``policy.pi`` from ``raw_t_start`` to ``raw_t_end``."""
-    num_batches = x_t_start.size(0)
-    ndim = x_t_start.dim()
-    shape = (num_batches, *((ndim - 1) * [1]))
+    shape = (x_t_start.size(0), *((x_t_start.dim() - 1) * [1]))
     raw_t_start = raw_t_start.reshape(shape)
     raw_t_end = raw_t_end.reshape(shape)
     sigma_t = sigma_t_start.reshape(shape)
-
-    delta_raw_t = raw_t_start - raw_t_end
-    num_substeps = (delta_raw_t * total_substeps).round().to(torch.long).clamp(min=1)
-    substep_size = delta_raw_t / num_substeps
-    max_num_substeps = num_substeps.max()
+    substep_size = (raw_t_start - raw_t_end) / num_substeps
 
     raw_t = raw_t_start
     x_t = x_t_start
-    for substep_id in range(max_num_substeps.item()):
+    for _ in range(num_substeps):
         velocity = policy.pi(x_t, sigma_t)
         raw_t_minus = (raw_t - substep_size).clamp(min=0)
         sigma_t_minus = shift_timesteps(raw_t_minus, policy.shift)
-        x_t_minus = x_t + velocity * (sigma_t_minus - sigma_t)
-
-        active_mask = num_substeps > substep_id
-        x_t = torch.where(active_mask, x_t_minus, x_t)
-        sigma_t = torch.where(active_mask, sigma_t_minus, sigma_t)
-        raw_t = torch.where(active_mask, raw_t_minus, raw_t)
+        x_t = x_t + velocity * (sigma_t_minus - sigma_t)
+        sigma_t = sigma_t_minus
+        raw_t = raw_t_minus
 
     return x_t, sigma_t
 
@@ -114,7 +105,16 @@ def rollout(dit, video, audio, context, pooled, *, steps, dtype, reference=None,
         mm.throw_exception_if_processing_interrupted()
         segment = base_segment * (final_scale if index == steps - 1 else 1.0)
         raw_dst = max(raw_src - segment, eps)
+        num_substeps = max(int(round((raw_src - raw_dst) * params["num_policy_substeps"])), 1)
         sigma_src = shift_timesteps(torch.full((batch,), raw_src, device=device), shift)
+
+        # The rollout evaluates the DiT per segment, bypassing the sampler's cond
+        # batch path: hand the model wrappers the segment sigma and clear the
+        # per-step skip flag the way calc_cond_batch does for each step.
+        options["sigmas"] = sigma_src
+        easycache = options.get("easycache")
+        if easycache is not None:
+            easycache.skip_current_step = False
 
         if audio_mask is not None:
             sigma = sigma_src.reshape(batch, *((audio.ndim - 1) * [1]))
@@ -142,7 +142,7 @@ def rollout(dit, video, audio, context, pooled, *, steps, dtype, reference=None,
                 sigma,
                 torch.full((batch,), raw_src, device=device),
                 torch.full((batch,), raw_dst, device=device),
-                int(params["num_policy_substeps"]),
+                num_substeps,
                 policy,
             )
             updated.append(result)
