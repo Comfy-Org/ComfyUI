@@ -487,7 +487,7 @@ class CLIP:
         state = comfy.model_state.ModelState()
         model_management.register_ephemeral_model(state)
         with model_management.cuda_device_context(device), comfy.ops.use_quantized_matmul(self.cond_stage_model, device):
-            self.cond_stage_model.set_clip_options({"prepare_runtime_model": lambda model: state.load(model, device)})
+            self.cond_stage_model.set_clip_options({"prepare_runtime_model": lambda model: state.load(model, device), "generation_state": state.metadata})
             return self.cond_stage_model.generate(tokens, do_sample=do_sample, max_length=max_length, temperature=temperature, top_k=top_k, top_p=top_p, min_p=min_p, repetition_penalty=repetition_penalty, seed=seed, presence_penalty=presence_penalty, mtp=mtp)
 
     def decode(self, token_ids, skip_special_tokens=True):
