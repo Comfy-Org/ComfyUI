@@ -43,6 +43,7 @@ def test_cache_budget_admits_all_conditions_together(monkeypatch, vram_margin, r
     monkeypatch.setattr(system_memory, "virtual_memory_available", lambda: 3 * 1024 ** 3 + cache_bytes + ram_margin)
     monkeypatch.setattr(model_management, "free_pins", lambda size, **kwargs: min(size, reclaimable))
     monkeypatch.setattr(patcher, "get_free_memory", lambda device: 4 * cache_bytes + vram_margin)
+    monkeypatch.setattr(patcher, "is_dynamic", lambda: True)
 
     cache = model.get_writable_model(conditions, (1, 4, 3, 5), {"transformer_options": transformer_options}, torch.device("cpu"))
     assert (cache is not None) == admitted

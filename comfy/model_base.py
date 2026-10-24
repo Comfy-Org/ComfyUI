@@ -2731,7 +2731,7 @@ class QwenImage21(QwenImage):
         transformer_options = model_options.get("transformer_options", {})
         options = transformer_options.get("qwen_image21_cache", {})
         model = self.diffusion_model
-        if options.get("device", "auto") != "auto" or not model.can_cache_prefix(transformer_options):
+        if options.get("device", "auto") != "auto" or not self.current_patcher.is_dynamic() or not model.can_cache_prefix(transformer_options):
             return None
 
         heads = model.transformer_blocks[0].attn.heads
