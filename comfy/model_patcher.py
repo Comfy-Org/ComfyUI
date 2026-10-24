@@ -19,7 +19,6 @@
 from __future__ import annotations
 
 import collections
-import contextlib
 import inspect
 import logging
 import math
@@ -1405,16 +1404,6 @@ class ModelPatcher:
     def set_additional_models(self, key: str, models: list['ModelPatcher']):
         self.additional_models[key] = models
 
-    @contextlib.contextmanager
-    def writable_models(self, conds, noise_shape, model_options):
-        with contextlib.ExitStack() as stack:
-            for patcher in [self] + self.get_additional_models_with_key("multigpu"):
-                model = patcher.model.get_writable_model(conds, noise_shape, model_options, patcher.load_device)
-                if model is not None:
-                    with comfy.model_management.cuda_device_context(patcher.load_device):
-                        stack.enter_context(writable_model(model, patcher.load_device))
-            yield
-
     def remove_additional_models(self, key: str):
         if key in self.additional_models:
             self.additional_models.pop(key)
@@ -1833,6 +1822,13 @@ class ModelPatcherDynamic(ModelPatcher):
     def is_dynamic(self):
         return True
 
+    def discard_writes(self):
+        """Forget pinned writes so unpinning does not flush them to the backing file."""
+        pin_state = self.model.dynamic_pins[self.load_device]
+        for subset in ("weights", "weights-loaded", "weights-fast"):
+            for module, _ in pin_state[subset][1]:
+                module._pins[subset]["dirty"] = False
+
     def set_in_use_by_current_prompt(self, in_use):
         self.model.dynamic_pins[self.load_device]["current_prompt"] = in_use
 
@@ -2244,29 +2240,12 @@ class ModelPatcherDynamic(ModelPatcher):
 CoreModelPatcher = ModelPatcher
 
 
-@contextlib.contextmanager
 def writable_model(model, device):
-    """Load a writable model over its own anonymous backing file for the duration of the block."""
-    state, file = comfy.utils.create_safetensors(model.state_dict())
-    patcher = None
-    try:
-        model.load_state_dict(state, assign=True)
-        patcher = ModelPatcherDynamic(model, device, torch.device("cpu"), fast_disk=comfy.storage.anonymous_fast_disk())
-        comfy.model_management.load_models_gpu([patcher])
-        patcher.set_in_use_by_current_prompt(True)
-        yield patcher
-    finally:
-        with comfy.model_management.cuda_device_context(device):
-            # The final forward may still be using the allocation graph's pages.
-            comfy.model_management.synchronize()
-            comfy.model_prefetch.cleanup_prefetch_queues()
-            comfy.model_prefetch.cleanup_malloc_graph()
-            if patcher is not None:
-                vbar = model.dynamic_vbars.pop(device, None)
-                if vbar is not None:
-                    vbar.close()
-                for module in model.modules():
-                    for pin in getattr(module, "_pins", {}).values():
-                        pin["dirty"] = False
-                comfy.model_management.unload_model_and_clones(patcher, unload_additional_models=False)
-            file.close()
+    """Load a writable model over an anonymous backing file for the rest of the node."""
+    state, _ = comfy.utils.create_safetensors(model.state_dict())
+    model.load_state_dict(state, assign=True)
+    patcher = ModelPatcherDynamic(model, device, torch.device("cpu"), fast_disk=comfy.storage.anonymous_fast_disk())
+    comfy.model_management.load_models_gpu([patcher])
+    patcher.set_in_use_by_current_prompt(True)
+    comfy.model_management.register_ephemeral_model(patcher, model)
+    return patcher
