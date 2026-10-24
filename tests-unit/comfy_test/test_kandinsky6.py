@@ -404,6 +404,10 @@ def test_concat_av_latent_fits_time_first_audio():
         reference, torch.randn(1, 25, 40), torch.ones(1, 1, 4, 25))
     assert tuple(audio.shape) == (1, 20, 40) and tuple(mask.shape) == (1, 20, 40)
 
+    # A batch mismatch is never fitted: narrowing the batch would silently drop items.
+    with pytest.raises(ValueError):
+        LTXVConcatAVLatent.fit_audio(reference, torch.randn(2, 20, 40), torch.zeros(1, 1, 4, 20))
+
 
 def test_empty_latent_node_builds_joint_latent():
     latent = Kandinsky6EmptyLatent.execute(864, 480, 121, 1)[0]
