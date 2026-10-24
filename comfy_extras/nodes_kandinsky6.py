@@ -166,7 +166,6 @@ class Kandinsky6ImageToVideoAudio(io.ComfyNode):
             outputs=[
                 io.Conditioning.Output(display_name="positive"),
                 io.Conditioning.Output(display_name="negative"),
-                io.Latent.Output(display_name="joint_latent"),
             ],
         )
 
@@ -175,7 +174,7 @@ class Kandinsky6ImageToVideoAudio(io.ComfyNode):
         _validate_joint_latent(empty_latent)
 
         if image is None:
-            return io.NodeOutput(positive, negative, empty_latent)
+            return io.NodeOutput(positive, negative)
         if vae is None:
             raise ValueError("Connect the video VAE to encode the I2VA reference image.")
 
@@ -194,7 +193,7 @@ class Kandinsky6ImageToVideoAudio(io.ComfyNode):
         values = {"k6_reference": reference}
         positive = node_helpers.conditioning_set_values(positive, values)
         negative = node_helpers.conditioning_set_values(negative, values)
-        return io.NodeOutput(positive, negative, empty_latent)
+        return io.NodeOutput(positive, negative)
 
 
 class Kandinsky6PiFlowGuider(comfy.samplers.CFGGuider):
