@@ -223,7 +223,7 @@ def test_audio_vae_decodes_to_comfy_audio_layout():
 
 
 def _k6_audio_tiling_wrapper():
-    # Minimal stand-in for comfy.sd.VAE carrying the attributes decode_tiled_1d_k6 reads.
+    # Minimal stand-in for comfy.sd.VAE carrying the attributes decode_tiled_1d reads.
     # upscale_ratio is the small config's real 2x VAE times 4x4 BigVGAN upsampling.
     return types.SimpleNamespace(
         first_stage_model=Kandinsky6AudioVAE(_SMALL_BIGVGAN_CONFIG),
@@ -232,6 +232,7 @@ def _k6_audio_tiling_wrapper():
         vae_output_dtype=lambda: torch.float32,
         output_device=torch.device("cpu"),
         process_output=lambda audio: audio,
+        latent_time_first=True,
         upscale_ratio=32,
         output_channels=1,
     )
@@ -252,7 +253,7 @@ def test_audio_vae_decode_tiled_k6_tiles_time_axis():
     torch.manual_seed(0)
     samples = torch.randn(1, 50, 40)
     full = wrapper.first_stage_model.decode(samples)
-    out = comfy.sd.VAE.decode_tiled_1d_k6(wrapper, samples, tile_x=16, overlap=4)
+    out = comfy.sd.VAE.decode_tiled_1d(wrapper, samples, tile_x=16, overlap=4)
     assert tuple(out.shape) == tuple(full.shape) == (1, 1, 50 * 32)
     assert torch.isfinite(out).all()
     # The decoder's middle attention is non-local, so tiled output approximates the
@@ -264,7 +265,7 @@ def test_audio_vae_decode_tiled_k6_single_tile_matches_full():
     wrapper = _k6_audio_tiling_wrapper()
     torch.manual_seed(0)
     samples = torch.randn(1, 10, 40)
-    out = comfy.sd.VAE.decode_tiled_1d_k6(wrapper, samples, tile_x=16, overlap=4)
+    out = comfy.sd.VAE.decode_tiled_1d(wrapper, samples, tile_x=16, overlap=4)
     assert torch.equal(out, wrapper.first_stage_model.decode(samples))
 
 
