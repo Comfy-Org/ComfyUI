@@ -1409,8 +1409,6 @@ class ModelPatcher:
     def writable_models(self, conds, noise_shape, model_options):
         with contextlib.ExitStack() as stack:
             for patcher in [self] + self.get_additional_models_with_key("multigpu"):
-                if not patcher.is_dynamic():
-                    continue
                 model = patcher.model.get_writable_model(conds, noise_shape, model_options, patcher.load_device)
                 if model is not None:
                     with comfy.model_management.cuda_device_context(patcher.load_device):
