@@ -38,6 +38,7 @@ import comfy.model_management
 import comfy.model_prefetch
 import comfy.ops
 import comfy.patcher_extension
+import comfy.storage
 import comfy.utils
 import comfy_aimdo.host_buffer
 from comfy.comfy_types import UnetWrapperFunction
@@ -1413,7 +1414,7 @@ class ModelPatcher:
                 model = patcher.model.get_writable_model(conds, noise_shape, model_options, patcher.load_device)
                 if model is not None:
                     with comfy.model_management.cuda_device_context(patcher.load_device):
-                        stack.enter_context(patcher.writable_model(model))
+                        stack.enter_context(writable_model(model, patcher.load_device))
             yield
 
     def remove_additional_models(self, key: str):
@@ -1834,35 +1835,6 @@ class ModelPatcherDynamic(ModelPatcher):
     def is_dynamic(self):
         return True
 
-    @contextlib.contextmanager
-    def writable_model(self, model):
-        state, file = comfy.utils.create_safetensors(model.state_dict())
-        patcher = None
-        try:
-            model.load_state_dict(state, assign=True)
-            patcher = ModelPatcherDynamic(model, self.load_device, torch.device("cpu"), fast_disk=self.fast_disk)
-            self.set_additional_models("writable", [patcher])
-            # Loading reverses this list; the writable model gets priority over its owner.
-            comfy.model_management.load_models_gpu([patcher, self])
-            patcher.set_in_use_by_current_prompt(True)
-            yield patcher
-        finally:
-            with comfy.model_management.cuda_device_context(self.load_device):
-                # The final forward may still be using the allocation graph's pages.
-                comfy.model_management.synchronize()
-                comfy.model_prefetch.cleanup_prefetch_queues()
-                comfy.model_prefetch.cleanup_malloc_graph()
-                if patcher is not None:
-                    self.remove_additional_models("writable")
-                    vbar = model.dynamic_vbars.pop(patcher.load_device, None)
-                    if vbar is not None:
-                        vbar.close()
-                    for module in model.modules():
-                        for pin in getattr(module, "_pins", {}).values():
-                            pin["dirty"] = False
-                    comfy.model_management.unload_model_and_clones(patcher, unload_additional_models=False)
-                file.close()
-
     def set_in_use_by_current_prompt(self, in_use):
         self.model.dynamic_pins[self.load_device]["current_prompt"] = in_use
 
@@ -2272,3 +2244,31 @@ class ModelPatcherDynamic(ModelPatcher):
 
 
 CoreModelPatcher = ModelPatcher
+
+
+@contextlib.contextmanager
+def writable_model(model, device):
+    """Load a writable model over its own anonymous backing file for the duration of the block."""
+    state, file = comfy.utils.create_safetensors(model.state_dict())
+    patcher = None
+    try:
+        model.load_state_dict(state, assign=True)
+        patcher = ModelPatcherDynamic(model, device, torch.device("cpu"), fast_disk=comfy.storage.anonymous_fast_disk())
+        comfy.model_management.load_models_gpu([patcher])
+        patcher.set_in_use_by_current_prompt(True)
+        yield patcher
+    finally:
+        with comfy.model_management.cuda_device_context(device):
+            # The final forward may still be using the allocation graph's pages.
+            comfy.model_management.synchronize()
+            comfy.model_prefetch.cleanup_prefetch_queues()
+            comfy.model_prefetch.cleanup_malloc_graph()
+            if patcher is not None:
+                vbar = model.dynamic_vbars.pop(device, None)
+                if vbar is not None:
+                    vbar.close()
+                for module in model.modules():
+                    for pin in getattr(module, "_pins", {}).values():
+                        pin["dirty"] = False
+                comfy.model_management.unload_model_and_clones(patcher, unload_additional_models=False)
+            file.close()
