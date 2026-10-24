@@ -1,6 +1,7 @@
 import json
 import types
 import uuid
+from unittest.mock import patch
 
 import pytest
 import torch
@@ -8,6 +9,7 @@ import torch
 import comfy.ops
 import comfy.sd
 import comfy.utils
+from comfy import memory_management
 from comfy import model_detection
 from comfy import model_management
 from comfy import samplers
@@ -432,33 +434,36 @@ def _small_dit():
     # disable_weight_init leaves torch.empty garbage behind; bound the weights
     # so the forward stays finite for the value checks below.
     torch.manual_seed(0)
-    model = Kandinsky6NativeAVDiT(
-        in_visual_dim=16,
-        out_visual_dim=16,
-        in_audio_dim=40,
-        in_text_dim=32,
-        in_text_dim2=32,
-        time_dim=32,
-        model_dim=32,
-        ff_dim=64,
-        time_dim_a=32,
-        model_dim_a=32,
-        ff_dim_a=64,
-        head_dim_a=16,
-        visual_embed_dim=(2 * 16 + 1) * 4,
-        patch_size=(1, 2, 2),
-        num_text_blocks=1,
-        num_visual_blocks=1,
-        axes_dims=(8, 4, 4),
-        rope_scale_factor=(1.0, 1.0, 1.0),
-        cross_gates=True,
-        fix_modulation=True,
-        ca_rope=True,
-        visual_token_type_num_embeddings=2,
-        dtype=torch.float32,
-        device="cpu",
-        operations=comfy.ops.disable_weight_init,
-    )
+    # aimdo's lazy weight init leaves weights None until a state dict loads;
+    # these test models are built without one, so use the plain init path.
+    with patch.object(memory_management, "aimdo_enabled", False):
+        model = Kandinsky6NativeAVDiT(
+            in_visual_dim=16,
+            out_visual_dim=16,
+            in_audio_dim=40,
+            in_text_dim=32,
+            in_text_dim2=32,
+            time_dim=32,
+            model_dim=32,
+            ff_dim=64,
+            time_dim_a=32,
+            model_dim_a=32,
+            ff_dim_a=64,
+            head_dim_a=16,
+            visual_embed_dim=(2 * 16 + 1) * 4,
+            patch_size=(1, 2, 2),
+            num_text_blocks=1,
+            num_visual_blocks=1,
+            axes_dims=(8, 4, 4),
+            rope_scale_factor=(1.0, 1.0, 1.0),
+            cross_gates=True,
+            fix_modulation=True,
+            ca_rope=True,
+            visual_token_type_num_embeddings=2,
+            dtype=torch.float32,
+            device="cpu",
+            operations=comfy.ops.disable_weight_init,
+        )
     for param in model.parameters():
         if param.dim() >= 2:
             torch.nn.init.normal_(param, std=0.02)
@@ -565,35 +570,38 @@ def test_dit_single_frame_tail_rope_unchanged():
 def _small_distilled_dit(n_grid=2):
     # A distilled head expands both output heads into n_grid DX grids.
     torch.manual_seed(0)
-    model = Kandinsky6NativeAVDiT(
-        in_visual_dim=16,
-        out_visual_dim=16 * n_grid,
-        in_audio_dim=40,
-        out_audio_dim=40 * n_grid,
-        n_grid=n_grid,
-        in_text_dim=32,
-        in_text_dim2=32,
-        time_dim=32,
-        model_dim=32,
-        ff_dim=64,
-        time_dim_a=32,
-        model_dim_a=32,
-        ff_dim_a=64,
-        head_dim_a=16,
-        visual_embed_dim=(2 * 16 + 1) * 4,
-        patch_size=(1, 2, 2),
-        num_text_blocks=1,
-        num_visual_blocks=1,
-        axes_dims=(8, 4, 4),
-        rope_scale_factor=(1.0, 1.0, 1.0),
-        cross_gates=True,
-        fix_modulation=True,
-        ca_rope=True,
-        visual_token_type_num_embeddings=2,
-        dtype=torch.float32,
-        device="cpu",
-        operations=comfy.ops.disable_weight_init,
-    )
+    # aimdo's lazy weight init leaves weights None until a state dict loads;
+    # these test models are built without one, so use the plain init path.
+    with patch.object(memory_management, "aimdo_enabled", False):
+        model = Kandinsky6NativeAVDiT(
+            in_visual_dim=16,
+            out_visual_dim=16 * n_grid,
+            in_audio_dim=40,
+            out_audio_dim=40 * n_grid,
+            n_grid=n_grid,
+            in_text_dim=32,
+            in_text_dim2=32,
+            time_dim=32,
+            model_dim=32,
+            ff_dim=64,
+            time_dim_a=32,
+            model_dim_a=32,
+            ff_dim_a=64,
+            head_dim_a=16,
+            visual_embed_dim=(2 * 16 + 1) * 4,
+            patch_size=(1, 2, 2),
+            num_text_blocks=1,
+            num_visual_blocks=1,
+            axes_dims=(8, 4, 4),
+            rope_scale_factor=(1.0, 1.0, 1.0),
+            cross_gates=True,
+            fix_modulation=True,
+            ca_rope=True,
+            visual_token_type_num_embeddings=2,
+            dtype=torch.float32,
+            device="cpu",
+            operations=comfy.ops.disable_weight_init,
+        )
     for param in model.parameters():
         if param.dim() >= 2:
             torch.nn.init.normal_(param, std=0.02)
