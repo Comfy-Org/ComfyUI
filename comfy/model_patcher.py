@@ -1829,6 +1829,16 @@ class ModelPatcherDynamic(ModelPatcher):
             for module, _ in pin_state[subset][1]:
                 module._pins[subset]["dirty"] = False
 
+    def flush_writes(self):
+        """Write every value of a writable model back to its backing file without evicting it."""
+        for m in self.model.modules():
+            if hasattr(m, "_v") and m._v_signature is not None:
+                m.writeback(m._v_weight)
+        pin_state = self.model.dynamic_pins[self.load_device]
+        for subset in ("weights", "weights-loaded", "weights-fast"):
+            for module, _ in pin_state[subset][1]:
+                comfy.pinned_memory.flush_pin(module, module._pins[subset])
+
     def set_in_use_by_current_prompt(self, in_use):
         self.model.dynamic_pins[self.load_device]["current_prompt"] = in_use
 
@@ -2239,13 +2249,3 @@ class ModelPatcherDynamic(ModelPatcher):
 
 CoreModelPatcher = ModelPatcher
 
-
-def writable_model(model, device):
-    """Load a writable model over an anonymous backing file for the rest of the node."""
-    state, _ = comfy.utils.create_safetensors(model.state_dict())
-    model.load_state_dict(state, assign=True)
-    patcher = ModelPatcherDynamic(model, device, torch.device("cpu"), fast_disk=comfy.storage.anonymous_fast_disk())
-    comfy.model_management.load_models_gpu([patcher])
-    patcher.set_in_use_by_current_prompt(True)
-    comfy.model_management.register_ephemeral_model(patcher, model)
-    return patcher

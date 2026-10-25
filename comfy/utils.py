@@ -87,8 +87,35 @@ _TYPES = {
 _SAFETENSORS_MAX_HEADER_SIZE = 100_000_000
 
 
-def create_safetensors(tensors, metadata=None):
-    """Return zero-valued tensor descriptors and their open backing file, owned by the caller."""
+def _safetensors_descriptors(header, file, data_offset):
+    """Meta tensors whose storage names each header entry's slice of file."""
+    lock = threading.Lock()
+    state_dict = {}
+    for name, info in header.items():
+        if name == "__metadata__":
+            continue
+        start, end = info["data_offsets"]
+        value = torch.empty(info["shape"], dtype=_TYPES[info["dtype"]], device="meta")
+        value.untyped_storage()._comfy_tensor_file_slice = comfy.memory_management.TensorFileSlice(file, lock, data_offset + start, end - start)
+        state_dict[name] = value
+    return state_dict
+
+
+def _encode_safetensors_header(header, size=None):
+    encoded = json.dumps(header, separators=(",", ":")).encode("utf-8")
+    if size is None:
+        size = len(encoded) + (-len(encoded) % 8)
+    elif len(encoded) > size:
+        raise ValueError("The safetensors header does not fit its reserved size")
+    return encoded + b" " * (size - len(encoded))
+
+
+def create_safetensors(tensors, metadata=None, file=None, header_size=None):
+    """Return zero-valued tensor descriptors and their open backing file, owned by the caller.
+
+    The backing is anonymous unless an open writable file is given. header_size
+    reserves room for rewrite_safetensors_header.
+    """
     types = {dtype: name for name, dtype in _TYPES.items()}
     header = {} if metadata is None else {"__metadata__": metadata}
     offset = 0
@@ -97,26 +124,38 @@ def create_safetensors(tensors, metadata=None):
         header[name] = {"dtype": types[tensor.dtype], "shape": list(tensor.shape), "data_offsets": [offset, offset + size]}
         offset += size
 
-    encoded = json.dumps(header, separators=(",", ":")).encode("utf-8")
-    encoded += b" " * (-len(encoded) % 8)
+    encoded = _encode_safetensors_header(header, header_size)
     data_offset = 8 + len(encoded)
 
-    f = create_anonymous_file(data_offset + offset)
+    if file is None:
+        file = create_anonymous_file(data_offset + offset)
+    else:
+        file.truncate(data_offset + offset)
     try:
-        f.write(struct.pack("<Q", len(encoded)))
-        f.write(encoded)
-
-        lock = threading.Lock()
-        state_dict = {}
-        for name, tensor in tensors.items():
-            start, end = header[name]["data_offsets"]
-            value = torch.empty(tensor.shape, dtype=tensor.dtype, device="meta")
-            value.untyped_storage()._comfy_tensor_file_slice = comfy.memory_management.TensorFileSlice(f, lock, data_offset + start, end - start)
-            state_dict[name] = value
-        return state_dict, f
+        file.seek(0)
+        file.write(struct.pack("<Q", len(encoded)))
+        file.write(encoded)
+        return _safetensors_descriptors(header, file, data_offset), file
     except BaseException:
-        f.close()
+        file.close()
         raise
+
+
+def open_safetensors(file):
+    """Return tensor descriptors over an open safetensors file and its header."""
+    file.seek(0)
+    header_size = struct.unpack("<Q", file.read(8))[0]
+    if header_size > _SAFETENSORS_MAX_HEADER_SIZE:
+        raise ValueError("The safetensors header is too large.")
+    header = json.loads(file.read(header_size))
+    return _safetensors_descriptors(header, file, 8 + header_size), header
+
+
+def rewrite_safetensors_header(file, header):
+    """Replace the header of an open safetensors file within the space it already occupies."""
+    file.seek(0)
+    size = struct.unpack("<Q", file.read(8))[0]
+    file.write(_encode_safetensors_header(header, size))
 
 
 def _invalid_safetensors_error(message, ckpt):

@@ -15,6 +15,7 @@ import math
 import logging
 import comfy.sampler_helpers
 import comfy.model_patcher
+import comfy.model_state
 import comfy.patcher_extension
 import comfy.hooks
 import comfy.context_windows
@@ -1238,7 +1239,9 @@ class CFGGuider:
             model = patcher.model.get_writable_model(self.conds, noise.shape, self.model_options, patcher.load_device)
             if model is not None:
                 with comfy.model_management.cuda_device_context(patcher.load_device):
-                    comfy.model_patcher.writable_model(model, patcher.load_device)
+                    state = comfy.model_state.ModelState()
+                    state.load(model, patcher.load_device)
+                    comfy.model_management.register_ephemeral_model(state)
         samples = executor.execute(self, sigmas, extra_args, callback, noise, latent_image, denoise_mask, disable_pbar)
         return self.inner_model.process_latent_out(samples.to(torch.float32))
 
