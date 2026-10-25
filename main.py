@@ -595,7 +595,7 @@ def start_comfyui(asyncio_loop=None):
         stop_startup("missing_packages", f"The assets system needs packages that could not be imported: {missing}.\n"
                                          f"{get_missing_requirements_message()}\n{WITHOUT_ASSETS}")
     asset_manager: AssetManager = default_asset_manager()
-    feature_flags.SERVER_FEATURE_FLAGS["assets"] = asset_manager.enabled
+    feature_flags.set_server_feature("assets", asset_manager.enabled)
     if not asset_manager.enabled:
         cleanup_temp_filesystem()
 
