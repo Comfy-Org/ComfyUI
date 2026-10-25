@@ -6,6 +6,7 @@ from unittest.mock import patch
 import pytest
 import torch
 
+import comfy.nested_tensor
 import comfy.ops
 import comfy.sd
 import comfy.utils
@@ -21,7 +22,10 @@ from comfy.ldm.kandinsky6.detection import detect_kandinsky6, to_native_state_di
 from comfy.ldm.kandinsky6.model import Kandinsky6NativeAVDiT
 from comfy_extras import nodes_kandinsky6 as k6_nodes
 from comfy_extras.nodes_kandinsky6 import (
+    Kandinsky6AddGuide,
+    Kandinsky6AddLatentGuide,
     Kandinsky6EmptyLatent,
+    Kandinsky6ImageToVideoAudio,
     Kandinsky6PiFlowGuider,
 )
 from comfy_extras.nodes_lt import LTXVConcatAVLatent
@@ -430,6 +434,141 @@ def test_empty_latent_node_rounds_unaligned_shapes():
     assert tuple(audio.shape) == (2, 218, 40)
 
 
+class _FakeVae:
+    """Deterministic stand-in for the K6 video VAE: frames encode to the mean of their pixels.
+
+    Like the real VAE, a 4D batch of frames is one video: the batch axis becomes time.
+    """
+
+    def spacial_compression_encode(self):
+        return 8
+
+    def encode(self, pixels):
+        x = pixels.movedim(-1, 1)
+        if x.ndim == 4:
+            x = x.movedim(1, 0).unsqueeze(0)  # [1, 3, N, H, W]
+        n = 1 + ((x.shape[2] - 1) // 4) * 4
+        k = 1 + (n - 1) // 4
+        value = x[:, :, :n].mean(dim=(1, 2, 3, 4), keepdim=True)
+        return value.expand(-1, 1, k, x.shape[3] // 8, x.shape[4] // 8).repeat(1, 16, 1, 1, 1)
+
+
+def _cond():
+    return [({}, {})]
+
+
+def test_i2v_node_pins_start_and_end_frames():
+    joint = Kandinsky6EmptyLatent.execute(864, 480, 121, 1)[0]
+    start = torch.full((1, 960, 1280, 3), 0.25)
+    end = torch.full((1, 960, 1280, 3), 0.75)
+
+    out_positive, out_negative, out_latent = Kandinsky6ImageToVideoAudio.execute(
+        _cond(), _cond(), joint, start_image=start, end_image=end, vae=_FakeVae())
+
+    video, _ = out_latent["samples"].unbind()
+    assert torch.allclose(video[:, :, 0], torch.full_like(video[:, :, 0], 0.25))
+    assert torch.allclose(video[:, :, -1], torch.full_like(video[:, :, -1], 0.75))
+    assert torch.count_nonzero(video[:, :, 1:-1]) == 0
+
+    video_mask, audio_mask = out_latent["noise_mask"].unbind()
+    assert video_mask[0, 0, 0].item() == 0.0
+    assert video_mask[0, 0, -1].item() == 0.0
+    assert video_mask[0, 0, 1:-1].min().item() == 1.0
+    assert audio_mask.min().item() == 1.0
+
+    # The start frame doubles as the model's I2VA reference on both conds.
+    reference = out_positive[0][1]["k6_reference"]
+    assert torch.equal(reference, video[:, :, :1])
+    assert torch.equal(out_negative[0][1]["k6_reference"], reference)
+
+
+def test_i2v_node_builds_latent_from_image():
+    # 960x720 image -> 120x90 latents, the default 121 frames -> 31 latent frames.
+    start = torch.full((1, 720, 960, 3), 0.3)
+    _, _, out_latent = Kandinsky6ImageToVideoAudio.execute(_cond(), _cond(), None, start_image=start, vae=_FakeVae())
+    video, audio = out_latent["samples"].unbind()
+    assert tuple(video.shape) == (1, 16, 31, 90, 120)
+    assert torch.allclose(video[:, :, 0], torch.full_like(video[:, :, 0], 0.3))
+    assert out_latent["noise_mask"].unbind()[0][0, 0, 0].item() == 0.0
+
+
+def test_i2v_node_requires_latent_or_image():
+    with pytest.raises(ValueError):
+        Kandinsky6ImageToVideoAudio.execute(_cond(), _cond(), None)
+
+
+def test_i2v_node_requires_vae_for_images():
+    joint = Kandinsky6EmptyLatent.execute(864, 480, 121, 1)[0]
+    with pytest.raises(ValueError):
+        Kandinsky6ImageToVideoAudio.execute(_cond(), _cond(), joint, start_image=torch.rand(1, 480, 864, 3))
+
+
+def test_add_guide_node_pins_mid_frame():
+    joint = Kandinsky6EmptyLatent.execute(864, 480, 121, 1)[0]
+    image = torch.full((1, 480, 864, 3), 0.5)
+
+    out = Kandinsky6AddGuide.execute(joint, 60, vae=_FakeVae(), image=image)[0]
+
+    video, _ = out["samples"].unbind()
+    video_mask, _ = out["noise_mask"].unbind()
+    # pixel frame 60 sits on latent frame 15
+    assert torch.allclose(video[:, :, 15], torch.full_like(video[:, :, 15], 0.5))
+    assert video_mask[0, 0, 15].item() == 0.0
+    assert video_mask[0, 0, 14].item() == 1.0
+    assert video_mask[0, 0, 16].item() == 1.0
+
+
+def test_add_guide_node_negative_index_counts_from_end():
+    joint = Kandinsky6EmptyLatent.execute(864, 480, 121, 1)[0]
+    image = torch.full((1, 480, 864, 3), 0.5)
+
+    out = Kandinsky6AddGuide.execute(joint, -1, vae=_FakeVae(), image=image)[0]
+
+    video_mask, _ = out["noise_mask"].unbind()
+    assert video_mask[0, 0, -1].item() == 0.0
+    assert video_mask[0, 0, -2].item() == 1.0
+
+
+def test_add_guide_node_clip_guide():
+    joint = Kandinsky6EmptyLatent.execute(864, 480, 121, 1)[0]
+    # 5 frames -> 2 latent frames; the clip starts at pixel frame 8 -> latent 2.
+    clip = torch.full((5, 480, 864, 3), 0.5)
+
+    out = Kandinsky6AddGuide.execute(joint, 8, vae=_FakeVae(), image=clip)[0]
+    video, _ = out["samples"].unbind()
+    video_mask, _ = out["noise_mask"].unbind()
+    assert torch.allclose(video[:, :, 2:4], torch.full_like(video[:, :, 2:4], 0.5))
+    assert video_mask[0, 0, 2:4].max().item() == 0.0
+    assert video_mask[0, 0, 1].item() == 1.0
+    assert video_mask[0, 0, 4].item() == 1.0
+
+    # The same clip at the very end does not fit: 30 + 2 > 31 latent frames.
+    with pytest.raises(ValueError):
+        Kandinsky6AddGuide.execute(joint, -1, vae=_FakeVae(), image=clip)
+
+
+def test_add_latent_guide_node_pins_latent_frames():
+    joint = Kandinsky6EmptyLatent.execute(864, 480, 121, 1)[0]
+    guide = torch.full((1, 16, 2, 60, 108), 0.9)
+
+    out = Kandinsky6AddLatentGuide.execute(joint, {"samples": guide}, -3)[0]
+    video, _ = out["samples"].unbind()
+    video_mask, _ = out["noise_mask"].unbind()
+    # latent_idx -3 of 31 frames -> 28, pinning latent frames 28 and 29
+    assert torch.allclose(video[:, :, 28:30], torch.full_like(video[:, :, 28:30], 0.9))
+    assert video_mask[0, 0, 28:30].max().item() == 0.0
+    assert video_mask[0, 0, 30].item() == 1.0
+
+    # A joint AV guide contributes its video stream.
+    joint_guide = comfy.nested_tensor.NestedTensor((guide, torch.zeros(1, 10, 40)))
+    out2 = Kandinsky6AddLatentGuide.execute(joint, {"samples": joint_guide}, 5)[0]
+    video2, _ = out2["samples"].unbind()
+    assert torch.allclose(video2[:, :, 5:7], torch.full_like(video2[:, :, 5:7], 0.9))
+
+    with pytest.raises(ValueError):
+        Kandinsky6AddLatentGuide.execute(joint, {"samples": torch.full((1, 16, 2, 30, 54), 0.9)}, 0)
+
+
 def _small_dit():
     # disable_weight_init leaves torch.empty garbage behind; bound the weights
     # so the forward stays finite for the value checks below.
@@ -688,6 +827,33 @@ def test_piflow_rollout_audio_mask_keeps_clean_region():
     assert not torch.equal(a2[:, 2:], audio_clean[:, 2:])
 
 
+def test_piflow_rollout_video_mask_keeps_clean_frames():
+    model = _small_distilled_dit(n_grid=2)
+    torch.manual_seed(0)
+    video = torch.randn(1, 16, 4, 4, 4)
+    audio = torch.randn(1, 4, 40)
+    context = torch.randn(1, 6, 32)
+    pooled = torch.randn(1, 32)
+    video_clean = torch.randn(1, 16, 4, 4, 4)
+
+    v, _ = piflow.rollout(
+        model, video, audio, context, pooled, steps=4, dtype=torch.float32,
+        video_mask=torch.zeros(1, 1, 4, 1, 1), video_clean=video_clean,
+    )
+    # A fully masked video stream comes back exactly as the clean latent.
+    assert torch.equal(v, video_clean)
+
+    mask = torch.zeros(1, 1, 4, 1, 1)
+    mask[:, :, 2:] = 1.0
+    v2, _ = piflow.rollout(
+        model, video, audio, context, pooled, steps=4, dtype=torch.float32,
+        video_mask=mask, video_clean=video_clean,
+    )
+    # Masked frames stay clean; the rest is generated.
+    assert torch.equal(v2[:, :, :2], video_clean[:, :, :2])
+    assert not torch.equal(v2[:, :, 2:], video_clean[:, :, 2:])
+
+
 def test_piflow_guider_is_a_basic_guider():
     # The PiFlow guider is a CFG guider that keeps a single conditioning, so it
     # slots into the custom sampler like the other guiders.
@@ -744,3 +910,53 @@ def test_piflow_guider_drives_cli_progress_bar(monkeypatch):
     assert bars["total"] == steps
     assert bars["disable"] is False
     assert bars["updates"] == steps
+
+
+def test_piflow_guider_passes_stream_masks_to_rollout(monkeypatch):
+    # A latent noise mask reaches the rollout per stream: the video mask pins
+    # the guide frames, the audio mask the custom track.
+    steps = 4
+    video = torch.randn(1, 16, 2, 4, 4)
+    audio = torch.randn(1, 4, 40)
+    noise, latent_shapes = comfy.utils.pack_latents((video, audio))
+    video_mask = torch.ones(1, 16, 2, 4, 4)
+    video_mask[0, :, 0] = 0.0
+    audio_mask = torch.zeros(1, 4, 40)
+    denoise_mask, _ = comfy.utils.pack_latents((video_mask, audio_mask))
+
+    guider = object.__new__(Kandinsky6PiFlowGuider)
+    guider.inner_model = types.SimpleNamespace(
+        get_dtype_inference=lambda: torch.float32,
+        diffusion_model=None,
+        process_latent_in=lambda x: x,
+        process_latent_out=lambda x: x,
+        latent_format=types.SimpleNamespace(process_in=lambda x: x * 0.5),
+    )
+    reference = torch.randn(1, 16, 1, 4, 4)
+    guider.conds = {"positive": [{"cross_attn": torch.randn(1, 4, 32),
+                                  "pooled_output": torch.randn(1, 32),
+                                  "uuid": uuid.uuid4(),
+                                  "k6_reference": reference}]}
+    guider.model_options = {"transformer_options": {}}
+
+    seen = {}
+    def fake_rollout(dit, v, a, context, pooled, *, steps, dtype, **kwargs):
+        seen["video_mask"] = kwargs.get("video_mask")
+        seen["video_clean"] = kwargs.get("video_clean")
+        seen["audio_mask"] = kwargs.get("audio_mask")
+        seen["reference"] = kwargs.get("reference")
+        return v, a
+    monkeypatch.setattr(k6_nodes.piflow, "rollout", fake_rollout)
+
+    guider.inner_sample(
+        noise, noise, torch.device("cpu"), None,
+        torch.linspace(1.0, 0.0, steps + 1), denoise_mask, None, False, 0,
+        latent_shapes=latent_shapes,
+    )
+
+    assert torch.equal(seen["video_mask"], video_mask)
+    assert torch.equal(seen["video_clean"], video)
+    assert torch.equal(seen["audio_mask"], audio_mask)
+    # The conditioning carries VAE-space latents; the rollout's reference tail
+    # must be in the trajectory's model space.
+    assert torch.equal(seen["reference"], reference * 0.5)

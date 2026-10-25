@@ -84,6 +84,60 @@ def _validate_joint_latent(joint_latent):
             )
 
 
+def _encode_frames(vae, image, width, height):
+    """Resize a batched image or clip onto the canvas and encode it to video latent frames."""
+    resized = comfy.utils.common_upscale(
+        image.movedim(-1, 1), width, height, "bilinear", "center"
+    ).movedim(1, -1)
+    latent = vae.encode(resized)
+    if latent.ndim == 4:
+        latent = latent.unsqueeze(2)
+    return latent
+
+
+def _pin_video_frames(joint_latent, frames, latent_idx):
+    """Write encoded frames into the video stream at latent_idx and keep them clean via the noise mask."""
+    video, audio = _joint_streams(joint_latent)
+    frames = frames.to(device=video.device, dtype=video.dtype)
+    if frames.shape[0] == 1 and video.shape[0] != 1:
+        frames = frames.expand(video.shape[0], -1, -1, -1, -1)
+    count = frames.shape[2]
+    if frames.shape[3:] != video.shape[3:]:
+        raise ValueError(
+            f"the guide's spatial size {frames.shape[3]}x{frames.shape[4]} must match the "
+            f"latent's {video.shape[3]}x{video.shape[4]}."
+        )
+    if latent_idx < 0 or latent_idx + count > video.shape[2]:
+        raise ValueError(
+            f"the guide's {count} latent frame(s) at index {latent_idx} do not fit the "
+            f"{video.shape[2]}-frame video latent."
+        )
+
+    mask = joint_latent.get("noise_mask")
+    if mask is None:
+        video_mask = torch.ones(video.shape[0], 1, video.shape[2], 1, 1, device=video.device)
+        audio_mask = torch.ones(audio.shape[0], 1, 1, audio.shape[1], device=audio.device)
+    elif getattr(mask, "is_nested", False):
+        video_mask, audio_mask = list(mask.unbind())
+        video_mask = video_mask.clone()
+    else:
+        if mask.ndim != 5:
+            raise ValueError(
+                "a Kandinsky 6 joint latent noise mask must be a nested AV mask or a 5D video mask."
+            )
+        video_mask = mask.clone()
+        audio_mask = torch.ones(audio.shape[0], 1, 1, audio.shape[1], device=audio.device)
+
+    video = video.clone()
+    video[:, :, latent_idx:latent_idx + count] = frames
+    video_mask[:, :, latent_idx:latent_idx + count] = 0.0
+
+    out = dict(joint_latent)
+    out["samples"] = comfy.nested_tensor.NestedTensor((video, audio))
+    out["noise_mask"] = comfy.nested_tensor.NestedTensor((video_mask, audio_mask))
+    return out
+
+
 class Kandinsky6EmptyLatent(io.ComfyNode):
     @classmethod
     def define_schema(cls) -> io.Schema:
@@ -140,13 +194,16 @@ class Kandinsky6EmptyLatent(io.ComfyNode):
 
 
 class Kandinsky6ImageToVideoAudio(io.ComfyNode):
-    """Animate a reference image into video+audio, or run text-only.
+    """Animate frame images into video+audio, or run text-only.
 
-    ``image`` is resized to the generation size and VAE-encoded here, so no
-    separate VAEEncode step is needed.  Leave ``image`` unconnected for pure
-    text-to-video+audio.  The encoded reference is passed through the
-    conditioning; the model appends it as a clean tail frame internally, so
-    the latent keeps its native shape through sampling.
+    Connected frames are resized to the generation size and VAE-encoded here,
+    so no separate VAEEncode step is needed.  Each one is pinned into the
+    latent at the first or last latent frame with the noise mask, so the
+    output video starts or ends exactly on it.  The start frame is
+    additionally passed through the conditioning as the model's I2VA
+    reference.  ``empty_latent`` can be left unconnected: the node then builds
+    one from a connected image, using its size and the default frame count.
+    Leave both images unconnected for pure text-to-video+audio.
     """
 
     @classmethod
@@ -155,45 +212,158 @@ class Kandinsky6ImageToVideoAudio(io.ComfyNode):
             node_id="Kandinsky6ImageToVideoAudio",
             display_name="Kandinsky 6 Image to Video+Audio",
             category="model/conditioning/kandinsky6",
-            description="Animate a reference image into video+audio, or run text-only. The image is resized and VAE-encoded here; leave it unconnected for pure text-to-video+audio.",
+            description="Animate a start and/or end frame image into video+audio, or run text-only. Frames are resized and VAE-encoded here and pinned into the returned latent, so the video starts or ends exactly on them. Leave empty_latent unconnected to build it from the image size.",
             inputs=[
                 io.Conditioning.Input("positive"),
                 io.Conditioning.Input("negative"),
-                io.Latent.Input("empty_latent"),
-                io.Image.Input("image", optional=True),
+                io.Latent.Input("empty_latent", optional=True),
+                io.Image.Input("start_image", optional=True),
+                io.Image.Input("end_image", optional=True),
                 io.Vae.Input("vae", optional=True),
             ],
             outputs=[
                 io.Conditioning.Output(display_name="positive"),
                 io.Conditioning.Output(display_name="negative"),
+                io.Latent.Output(display_name="joint_latent"),
             ],
         )
 
     @classmethod
-    def execute(cls, positive, negative, empty_latent, image=None, vae=None) -> io.NodeOutput:
-        _validate_joint_latent(empty_latent)
+    def execute(cls, positive, negative, empty_latent, start_image=None, end_image=None, vae=None) -> io.NodeOutput:
+        if empty_latent is None:
+            anchor = start_image if start_image is not None else end_image
+            if anchor is None:
+                raise ValueError("Connect an empty latent or a frame image to size the generation.")
+            width = (anchor.shape[2] // _VIDEO_SPATIAL_FACTOR) * _VIDEO_SPATIAL_FACTOR
+            height = (anchor.shape[1] // _VIDEO_SPATIAL_FACTOR) * _VIDEO_SPATIAL_FACTOR
+            if width < _VIDEO_SPATIAL_FACTOR or height < _VIDEO_SPATIAL_FACTOR:
+                raise ValueError(
+                    f"the frame image is too small: it needs at least "
+                    f"{_VIDEO_SPATIAL_FACTOR}x{_VIDEO_SPATIAL_FACTOR} pixels."
+                )
+            empty_latent = Kandinsky6EmptyLatent.execute(
+                width, height, int(GENERATION_DEFAULTS["sample_frames"]), 1
+            )[0]
+        else:
+            _validate_joint_latent(empty_latent)
 
-        if image is None:
-            return io.NodeOutput(positive, negative)
+        if start_image is None and end_image is None:
+            return io.NodeOutput(positive, negative, empty_latent)
         if vae is None:
-            raise ValueError("Connect the video VAE to encode the I2VA reference image.")
+            raise ValueError("Connect the video VAE to encode the frame images.")
 
         video, _ = _joint_streams(empty_latent)
         down = vae.spacial_compression_encode()
         target_w = int(video.shape[4] * down)
         target_h = int(video.shape[3] * down)
-        resized = comfy.utils.common_upscale(
-            image[:1, :, :, :3].movedim(-1, 1), target_w, target_h, "bilinear", "center"
-        ).movedim(1, -1)
-        reference = vae.encode(resized)
-        if reference.ndim == 4:
-            reference = reference.unsqueeze(2)
-        reference = reference.to(device=video.device, dtype=video.dtype)
 
-        values = {"k6_reference": reference}
-        positive = node_helpers.conditioning_set_values(positive, values)
-        negative = node_helpers.conditioning_set_values(negative, values)
-        return io.NodeOutput(positive, negative)
+        if start_image is not None:
+            start = _encode_frames(vae, start_image[:1], target_w, target_h)
+            empty_latent = _pin_video_frames(empty_latent, start, 0)
+            reference = start.to(device=video.device, dtype=video.dtype)
+            values = {"k6_reference": reference}
+            positive = node_helpers.conditioning_set_values(positive, values)
+            negative = node_helpers.conditioning_set_values(negative, values)
+
+        if end_image is not None:
+            end = _encode_frames(vae, end_image[:1], target_w, target_h)
+            empty_latent = _pin_video_frames(empty_latent, end, video.shape[2] - 1)
+
+        return io.NodeOutput(positive, negative, empty_latent)
+
+
+class Kandinsky6AddGuide(io.ComfyNode):
+    """Anchor an image, or a short clip batched as frames, at a pixel frame of the joint latent.
+
+    The frames are resized and VAE-encoded here and pinned into the latent with
+    the noise mask, so the PiFlow rollout keeps them clean and the video
+    interpolates between the anchored frames. Chain several nodes to anchor
+    several frames.
+    """
+
+    @classmethod
+    def define_schema(cls) -> io.Schema:
+        return io.Schema(
+            node_id="Kandinsky6AddGuide",
+            display_name="Kandinsky 6 Add Guide",
+            category="model/conditioning/kandinsky6",
+            description="Anchor an image, or a short clip batched as frames, at any pixel frame of a Kandinsky 6 joint latent. The frames are VAE-encoded here and kept clean by the noise mask, so the video interpolates between them. Chain several nodes to anchor several frames.",
+            inputs=[
+                io.Latent.Input("latent"),
+                io.Vae.Input("vae", optional=True),
+                io.Image.Input("image", optional=True,
+                               tooltip="Image, or a clip batched as frames. Clip guides are cropped to the model's 4*n+1 frame grid and start at the nearest lower multiple of 4."),
+                io.Int.Input("frame_idx", default=0, min=-9999, max=9999,
+                             tooltip="Pixel frame to anchor the guide at. Negative values are counted from the end of the video. "
+                                     "The anchored frame decodes at the start of the 4-frame group containing the requested index."),
+            ],
+            outputs=[
+                io.Latent.Output(display_name="latent"),
+            ],
+        )
+
+    @classmethod
+    def execute(cls, latent, frame_idx, vae=None, image=None) -> io.NodeOutput:
+        if image is None:
+            raise ValueError("Connect an image or clip to anchor.")
+        if vae is None:
+            raise ValueError("Connect the video VAE to encode the guide.")
+
+        video, _ = _joint_streams(latent)
+        frame_count = (video.shape[2] - 1) * _VIDEO_TEMPORAL_FACTOR + 1
+        resolved = frame_idx if frame_idx >= 0 else frame_count + frame_idx
+        frames = image.shape[0]
+        if frames > 1:
+            resolved = (resolved // _VIDEO_TEMPORAL_FACTOR) * _VIDEO_TEMPORAL_FACTOR
+            frames = (frames - 1) // _VIDEO_TEMPORAL_FACTOR * _VIDEO_TEMPORAL_FACTOR + 1
+            image = image[:frames]
+
+        down = vae.spacial_compression_encode()
+        guide = _encode_frames(vae, image, int(video.shape[4] * down), int(video.shape[3] * down))
+        return io.NodeOutput(_pin_video_frames(latent, guide, resolved // _VIDEO_TEMPORAL_FACTOR))
+
+
+class Kandinsky6AddLatentGuide(io.ComfyNode):
+    """Pin an already-encoded video latent at a latent frame of the joint latent.
+
+    Same pinning as Kandinsky 6 Add Guide without the VAE round trip, for when
+    the guide comes out of an earlier stage (another generation, an upscale,
+    a decode/encode pair) as a latent instead of an image.
+    """
+
+    @classmethod
+    def define_schema(cls) -> io.Schema:
+        return io.Schema(
+            node_id="Kandinsky6AddLatentGuide",
+            display_name="Kandinsky 6 Add Latent Guide",
+            category="model/conditioning/kandinsky6",
+            description="Pin an already-encoded video latent at any latent frame of a Kandinsky 6 joint latent, kept clean by the noise mask. Same effect as Kandinsky 6 Add Guide without the VAE decode/encode round trip.",
+            inputs=[
+                io.Latent.Input("latent", tooltip="Target Kandinsky 6 joint latent the guide is pinned onto."),
+                io.Latent.Input("guide", tooltip="Guide latent: a video latent, or a joint AV latent whose video stream is pinned. Its spatial size must match the target's."),
+                io.Int.Input("latent_idx", default=0, min=-9999, max=9999,
+                             tooltip="Latent frame to pin the guide at. Negative values are counted from the end of the latent."),
+            ],
+            outputs=[
+                io.Latent.Output(display_name="latent"),
+            ],
+        )
+
+    @classmethod
+    def execute(cls, latent, guide, latent_idx) -> io.NodeOutput:
+        video, _ = _joint_streams(latent)
+        samples = guide["samples"]
+        if getattr(samples, "is_nested", False):
+            guide_video = list(samples.unbind())[0]
+        else:
+            guide_video = samples
+        if guide_video.ndim != 5 or guide_video.shape[1] != _VIDEO_CHANNELS:
+            raise ValueError(
+                f"the guide must carry a 5D video latent with {_VIDEO_CHANNELS} channels."
+            )
+
+        resolved = latent_idx if latent_idx >= 0 else video.shape[2] + latent_idx
+        return io.NodeOutput(_pin_video_frames(latent, guide_video, resolved))
 
 
 class Kandinsky6PiFlowGuider(comfy.samplers.CFGGuider):
@@ -202,11 +372,12 @@ class Kandinsky6PiFlowGuider(comfy.samplers.CFGGuider):
     Each segment costs one DiT evaluation; the model's n_grid velocity grids are
     then integrated over the segment by a network-free policy, so the distilled
     model runs on its intended step budget. Only the positive conditioning is
-    consumed (the distilled release runs without CFG). The video stream is fully
-    denoised; a latent noise mask can keep part of the audio stream clean, which
-    is how a custom audio track is encoded into the generation. The custom
-    sampler's ``sampler`` and sigma values only set the segment count
-    (len(sigmas) - 1); PiFlow keeps its own shifted schedule.
+    consumed (the distilled release runs without CFG). A latent noise mask can
+    keep part of either stream clean: pinned video frames are how start/end and
+    guide frames stay exact, and a masked audio stream is how a custom audio
+    track is encoded into the generation. The custom sampler's ``sampler`` and
+    sigma values only set the segment count (len(sigmas) - 1); PiFlow keeps its
+    own shifted schedule.
     """
 
     def set_conds(self, positive):
@@ -216,11 +387,11 @@ class Kandinsky6PiFlowGuider(comfy.samplers.CFGGuider):
                       denoise_mask, callback, disable_pbar, seed, latent_shapes=None):
         self.inner_model.latent_shapes = latent_shapes
 
+        video_mask = None
         audio_mask = None
         if denoise_mask is not None:
             masks = comfy.utils.unpack_latents(denoise_mask, latent_shapes)
-            if not bool(torch.all(masks[0] >= 1.0 - 1e-6)):
-                raise ValueError("Kandinsky 6 PiFlow sampling supports full video denoise only.")
+            video_mask = masks[0]
             if len(masks) > 1:
                 audio_mask = masks[1]
         if len(self.conds["positive"]) != 1:
@@ -235,12 +406,21 @@ class Kandinsky6PiFlowGuider(comfy.samplers.CFGGuider):
         pooled = mm.cast_to_device(cond["pooled_output"], device, dtype)
         reference = cond.get("k6_reference", None)
         if reference is not None:
+            # The reference tail is concatenated onto the video sequence inside
+            # the DiT, so it must be in the same model space as the trajectory;
+            # the conditioning carries VAE-space latents.
+            reference = self.inner_model.latent_format.process_in(reference)
             reference = mm.cast_to_device(reference, device, dtype)
 
         video, audio = comfy.utils.unpack_latents(noise, latent_shapes)
+        video_clean = None
         audio_clean = None
-        if audio_mask is not None:
-            _, audio_clean = comfy.utils.unpack_latents(latent_image, latent_shapes)
+        if video_mask is not None or audio_mask is not None:
+            # Pin the clean latent into the trajectory space, the same space
+            # the standard sampler moves latent_image into before blending in
+            # the masked region; process_latent_out brings the output back.
+            clean = self.inner_model.process_latent_in(latent_image)
+            video_clean, audio_clean = comfy.utils.unpack_latents(clean, latent_shapes)
         steps = max(int(sigmas.shape[-1]) - 1, 1)
 
         options = dict(self.model_options.get("transformer_options", {}))
@@ -270,6 +450,8 @@ class Kandinsky6PiFlowGuider(comfy.samplers.CFGGuider):
                 reference=reference,
                 transformer_options=options,
                 callback=segment_callback,
+                video_mask=video_mask,
+                video_clean=video_clean,
                 audio_mask=audio_mask,
                 audio_clean=audio_clean,
             )
@@ -284,7 +466,7 @@ class Kandinsky6PiFlowGuiderNode(io.ComfyNode):
             node_id="Kandinsky6PiFlowGuider",
             display_name="Kandinsky 6 PiFlow Guider",
             category="model/sampling/guiders",
-            description="Runs the vendor PiFlow schedule on a distilled Kandinsky 6 checkpoint. The video is fully denoised; a latent noise mask can keep part of the audio clean to encode a custom track.",
+            description="Runs the vendor PiFlow schedule on a distilled Kandinsky 6 checkpoint. A latent noise mask can keep part of the video (pinned start/end/guide frames) or of the audio (a custom track) clean.",
             inputs=[
                 io.Model.Input("model"),
                 io.Conditioning.Input("conditioning"),
@@ -307,6 +489,8 @@ class Kandinsky6Extension(ComfyExtension):
         return [
             Kandinsky6EmptyLatent,
             Kandinsky6ImageToVideoAudio,
+            Kandinsky6AddGuide,
+            Kandinsky6AddLatentGuide,
             Kandinsky6PiFlowGuiderNode,
         ]
 

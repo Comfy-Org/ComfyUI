@@ -81,13 +81,13 @@ def policy_rollout_fm(x_t_start, sigma_t_start, raw_t_start, raw_t_end, num_subs
     return x_t, sigma_t
 
 
-def rollout(dit, video, audio, context, pooled, *, steps, dtype, reference=None, transformer_options=None, callback=None, audio_mask=None, audio_clean=None):
+def rollout(dit, video, audio, context, pooled, *, steps, dtype, reference=None, transformer_options=None, callback=None, video_mask=None, video_clean=None, audio_mask=None, audio_clean=None):
     """Run the PiFlow segments; one DiT evaluation per segment.
 
-    With ``audio_mask`` the masked audio region is kept clean: before each
-    evaluation it is replaced by the on-distribution noised clean latent, and
-    the final output takes the clean latent there, matching Comfy's standard
-    inpainting semantics.
+    With ``video_mask``/``audio_mask`` the masked region of a stream is kept
+    clean: before each evaluation it is replaced by the on-distribution noised
+    clean latent, and the final output takes the clean latent there, matching
+    Comfy's standard inpainting semantics.
     """
     params = PIFLOW_DEFAULTS
     eps = float(params["eps"])
@@ -99,6 +99,7 @@ def rollout(dit, video, audio, context, pooled, *, steps, dtype, reference=None,
     device = video.device
     n_grid = dit.n_grid
     options = dict(transformer_options or {})
+    video_noise = video
     audio_noise = audio
 
     for index in range(steps):
@@ -115,6 +116,10 @@ def rollout(dit, video, audio, context, pooled, *, steps, dtype, reference=None,
         easycache = options.get("easycache")
         if easycache is not None:
             easycache.skip_current_step = False
+
+        if video_mask is not None:
+            sigma = sigma_src.reshape(batch, *((video.ndim - 1) * [1]))
+            video = video * video_mask + (sigma * video_noise + (1 - sigma) * video_clean) * (1 - video_mask)
 
         if audio_mask is not None:
             sigma = sigma_src.reshape(batch, *((audio.ndim - 1) * [1]))
@@ -152,6 +157,8 @@ def rollout(dit, video, audio, context, pooled, *, steps, dtype, reference=None,
             callback(index, (x0_streams[0], x0_streams[1]), (video, audio), steps)
         raw_src = raw_dst
 
+    if video_mask is not None:
+        video = video * video_mask + video_clean * (1 - video_mask)
     if audio_mask is not None:
         audio = audio * audio_mask + audio_clean * (1 - audio_mask)
     return video, audio
