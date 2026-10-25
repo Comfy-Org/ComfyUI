@@ -13,6 +13,7 @@ import torch.nn.functional as F
 
 import comfy.model_management
 import comfy.model_prefetch
+import comfy.ops
 import comfy.patcher_extension
 import comfy.quant_ops
 import comfy.ldm.common_dit
@@ -30,18 +31,18 @@ class RMSNorm(nn.Module):
         self.eps = eps
         self.scale = nn.Parameter(torch.empty(features, device=device, dtype=dtype))
 
-    def weight(self, x):
+    def fp32_weight(self, x):
         return comfy.model_management.cast_to(self.scale, dtype=torch.float32, device=x.device) + 1.0
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return F.rms_norm(x.float(), (x.shape[-1],), weight=self.weight(x), eps=self.eps).to(x.dtype)
+        return F.rms_norm(x, (x.shape[-1],), weight=self.fp32_weight(x).to(x.dtype), eps=self.eps)
 
 
 def modulated_norm(x, norm, scale, shift):
     if comfy.model_management.in_training:
         return (1 + scale) * norm(x) + shift
     # the norm weight is folded in fp32 into the scale of the fused rmsnorm(x) * (1 + scale) + shift
-    scale = (norm.weight(x) * (1 + scale.float()) - 1).to(x.dtype)
+    scale = (norm.fp32_weight(x) * (1 + scale.float()) - 1).to(x.dtype)
     return comfy.quant_ops.ck.rms_adaln(x, scale, shift, norm.eps)
 
 
@@ -122,7 +123,7 @@ class Attention(nn.Module):
 
         if freqs is not None and not patches and not comfy.model_management.in_training:
             qnorm, knorm = self.qknorm.qnorm, self.qknorm.knorm
-            q, k = comfy.quant_ops.ck.rms_rope(q, k, freqs, qnorm.weight(q), knorm.weight(k), qnorm.eps)
+            q, k = comfy.quant_ops.ck.rms_rope_(q, k, freqs, qnorm.fp32_weight(q), knorm.fp32_weight(k), qnorm.eps)
         else:
             q, k = self.qknorm(q, k)
             if patches:
@@ -139,9 +140,10 @@ class Attention(nn.Module):
             if freqs is not None:
                 q, k = apply_rope(q, k, freqs)
 
+        # expanded here: block-sparse, sol and custom attention overrides reshape k/v by the query heads
+        k, v = comfy.ops.repeat_kv_for_gqa(k, v, self.heads, 2)
         q, k, v = AttentionTensorContainer(q.flatten(2)), AttentionTensorContainer(k.flatten(2)), AttentionTensorContainer(v.flatten(2))
-        out = optimized_attention_masked(q, k, v, self.heads, mask=mask, enable_gqa=self.kvheads != self.heads,
-                                         preferred_attention=self.comfy_attention, transformer_options=transformer_options)
+        out = optimized_attention_masked(q, k, v, self.heads, mask=mask, preferred_attention=self.comfy_attention, transformer_options=transformer_options)
 
         if "block_index" in transformer_options and "attn1_output_patch" in transformer_patches:
             extra_options = transformer_options.copy()
@@ -397,9 +399,8 @@ class SingleStreamDiT(nn.Module):
         comfy.model_prefetch.prefetch_queue_pop(prefetch_queue, device, None, malloc_scope="block")
         comfy.model_prefetch.malloc_graph_end()
 
-        final = self.last(combined, t)
+        out = self.last(combined[:, txtlen:txtlen + img_tokens], t)
         del combined
-        out = final[:, txtlen:txtlen + img_tokens, :]
         out = out.reshape(bs, h_, w_, self.channels, patch, patch).permute(0, 3, 1, 4, 2, 5).reshape(bs, self.channels, h_ * patch, w_ * patch)
         out = out[:, :, :h_orig, :w_orig]  # crop padding back off
         if temporal:
