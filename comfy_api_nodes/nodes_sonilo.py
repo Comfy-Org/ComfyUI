@@ -177,7 +177,7 @@ async def _stream_sonilo_music(
     title: str | None = None
 
     timeout = aiohttp.ClientTimeout(total=1200.0, sock_read=300.0)
-    async with aiohttp.ClientSession(timeout=timeout) as session:
+    async with aiohttp.ClientSession(timeout=timeout, trust_env=True) as session:
         PromptServer.instance.send_progress_text("Status: Queued", node_id)
         async with session.post(url, data=form, headers=headers) as resp:
             if resp.status >= 400:
