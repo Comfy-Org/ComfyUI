@@ -375,7 +375,7 @@ comfyui-workflow-templates is not installed.
 
         repo_owner, repo_name, version = cls.parse_version_string(version_string)
 
-        if version.startswith("v"):
+        if version not in ("latest", "prerelease"):
             expected_path = str(
                 Path(cls.CUSTOM_FRONTENDS_ROOT)
                 / f"{repo_owner}_{repo_name}"

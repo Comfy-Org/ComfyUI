@@ -130,6 +130,21 @@ def test_finally_block(mock_os_functions, mock_download, mock_provider):
     mock_rmdir.assert_called_once()
 
 
+@pytest.mark.parametrize("version", ["1.0.0", "v1.0.0"])
+def test_init_frontend_uses_cached_version(tmp_path, version):
+    cached = tmp_path / "test-owner_test-repo" / "1.0.0"
+    cached.mkdir(parents=True)
+
+    with (
+        patch.object(FrontendManager, "CUSTOM_FRONTENDS_ROOT", str(tmp_path)),
+        patch.object(FrontEndProvider, "get_release", side_effect=HTTPError("403 rate limit exceeded")),
+        patch.object(FrontendManager, "default_frontend_path", return_value="/default/path"),
+    ):
+        frontend_path = FrontendManager.init_frontend(f"test-owner/test-repo@{version}")
+
+    assert frontend_path == str(cached)
+
+
 def test_parse_version_string():
     version_string = "owner/repo@1.0.0"
     repo_owner, repo_name, version = FrontendManager.parse_version_string(
