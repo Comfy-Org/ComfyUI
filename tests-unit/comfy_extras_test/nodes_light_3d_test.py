@@ -134,6 +134,17 @@ class TestNormalizeLight:
         assert light["intensity"] == 1.0
         assert light["target"] == [0.0, 0.0, 0.0]
 
+    @pytest.mark.parametrize("inner,outer,expected", [
+        (12.0, 20.0, (12.0, 20.0)),
+        (60.0, 45.0, (45.0, 45.0)),
+        (-5.0, 45.0, (0.0, 45.0)),
+        (10.0, -1.0, (1.0, 1.0)),
+        (30.0, 120.0, (30.0, 90.0)),
+    ])
+    def test_spot_cones_are_clamped_like_create_light_info(self, inner, outer, expected):
+        light = _normalize_light({"type": "spot", "innerConeAngle": inner, "outerConeAngle": outer})
+        assert (light["inner_cone"], light["outer_cone"]) == expected
+
 
 class TestRenderLight:
     @staticmethod
@@ -242,6 +253,30 @@ class TestRenderLight:
         finally:
             comfy.model_management.interrupt_current_processing(False)
         assert len(traced) == 1
+
+    def test_an_interrupt_stops_before_the_next_light(self, monkeypatch):
+        traced = []
+
+        def trace_then_cancel(*args, **kwargs):
+            traced.append(1)
+            comfy.model_management.interrupt_current_processing(True)
+            return _any_hit_rays_bvh(*args, **kwargs)
+
+        monkeypatch.setattr(nodes_light_3d, "_any_hit_rays_bvh", trace_then_cancel)
+        lights = CreateLightInfo.execute(editor_state=[directional(), directional()]).result[0]
+        try:
+            with pytest.raises(comfy.model_management.InterruptProcessingException):
+                self._render(lights)
+        finally:
+            comfy.model_management.interrupt_current_processing(False)
+        assert len(traced) == 1
+
+    def test_a_raw_spot_wider_than_90_degrees_renders_like_the_clamped_one(self):
+        spot = {"type": "spot", "color": "#ffffff", "intensity": 8.0, "position": {"x": 0.0, "y": 2.0, "z": 0.0},
+                "target": {"x": 0.0, "y": 0.0, "z": 0.0}, "innerConeAngle": 30.0, "castShadow": False}
+        wide, _ = self._render([{**spot, "outerConeAngle": 120.0}]).result
+        clamped, _ = self._render([{**spot, "outerConeAngle": 90.0}]).result
+        assert torch.allclose(wide, clamped)
 
     def test_sky_matches_the_floor_color(self):
         image, _ = self._render([], camera_info={

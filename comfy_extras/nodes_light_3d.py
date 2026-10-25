@@ -83,10 +83,17 @@ def _ground_plane(size=100.0, y=-1.0):
     return v, faces, n
 
 
+def _spot_cone_angles(light) -> tuple[float, float]:
+    outer = min(max(float(light.get("outerConeAngle", 45.0)), _MIN_OUTER_CONE), _MAX_CONE)
+    inner = min(max(float(light.get("innerConeAngle", 30.0)), 0.0), outer)
+    return inner, outer
+
+
 def _normalize_light(light):
     kind = str(light.get("type", "directional"))
     if kind not in LIGHT_TYPES:
         raise ValueError(f"Unsupported light type '{kind}'. Supported: {', '.join(LIGHT_TYPES)}")
+    inner_cone, outer_cone = _spot_cone_angles(light)
     return {
         "type": kind,
         "color": _hex_to_linear_rgb(light.get("color")),
@@ -94,8 +101,8 @@ def _normalize_light(light):
         "position": _vec3(light.get("position"), _DEFAULT_LIGHT_POSITION),
         "target": _vec3(light.get("target")),
         "range": max(0.0, float(light.get("range", 0.0) or 0.0)),
-        "inner_cone": float(light.get("innerConeAngle", 30.0)),
-        "outer_cone": float(light.get("outerConeAngle", 45.0)),
+        "inner_cone": inner_cone,
+        "outer_cone": outer_cone,
         "radius": max(0.0, float(light.get("radius", 0.0) or 0.0)),
         "cast_shadow": bool(light.get("castShadow", True)),
     }
@@ -120,9 +127,7 @@ def _clean_light(light) -> IO.Load3DLightInfo.LightInfo:
         if rng > 0.0:
             cleaned["range"] = rng
     if kind == "spot":
-        outer = min(max(float(light.get("outerConeAngle", 45.0)), _MIN_OUTER_CONE), _MAX_CONE)
-        cleaned["innerConeAngle"] = min(max(float(light.get("innerConeAngle", 30.0)), 0.0), outer)
-        cleaned["outerConeAngle"] = outer
+        cleaned["innerConeAngle"], cleaned["outerConeAngle"] = _spot_cone_angles(light)
     radius = float(light.get("radius", 0.0) or 0.0)
     if radius > 0.0:
         cleaned["radius"] = radius
@@ -199,8 +204,8 @@ def _light_contribution(light, P, N, tri, bvh, dev, shadow_samples):
         if light["type"] == "spot":
             aim = torch.nn.functional.normalize(
                 torch.tensor(light["target"], device=dev) - pos, dim=-1, eps=1e-6)
-            cos_outer = math.cos(math.radians(max(light["outer_cone"], 1e-3)))
-            cos_inner = math.cos(math.radians(min(light["inner_cone"], light["outer_cone"])))
+            cos_outer = math.cos(math.radians(light["outer_cone"]))
+            cos_inner = math.cos(math.radians(light["inner_cone"]))
             cos_dir = (-L * aim[None, :]).sum(-1)
             t = ((cos_dir - cos_outer) / max(cos_inner - cos_outer, 1e-6)).clamp(0.0, 1.0)
             atten = atten * (t * t * (3.0 - 2.0 * t))
@@ -353,6 +358,7 @@ class RenderLight(IO.ComfyNode):
             radiance = ground_rgb[None, :] + (sky_rgb - ground_rgb)[None, :] * up_mix
             hit_out = hit.to(out_dev)
             for light, buf in zip(lights, per_light):
+                comfy.model_management.throw_exception_if_processing_interrupted()
                 contribution = _light_contribution(light, P, N, tri, bvh, dev, shadow_samples)
                 radiance = radiance + contribution
                 local = buf[s:e]
