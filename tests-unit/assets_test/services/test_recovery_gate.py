@@ -107,10 +107,19 @@ def test_no_hash_match_creates_fresh_rows(session, temp_dir: Path):
     assert len(session.scalars(select(Asset)).all()) == 2
 
 
-def test_off_mode_no_recovery(session, temp_dir: Path):
+def _stat_content(session, path: Path, hash_value: str | None) -> tuple[AssetContent, Asset]:
+    content, record = _missing_content(session, path, hash_value)
+    stat_result = path.stat()
+    content.size_bytes = stat_result.st_size
+    content.mtime_ns = stat_result.st_mtime_ns
+    session.commit()
+    return content, record
+
+
+def test_off_mode_recovers_by_exact_stat_without_hashing(session, temp_dir: Path):
     path = temp_dir / "off.bin"
     path.write_bytes(b"bytes")
-    missing, _ = _missing_content(session, path, _stored_hash(path))
+    missing, record = _stat_content(session, path, _stored_hash(path))
 
     with (
         patch("app.assets.scanner.mode.hashing_enabled", return_value=False),
@@ -120,6 +129,26 @@ def test_off_mode_no_recovery(session, temp_dir: Path):
     session.commit()
 
     hash_mock.assert_not_called()
+    assert error is None
+    assert created == 0
+    recovered = session.get(AssetContent, missing.id)
+    assert recovered.is_missing is False
+    assert recovered.hash == _stored_hash(path)
+    assert session.get(AssetTag, {"asset_id": record.id, "tag_name": "missing"}) is None
+
+
+@pytest.mark.parametrize("field", ["size_bytes", "mtime_ns"])
+def test_off_mode_stat_mismatch_creates_fresh_rows(session, temp_dir: Path, field: str):
+    path = temp_dir / "off-changed.bin"
+    path.write_bytes(b"bytes")
+    missing, _ = _stat_content(session, path, None)
+    setattr(missing, field, getattr(missing, field) + 1)
+    session.commit()
+
+    with patch("app.assets.scanner.mode.hashing_enabled", return_value=False):
+        created, error = seed_asset_specs(session, [_spec(path)])
+    session.commit()
+
     assert error is None
     assert created == 1
     assert session.get(AssetContent, missing.id).is_missing is True

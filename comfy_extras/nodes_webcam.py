@@ -1,5 +1,4 @@
 import nodes
-import folder_paths
 
 MAX_RESOLUTION = nodes.MAX_RESOLUTION
 
@@ -22,7 +21,7 @@ class WebcamCapture(nodes.LoadImage):
     CATEGORY = "image"
 
     def load_capture(self, image, **kwargs):
-        return super().load_image(folder_paths.get_annotated_filepath(image))
+        return super().load_image(image)
 
     @classmethod
     def IS_CHANGED(cls, image, width, height, capture_on_queue):

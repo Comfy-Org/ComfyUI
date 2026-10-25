@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 from typing import Tuple, Union, Optional
-from comfy.ldm.modules.attention import optimized_attention
+from comfy.ldm.modules.attention import AttentionTensorContainer, ComfyAttention, optimized_attention
 
 
 def reshape_for_broadcast(freqs_cis: Union[torch.Tensor, Tuple[torch.Tensor]], x: torch.Tensor, head_first=False):
@@ -113,6 +113,7 @@ class CrossAttention(nn.Module):
         factory_kwargs = {'device': device, 'dtype': dtype}
         super().__init__()
         self.attn_precision = attn_precision
+        self.comfy_attention = ComfyAttention()
         self.qdim = qdim
         self.kdim = kdim
         self.num_heads = num_heads
@@ -156,12 +157,15 @@ class CrossAttention(nn.Module):
             qq, _ = apply_rotary_emb(q, None, freqs_cis_img)
             assert qq.shape == q.shape, f'qq: {qq.shape}, q: {q.shape}'
             q = qq
+            del qq
 
         q = q.transpose(-2, -3).contiguous()        # q ->  B, L1, H, C - B, H, L1, C
         k = k.transpose(-2, -3).contiguous()      # k ->  B, L2, H, C - B, H, C, L2
         v = v.transpose(-2, -3).contiguous()
 
-        context = optimized_attention(q, k, v, self.num_heads, skip_reshape=True, attn_precision=self.attn_precision)
+        q, k, v = AttentionTensorContainer(q), AttentionTensorContainer(k), AttentionTensorContainer(v)
+        del kv
+        context = optimized_attention(q, k, v, self.num_heads, skip_reshape=True, attn_precision=self.attn_precision, preferred_attention=self.comfy_attention)
 
         out = self.out_proj(context)  # context.reshape - B, L1, -1
         out = self.proj_drop(out)
@@ -178,6 +182,7 @@ class Attention(nn.Module):
     def __init__(self, dim, num_heads, qkv_bias=True, qk_norm=False, attn_drop=0., proj_drop=0., attn_precision=None, dtype=None, device=None, operations=None):
         super().__init__()
         self.attn_precision = attn_precision
+        self.comfy_attention = ComfyAttention()
         self.dim = dim
         self.num_heads = num_heads
         assert self.dim % num_heads == 0, 'dim should be divisible by num_heads'
@@ -208,8 +213,11 @@ class Attention(nn.Module):
             assert qq.shape == q.shape and kk.shape == k.shape, \
                 f'qq: {qq.shape}, q: {q.shape}, kk: {kk.shape}, k: {k.shape}'
             q, k = qq, kk
+            del qq, kk
 
-        x = optimized_attention(q, k, v, self.num_heads, skip_reshape=True, attn_precision=self.attn_precision)
+        q, k, v = AttentionTensorContainer(q), AttentionTensorContainer(k), AttentionTensorContainer(v)
+        del qkv
+        x = optimized_attention(q, k, v, self.num_heads, skip_reshape=True, attn_precision=self.attn_precision, preferred_attention=self.comfy_attention)
         x = self.out_proj(x)
         x = self.proj_drop(x)
 

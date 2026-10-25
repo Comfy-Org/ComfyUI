@@ -1,3 +1,4 @@
+import errno
 import logging
 import re
 from contextlib import nullcontext
@@ -86,9 +87,16 @@ def run_hash_failure(session: Mock, path: Path, progress: _ScanState) -> bool:
         pytest.param(
             lambda: scanner.sync_root_safely("models"),
             "scanner.fast_scan_failed",
-            {"error_type": "FileNotFoundError", "root": "models"},
+            {"error_kind": "other", "error_type": "FileNotFoundError", "root": "models"},
             set(),
             id="fast-scan",
+        ),
+        pytest.param(
+            lambda: scanner.sync_temp_references_safely(),
+            "scanner.temp_sync_failed",
+            {"error_kind": "other", "error_type": "FileNotFoundError", "root": "temp"},
+            None,
+            id="temp-sync",
         ),
     ],
 )
@@ -258,7 +266,7 @@ def test_locked_files_during_discovery_emit_stat_failed_exactly_once(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     def deny_stat(*_args, **_kwargs):
-        raise PermissionError("/private/assets/secret.bin")
+        raise PermissionError(errno.EACCES, "Permission denied", "/private/assets/secret.bin")
 
     monkeypatch.setattr(scanner, "os", SimpleNamespace(stat=deny_stat, path=scanner.os.path))
     progress = _ScanState()
@@ -269,7 +277,7 @@ def test_locked_files_during_discovery_emit_stat_failed_exactly_once(
 
     assert specs == []
     assert events_named(caplog, "scanner.stat_failed") == [
-        {"error_type": "PermissionError", "site": "discovery"}
+        {"error_kind": "permission_denied", "error_type": "PermissionError", "site": "discovery"}
     ]
     assert progress.permission_denied == 3
 
@@ -341,7 +349,7 @@ def test_locked_files_during_enrichment_emit_stat_failed_exactly_once(
     assert first is False
     assert second is False
     assert events_named(caplog, "scanner.stat_failed") == [
-        {"error_type": "PermissionError", "site": "enrich"}
+        {"error_kind": "other", "error_type": "PermissionError", "site": "enrich"}
     ]
     assert progress.permission_denied == 2
 

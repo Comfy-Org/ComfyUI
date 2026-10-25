@@ -173,8 +173,18 @@ class ResnetBlock3D(nn.Module):
         return self.conv2(h, pre_norm=self.norm2, residual=x)
 
 
+class ResnetShortcut3D(nn.Module):
+    # resnet block pruned down to its shortcut (LightVAE Lite encoder)
+    def __init__(self, in_channels, out_channels):
+        super().__init__()
+        self.nin_shortcut = CausalConv3d(in_channels, out_channels, kernel_size=1) if in_channels != out_channels else nn.Identity()
+
+    def forward(self, x):
+        return self.nin_shortcut(x)
+
+
 class EncoderFCN3D(nn.Module):
-    def __init__(self, ch, ch_mult, space_down, time_down, num_res_blocks, in_channels, z_channels, double_z=True):
+    def __init__(self, ch, ch_mult, space_down, time_down, num_res_blocks, in_channels, z_channels, double_z=True, kept_blocks=None):
         super().__init__()
         self.num_levels = len(ch_mult)
         if isinstance(num_res_blocks, int):
@@ -192,8 +202,9 @@ class EncoderFCN3D(nn.Module):
             down = nn.Module()
             down.block = nn.ModuleList()
             for i in range(self.num_res_blocks[i_level]):
+                block = ResnetBlock3D if kept_blocks is None or (i_level, i) in kept_blocks else ResnetShortcut3D
                 down.block.append(
-                    ResnetBlock3D(
+                    block(
                         in_channels=block_in[i_level] if i == 0 else block_mid[i_level],
                         out_channels=block_mid[i_level],
                     )
@@ -269,9 +280,8 @@ class FeedForward(nn.Module):
 
     def forward(self, x, pre_norm, residual, residual_scale):
         # norm, gated silu and residual addcmul fold into the INT8 kernels
-        h = comfy.ops.linear_input_act(self.w1, x, "rms_norm", pre_norm.weight, pre_norm.eps)
-        return comfy.ops.linear_input_act(
-            self.w2, h, "swiglu", residual=residual, residual_scale=residual_scale)
+        h = comfy.ops.linear_input_act(self.w1, x, "rms_norm", act_weight=pre_norm)
+        return comfy.ops.linear_input_act(self.w2, h, "swiglu", residual=residual, residual_scale=residual_scale)
 
 
 class Attention(nn.Module):
@@ -290,7 +300,7 @@ class Attention(nn.Module):
     def forward(self, x, rotary_pos_emb, pre_norm, residual, residual_scale):
         batch_size, seq_len, _ = x.shape
 
-        qkv = comfy.ops.linear_input_act(self.to_qkv, x, "rms_norm", pre_norm.weight, pre_norm.eps)
+        qkv = comfy.ops.linear_input_act(self.to_qkv, x, "rms_norm", act_weight=pre_norm)
         qkv = qkv.view(batch_size, seq_len, -1, 3 * self.dim_head)
         query, key, value = torch.chunk(qkv, 3, dim=-1)
 
@@ -314,9 +324,7 @@ class Attention(nn.Module):
             out = out.transpose(1, 2).reshape(batch_size, seq_len, -1)
         else:
             out = optimized_attention(query, key, value, self.heads, skip_reshape=True)
-        return comfy.ops.linear_input_act(
-            self.to_out, torch.nan_to_num(out), None,
-            residual=residual, residual_scale=residual_scale)
+        return comfy.ops.linear_input_act(self.to_out, torch.nan_to_num(out), None, residual=residual, residual_scale=residual_scale)
 
 
 class TransformerBlock(nn.Module):
@@ -426,6 +434,11 @@ class MiniMaxH3VideoVAE(nn.Module):
         tile_overlap_min=64,
         tiling=True,
         operations=ops,
+        num_layers=36,
+        still_frame=None,
+        encoder_kept_blocks=None,
+        encoder=True,
+        decoder=True,
     ):
         super().__init__()
         self.vae_ratio = int(math.prod(space_down))
@@ -439,30 +452,39 @@ class MiniMaxH3VideoVAE(nn.Module):
         self.token_overlap = (-token_drop) % self.tokens_chunk_size
         self.frame_overlap = max(self.token_overlap * self.vae_ratio_t - self.frame_pre_padding, 0)
 
+        # a decoder fine-tuned to decode one latent directly keeps this output frame of it
+        if still_frame is not None and not 0 <= still_frame < self.vae_ratio_t:
+            raise ValueError(f"still_frame must be in [0, {self.vae_ratio_t}), got {still_frame}")
+        self.still_frame = still_frame
+
         # spatial tiling parameters
         self.tiling = tiling
         self.tile_size = tile_size
         self.tile_overlap_min = tile_overlap_min
 
-        self.encoder = EncoderFCN3D(
-            ch=ch,
-            ch_mult=list(ch_mult),
-            space_down=list(space_down),
-            time_down=list(time_down),
-            num_res_blocks=num_res_blocks,
-            in_channels=in_channels,
-            z_channels=z_channels,
-            double_z=True,
-        )
-        self.quant_conv = ops.Conv3d(z_channels * 2, 2 * embed_dim, 1)
-        self.post_quant_conv = ops.Conv3d(embed_dim, z_channels, 1)
-        self.decoder = ViT3DDecoder(
-            patch_size=self.vae_ratio,
-            patch_size_t=self.vae_ratio_t,
-            in_channels=z_channels,
-            out_channels=out_ch,
-            operations=operations,
-        )
+        if encoder:
+            self.encoder = EncoderFCN3D(
+                ch=ch,
+                ch_mult=list(ch_mult),
+                space_down=list(space_down),
+                time_down=list(time_down),
+                num_res_blocks=num_res_blocks,
+                in_channels=in_channels,
+                z_channels=z_channels,
+                double_z=True,
+                kept_blocks=encoder_kept_blocks,
+            )
+            self.quant_conv = ops.Conv3d(z_channels * 2, 2 * embed_dim, 1)
+        if decoder:
+            self.post_quant_conv = ops.Conv3d(embed_dim, z_channels, 1)
+            self.decoder = ViT3DDecoder(
+                patch_size=self.vae_ratio,
+                patch_size_t=self.vae_ratio_t,
+                in_channels=z_channels,
+                out_channels=out_ch,
+                num_layers=num_layers,
+                operations=operations,
+            )
 
         self.register_buffer("latents_mean", torch.tensor(LATENTS_MEAN))
         self.register_buffer("latents_std", torch.tensor(LATENTS_STD))
@@ -499,10 +521,10 @@ class MiniMaxH3VideoVAE(nn.Module):
             return self.tiled_encode(x)
         return self._encode_moments(x)
 
-    def _adaptive_decode(self, z):
+    def _adaptive_decode(self, z, frames=slice(None)):
         if self.tiling:
-            return self.tiled_decode(z)
-        return self._decode_pixels(z)
+            return self.tiled_decode(z, frames)
+        return self._decode_pixels(z)[:, :, frames]
 
     # spatial tiling
 
@@ -596,7 +618,7 @@ class MiniMaxH3VideoVAE(nn.Module):
             group = slices[k:k + batch]
             yield from self._decode_pixels(torch.cat(group)).chunk(len(group))
 
-    def tiled_decode(self, z):
+    def tiled_decode(self, z, frames=slice(None)):
         height, width = z.shape[-2] * self.vae_ratio, z.shape[-1] * self.vae_ratio
         y_idx, y_len, y_overlap = self.split_tiles(height)
         x_idx, x_len, x_overlap = self.split_tiles(width)
@@ -614,7 +636,7 @@ class MiniMaxH3VideoVAE(nn.Module):
             out_x = 0
             # enumerate would retain the previous tile while the next batch decodes.
             for j in range(len(x_idx)):
-                tile = next(tiles)
+                tile = next(tiles)[:, :, frames]
                 if i > 0:
                     tile = self.blend(strip[..., :, x_idx[j]:x_idx[j] + x_len[j]], tile, y_overlap[i - 1], dim=-2)
                 if j > 0:
@@ -800,7 +822,14 @@ class MiniMaxH3VideoVAE(nn.Module):
         z = z * latents_std + latents_mean
 
         if z.shape[2] == 1:
-            dec = self._finalize_pixels(self._adaptive_decode(z)[:, :, -1:, :, :])
+            if self.still_frame is not None:
+                dec = self._adaptive_decode(z, slice(self.still_frame, self.still_frame + 1))
+            else:
+                # A still latent is the first latent of a clip and decodes badly alone: decode it as a
+                # full clip of copies and keep only its first real frame.
+                first = slice(self.frame_pre_padding, self.frame_pre_padding + 1)
+                dec = self._adaptive_decode(z.repeat(1, 1, self.tokens_chunk_size, 1, 1), first)
+            dec = self._finalize_pixels(dec)
             if output_buffer is None:
                 return dec
             output_buffer.copy_(dec)

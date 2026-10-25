@@ -299,16 +299,18 @@ class DiTBlock(nn.Module):
 
 
 class FinalLayer(nn.Module):
-    def __init__(self, hidden, t_dim, video_dim, audio_dim, eps, apply_silu=True, adaln_dtype=None,
+    def __init__(self, hidden, t_dim, video_dim, audio_dim, eps, apply_silu=True, adaln_dtype=None, pdd_steps=1,
                  dtype=None, device=None, operations=None):
         super().__init__()
+        self.video_dim = video_dim
         self.norm = operations.RMSNorm(hidden, eps=eps, dtype=dtype, device=device)
         self.adaln_proj = AdalnProj(t_dim, hidden, 2, 1, apply_silu=apply_silu,
                                     dtype=adaln_dtype if adaln_dtype is not None else dtype,
                                     device=device, operations=operations)
-        # output heads are the checkpoint's fp32 island; norm/adaln are stored at model dtype
-        self.video_out = operations.Linear(hidden, video_dim, bias=True, dtype=torch.float32, device=device)
-        self.audio_out = operations.Linear(hidden, audio_dim, bias=True, dtype=torch.float32, device=device)
+        # output heads are the checkpoint's fp32 island; norm/adaln are stored at model dtype.
+        # a PDD checkpoint ships pdd_steps stacked heads per stream (a PDD LoRA grows plain heads to the same layout)
+        self.video_out = operations.Linear(hidden, video_dim * pdd_steps, bias=True, dtype=torch.float32, device=device)
+        self.audio_out = operations.Linear(hidden, audio_dim * pdd_steps, bias=True, dtype=torch.float32, device=device)
 
     def forward(self, x, t_emb, video_seg, audio_seg, sigma, sample_sigmas, shifts):
         # video_seg / audio_seg: (start, stop, row) of the target streams, where row
@@ -319,7 +321,7 @@ class FinalLayer(nn.Module):
             a, b, row = seg
             return (self.norm(x[a:b]) * (1.0 + _mod_row(scale, row, scale.dtype)) + _mod_row(shift, row, shift.dtype)).to(torch.float32)
 
-        n = self.video_out.weight.shape[0] // self.video_out.out_features
+        n = self.video_out.weight.shape[0] // self.video_dim
         if n == 1:
             return self.video_out(mod(video_seg)), self.audio_out(mod(audio_seg))
 
@@ -478,7 +480,7 @@ class MiniMaxH3Model(nn.Module):
                  timestep_input_dim=256, time_embed_hidden_size=5376, time_embed_dim=2688,
                  rope_inv_freq_len=16, norm_eps=1e-5, qk_norm_eps=1e-5, final_norm_eps=1e-5,
                  sigma_shift_video=12.0, sigma_shift_audio=3.0,
-                 adaln_curve_grid=None, gate_compress=False,
+                 adaln_curve_grid=None, gate_compress=False, pdd_steps=1,
                  image_model=None, dtype=None, device=None, operations=None, **kwargs):
         super().__init__()
         self.dtype = dtype
@@ -513,7 +515,7 @@ class MiniMaxH3Model(nn.Module):
                      dtype=dtype, device=device, operations=operations)
             for _ in range(num_layers)])
         self.final_layer = FinalLayer(hidden_size, time_embed_dim, video_patch_dim, audio_latents_dim,
-                                      final_norm_eps, **curve, dtype=dtype, device=device, operations=operations)
+                                      final_norm_eps, **curve, pdd_steps=pdd_steps, dtype=dtype, device=device, operations=operations)
 
     def preprocess_text_embeds(self, text_states):
         """[B, L, text_dim] Qwen states -> [B, L, hidden] refined text embeds."""
@@ -557,6 +559,49 @@ class MiniMaxH3Model(nn.Module):
                 r = aug * r + (1.0 - aug) * noise.to(r.device)
             rows.append(r.to(device))
         return torch.cat(rows, dim=0) if rows else None
+
+    def _embed_and_pack(self, video_x, audio_x, context, layout, payload, transformer_options):
+        device = video_x.device
+        dtype = context.dtype
+        img_update = layout.img_update.to(device)
+        audio_update = layout.audio_update.to(device)
+        video_rows = patchify_video(video_x.to(torch.float32), self.patch_size)
+        audio_rows = pack_audio(audio_x.to(torch.float32))
+        cond_video_rows = self._cond_video_rows(payload, device)
+        cond_audio_rows = self._cond_audio_rows(payload, device)
+
+        all_video_rows = video_rows
+        if cond_video_rows is not None:
+            all_video_rows = torch.empty(img_update.shape[0], video_rows.shape[1], dtype=torch.float32, device=device)
+            all_video_rows[~img_update] = cond_video_rows
+            all_video_rows[img_update] = video_rows
+        all_audio_rows = audio_rows
+        if cond_audio_rows is not None:
+            all_audio_rows = torch.empty(audio_update.shape[0], audio_rows.shape[1], dtype=torch.float32, device=device)
+            all_audio_rows[~audio_update] = cond_audio_rows
+            all_audio_rows[audio_update] = audio_rows
+
+        video_embed = self.video_patch_proj(all_video_rows).to(dtype)
+        audio_embed = self.audio_patch_proj(all_audio_rows).to(dtype)
+        text_states = context[0]
+        if text_states.shape[-1] != self.hidden_size:
+            text_states = self.token_refiner(self.condition_proj(text_states),
+                                             transformer_options=transformer_options)
+
+        # segments are contiguous: assemble by slices, embed rows follow segment order
+        h = torch.empty(layout.seq_len, self.hidden_size, dtype=dtype, device=device)
+        voff = aoff = 0
+        for a, b, kind in layout.segments:
+            n = b - a
+            if kind == "text":
+                h[a:b] = text_states
+            elif kind in ("cond", "ref_img", "video"):
+                h[a:b] = video_embed[voff:voff + n]
+                voff += n
+            else:  # ref_audio / audio
+                h[a:b] = audio_embed[aoff:aoff + n]
+                aoff += n
+        return h
 
     def forward(self, x, timestep, context, transformer_options={}, minimax_payload=None, denoise_mask=None, audio_denoise_mask=None, **kwargs):
         # the sampler carries the audio as (sigma_v / sigma_a) * x_audio; undo it outside
@@ -693,45 +738,7 @@ class MiniMaxH3Model(nn.Module):
             else:
                 mod_segments.append((a, b, row_base + seg_tag[kind]))
 
-        # embed
-        img_update = layout.img_update.to(device)
-        audio_update = layout.audio_update.to(device)
-        video_rows = patchify_video(video_x.to(torch.float32), self.patch_size)
-        audio_rows = pack_audio(audio_x.to(torch.float32))
-        cond_video_rows = self._cond_video_rows(payload, device)
-        cond_audio_rows = self._cond_audio_rows(payload, device)
-
-        all_video_rows = video_rows
-        if cond_video_rows is not None:
-            all_video_rows = torch.empty(img_update.shape[0], video_rows.shape[1], dtype=torch.float32, device=device)
-            all_video_rows[~img_update] = cond_video_rows
-            all_video_rows[img_update] = video_rows
-        all_audio_rows = audio_rows
-        if cond_audio_rows is not None:
-            all_audio_rows = torch.empty(audio_update.shape[0], audio_rows.shape[1], dtype=torch.float32, device=device)
-            all_audio_rows[~audio_update] = cond_audio_rows
-            all_audio_rows[audio_update] = audio_rows
-
-        video_embed = self.video_patch_proj(all_video_rows).to(dtype)
-        audio_embed = self.audio_patch_proj(all_audio_rows).to(dtype)
-        text_states = context[0]
-        if text_states.shape[-1] != self.hidden_size:
-            text_states = self.token_refiner(self.condition_proj(text_states),
-                                             transformer_options=transformer_options)
-
-        # segments are contiguous: assemble by slices, embed rows follow segment order
-        h = torch.empty(layout.seq_len, self.hidden_size, dtype=dtype, device=device)
-        voff = aoff = 0
-        for a, b, kind in layout.segments:
-            n = b - a
-            if kind == "text":
-                h[a:b] = text_states
-            elif kind in ("cond", "ref_img", "video"):
-                h[a:b] = video_embed[voff:voff + n]
-                voff += n
-            else:  # ref_audio / audio
-                h[a:b] = audio_embed[aoff:aoff + n]
-                aoff += n
+        h = self._embed_and_pack(video_x, audio_x, context, layout, payload, transformer_options)
 
         t_vals = torch.tensor(unique_t, dtype=torch.float32, device=device)
         if self.use_adaln_curves:

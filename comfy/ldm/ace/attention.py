@@ -19,7 +19,7 @@ import torch.nn.functional as F
 from torch import nn
 
 import comfy.model_management
-from comfy.ldm.modules.attention import optimized_attention
+from comfy.ldm.modules.attention import AttentionTensorContainer, ComfyAttention, optimized_attention
 
 class Attention(nn.Module):
     def __init__(
@@ -50,6 +50,7 @@ class Attention(nn.Module):
         dtype=None, device=None, operations=None
     ):
         super().__init__()
+        self.comfy_attention = ComfyAttention()
 
         self.inner_dim = out_dim if out_dim is not None else dim_head * heads
         self.inner_kv_dim = self.inner_dim if kv_heads is None else dim_head * kv_heads
@@ -435,9 +436,11 @@ class CustomerAttnProcessor2_0:
             attention_mask = attention_mask.view(batch_size, attn.heads, -1, attention_mask.shape[-1])
 
         # the output of sdp = (batch, num_heads, seq_len, head_dim)
+        heads = query.shape[1]
+        query, key, value = AttentionTensorContainer(query), AttentionTensorContainer(key), AttentionTensorContainer(value)
         hidden_states = optimized_attention(
-            query, key, value, heads=query.shape[1], mask=attention_mask, skip_reshape=True, transformer_options=transformer_options,
-        ).to(query.dtype)
+            query, key, value, heads=heads, mask=attention_mask, skip_reshape=True, preferred_attention=attn.comfy_attention, transformer_options=transformer_options,
+        )
 
         # linear proj
         hidden_states = attn.to_out[0](hidden_states)

@@ -1,4 +1,4 @@
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 class MultiPromptEntry(BaseModel):
@@ -205,3 +205,53 @@ class Kling3TurboQueryResponse(BaseModel):
     message: str | None = Field(None)
     request_id: str | None = Field(None)
     data: list[Kling3TurboTaskData] | None = Field(None)
+
+
+class KlingSolutionContent(BaseModel):
+    type: str = Field(..., description="'product_image' or 'person_image'")
+    url: str = Field(...)
+
+
+class KlingTryOnSettings(BaseModel):
+    keep_pose: bool = Field(...)
+
+
+class KlingTryOnRequest(BaseModel):
+    contents: list[KlingSolutionContent] = Field(...)
+    settings: KlingTryOnSettings = Field(...)
+
+
+class KlingSolutionCreateData(BaseModel):
+    task_id: str | None = Field(None)
+    status: str | None = Field(None)
+
+
+class KlingSolutionCreateResponse(BaseModel):
+    code: int | None = Field(None)
+    message: str | None = Field(None)
+    request_id: str | None = Field(None)
+    data: KlingSolutionCreateData | None = Field(None)
+
+
+class KlingSolutionOutput(BaseModel):
+    type: str | None = Field(None)
+    url: str | None = Field(None)
+
+
+class KlingSolutionTask(BaseModel):
+    id: str | None = Field(None)
+    status: str | None = Field(None, description="submitted | processing | succeed | failed")
+    message: str | None = Field(None)
+    outputs: list[KlingSolutionOutput] | None = Field(None)
+
+
+class KlingSolutionQueryResponse(BaseModel):
+    code: int | None = Field(None)
+    message: str | None = Field(None)
+    request_id: str | None = Field(None)
+    data: list[KlingSolutionTask] | None = Field(None)
+
+    @field_validator("data", mode="before")
+    @classmethod
+    def single_task_as_list(cls, v):
+        return [v] if isinstance(v, dict) else v

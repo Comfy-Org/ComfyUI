@@ -29,6 +29,12 @@
 
 ## Architecture Boundaries
 
+- Keep `comfy/` limited to model implementations and their supporting inference
+  infrastructure, consistent with its current scope: model detection, loading,
+  and conversion; encoders, tokenizers, and latent formats; conditioning,
+  sampling, and model patching; tensor operations, quantization, and device,
+  memory, and offload management. Put UI, API/server, workflow/queue, application
+  persistence, and other product-level logic outside `comfy/`.
 - Keep each layer focused on the concepts it owns. Do not leak UI, API,
   workflow, queue, persistence, telemetry, model-loading, node, or execution
   concerns into unrelated layers just because it is convenient to pass data
@@ -153,6 +159,17 @@
   or describe obvious behavior. Short TODOs are fine when they name the concrete
   missing follow-up.
 
+## Model Integration
+
+- Reuse native ComfyUI loaders and nodes wherever possible. Extend existing
+  loading paths before introducing model-specific loaders.
+- Use standard `MODEL`, `CLIP`, and `VAE` interfaces where they fit, preferring
+  the regular checkpoint loader for bundled components.
+- Package weights as single `.safetensors` files in the normal model folders;
+  never require model directories. Provide a conversion script when repackaging.
+- Use native execution and optimization mechanisms. Benchmark performance and
+  verify short and long generations against the reference implementation.
+
 ## Model, Device, and Memory Behavior
 
 - Treat dtype, device placement, VRAM usage, and offloading behavior as core
@@ -186,6 +203,10 @@
   handwritten implementations of the same operation. Remove duplicate local
   kernels and adapt inputs to the shared operation's documented layout while
   preserving the model's original math and output contract.
+- Model implementations must use `AttentionTensorContainer` and per-module
+  `self.comfy_attention = ComfyAttention()`, passed to attention as `preferred_attention`.
+- Integrate model block loops with the memory compiler and prefetch helpers in
+  `comfy.model_prefetch`, following existing model patterns.
 - All models should use the optimized attention function selected by ComfyUI.
   Treat optimized backend functions, dispatch helpers, and capability-selected
   callables as opaque. Higher-level code must not inspect function identity,
@@ -328,8 +349,7 @@
 
 ## Nodes and User-Facing Behavior
 
-- Follow existing node conventions: `INPUT_TYPES`, `RETURN_TYPES`, `FUNCTION`,
-  `CATEGORY`, and registration through the local mapping used by that file.
+- Use V3 schemas for new nodes and reuse existing native nodes wherever possible.
 - Treat legacy combo inputs, `io.Combo`, and `io.DynamicCombo` values as
   untrusted when they affect filesystem access. Any value used as a file or
   folder name, path component, format, or extension must be validated again at
