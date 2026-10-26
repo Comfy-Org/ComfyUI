@@ -937,7 +937,7 @@ async def _request_base(cfg: _RequestConfig, expect_binary: bool):
                 monitor_task = asyncio.create_task(_monitor(stop_event, start_time))
 
             timeout = aiohttp.ClientTimeout(total=cfg.timeout)
-            sess = aiohttp.ClientSession(timeout=timeout)
+            sess = aiohttp.ClientSession(timeout=timeout, trust_env=True)
 
             if cfg.content_type == "multipart/form-data" and method != "GET":
                 payload_headers.pop("Content-Type", None)
@@ -1213,7 +1213,7 @@ async def _request_base(cfg: _RequestConfig, expect_binary: bool):
                 )
                 raise LocalNetworkError(
                     "Unable to connect to the API server due to local network issues. "
-                    "Please check your internet connection and try again."
+                    "Please check your internet connection or proxy settings and try again."
                 ) from e
             request_logger.log_request_response(
                 operation_id=operation_id,

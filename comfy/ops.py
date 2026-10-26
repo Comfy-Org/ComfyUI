@@ -128,7 +128,7 @@ def cast_to_input(weight, input, non_blocking=False, copy=True):
 def materialize_meta_param(s, param_keys):
     for param_key in param_keys:
         param = getattr(s, param_key, None)
-        if param is not None and getattr(param, "is_meta", False):
+        if param is not None and getattr(param, "is_meta", False) and not hasattr(param.untyped_storage(), "_comfy_tensor_file_slice"):
             setattr(s, param_key, torch.nn.Parameter(torch.zeros(param.shape, dtype=param.dtype), requires_grad=param.requires_grad))
 
 
@@ -250,7 +250,8 @@ def cast_modules_with_vbar(comfy_modules, dtype, device, bias_dtype, non_blockin
                 pin = comfy.pinned_memory.get_pin(m, subset=subset)
             cast_maybe_lowvram_patch(source, pin, offload_stream, xfer_dest2=dest)
 
-        handle_pin(s, pin, xfer_source, xfer_dest, subset=subset, size=dest_size)
+        if not isinstance(s, WritableWeight) or s.read_before_write:
+            handle_pin(s, pin, xfer_source, xfer_dest, subset=subset, size=dest_size)
 
         for param_key in ("weight", "bias"):
             lowvram_source = getattr(s, param_key + "_lowvram_function", None)
@@ -507,6 +508,47 @@ class CastWeightBiasOp:
     comfy_force_forward = False
     weight_function = []
     bias_function = []
+
+class WritableWeight(torch.nn.Module, CastWeightBiasOp):
+    """One runtime tensor, either realized or cast from writable file backing."""
+    # False only when the next use overwrites the complete tensor before reading it.
+    read_before_write = True
+
+    def __init__(self, shape, dtype, device="meta"):
+        super().__init__()
+        self.weight = torch.nn.Parameter(torch.empty(shape, dtype=dtype, device=device), requires_grad=False)
+        self.bias = None
+        self._pins = {}
+        self._pin_subset = None
+
+    @contextlib.contextmanager
+    def access(self, device, write=True):
+        if not self.comfy_cast_weights:
+            yield self.weight, None
+            return
+        assert hasattr(self, "_prefetch"), "Writable weights require prefetch"
+        with CastBiasWeightContext(self, dtype=self.weight.dtype, device=device, offloadable=True) as values:
+            try:
+                yield values
+            finally:
+                if write and self._v_signature is None:
+                    self.writeback(values[0])
+
+    def writeback(self, value):
+        subset = self._pin_subset
+        pin = comfy.pinned_memory.get_pin(self, subset) if subset is not None else None
+        if pin is None:
+            subset = "weights-fast" if self._pin_state["fast_disk"] else "weights-loaded" if self._v_signature is not None else "weights"
+            comfy.pinned_memory.pin_memory(self, subset=subset)
+            pin = comfy.pinned_memory.get_pin(self, subset)
+        if pin is not None:
+            dest = comfy.memory_management.interpret_gathered_like([self.weight], pin)[0]
+            dest.copy_(value, non_blocking=True)
+            #FIXME use offload streams
+            torch.cuda.current_stream(value.device).synchronize()
+            self._pins[subset]["dirty"] = True
+        else:
+            comfy.memory_management.write_tensor_file_slice(self.weight, value)
 
 class disable_weight_init:
     @staticmethod
