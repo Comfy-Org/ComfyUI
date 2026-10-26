@@ -44,11 +44,34 @@ class OpenModelState(io.ComfyNode):
         return io.NodeOutput(comfy.model_state.ModelState.open(state_path(filename), create))
 
 
+class SaveModelState(io.ComfyNode):
+    @classmethod
+    def define_schema(cls) -> io.Schema:
+        return io.Schema(
+            node_id="SaveModelState",
+            display_name="Save Model State",
+            category="model_state",
+            description="Writes a model state's values to a file in the output folder.",
+            is_output_node=True,
+            inputs=[
+                io.ModelState.Input("state"),
+                io.String.Input("filename", default="model_states/ComfyUI.safetensors"),
+            ],
+            outputs=[io.ModelState.Output(tooltip="The saved state, for chaining or ending a loop.")],
+        )
+
+    @classmethod
+    def execute(cls, state, filename) -> io.NodeOutput:
+        state.save(state_path(filename))
+        return io.NodeOutput(state)
+
+
 class ModelStateExtension(ComfyExtension):
     @override
     async def get_node_list(self) -> list[type[io.ComfyNode]]:
         return [
             OpenModelState,
+            SaveModelState,
         ]
 
 
