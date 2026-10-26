@@ -2849,6 +2849,9 @@ class MOSSImage(BaseModel):
         # rope positions follow the true text length, so no repeat padding: cond and uncond of different lengths run separately
         if cross_attn is not None:
             out['c_crossattn'] = comfy.conds.CONDRegular(cross_attn)
+        context_attention_bias = kwargs.get("context_attention_bias", None)
+        if context_attention_bias is not None:
+            out['context_attention_bias'] = comfy.conds.CONDRegular(context_attention_bias)
         ref_latents = kwargs.get("reference_latents", None)
         if ref_latents:
             # control adapters widen video_embedder, the references carry no control

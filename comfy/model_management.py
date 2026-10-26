@@ -1776,6 +1776,10 @@ def pytorch_attention_enabled():
     return ENABLE_PYTORCH_ATTENTION
 
 def pytorch_attention_enabled_vae():
+    if is_amd():
+        arch = torch.cuda.get_device_properties(get_torch_device()).gcnArchName
+        if arch.startswith("gfx11"):  # aotriton ships no head dim > 256 kernels for gfx11 (ROCm/aotriton#168), the VAE's single head needs 384 or 512
+            return False
     return pytorch_attention_enabled()
 
 def pytorch_attention_flash_attention():

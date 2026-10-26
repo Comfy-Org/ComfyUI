@@ -13,6 +13,9 @@ from comfy.cli_args import args
 _STAGING_API_HOST = "stagingapi.comfy.org"
 _TESTENV_HOST_SUFFIX = ".testenvs.comfy.org"
 _STAGING_PLATFORM_BASE_URL = "https://stagingplatform.comfy.org"
+_PROD_PLATFORM_BASE_URL = "https://platform.comfy.org"
+_STAGING_BUILDER_BASE_URL = "https://stagingplatformapi.comfy.org/builder"
+_PROD_BUILDER_BASE_URL = "https://platformapi.comfy.org/builder"
 
 
 def _is_staging_tier(host: str) -> bool:
@@ -44,3 +47,16 @@ def environment_overrides_for_base(base_url: str) -> dict[str, Any] | None:
 
 def get_environment_overrides() -> dict[str, Any] | None:
     return environment_overrides_for_base(getattr(args, "comfy_api_base", "") or "")
+
+
+def _staging_selected() -> bool:
+    return _is_staging_tier(urlparse(getattr(args, "comfy_api_base", "") or "").hostname or "")
+
+
+def builder_base_url() -> str:
+    """comfy-builder API base for the --comfy-api-base tier; fixed mapping, never taken from request data."""
+    return _STAGING_BUILDER_BASE_URL if _staging_selected() else _PROD_BUILDER_BASE_URL
+
+
+def platform_base_url() -> str:
+    return _STAGING_PLATFORM_BASE_URL if _staging_selected() else _PROD_PLATFORM_BASE_URL
