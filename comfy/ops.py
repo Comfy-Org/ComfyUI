@@ -305,12 +305,9 @@ def resolve_cast_module_with_vbar(s, dtype, device, bias_dtype, compute_dtype, w
         weight = params[0]
         bias = params[1]
         if prefetch["signature"] is not None:
-            # FIXME: Make this non_gemv_specific.
-            if (isinstance(s, MixedPrecisionOp) and s.comfy_gemv_optimized and isinstance(weight, QuantizedTensor) and not s._full_precision_mm
-                    and s.weight_lowvram_function is None and len(s.weight_function) == 0):
-                weight = weight.optimize_for_gemv(xfer_dest)
             s._v_weight = weight
             s._v_bias = bias
+            s._v_relayout = False
         s._v_signature = prefetch["signature"]
 
     def post_cast(s, param_key, x, dtype, resident, update_weight):
