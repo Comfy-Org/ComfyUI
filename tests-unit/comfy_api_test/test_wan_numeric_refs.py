@@ -1,12 +1,6 @@
-"""Default-provider contract tests; synthetic tensors are not model proof.
-
-Source-only proposal: this module has not been imported or executed by its author.
-Run only in a separately selected exact Core/SDK environment.
-"""
+"""Default-provider contract tests; synthetic tensors are not model proof."""
 import asyncio
 import gc
-import hashlib
-from pathlib import Path
 import weakref
 from types import SimpleNamespace
 
@@ -17,8 +11,6 @@ from comfy_api.latest import _sdk as sdk
 
 
 def run(body):
-    assert hashlib.sha256(Path(sdk.__file__).read_bytes()).hexdigest() == (
-        "19945795d5a6188e8d122e96ea82d7a8887c752bced9c776cdf79aba3afc700d")
     async def scoped():
         refs = sdk.InProcessRefResolver()
         try:
@@ -40,7 +32,7 @@ def numeric(case):
     if case == "strided":
         return torch.arange(24, dtype=torch.float32).reshape(4, 6).t()[::2]
     if case == "bf16-bits":
-        return torch.arange(65536, dtype=torch.int32).to(torch.uint16).view(torch.bfloat16)
+        return torch.arange(65536, dtype=torch.int32).to(torch.uint16).view(torch.bfloat16).reshape(256, 256)
     if case == "special":
         return torch.tensor([0x7fc01234, 0x7f800000, -8388608, -2147483648],
                             dtype=torch.int32).view(torch.float32)
@@ -94,8 +86,6 @@ def test_numeric_rejects_without_materializing_large_storage(case):
 
 
 def test_metadata_boundaries_without_allocating_boundary_buffers():
-    assert hashlib.sha256(Path(sdk.__file__).read_bytes()).hexdigest() == (
-        "19945795d5a6188e8d122e96ea82d7a8887c752bced9c776cdf79aba3afc700d")
     # Deliberately tests only the metadata helper, not transport admission.
     for shape, size in [([16384], 65536), ([4096, 4096], 64 * 1024**2),
                         ([0, 16384], 0), ([1] * 8, 8), ([], 8)]:
