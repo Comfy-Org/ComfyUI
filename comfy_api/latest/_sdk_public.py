@@ -1,5 +1,5 @@
 """Public SDK surface. Mirrors the ``_io_public`` / ``_ui_public`` pattern:
-custom nodes import from ``comfy_api.latest.sdk`` (or a pinned version), never
+custom nodes use ``from comfy_api.latest import sdk`` (or a pinned version), never
 from ``_sdk`` directly."""
 from ._sdk import (  # noqa: F401
     AssetCatalogueMetadataProvider,

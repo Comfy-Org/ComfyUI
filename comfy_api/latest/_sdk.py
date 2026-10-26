@@ -9,13 +9,13 @@ Design (see docs/secure_custom_nodes_WIP.md):
   (``ImageRef``, ``ModelRef``, ``AssetRef`` ...), never raw buffers/paths.
 * Side effects go through **ctx** domains (``ctx.assets``, ``ctx.progress`` ...)
   rather than ``folder_paths`` / ``PromptServer`` / ambient globals.
-* Everything here ships a **default in-process implementation** so open-source
-  ComfyUI behaves exactly as today (a ref just wraps the real object; ctx is a
-  thin passthrough). Zero behavior change, better authoring API.
-* The **overlay** (proprietary, cloud-only, loaded by ``COMFY_OVERLAY_MODULE``)
-  calls ``providers.register_*`` at import to replace those defaults with the
+* Resource refs and implemented ctx domains have **in-process defaults**.
+  Optional domains can raise ``NotImplementedError``; see ``comfy_api/README.md``
+  for availability in ordinary ComfyUI.
+* An optional **overlay**, loaded by ``COMFY_OVERLAY_MODULE``, calls
+  ``providers.register_*`` at import to replace those defaults with the
   isolated engine: out-of-process guests, shm/CUDA-IPC refs, an enforcing
-  broker. Uninstall the overlay -> pure OSS.
+  broker. Without an overlay, execution stays in the ComfyUI process.
 
 Nothing isolation-specific lives in this file. This is the *seam*, not the
 engine.
