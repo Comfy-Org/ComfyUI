@@ -63,12 +63,34 @@ class SaveModelState(io.ComfyNode):
         return io.NodeOutput(state)
 
 
+class CopyModelState(io.ComfyNode):
+    @classmethod
+    def define_schema(cls) -> io.Schema:
+        return io.Schema(
+            node_id="CopyModelState",
+            display_name="Copy Model State",
+            category="model_state",
+            description="Saves a model state and copies its file to a new file in the output folder.",
+            is_output_node=True,
+            inputs=[
+                io.ModelState.Input("state"),
+                io.String.Input("filename", default="model_states/ComfyUI_copy.safetensors"),
+            ],
+            outputs=[io.ModelState.Output()],
+        )
+
+    @classmethod
+    def execute(cls, state, filename) -> io.NodeOutput:
+        return io.NodeOutput(state.copy(state_path(filename)))
+
+
 class ModelStateExtension(ComfyExtension):
     @override
     async def get_node_list(self) -> list[type[io.ComfyNode]]:
         return [
             OpenModelState,
             SaveModelState,
+            CopyModelState,
         ]
 
 
