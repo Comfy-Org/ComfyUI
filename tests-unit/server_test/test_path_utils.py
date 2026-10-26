@@ -1,6 +1,7 @@
 """Tests for ``comfy.path_utils.is_subpath`` (used by ``server.py`` to guard
 ``/view`` and ``/upload`` against cross-drive and escape attempts)."""
 
+import ntpath
 import os
 from unittest import mock
 
@@ -43,6 +44,21 @@ class TestIsSubpathSameDrive:
         monkeypatch.chdir(tmp_path)
         outside = str(tmp_path.parent / "other.png")
         assert is_subpath(outside, ".") is False
+
+
+class TestIsSubpathWindowsCase:
+    """``commonpath`` on Windows compares components case-insensitively but
+    returns the first argument's casing, so the parent must come first or a
+    contained path that merely differs in case compares unequal."""
+
+    def test_case_difference_is_still_contained(self):
+        parent = "C:\\ComfyUI\\output"
+        child = "c:\\comfyui\\output\\image.png"
+        with mock.patch.multiple(
+            "os.path", abspath=lambda p: p, commonpath=ntpath.commonpath
+        ):
+            assert is_subpath(child, parent) is True
+            assert is_subpath("D:\\elsewhere\\image.png", parent) is False
 
 
 class TestIsSubpathCrossDrive:
