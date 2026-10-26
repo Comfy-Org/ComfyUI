@@ -19,6 +19,9 @@ def is_subpath(path: str, parent: str) -> bool:
     abs_path = os.path.abspath(path)
     abs_parent = os.path.abspath(parent)
     try:
-        return os.path.commonpath((abs_path, abs_parent)) == abs_parent
+        # Parent goes first: on Windows, commonpath is case-insensitive but
+        # returns the first argument's casing, so a contained path whose
+        # case differs from the parent would otherwise compare unequal.
+        return os.path.commonpath((abs_parent, abs_path)) == abs_parent
     except ValueError:
         return False
