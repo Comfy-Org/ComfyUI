@@ -95,6 +95,24 @@ def test_filter_files_extensions():
     assert folder_paths.filter_files_extensions(files, [".jpg", ".png"]) == ["file2.jpg", "file3.png"]
     assert folder_paths.filter_files_extensions(files, []) == files
 
+def test_get_input_files_avoids_per_file_stats(tmp_path, monkeypatch):
+    (tmp_path / "image.png").touch()
+    (tmp_path / "nested").mkdir()
+    monkeypatch.setattr(folder_paths, "input_directory", str(tmp_path))
+
+    real_stat = os.stat
+    stats = []
+
+    def count_stat(path, *args, **kwargs):
+        stats.append(path)
+        return real_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "stat", count_stat)
+    assert folder_paths.get_input_files() == ["image.png"]
+    (tmp_path / "new.png").touch()
+    assert set(folder_paths.get_input_files()) == {"image.png", "new.png"}
+    assert stats == []
+
 @patch("folder_paths.recursive_search")
 @patch("folder_paths.folder_names_and_paths")
 def test_get_filename_list(mock_folder_names_and_paths, mock_recursive_search):

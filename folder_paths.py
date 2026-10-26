@@ -148,6 +148,10 @@ def get_input_directory() -> str:
     global input_directory
     return input_directory
 
+def get_input_files() -> list[str]:
+    with os.scandir(get_input_directory()) as entries:
+        return [entry.name for entry in entries if entry.is_file()]
+
 def get_previews_directory() -> str:
     """Where generated asset previews are stored. Not served by type through /view."""
     return previews_directory
