@@ -59,6 +59,9 @@ _T = TypeVar("_T", bound="TensorRef")
 
 class ValueRef(Ref):
     KIND: str
+    async def value(self) -> Any: ...
+    @classmethod
+    async def from_value(cls, v: Any) -> ValueRef: ...
 
 class TensorRef(Ref):
     KIND: str
