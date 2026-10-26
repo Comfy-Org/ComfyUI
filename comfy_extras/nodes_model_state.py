@@ -1,0 +1,56 @@
+import os
+
+from typing_extensions import override
+
+import comfy.model_state
+import folder_paths
+from comfy_api.latest import ComfyExtension, io
+
+
+def state_path(filename):
+    output_dir = folder_paths.get_output_directory()
+    path = os.path.abspath(os.path.join(output_dir, filename))
+    if not folder_paths.is_within_directory(output_dir, path):
+        raise ValueError(f"Model state files must be inside the output folder: {filename}")
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    return path
+
+
+class OpenModelState(io.ComfyNode):
+    @classmethod
+    def define_schema(cls) -> io.Schema:
+        return io.Schema(
+            node_id="OpenModelState",
+            display_name="Open Model State",
+            category="model_state",
+            search_aliases=["KV cache", "conversation", "resume"],
+            description="Opens a model state file in the output folder, such as a text generation conversation, so a sampler can continue from it. The file is only written by Save Model State.",
+            inputs=[
+                io.String.Input("filename", default="model_states/ComfyUI.safetensors"),
+                io.Combo.Input("create", options=["if_missing", "never", "always"], default="if_missing", tooltip="What to do when the file is missing: start from an empty state, or fail. always ignores the file and starts empty on every run."),
+            ],
+            outputs=[io.ModelState.Output()],
+        )
+
+    @classmethod
+    def fingerprint_inputs(cls, filename, create):
+        if create == "always":
+            return float("NaN")
+        path = state_path(filename)
+        return os.stat(path).st_mtime_ns if os.path.exists(path) else None
+
+    @classmethod
+    def execute(cls, filename, create) -> io.NodeOutput:
+        return io.NodeOutput(comfy.model_state.ModelState.open(state_path(filename), create))
+
+
+class ModelStateExtension(ComfyExtension):
+    @override
+    async def get_node_list(self) -> list[type[io.ComfyNode]]:
+        return [
+            OpenModelState,
+        ]
+
+
+async def comfy_entrypoint() -> ModelStateExtension:
+    return ModelStateExtension()

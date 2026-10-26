@@ -21,6 +21,7 @@ if TYPE_CHECKING:
     from comfy.controlnet import ControlNet
     from comfy.hooks import HookGroup, HookKeyframeGroup
     from comfy.model_patcher import ModelPatcher
+    from comfy.model_state import ModelState as ModelState_
     from comfy.samplers import CFGGuider, Sampler
     from comfy.sd import CLIP, VAE
     from comfy.sd import StyleModel as StyleModel_
@@ -614,6 +615,12 @@ class Vae(ComfyTypeIO):
 class Model(ComfyTypeIO):
     if TYPE_CHECKING:
         Type = ModelPatcher
+
+@comfytype(io_type="MODEL_STATE")
+class ModelState(ComfyTypeIO):
+    """A writable model's values over a file, such as an LLM's KV cache."""
+    if TYPE_CHECKING:
+        Type = ModelState_
 
 @comfytype(io_type="BACKGROUND_REMOVAL")
 class BackgroundRemoval(ComfyTypeIO):
@@ -2646,6 +2653,7 @@ __all__ = [
     "ControlNet",
     "Vae",
     "Model",
+    "ModelState",
     "ModelPatch",
     "ClipVision",
     "ClipVisionOutput",
