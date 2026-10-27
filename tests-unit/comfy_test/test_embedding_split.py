@@ -15,6 +15,10 @@ behavioural tests reproduce the full split + re-prefix logic from
 comma-separated embedding ends up as its own ``embedding:`` segment
 in the final ``to_tokenize`` list — which is what the per-segment
 dispatcher keys off.
+
+The last test in this file drives the production tokenizer itself, so a
+regression in the split or in the re-prefix loop cannot slip through
+even when the regex still contains the comma.
 """
 
 from __future__ import annotations
@@ -22,6 +26,8 @@ from __future__ import annotations
 import ast
 import re
 from pathlib import Path
+
+import torch
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -193,3 +199,70 @@ def test_sd1_clip_uses_the_widened_separator_pattern() -> None:
         f"does not accept a comma before the identifier; this "
         f"regresses issue #1354."
     )
+
+
+# ---------------------------------------------------------------------------
+# Production test — drive the real tokenizer, not a copy of it.
+# ---------------------------------------------------------------------------
+
+
+def _fake_embedding_loader(monkeypatch):
+    """Replace ``comfy.sd1_clip.load_embed`` with a stub.
+
+    Only the embeddings named ``a`` and ``b`` exist; every other name
+    resolves to ``None`` exactly like a missing embedding file does.
+    That detail matters for the comma case: the split leaves the comma
+    attached to the first name (``a,``), and it is ``_try_get_embedding``
+    that strips it and retries the lookup.
+    """
+    import comfy.sd1_clip as sd1_clip
+
+    requested: list[str] = []
+    loaded: dict[str, torch.Tensor] = {}
+
+    def fake_load_embed(embedding_name, embedding_directory, embedding_size, embed_key=None):
+        requested.append(embedding_name)
+        if embedding_name not in ("a", "b"):
+            return None
+        tensor = torch.full((embedding_size,), float(len(loaded) + 1))
+        loaded[embedding_name] = tensor
+        return tensor
+
+    monkeypatch.setattr(sd1_clip, "load_embed", fake_load_embed)
+    return requested, loaded
+
+
+def test_sd1_tokenizer_dispatches_both_comma_separated_embeddings(monkeypatch, tmp_path) -> None:
+    """``SD1Tokenizer.tokenize_with_weights`` must dispatch *both* of the
+    embeddings in ``embedding:a,embedding:b``.
+
+    ``comfy.sd1_clip.SD1Tokenizer`` is the ``ClipTarget.tokenizer`` of the
+    SD1 model (see ``comfy/supported_models.py``), so this is the very
+    method ``comfy/sd.py`` calls to tokenise a prompt. Driving it here
+    means a regression in the split or in the re-prefix loop fails this
+    test, which the ``_to_tokenize`` helper above — a copy of that logic
+    — cannot do.
+    """
+    import comfy.sd1_clip as sd1_clip
+
+    requested, loaded = _fake_embedding_loader(monkeypatch)
+
+    tokenizer = sd1_clip.SD1Tokenizer(embedding_directory=str(tmp_path))
+    batched = tokenizer.tokenize_with_weights("embedding:a,embedding:b")
+
+    # Both embeddings reached the dispatcher and both resolved.
+    assert set(loaded) == {"a", "b"}, (
+        f"the dispatcher did not receive both embeddings: loaded {sorted(loaded)} "
+        f"after the requests {requested}"
+    )
+
+    # And both of them are part of the tokenised output.
+    batches = batched[tokenizer.clip_name]
+    tensors = [t for batch in batches for (t, _weight) in batch if torch.is_tensor(t)]
+    assert len(tensors) == 2, (
+        f"expected exactly two embedding tensors in the token output, got {len(tensors)}"
+    )
+    for name in ("a", "b"):
+        assert any(t is loaded[name] for t in tensors), (
+            f"the embedding {name!r} is missing from the token output"
+        )
