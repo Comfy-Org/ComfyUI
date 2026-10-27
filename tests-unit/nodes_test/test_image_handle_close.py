@@ -23,6 +23,9 @@ import torch
 from PIL import Image
 
 import node_helpers
+import nodes
+from comfy_extras import nodes_dataset, nodes_painter
+from comfy_extras.nodes_dataset import load_and_process_images
 
 
 class OpenedImage:
@@ -105,8 +108,6 @@ def test_dataset_loader_closes_the_image_it_opened(tmp_path: Path, opened_images
     """``load_and_process_images`` must release the file handle of the
     image it opened, even though the working image is replaced by a
     converted copy."""
-    from comfy_extras.nodes_dataset import load_and_process_images
-
     _save_animated_webp(tmp_path / "anim.webp")
 
     tensors = load_and_process_images(["anim.webp"], str(tmp_path))
@@ -125,8 +126,6 @@ def test_dataset_loader_closes_the_image_it_opened_on_failure(
     tmp_path: Path, opened_images, monkeypatch
 ) -> None:
     """The ``finally`` block must also run when the processing raises."""
-    from comfy_extras import nodes_dataset
-
     _save_animated_webp(tmp_path / "anim.webp")
     monkeypatch.setattr(nodes_dataset.np, "array", _boom)
 
@@ -150,8 +149,6 @@ def test_dataset_loader_closes_the_image_it_opened_on_failure(
 def test_painter_closes_the_image_it_opened(tmp_path: Path, opened_images, monkeypatch) -> None:
     """``PainterNode`` converts and resizes the mask, so the image it
     opened has to be tracked separately from the working image."""
-    from comfy_extras import nodes_painter
-
     mask_path = tmp_path / "mask.webp"
     _save_animated_webp(mask_path)
     monkeypatch.setattr(
@@ -176,8 +173,6 @@ def test_painter_closes_the_image_it_opened_on_failure(
     tmp_path: Path, opened_images, monkeypatch
 ) -> None:
     """The ``finally`` block must also run when the processing raises."""
-    from comfy_extras import nodes_painter
-
     mask_path = tmp_path / "mask.webp"
     _save_animated_webp(mask_path)
     monkeypatch.setattr(
@@ -227,8 +222,6 @@ class _NoVideo:
 @pytest.fixture
 def load_image_node(monkeypatch, tmp_path: Path):
     """``nodes.LoadImage`` wired to a temporary multi-frame image."""
-    import nodes
-
     image_path = tmp_path / "anim.webp"
     _save_animated_webp(image_path)
     monkeypatch.setattr(
@@ -264,8 +257,6 @@ def test_load_image_closes_the_image_it_opened_on_failure(
     load_image_node, opened_images, monkeypatch
 ) -> None:
     """The ``finally`` block must also run when the frame loop raises."""
-    import nodes
-
     monkeypatch.setattr(nodes.ImageSequence, "Iterator", _boom)
 
     with pytest.raises(RuntimeError, match="boom"):
