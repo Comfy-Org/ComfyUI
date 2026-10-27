@@ -137,11 +137,11 @@ class PatinaPBRMapsNode(IO.ComfyNode):
     def define_schema(cls) -> IO.Schema:
         return IO.Schema(
             node_id="PatinaPBRMapsNode",
-            display_name="Patina PBR Maps",
+            display_name="Patina PBR Material Maps",
             category="partner/3d/fal",
             essentials_category="3D",
-            description="Generate seamless PBR maps (basecolor, normal, roughness, metalness, height) "
-            "from a photo or render.",
+            description="Generate PBR material maps (basecolor, normal, roughness, metalness, height) "
+            "from a texture image.",
             inputs=[
                 IO.Image.Input("image", tooltip="Input photograph or render to derive PBR maps from."),
                 *_map_toggle_inputs(),
@@ -227,8 +227,8 @@ class PatinaMaterialNode(IO.ComfyNode):
             display_name="Patina Material",
             category="partner/3d/fal",
             essentials_category="3D",
-            description="Generate a complete seamlessly tiling PBR material (base texture + maps, up to 8K) "
-            "from a text prompt. Optionally drive it with an input image (img2img) "
+            description="Generate a complete seamlessly tiling PBR material (texture image + PBR maps) "
+            "from a text prompt, up to 8K. Optionally drive it with an input image (img2img) "
             "or an image + mask (inpaint).",
             inputs=[
                 IO.String.Input("prompt", multiline=True, tooltip="Describe the material/texture to generate."),
@@ -410,7 +410,7 @@ class PatinaMaterialExtractNode(IO.ComfyNode):
             display_name="Patina Material Extract",
             category="partner/3d/fal",
             essentials_category="3D",
-            description="Extract a seamlessly tiling PBR material (base texture + maps) from a region of an "
+            description="Extract a seamlessly tiling PBR material (texture image + PBR maps) from a region of an "
             "input image, guided by a prompt.",
             inputs=[
                 IO.Image.Input("image", tooltip="Image to extract a texture from."),
