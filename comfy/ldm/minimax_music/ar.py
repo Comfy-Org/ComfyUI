@@ -95,7 +95,7 @@ class RVQMLP(nn.Module):
 
     def forward(self, x):
         if self.merged_mlp:
-            return self.down_proj(self.gate_up_proj(x), input_act="swiglu")
+            return comfy.ops.linear_input_act(self.down_proj, self.gate_up_proj(x), "swiglu")
         return self.down_proj(torch.nn.functional.silu(self.gate_proj(x)) * self.up_proj(x))
 
 

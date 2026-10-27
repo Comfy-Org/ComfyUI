@@ -2,6 +2,7 @@ from comfy import sd1_clip
 import comfy.text_encoders.t5
 import comfy.text_encoders.sd3_clip
 import comfy.text_encoders.llama
+import comfy.text_encoders.qwen3vl
 import comfy.model_management
 from transformers import T5TokenizerFast, Qwen2Tokenizer
 from .bpe_tokenizer import from_tekken_json
@@ -160,9 +161,11 @@ class KleinTokenizer(sd1_clip.SD1Tokenizer):
         super().__init__(embedding_directory=embedding_directory, tokenizer_data=tokenizer_data, name=name, tokenizer=tokenizer)
         self.llama_template = "<|im_start|>user\n{}<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
 
-    def tokenize_with_weights(self, text, return_word_ids=False, llama_template=None, system_prompt="", **kwargs):
+    def tokenize_with_weights(self, text, return_word_ids=False, llama_template=None, system_prompt="", thinking=False, **kwargs):
         if llama_template is None:
             llama_text = self.llama_template.format(text)
+            if thinking:  # hybrid Qwen3 chat template: the model opens its own think block
+                llama_text = llama_text.removesuffix("<think>\n\n</think>\n\n")
         else:
             llama_text = llama_template.format(text)
         if system_prompt:
@@ -198,3 +201,47 @@ def klein_te(dtype_llama=None, llama_quantization_metadata=None, model_type="qwe
                 dtype = dtype_llama
             super().__init__(device=device, dtype=dtype, name=model_type, model_options=model_options, clip_model=model)
     return Flux2TEModel_
+
+class Flux3Tokenizer(comfy.text_encoders.qwen3vl.Qwen3VLTokenizer):
+    def __init__(self, embedding_directory=None, tokenizer_data={}):
+        super().__init__(embedding_directory=embedding_directory, tokenizer_data=tokenizer_data, model_type="qwen3vl_4b")
+
+    def tokenize_with_weights(self, text, return_word_ids=False, **kwargs):
+        # instruct template, right padded to a multiple of 80 tokens
+        tokens = super().tokenize_with_weights(text, return_word_ids=return_word_ids, **kwargs)
+        pad = (151643, 1.0, 0) if return_word_ids else (151643, 1.0)
+        for batch in tokens[self.clip_name]:
+            batch.extend([pad] * (-len(batch) % 80))
+        return tokens
+
+class Flux3Qwen3VL(comfy.text_encoders.qwen3vl.Qwen3VL):
+    model_type = "qwen3vl_4b"
+
+    def forward(self, input_ids, attention_mask=None, **kwargs):
+        if attention_mask is not None:
+            # transformers 4.57, which the reference pins, puts the padding at rope position 1; the DiT attends to it
+            kwargs["position_ids"] = (attention_mask.cumsum(-1) - 1).masked_fill(attention_mask == 0, 1)
+        return super().forward(input_ids, attention_mask=attention_mask, **kwargs)
+
+class Flux3Qwen3VLModel(sd1_clip.SDClipModel):
+    def __init__(self, device="cpu", dtype=None, model_options={}):
+        super().__init__(device=device, layer=[4, 8, 12, 16, 20, 24, 28, 32], layer_idx=None, textmodel_json_config={}, dtype=dtype, special_tokens={"pad": 151643}, layer_norm_hidden_state=False, model_class=Flux3Qwen3VL, enable_attention_masks=True, model_options=model_options)
+
+class Flux3TEModel(sd1_clip.SD1ClipModel):
+    def __init__(self, device="cpu", dtype=None, model_options={}):
+        super().__init__(device=device, dtype=dtype, name="qwen3vl_4b", clip_model=Flux3Qwen3VLModel, model_options=model_options)
+
+    def encode_token_weights(self, token_weight_pairs):
+        out, pooled = super().encode_token_weights(token_weight_pairs)
+        return out.movedim(1, 2).flatten(2), pooled
+
+def flux3_te(dtype_llama=None, llama_quantization_metadata=None):
+    class Flux3TEModel_(Flux3TEModel):
+        def __init__(self, device="cpu", dtype=None, model_options={}):
+            if llama_quantization_metadata is not None:
+                model_options = model_options.copy()
+                model_options["quantization_metadata"] = llama_quantization_metadata
+            if dtype_llama is not None:
+                dtype = dtype_llama
+            super().__init__(device=device, dtype=dtype, model_options=model_options)
+    return Flux3TEModel_

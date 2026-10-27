@@ -17,6 +17,7 @@ from .diffusionmodules.util import AlphaBlender, timestep_embedding
 from .sub_quadratic_attention import efficient_dot_product_attention
 
 from comfy import model_management
+from comfy.configurable import ConfigurableModule
 
 if model_management.xformers_enabled():
     import xformers
@@ -73,15 +74,22 @@ def get_attention_function(name: str, default: Any=...) -> Union[Callable, None]
     return REGISTERED_ATTENTION_FUNCTIONS[name]
 
 
-class ComfyAttention(nn.Module):
+class ComfyAttention(ConfigurableModule):
     def __init__(self):
         super().__init__()
         self.config = None
         self.function = None
+        self.method = None
+
+    def with_config(self, encoded_config):
+        attention = ComfyAttention()
+        attention.load_state_dict({"config": encoded_config})
+        return attention
 
     def _load_from_state_dict(self, state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs):
         self.config = None
         self.function = None
+        self.method = None
         metadata = state_dict.pop(prefix + "config", None)
         if metadata is not None:
             self.config = json.loads(metadata.numpy().tobytes())
@@ -97,6 +105,7 @@ class ComfyAttention(nn.Module):
                 else:
                     logging.warning(f"Ignoring unknown attention method {method!r} for {prefix.rstrip('.')}")
                 if self.function is not None:
+                    self.method = method
                     break
         super()._load_from_state_dict(state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs)
 

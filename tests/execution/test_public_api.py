@@ -29,6 +29,7 @@ class TestPublicAPI:
             '--port', str(args_pytest["port"]),
             '--extra-model-paths-config', 'tests/execution/extra_model_paths.yaml',
             '--cpu',
+            '--disable-assets',
         ]
         p = subprocess.Popen(pargs)
         yield

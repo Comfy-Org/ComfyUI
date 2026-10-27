@@ -196,7 +196,7 @@ class WanFeedForward(nn.Sequential):
     """[Linear, GELU(tanh), Linear], with the GELU folded into the down-projection."""
 
     def forward(self, x):
-        return self[2](self[0](x), input_act="gelu_tanh")
+        return comfy.ops.linear_input_act(self[2], self[0](x), "gelu_tanh")
 
 
 class WanAttentionBlock(nn.Module):

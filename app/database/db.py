@@ -6,7 +6,6 @@ import sqlite3
 import time
 from contextlib import closing
 from app.logger import log_startup_warning
-from utils.install_util import get_missing_requirements_message
 from filelock import FileLock, Timeout
 from comfy.cli_args import args, database_default_path
 
@@ -23,6 +22,7 @@ try:
     from alembic.runtime.migration import MigrationContext
     from alembic.script import ScriptDirectory
     from sqlalchemy import create_engine, event
+    from sqlalchemy.engine import URL, make_url
     from sqlalchemy.exc import OperationalError
     from sqlalchemy.orm import sessionmaker
     from sqlalchemy.pool import StaticPool
@@ -32,16 +32,9 @@ try:
     import blake3  # noqa: F401 — verify the hard dependency is importable at startup
 
     _DB_AVAILABLE = True
-except ImportError as e:
-    log_startup_warning(
-        f"""
-------------------------------------------------------------------------
-Error importing dependencies: {e}
-{get_missing_requirements_message()}
-This error is happening because ComfyUI now uses a local sqlite database.
-------------------------------------------------------------------------
-""".strip()
-    )
+except ImportError:
+    # Only the assets system needs these; with it on, startup stops and says what to install.
+    logging.debug("Database packages failed to import", exc_info=True)
 
 
 def dependencies_available():
@@ -76,8 +69,11 @@ def get_alembic_config():
     scripts_path = os.path.abspath(os.path.join(root_path, "alembic_db"))
 
     config = Config(config_path)
-    config.set_main_option("script_location", scripts_path)
-    config.set_main_option("sqlalchemy.url", get_database_url())
+    # Config values go through ConfigParser interpolation, so a literal % in a path must be doubled,
+    # including in the %(here)s default that alembic fills in unescaped.
+    config.file_config.set("DEFAULT", "here", os.path.dirname(config_path).replace("%", "%%"))
+    config.set_main_option("script_location", scripts_path.replace("%", "%%"))
+    config.set_main_option("sqlalchemy.url", get_database_url().replace("%", "%%"))
 
     return config
 
@@ -89,7 +85,9 @@ def get_database_url():
     import folder_paths
 
     db_path = os.path.join(folder_paths.get_user_directory(), "comfyui.db")
-    return f"sqlite:///{db_path}"
+    # Built by SQLAlchemy so its own parser reads the path back intact: 2.1+ decodes %xx, and every version
+    # stops the path at ? (which only 2.1+ quotes).
+    return URL.create("sqlite", database=db_path).render_as_string()
 
 
 def get_legacy_default_db_path():
@@ -99,7 +97,7 @@ def get_legacy_default_db_path():
 def get_db_path():
     url = get_database_url()
     if url.startswith("sqlite:///"):
-        return url.split("///", 1)[1]
+        return make_url(url).database
     else:
         raise ValueError(f"Unsupported database URL '{url}'.")
 
@@ -229,7 +227,6 @@ def _is_memory_db(db_url):
 
 def init_db():
     db_url = get_database_url()
-    logging.debug(f"Database URL: {db_url}")
 
     if _is_memory_db(db_url):
         _init_memory_db(db_url)
@@ -363,7 +360,7 @@ def _migrate_and_bind(db_url, db_path, db_exists):
             command.upgrade(config, target_rev)
             logging.info(f"Database upgraded from {current_rev} to {target_rev}")
         except Exception as e:
-            logging.exception("Error upgrading database: ")
+            logging.debug("Error upgrading database", exc_info=True)
             if backup_path:
                 # Restore the database from backup if upgrade fails
                 try:

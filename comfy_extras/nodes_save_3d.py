@@ -180,22 +180,22 @@ def save_glb(vertices, faces, filepath=None, metadata=None,
     texture_png_bytes = None
     if texture_image is not None:
         buf = BytesIO()
-        texture_image.save(buf, format="PNG")
+        texture_image.save(buf, format="PNG", compress_level=4)
         texture_png_bytes = buf.getvalue()
     mr_png_bytes = None
     if metallic_roughness_image is not None:
         buf = BytesIO()
-        metallic_roughness_image.save(buf, format="PNG")
+        metallic_roughness_image.save(buf, format="PNG", compress_level=4)
         mr_png_bytes = buf.getvalue()
     nm_png_bytes = None
     if normal_map_image is not None:
         buf = BytesIO()
-        normal_map_image.save(buf, format="PNG")
+        normal_map_image.save(buf, format="PNG", compress_level=4)
         nm_png_bytes = buf.getvalue()
     em_png_bytes = None
     if emissive_image is not None:
         buf = BytesIO()
-        emissive_image.save(buf, format="PNG")
+        emissive_image.save(buf, format="PNG", compress_level=4)
         em_png_bytes = buf.getvalue()
 
     vertices_buffer = vertices_np.tobytes()
