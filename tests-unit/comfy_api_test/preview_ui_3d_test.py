@@ -1,5 +1,6 @@
 import os
 from io import BytesIO
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -7,35 +8,39 @@ import pytest
 import folder_paths
 from comfy_api.latest import IO, UI, Types
 from comfy_extras.nodes_load_3d import Preview3DAdvanced, PreviewGaussianSplat, PreviewPointCloud
-from comfy_extras.nodes_save_3d import Save3DAdvanced, SaveGaussianSplat, SavePointCloud
+from comfy_extras.nodes_save_3d import Save3DAdvanced, SaveGaussianSplat, SaveGLB, SavePointCloud
 
 
-def test_preview_ui_3d_advanced_keeps_bare_path_by_default():
-    ui = UI.PreviewUI3DAdvanced("3d/model.glb", {"fov": 35}, [])
-
-    assert ui.as_dict() == {"result": ["3d/model.glb", {"fov": 35}, []]}
-
-
-def test_preview_ui_3d_advanced_reports_saved_result_as_standard_output_item():
+def test_saved_3d_models_reports_files_and_viewer_state():
     saved = UI.SavedResult("model_00001.glb", "3d", IO.FolderType.output)
-    ui = UI.PreviewUI3DAdvanced("3d/model_00001.glb", None, [], saved_result=saved)
+    ui = UI.Saved3DModels([saved], {"fov": 35}, [{"scale": 1}])
 
     assert ui.as_dict() == {
-        "result": ["3d/model_00001.glb", None, []],
         "3d": [{"filename": "model_00001.glb", "subfolder": "3d", "type": "output"}],
+        "camera_info": [{"fov": 35}],
+        "model_3d_info": [{"scale": 1}],
     }
 
 
+def test_saved_3d_models_defaults_to_no_viewer_state():
+    ui = UI.Saved3DModels([UI.SavedResult("m.glb", "", IO.FolderType.output)])
+
+    assert ui.as_dict()["camera_info"] == [None]
+    assert ui.as_dict()["model_3d_info"] == []
+
+
+def test_preview_ui_3d_advanced_splits_the_path_into_a_saved_result():
+    ui = UI.PreviewUI3DAdvanced("3d/model.glb", {"fov": 35}, [])
+
+    assert ui.as_dict()["3d"] == [{"filename": "model.glb", "subfolder": "3d", "type": "output"}]
+    assert ui.as_dict()["camera_info"] == [{"fov": 35}]
+
+
 @pytest.mark.parametrize("folder_type", [IO.FolderType.temp, "temp"])
-def test_preview_ui_3d_advanced_annotates_folder_type(folder_type):
+def test_preview_ui_3d_advanced_uses_the_folder_type(folder_type):
     ui = UI.PreviewUI3DAdvanced("preview.glb", None, [], folder_type=folder_type)
 
-    result = ui.as_dict()["result"]
-
-    assert result[0] == "preview.glb [temp]"
-    name, base_dir = folder_paths.annotated_filepath(result[0])
-    assert name == "preview.glb"
-    assert base_dir == folder_paths.get_temp_directory()
+    assert ui.as_dict()["3d"] == [{"filename": "preview.glb", "subfolder": "", "type": "temp"}]
 
 
 @pytest.mark.parametrize(
@@ -47,25 +52,24 @@ def test_preview_ui_3d_advanced_annotates_folder_type(folder_type):
         (PreviewPointCloud, "ply", "preview_pointcloud_"),
     ],
 )
-def test_preview_nodes_report_where_they_wrote_the_file(tmp_path, node_cls, file_format, prefix):
+def test_preview_nodes_report_the_temp_file_they_wrote(tmp_path, node_cls, file_format, prefix):
     model = Types.File3D(BytesIO(b"model-bytes"), file_format)
 
     with patch.object(folder_paths, "get_temp_directory", return_value=str(tmp_path)):
         output = node_cls.execute(model, viewport_state={}, width=1, height=1)
-        reported = output.ui.as_dict()["result"][0]
-        name, base_dir = folder_paths.annotated_filepath(reported)
 
-    assert reported.endswith(f".{file_format} [temp]")
-    assert name.startswith(prefix)
-    assert base_dir == str(tmp_path)
-    assert os.path.isfile(os.path.join(tmp_path, name))
+    (item,) = output.ui.as_dict()["3d"]
+    assert item["type"] == "temp"
+    assert item["subfolder"] == ""
+    assert item["filename"].startswith(prefix) and item["filename"].endswith(f".{file_format}")
+    assert os.path.isfile(os.path.join(tmp_path, item["filename"]))
 
 
 @pytest.mark.parametrize(
     ("node_cls", "file_format"),
     [(Save3DAdvanced, "glb"), (SaveGaussianSplat, "spz"), (SavePointCloud, "ply")],
 )
-def test_save_nodes_report_the_saved_file_as_a_3d_output_item(tmp_path, node_cls, file_format):
+def test_save_nodes_report_the_output_file_they_wrote(tmp_path, node_cls, file_format):
     model = Types.File3D(BytesIO(b"model-bytes"), file_format)
 
     with patch.object(folder_paths, "get_output_directory", return_value=str(tmp_path)):
@@ -73,8 +77,25 @@ def test_save_nodes_report_the_saved_file_as_a_3d_output_item(tmp_path, node_cls
 
     ui = output.ui.as_dict()
     (item,) = ui["3d"]
-    assert item["subfolder"] == "3d"
     assert item["type"] == "output"
+    assert item["subfolder"] == "3d"
     assert item["filename"].startswith("ComfyUI_") and item["filename"].endswith(f".{file_format}")
-    assert ui["result"][0] == f"3d/{item['filename']}"
+    assert set(ui) == {"3d", "camera_info", "model_3d_info"}
+    assert os.path.isfile(os.path.join(tmp_path, "3d", item["filename"]))
+
+
+def test_save_glb_reports_a_file3d_input_in_the_same_shape(tmp_path):
+    model = Types.File3D(BytesIO(b"model-bytes"), "glb")
+
+    with (
+        patch.object(folder_paths, "get_output_directory", return_value=str(tmp_path)),
+        patch.object(SaveGLB, "hidden", SimpleNamespace(prompt=None, extra_pnginfo=None)),
+    ):
+        output = SaveGLB.execute(model, filename_prefix="3d/ComfyUI")
+
+    ui = output.ui.as_dict()
+    (item,) = ui["3d"]
+    assert item == {"filename": item["filename"], "subfolder": "3d", "type": "output"}
+    assert item["filename"].endswith("_.glb")
+    assert ui["camera_info"] == [None]
     assert os.path.isfile(os.path.join(tmp_path, "3d", item["filename"]))

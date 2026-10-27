@@ -15,10 +15,10 @@ from app.assets.database.models import Asset, AssetContent, Base
 from app.assets.database.queries.records import create_content, create_record
 from app.assets.lifecycle import (
     cleanup_temp_filesystem,
-    get_excluded_scan_roots,
     run_asset_shutdown_cleanup,
     run_asset_startup,
     run_startup,
+    start_asset_seeder,
     wipe_temp_db_rows,
 )
 from app.assets.scanner import get_temp_prefixes, sync_temp_references_safely
@@ -173,6 +173,13 @@ def test_run_startup_enabled_delegates_to_asset_startup_not_bare_sweep():
     cleanup_mock.assert_not_called()
 
 
+def test_startup_scan_covers_models_input_and_output():
+    with patch.object(asset_seeder, "start", return_value=True) as start_mock:
+        start_asset_seeder()
+
+    assert start_mock.call_args.kwargs["roots"] == ("models", "input", "output")
+
+
 def test_run_startup_logs_and_absorbs_disabled_filesystem_failure(caplog):
     with patch("app.assets.lifecycle.cleanup_temp_filesystem", side_effect=RuntimeError("filesystem failure")):
         run_startup(enable_assets=False)
@@ -182,24 +189,21 @@ def test_run_startup_logs_and_absorbs_disabled_filesystem_failure(caplog):
 
 def test_rmtree_failure_excludes_temp_from_scan(session, comfy_dirs, mock_create_session):
     record_id, content_id = _seed_temp_rows(session, comfy_dirs)
-
-    wipe_temp_db_rows(session)
-    session.commit()
-    assert session.get(Asset, record_id) is None
+    tracked_file = comfy_dirs / "preview.png"
+    tracked_file.unlink()
 
     with patch("app.assets.lifecycle.shutil.rmtree", side_effect=OSError("busy")):
         assert cleanup_temp_filesystem() is False
 
-    assert str(comfy_dirs) in get_excluded_scan_roots()
     assert get_temp_prefixes() == []
-
-    residual = comfy_dirs / "leftover.png"
-    residual.write_bytes(b"\x00" * 10)
 
     with patch("app.assets.scanner.create_session", mock_create_session):
         sync_temp_references_safely()
 
-    assert session.scalars(select(Asset)).all() == []
+    session.expire_all()
+    content = session.get(AssetContent, content_id)
+    assert session.get(Asset, record_id) is not None
+    assert content is not None and content.is_missing is False
 
 
 def test_shutdown_skips_cleanup_when_seeder_join_times_out(session, comfy_dirs, mock_create_session, caplog):

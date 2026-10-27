@@ -7,7 +7,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from comfy.ldm.modules.attention import optimized_attention
+from comfy.ldm.modules.attention import AttentionTensorContainer, ComfyAttention, optimized_attention
 import comfy.ops
 import comfy.patcher_extension
 import comfy.ldm.common_dit
@@ -63,6 +63,7 @@ class MultiHeadLayerNorm(nn.Module):
 class SingleAttention(nn.Module):
     def __init__(self, dim, n_heads, mh_qknorm=False, dtype=None, device=None, operations=None):
         super().__init__()
+        self.comfy_attention = ComfyAttention()
 
         self.n_heads = n_heads
         self.head_dim = dim // n_heads
@@ -95,7 +96,8 @@ class SingleAttention(nn.Module):
         v = v.view(bsz, seqlen1, self.n_heads, self.head_dim)
         q, k = self.q_norm1(q), self.k_norm1(k)
 
-        output = optimized_attention(q.permute(0, 2, 1, 3), k.permute(0, 2, 1, 3), v.permute(0, 2, 1, 3), self.n_heads, skip_reshape=True, transformer_options=transformer_options)
+        q, k, v = AttentionTensorContainer(q.permute(0, 2, 1, 3)), AttentionTensorContainer(k.permute(0, 2, 1, 3)), AttentionTensorContainer(v.permute(0, 2, 1, 3))
+        output = optimized_attention(q, k, v, self.n_heads, skip_reshape=True, preferred_attention=self.comfy_attention, transformer_options=transformer_options)
         c = self.w1o(output)
         return c
 
@@ -104,6 +106,7 @@ class SingleAttention(nn.Module):
 class DoubleAttention(nn.Module):
     def __init__(self, dim, n_heads, mh_qknorm=False, dtype=None, device=None, operations=None):
         super().__init__()
+        self.comfy_attention = ComfyAttention()
 
         self.n_heads = n_heads
         self.head_dim = dim // n_heads
@@ -168,7 +171,9 @@ class DoubleAttention(nn.Module):
             torch.cat([cv, xv], dim=1),
         )
 
-        output = optimized_attention(q.permute(0, 2, 1, 3), k.permute(0, 2, 1, 3), v.permute(0, 2, 1, 3), self.n_heads, skip_reshape=True, transformer_options=transformer_options)
+        del cq, ck, cv, xq, xk, xv
+        q, k, v = AttentionTensorContainer(q.permute(0, 2, 1, 3)), AttentionTensorContainer(k.permute(0, 2, 1, 3)), AttentionTensorContainer(v.permute(0, 2, 1, 3))
+        output = optimized_attention(q, k, v, self.n_heads, skip_reshape=True, preferred_attention=self.comfy_attention, transformer_options=transformer_options)
 
         c, x = output.split([seqlen1, seqlen2], dim=1)
         c = self.w1o(c)

@@ -2,7 +2,7 @@ import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from comfy.ldm.modules.attention import optimized_attention
+from comfy.ldm.modules.attention import AttentionTensorContainer, ComfyAttention, optimized_attention
 import comfy.model_management
 
 class GELU(nn.Module):
@@ -288,6 +288,7 @@ class CrossAttention(nn.Module):
         **kwargs,
     ):
         super().__init__()
+        self.comfy_attention = ComfyAttention()
         self.qdim = qdim
         self.kdim = kdim
 
@@ -338,12 +339,14 @@ class CrossAttention(nn.Module):
         q = self.q_norm(q)
         k = self.k_norm(k)
 
+        q, k, v = AttentionTensorContainer(q.reshape(b, s1, -1)), AttentionTensorContainer(k.reshape(b, s2, -1)), AttentionTensorContainer(v)
+        del kv
         x = optimized_attention(
-            q.reshape(b, s1, self.num_heads * self.head_dim),
-            k.reshape(b, s2, self.num_heads * self.head_dim),
+            q,
+            k,
             v,
             heads=self.num_heads,
-            low_precision_attention=False,
+            low_precision_attention=False, preferred_attention=self.comfy_attention,
         )
 
         out = self.out_proj(x)
@@ -365,6 +368,7 @@ class Attention(nn.Module):
         dtype = None
     ):
         super().__init__()
+        self.comfy_attention = ComfyAttention()
         self.dim = dim
         self.num_heads = num_heads
         self.head_dim = self.dim // num_heads
@@ -408,12 +412,14 @@ class Attention(nn.Module):
         query = self.q_norm(query)
         key = self.k_norm(key)
 
+        query, key, value = AttentionTensorContainer(query.reshape(B, N, -1)), AttentionTensorContainer(key.reshape(B, N, -1)), AttentionTensorContainer(value)
+        del qkv, qkv_combined
         x = optimized_attention(
-            query.reshape(B, N, self.num_heads * self.head_dim),
-            key.reshape(B, N, self.num_heads * self.head_dim),
+            query,
+            key,
             value,
             heads=self.num_heads,
-            low_precision_attention=False,
+            low_precision_attention=False, preferred_attention=self.comfy_attention,
         )
 
         x = self.out_proj(x)

@@ -1,3 +1,4 @@
+import importlib
 import logging
 import os
 import shutil
@@ -5,7 +6,6 @@ import sqlite3
 import time
 from contextlib import closing
 from app.logger import log_startup_warning
-from utils.install_util import get_missing_requirements_message
 from filelock import FileLock, Timeout
 from comfy.cli_args import args, database_default_path
 
@@ -13,6 +13,8 @@ _DB_AVAILABLE = False
 Session = None
 WriteSession = None
 
+# The packages the imports below need; keep in step with them.
+_DEPENDENCIES = ("sqlalchemy", "alembic", "blake3")
 
 try:
     from alembic import command
@@ -20,6 +22,7 @@ try:
     from alembic.runtime.migration import MigrationContext
     from alembic.script import ScriptDirectory
     from sqlalchemy import create_engine, event
+    from sqlalchemy.engine import URL, make_url
     from sqlalchemy.exc import OperationalError
     from sqlalchemy.orm import sessionmaker
     from sqlalchemy.pool import StaticPool
@@ -29,16 +32,9 @@ try:
     import blake3  # noqa: F401 — verify the hard dependency is importable at startup
 
     _DB_AVAILABLE = True
-except ImportError as e:
-    log_startup_warning(
-        f"""
-------------------------------------------------------------------------
-Error importing dependencies: {e}
-{get_missing_requirements_message()}
-This error is happening because ComfyUI now uses a local sqlite database.
-------------------------------------------------------------------------
-""".strip()
-    )
+except ImportError:
+    # Only the assets system needs these; with it on, startup stops and says what to install.
+    logging.debug("Database packages failed to import", exc_info=True)
 
 
 def dependencies_available():
@@ -46,6 +42,17 @@ def dependencies_available():
     Temporary function to check if the dependencies are available
     """
     return _DB_AVAILABLE
+
+
+def missing_dependencies():
+    """Names of the database packages that fail to import."""
+    missing = []
+    for name in _DEPENDENCIES:
+        try:
+            importlib.import_module(name)
+        except ImportError:
+            missing.append(name)
+    return missing
 
 
 def can_create_session():
@@ -62,8 +69,11 @@ def get_alembic_config():
     scripts_path = os.path.abspath(os.path.join(root_path, "alembic_db"))
 
     config = Config(config_path)
-    config.set_main_option("script_location", scripts_path)
-    config.set_main_option("sqlalchemy.url", get_database_url())
+    # Config values go through ConfigParser interpolation, so a literal % in a path must be doubled,
+    # including in the %(here)s default that alembic fills in unescaped.
+    config.file_config.set("DEFAULT", "here", os.path.dirname(config_path).replace("%", "%%"))
+    config.set_main_option("script_location", scripts_path.replace("%", "%%"))
+    config.set_main_option("sqlalchemy.url", get_database_url().replace("%", "%%"))
 
     return config
 
@@ -75,7 +85,9 @@ def get_database_url():
     import folder_paths
 
     db_path = os.path.join(folder_paths.get_user_directory(), "comfyui.db")
-    return f"sqlite:///{db_path}"
+    # Built by SQLAlchemy so its own parser reads the path back intact: 2.1+ decodes %xx, and every version
+    # stops the path at ? (which only 2.1+ quotes).
+    return URL.create("sqlite", database=db_path).render_as_string()
 
 
 def get_legacy_default_db_path():
@@ -85,7 +97,7 @@ def get_legacy_default_db_path():
 def get_db_path():
     url = get_database_url()
     if url.startswith("sqlite:///"):
-        return url.split("///", 1)[1]
+        return make_url(url).database
     else:
         raise ValueError(f"Unsupported database URL '{url}'.")
 
@@ -133,8 +145,6 @@ def prepare_file_db_path(db_path):
     if db_dir:
         os.makedirs(db_dir, exist_ok=True)
 
-    copy_legacy_default_db(db_path)
-
 
 _BACKUP_TIMEOUT_SECONDS = 5.0
 _SQLITE_BUSY, _SQLITE_LOCKED = 5, 6  # sqlite3 only exports these names from Python 3.11
@@ -157,12 +167,16 @@ def _backup_database(source_path, destination_path):
 
 
 _db_lock = None
+_LOCK_WAIT_SECONDS = 5.0
 
 def _acquire_file_lock(db_path):
     """Acquire an OS-level file lock to prevent multi-process access.
 
     Uses filelock for cross-platform support (macOS, Linux, Windows).
     The OS automatically releases the lock when the process exits, even on crashes.
+    If the lock is held, waits up to _LOCK_WAIT_SECONDS for it to be released, since a
+    relaunch can start while the previous process is still exiting. The lock is never
+    taken from a holder.
     """
     global _db_lock
     lock_path = db_path + ".lock"
@@ -170,11 +184,40 @@ def _acquire_file_lock(db_path):
     try:
         _db_lock.acquire(timeout=0)
     except Timeout:
-        raise RuntimeError(
-            f"Could not acquire lock on database '{db_path}'. "
-            "Another ComfyUI process may already be using it. "
-            "Use --database-url to specify a separate database file."
-        )
+        logging.info(f"Database lock is held; waiting up to {_LOCK_WAIT_SECONDS:g}s for it to be released")
+        try:
+            _db_lock.acquire(timeout=_LOCK_WAIT_SECONDS)
+        except Timeout:
+            raise RuntimeError(
+                f"Could not acquire lock on database '{db_path}'. "
+                "Another ComfyUI process may already be using it. "
+                "Use --database-url to specify a separate database file."
+            )
+
+
+def lock_holder_db_path():
+    """The database path if another process holds its lock, else None.
+
+    Never waits and never keeps the lock: a free lock is taken and released at once.
+    A missing lock file means no holder, so none is created.
+    """
+    try:
+        db_path = get_db_path()
+    except ValueError:
+        return None
+    lock_path = db_path + ".lock"
+    if not os.path.exists(lock_path):
+        return None
+    probe = FileLock(lock_path)
+    try:
+        probe.acquire(timeout=0)
+        probe.release()
+    except Timeout:
+        return db_path
+    except Exception as e:
+        # The check is advisory, so it must never stop startup.
+        logging.debug(f"Could not check the database lock '{lock_path}': {e}")
+    return None
 
 
 def _is_memory_db(db_url):
@@ -184,7 +227,6 @@ def _is_memory_db(db_url):
 
 def init_db():
     db_url = get_database_url()
-    logging.debug(f"Database URL: {db_url}")
 
     if _is_memory_db(db_url):
         _init_memory_db(db_url)
@@ -222,18 +264,27 @@ def _init_file_db(db_url):
     """Initialize a file-backed SQLite database using Alembic migrations."""
     db_path = get_db_path()
     prepare_file_db_path(db_path)
-    db_exists = os.path.exists(db_path)
 
-    # Lock BEFORE any migration work — deliberately diverging from upstream master, whose
-    # "it would block Alembic" rationale is false (the lock guards a separate `<db>.lock`
-    # file). Only this order makes revision inspection, backup, upgrade and the failure-path
-    # restore mutually exclusive between processes.
+    # Lock before legacy import, migration inspection, backup, upgrade, and failure recovery.
+    # The separate `<db>.lock` file does not block Alembic; this ordering keeps the sequence
+    # process-exclusive.
     _acquire_file_lock(db_path)
     try:
+        copy_legacy_default_db(db_path)
+        db_exists = os.path.exists(db_path)
         _migrate_and_bind(db_url, db_path, db_exists)
     except Exception:
         _db_lock.release()
         raise
+
+
+# NORMAL: commits skip the fsync that held the write lock. A power loss or OS crash can
+# roll back recent commits but cannot corrupt the database. "FULL" is SQLite's default.
+WAL_SYNCHRONOUS = "NORMAL"
+
+
+def _set_wal_synchronous(dbapi_connection, connection_record=None):
+    dbapi_connection.execute(f"PRAGMA synchronous={WAL_SYNCHRONOUS}")
 
 
 _DESTRUCTIVE_REVISION = "0007_record_content_split"
@@ -283,6 +334,11 @@ def _migrate_and_bind(db_url, db_path, db_exists):
     else:
         if journal_mode.lower() != "wal":
             logging.warning("SQLite WAL mode unavailable; continuing with %s journal mode.", journal_mode)
+        else:
+            # Only in WAL mode: with a rollback journal, NORMAL risks corruption on power loss.
+            event.listen(engine, "connect", _set_wal_synchronous)
+            event.listen(write_engine, "connect", _set_wal_synchronous)
+            _set_wal_synchronous(conn.connection.dbapi_connection)  # opened before the hooks
 
     context = MigrationContext.configure(conn)
     current_rev = context.get_current_revision()
@@ -304,7 +360,7 @@ def _migrate_and_bind(db_url, db_path, db_exists):
             command.upgrade(config, target_rev)
             logging.info(f"Database upgraded from {current_rev} to {target_rev}")
         except Exception as e:
-            logging.exception("Error upgrading database: ")
+            logging.debug("Error upgrading database", exc_info=True)
             if backup_path:
                 # Restore the database from backup if upgrade fails
                 try:
@@ -322,7 +378,9 @@ def _migrate_and_bind(db_url, db_path, db_exists):
                 f"The asset catalog was rebuilt from scratch by migration "
                 f"{_DESTRUCTIVE_REVISION}: manual tags, user metadata, previews, renames, "
                 f"API-created records and job_id links from the previous database were "
-                f"discarded. The database from before the upgrade was kept at {backup_path}."
+                f"discarded. Record deletions were also discarded, so files still on disk "
+                f"will be catalogued again. The database from before the upgrade was kept "
+                f"at {backup_path}."
             )
 
     conn.close()

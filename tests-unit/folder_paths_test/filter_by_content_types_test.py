@@ -66,3 +66,13 @@ def test_handles_no_extension():
 def test_handles_no_files():
     files = []
     assert filter_files_content_types(files, ["image", "audio", "video"]) == []
+
+
+
+def test_exr_is_listed_as_an_image_once_registered():
+    # LoadImage decodes EXR through PyAV, so registering .exr makes it selectable.
+    from utils.mime_types import init_mime_types
+
+    init_mime_types()
+    with patch("folder_paths.extension_mimetypes_cache", extension_mimetypes_cache.copy()):
+        assert filter_files_content_types(["a.exr", "b.png"], ["image"]) == ["a.exr", "b.png"]

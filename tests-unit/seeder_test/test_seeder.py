@@ -1,18 +1,24 @@
 import logging
 import re
 import threading
-from contextlib import nullcontext
+import time
+from datetime import datetime
+from contextlib import contextmanager, nullcontext
+from pathlib import Path
 from unittest.mock import Mock
 
 import pytest
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, select
+from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
+from app.assets import scanner as scanner_module
 from app.assets import seeder as seeder_module
-from app.assets.database.models import Base
+from app.assets.database.models import Asset, Base
 from app.assets.database.queries import create_content, create_record, mark_content_missing
 from app.assets.event_log import TAG
-from app.assets.seeder import ScanPhase, State, _AssetSeeder, _ScanStage, _ScanState
+from app.assets.scanner import SeedAssetSpec
+from app.assets.seeder import Progress, ScanPhase, State, _AssetSeeder, _ScanStage, _ScanState
 
 
 EVENT_LINE_PATTERN = re.compile(
@@ -67,6 +73,113 @@ def events_named(
     return [fields for event, fields in tagged_events(caplog) if event == event_name]
 
 
+def _seed_spec(path: Path) -> SeedAssetSpec:
+    stat_result = path.stat()
+    return {
+        "abs_path": str(path),
+        "size_bytes": stat_result.st_size,
+        "mtime_ns": stat_result.st_mtime_ns,
+        "info_name": path.name,
+        "tags": ["input"],
+        "fname": path.name,
+        "metadata": None,
+        "mime_type": None,
+        "job_id": None,
+    }
+
+
+def _configure_fast_phase(
+    monkeypatch: pytest.MonkeyPatch,
+    paths: list[Path],
+    specs: list[SeedAssetSpec],
+) -> None:
+    monkeypatch.setattr(
+        seeder_module, "sync_root_safely", lambda _root, _progress, _should_stop=None: set()
+    )
+    monkeypatch.setattr(
+        seeder_module,
+        "collect_paths_for_roots",
+        lambda _roots, _progress=None, _should_stop=None: [str(path) for path in paths],
+    )
+    monkeypatch.setattr(
+        seeder_module,
+        "build_asset_specs",
+        lambda *_args, **_kwargs: (specs, set(), 0),
+    )
+    watch_session = Mock()
+    monkeypatch.setattr(seeder_module, "create_session", lambda: nullcontext(watch_session))
+    monkeypatch.setattr(seeder_module, "tick_watch_list", lambda _progress=None: None)
+
+
+def _run_faulting_fast_phase(
+    scan_seeder: _AssetSeeder,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    original_fault: Exception,
+    commit_failure: Exception | None = None,
+) -> tuple[Engine, tuple[int, int, int]]:
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    paths = [tmp_path / name for name in ("first.bin", "broken.bin", "last.bin")]
+    for path in paths:
+        path.write_bytes(path.name.encode())
+    specs = [_seed_spec(path) for path in paths]
+
+    @contextmanager
+    def database_session():
+        with Session(engine) as session:
+            if commit_failure is not None:
+                session.connection().exec_driver_sql("BEGIN")
+                monkeypatch.setattr(
+                    session, "commit", Mock(side_effect=commit_failure)
+                )
+            yield session
+
+    def create_record_or_raise(
+        session: Session,
+        *,
+        content_id: str,
+        name: str,
+        mime_type: str | None,
+        job_id: str | None,
+        loader_path: str | None,
+        tags: list[str],
+        created_at: datetime,
+    ) -> Asset:
+        if name == "broken.bin":
+            raise original_fault
+        return create_record(
+            session,
+            content_id=content_id,
+            name=name,
+            mime_type=mime_type,
+            job_id=job_id,
+            loader_path=loader_path,
+            tags=tags,
+            created_at=created_at,
+        )
+
+    monkeypatch.setattr(scanner_module, "create_session", database_session)
+    monkeypatch.setattr(scanner_module, "create_write_session", database_session)
+    monkeypatch.setattr(scanner_module, "create_record", create_record_or_raise)
+    monkeypatch.setattr(scanner_module.mode, "hashing_enabled", lambda: False)
+    _configure_fast_phase(monkeypatch, paths, specs)
+    return engine, scan_seeder._run_fast_phase(("models",))
+
+
+def test_idle_status_returns_a_progress_snapshot() -> None:
+    seeder = _AssetSeeder()
+    seeder._last_progress = Progress(created=1)
+
+    status = seeder.get_status()
+    assert status.progress is not None
+    status.progress.created = 999
+
+    next_status = seeder.get_status()
+    assert next_status.progress is not None
+    assert next_status.progress.created == 1
+
+
 def test_seeder_models_missing_as_content_state():
     engine = create_engine("sqlite:///:memory:")
     Base.metadata.create_all(engine)
@@ -93,6 +206,8 @@ def test_multi_root_scan_emits_one_started_and_completed_without_root(
 ) -> None:
     clock = iter((10.0, 10.8126))
     monkeypatch.setattr(seeder_module.time, "perf_counter", lambda: next(clock))
+    cpu_clock = iter((2.0, 2.25))
+    monkeypatch.setattr(seeder_module.time, "thread_time", lambda: next(cpu_clock))
     monkeypatch.setattr(scan_seeder, "_run_fast_phase", lambda roots: (3, 2, 5))
     monkeypatch.setattr(scan_seeder, "_run_enrich_phase", lambda roots: (False, 4))
 
@@ -103,13 +218,19 @@ def test_multi_root_scan_emits_one_started_and_completed_without_root(
     completed = events_named(caplog, "seeder.scan_completed")
     assert len(completed) == 1
     assert completed[0] == {
+        "cpu_ms": 250,
         "created": 3,
+        "dirs_listed_count": 0,
         "elapsed_ms": 813,
         "enrich_failed": 0,
         "enriched": 4,
+        "files_statted_count": 0,
         "hash_failed": 0,
+        "missing_marked_count": 0,
+        "paused_ms": 0,
         "permission_denied": 0,
         "phase": "full",
+        "recovered_count": 0,
         "skipped": 2,
     }
 
@@ -123,6 +244,8 @@ def test_scan_completed_reports_per_scan_failure_counts(
         hash_failed=2,
         enrich_failed=3,
         permission_denied=1,
+        missing_marked=10,
+        recovered=7,
     )
     clock = iter((10.0, 10.5))
     monkeypatch.setattr(seeder_module.time, "perf_counter", lambda: next(clock))
@@ -137,6 +260,8 @@ def test_scan_completed_reports_per_scan_failure_counts(
     assert completed[0]["hash_failed"] == 2
     assert completed[0]["enrich_failed"] == 3
     assert completed[0]["permission_denied"] == 1
+    assert completed[0]["missing_marked_count"] == 10
+    assert completed[0]["recovered_count"] == 7
 
 
 def test_enrich_phase_does_not_count_returned_ids_as_failures(
@@ -155,7 +280,7 @@ def test_enrich_phase_does_not_count_returned_ids_as_failures(
     )
     monkeypatch.setattr(seeder_module, "create_session", lambda: nullcontext(session))
     monkeypatch.setattr(seeder_module, "drain_pending_verifications", lambda _session: None)
-    monkeypatch.setattr(seeder_module, "tick_watch_list", lambda: None)
+    monkeypatch.setattr(seeder_module, "tick_watch_list", lambda _progress=None: None)
     monkeypatch.setattr(seeder_module, "drain_transition_queue", lambda _session: None)
     monkeypatch.setattr(
         seeder_module,
@@ -165,7 +290,7 @@ def test_enrich_phase_does_not_count_returned_ids_as_failures(
     monkeypatch.setattr(
         seeder_module,
         "enrich_assets_batch",
-        lambda *_args, **_kwargs: (0, ["record-1", "record-2"]),
+        lambda *_args, **_kwargs: (0, ["record-1", "record-2"], 2),
     )
     monkeypatch.setattr(scan_seeder, "_check_pause_and_cancel", lambda _stage: False)
 
@@ -250,7 +375,7 @@ def test_scan_failure_emits_exception_type_without_message(
         scan_seeder._run_scan()
 
     assert events_named(caplog, "seeder.scan_failed") == [
-        {"error_type": "FileNotFoundError", "phase": "enrich", "root": "models"}
+        {"error_kind": "other", "error_type": "FileNotFoundError", "phase": "enrich", "root": "models"}
     ]
     tagged = "\n".join(record.getMessage() for record in caplog.records if TAG in record.getMessage())
     assert "/private/models/secret.safetensors" not in tagged
@@ -313,7 +438,7 @@ def test_idle_reset_survives_a_raising_cancellation_emit(
     monkeypatch.setattr(scan_seeder, "_check_pause_and_cancel", cancel_at_pruning)
     monkeypatch.setattr(seeder_module, "get_owned_prefixes", lambda: ())
     monkeypatch.setattr(
-        seeder_module, "mark_missing_outside_prefixes_safely", lambda prefixes: 0
+        seeder_module, "mark_missing_outside_prefixes_safely", lambda prefixes, _should_stop=None: 0
     )
 
     original_emit = seeder_module.emit
@@ -340,7 +465,7 @@ def test_scan_paused_after_its_last_phase_still_completes(
     scan_seeder._phase = ScanPhase.ENRICH
     monkeypatch.setattr(seeder_module, "get_owned_prefixes", lambda: ())
     monkeypatch.setattr(
-        seeder_module, "mark_missing_outside_prefixes_safely", lambda prefixes: 0
+        seeder_module, "mark_missing_outside_prefixes_safely", lambda prefixes, _should_stop=None: 0
     )
 
     def pause_while_finishing(roots) -> tuple[bool, int]:
@@ -385,10 +510,10 @@ def test_prune_before_scan_emits_marked_missing_with_pruning_stage(
     scan_seeder._phase = ScanPhase.FAST
     monkeypatch.setattr(seeder_module, "get_owned_prefixes", lambda: ())
     monkeypatch.setattr(
-        seeder_module, "mark_missing_outside_prefixes_safely", lambda prefixes: 5
+        seeder_module, "mark_missing_outside_prefixes_safely", lambda prefixes, _should_stop=None: 5
     )
     monkeypatch.setattr(
-        seeder_module, "sync_temp_references_safely", lambda _progress: None
+        seeder_module, "sync_temp_references_safely", lambda _progress, _should_stop=None: None
     )
     monkeypatch.setattr(scan_seeder, "_run_fast_phase", lambda roots: (0, 0, 0))
 
@@ -408,7 +533,7 @@ def test_standalone_mark_missing_emits_count_with_mark_missing_stage(
     scan_seeder._state = State.IDLE
     monkeypatch.setattr(seeder_module, "get_owned_prefixes", lambda: ())
     monkeypatch.setattr(
-        seeder_module, "mark_missing_outside_prefixes_safely", lambda prefixes: 7
+        seeder_module, "mark_missing_outside_prefixes_safely", lambda prefixes, _should_stop=None: 7
     )
 
     with caplog.at_level(logging.INFO):
@@ -420,6 +545,61 @@ def test_standalone_mark_missing_emits_count_with_mark_missing_stage(
     ]
 
 
+def test_standalone_mark_missing_failure_returns_none_and_emits_no_success_event(
+    scan_seeder: _AssetSeeder,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    scan_seeder._state = State.IDLE
+    monkeypatch.setattr(seeder_module, "get_owned_prefixes", lambda: [])
+
+    def fail_create_session():
+        raise RuntimeError("database unavailable")
+
+    monkeypatch.setattr(scanner_module, "create_session", fail_create_session)
+
+    with caplog.at_level(logging.INFO):
+        result = scan_seeder.mark_missing_outside_prefixes()
+
+    assert result is None
+    assert events_named(caplog, "scanner.mark_missing_failed") == [
+        {"error_kind": "other", "error_type": "RuntimeError"}
+    ]
+    assert events_named(caplog, "seeder.marked_missing") == []
+
+
+def test_scan_prune_failure_is_reported_and_the_scan_still_runs(
+    scan_seeder: _AssetSeeder,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    scan_seeder._prune_first = True
+    scan_seeder._phase = ScanPhase.FAST
+    fast_phase_roots: list[tuple[str, ...]] = []
+    monkeypatch.setattr(seeder_module, "get_owned_prefixes", lambda: [])
+    monkeypatch.setattr(
+        seeder_module, "mark_missing_outside_prefixes_safely", lambda _prefixes, _should_stop=None: None
+    )
+    monkeypatch.setattr(
+        seeder_module, "sync_temp_references_safely", lambda _progress, _should_stop=None: None
+    )
+
+    def run_fast_phase(roots: tuple[str, ...]) -> tuple[int, int, int]:
+        fast_phase_roots.append(roots)
+        return 0, 0, 0
+
+    monkeypatch.setattr(scan_seeder, "_run_fast_phase", run_fast_phase)
+
+    with caplog.at_level(logging.INFO):
+        scan_seeder._run_scan()
+
+    assert scan_seeder._errors == [
+        "Marking missing assets failed; scan continued with the prune incomplete"
+    ]
+    assert fast_phase_roots == [("models", "input")]
+    assert events_named(caplog, "seeder.marked_missing") == []
+
+
 def test_batch_insert_failure_emits_only_the_exception_type(
     scan_seeder: _AssetSeeder,
     monkeypatch: pytest.MonkeyPatch,
@@ -427,53 +607,310 @@ def test_batch_insert_failure_emits_only_the_exception_type(
 ) -> None:
     session = Mock()
     monkeypatch.setattr(
-        seeder_module, "sync_root_safely", lambda _root, _progress: set()
+        seeder_module, "sync_root_safely", lambda _root, _progress, _should_stop=None: set()
     )
     monkeypatch.setattr(
-        seeder_module, "collect_paths_for_roots", lambda roots: ["asset.safetensors"]
+        seeder_module,
+        "collect_paths_for_roots",
+        lambda roots, progress=None, should_stop=None: ["asset.safetensors"],
     )
     monkeypatch.setattr(
         seeder_module,
         "build_asset_specs",
-        lambda paths, existing_paths, enable_metadata_extraction, progress=None: (
+        lambda paths, existing_paths, enable_metadata_extraction, progress=None, should_stop=None: (
             [{"tags": []}],
             {},
             0,
         ),
     )
 
-    def fail_insert(batch, batch_tags) -> int:
+    def fail_insert(batch, batch_tags, progress=None) -> int:
         raise PermissionError("/private/models/asset.safetensors")
 
     monkeypatch.setattr(seeder_module, "insert_asset_specs", fail_insert)
     monkeypatch.setattr(seeder_module, "create_session", lambda: nullcontext(session))
-    monkeypatch.setattr(seeder_module, "tick_watch_list", lambda: None)
+    monkeypatch.setattr(seeder_module, "tick_watch_list", lambda _progress=None: None)
 
     with caplog.at_level(logging.INFO):
         scan_seeder._run_fast_phase(("models",))
 
     assert events_named(caplog, "seeder.batch_insert_failed") == [
-        {"error_type": "PermissionError"}
+        {"error_kind": "other", "error_type": "PermissionError"}
     ]
     tagged = "\n".join(record.getMessage() for record in caplog.records if TAG in record.getMessage())
     assert "/private/models/asset.safetensors" not in tagged
 
 
-def test_enrich_phase_commits_pending_verifications_before_ticking_watch_list(
+def test_batch_insert_fault_reports_the_specs_committed_before_it(
     scan_seeder: _AssetSeeder,
     monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    tmp_path: Path,
 ) -> None:
-    calls: list[str] = []
-    session = Mock()
-    session.commit.side_effect = lambda: calls.append("commit")
-    monkeypatch.setattr(seeder_module, "create_session", lambda: nullcontext(session))
+    with caplog.at_level(logging.INFO):
+        engine, result = _run_faulting_fast_phase(
+            scan_seeder,
+            monkeypatch,
+            tmp_path,
+            OSError("forced record creation failure"),
+        )
+
+    with Session(engine) as session:
+        assert {record.name for record in session.scalars(select(Asset))} == {
+            "first.bin",
+            "last.bin",
+        }
+    assert result == (2, 0, 3)
+    assert scan_seeder._scan_state is not None
+    assert scan_seeder._scan_state.created == 2
+    assert scan_seeder._errors == [
+        "Batch insert encountered an error at offset 0 after creating 2: "
+        "forced record creation failure"
+    ]
+
+
+def test_batch_memory_error_stops_the_scan_instead_of_continuing(
+    scan_seeder: _AssetSeeder,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(MemoryError):
+        _run_faulting_fast_phase(
+            scan_seeder,
+            monkeypatch,
+            tmp_path,
+            MemoryError("out of memory"),
+        )
+
+    assert scan_seeder._errors == []
+
+
+def test_salvage_commit_failure_reports_the_original_batch_fault(
+    scan_seeder: _AssetSeeder,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    tmp_path: Path,
+) -> None:
+    original_fault = OSError("No space left on device")
+    commit_failure = RuntimeError("forced salvage commit failure")
+
+    with caplog.at_level(logging.INFO):
+        engine, result = _run_faulting_fast_phase(
+            scan_seeder,
+            monkeypatch,
+            tmp_path,
+            original_fault,
+            commit_failure,
+        )
+
+    with Session(engine) as session:
+        assert session.scalar(select(Asset)) is None
+    assert result == (0, 0, 3)
+    assert scan_seeder._errors == [
+        "Batch insert encountered an error at offset 0 after creating 0: "
+        "No space left on device"
+    ]
+    assert events_named(caplog, "seeder.batch_insert_failed") == [
+        {"error_kind": "other", "error_type": "OSError"}
+    ]
+    caller_logs = [
+        record
+        for record in caplog.records
+        if record.getMessage().startswith("Batch insert encountered an error")
+    ]
+    assert len(caller_logs) == 1
+    assert caller_logs[0].exc_info is not None
+    assert caller_logs[0].exc_info[1] is original_fault
+
+
+# --- scan performance fields on seeder.scan_completed --------------------------------
+
+
+def test_scan_completed_reports_the_scan_state_counters(
+    scan_seeder: _AssetSeeder,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    scan_seeder._scan_state = _ScanState(dirs_listed=7, files_statted=31, paused_s=1.2344)
+    monkeypatch.setattr(scan_seeder, "_run_fast_phase", lambda roots: (0, 0, 0))
+    monkeypatch.setattr(scan_seeder, "_run_enrich_phase", lambda roots: (False, 0))
+
+    with caplog.at_level(logging.INFO):
+        scan_seeder._run_scan()
+
+    [completed] = events_named(caplog, "seeder.scan_completed")
+    assert completed["dirs_listed_count"] == 7
+    assert completed["files_statted_count"] == 31
+    assert completed["paused_ms"] == 1234
+
+
+def test_paused_ms_accumulates_across_pauses(
+    scan_seeder: _AssetSeeder,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    pause_s = 0.05
+
+    def fast_phase_paused_twice(roots):
+        for _ in range(2):
+            assert scan_seeder.pause()
+            threading.Timer(pause_s, scan_seeder.resume).start()
+            assert scan_seeder._check_pause_and_cancel(_ScanStage.FAST_SCAN) is False
+        return 0, 0, 0
+
+    monkeypatch.setattr(scan_seeder, "_run_fast_phase", fast_phase_paused_twice)
+    monkeypatch.setattr(scan_seeder, "_run_enrich_phase", lambda roots: (False, 0))
+
+    with caplog.at_level(logging.INFO):
+        scan_seeder._run_scan()
+
+    [completed] = events_named(caplog, "seeder.scan_completed")
+    # Each wait starts just after its timer, so allow a little under 2 * 50 ms.
+    assert completed["paused_ms"] >= 80
+    assert completed["paused_ms"] <= completed["elapsed_ms"]
+
+
+def test_an_unpaused_checkpoint_adds_no_paused_time(scan_seeder: _AssetSeeder) -> None:
+    assert scan_seeder._check_pause_and_cancel(_ScanStage.FAST_SCAN) is False
+
+    assert scan_seeder._scan_state is not None
+    assert scan_seeder._scan_state.paused_s == 0.0
+
+
+def test_cpu_ms_counts_the_scan_threads_cpu_not_its_sleep(
+    scan_seeder: _AssetSeeder,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    def fast_phase_that_spins_then_sleeps(roots):
+        spin_until = time.thread_time() + 0.03
+        while time.thread_time() < spin_until:
+            pass
+        time.sleep(0.05)
+        return 0, 0, 0
+
+    monkeypatch.setattr(scan_seeder, "_run_fast_phase", fast_phase_that_spins_then_sleeps)
+    monkeypatch.setattr(scan_seeder, "_run_enrich_phase", lambda roots: (False, 0))
+
+    with caplog.at_level(logging.INFO):
+        scan_seeder._run_scan()
+
+    [completed] = events_named(caplog, "seeder.scan_completed")
+    assert completed["cpu_ms"] > 0
+    assert completed["cpu_ms"] <= completed["elapsed_ms"]
+
+
+def test_dirs_listed_counts_each_directory_the_walk_lists(tmp_path: Path) -> None:
+    for relative in ("a/one.png", "a/b/two.png", "c/three.png", ".hidden/four.png"):
+        (tmp_path / relative).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / relative).write_bytes(b"x")
+    state = _ScanState()
+
+    files = scanner_module.list_files_recursively(str(tmp_path), state)
+
+    assert len(files) == 3
+    assert state.dirs_listed == 4  # root, a, a/b, c; the hidden directory is never listed
+
+
+def test_files_statted_counts_discovery_and_admission_stats_only_for_new_files(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     monkeypatch.setattr(
-        seeder_module, "drain_pending_verifications", lambda _session: calls.append("drain_pending")
+        scanner_module, "get_name_and_tags_from_asset_path", lambda path: (Path(path).name, ["input"])
     )
-    monkeypatch.setattr(seeder_module, "tick_watch_list", lambda: calls.append("tick_watch_list"))
-    monkeypatch.setattr(seeder_module, "drain_transition_queue", lambda _session: None)
-    monkeypatch.setattr(scan_seeder, "_check_pause_and_cancel", lambda _stage: True)
+    monkeypatch.setattr(scanner_module, "compute_loader_path", lambda path: Path(path).name)
+    known = tmp_path / "known.png"
+    new = tmp_path / "new.png"
+    partial = tmp_path / "download.part"
+    for path in (known, new, partial):
+        path.write_bytes(b"x")
+    state = _ScanState()
 
-    scan_seeder._run_enrich_phase(("models",))
+    specs, _tags, skipped = scanner_module.build_asset_specs(
+        [str(known), str(new), str(partial)],
+        existing_paths={str(known)},
+        enable_metadata_extraction=False,
+        progress=state,
+    )
 
-    assert calls[:3] == ["drain_pending", "commit", "tick_watch_list"]
+    assert [spec["abs_path"] for spec in specs] == [str(new)]
+    assert skipped == 2
+    assert state.files_statted == 2  # new.png's discovery stat and its admission re-stat
+
+
+def test_files_statted_counts_the_reference_sync_stat_per_live_row(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    present = tmp_path / "present.png"
+    present.write_bytes(b"x")
+    rows = [
+        Mock(id="c1", path=str(present), size_bytes=1, mtime_ns=present.stat().st_mtime_ns),
+        Mock(id="c2", path=str(tmp_path / "gone.png"), size_bytes=1, mtime_ns=1),
+    ]
+    monkeypatch.setattr(scanner_module, "live_contents_under_prefixes", lambda _s, _p: rows)
+    state = _ScanState()
+
+    scanner_module.observe_references_on_filesystem(Mock(), [str(tmp_path)], state)
+
+    assert state.files_statted == 2
+
+
+def test_files_statted_counts_the_seed_and_enrich_stats(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    asset = tmp_path / "asset.png"
+    asset.write_bytes(b"x")
+    monkeypatch.setattr(scanner_module.mode, "hashing_enabled", lambda: False)
+    state = _ScanState()
+
+    scanner_module.observe_asset_specs([_seed_spec(asset)], state)
+    scanner_module.enrich_asset(
+        Mock(),
+        file_path=str(tmp_path / "vanished.png"),
+        content_id="c1",
+        record_id="r1",
+        progress=state,
+    )
+
+    assert state.files_statted == 2
+
+
+def test_a_pause_landing_after_the_gate_check_still_blocks_the_checkpoint(
+    scan_seeder: _AssetSeeder,
+) -> None:
+    gate = Mock()
+    gate.is_set.side_effect = [True, False]  # the pause lands just after the first check
+    gate.wait.side_effect = lambda: time.sleep(0.02)
+    scan_seeder._run_gate = gate
+
+    assert scan_seeder._check_pause_and_cancel(_ScanStage.FAST_SCAN) is False
+
+    gate.wait.assert_called_once_with()
+    assert scan_seeder._scan_state is not None
+    assert scan_seeder._scan_state.paused_s >= 0.02
+
+
+def test_scan_failure_classifies_a_real_sqlite_expression_tree_error(
+    scan_seeder: _AssetSeeder,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    engine = create_engine("sqlite:///:memory:")
+    secret_path = "/private/models/secret.safetensors"
+
+    def fail_scan(_roots):
+        # One bound path per term; SQLite rejects the expression past depth 1000.
+        clause = " OR ".join(["? = 1"] * 1100)
+        with engine.connect() as connection:
+            connection.exec_driver_sql(f"SELECT 1 WHERE {clause}", tuple([secret_path] * 1100))
+
+    monkeypatch.setattr(scan_seeder, "_run_fast_phase", fail_scan)
+
+    with caplog.at_level(logging.INFO):
+        scan_seeder._run_scan()
+
+    [failed] = events_named(caplog, "seeder.scan_failed")
+    assert failed["error_type"] == "OperationalError"
+    assert failed["error_kind"] == "expression_tree_too_large"
+    tagged = "\n".join(record.getMessage() for record in caplog.records if TAG in record.getMessage())
+    assert secret_path not in tagged

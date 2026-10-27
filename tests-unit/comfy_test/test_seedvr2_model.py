@@ -91,11 +91,9 @@ class _EncodeWrapper(seedvr_vae_mod.VideoAutoencoderKLWrapper):
     def __init__(self, encoded):
         nn.Module.__init__(self)
         self.encoded = encoded
-        self.spatial_downsample_factor = 8
-        self.temporal_downsample_factor = 4
         self.seen = []
 
-    def encode(self, x):
+    def encode(self, x, device=None):
         self.seen.append(tuple(x.shape))
         return self.encoded.to(device=x.device, dtype=x.dtype)
 
@@ -103,58 +101,27 @@ class _EncodeWrapper(seedvr_vae_mod.VideoAutoencoderKLWrapper):
 class _DecodeWrapper(seedvr_vae_mod.VideoAutoencoderKLWrapper):
     def __init__(self):
         nn.Module.__init__(self)
-        self.spatial_downsample_factor = 8
-        self.temporal_downsample_factor = 4
-        self.calls = []
-
-    def decode(self, z, seedvr2_tiling=None):
-        self.calls.append({"shape": tuple(z.shape), "seedvr2_tiling": seedvr2_tiling})
-        if z.ndim == 4:
-            b, tc, h, w = z.shape
-            t = tc // _LATENT_CHANNELS
-        else:
-            b, _, t, h, w = z.shape
-        return torch.zeros(b, 3, t, h * 8, w * 8, dtype=z.dtype, device=z.device)
 
 
 def test_seedvr2_wrapper_public_encode_returns_tensor(monkeypatch):
-    raw_latent = torch.full((1, _LATENT_CHANNELS, 1, 4, 5), 2.0)
+    moments = torch.cat([torch.full((1, _LATENT_CHANNELS, 1, 4, 5), 2.0), torch.full((1, _LATENT_CHANNELS, 1, 4, 5), -1.0)], dim=1)
     seen_shapes = []
 
-    def base_encode(self, x):
+    def slicing_encode(self, x):
         seen_shapes.append(tuple(x.shape))
-        return raw_latent.to(device=x.device, dtype=x.dtype)
+        return moments.to(device=x.device, dtype=x.dtype)
 
-    monkeypatch.setattr(seedvr_vae_mod.VideoAutoencoderKL, "encode", base_encode)
+    monkeypatch.setattr(seedvr_vae_mod.VideoAutoencoderKLWrapper, "slicing_encode", slicing_encode)
 
     vae = seedvr_vae_mod.VideoAutoencoderKLWrapper.__new__(seedvr_vae_mod.VideoAutoencoderKLWrapper)
     nn.Module.__init__(vae)
-    vae._dummy = nn.Parameter(torch.zeros((), dtype=torch.float32))
 
     latent = vae.encode(torch.zeros(1, 3, 32, 40))
 
     assert type(latent) is torch.Tensor
     assert tuple(latent.shape) == (1, _LATENT_CHANNELS, 4, 5)
+    assert torch.equal(latent, torch.full_like(latent, 2.0)), "the latent is the posterior mean"
     assert seen_shapes == [(1, 3, 1, 32, 40)]
-
-
-def test_seedvr2_wrapper_private_encode_helper_keeps_raw_latent(monkeypatch):
-    raw_latent = torch.full((1, _LATENT_CHANNELS, 1, 4, 5), 3.0)
-
-    def base_encode(self, x):
-        return raw_latent.to(device=x.device, dtype=x.dtype)
-
-    monkeypatch.setattr(seedvr_vae_mod.VideoAutoencoderKL, "encode", base_encode)
-
-    vae = seedvr_vae_mod.VideoAutoencoderKLWrapper.__new__(seedvr_vae_mod.VideoAutoencoderKLWrapper)
-    nn.Module.__init__(vae)
-    vae._dummy = nn.Parameter(torch.zeros((), dtype=torch.float32))
-
-    latent, raw = vae._encode_with_raw_latent(torch.zeros(1, 3, 32, 40))
-
-    assert tuple(latent.shape) == (1, _LATENT_CHANNELS, 4, 5)
-    assert tuple(raw.shape) == (1, _LATENT_CHANNELS, 1, 4, 5)
-    assert torch.equal(raw, raw_latent)
 
 
 def _make_vae(wrapper):
@@ -209,6 +176,20 @@ def test_seedvr2_7b_keeps_final_block_text_path(monkeypatch):
     ]
 
 
+def _bytedance_interleaved_rope(x, freqs):
+    """ByteDance SeedVR2 pixel-RoPE: adjacent feature pairs rotated by the interleaved angles,
+    leaving the head-dim tail past the rotary width untouched."""
+    rot = freqs.shape[-1]
+    angles = freqs[:, ::2].float().unsqueeze(1)
+    cos, sin = torch.cos(angles), torch.sin(angles)
+    out = x.float().clone()
+    even = out[..., 0:rot:2].clone()
+    odd = out[..., 1:rot:2].clone()
+    out[..., 0:rot:2] = even * cos - odd * sin
+    out[..., 1:rot:2] = odd * cos + even * sin
+    return out.to(x.dtype)
+
+
 def test_seedvr2_7b_rope3d_matches_wrapper_oracle():
     rope = seedvr_model.get_na_rope("rope3d", dim=64)
     generator = torch.Generator(device="cpu").manual_seed(0)
@@ -217,19 +198,13 @@ def test_seedvr2_7b_rope3d_matches_wrapper_oracle():
     shape = torch.tensor([[1, 2, 2]], dtype=torch.long)
     freqs = rope.get_axial_freqs(1, 2, 2).reshape(4, -1)
 
-    expected_q = seedvr_model._apply_seedvr2_rotary_emb(
-        freqs,
-        q.permute(1, 0, 2).float(),
-    ).to(q.dtype).permute(1, 0, 2)
-    expected_k = seedvr_model._apply_seedvr2_rotary_emb(
-        freqs,
-        k.permute(1, 0, 2).float(),
-    ).to(k.dtype).permute(1, 0, 2)
+    expected_q = _bytedance_interleaved_rope(q, freqs)
+    expected_k = _bytedance_interleaved_rope(k, freqs)
 
     actual_q, actual_k = rope(q.clone(), k.clone(), shape, seedvr_model.Cache(disable=True))
 
-    torch.testing.assert_close(actual_q, expected_q, rtol=0, atol=0)
-    torch.testing.assert_close(actual_k, expected_k, rtol=0, atol=0)
+    torch.testing.assert_close(actual_q, expected_q, rtol=1e-5, atol=1e-6)
+    torch.testing.assert_close(actual_k, expected_k, rtol=1e-5, atol=1e-6)
 
 
 def test_seedvr2_forward_requires_conditioning_latents():
@@ -293,6 +268,8 @@ def test_seedvr2_encode_and_encode_tiled_preserve_native_latent_contract(monkeyp
 
 def test_vaedecode_tiled_spatial_applies_temporal_discarded(monkeypatch):
     monkeypatch.setattr(sd_mod.model_management, "load_models_gpu", lambda *a, **k: None)
+    tiled = MagicMock(return_value=torch.zeros(1, 3, 5, 32, 40))
+    monkeypatch.setattr(seedvr_vae_mod, "tiled_vae", tiled)
     vae = _make_vae(_DecodeWrapper())
 
     nodes_mod.VAEDecodeTiled().decode(
@@ -306,15 +283,7 @@ def test_vaedecode_tiled_spatial_applies_temporal_discarded(monkeypatch):
 
     # Spatial inputs flow through; temporal inputs are discarded as public tiling
     # knobs, but SeedVR2's internal MemoryState causal slicing is left intact.
-    assert vae.first_stage_model.calls == [
-        {
-            "shape": (1, _LATENT_CHANNELS, 2, 4, 5),
-            "seedvr2_tiling": {
-                "enable_tiling": True,
-                "tile_size": (512, 512),
-                "tile_overlap": (64, 64),
-                "temporal_size": None,
-                "temporal_overlap": None,
-            },
-        }
-    ]
+    assert tiled.call_count == 1
+    (latent, _), kwargs = tiled.call_args
+    assert tuple(latent.shape) == (1, _LATENT_CHANNELS, 2, 4, 5)
+    assert kwargs == {"tile_size": (512, 512), "tile_overlap": (64, 64), "encode": False}

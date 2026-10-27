@@ -22,6 +22,7 @@ def process_qwen2vl_images(
     if image_std is None:
         image_std = [0.26862954, 0.26130258, 0.27577711]
 
+    images = images[..., :3]
     batch_size, height, width, channels = images.shape
     device = images.device
     # dtype = images.dtype

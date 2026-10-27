@@ -11,12 +11,13 @@ import torch
 
 import comfy.ldm.common_dit
 import comfy.model_management
+import comfy.model_prefetch
 import comfy.quant_ops
 import comfy.utils
 from comfy.ldm.flux.math import apply_rope1
-from comfy.ldm.modules.attention import optimized_attention
+from comfy.ldm.modules.attention import AttentionTensorContainer, optimized_attention
 
-from .model import WanAttentionBlock, WanModel, WanSelfAttention, repeat_e, sinusoidal_embedding_1d
+from .model import WanAttentionBlock, WanModel, WanSelfAttention, modulate, repeat_e, sinusoidal_embedding_1d
 
 
 class WanAnimate2SelfAttention(WanSelfAttention):
@@ -39,7 +40,7 @@ class WanAnimate2SelfAttention(WanSelfAttention):
     def forward_pose(self, x, freqs, transformer_options={}):
         b, s, n, d = *x.shape[:2], self.num_heads, self.head_dim
         q, k, v = self.qkv(x, freqs)
-        out = optimized_attention(q.reshape(b, s, n * d), k.reshape(b, s, n * d), v.reshape(b, s, n * d), heads=self.num_heads, transformer_options=transformer_options)
+        out = optimized_attention(AttentionTensorContainer(q.reshape(b, s, n * d)), AttentionTensorContainer(k.reshape(b, s, n * d)), AttentionTensorContainer(v.reshape(b, s, n * d)), heads=self.num_heads, preferred_attention=self.comfy_attention, transformer_options=transformer_options)
         return self.o(self._attn1_patch(out, q, k, transformer_options)), k, v
 
     def forward_gen(self, x, freqs, k_pose, v_pose, f_gen, hw, buffers, ref_strength=1.0, transformer_options={}):
@@ -50,7 +51,7 @@ class WanAnimate2SelfAttention(WanSelfAttention):
             v[:, :hw] *= ref_strength  # frame 0 is the reference image's slot
 
         if k_pose is None:  # pose influence windowed out: plain self-attention, no per-frame loop
-            out = optimized_attention(q.reshape(b, s, n * d), k.reshape(b, s, n * d), v.reshape(b, s, n * d), heads=self.num_heads, transformer_options=transformer_options)
+            out = optimized_attention(AttentionTensorContainer(q.reshape(b, s, n * d)), AttentionTensorContainer(k.reshape(b, s, n * d)), AttentionTensorContainer(v.reshape(b, s, n * d)), heads=self.num_heads, preferred_attention=self.comfy_attention, transformer_options=transformer_options)
             return self.o(self._attn1_patch(out, q, k, transformer_options))
 
         # gen half is the same every frame; only the hw-token pose tail is rewritten
@@ -66,7 +67,7 @@ class WanAnimate2SelfAttention(WanSelfAttention):
                 kbuf[:, s:] = k_pose[:, (j - 1) * hw:j * hw]
                 vbuf[:, s:] = v_pose[:, (j - 1) * hw:j * hw]
                 kk, vv = kbuf, vbuf
-            out[:, j * hw:(j + 1) * hw] = optimized_attention(q_j, kk.reshape(b, kk.shape[1], n * d), vv.reshape(b, kk.shape[1], n * d), heads=self.num_heads, transformer_options=transformer_options)
+            out[:, j * hw:(j + 1) * hw] = optimized_attention(AttentionTensorContainer(q_j), AttentionTensorContainer(kk.reshape(b, kk.shape[1], n * d)), AttentionTensorContainer(vv.reshape(b, kk.shape[1], n * d)), heads=self.num_heads, preferred_attention=self.comfy_attention, transformer_options=transformer_options)
         return self.o(self._attn1_patch(out, q, k, transformer_options))
 
 
@@ -85,13 +86,13 @@ class WanAnimate2Block(WanAttentionBlock):
         x = x + self.cross_attn(self.norm3(x), context, context_img_len=context_img_len, transformer_options=transformer_options)
         for p in transformer_options.get("patches", {}).get("attn2_patch", []):
             x = p({"x": x, "transformer_options": transformer_options})
-        y = self.ffn(torch.addcmul(repeat_e(e[3], x), self.norm2(x), 1 + repeat_e(e[4], x)))
+        y = self.ffn(modulate(x, self.norm2, e[3], e[4]))
         return torch.addcmul(x, y, repeat_e(e[5], x))
 
     def forward_pose(self, x, e, freqs, context, context_img_len=257, transformer_options={}):
         e = self._modulation(e, x)
         x = x.contiguous()
-        y, k, v = self.self_attn.forward_pose(torch.addcmul(repeat_e(e[0], x), self.norm1(x), 1 + repeat_e(e[1], x)), freqs, transformer_options=transformer_options)
+        y, k, v = self.self_attn.forward_pose(modulate(x, self.norm1, e[0], e[1]), freqs, transformer_options=transformer_options)
         x = torch.addcmul(x, y, repeat_e(e[2], x))
         del y
         return self._cross_attn_ffn(x, e, context, context_img_len, transformer_options), k, v
@@ -99,15 +100,27 @@ class WanAnimate2Block(WanAttentionBlock):
     def kv_from_input(self, x_pose, e, freqs, transformer_options={}):
         e = self._modulation(e, x_pose)
         x_pose = x_pose.contiguous()
-        return self.self_attn.kv(torch.addcmul(repeat_e(e[0], x_pose), self.norm1(x_pose), 1 + repeat_e(e[1], x_pose)), freqs)
+        return self.self_attn.kv(modulate(x_pose, self.norm1, e[0], e[1]), freqs)
 
     def forward_gen(self, x, e, freqs, context, k_pose, v_pose, f_gen, hw, buffers, ref_strength=1.0, context_img_len=257, transformer_options={}):
         e = self._modulation(e, x)
         x = x.contiguous()
-        y = self.self_attn.forward_gen(torch.addcmul(repeat_e(e[0], x), self.norm1(x), 1 + repeat_e(e[1], x)), freqs, k_pose, v_pose, f_gen, hw, buffers, ref_strength=ref_strength, transformer_options=transformer_options)
+        y = self.self_attn.forward_gen(modulate(x, self.norm1, e[0], e[1]), freqs, k_pose, v_pose, f_gen, hw, buffers, ref_strength=ref_strength, transformer_options=transformer_options)
         x = torch.addcmul(x, y, repeat_e(e[2], x))
         del y
         return self._cross_attn_ffn(x, e, context, context_img_len, transformer_options)
+
+
+def quantize_cache(t, dtype):
+    if dtype not in ("int8", "int4"):
+        return t, None
+    g = 256
+    while g > 4 and t.shape[-1] % g:
+        g //= 4
+    t = t.reshape(-1, t.shape[-1])
+    if dtype == "int4":
+        return comfy.quant_ops.TensorCoreConvRotW4A4Layout.quantize(t, convrot_groupsize=g)
+    return comfy.quant_ops.TensorWiseINT8Layout.quantize(t, is_weight=True, per_channel=True, convrot=True, convrot_groupsize=g)
 
 
 class PoseBranchCache:
@@ -119,8 +132,6 @@ class PoseBranchCache:
     the store device runs low on memory. Created and freed by WanAnimate2Cache; Qwen-Image 2.1
     also stores its prefix K/V in it.
     """
-
-    CONVROT_GROUPSIZE = 256
 
     def __init__(self, store_device=None, dtype="default"):
         self.store_device = torch.device(store_device) if store_device is not None else torch.device("cpu")
@@ -172,17 +183,10 @@ class PoseBranchCache:
         return self.slot is not None and len(self.slot["blocks"]) == num_blocks
 
     def put(self, i, t):
-        params = None
         if self.dtype in ("int8", "int4"):
             # convrot is what lets low-bit survive the ~125x per-channel outliers here, and over a [tokens, dim] view per-row scale means per-token. The kernels want 2D and a power-of-4 group that divides dim.
             self.slot["shape"] = t.shape
-            g = self.CONVROT_GROUPSIZE
-            while g > 4 and t.shape[-1] % g:
-                g //= 4
-            if self.dtype == "int4":
-                t, params = comfy.quant_ops.TensorCoreConvRotW4A4Layout.quantize(t.reshape(-1, t.shape[-1]), convrot_groupsize=g)
-            else:
-                t, params = comfy.quant_ops.TensorWiseINT8Layout.quantize(t.reshape(-1, t.shape[-1]), is_weight=True, per_channel=True, convrot=True, convrot_groupsize=g)
+        t, params = quantize_cache(t, self.dtype)
 
         t = t.to(self.store_device, copy=True)
         if comfy.model_management.pin_memory(t, evict_active=False):
@@ -200,16 +204,17 @@ class PoseBranchCache:
         stream = None
         r = None
         if t.device != device:
-            stream = comfy.model_management.get_offload_stream(device)
-            cs = comfy.model_management.current_stream(device)
-            if stream is not None and cs is not None:
-                # the handed-out stream last waited on the main stream a full rotation ago, which does not cover the previous consumer's reads of this slot; wait now so the copy cannot overwrite a slot still being read
-                stream.wait_stream(cs)
             # two persistent staging buffers per tensor shape instead of a fresh allocation per block (~29 GB of churn per pass at 720p); windows of different lengths get their own pair
             buf_key = (tuple(t.shape), cast_dtype if cast_dtype is not None else t.dtype)
             if buf_key not in self._staging:
-                self._staging[buf_key] = [torch.empty(t.shape, dtype=buf_key[1], device=device) for _ in range(2)]
+                with comfy.model_prefetch.pause_malloc_graph():
+                    self._staging[buf_key] = [torch.empty(t.shape, dtype=buf_key[1], device=device) for _ in range(2)]
             r = self._staging[buf_key][i % 2]
+            stream = comfy.model_management.get_offload_stream(device)
+            cs = comfy.model_management.current_stream(device)
+            if stream is not None and cs is not None:
+                # Wait for staging allocation and the previous consumer's reads before overwriting the buffer.
+                stream.wait_stream(cs)
         self._pending[i] = (comfy.model_management.cast_to(t, cast_dtype, device, non_blocking=True, stream=stream, r=r), stream)
 
     def take(self, i, device, dtype, batch_size):

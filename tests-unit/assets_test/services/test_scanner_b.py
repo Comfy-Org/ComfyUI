@@ -5,14 +5,14 @@ from pathlib import Path
 from unittest.mock import patch
 
 from sqlalchemy import select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, sessionmaker
 
 from app.assets.database.models import Asset, AssetContent, AssetTag
 from app.assets.helpers import to_stored_hash
 from app.assets.scanner import (
     build_asset_specs,
     enrich_asset,
-    mark_contents_missing_outside_prefixes,
+    mark_missing_outside_prefixes_safely,
     seed_asset_specs,
     apply_reference_observations,
     observe_references_on_filesystem,
@@ -94,7 +94,7 @@ def test_enrichment_retains_dimensions_when_image_extraction_degrades(
             "app.assets.scanner.extract_file_metadata",
             return_value=_ExtractedMetadata("image/png", {"filename": "image.png"}),
         ),
-        patch("app.assets.scanner.extract_image_dimensions", return_value=None),
+        patch("app.assets.scanner.extract_media_metadata", return_value=None),
     ):
         enrich_asset(session, str(path), content.id, record.id)
 
@@ -133,12 +133,13 @@ def test_seed_creates_content_and_record(session, temp_dir: Path):
     (input_root / "second.png").write_bytes(b"second")
 
     with patch("folder_paths.get_input_directory", return_value=str(input_root)):
-        created = seed_asset_specs(session, _build_seed_specs(input_root))
+        created, error = seed_asset_specs(session, _build_seed_specs(input_root))
     session.commit()
 
     contents = list(session.scalars(select(AssetContent).order_by(AssetContent.path)))
     records = list(session.scalars(select(Asset).order_by(Asset.name)))
 
+    assert error is None
     assert created == 2
     assert len(contents) == 2
     assert len(records) == 2
@@ -149,7 +150,7 @@ def test_seed_creates_content_and_record(session, temp_dir: Path):
     ]
 
 
-def test_prune_marks_missing_not_deletes(session, temp_dir: Path):
+def test_prune_marks_missing_not_deletes(session, db_engine, temp_dir: Path):
     input_root = temp_dir / "input"
     input_root.mkdir()
     file_path = input_root / "removed-from-registry.png"
@@ -159,8 +160,11 @@ def test_prune_marks_missing_not_deletes(session, temp_dir: Path):
         seed_asset_specs(session, _build_seed_specs(input_root))
     session.commit()
 
-    marked = mark_contents_missing_outside_prefixes(session, prefixes=[])
-    session.commit()
+    with patch("app.assets.scanner.create_session", sessionmaker(bind=db_engine)), \
+         patch("app.database.db.WriteSession", sessionmaker(bind=db_engine)), \
+         patch("app.assets.scanner.get_owned_prefixes", return_value=[]):
+        marked = mark_missing_outside_prefixes_safely([])
+    session.expire_all()
 
     content = session.scalar(select(AssetContent))
     record = session.scalar(select(Asset))
@@ -170,6 +174,16 @@ def test_prune_marks_missing_not_deletes(session, temp_dir: Path):
     assert content is not None and content.is_missing is True
     assert record is not None
     assert missing_tag is not None and missing_tag.origin == "automatic"
+
+
+def test_mark_missing_failure_returns_none():
+    with patch(
+        "app.assets.scanner.create_session",
+        side_effect=RuntimeError("database unavailable"),
+    ):
+        result = mark_missing_outside_prefixes_safely([])
+
+    assert result is None
 
 
 def test_unhashed_missing_content_gets_tagged(session, temp_dir: Path):

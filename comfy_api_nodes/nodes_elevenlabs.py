@@ -62,6 +62,18 @@ ELEVENLABS_VOICE_MAP = {
     f"{name} ({gender}, {accent})": voice_id for voice_id, name, gender, accent in ELEVENLABS_VOICES
 }
 
+ELEVENLABS_V4_TTS_SETTINGS = [
+    IO.Float.Input(
+        "similarity_boost",
+        default=0.75,
+        min=0.0,
+        max=1.0,
+        step=0.01,
+        display_mode=IO.NumberDisplay.slider,
+        tooltip="Similarity boost. Higher values make the voice more similar to the original.",
+    ),
+]
+
 
 class ElevenLabsSpeechToText(IO.ComfyNode):
     @classmethod
@@ -271,6 +283,8 @@ class ElevenLabsTextToSpeech(IO.ComfyNode):
                 IO.DynamicCombo.Input(
                     "model",
                     options=[
+                        IO.DynamicCombo.Option("eleven_v4", ELEVENLABS_V4_TTS_SETTINGS),
+                        IO.DynamicCombo.Option("eleven_v4_turbo", ELEVENLABS_V4_TTS_SETTINGS),
                         IO.DynamicCombo.Option(
                             "eleven_multilingual_v2",
                             [
@@ -278,7 +292,7 @@ class ElevenLabsTextToSpeech(IO.ComfyNode):
                                     "speed",
                                     default=1.0,
                                     min=0.7,
-                                    max=1.3,
+                                    max=1.2,
                                     step=0.01,
                                     display_mode=IO.NumberDisplay.slider,
                                     tooltip="Speech speed. 1.0 is normal, <1.0 slower, >1.0 faster.",
@@ -338,8 +352,7 @@ class ElevenLabsTextToSpeech(IO.ComfyNode):
                 IO.String.Input(
                     "language_code",
                     default="",
-                    tooltip="ISO-639-1 or ISO-639-3 language code (e.g., 'en', 'es', 'fra'). "
-                    "Leave empty for automatic detection.",
+                    tooltip="ISO 639-1 language code (e.g., 'en', 'es', 'ja'). Leave empty for automatic detection.",
                 ),
                 IO.Int.Input(
                     "seed",
@@ -364,7 +377,8 @@ class ElevenLabsTextToSpeech(IO.ComfyNode):
             ],
             is_api_node=True,
             price_badge=IO.PriceBadge(
-                expr="""{"type":"usd","usd":0.24,"format":{"approximate":true,"suffix":"/1K chars"}}""",
+                depends_on=IO.PriceBadgeDepends(widgets=["model"]),
+                expr="""{"type":"usd","usd":widgets.model = "eleven_v4" ? 0.1144 : (widgets.model = "eleven_v4_turbo" ? 0.0572 : 0.24),"format":{"approximate":true,"suffix":"/1K chars"}}""",
             ),
         )
 
@@ -380,7 +394,7 @@ class ElevenLabsTextToSpeech(IO.ComfyNode):
         seed: int,
         output_format: str,
     ) -> IO.NodeOutput:
-        validate_string(text, min_length=1)
+        validate_string(text, field_name="text", min_length=1)
         request = TextToSpeechRequest(
             text=text,
             model_id=model["model"],
@@ -388,7 +402,7 @@ class ElevenLabsTextToSpeech(IO.ComfyNode):
             voice_settings=TextToSpeechVoiceSettings(
                 stability=stability,
                 similarity_boost=model["similarity_boost"],
-                speed=model["speed"],
+                speed=model.get("speed"),
                 use_speaker_boost=model.get("use_speaker_boost", None),
                 style=model.get("style", None),
             ),
@@ -624,7 +638,7 @@ ELEVENLABS_STS_VOICE_SETTINGS = [
         "speed",
         default=1.0,
         min=0.7,
-        max=1.3,
+        max=1.2,
         step=0.01,
         display_mode=IO.NumberDisplay.slider,
         tooltip="Speech speed. 1.0 is normal, <1.0 slower, >1.0 faster.",
@@ -818,7 +832,8 @@ class ElevenLabsTextToDialogue(IO.ComfyNode):
                 ),
                 IO.Combo.Input(
                     "model",
-                    options=["eleven_v3"],
+                    options=["eleven_v3", "eleven_v4", "eleven_v4_turbo"],
+                    default="eleven_v4",
                     tooltip="Model to use for dialogue generation.",
                 ),
                 IO.DynamicCombo.Input(
@@ -840,8 +855,7 @@ class ElevenLabsTextToDialogue(IO.ComfyNode):
                 IO.String.Input(
                     "language_code",
                     default="",
-                    tooltip="ISO-639-1 or ISO-639-3 language code (e.g., 'en', 'es', 'fra'). "
-                    "Leave empty for automatic detection.",
+                    tooltip="ISO 639-1 language code (e.g., 'en', 'es', 'ja'). Leave empty for automatic detection.",
                 ),
                 IO.Int.Input(
                     "seed",
@@ -866,7 +880,8 @@ class ElevenLabsTextToDialogue(IO.ComfyNode):
             ],
             is_api_node=True,
             price_badge=IO.PriceBadge(
-                expr="""{"type":"usd","usd":0.24,"format":{"approximate":true,"suffix":"/1K chars"}}""",
+                depends_on=IO.PriceBadgeDepends(widgets=["model"]),
+                expr="""{"type":"usd","usd":widgets.model = "eleven_v4" ? 0.1144 : (widgets.model = "eleven_v4_turbo" ? 0.0572 : 0.24),"format":{"approximate":true,"suffix":"/1K chars"}}""",
             ),
         )
 
@@ -886,7 +901,7 @@ class ElevenLabsTextToDialogue(IO.ComfyNode):
         for i in range(1, num_entries + 1):
             text = inputs[f"text{i}"]
             voice_id = inputs[f"voice{i}"]
-            validate_string(text, min_length=1)
+            validate_string(text, field_name=f"text{i}", min_length=1)
             dialogue_inputs.append(DialogueInput(text=text, voice_id=voice_id))
         request = TextToDialogueRequest(
             inputs=dialogue_inputs,

@@ -478,7 +478,7 @@ except:
 
 SUPPORT_FP8_OPS = args.supports_fp8_compute
 
-AMD_RDNA2_AND_OLDER_ARCH = ["gfx1030", "gfx1031", "gfx1035", "gfx1010", "gfx1011", "gfx1012", "gfx906", "gfx900", "gfx803"]
+AMD_RDNA2_AND_OLDER_ARCH = ["gfx1030", "gfx1031", "gfx1032", "gfx1033", "gfx1034", "gfx1035", "gfx1036", "gfx1010", "gfx1011", "gfx1012", "gfx906", "gfx900", "gfx803"]
 AMD_ENABLE_MIOPEN_ENV = 'COMFYUI_ENABLE_MIOPEN'
 
 try:
@@ -1391,6 +1391,8 @@ def current_stream(device):
         return torch.cuda.current_stream()
     elif is_device_xpu(device):
         return torch.xpu.current_stream()
+    elif is_device_npu(device):
+        return torch.npu.current_stream(device)
     else:
         return None
 
@@ -1523,7 +1525,27 @@ def get_offload_stream(device):
         s = ss[stream_counter]
         stream_counters[device] = stream_counter
         return s
+    elif is_device_npu(device):
+        ss = []
+        # Match the CUDA/XPU stream interface used by the shared offload path.
+        # torch.npu.stream provides the context manager for torch-npu streams.
+        for k in range(NUM_STREAMS):
+            s1 = torch.npu.Stream(device=device, priority=0)
+            s1.as_context = torch.npu.stream
+            ss.append(s1)
+        STREAMS[device] = ss
+        s = ss[stream_counter]
+        stream_counters[device] = stream_counter
+        return s
     return None
+
+def sync_all_offload_streams():
+    if NUM_STREAMS == 0:
+        synchronize()
+        return
+    for streams in STREAMS.values():
+        for stream in streams:
+            stream.synchronize()
 
 def sync_stream(device, stream):
     if stream is None or current_stream(device) is None:
@@ -1610,7 +1632,16 @@ def get_disk_swap_total():
         logging.warning("Could not get amount of swap memory on system.")
     return total
 
-if not args.disable_pinned_memory:
+def is_integrated_gpu():
+    device = get_torch_device()
+    return device.type == "cuda" and bool(torch.cuda.get_device_properties(device).is_integrated)
+
+DISABLE_PINNED_MEMORY = args.disable_pinned_memory
+if not DISABLE_PINNED_MEMORY and is_integrated_gpu():
+    # Integrated GPU VRAM is carved out of system RAM, so pinning host memory only takes RAM from the GPU.
+    DISABLE_PINNED_MEMORY = True
+
+if not DISABLE_PINNED_MEMORY:
     if is_nvidia() or is_amd():
         ram = get_total_memory(torch.device("cpu"))
         if WINDOWS:
@@ -1746,7 +1777,9 @@ def pytorch_attention_enabled():
 
 def pytorch_attention_enabled_vae():
     if is_amd():
-        return False  # enabling pytorch attention on AMD currently causes crash when doing high res
+        arch = torch.cuda.get_device_properties(get_torch_device()).gcnArchName
+        if arch.startswith("gfx11"):  # aotriton ships no head dim > 256 kernels for gfx11 (ROCm/aotriton#168), the VAE's single head needs 384 or 512
+            return False
     return pytorch_attention_enabled()
 
 def pytorch_attention_flash_attention():
@@ -1856,6 +1889,9 @@ def is_device_xpu(device):
 
 def is_device_cuda(device):
     return is_device_type(device, 'cuda')
+
+def is_device_npu(device):
+    return is_device_type(device, 'npu')
 
 def set_torch_device(device):
     """Set the current device for the given torch device. Supports CUDA and XPU."""
@@ -1992,6 +2028,9 @@ def should_use_bf16(device=None, model_params=0, prioritize_performance=True, ma
     return False
 
 def supports_fp8_compute(device=None):
+    if is_device_cpu(device):
+        return False
+
     if SUPPORT_FP8_OPS:
         return True
 
@@ -2016,6 +2055,9 @@ def supports_fp8_compute(device=None):
     return True
 
 def supports_nvfp4_compute(device=None):
+    if is_device_cpu(device):
+        return False
+
     if not is_nvidia():
         return False
 
@@ -2026,6 +2068,9 @@ def supports_nvfp4_compute(device=None):
     return True
 
 def supports_mxfp8_compute(device=None):
+    if is_device_cpu(device):
+        return False
+
     if not is_nvidia():
         return False
 
@@ -2054,6 +2099,9 @@ def supports_fp64(device=None):
     return True
 
 def supports_int8_compute(device=None):
+    if is_device_cpu(device):
+        return False
+
     # The eager comfy_kitchen backend implements int8 weight-only quantized
     # matmul via torch._int_mm, which PyTorch does not implement for MPS.
     # https://github.com/pytorch/pytorch/issues/141287
@@ -2097,6 +2145,8 @@ def synchronize():
         return
     if is_intel_xpu():
         torch.xpu.synchronize()
+    elif is_ascend_npu():
+        torch.npu.synchronize()
     elif torch.cuda.is_available():
         torch.cuda.synchronize()
 

@@ -2,8 +2,7 @@
 and files, recording a hash-mode transition, and handing the filesystem scan to
 the background seeder. Startup only enqueues transition work — draining it
 belongs to the seeder, so a large library cannot stall the server before it
-accepts requests. It also settles, before any of that, whether the database
-dependencies exist at all, disabling the asset routes when they do not.
+accepts requests.
 """
 
 from __future__ import annotations
@@ -13,15 +12,21 @@ import os
 import shutil
 
 import folder_paths
-from sqlalchemy import select
 
-from app.assets.database.models import Asset, AssetContent
-from app.assets.database.queries.records import delete_record
-from app.assets.helpers import sql_path_under_prefix
-from app.assets.services.hash_mode_state import enqueue_transition_work
-from app.assets.services.hash_mode_state import record_transition_intent
-from app.database.db import can_create_session, create_session
+from app.database.db import can_create_session, create_session, dependencies_available
 from comfy.cli_args import args
+
+# Startup imports this module even without the database packages; the functions
+# that need these are only called when a session can be created.
+if dependencies_available():
+    from sqlalchemy import select
+
+    from app.assets.database.models import Asset, AssetContent
+    from app.assets.database.queries.records import delete_record
+    from app.assets.helpers import sql_path_under_prefix
+    from app.assets.services.asset_management import reclaim_preview
+    from app.assets.services.hash_mode_state import enqueue_transition_work
+    from app.assets.services.hash_mode_state import record_transition_intent
 
 _excluded_scan_roots: set[str] = set()
 _hash_mode_transition: str | None = None
@@ -54,18 +59,19 @@ def wipe_temp_db_rows(session) -> tuple[int, int]:
     # case-different persistent directory destroys user assets.
     under_temp = sql_path_under_prefix(AssetContent.path, temp_root)
 
-    temp_record_ids = list(
-        session.scalars(
-            select(Asset.id)
-            .join(AssetContent, Asset.content_id == AssetContent.id)
-            .where(under_temp)
-        )
-    )
+    temp_records = session.execute(
+        select(Asset.id, Asset.preview_id)
+        .join(AssetContent, Asset.content_id == AssetContent.id)
+        .where(under_temp)
+    ).all()
 
     records_deleted = 0
-    for record_id in temp_record_ids:
+    for record_id, _ in temp_records:
         delete_record(session, record_id)
         records_deleted += 1
+    # Their previews live in previews/, not temp/, so the path predicate never reaches them.
+    for preview_id in {preview_id for _, preview_id in temp_records if preview_id}:
+        reclaim_preview(session, preview_id)
 
     contents_deleted = 0
     for content in session.scalars(select(AssetContent).where(under_temp)).all():

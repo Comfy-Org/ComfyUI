@@ -33,3 +33,19 @@ def prefix_case_paths(root: str) -> list[tuple[str, bool]]:
 
 def expected_prefix_case_paths(root: str) -> set[str]:
     return {os.path.abspath(path) for path, expected in prefix_case_paths(root) if expected}
+
+
+def anchor_case_paths() -> list[tuple[str, str, bool]]:
+    """(path, prefix, Path(path).is_relative_to(prefix)) across POSIX anchors.
+
+    abspath keeps exactly two leading slashes, and pathlib treats "//" as its own
+    anchor, so "//server/..." is not under "/". Three or more collapse to "/".
+    """
+    return [
+        ("//server/file", "/", False),
+        ("//server/file", "//server", True),
+        ("//server", "//", True),
+        ("/x", "//", False),
+        ("///x/y", "/", True),
+        ("/x/y", "/", True),
+    ]

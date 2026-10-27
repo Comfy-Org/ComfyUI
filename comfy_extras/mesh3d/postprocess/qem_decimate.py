@@ -1,11 +1,8 @@
 """
-Pure-PyTorch GPU-parallel QEM mesh simplification.
+Pure-PyTorch GPU QEM mesh simplification.
 
-  - Parallel greedy edge-matching collapse loop
-  - Plane/line/feature-edge/boundary quadrics, memoryless accumulation
-  - Normal-flip prevention, link-condition, skinny penalties
-  - Non-manifold/sliver handling without dropping faces
-  - Pre/post-clean pipeline (weld, degenerates, small components)
+Parallel rounds of independent edge collapses, gated by normal-flip, link-condition and
+skinny-triangle checks, with mesh cleanup before and after.
 """
 from __future__ import annotations
 
@@ -14,95 +11,63 @@ from typing import Optional, Tuple
 
 import math
 
-import numpy as _np
 import torch
-from scipy.sparse import coo_matrix
-from scipy.sparse.csgraph import connected_components
 from tqdm import tqdm as _tqdm
+import comfy.quant_ops
 import comfy.utils as _comfy_utils
 
 
 @dataclass
 class QEMConfig:
-    # Precision
-    dtype: torch.dtype = torch.float32  # float64 much slower on consumer GPUs
-
-    # Numerical conditioning
-    stabilizer_scale: float = 1e-3  # Tikhonov reg: stabilizer = mesh_scale^2 * this
-    wander_threshold: float = 2.0  # fall back to midpoint if v* lands > N×edge_length from an endpoint
+    stabilizer_scale: float = 1e-3  # Tikhonov term = mesh_scale² * this
+    wander_threshold: float = 2.0  # midpoint fallback when v* is > this × edge length from an endpoint
     clamp_v_to_edge: bool = True  # project v* onto the edge segment (qem mode only)
 
-    # Placement mode (also selects collapse driver):
-    # "midpoint" = threshold-schedule driver, most stable (defaults below match it);
-    # "qem" = sharpest, QEM-optimum placement + ratio driver.
+    # "midpoint": cost-threshold driver, most stable, defaults tuned for it; "qem": optimal placement, ratio driver
     placement_mode: str = "midpoint"
 
-    flip_reject_hard: bool = True  # hard-reject (err=+inf) top-K collapses that flip any 1-ring normal
-
-    # Per-iteration batch sizing
-    sampling_cap: int = 10_000_000  # max edges processed per outer iter
+    sampling_cap: int = 10_000_000  # about this many edges evaluated per round
     max_collapses_fraction: float = 0.25  # of remaining faces-to-remove
     max_collapses_floor: int = 10_000
     max_collapses_ceiling: int = 1_000_000
-    max_collapses_relative_cap: float = 0.10  # cap per-iter collapses as fraction of current faces; 0 disables
+    max_collapses_relative_cap: float = 0.10  # of current faces
 
-    # Loop control
     max_iterations: int = 5_000
-    compaction_period: int = 5
-    compaction_threshold: float = 0.85  # compact when alive_frac < this
 
-    # Quality knobs
-    boundary_quadrics: bool = True
-    boundary_weight: float = 1000.0
-    recompute_normals_post: bool = True
-    line_quadric_weight: float = 0.0  # penalise deviation ⟂ to edge dir → more uniform verts; 0 disables
-    line_quadric_skip_opposite_normals_cos: float = 0.0  # skip line quadrics on edges with endpoint cos < this
+    boundary_weight: float = 1000.0  # line quadrics pinning boundary edges
+    line_quadric_weight: float = 0.0  # more uniform verts; 0 disables
+    line_quadric_skip_opposite_normals_cos: float = 0.0  # skip edges with endpoint normal cos below this
 
-    # Feature-edge quadrics on sharp interior edges (dihedral > min); 0 disables.
+    # line quadrics on interior edges sharper than the min dihedral; 0 disables
     feature_edge_quadric_weight: float = 0.0
     feature_edge_min_dihedral_deg: float = 30.0
 
-    # Flip check (FA-QEM §3.3)
-    quality_topk_multiplier: int = 4  # quality-check band size = this * max_collapses_per_iter
-    flip_cos_threshold: float = 0.0  # 0 = count any sign reversal (dihedral > 90°)
-    flip_check_max_degree: int = 16  # cap on vertex degree for the flip-check table
+    # FA-QEM §3.3: reject collapses that flip a 1-ring normal
+    flip_cos_threshold: float = 0.0  # 0 = any sign reversal (dihedral > 90°)
+    flip_check_max_degree: int = 16  # torch fallback only; the kitchen op is exact
 
-    # Triangle shape penalty
-    skinny_weight: float = 1e-3  # penalise top-K collapses producing needle/sliver tris; 0 disables
+    skinny_weight: float = 1e-3  # needle/sliver penalty
 
-    #  Topology preservation
-    enforce_link_condition: bool = True  # reject collapses that violate the link condition
+    enforce_link_condition: bool = True  # keep topology, until that alone blocks the target
 
-    # Quadric area weighting
-    area_weighted_quadrics: bool = False  # True: Garland-Heckbert area-weighted; False: un-weighted
+    area_weighted_quadrics: bool = False  # Garland-Heckbert area weighting
 
-    # edge-length cost regularizer
-    lambda_edge_length: float = 1e-2  # add λ*len² to bias toward short edges; 0 disables
-    lambda_edge_length_absolute: bool = True  # apply λ absolutely vs relative-to-QEM-median
+    lambda_edge_length: float = 1e-2  # cost += λ·len², favours short edges
 
-    # Threshold-schedule driver (placement_mode == "midpoint"):
-    # each round collapses a disjoint set with cost <= thresh, ×10 when < 1% removed.
-    threshold_start: float = 1e-8
-    memoryless_qem: bool = True  # rebuild quadrics each round vs accumulate
-    repair_nonmanifold: bool = True  # final repair_non_manifold_edges pass
+    threshold_start: float = 1e-8  # midpoint driver, × mesh_scale²; ×10 when a round removes < 1%
+    repair_nonmanifold: bool = True  # split sheets fused at non-manifold edges after decimation
 
-    # Pre-clean (input mesh)
-    preclean: bool = True  # weld coincident verts, drop degenerate/duplicate/unused
-
-    # Post-clean (output mesh)
     postclean: bool = True  # remove slivers, tiny components, unused verts left by collapse
     postclean_min_angle_deg: float = 0.5
     postclean_max_aspect_ratio: float = 100.0
-    postclean_min_component_faces: int = 8  # drop components with fewer faces than this
+    postclean_min_component_faces: int = 8
 
-    # Preclean tuning
-    preclean_weld_epsilon_rel: float = 1e-5  # weld tolerance as fraction of bbox diagonal
-    preclean_min_component_faces: int = 0  # 0 = keep all components
+    preclean_weld_epsilon_rel: float = 1e-5  # fraction of bbox diagonal
 
 
     @property
     def threshold_driver(self) -> bool:
-        """The cost-threshold collapse driver is used by the midpoint placement mode."""
+        """True when the cost-threshold driver is used (midpoint placement)."""
         return self.placement_mode == "midpoint"
 
 
@@ -122,37 +87,10 @@ def _sorted_edge_halfedges(
     return key[sort_idx], face_per_he[sort_idx], slot_per_he[sort_idx]
 
 
-def _vert_is_boundary_mask(faces: torch.Tensor, num_verts: int) -> torch.Tensor:
-    """(V,) bool mask: True for verts incident to any boundary edge."""
-    device = faces.device
-    out = torch.zeros(num_verts, dtype=torch.bool, device=device)
-    bedges = _detect_boundary_edges(faces, num_verts)
-    if bedges.numel() == 0:
-        return out
-    out[bedges[:, 0]] = True
-    out[bedges[:, 1]] = True
-    return out
-
-
-def _detect_boundary_edges(faces: torch.Tensor, num_verts: int) -> torch.Tensor:
-    """Boundary edges as [N, 2] of vertex indices (each appearing in exactly one face)."""
-    if faces.numel() == 0:
-        return torch.empty((0, 2), dtype=torch.int64, device=faces.device)
-    sorted_keys, _, _ = _sorted_edge_halfedges(faces, num_verts)
-    unique_key, counts = torch.unique(sorted_keys, return_counts=True)
-    boundary_key = unique_key[counts == 1]
-    if boundary_key.numel() == 0:
-        return torch.empty((0, 2), dtype=torch.int64, device=faces.device)
-    P = num_verts + 1
-    bv0 = boundary_key // P
-    bv1 = boundary_key % P
-    return torch.stack([bv0, bv1], dim=1)
-
-
 def _manifold_edge_pairs(
     sorted_keys: torch.Tensor, sorted_faces: torch.Tensor,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Edges shared by exactly 2 faces (filters >2-incident groups); returns (pair_keys, fa, fb)."""
+    """Edges shared by exactly 2 faces; returns (pair_keys, fa, fb)."""
     if sorted_keys.shape[0] < 2:
         empty = sorted_keys.new_empty(0)
         return empty, empty, empty
@@ -172,15 +110,20 @@ def _manifold_edge_pairs(
             sorted_faces[pair_starts + 1])
 
 
+_FACE_CHUNK = 1 << 22  # faces per pass of the quadric build
+_EDGE_CHUNK = 1 << 21  # edges per pass of the collapse errors
+
+
 def _line_quadric_planes(
     pa: torch.Tensor, pb: torch.Tensor
-) -> Tuple[torch.Tensor, torch.Tensor]:
-    """Two plane equations (E,4) per edge whose squared-dist sum = squared ⟂ distance to the edge line."""
-    e = pb - pa                                                # (E, 3)
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Two planes (E, 4) per edge whose squared distances sum to the squared distance from the edge line.
+    Returns (p_u, p_w, edge_len)."""
+    e = pb - pa
     elen = torch.norm(e, dim=-1, keepdim=True).clamp_min(1e-12)
-    e_unit = e / elen                                          # (E, 3)
-    m = 0.5 * (pa + pb)                                        # (E, 3)
-    # helper axis not parallel to e_unit, then Gram-Schmidt against e_unit
+    e_unit = e / elen
+    m = 0.5 * (pa + pb)
+    # least-aligned axis, orthogonalised against e_unit
     helper = torch.zeros_like(e_unit)
     helper.scatter_(-1, e_unit.abs().argmin(dim=-1, keepdim=True), 1.0)
     u = helper - (helper * e_unit).sum(-1, keepdim=True) * e_unit
@@ -188,7 +131,7 @@ def _line_quadric_planes(
     w = torch.cross(e_unit, u, dim=-1)
     d_u = -(u * m).sum(-1, keepdim=True)
     d_w = -(w * m).sum(-1, keepdim=True)
-    p_u = torch.cat([u, d_u], dim=-1)                          # (E, 4)
+    p_u = torch.cat([u, d_u], dim=-1)
     p_w = torch.cat([w, d_w], dim=-1)
     return p_u, p_w, elen.squeeze(-1)
 
@@ -201,7 +144,7 @@ def _add_line_quadrics(
     weight: float,
     skip_he_mask: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
-    """Add line quadrics for all 3F half-edges, weighted by face_area*weight; skip_he_mask zeroes True positions."""
+    """Add line quadrics of all 3F half-edges to Q_flat, weighted by face area * weight; skip_he_mask drops edges."""
     a_all = torch.cat([faces[:, 0], faces[:, 1], faces[:, 2]], dim=0).long()
     b_all = torch.cat([faces[:, 1], faces[:, 2], faces[:, 0]], dim=0).long()
     pa = verts[a_all]
@@ -217,7 +160,7 @@ def _add_line_quadrics(
         + p_w.unsqueeze(-1) * p_w.unsqueeze(-2)
     ) * w_per_edge
     K_flat = K_line.reshape(-1, 16)
-    Q_flat.scatter_add_(0, a_all.unsqueeze(1).expand(-1, 16), K_flat)  # scatter to both endpoints
+    Q_flat.scatter_add_(0, a_all.unsqueeze(1).expand(-1, 16), K_flat)
     Q_flat.scatter_add_(0, b_all.unsqueeze(1).expand(-1, 16), K_flat)
     return Q_flat
 
@@ -226,8 +169,9 @@ def _build_quadrics(
     verts: torch.Tensor,
     faces: torch.Tensor,
     cfg: QEMConfig,
+    b_edges: torch.Tensor,  # (B, 2) boundary edges of `faces`
 ) -> torch.Tensor:
-    """Per-vertex area-weighted quadric (V, 4, 4)."""
+    """Per-vertex quadrics (V, 4, 4): face planes plus the line, boundary and feature-edge terms enabled in cfg."""
     V = verts.shape[0]
     dtype = verts.dtype
     device = verts.device
@@ -235,66 +179,58 @@ def _build_quadrics(
     Q_flat = torch.zeros((V, 16), dtype=dtype, device=device)
 
     if faces.numel() > 0:
-        v0 = verts[faces[:, 0]]
-        v1 = verts[faces[:, 1]]
-        v2 = verts[faces[:, 2]]
-        e1 = v1 - v0
-        e2 = v2 - v0
-        n = torch.cross(e1, e2, dim=-1)
-        area = torch.norm(n, dim=-1)
-        mask = area > 1e-12
-        # where() avoids boolean-index gather+scatter (fewer index kernels)
-        n_norm = torch.where(mask.unsqueeze(-1),
-                             n / area.unsqueeze(-1).clamp_min(1e-12),
-                             n.new_zeros(()))
-        d = -(n_norm * v0).sum(dim=-1, keepdim=True)
-        p = torch.cat([n_norm, d], dim=-1)           # (F, 4)
-        K = torch.einsum("fi,fj->fij", p, p)         # (F, 4, 4)
-
-        if cfg.area_weighted_quadrics:
-            K.mul_(area[:, None, None])
-        K_flat = K.reshape(-1, 16)
-        for corner in range(3):
-            idx = faces[:, corner].unsqueeze(1).expand(-1, 16)
-            Q_flat.scatter_add_(0, idx, K_flat)
-
-    # Line quadrics: squared ⟂ distance from v to the edge-midpoint line, all 3F half-edges in one pass.
-    if cfg.line_quadric_weight > 0 and faces.numel() > 0:
-        # skip thin-shell rim edges (endpoint normals oppose)
-        skip_he_sharp = None
-        if cfg.line_quadric_skip_opposite_normals_cos < 1.0:
-            v_norm = torch.zeros((V, 3), dtype=dtype, device=device)
-            n_weighted = n_norm * area.unsqueeze(-1)  # normal * 2× area
+        F = faces.shape[0]
+        area = torch.empty(F, dtype=dtype, device=device)
+        n_norm = torch.empty((F, 3), dtype=dtype, device=device) if cfg.line_quadric_weight > 0 else None
+        # a chunk at a time: the per-face quadrics are the decimation's largest transient
+        for s in range(0, F, _FACE_CHUNK):
+            f = faces[s:s + _FACE_CHUNK]
+            v0 = verts[f[:, 0]]
+            n = torch.cross(verts[f[:, 1]] - v0, verts[f[:, 2]] - v0, dim=-1)
+            a = torch.norm(n, dim=-1)
+            # degenerate faces get a zero plane
+            nn = torch.where((a > 1e-12).unsqueeze(-1), n / a.unsqueeze(-1).clamp_min(1e-12), n.new_zeros(()))
+            p = torch.cat([nn, -(nn * v0).sum(dim=-1, keepdim=True)], dim=-1)   # (n, 4)
+            K = torch.einsum("fi,fj->fij", p, p)
+            if cfg.area_weighted_quadrics:
+                K.mul_(a[:, None, None])
+            K_flat = K.reshape(-1, 16)
             for corner in range(3):
-                v_norm.scatter_add_(0, faces[:, corner].unsqueeze(-1).expand(-1, 3),
-                                     n_weighted)
-            v_norm = torch.nn.functional.normalize(v_norm, p=2, dim=-1, eps=1e-12)
-            a_he = torch.cat([faces[:, 0], faces[:, 1], faces[:, 2]], dim=0).long()
-            b_he = torch.cat([faces[:, 1], faces[:, 2], faces[:, 0]], dim=0).long()
-            cos_endpoints = (v_norm[a_he] * v_norm[b_he]).sum(dim=-1)
-            skip_he_sharp = cos_endpoints < cfg.line_quadric_skip_opposite_normals_cos
-            if not skip_he_sharp.any():
-                skip_he_sharp = None
+                Q_flat.scatter_add_(0, f[:, corner].unsqueeze(1).expand(-1, 16), K_flat)
+            area[s:s + f.shape[0]] = a
+            if n_norm is not None:
+                n_norm[s:s + f.shape[0]] = nn
+
+    # line quadrics on all half-edges, skipping thin-shell rim edges whose endpoint normals oppose
+    if cfg.line_quadric_weight > 0 and faces.numel() > 0:
+        v_norm = torch.zeros((V, 3), dtype=dtype, device=device)
+        n_weighted = n_norm * area.unsqueeze(-1)
+        for corner in range(3):
+            v_norm.scatter_add_(0, faces[:, corner].unsqueeze(-1).expand(-1, 3),
+                                 n_weighted)
+        v_norm = torch.nn.functional.normalize(v_norm, p=2, dim=-1, eps=1e-12)
+        a_he = torch.cat([faces[:, 0], faces[:, 1], faces[:, 2]], dim=0).long()
+        b_he = torch.cat([faces[:, 1], faces[:, 2], faces[:, 0]], dim=0).long()
+        cos_endpoints = (v_norm[a_he] * v_norm[b_he]).sum(dim=-1)
+        skip_he_sharp = cos_endpoints < cfg.line_quadric_skip_opposite_normals_cos
         Q_flat = _add_line_quadrics(verts, faces, area, Q_flat,
                                      cfg.line_quadric_weight,
                                      skip_he_mask=skip_he_sharp)
 
-    # Boundary line quadrics: pin boundary-edge endpoints to the boundary line.
-    if cfg.boundary_quadrics and faces.numel() > 0:
-        b_edges = _detect_boundary_edges(faces, V)
-        if b_edges.shape[0] > 0:
-            ba = b_edges[:, 0]
-            bb = b_edges[:, 1]
-            pa = verts[ba]
-            pb = verts[bb]
-            p_u, p_w, _ = _line_quadric_planes(pa, pb)
-            K_b = (torch.einsum("ei,ej->eij", p_u, p_u)
-                   + torch.einsum("ei,ej->eij", p_w, p_w)) * cfg.boundary_weight
-            K_b_flat = K_b.reshape(-1, 16)
-            Q_flat.scatter_add_(0, ba.unsqueeze(1).expand(-1, 16), K_b_flat)
-            Q_flat.scatter_add_(0, bb.unsqueeze(1).expand(-1, 16), K_b_flat)
+    # pin boundary verts to their boundary edge lines
+    if b_edges.shape[0] > 0:
+        ba = b_edges[:, 0]
+        bb = b_edges[:, 1]
+        pa = verts[ba]
+        pb = verts[bb]
+        p_u, p_w, _ = _line_quadric_planes(pa, pb)
+        K_b = (torch.einsum("ei,ej->eij", p_u, p_u)
+               + torch.einsum("ei,ej->eij", p_w, p_w)) * cfg.boundary_weight
+        K_b_flat = K_b.reshape(-1, 16)
+        Q_flat.scatter_add_(0, ba.unsqueeze(1).expand(-1, 16), K_b_flat)
+        Q_flat.scatter_add_(0, bb.unsqueeze(1).expand(-1, 16), K_b_flat)
 
-    # Feature-edge quadrics: line quadric on sharp interior edges weighted by (1 - cos(dihedral)).
+    # feature-edge line quadrics, weighted by 1 - cos(dihedral)
     if cfg.feature_edge_quadric_weight > 0 and faces.numel() > 0:
         v0 = verts[faces[:, 0]]
         v1 = verts[faces[:, 1]]
@@ -333,23 +269,16 @@ def _edge_errors(
     verts: torch.Tensor,
     Q: torch.Tensor,
     edges: torch.Tensor,
-    stabilizer: float,
-    max_edge_length_sq: float,
-    mesh_scale_sq: float,
+    stabilizer: torch.Tensor,     # 0-d, like max_err and mesh_scale_sq
+    max_err: torch.Tensor,
+    mesh_scale_sq: torch.Tensor,
     cfg: QEMConfig,
     vert_is_boundary: Optional[torch.Tensor] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Returns (optimal_pos, error, valid_mask); vert_is_boundary enables boundary-aware midpoint."""
+    """Per-edge collapse position, cost and valid mask; vert_is_boundary snaps midpoints to boundary endpoints."""
     n_edges = edges.shape[0]
     dtype = verts.dtype
     device = verts.device
-
-    if n_edges == 0:
-        return (
-            torch.empty((0, 3), dtype=dtype, device=device),
-            torch.empty((0,), dtype=dtype, device=device),
-            torch.zeros((0,), dtype=torch.bool, device=device),
-        )
 
     verts_pair = verts[edges]           # (E, 2, 3)
     pa = verts_pair[:, 0]
@@ -357,7 +286,7 @@ def _edge_errors(
     edge_vec = pb - pa
     el = torch.norm(edge_vec, dim=-1)
 
-    # boundary-aware midpoint: snap to the boundary endpoint when exactly one is boundary
+    # snap to the boundary endpoint when exactly one endpoint is on the boundary
     if vert_is_boundary is not None:
         ba = vert_is_boundary[edges[:, 0]]
         bb = vert_is_boundary[edges[:, 1]]
@@ -368,7 +297,7 @@ def _edge_errors(
     else:
         midpoint = torch.lerp(pa, pb, 0.5)
 
-    Qe = Q[edges].sum(dim=1)            # (E, 4, 4) — sum of Q[va] and Q[vb]
+    Qe = Q[edges].sum(dim=1)            # (E, 4, 4)
 
     if cfg.placement_mode == "midpoint":
         opt = midpoint
@@ -376,20 +305,19 @@ def _edge_errors(
         A = Qe[:, :3, :3] + torch.eye(3, device=device, dtype=dtype) * stabilizer
         b = -Qe[:, :3, 3].unsqueeze(-1)
 
-        # stabilizer keeps A invertible; full-batch solve, midpoint fallback via where (no sync)
+        # stabilizer keeps A invertible; where() fallback avoids a host sync
         sol = torch.linalg.solve(A, b)
         dets = torch.det(A)
         good = (dets.abs() > 1e-12).unsqueeze(-1)
         opt = torch.where(good, sol.squeeze(-1), midpoint)
 
         if cfg.clamp_v_to_edge:
-            # project v* onto the edge segment (subsumes the wander check)
+            # subsumes the wander check
             edge_len_sq = (edge_vec * edge_vec).sum(dim=-1) + 1e-20
             t = ((opt - pa) * edge_vec).sum(dim=-1) / edge_len_sq
             t = t.clamp(0.0, 1.0).unsqueeze(-1)
             opt = torch.lerp(pa, pb, t)
         else:
-            # fall back to midpoint when v* wanders from both endpoints
             dist_a = torch.norm(opt - pa, dim=-1)
             dist_b = torch.norm(opt - pb, dim=-1)
             wander_bad = ((dist_a > cfg.wander_threshold * el) |
@@ -399,25 +327,12 @@ def _edge_errors(
     v4 = torch.cat([opt, torch.ones((n_edges, 1), device=device, dtype=dtype)], dim=1)
     err = torch.abs(torch.einsum("ei,eij,ej->e", v4, Qe, v4))
 
-    # mesh_scale_sq: Python float or 0-d tensor
-    if torch.is_tensor(mesh_scale_sq):
-        length_ok = el * el > mesh_scale_sq * 1e-10
-    else:
-        length_ok = el > math.sqrt(mesh_scale_sq) * 1e-5
-    error_ok = err < max_edge_length_sq
+    length_ok = el * el > mesh_scale_sq * 1e-10
+    error_ok = err < max_err
     nan_ok = ~torch.isnan(opt).any(dim=-1) & ~torch.isnan(err)
     valid = length_ok & error_ok & nan_ok
 
-    # edge-length regularizer: bias collapse order toward short edges (uniform sizing)
-    if cfg.lambda_edge_length > 0.0 and valid.any():
-        el2 = el * el
-        if cfg.lambda_edge_length_absolute:
-            err = err + cfg.lambda_edge_length * el2
-        else:
-            qem_med = err[valid].median()
-            len_med = el2[valid].median().clamp_min(1e-30)
-            err = err + cfg.lambda_edge_length * el2 * (qem_med / len_med)
-    return opt, err, valid
+    return opt, err + cfg.lambda_edge_length * el * el, valid
 
 
 def _greedy_matching(
@@ -426,7 +341,7 @@ def _greedy_matching(
     v_alive: torch.Tensor,
     max_select: int,
 ) -> torch.Tensor:
-    """Vectorised independent edge-set selection: an edge wins iff it is the min-key edge at both endpoints."""
+    """Independent edge set: an edge wins iff its (err, index) key is lowest at both endpoints; at most max_select."""
     device = edges.device
     n_edges = edges.shape[0]
     if n_edges == 0:
@@ -461,7 +376,7 @@ def _build_vert_to_faces_pad(
     num_verts: int,
     max_deg: int,
 ) -> torch.Tensor:
-    """Pad-CSR vertex-to-incident-faces table (V, max_deg) of face indices, -1 padded, degree truncated."""
+    """(V, max_deg) incident-face table, -1 padded; faces beyond max_deg are dropped."""
     device = faces.device
     F = faces.shape[0]
     if F == 0:
@@ -481,224 +396,6 @@ def _build_vert_to_faces_pad(
     return table
 
 
-def _normal_flip_mask(
-    verts: torch.Tensor,        # (V, 3)
-    faces: torch.Tensor,        # (F, 3) — must be alive faces only
-    edges: torch.Tensor,        # (E, 2) candidate collapse edges
-    opt: torch.Tensor,          # (E, 3) proposed collapse positions
-    vert_to_faces: torch.Tensor,  # (V, max_deg) face indices or -1
-    cos_threshold: float = 0.0,
-    chunk_size: int = 100_000,
-    return_count: bool = False,
-) -> torch.Tensor:
-    """(E,) bool mask (no adjacent-face flip), or int count of would-flip faces per edge if return_count."""
-    E = edges.shape[0]
-    device = verts.device
-    if return_count:
-        out = torch.zeros(E, dtype=torch.int32, device=device)
-    else:
-        out = torch.ones(E, dtype=torch.bool, device=device)
-    if E == 0:
-        return out
-
-    max_deg = vert_to_faces.shape[1]
-    a_all = edges[:, 0]
-    b_all = edges[:, 1]
-
-    for start in range(0, E, chunk_size):
-        stop = min(start + chunk_size, E)
-        Ec = stop - start
-        a = a_all[start:stop]
-        b = b_all[start:stop]
-        oc = opt[start:stop]
-
-        fa = vert_to_faces[a]                                 # (Ec, max_deg)
-        fb = vert_to_faces[b]
-        all_f = torch.cat([fa, fb], dim=1)                    # (Ec, 2*max_deg)
-        valid_f = all_f >= 0
-        all_f_safe = all_f.clamp(min=0)
-        fv = faces[all_f_safe]                                # (Ec, 2*max_deg, 3)
-
-        a_b = a.view(Ec, 1)
-        b_b = b.view(Ec, 1)
-        s0_a = fv[..., 0] == a_b
-        s0_b = fv[..., 0] == b_b
-        s1_a = fv[..., 1] == a_b
-        s1_b = fv[..., 1] == b_b
-        s2_a = fv[..., 2] == a_b
-        s2_b = fv[..., 2] == b_b
-        contains_a = s0_a | s1_a | s2_a
-        contains_b = s0_b | s1_b | s2_b
-        # affected: face contains exactly one of {a, b} and slot is non-pad
-        affected = (contains_a ^ contains_b) & valid_f
-        if not affected.any():
-            continue
-
-        p0 = verts[fv[..., 0]]                                # (Ec, 2*max_deg, 3)
-        p1 = verts[fv[..., 1]]
-        p2 = verts[fv[..., 2]]
-        n_old = torch.cross(p1 - p0, p2 - p0, dim=-1)
-
-        opt_b = oc.view(Ec, 1, 3).expand(-1, 2 * max_deg, -1)
-        rep0 = (s0_a | s0_b).unsqueeze(-1)
-        rep1 = (s1_a | s1_b).unsqueeze(-1)
-        rep2 = (s2_a | s2_b).unsqueeze(-1)
-        p0n = torch.where(rep0, opt_b, p0)
-        p1n = torch.where(rep1, opt_b, p1)
-        p2n = torch.where(rep2, opt_b, p2)
-        n_new = torch.cross(p1n - p0n, p2n - p0n, dim=-1)
-
-        nlen_old = torch.norm(n_old, dim=-1)
-        nlen_new = torch.norm(n_new, dim=-1)
-        # degenerate-before faces can't flip; treat as OK
-        denom = nlen_old * nlen_new
-        safe = denom > 1e-20
-        cos = torch.where(safe, (n_old * n_new).sum(dim=-1) / denom.clamp_min(1e-20),
-                          torch.ones_like(denom))
-        flip = (cos < cos_threshold) & affected & safe
-        if return_count:
-            out[start:stop] = flip.sum(dim=-1).to(torch.int32)
-        else:
-            out[start:stop] = ~flip.any(dim=-1)
-
-    return out
-
-
-def _link_condition_mask(
-    faces: torch.Tensor,         # (F, 3) alive faces only
-    edges: torch.Tensor,         # (E, 2) candidate collapse edges
-    vert_to_faces: torch.Tensor, # (V, max_deg) face idx or -1
-    chunk_size: int = 100_000,
-) -> torch.Tensor:
-    """(E,) bool mask — True where the collapse is topology-safe (link condition: common neighbours <= edge faces)."""
-    E = edges.shape[0]
-    device = faces.device
-    out = torch.ones(E, dtype=torch.bool, device=device)
-    if E == 0:
-        return out
-    D = vert_to_faces.shape[1]
-    a_all = edges[:, 0]
-    b_all = edges[:, 1]
-
-    for s in range(0, E, chunk_size):
-        e = min(s + chunk_size, E)
-        a = a_all[s:e]
-        b = b_all[s:e]
-        Ec = a.shape[0]
-
-        fa = vert_to_faces[a]                       # (Ec, D)
-        fb = vert_to_faces[b]
-        fa_ok = fa >= 0
-        fb_ok = fb >= 0
-        fav = faces[fa.clamp(min=0)]                # (Ec, D, 3)
-        fbv = faces[fb.clamp(min=0)]
-
-        # neighbour verts of a/b: take the 2 non-anchor verts per incident face → (Ec, 2D)
-        a_b = a[:, None]
-        b_b = b[:, None]
-        an1 = torch.where(fav[..., 0] == a_b, fav[..., 1], fav[..., 0])
-        an2 = torch.where(fav[..., 2] == a_b, fav[..., 1], fav[..., 2])
-        bn1 = torch.where(fbv[..., 0] == b_b, fbv[..., 1], fbv[..., 0])
-        bn2 = torch.where(fbv[..., 2] == b_b, fbv[..., 1], fbv[..., 2])
-        na = torch.stack([an1, an2], dim=-1).reshape(Ec, 2 * D)
-        nb = torch.stack([bn1, bn2], dim=-1).reshape(Ec, 2 * D)
-        fa_okx = fa_ok.repeat_interleave(2, dim=1)
-        fb_okx = fb_ok.repeat_interleave(2, dim=1)
-        na[(na == a_b) | (na == b_b) | ~fa_okx] = -1
-        nb[(nb == a_b) | (nb == b_b) | ~fb_okx] = -1
-
-        # common neighbours: na entries also appearing in nb
-        in_b = (na[:, :, None] == nb[:, None, :]) & (na[:, :, None] >= 0)
-        na_common = torch.where(in_b.any(dim=2), na, torch.full_like(na, -1))
-        # distinct count of common neighbours per edge (sort + count transitions)
-        cs, _ = na_common.sort(dim=1)
-        count_common = ((cs[:, 1:] != cs[:, :-1]) & (cs[:, 1:] >= 0)).sum(dim=1) \
-                       + (cs[:, :1] >= 0).sum(dim=1)
-
-        # faces on the edge = a's faces also containing b
-        count_faces = ((fav == b[:, None, None]).any(dim=2) & fa_ok).sum(dim=1)
-
-        out[s:e] = count_common <= count_faces
-
-    return out
-
-
-def _skinny_penalty(
-    verts: torch.Tensor,        # (V, 3)
-    faces: torch.Tensor,        # (F, 3) — alive faces only
-    edges: torch.Tensor,        # (E, 2) candidate collapse edges
-    opt: torch.Tensor,          # (E, 3) proposed collapse positions
-    vert_to_faces: torch.Tensor,  # (V, max_deg)
-    chunk_size: int = 100_000,
-) -> torch.Tensor:
-    """Per-edge post-collapse triangle-shape penalty (lambda_skinny); mean of 1 - clamp(shape,0,1) over the 1-ring."""
-    E = edges.shape[0]
-    device = verts.device
-    out = torch.zeros(E, dtype=verts.dtype, device=device)
-    if E == 0:
-        return out
-
-    max_deg = vert_to_faces.shape[1]
-    a_all = edges[:, 0]
-    b_all = edges[:, 1]
-    sqrt3_4 = 4.0 * math.sqrt(3.0)
-
-    for start in range(0, E, chunk_size):
-        stop = min(start + chunk_size, E)
-        Ec = stop - start
-        a = a_all[start:stop]
-        b = b_all[start:stop]
-        oc = opt[start:stop]
-
-        fa = vert_to_faces[a]
-        fb = vert_to_faces[b]
-        all_f = torch.cat([fa, fb], dim=1)
-        valid_f = all_f >= 0
-        all_f_safe = all_f.clamp(min=0)
-        fv = faces[all_f_safe]
-
-        a_b = a.view(Ec, 1)
-        b_b = b.view(Ec, 1)
-        s0_a = fv[..., 0] == a_b
-        s0_b = fv[..., 0] == b_b
-        s1_a = fv[..., 1] == a_b
-        s1_b = fv[..., 1] == b_b
-        s2_a = fv[..., 2] == a_b
-        s2_b = fv[..., 2] == b_b
-        contains_a = s0_a | s1_a | s2_a
-        contains_b = s0_b | s1_b | s2_b
-        # affected: face contains exactly one of {a, b} and slot is non-pad
-        affected = (contains_a ^ contains_b) & valid_f
-        if not affected.any():
-            continue
-
-        p0 = verts[fv[..., 0]]
-        p1 = verts[fv[..., 1]]
-        p2 = verts[fv[..., 2]]
-        opt_b = oc.view(Ec, 1, 3).expand(-1, 2 * max_deg, -1)
-        rep0 = (s0_a | s0_b).unsqueeze(-1)
-        rep1 = (s1_a | s1_b).unsqueeze(-1)
-        rep2 = (s2_a | s2_b).unsqueeze(-1)
-        p0n = torch.where(rep0, opt_b, p0)
-        p1n = torch.where(rep1, opt_b, p1)
-        p2n = torch.where(rep2, opt_b, p2)
-
-        e01 = p1n - p0n
-        e02 = p2n - p0n
-        e12 = p2n - p1n
-        two_area = torch.cross(e01, e02, dim=-1).norm(dim=-1)
-        edge_sum_sq = ((e01 * e01).sum(-1)
-                       + (e02 * e02).sum(-1)
-                       + (e12 * e12).sum(-1))
-        shape = (sqrt3_4 * 0.5 * two_area) / edge_sum_sq.clamp_min(1e-20)
-        term = 1.0 - shape.clamp(0.0, 1.0)
-        term = torch.where(affected, term, torch.zeros_like(term))
-        n_affected = affected.sum(dim=-1).clamp_min(1).to(term.dtype)
-        out[start:stop] = term.sum(dim=-1) / n_affected
-
-    return out
-
-
 def _quality_checks_fused(
     verts: torch.Tensor,
     faces: torch.Tensor,
@@ -706,26 +403,20 @@ def _quality_checks_fused(
     opt: torch.Tensor,
     vert_to_faces: torch.Tensor,
     cos_threshold: float = 0.0,
-    want_flip: bool = True,
-    want_skinny: bool = True,
     want_link: bool = False,
     chunk_size: int = 100_000,
-) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor], Optional[torch.Tensor]]:
-    """Fused 1-ring checks (flip count / skinny / link) sharing one faces gather.
-    Returns (flip_count|None, skinny|None, link_safe|None)."""
+) -> Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
+    """Torch fallback for the 1-ring collapse checks; returns (flip_count, skinny, link_ok or None)."""
     E = edges.shape[0]
     device = verts.device
-    flip_out = torch.zeros(E, dtype=torch.int32, device=device) if want_flip else None
-    skinny_out = torch.zeros(E, dtype=verts.dtype, device=device) if want_skinny else None
+    flip_out = torch.zeros(E, dtype=torch.int32, device=device)
+    skinny_out = torch.zeros(E, dtype=verts.dtype, device=device)
     link_out = torch.ones(E, dtype=torch.bool, device=device) if want_link else None
-    if E == 0:
-        return flip_out, skinny_out, link_out
 
     D = vert_to_faces.shape[1]
     a_all = edges[:, 0]
     b_all = edges[:, 1]
     sqrt3_4 = 4.0 * math.sqrt(3.0)
-    need_geom = want_flip or want_skinny
 
     for start in range(0, E, chunk_size):
         stop = min(start + chunk_size, E)
@@ -733,7 +424,6 @@ def _quality_checks_fused(
         a = a_all[start:stop]
         b = b_all[start:stop]
 
-        # shared gather of a's and b's incident faces (the expensive part)
         fa = vert_to_faces[a]
         fb = vert_to_faces[b]
         all_f = torch.cat([fa, fb], dim=1)                   # (Ec, 2D)
@@ -742,56 +432,47 @@ def _quality_checks_fused(
         a_b = a.view(Ec, 1)
         b_b = b.view(Ec, 1)
 
-        if need_geom:
-            oc = opt[start:stop]
-            s0_a = fv[..., 0] == a_b
-            s0_b = fv[..., 0] == b_b
-            s1_a = fv[..., 1] == a_b
-            s1_b = fv[..., 1] == b_b
-            s2_a = fv[..., 2] == a_b
-            s2_b = fv[..., 2] == b_b
-            contains_a = s0_a | s1_a | s2_a
-            contains_b = s0_b | s1_b | s2_b
-            affected = (contains_a ^ contains_b) & valid_f
-            if affected.any():
-                p0 = verts[fv[..., 0]]
-                p1 = verts[fv[..., 1]]
-                p2 = verts[fv[..., 2]]
-                opt_b = oc.view(Ec, 1, 3).expand(-1, 2 * D, -1)
-                rep0 = (s0_a | s0_b).unsqueeze(-1)
-                rep1 = (s1_a | s1_b).unsqueeze(-1)
-                rep2 = (s2_a | s2_b).unsqueeze(-1)
-                p0n = torch.where(rep0, opt_b, p0)
-                p1n = torch.where(rep1, opt_b, p1)
-                p2n = torch.where(rep2, opt_b, p2)
+        oc = opt[start:stop]
+        s0_a = fv[..., 0] == a_b
+        s0_b = fv[..., 0] == b_b
+        s1_a = fv[..., 1] == a_b
+        s1_b = fv[..., 1] == b_b
+        s2_a = fv[..., 2] == a_b
+        s2_b = fv[..., 2] == b_b
+        contains_a = s0_a | s1_a | s2_a
+        contains_b = s0_b | s1_b | s2_b
+        affected = (contains_a ^ contains_b) & valid_f
+        p0 = verts[fv[..., 0]]
+        p1 = verts[fv[..., 1]]
+        p2 = verts[fv[..., 2]]
+        opt_b = oc.view(Ec, 1, 3).expand(-1, 2 * D, -1)
+        p0n = torch.where((s0_a | s0_b).unsqueeze(-1), opt_b, p0)
+        p1n = torch.where((s1_a | s1_b).unsqueeze(-1), opt_b, p1)
+        p2n = torch.where((s2_a | s2_b).unsqueeze(-1), opt_b, p2)
 
-                # post-collapse normal (skinny's two_area == flip's ‖n_new‖)
-                e01 = p1n - p0n
-                e02 = p2n - p0n
-                n_new = torch.cross(e01, e02, dim=-1)
-                nlen_new = torch.norm(n_new, dim=-1)
+        # ‖n_new‖ is also twice the new area for the skinny term
+        e01 = p1n - p0n
+        e02 = p2n - p0n
+        e12 = p2n - p1n
+        n_new = torch.cross(e01, e02, dim=-1)
+        nlen_new = torch.norm(n_new, dim=-1)
+        edge_sum_sq = (e01 * e01).sum(-1) + (e02 * e02).sum(-1) + (e12 * e12).sum(-1)
 
-                if want_flip:
-                    n_old = torch.cross(p1 - p0, p2 - p0, dim=-1)
-                    nlen_old = torch.norm(n_old, dim=-1)
-                    denom = nlen_old * nlen_new
-                    safe = denom > 1e-20
-                    cos = torch.where(safe, (n_old * n_new).sum(dim=-1) / denom.clamp_min(1e-20),
-                                      torch.ones_like(denom))
-                    flip = (cos < cos_threshold) & affected & safe
-                    flip_out[start:stop] = flip.sum(dim=-1).to(torch.int32)
+        d01, d02, d12 = p1 - p0, p2 - p0, p2 - p1
+        n_old = torch.cross(d01, d02, dim=-1)
+        nlen_old = torch.norm(n_old, dim=-1)
+        old_sum_sq = (d01 * d01).sum(-1) + (d02 * d02).sum(-1) + (d12 * d12).sum(-1)
+        # faces too thin to have a normal never count as flipped (scale-relative test)
+        usable = (nlen_old > 1e-6 * old_sum_sq) & (nlen_new > 1e-6 * edge_sum_sq)
+        flip = ((n_old * n_new).sum(dim=-1) < cos_threshold * nlen_old * nlen_new) & affected & usable
+        flip_out[start:stop] = flip.sum(dim=-1).to(torch.int32)
 
-                if want_skinny:
-                    e12 = p2n - p1n
-                    edge_sum_sq = ((e01 * e01).sum(-1) + (e02 * e02).sum(-1) + (e12 * e12).sum(-1))
-                    shape = (sqrt3_4 * 0.5 * nlen_new) / edge_sum_sq.clamp_min(1e-20)
-                    term = 1.0 - shape.clamp(0.0, 1.0)
-                    term = torch.where(affected, term, torch.zeros_like(term))
-                    n_affected = affected.sum(dim=-1).clamp_min(1).to(term.dtype)
-                    skinny_out[start:stop] = term.sum(dim=-1) / n_affected
+        shape = (sqrt3_4 * 0.5 * nlen_new) / edge_sum_sq.clamp_min(1e-20)
+        term = torch.where(affected, 1.0 - shape.clamp(0.0, 1.0), torch.zeros_like(shape))
+        skinny_out[start:stop] = term.sum(dim=-1) / affected.sum(dim=-1).clamp_min(1).to(term.dtype)
 
         if want_link:
-            # reuses fv / valid_f; matches _link_condition_mask
+            # link condition: common neighbours of a and b must not outnumber the faces on edge ab
             fa_ok = valid_f[:, :D]
             fb_ok = valid_f[:, D:]
             fav = fv[:, :D]
@@ -817,10 +498,34 @@ def _quality_checks_fused(
     return flip_out, skinny_out, link_out
 
 
+def _gated_errors(
+    verts: torch.Tensor,
+    faces: torch.Tensor,        # (F, 3) alive faces only
+    edges: torch.Tensor,
+    opt: torch.Tensor,
+    err: torch.Tensor,
+    cfg: QEMConfig,
+    link: bool,
+) -> torch.Tensor:
+    """Collapse costs with +inf on normal flips and (if `link`) link violations, plus the skinny penalty.
+    The comfy-kitchen kernel is exact; the torch fallback caps vertex degree at cfg.flip_check_max_degree."""
+    collapse_checks = _kitchen_op("edge_collapse_checks", verts)
+    if collapse_checks is not None:
+        flips, skinny, link_ok = collapse_checks(verts, faces, edges, opt, cfg.flip_cos_threshold)
+    else:
+        v_to_f = _build_vert_to_faces_pad(faces, verts.shape[0], cfg.flip_check_max_degree)
+        flips, skinny, link_ok = _quality_checks_fused(
+            verts, faces, edges, opt, v_to_f, cos_threshold=cfg.flip_cos_threshold, want_link=link)
+    if link:
+        err = err.masked_fill(~link_ok, float("inf"))
+    err = err.masked_fill(flips > 0, float("inf"))
+    # × len² to match the QEM cost scale
+    el_sq = (verts[edges[:, 1]] - verts[edges[:, 0]]).pow(2).sum(dim=-1)
+    return err + cfg.skinny_weight * skinny * el_sq
+
+
 def _compute_vertex_normals(verts: torch.Tensor, faces: torch.Tensor, weld: bool = True) -> torch.Tensor:
-    """Area-weighted smooth vertex normals. `weld` averages face normals across vertices that
-    share a position (UV-seam duplicates from unwrapping) so both sides of a seam get one
-    identical normal — otherwise a visible shading seam appears in the exported GLB."""
+    """Area-weighted vertex normals; `weld` gives coincident vertices (UV-seam duplicates) one shared normal."""
     if faces.numel() == 0:
         return torch.zeros_like(verts)
     faces_long = faces.to(torch.int64)
@@ -828,7 +533,7 @@ def _compute_vertex_normals(verts: torch.Tensor, faces: torch.Tensor, weld: bool
     v0, v1, v2 = verts[i0], verts[i1], verts[i2]
     fn = torch.cross(v1 - v0, v2 - v0, dim=-1)
     if weld and verts.shape[0]:
-        # Group coincident positions (quantized to ~1e-5 of the bbox) into one shared normal.
+        # coincident = same position quantized to 1e-5 of the largest bbox extent
         lo = verts.min(0).values
         inv_tol = 1.0 / (float((verts.max(0).values - lo).max().clamp_min(1e-9)) * 1e-5)
         q = ((verts - lo) * inv_tol).round().to(torch.int64)
@@ -846,47 +551,24 @@ def _compute_vertex_normals(verts: torch.Tensor, faces: torch.Tensor, weld: bool
     return torch.nn.functional.normalize(vn, p=2, dim=-1, eps=1e-6)
 
 
-# Public API
-
-@dataclass
-class CleanStats:
-    in_verts: int = 0
-    in_faces: int = 0
-    out_verts: int = 0
-    out_faces: int = 0
-    welded_verts: int = 0          # how many vertex IDs collapsed during welding
-    degenerate_faces: int = 0      # zero-area or repeated-index faces removed
-    duplicate_faces: int = 0       # same vertex-set removed
-    unused_verts: int = 0          # verts not in any face removed
-    components_dropped: int = 0    # disconnected components below threshold
-
-    def __str__(self):
-        return (f"clean: in={self.in_verts}v/{self.in_faces}f -> "
-                f"out={self.out_verts}v/{self.out_faces}f "
-                f"(welded {self.welded_verts}v, degen {self.degenerate_faces}f, "
-                f"dup {self.duplicate_faces}f, unused {self.unused_verts}v, "
-                f"comps {self.components_dropped})")
-
-
 def _weld_vertices(
     verts: torch.Tensor, faces: torch.Tensor, epsilon,
     colors: Optional[torch.Tensor] = None,
-    normals: Optional[torch.Tensor] = None,
-) -> Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor], int]:
-    """Merge vertices closer than epsilon (L_inf grid), cluster-averaging attributes; returns (v, f, colors, normals, n_welded)."""
+) -> Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
+    """Merge vertices that round to the same epsilon grid cell, averaging positions and colors; returns (v, f, colors)."""
     if verts.shape[0] == 0:
-        return verts, faces, colors, normals, 0
+        return verts, faces, colors
     device = verts.device
     scale = 1.0 / epsilon
     bbox_min = verts.min(dim=0)[0]
     q = ((verts - bbox_min) * scale).round().to(torch.int64)
     bbox = (verts.max(dim=0)[0] - bbox_min)
     extent = (bbox * scale).round().to(torch.int64) + 2
-    key = (q[:, 0] * extent[1] + q[:, 1]) * extent[2] + q[:, 2]  # pack 3D quantized pos to 1D key
+    key = (q[:, 0] * extent[1] + q[:, 1]) * extent[2] + q[:, 2]
     unique_key, inv = torch.unique(key, return_inverse=True)
     n_unique = unique_key.shape[0]
     if n_unique == verts.shape[0]:
-        return verts, faces, colors, normals, 0
+        return verts, faces, colors
     counts = torch.zeros(n_unique, dtype=verts.dtype, device=device)
     counts.scatter_add_(0, inv, torch.ones(verts.shape[0], dtype=verts.dtype, device=device))
     counts_div = counts.unsqueeze(-1).clamp_min(1.0)
@@ -901,23 +583,17 @@ def _weld_vertices(
         new_colors.scatter_add_(0, inv.unsqueeze(-1).expand_as(colors), colors)
         new_colors = new_colors / counts_div.to(colors.dtype)
 
-    new_normals = None
-    if normals is not None:
-        new_normals = torch.zeros((n_unique, normals.shape[1]), dtype=normals.dtype, device=device)
-        new_normals.scatter_add_(0, inv.unsqueeze(-1).expand_as(normals), normals)
-        new_normals = torch.nn.functional.normalize(new_normals, p=2, dim=-1, eps=1e-6)
-
     new_faces = inv[faces.long()] if faces.numel() > 0 else faces
-    return new_verts, new_faces, new_colors, new_normals, int(verts.shape[0] - n_unique)
+    return new_verts, new_faces, new_colors
 
 
 def _drop_degenerate_faces(
     verts: torch.Tensor, faces: torch.Tensor,
     min_area: float = 1e-14,
-) -> Tuple[torch.Tensor, int]:
-    """Drop degenerate-by-construction faces (repeated indices or zero-area); slivers go to _collapse_slivers."""
+) -> torch.Tensor:
+    """Drop faces with repeated indices or area below min_area."""
     if faces.numel() == 0:
-        return faces, 0
+        return faces
     idx_bad = (faces[:, 0] == faces[:, 1]) | (faces[:, 1] == faces[:, 2]) | (faces[:, 0] == faces[:, 2])
     f_good = faces[~idx_bad]
     v0 = verts[f_good[:, 0]]
@@ -926,20 +602,17 @@ def _drop_degenerate_faces(
     e0 = v1 - v0
     e2 = v0 - v2
     area = 0.5 * torch.norm(torch.cross(e0, -e2, dim=-1), dim=-1)
-    bad = area < min_area
-    kept = f_good[~bad]
-    n_dropped = idx_bad.sum() + bad.sum()  # tensor-scalar; caller .item()s once
-    return kept, n_dropped
+    return f_good[area >= min_area]
 
 
 def _collapse_slivers(
     verts: torch.Tensor, faces: torch.Tensor,
     min_angle_deg: float = 0.0,
     max_aspect_ratio: float = 0.0,
-) -> Tuple[torch.Tensor, int]:
-    """Resolve sliver triangles by collapsing each sliver's shortest edge (no holes); returns (faces, n_collapsed)."""
+) -> torch.Tensor:
+    """Resolve sliver triangles by collapsing each sliver's shortest edge (no holes)."""
     if faces.numel() == 0 or (min_angle_deg <= 0 and max_aspect_ratio <= 0):
-        return faces, 0
+        return faces
 
     fl = faces.long()
     v0 = verts[fl[:, 0]]
@@ -967,245 +640,259 @@ def _collapse_slivers(
         bad = bad | (angles_deg.min(dim=-1).values < min_angle_deg)
 
     if not bad.any():
-        return faces, 0
+        return faces
 
-    # per sliver pick its shortest edge to collapse
-    edge_lens = torch.stack([l0, l1, l2], dim=-1)  # (F, 3)
-    shortest_slot = edge_lens.argmin(dim=-1)        # (F,) ∈ {0,1,2}
-
-    V = verts.shape[0]
-    # collapse higher-index endpoint into lower (min/max ordering avoids cycles)
-    merge_map = torch.arange(V, device=verts.device, dtype=torch.int64)
+    # chained collapses all merge into the lowest vertex
     bad_idx = torch.nonzero(bad, as_tuple=True)[0]
-    for slot in range(3):
-        sel = bad_idx[shortest_slot[bad_idx] == slot]
-        if sel.numel() == 0:
-            continue
-        a = fl[sel, slot]
-        b = fl[sel, (slot + 1) % 3]
-        lo = torch.minimum(a, b)
-        hi = torch.maximum(a, b)
-        merge_map[hi] = lo  # last-write-wins on conflict
-
-    # path-compress until stable
-    for _ in range(10):
-        new_map = merge_map[merge_map]
-        if torch.equal(new_map, merge_map):
-            break
-        merge_map = new_map
-
-    new_faces = merge_map[fl]
+    slot = torch.stack([l0, l1, l2], dim=-1)[bad_idx].argmin(dim=-1)
+    merge = torch.stack([fl[bad_idx, slot], fl[bad_idx, (slot + 1) % 3]], dim=1)
+    new_faces = _connected_labels(merge, verts.shape[0])[fl]
     nondeg = ((new_faces[:, 0] != new_faces[:, 1]) &
               (new_faces[:, 1] != new_faces[:, 2]) &
               (new_faces[:, 0] != new_faces[:, 2]))
-    new_faces = new_faces[nondeg].to(dtype=faces.dtype)
-    return new_faces, bad.sum()
+    return new_faces[nondeg].to(dtype=faces.dtype)
 
 
-def _drop_duplicate_faces(faces: torch.Tensor, num_verts: int) -> Tuple[torch.Tensor, int]:
+def _drop_duplicate_faces(faces: torch.Tensor) -> torch.Tensor:
     """Remove duplicate faces (same vertex set), keeping the first occurrence (winding-preserving)."""
     if faces.shape[0] <= 1:
-        return faces, 0
-    key_sorted = torch.sort(faces, dim=1)[0]
-    P = num_verts + 1
-    packed = (key_sorted[:, 0].long() * P + key_sorted[:, 1].long()) * P + key_sorted[:, 2].long()
-    unique_packed, inv = torch.unique(packed, return_inverse=True)
-    if unique_packed.shape[0] == faces.shape[0]:
-        return faces, 0
-    # first-occurrence index per unique key
-    arange = torch.arange(packed.shape[0], device=packed.device)
-    first = torch.full((unique_packed.shape[0],), packed.shape[0],
-                       dtype=torch.int64, device=packed.device)
+        return faces
+    groups, inv = torch.unique(torch.sort(faces, dim=1)[0], dim=0, return_inverse=True)
+    if groups.shape[0] == faces.shape[0]:
+        return faces
+    arange = torch.arange(faces.shape[0], dtype=torch.int32, device=faces.device)
+    first = torch.full((groups.shape[0],), faces.shape[0], dtype=torch.int32, device=faces.device)
     first.scatter_reduce_(0, inv, arange, reduce="amin", include_self=True)
-    kept = faces[first]
-    return kept, int(faces.shape[0] - kept.shape[0])
+    return faces[first]
+
+
+def _folded_faces(faces: torch.Tensor) -> torch.Tensor:
+    """(F,) bool: faces sharing their vertex set with another face.
+    Marks every face of a group with mixed winding (fins) and all but the first of same-wound repeats."""
+    key_sorted, order = torch.sort(faces, dim=1)
+    groups, inv = torch.unique(key_sorted, dim=0, return_inverse=True)
+    n_groups = groups.shape[0]
+    # winding = parity of the sorting permutation
+    odd = ((order[:, 0] > order[:, 1]).long() + (order[:, 0] > order[:, 2]).long()
+           + (order[:, 1] > order[:, 2]).long()) % 2
+    n_odd = torch.zeros(n_groups, dtype=torch.long, device=faces.device).scatter_add_(0, inv, odd)
+    mixed = (n_odd > 0) & (n_odd < torch.bincount(inv, minlength=n_groups))
+    arange = torch.arange(faces.shape[0], dtype=torch.int32, device=faces.device)
+    first = torch.full((n_groups,), faces.shape[0], dtype=torch.int32, device=faces.device)
+    first.scatter_reduce_(0, inv, arange, reduce="amin")
+    return mixed[inv] | (first[inv] != arange)
 
 
 def _drop_unused_verts(
     verts: torch.Tensor, faces: torch.Tensor,
     colors: Optional[torch.Tensor] = None,
-    normals: Optional[torch.Tensor] = None,
-) -> Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor], int]:
-    """Remove vertices not referenced by any face; remap faces and filter attributes."""
+) -> Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
+    """Remove vertices not referenced by any face; remap faces and filter colors."""
     if verts.shape[0] == 0 or faces.numel() == 0:
-        return verts, faces, colors, normals, 0
+        return verts, faces, colors
     used = torch.zeros(verts.shape[0], dtype=torch.bool, device=verts.device)
     used[faces[:, 0]] = True
     used[faces[:, 1]] = True
     used[faces[:, 2]] = True
-    # cumsum compact remap: 0..N-1 to used verts in order
     remap = used.long().cumsum(0) - 1
     new_verts = verts[used]
     new_faces = remap[faces.long()]
     new_colors = colors[used] if colors is not None else None
-    new_normals = normals[used] if normals is not None else None
-    n_dropped = verts.shape[0] - used.sum()
-    return new_verts, new_faces, new_colors, new_normals, n_dropped
+    return new_verts, new_faces, new_colors
+
+
+def _split_touching_sheets(v, f, max_passes=4):
+    """Split sheets touching along an edge or at a vertex; returns (faces, src), src = original vertex per new vertex.
+    On 3+-face edges, forward faces pair with backward ones by normal agreement; where pairings around a vertex
+    conflict, the least sure pairing of each conflicting group is flipped, up to `max_passes` times.
+    A closed, consistently oriented mesh stays closed."""
+    dev = f.device
+    m = f.shape[0]
+    n = int(f.max()) + 1
+    fv = f.reshape(-1)
+    nxt = lambda c: c - c % 3 + (c + 1) % 3   # the corner after c in its face: c -> nxt(c) is the half-edge
+    fe = f.roll(-1, 1).reshape(-1)
+    key = torch.minimum(fv, fe) * n + torch.maximum(fv, fe)
+    del fe
+    order = torch.argsort(key)
+    ks = key[order]
+    edge_cnt = torch.unique_consecutive(ks, return_counts=True)[1]
+    cnt = torch.repeat_interleave(edge_cnt, edge_cnt)
+    pair = torch.nonzero(ks[1:] == ks[:-1], as_tuple=True)[0]
+    pair = pair[cnt[pair] == 2]
+    h1, h2 = order[pair], order[pair + 1]
+    del pair
+
+    fans = bool((cnt > 2).any())
+    if fans:
+        h = order[cnt > 2]
+        size = edge_cnt[edge_cnt > 2]
+        fan_key = ks[torch.cumsum(edge_cnt, 0) - edge_cnt][edge_cnt > 2]
+        g = torch.repeat_interleave(torch.arange(size.numel(), device=dev), size)
+        d = (fv[h] > fv[nxt(h)]).long()
+        o = torch.argsort((g * 2 + d) * (3 * m) + h)
+        h, g, d = h[o], g[o], d[o]
+        per_dir = torch.bincount(g * 2 + d, minlength=2 * size.numel()).view(-1, 2)
+        g_start = torch.cumsum(size, 0) - size
+        rank = torch.arange(h.numel(), device=dev) - g_start[g] - d * per_dir[g, 0]
+        # dot[g, i, j]: normal agreement of the i-th forward and j-th backward face
+        first2 = rank < 2
+        tri = v[f[h[first2] // 3]]
+        fn = torch.nn.functional.normalize(torch.cross(tri[:, 1] - tri[:, 0], tri[:, 2] - tri[:, 0], dim=-1), dim=-1)
+        nrm = torch.zeros((size.numel(), 2, 2, 3), dtype=v.dtype, device=dev)
+        nrm[g[first2], d[first2], rank[first2]] = fn
+        dot = torch.einsum("gic,gjc->gij", nrm[:, 0], nrm[:, 1])
+        nf, nb = per_dir[:, 0], per_dir[:, 1]
+        swap = ((dot[:, 0, 1] + dot[:, 1, 0]) > (dot[:, 0, 0] + dot[:, 1, 1])).long()
+        pick_f = (dot[:, 1, 0] > dot[:, 0, 0]).long()
+        pick_b = (dot[:, 0, 1] > dot[:, 0, 0]).long()
+        # how sure each choice is; larger fans pair by order and gain nothing from a flip
+        margin = torch.full_like(dot[:, 0, 0], float("inf"))
+        margin = torch.where((nf == 2) & (nb == 2), (dot[:, 0, 1] + dot[:, 1, 0] - dot[:, 0, 0] - dot[:, 1, 1]).abs(), margin)
+        margin = torch.where((nf == 2) & (nb == 1), (dot[:, 1, 0] - dot[:, 0, 0]).abs(), margin)
+        margin = torch.where((nf == 1) & (nb == 2), (dot[:, 0, 1] - dot[:, 0, 0]).abs(), margin)
+        hf, gf, rf = h[d == 0], g[d == 0], rank[d == 0]
+    del key, order, ks, edge_cnt, cnt
+
+    def join(flip):
+        a1, a2 = h1, h2
+        if fans:
+            sw, pf, pb = swap ^ flip, pick_f ^ flip, pick_b ^ flip
+            partner = torch.where(rf < nb[gf], rf, -1)  # larger fans pair by order
+            partner = torch.where((nf[gf] == 2) & (nb[gf] == 2), rf ^ sw[gf], partner)
+            partner = torch.where((nf[gf] == 2) & (nb[gf] == 1), torch.where(rf == pf[gf], 0, -1), partner)
+            partner = torch.where((nf[gf] == 1) & (nb[gf] == 2), pb[gf], partner)
+            ok = partner >= 0
+            a1 = torch.cat([a1, hf[ok]])
+            a2 = torch.cat([a2, h[g_start[gf[ok]] + nf[gf[ok]] + partner[ok]]])
+        same_dir = fv[a1] == fv[a2]
+        a = torch.cat([a1, nxt(a1)])
+        b = torch.cat([torch.where(same_dir, a2, nxt(a2)), torch.where(same_dir, nxt(a2), a2)])
+        return _connected_labels(torch.stack([a, b], 1), 3 * m)
+
+    flip = 0
+    for _ in range(max_passes):
+        label = join(flip)
+        if not fans:
+            break
+        # fan edges still shared after the split: corners only merge within one vertex, so a label pair can repeat
+        # only among the half-edges of one edge, and the fans' own half-edges suffice
+        lk = torch.minimum(label[h], label[nxt(h)]) * (3 * m) + torch.maximum(label[h], label[nxt(h)])
+        _, inv, c = torch.unique(lk, return_inverse=True, return_counts=True)
+        stuck = torch.zeros(size.numel(), dtype=torch.bool, device=dev)
+        stuck[g[c[inv] > 2]] = True
+        stuck &= torch.isfinite(margin)
+        if not bool(stuck.any()):
+            break
+        # flipping all of them keeps a ring of conflicting fans inconsistent: flip the least sure one per group
+        idx = stuck.nonzero().squeeze(1)
+        va, vb = fan_key[idx] // n, fan_key[idx] % n
+        grp = _connected_labels(torch.stack([va, vb], 1), n)[va]
+        least = torch.full((n,), float("inf"), dtype=margin.dtype, device=dev).scatter_reduce(0, grp, margin[idx], "amin")
+        flip = flip ^ torch.zeros_like(fan_key).index_fill(0, idx[margin[idx] == least[grp]], 1)
+    # labels are the smallest corner of their component, so the roots in order are the new vertices
+    root = label == torch.arange(3 * m, device=dev)
+    return (root.cumsum(0) - 1)[label].view(m, 3), fv[root]
 
 
 def _repair_nonmanifold_edges(
     verts: torch.Tensor, faces: torch.Tensor,
-) -> Tuple[torch.Tensor, torch.Tensor]:
-    """repair_non_manifold_edges: explode corners, re-merge only across manifold edges; returns (verts, faces, src)."""
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """cumesh's repair_non_manifold_edges: explode corners, re-merge only across manifold edges; returns (verts, faces, src)."""
     if faces.numel() == 0:
-        return verts, faces
-    dev, vdt, fdt = verts.device, verts.dtype, faces.dtype
-    F = faces.detach().cpu().numpy().astype(_np.int64)
-    V = verts.detach().cpu().numpy()
-    nf = F.shape[0]
-    nv = V.shape[0]
-    corner_vert = F.reshape(-1)                      # (3F,) original vertex per corner
+        return verts, faces, torch.arange(verts.shape[0], device=verts.device)
+    nf = faces.shape[0]
+    corner_vert = faces.long().reshape(-1)           # (3F,) original vertex per corner
+    corner = torch.arange(3 * nf, device=faces.device).view(nf, 3)
 
-    # per-face edges keyed by (vmin,vmax)
-    keys_l, ca_l, cb_l = [], [], []
-    for (i, j) in ((0, 1), (1, 2), (2, 0)):
-        va, vb = F[:, i], F[:, j]
-        ci = 3 * _np.arange(nf) + i
-        cj = 3 * _np.arange(nf) + j
-        amin = _np.where(va <= vb, ci, cj)           # corner of the smaller-id endpoint
-        amax = _np.where(va <= vb, cj, ci)
-        vmin = _np.minimum(va, vb).astype(_np.int64)
-        vmax = _np.maximum(va, vb).astype(_np.int64)
-        keys_l.append(vmin * (nv + 1) + vmax)
-        ca_l.append(amin)
-        cb_l.append(amax)
-    keys = _np.concatenate(keys_l)
-    ca = _np.concatenate(ca_l)
-    cb = _np.concatenate(cb_l)
-    order = _np.argsort(keys, kind="stable")
-    keys = keys[order]
-    ca = ca[order]
-    cb = cb[order]
-    uniq, start, cnt = _np.unique(keys, return_index=True, return_counts=True)
-    man = start[cnt == 2]                            # manifold edges (exactly 2 incident faces)
-    # union both endpoints' corners across each manifold edge
-    rows = _np.concatenate([ca[man], cb[man]])
-    cols = _np.concatenate([ca[man + 1], cb[man + 1]])
+    # half-edges keyed by (vmin, vmax), with the corners at each endpoint
+    va = corner_vert
+    vb = faces.long()[:, [1, 2, 0]].reshape(-1)
+    ca = corner.reshape(-1)
+    cb = corner[:, [1, 2, 0]].reshape(-1)
+    swap = va > vb
+    keys = torch.minimum(va, vb) * (verts.shape[0] + 1) + torch.maximum(va, vb)
+    keys, order = torch.sort(keys)
+    cmin = torch.where(swap, cb, ca)[order]
+    cmax = torch.where(swap, ca, cb)[order]
+    _, cnt = torch.unique_consecutive(keys, return_counts=True)
+    man = (torch.cumsum(cnt, 0) - cnt)[cnt == 2]     # manifold edges (exactly 2 incident faces)
+    pairs = torch.cat([torch.stack([cmin[man], cmin[man + 1]], 1), torch.stack([cmax[man], cmax[man + 1]], 1)])
+    roots, labels = torch.unique(_connected_labels(pairs, 3 * nf), return_inverse=True)
+    src = corner_vert[roots]
+    return verts[src], labels.view(nf, 3).to(faces.dtype), src
 
-    n = 3 * nf
-    g = coo_matrix((_np.ones(rows.shape[0], dtype=_np.int8), (rows, cols)), shape=(n, n))
-    _ncomp, labels = connected_components(g, directed=False)
 
-    new_faces = labels[3 * _np.arange(nf)[:, None] + _np.array([0, 1, 2])[None, :]]
-    nnv = int(labels.max()) + 1
-    # source original-vertex index per new vertex
-    src = _np.zeros(nnv, dtype=_np.int64)
-    src[labels] = corner_vert
-    new_verts = V[src]
-    src_t = torch.from_numpy(src).to(device=dev)
-    return (torch.from_numpy(new_verts).to(device=dev, dtype=vdt),
-            torch.from_numpy(new_faces.astype(_np.int64)).to(device=dev, dtype=fdt),
-            src_t)
+def _kitchen_op(name: str, tensor: torch.Tensor):
+    """comfy-kitchen's op `name` when its CUDA backend can run it on `tensor`, else None."""
+    ck = getattr(comfy.quant_ops, "ck", None)
+    if ck is None or not hasattr(ck, name) or not tensor.is_cuda:
+        return None
+    cuda = ck.list_backends().get("cuda", {})
+    if not (cuda.get("available", False) and not cuda.get("disabled", True) and name in cuda.get("capabilities", ())):
+        return None
+    floor = ck.registry.get_constraints("cuda", name).min_compute_capability
+    if floor is not None and torch.cuda.get_device_capability(tensor.device) < floor:
+        return None
+    return getattr(ck, name)
+
+
+def _connected_labels(edges: torch.Tensor, n: int) -> torch.Tensor:
+    """Smallest node index of each node's connected component, for nodes 0..n-1 and edges (E, 2)."""
+    connected_components = _kitchen_op("connected_components", edges)
+    if connected_components is not None:
+        return connected_components(edges, n)
+    # min-label propagation with pointer jumping; stopping before convergence splits long components
+    label = torch.arange(n, dtype=torch.int32, device=edges.device)
+    a, b = edges[:, 0], edges[:, 1]
+    while True:
+        low = torch.minimum(label[a], label[b])
+        new = label.clone()
+        new.scatter_reduce_(0, a, low, "amin")
+        new.scatter_reduce_(0, b, low, "amin")
+        new = new[new]
+        if torch.equal(new, label):
+            return label.long()
+        label = new
 
 
 def _drop_small_components(
     verts: torch.Tensor, faces: torch.Tensor, min_faces: int,
-    max_propagation_iters: int = 200,
-) -> Tuple[torch.Tensor, torch.Tensor, int]:
-    """Label-propagation connected components; drop components below min_faces."""
+) -> torch.Tensor:
+    """Faces of the connected components with at least min_faces faces."""
     if faces.numel() == 0 or min_faces <= 1:
-        return verts, faces, 0
-    device = verts.device
-    V = verts.shape[0]
-    labels = torch.arange(V, device=device, dtype=torch.int64)
-    for _ in range(max_propagation_iters):
-        v0, v1, v2 = faces[:, 0], faces[:, 1], faces[:, 2]
-        face_min = torch.minimum(torch.minimum(labels[v0], labels[v1]), labels[v2])
-        new_labels = labels.clone()
-        new_labels.scatter_reduce_(0, v0, face_min, reduce="amin", include_self=True)
-        new_labels.scatter_reduce_(0, v1, face_min, reduce="amin", include_self=True)
-        new_labels.scatter_reduce_(0, v2, face_min, reduce="amin", include_self=True)
-        new_labels = new_labels[new_labels]  # path-compress
-        if torch.equal(new_labels, labels):
-            break
-        labels = new_labels
+        return faces
+    labels = _connected_labels(torch.cat([faces[:, :2], faces[:, 1:]]), verts.shape[0])
     face_label = labels[faces[:, 0]]
     unique_labels, counts = torch.unique(face_label, return_counts=True)
     big_labels = unique_labels[counts >= min_faces]
-    if big_labels.shape[0] == unique_labels.shape[0]:
-        return verts, faces, 0
-    # safety: never drop every component (return the small mesh, not an empty one)
-    if big_labels.shape[0] == 0:
-        return verts, faces, 0
-    keep_face = torch.isin(face_label, big_labels)
-    kept_faces = faces[keep_face]
-    n_dropped = int(unique_labels.shape[0] - big_labels.shape[0])
-    return verts, kept_faces, n_dropped
+    # never drop every component
+    if big_labels.shape[0] in (0, unique_labels.shape[0]):
+        return faces
+    return faces[torch.isin(face_label, big_labels)]
 
 
 def clean_mesh(
     verts: torch.Tensor, faces: torch.Tensor,
     colors: Optional[torch.Tensor] = None,
-    normals: Optional[torch.Tensor] = None,
-    weld_epsilon: float = 0.0,
-    weld_epsilon_rel: float = 1e-6,
-    drop_degenerate: bool = True,
+    weld_epsilon_rel: float = 0.0,
     drop_duplicates: bool = True,
-    drop_unused: bool = True,
     min_component_faces: int = 0,
     min_angle_deg: float = 0.0,
     max_aspect_ratio: float = 0.0,
-) -> Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor], CleanStats]:
-    """Mesh hygiene pipeline; preserves per-vertex attributes through welding. Returns (v, f, colors, normals, stats)."""
-    stats = CleanStats(in_verts=verts.shape[0], in_faces=faces.shape[0])
-    v = verts
+) -> Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
+    """Weld, drop degenerate faces, collapse slivers, drop duplicates, small components and unused verts.
+    Returns (v, f, colors)."""
     f = faces.long() if faces.numel() > 0 else faces
-    c = colors
-    n = normals
-
-    if weld_epsilon != 0.0 or weld_epsilon_rel > 0:
-        # eps stays a 0-d tensor (no sync)
-        if weld_epsilon > 0:
-            eps = torch.as_tensor(weld_epsilon, dtype=v.dtype, device=v.device)
-        else:
-            eps = torch.norm(v.max(dim=0)[0] - v.min(dim=0)[0]) * weld_epsilon_rel
-        v, f, c, n, n_welded = _weld_vertices(v, f, eps, c, n)
-        stats.welded_verts = n_welded
-
-    if drop_degenerate:
-        f_new, n_drop = _drop_degenerate_faces(v, f)
-        stats.degenerate_faces = n_drop
-        f = f_new
-        # slivers get collapse-merged instead of dropped (preserves topology)
-        if min_angle_deg > 0 or max_aspect_ratio > 0:
-            f_new, n_sliv = _collapse_slivers(
-                v, f, min_angle_deg=min_angle_deg, max_aspect_ratio=max_aspect_ratio,
-            )
-            stats.degenerate_faces += n_sliv
-            f = f_new
-
+    if weld_epsilon_rel > 0:
+        eps = torch.norm(verts.max(dim=0)[0] - verts.min(dim=0)[0]) * weld_epsilon_rel  # 0-d, no sync
+        verts, f, colors = _weld_vertices(verts, f, eps, colors)
+    f = _drop_degenerate_faces(verts, f)
+    f = _collapse_slivers(verts, f, min_angle_deg=min_angle_deg, max_aspect_ratio=max_aspect_ratio)
     if drop_duplicates:
-        f_new, n_dup = _drop_duplicate_faces(f, v.shape[0])
-        stats.duplicate_faces = n_dup
-        f = f_new
-
-    if min_component_faces > 1:
-        v, f, n_comp = _drop_small_components(v, f, min_component_faces)
-        stats.components_dropped = n_comp
-
-    if drop_unused:
-        v, f, c, n, n_unused = _drop_unused_verts(v, f, c, n)
-        stats.unused_verts = n_unused
-
-    stats.out_verts = v.shape[0]
-    stats.out_faces = f.shape[0]
-    # materialize tensor-scalar counts to plain ints once at exit
-    for field in ("welded_verts", "degenerate_faces", "duplicate_faces",
-                  "unused_verts", "components_dropped"):
-        val = getattr(stats, field)
-        if torch.is_tensor(val):
-            setattr(stats, field, int(val.item()))
-    return v, f, c, n, stats
-
-
-@dataclass
-class SimplifyStats:
-    input_verts: int = 0
-    input_faces: int = 0
-    output_verts: int = 0
-    output_faces: int = 0
-    iterations: int = 0
-    total_collapses: int = 0
+        f = _drop_duplicate_faces(f)
+    f = _drop_small_components(verts, f, min_component_faces)
+    return _drop_unused_verts(verts, f, colors)
 
 
 def qem_simplify(
@@ -1213,80 +900,54 @@ def qem_simplify(
     faces: torch.Tensor,
     target_faces: int,
     colors: Optional[torch.Tensor] = None,
-    normals: Optional[torch.Tensor] = None,
-    max_edge_length: Optional[float] = None,
     config: Optional[QEMConfig] = None,
-) -> Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor], SimplifyStats]:
-    """Single-mesh QEM simplification. Returns (v, f, colors, normals, stats)."""
+) -> Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
+    """QEM-simplify a mesh to about target_faces faces; returns (v, f, colors)."""
     cfg = config or QEMConfig()
 
     device = vertices.device
     in_v_dtype = vertices.dtype
     in_f_dtype = faces.dtype
     in_c_dtype = colors.dtype if colors is not None else None
-    in_n_dtype = normals.dtype if normals is not None else None
 
-    verts = vertices.to(device=device, dtype=cfg.dtype, copy=True)
-    faces = faces.to(device=device, dtype=torch.int64).clone()
-    colors_w = colors.to(device=device, dtype=cfg.dtype, copy=True) if colors is not None else None
-    normals_w = normals.to(device=device, dtype=cfg.dtype, copy=True) if normals is not None else None
-
-    # preclean: weld + drop degenerate/duplicate, attributes cluster-averaged
-    if cfg.preclean:
-        verts, faces, colors_w, normals_w, _cs = clean_mesh(
-            verts, faces, colors_w, normals_w,
-            weld_epsilon_rel=cfg.preclean_weld_epsilon_rel,
-            min_component_faces=cfg.preclean_min_component_faces,
-        )
+    # preclean on copies, since collapses edit verts and colors in place
+    verts, faces, colors_w = clean_mesh(
+        vertices.to(dtype=torch.float32, copy=True), faces.to(dtype=torch.int64),
+        colors.to(dtype=torch.float32, copy=True) if colors is not None else None,
+        weld_epsilon_rel=cfg.preclean_weld_epsilon_rel,
+    )
 
     num_verts = verts.shape[0]
     num_faces = faces.shape[0]
 
-    stats = SimplifyStats(input_verts=num_verts, input_faces=num_faces)
-
     if num_faces <= target_faces or num_verts < 4:
-        stats.output_verts = num_verts
-        stats.output_faces = num_faces
         return verts.to(in_v_dtype), faces.to(in_f_dtype), \
-               (colors_w.to(in_c_dtype) if colors_w is not None else None), \
-               (normals_w.to(in_n_dtype) if normals_w is not None else None), \
-               stats
+               (colors_w.to(in_c_dtype) if colors_w is not None else None)
 
     v_alive = torch.ones(num_verts, dtype=torch.bool, device=device)
     f_alive = torch.ones(num_faces, dtype=torch.bool, device=device)
 
-    Q = _build_quadrics(verts, faces, cfg)
-
     bbox = verts.max(dim=0)[0] - verts.min(dim=0)[0]
     mesh_scale = torch.norm(bbox)                  # 0-d tensor; never .item()'d
-    if max_edge_length is None or max_edge_length <= 0:
-        max_edge_length = mesh_scale * 2.0
-    else:
-        max_edge_length = torch.as_tensor(max_edge_length, dtype=cfg.dtype, device=device)
-    # tiny-bbox guard (tensor-side, no sync)
-    max_edge_length = torch.where(
-        max_edge_length < 1e-6,
-        torch.ones((), dtype=max_edge_length.dtype, device=device),
-        max_edge_length,
-    )
-
-    stabilizer = mesh_scale * mesh_scale * cfg.stabilizer_scale
-    max_edge_length_sq = max_edge_length * max_edge_length
     mesh_scale_sq = mesh_scale * mesh_scale
+    stabilizer = mesh_scale_sq * cfg.stabilizer_scale
+    # reject costs >= (2 × bbox diagonal)², or >= 1 on a tiny bbox
+    max_err = torch.where(mesh_scale < 5e-7, torch.ones_like(mesh_scale), 4.0 * mesh_scale_sq)
+    Q = None
 
-    # threshold scaled by mesh_scale² so the 1e-8 start is scale-robust
     thresh = float(cfg.threshold_start) * float(mesh_scale_sq) if cfg.threshold_driver else 0.0
 
-    # pre-allocated merge_map, reused each iter
     merge_map = torch.arange(num_verts, device=device)
+    gen = torch.Generator(device=device).manual_seed(0)  # the edge sample must not depend on the global RNG state
 
-    # py_n_faces: Python-int face count (no host sync in hot loop), re-synced at compaction
+    # dropped once only the link condition keeps the threshold driver from the target
+    link = cfg.enforce_link_condition
+
+    # Python-int face estimate to avoid host syncs in the loop, re-synced at compaction
     py_n_faces = num_faces
 
     iteration = 0
-    total_collapses = 0
 
-    # progress bars (tqdm + comfy ProgressBar)
     _start_faces = num_faces
     _prog_total = max(1, _start_faces - int(target_faces))
     _qtq = _tqdm(total=100, desc="QEM simplify", leave=False)
@@ -1303,47 +964,36 @@ def qem_simplify(
             break
         _qreport()
 
-        alive_f = torch.nonzero(f_alive, as_tuple=True)[0]
-        if alive_f.numel() == 0:
+        if faces.shape[0] == 0:
             break
 
-        active_faces = faces[alive_f]
-
-        # memoryless QEM: rebuild Q from current geometry each iter
-        if cfg.threshold_driver and cfg.memoryless_qem and iteration > 0:
-            Q = _build_quadrics(verts, active_faces, cfg)
-
-        Q_for_iter = Q
-        # edge extraction: pack (min*V + max) so unique dedups in one pass
-        af_roll = torch.roll(active_faces, shifts=-1, dims=1)
-        mn = torch.minimum(active_faces, af_roll)
-        mx = torch.maximum(active_faces, af_roll)
-        packed = torch.add(mx, mn, alpha=num_verts).flatten()
-        packed = torch.unique(packed)
+        # unique edges; those used by one face are boundary
+        packed = torch.cat([torch.add(torch.maximum(faces[:, i], faces[:, j]), torch.minimum(faces[:, i], faces[:, j]), alpha=num_verts)
+                            for i, j in ((0, 1), (1, 2), (2, 0))])
+        packed, counts = torch.unique(packed, return_counts=True)
         edges_orig = torch.stack([packed // num_verts, packed % num_verts], dim=1)
+        b_edges = edges_orig[counts == 1]
+        del packed, counts
 
-        # filter by edge length
-        pab = verts[edges_orig]                              # (E, 2, 3)
-        el = torch.norm(pab[:, 1] - pab[:, 0], dim=-1)
-        edges_orig = edges_orig[el < max_edge_length]
-        if edges_orig.shape[0] == 0:
-            break
+        # threshold driver rebuilds quadrics from the current geometry each round; qem driver accumulates them
+        if Q is None:
+            Q = _build_quadrics(verts, faces, cfg, b_edges)
 
-        # sampling cap
-        n_edges_total = edges_orig.shape[0]
-        if n_edges_total > cfg.sampling_cap:
-            perm = torch.randperm(n_edges_total, device=device)[: cfg.sampling_cap]
-            edges_orig = edges_orig[perm]
+        if edges_orig.shape[0] > cfg.sampling_cap:
+            # a Bernoulli sample: randperm would sort every edge
+            edges_orig = edges_orig[torch.rand(edges_orig.shape[0], device=device, generator=gen) < cfg.sampling_cap / edges_orig.shape[0]]
 
-        # boundary mask only needed for non-qem placement
         if cfg.placement_mode != "qem":
-            vib = _vert_is_boundary_mask(active_faces, num_verts)
+            vib = torch.zeros(num_verts, dtype=torch.bool, device=device)
+            vib[b_edges.flatten()] = True
         else:
             vib = None
-        optimal, err, valid = _edge_errors(
-            verts, Q_for_iter, edges_orig, stabilizer, max_edge_length_sq,
-            mesh_scale_sq, cfg, vert_is_boundary=vib,
-        )
+        parts = [_edge_errors(verts, Q, edges_orig[s:s + _EDGE_CHUNK], stabilizer, max_err, mesh_scale_sq, cfg, vert_is_boundary=vib)
+                 for s in range(0, edges_orig.shape[0], _EDGE_CHUNK)]
+        optimal, err, valid = (torch.cat(p) for p in zip(*parts))
+        del parts
+        if cfg.threshold_driver:
+            Q = None  # rebuilt next round; the collapse and the next edge extraction run without it
         valid_idx = torch.nonzero(valid, as_tuple=True)[0]
         edges_orig = edges_orig[valid_idx]
         optimal = optimal[valid_idx]
@@ -1351,40 +1001,24 @@ def qem_simplify(
 
         faces_to_remove = py_n_faces - target_faces
         n_faces_round_start = py_n_faces
-        # ~2 faces removed per collapse, so cap the round at faces_to_remove//2
+        # ~2 faces removed per collapse
         cap_to_target = max(1, faces_to_remove // 2)
 
         if cfg.threshold_driver:
-            # band = cost <= thresh (×10 until non-empty), quality-check, then collapse a disjoint set
             cand = err <= thresh
             esc = 0
             while not bool(cand.any()) and esc < 50:
                 thresh *= 10.0
                 cand = err <= thresh
                 esc += 1
+            full_band = bool(cand.all())
             cand_idx = torch.nonzero(cand, as_tuple=True)[0]
             ce = edges_orig[cand_idx]
             copt = optimal[cand_idx]
             cerr = err[cand_idx].clone()
-            need_flip = cfg.flip_reject_hard
-            if ((need_flip or cfg.skinny_weight > 0 or cfg.enforce_link_condition)
-                    and ce.shape[0] > 0):
-                afq = faces[alive_f]
-                v_to_f = _build_vert_to_faces_pad(afq, num_verts, cfg.flip_check_max_degree)
-                # link + flip + skinny share one fused 1-ring pass
-                fc, sk, link_safe = _quality_checks_fused(
-                    verts, afq, ce, copt, v_to_f, cos_threshold=cfg.flip_cos_threshold,
-                    want_flip=need_flip, want_skinny=(cfg.skinny_weight > 0),
-                    want_link=cfg.enforce_link_condition)
-                if link_safe is not None:
-                    cerr[~link_safe] = float("inf")
-                if fc is not None:
-                    cerr = torch.where(fc > 0, torch.full_like(cerr, float("inf")), cerr)
-                if sk is not None:
-                    el_sq = (verts[ce[:, 1]] - verts[ce[:, 0]]).pow(2).sum(dim=-1)
-                    cerr = cerr + cfg.skinny_weight * sk * el_sq
-                del v_to_f, afq
-                # penalties may push edges above thresh — re-gate the band
+            if ce.shape[0] > 0:
+                cerr = _gated_errors(verts, faces, ce, copt, cerr, cfg, link)
+                # penalties can push edges out of the band
                 keep = cerr <= thresh
                 ce = ce[keep]
                 copt = copt[keep]
@@ -1392,8 +1026,11 @@ def qem_simplify(
             edges_orig = ce
             optimal = copt
             sel = _greedy_matching(ce, cerr, v_alive, cap_to_target)
+            if link and full_band and 2 * sel.numel() < min(0.01 * py_n_faces, 2 * cap_to_target):
+                # whole band gated yet < 1% removed: the link condition protects topology the target
+                # can't afford (e.g. tiny handles of a damaged mesh)
+                link = False
             if sel.numel() == 0:
-                # band fully rejected → raise thresh and retry
                 thresh *= 10.0
                 iteration += 1
                 if iteration >= cfg.max_iterations:
@@ -1404,61 +1041,17 @@ def qem_simplify(
                 cfg.max_collapses_ceiling,
                 max(cfg.max_collapses_floor, int(faces_to_remove * cfg.max_collapses_fraction)),
             )
-            if cfg.max_collapses_relative_cap > 0:
-                # cap to a fraction of current mesh size (anti cascade-overshoot)
-                rel_cap = max(1, int(py_n_faces * cfg.max_collapses_relative_cap))
-                max_collapses = min(max_collapses, rel_cap)
-            max_collapses = min(max_collapses, cap_to_target)
+            # relative cap avoids overshooting the target in one round
+            rel_cap = max(1, int(py_n_faces * cfg.max_collapses_relative_cap))
+            max_collapses = min(max_collapses, rel_cap, cap_to_target)
 
-            # soft quality penalties on top-K: flip + skinny, sharing one v_to_f build
-            need_flip = cfg.flip_reject_hard
-            need_quality = ((need_flip or cfg.skinny_weight > 0 or cfg.enforce_link_condition)
-                            and edges_orig.shape[0] > 0)
-            if need_quality:
-                n_check = min(edges_orig.shape[0],
-                              max(1, cfg.quality_topk_multiplier * max_collapses))
-                if n_check < edges_orig.shape[0]:
-                    topk = torch.topk(err, n_check, largest=False).indices
-                else:
-                    topk = torch.arange(edges_orig.shape[0], device=device)
-                active_for_quality = faces[alive_f]
-                v_to_f = _build_vert_to_faces_pad(active_for_quality, num_verts,
-                                                   cfg.flip_check_max_degree)
-                err = err.clone()
-                if cfg.enforce_link_condition:
-                    # reject link-condition violations on ALL candidate edges, not just top-K
-                    link_safe = _link_condition_mask(active_for_quality, edges_orig, v_to_f)
-                    err[~link_safe] = float("inf")
-                e_tk = edges_orig[topk]
-                o_tk = optimal[topk]
-                _do_flip = need_flip
-                _do_skinny = cfg.skinny_weight > 0
-                if _do_flip and _do_skinny:
-                    flip_count, skinny, _ = _quality_checks_fused(
-                        verts, active_for_quality, e_tk, o_tk, v_to_f,
-                        cos_threshold=cfg.flip_cos_threshold, want_link=False)
-                elif _do_flip:
-                    flip_count = _normal_flip_mask(
-                        verts, active_for_quality, e_tk, o_tk, v_to_f,
-                        cos_threshold=cfg.flip_cos_threshold, return_count=True)
-                    skinny = None
-                else:
-                    skinny = _skinny_penalty(verts, active_for_quality, e_tk, o_tk, v_to_f)
-                    flip_count = None
-                if _do_flip:
-                    # hard reject: any flipping top-K edge → +inf
-                    flips = flip_count > 0
-                    if flips.any():
-                        err[topk] = torch.where(
-                            flips, torch.full_like(err[topk], float("inf")),
-                            err[topk],
-                        )
-                if _do_skinny:
-                    # skinny_cost * len² (match QEM's length² scaling)
-                    elen_sq = (verts[e_tk[:, 1]] - verts[e_tk[:, 0]]).pow(2).sum(dim=-1)
-                    err[topk] = torch.add(err[topk], skinny * elen_sq,
-                                          alpha=cfg.skinny_weight)
-                del v_to_f, active_for_quality
+            if edges_orig.shape[0] > 0:
+                err = _gated_errors(verts, faces, edges_orig, optimal, err, cfg, link)
+                # +inf edges must not win the matching where all their neighbours are rejected too
+                keep = torch.isfinite(err)
+                edges_orig = edges_orig[keep]
+                optimal = optimal[keep]
+                err = err[keep]
 
             sel = _greedy_matching(edges_orig, err, v_alive, max_collapses)
 
@@ -1469,51 +1062,49 @@ def qem_simplify(
         v_a = ed_sel[:, 0]
         v_b = ed_sel[:, 1]
         new_pos = optimal[sel]
+        # the round's arrays would otherwise stay alive while the collapse and the next round allocate
+        del b_edges, edges_orig, optimal, err, valid, sel, ed_sel
 
-        # interpolate attributes by new_pos's position along [pa, pb]
-        if colors_w is not None or normals_w is not None:
+        if colors_w is not None:
             pa_sel = verts[v_a]
             pb_sel = verts[v_b]
             edge_vec = pb_sel - pa_sel
             edge_len_sq = (edge_vec * edge_vec).sum(dim=-1) + 1e-20
             t = ((new_pos - pa_sel) * edge_vec).sum(dim=-1) / edge_len_sq
-            t = t.clamp(0.0, 1.0).unsqueeze(-1)
-            if colors_w is not None:
-                colors_w[v_a] = torch.lerp(colors_w[v_a], colors_w[v_b], t)
-            if normals_w is not None:
-                normals_w[v_a] = torch.lerp(normals_w[v_a], normals_w[v_b], t)
+            colors_w[v_a] = torch.lerp(colors_w[v_a], colors_w[v_b], t.clamp(0.0, 1.0).unsqueeze(-1))
 
-        # apply collapse
         verts[v_a] = new_pos
         v_alive[v_b] = False
-        if not (cfg.threshold_driver and cfg.memoryless_qem):
+        if not cfg.threshold_driver:
             Q[v_a] += Q[v_b]
 
         merge_map[v_b] = v_a
-        faces = merge_map[faces]
-        merge_map[v_b] = v_b  # restore identity for next iter
+        for s in range(0, faces.shape[0], _FACE_CHUNK):  # in place, a chunk at a time
+            faces[s:s + _FACE_CHUNK] = merge_map[faces[s:s + _FACE_CHUNK]]
+        merge_map[v_b] = v_b  # back to identity
 
         bad = (faces[:, 0] == faces[:, 1]) | (faces[:, 1] == faces[:, 2]) | (faces[:, 2] == faces[:, 0])
         f_alive.masked_fill_(bad, False)
-        py_n_faces -= 2 * v_a.numel()  # ~2 faces/collapse estimate; re-synced at compaction
+        py_n_faces -= 2 * v_a.numel()
+        del v_a, v_b, new_pos, bad
+        if cfg.enforce_link_condition and not link:
+            # collapses through handles fold faces onto each other; drop the folds so counts see the real surface
+            alive_idx = torch.nonzero(f_alive, as_tuple=True)[0]
+            f_alive[alive_idx[_folded_faces(faces[alive_idx])]] = False
+            py_n_faces = int(f_alive.sum())
 
-        # schedule: round removed < 1% → raise thresh ×10
         if cfg.threshold_driver:
             removed = n_faces_round_start - py_n_faces
             if removed < 0.01 * n_faces_round_start:
                 thresh *= 10.0
 
-        total_collapses += int(v_a.numel())
         iteration += 1
 
-        # periodic compaction (resyncs py_n_faces exactly)
-        if iteration % cfg.compaction_period == 0:
-            alive_frac = py_n_faces / max(1, num_faces)
-            if alive_frac < cfg.compaction_threshold:
-                faces = faces[f_alive]
-                num_faces = faces.shape[0]
-                f_alive = torch.ones(num_faces, dtype=torch.bool, device=device)
-                py_n_faces = num_faces
+        # drop the dead faces now rather than carry them: the next round would copy the alive ones anyway
+        faces = faces[f_alive]
+        num_faces = faces.shape[0]
+        f_alive = torch.ones(num_faces, dtype=torch.bool, device=device)
+        py_n_faces = num_faces
 
         if iteration >= cfg.max_iterations:
             break
@@ -1521,116 +1112,31 @@ def qem_simplify(
     _qreport()
     _qtq.close()
 
-    # finalize: compact verts and faces
+    # alive faces are non-degenerate and only use alive verts
     final_v = verts[v_alive]
     final_c = colors_w[v_alive] if colors_w is not None else None
-    final_n = normals_w[v_alive] if normals_w is not None else None
+    remap = v_alive.long().cumsum(0) - 1
+    final_f = _drop_duplicate_faces(remap[faces[f_alive]])
 
-    remap = torch.full((num_verts,), -1, dtype=torch.int64, device=device)
-    remap[v_alive] = v_alive.long().cumsum(0)[v_alive] - 1  # compact remap, no sync
-
-    final_f_raw = faces[f_alive]
-    alive_mask = v_alive[final_f_raw].all(dim=1)
-    final_f_raw = final_f_raw[alive_mask]
-    final_f = remap[final_f_raw]
-    valid_faces = (final_f >= 0).all(dim=1)
-    final_f = final_f[valid_faces]
-
-    # drop degenerate faces (two indices equal)
-    if final_f.numel() > 0:
-        nondeg = (final_f[:, 0] != final_f[:, 1]) & (final_f[:, 1] != final_f[:, 2]) & (final_f[:, 0] != final_f[:, 2])
-        final_f = final_f[nondeg]
-
-    # dedup duplicate faces, winding-preserving
-    if final_f.numel() > 0:
-        key = torch.sort(final_f, dim=1)[0]
-        packed = (key[:, 0].long() * (final_v.shape[0] + 1) + key[:, 1].long()) \
-                 * (final_v.shape[0] + 1) + key[:, 2].long()
-        unique_packed, inv = torch.unique(packed, return_inverse=True)
-        arange = torch.arange(packed.shape[0], device=packed.device)
-        first = torch.full((unique_packed.shape[0],), packed.shape[0],
-                            dtype=torch.int64, device=packed.device)
-        first.scatter_reduce_(0, inv, arange, reduce="amin", include_self=True)
-        final_f = final_f[first]
-
-    # split back fused surface sheets (after dedup, before pruning)
+    # split fused sheets after dedup and before postclean pruning
     if cfg.repair_nonmanifold and final_f.numel() > 0:
-        final_v, final_f, _src = _repair_nonmanifold_edges(final_v, final_f)
+        final_f, _src = _split_touching_sheets(final_v, final_f)
+        final_v, final_f, _src2 = _repair_nonmanifold_edges(final_v[_src], final_f)
         if final_c is not None:
-            final_c = final_c[_src]
-        if final_n is not None:
-            final_n = final_n[_src]
+            final_c = final_c[_src[_src2]]
 
-    # post-clean: drop slivers, tiny components, unused verts
+    # postclean; already welded and deduplicated
     if cfg.postclean and final_f.numel() > 0:
-        comp_threshold = cfg.postclean_min_component_faces
-        final_v, final_f, final_c, final_n, _ps = clean_mesh(
-            final_v, final_f, final_c, final_n,
-            weld_epsilon=0.0, weld_epsilon_rel=0.0,  # already welded
-            drop_degenerate=True,
-            drop_duplicates=False,                   # already done above
-            drop_unused=True,
-            min_component_faces=comp_threshold,
+        final_v, final_f, final_c = clean_mesh(
+            final_v, final_f, final_c,
+            drop_duplicates=False,
+            min_component_faces=cfg.postclean_min_component_faces,
             min_angle_deg=cfg.postclean_min_angle_deg,
             max_aspect_ratio=cfg.postclean_max_aspect_ratio,
         )
 
-    # post-simplify normals
-    if cfg.recompute_normals_post and final_f.numel() > 0:
-        final_n = _compute_vertex_normals(final_v, final_f)
-    elif final_n is not None and final_f.numel() > 0:
-        # keep supplied normals; flip face winding where it disagrees
-        v0 = final_v[final_f[:, 0]]
-        v1 = final_v[final_f[:, 1]]
-        v2 = final_v[final_f[:, 2]]
-        fn = torch.cross(v1 - v0, v2 - v0, dim=-1)
-        ref = (final_n[final_f[:, 0]] + final_n[final_f[:, 1]]
-               + final_n[final_f[:, 2]]) / 3.0
-        wrong = (fn * ref).sum(dim=-1) < 0
-        final_f[wrong] = final_f[wrong][:, [0, 2, 1]]
-
-    stats.iterations = iteration
-    stats.total_collapses = total_collapses
-    stats.output_verts = final_v.shape[0]
-    stats.output_faces = final_f.shape[0]
-
-    return (
-        final_v.to(in_v_dtype),
-        final_f.to(in_f_dtype),
-        final_c.to(in_c_dtype) if final_c is not None else None,
-        final_n.to(in_n_dtype) if (final_n is not None and in_n_dtype is not None) else final_n,
-        stats,
-    )
-
-
-def qem_decimate_simplify(
-    vertices: torch.Tensor,
-    faces: torch.Tensor,
-    target: int,
-    colors: Optional[torch.Tensor] = None,
-    normals: Optional[torch.Tensor] = None,
-    max_edge_length: Optional[float] = None,
-    config: Optional[QEMConfig] = None,
-):
-    """Batched wrapper. Accepts (V,3)/(F,3) or (B,V,3)/(B,F,3)."""
-    if vertices.ndim == 3:
-        out_v, out_f, out_c, out_n, out_s = [], [], [], [], []
-        for i in range(vertices.shape[0]):
-            c_in = colors[i] if colors is not None else None
-            n_in = normals[i] if normals is not None else None
-            v, f, c, n, s = qem_simplify(vertices[i], faces[i], target, c_in, n_in, max_edge_length, config)
-            out_v.append(v)
-            out_f.append(f)
-            out_s.append(s)
-            if c is not None:
-                out_c.append(c)
-            if n is not None:
-                out_n.append(n)
-        return (out_v, out_f,
-                out_c if out_c else None,
-                out_n if out_n else None,
-                out_s)
-    return qem_simplify(vertices, faces, target, colors, normals, max_edge_length, config)
+    return (final_v.to(in_v_dtype), final_f.to(in_f_dtype),
+            final_c.to(in_c_dtype) if final_c is not None else None)
 
 
 def qem_cluster_decimate(
@@ -1639,8 +1145,8 @@ def qem_cluster_decimate(
     colors: Optional[torch.Tensor] = None,
     face_chunk: int = 4_000_000,
 ) -> Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
-    """Vertex-cluster decimation (Rossignac-Borrel): grid-bin/average verts, remap faces,
-    drop degenerate/duplicate. Fast O(V+F) prepass for huge meshes. Returns (verts, faces, colors)."""
+    """Rossignac-Borrel vertex clustering to about target_verts, an O(V+F) prepass for huge meshes.
+    Returns (verts, faces, colors)."""
     if vertices.shape[0] == 0 or faces.shape[0] == 0:
         return vertices, faces, colors
 
@@ -1676,7 +1182,7 @@ def qem_cluster_decimate(
         new_colors.scatter_add_(0, inv.unsqueeze(-1).expand_as(colors), colors)
         new_colors = new_colors / counts_div.to(colors.dtype)
 
-    # remap faces in chunks (face tensor can be huge), drop degenerates per chunk
+    # chunked to bound peak memory on huge face tensors
     out_chunks = []
     F = faces.shape[0]
     for fs in range(0, F, face_chunk):
@@ -1690,16 +1196,4 @@ def qem_cluster_decimate(
     else:
         new_faces = torch.empty((0, 3), dtype=faces.dtype, device=device)
 
-    # drop duplicate faces (same vertex set after clustering)
-    if new_faces.numel() > 0:
-        key_sorted = torch.sort(new_faces, dim=1)[0]
-        P = n_unique + 1
-        packed = (key_sorted[:, 0].long() * P + key_sorted[:, 1].long()) * P + key_sorted[:, 2].long()
-        _, first = torch.unique(packed, return_inverse=True)
-        arange = torch.arange(packed.shape[0], device=device, dtype=torch.int64)
-        first_idx = torch.full((int(first.max().item()) + 1,), packed.shape[0],
-                               dtype=torch.int64, device=device)
-        first_idx.scatter_reduce_(0, first, arange, reduce="amin", include_self=True)
-        new_faces = new_faces[first_idx]
-
-    return new_verts.to(vertices.dtype), new_faces.to(faces.dtype), new_colors
+    return new_verts, _drop_duplicate_faces(new_faces).to(faces.dtype), new_colors
