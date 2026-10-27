@@ -22,6 +22,11 @@ import pytest
 import torch
 from PIL import Image
 
+from comfy.cli_args import args
+
+if not torch.cuda.is_available():
+    args.cpu = True
+
 import node_helpers
 import nodes
 from comfy_extras import nodes_dataset, nodes_painter
