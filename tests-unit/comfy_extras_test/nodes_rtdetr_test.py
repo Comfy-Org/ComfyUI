@@ -23,6 +23,7 @@ def test_draws_labels_outside_coco_classes():
     assert painted(draw("screwdriver")) > painted(draw(None))
 
 
-def test_coco_label_keeps_its_class_colour():
-    # "person" is COCO class 0, the first palette colour
+def test_coco_labels_keep_their_class_colours():
+    # COCO classes 0 and 1 use the first two palette colours
     assert draw("person")[4, 4].tolist() == [1.0, 0.0, 0.0]
+    assert torch.allclose(draw("bicycle")[4, 4], torch.tensor([0.0, 200 / 255, 0.0]))
