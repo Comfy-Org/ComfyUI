@@ -1,5 +1,6 @@
 from typing_extensions import override
 
+import zlib
 import torch
 from comfy.ldm.rt_detr.rtdetr_v4 import COCO_CLASSES
 import comfy.model_management
@@ -108,7 +109,7 @@ class DrawBBoxes(io.ComfyNode):
             detections = bboxes[i]
             if detections:
                 boxes  = torch.tensor([[d["x"], d["y"], d["x"] + d["width"], d["y"] + d["height"]] for d in detections])
-                labels = [d.get("label") if d.get("label") in COCO_CLASSES else None for d in detections]
+                labels = [d.get("label") for d in detections]
                 scores = torch.tensor([d.get("score", 1.0) for d in detections])
             else:
                 boxes  = torch.zeros((0, 4))
@@ -135,7 +136,13 @@ class DrawBBoxes(io.ComfyNode):
                 (0,255,255),(255,20,147),(100,149,237)]
         for box, label, score in sorted(zip(boxes, labels, scores), key=lambda x: x[2].item()):
             x1, y1, x2, y2 = box.tolist()
-            color_idx = COCO_CLASSES.index(label) if label is not None else 0
+            if label in COCO_CLASSES:
+                color_idx = COCO_CLASSES.index(label)
+            elif label is not None:
+                # crc32 instead of hash() so a label keeps its colour across runs
+                color_idx = zlib.crc32(str(label).encode())
+            else:
+                color_idx = 0
             c = colors[color_idx % len(colors)]
             draw.rectangle([x1, y1, x2, y2], outline=c, width=3)
             if label is not None:
