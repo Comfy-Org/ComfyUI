@@ -1583,6 +1583,23 @@ def test_as_cropped_components_releases_uncropped_storage():
     )
 
 
+@pytest.mark.parametrize("color_space", ["sRGB", "HDR", "HDR PQ"])
+@pytest.mark.parametrize("bit_depth", [8, 10])
+def test_as_cropped_components_preserves_color_space(color_space, bit_depth):
+    images = torch.rand(2, 8, 8, 3)
+    video = VideoFromComponents(
+        VideoComponents(images=images, frame_rate=Fraction(24)),
+        bit_depth=bit_depth,
+        color_space=color_space,
+    )
+
+    cropped = video.as_cropped(2, 2, 4, 4)
+
+    assert cropped.get_color_space() == color_space
+    assert cropped.get_bit_depth() == bit_depth
+    assert torch.equal(cropped.get_components().images, images[:, 2:6, 2:6])
+
+
 def test_video_encoder_options_applies_h264_preset():
     from comfy_api.latest._input_impl.video_types import video_encoder_options
 
