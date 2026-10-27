@@ -138,7 +138,7 @@ class PatinaPBRMapsNode(IO.ComfyNode):
         return IO.Schema(
             node_id="PatinaPBRMapsNode",
             display_name="Patina PBR Maps",
-            category="partner/3d/Patina",
+            category="partner/3d/fal",
             essentials_category="3D",
             description="Generate seamless PBR maps (basecolor, normal, roughness, metalness, height) "
             "from a photo or render.",
@@ -225,7 +225,7 @@ class PatinaMaterialNode(IO.ComfyNode):
         return IO.Schema(
             node_id="PatinaMaterialNode",
             display_name="Patina Material",
-            category="partner/3d/Patina",
+            category="partner/3d/fal",
             essentials_category="3D",
             description="Generate a complete seamlessly tiling PBR material (base texture + maps, up to 8K) "
             "from a text prompt. Optionally drive it with an input image (img2img) "
@@ -408,7 +408,7 @@ class PatinaMaterialExtractNode(IO.ComfyNode):
         return IO.Schema(
             node_id="PatinaMaterialExtractNode",
             display_name="Patina Material Extract",
-            category="partner/3d/Patina",
+            category="partner/3d/fal",
             essentials_category="3D",
             description="Extract a seamlessly tiling PBR material (base texture + maps) from a region of an "
             "input image, guided by a prompt.",
