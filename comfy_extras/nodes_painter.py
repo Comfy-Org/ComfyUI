@@ -82,9 +82,9 @@ class PainterNode(io.ComfyNode):
 
         if mask and mask.strip():
             mask_path = folder_paths.get_annotated_filepath(mask)
-            painter_img = node_helpers.pillow(Image.open, mask_path)
+            opened_painter_img = node_helpers.pillow(Image.open, mask_path)
             try:
-                painter_img = painter_img.convert("RGBA")
+                painter_img = opened_painter_img.convert("RGBA")
 
                 if painter_img.size != (w, h):
                     painter_img = painter_img.resize((w, h), Image.LANCZOS)
@@ -96,10 +96,10 @@ class PainterNode(io.ComfyNode):
                 mask_tensor = torch.from_numpy(painter_np[:, :, 3]).unsqueeze(0)
 
                 base_np = base_image[0].cpu().numpy()
-                composited = painter_rgb * painter_alpha + base_np * (1.0 - painter_alpha)
+                composited = painter_rgb * painter_alpha + base_np * (1 - painter_alpha)
                 out_image = torch.from_numpy(composited).unsqueeze(0)
             finally:
-                painter_img.close()
+                opened_painter_img.close()
         else:
             mask_tensor = torch.zeros((1, h, w), dtype=torch.float32)
             out_image = base_image
