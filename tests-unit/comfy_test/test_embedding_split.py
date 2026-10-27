@@ -11,7 +11,7 @@ lookbehind to also accept a comma.
 The structural test guards against a future contributor silently
 reverting the pattern to the old form (``(?<=\\s)`` only). The
 behavioural tests reproduce the full split + re-prefix logic from
-``sd1_clip.py:SD1ClipModel.tokenize_with_weights`` and assert each
+``sd1_clip.py:SDTokenizer.tokenize_with_weights`` and assert each
 comma-separated embedding ends up as its own ``embedding:`` segment
 in the final ``to_tokenize`` list — which is what the per-segment
 dispatcher keys off.
@@ -28,6 +28,8 @@ import re
 from pathlib import Path
 
 import torch
+
+import comfy.sd1_clip as sd1_clip
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -46,7 +48,7 @@ EXPECTED_SPLIT_PATTERN = r"(?<=[\s,])" + re.escape(EMBEDDING_IDENTIFIER)
 
 def _to_tokenize(text: str) -> list[str]:
     """Reproduce the relevant lines from
-    ``SD1ClipModel.tokenize_with_weights`` (comfy/sd1_clip.py L594-600).
+    ``SDTokenizer.tokenize_with_weights`` (comfy/sd1_clip.py L594-600).
 
     The fix lives in the split pattern, but the to_tokenize list is
     what the per-segment dispatcher reads, so we assert the *list*
@@ -215,8 +217,6 @@ def _fake_embedding_loader(monkeypatch):
     attached to the first name (``a,``), and it is ``_try_get_embedding``
     that strips it and retries the lookup.
     """
-    import comfy.sd1_clip as sd1_clip
-
     requested: list[str] = []
     loaded: dict[str, torch.Tensor] = {}
 
@@ -243,8 +243,6 @@ def test_sd1_tokenizer_dispatches_both_comma_separated_embeddings(monkeypatch, t
     test, which the ``_to_tokenize`` helper above — a copy of that logic
     — cannot do.
     """
-    import comfy.sd1_clip as sd1_clip
-
     requested, loaded = _fake_embedding_loader(monkeypatch)
 
     tokenizer = sd1_clip.SD1Tokenizer(embedding_directory=str(tmp_path))
