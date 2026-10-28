@@ -1032,8 +1032,8 @@ class VAE:
                 if not comfy.memory_management.aimdo_enabled:
                     self.disable_offload = True
             elif "decoder.transformer_blocks.0.scale1" in sd or "decoder.blocks.0.scale1" in sd or "encoder.down.5.block.0.nin_shortcut.weight" in sd or ("blocks.0.scale1" in sd and "x_embedder.weight" in sd):  # MiniMax H3 video VAE (stock or Sol decoder), or just its decoder / encoder
-                if "blocks.0.scale1" in sd:  # Sol-H3-VAE as released: the decoder alone, unprefixed
-                    top = ("post_quant_conv", "latents_mean", "latents_std")
+                if "blocks.0.scale1" in sd:  # Sol-H3-VAE as released: the decoder unprefixed, possibly merged with the H3 encoder
+                    top = ("encoder", "quant_conv", "post_quant_conv", "latents_mean", "latents_std")
                     sd = {k if k.split(".")[0] in top else "decoder." + k: v for k, v in sd.items()}
                     sd.setdefault("latents_mean", torch.tensor(comfy.ldm.minimax.vae.LATENTS_MEAN))
                     sd.setdefault("latents_std", torch.tensor(comfy.ldm.minimax.vae.LATENTS_STD))
