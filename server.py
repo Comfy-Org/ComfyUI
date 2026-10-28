@@ -75,6 +75,7 @@ if TYPE_CHECKING:
 
 # Import cache control middleware
 from middleware.cache_middleware import cache_control
+from middleware.origin_middleware import is_cross_site_index_navigation
 
 if args.enable_manager:
     import comfyui_manager
@@ -206,7 +207,7 @@ def create_origin_only_middleware():
     async def origin_only_middleware(request: web.Request, handler):
         if 'Sec-Fetch-Site' in request.headers:
             sec_fetch_site = request.headers['Sec-Fetch-Site']
-            if sec_fetch_site == 'cross-site':
+            if sec_fetch_site == 'cross-site' and not is_cross_site_index_navigation(request):
                 return web.Response(status=403)
         #this code is used to prevent the case where a random website can queue comfy workflows by making a POST to 127.0.0.1 which browsers don't prevent for some dumb reason.
         #in that case the Host and Origin hostnames won't match
