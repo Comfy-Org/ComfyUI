@@ -448,12 +448,6 @@ class NonCausalViT3DDecoder(nn.Module):
         self.norm_out = ops.LayerNorm(dim, eps=eps)
         self.proj_out = operations.Linear(dim, out_channels * patch_size_t * patch_size * patch_size, bias=bias)
         self.pos_embed = RotaryEmbeddingND(int(dim_head * rope_dim_ratio), rope_theta, n_dim=3)
-        self._geo = (None, None)
-
-    def _geometry(self, T, H, W):
-        if self._geo[0] != (T, H, W):
-            self._geo = ((T, H, W), self._build_geometry(T, H, W))
-        return self._geo[1]
 
     def _build_geometry(self, T, H, W):
         """CPU index tables for one latent shape: clip rows are block-major (a block's tokens in (t, y, x) order,
@@ -506,7 +500,7 @@ class NonCausalViT3DDecoder(nn.Module):
         _, C, T, H, W = z.shape
         heads, dh, D, S, R = self.heads, self.dim_head, self.dim, self.num_global, self.ring
         dev = z.device
-        geo = self._geometry(T, H, W)
+        geo = self._build_geometry(T, H, W)
         rows, slot_rows = geo["rows"], geo["slot_rows"]
         gslot = geo["gslot"].to(dev)
         shifts = [(sh["ids"].to(dev), [[(qi.to(dev), ki.to(dev)) for qi, ki in wins] for wins in sh["windows_at"]],
