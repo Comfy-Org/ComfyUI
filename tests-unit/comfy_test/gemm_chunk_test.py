@@ -10,15 +10,17 @@ def _force_split(monkeypatch, size):
 
 
 def _count_calls(monkeypatch, module, name):
-    calls = []
+    """Record every result the wrapped op returns."""
+    results = []
     original = getattr(module, name)
 
     def counting(*args, **kwargs):
-        calls.append(1)
-        return original(*args, **kwargs)
+        result = original(*args, **kwargs)
+        results.append(result)
+        return result
 
     monkeypatch.setattr(module, name, counting)
-    return calls
+    return results
 
 
 def test_linear_split_matches_unsplit(monkeypatch):
@@ -46,23 +48,23 @@ def test_linear_split_keeps_the_input_shape(monkeypatch):
 
 def test_linear_split_runs_once_per_chunk(monkeypatch):
     _force_split(monkeypatch, 4)
-    calls = _count_calls(monkeypatch, gemm_chunk.F, "linear")
+    results = _count_calls(monkeypatch, gemm_chunk.F, "linear")
 
     gemm_chunk.linear(torch.randn(10, 6), torch.randn(5, 6))
 
-    assert len(calls) == 3  # 4 + 4 + 2 rows
+    assert len(results) == 3  # 4 + 4 + 2 rows
 
 
 def test_linear_without_a_split_is_the_plain_op(monkeypatch):
     monkeypatch.setattr(gemm_chunk, "_OVERRIDE", 0)
-    calls = _count_calls(monkeypatch, gemm_chunk.F, "linear")
+    results = _count_calls(monkeypatch, gemm_chunk.F, "linear")
     x = torch.randn(10, 6)
     w = torch.randn(5, 6)
 
     out = gemm_chunk.linear(x, w)
 
-    assert len(calls) == 1
-    assert torch.equal(out, torch.nn.functional.linear(x, w))
+    assert len(results) == 1
+    assert out is results[0]
 
 
 def test_bmm_split_matches_unsplit(monkeypatch):
@@ -80,26 +82,24 @@ def test_bmm_without_a_split_is_the_plain_op(monkeypatch):
     monkeypatch.setattr(gemm_chunk, "_OVERRIDE", 0)
     a = torch.randn(6, 9, 3)
     b = torch.randn(6, 3, 4)
-    expected = torch.bmm(a, b)
-    calls = _count_calls(monkeypatch, gemm_chunk.torch, "bmm")
+    results = _count_calls(monkeypatch, gemm_chunk.torch, "bmm")
 
     out = gemm_chunk.bmm(a, b)
 
-    assert len(calls) == 1
-    assert torch.equal(out, expected)
+    assert len(results) == 1
+    assert out is results[0]
 
 
 def test_bmm_that_fits_in_one_chunk_is_the_plain_op(monkeypatch):
     _force_split(monkeypatch, 4)
     a = torch.randn(4, 4, 3)
     b = torch.randn(4, 3, 4)
-    expected = torch.bmm(a, b)
-    calls = _count_calls(monkeypatch, gemm_chunk.torch, "bmm")
+    results = _count_calls(monkeypatch, gemm_chunk.torch, "bmm")
 
     out = gemm_chunk.bmm(a, b)
 
-    assert len(calls) == 1
-    assert torch.equal(out, expected)
+    assert len(results) == 1
+    assert out is results[0]
 
 
 def test_einsum_split_matches_unsplit(monkeypatch):
@@ -127,8 +127,44 @@ def test_measure_ignores_a_cpu_device(monkeypatch):
     monkeypatch.setattr(gemm_chunk, "_measured", False)
     monkeypatch.setattr(gemm_chunk, "_row_split", 0)
     monkeypatch.setattr(gemm_chunk, "_batch_split", 0)
+    probes = []
+    monkeypatch.setattr(gemm_chunk, "_faulty_rows", lambda device: probes.append("rows"))
+    monkeypatch.setattr(gemm_chunk, "_faulty_batches", lambda device: probes.append("batches"))
 
     gemm_chunk.measure(torch.device("cpu"))
 
+    assert probes == []
+    assert gemm_chunk._measured is False
+    assert gemm_chunk._row_split == 0
+    assert gemm_chunk._batch_split == 0
+
+
+def test_an_unmeasured_rocm_build_splits_by_default(monkeypatch):
+    monkeypatch.setattr(gemm_chunk, "_IS_ROCM", True)
+    monkeypatch.setattr(gemm_chunk, "_measured", False)
+    monkeypatch.setattr(gemm_chunk, "_OVERRIDE", None)
+
+    assert gemm_chunk.row_split() == gemm_chunk.ROW_SPLIT
+    assert gemm_chunk.batch_split() == gemm_chunk.BATCH_SPLIT
+
+
+def test_a_measured_rocm_build_does_not_split(monkeypatch):
+    monkeypatch.setattr(gemm_chunk, "_IS_ROCM", True)
+    monkeypatch.setattr(gemm_chunk, "_measured", True)
+    monkeypatch.setattr(gemm_chunk, "_OVERRIDE", None)
+    monkeypatch.setattr(gemm_chunk, "_row_split", 0)
+    monkeypatch.setattr(gemm_chunk, "_batch_split", 0)
+
     assert gemm_chunk.row_split() == 0
     assert gemm_chunk.batch_split() == 0
+
+
+def test_the_override_replaces_the_measured_limits(monkeypatch):
+    monkeypatch.setattr(gemm_chunk, "_IS_ROCM", True)
+    monkeypatch.setattr(gemm_chunk, "_measured", True)
+    monkeypatch.setattr(gemm_chunk, "_OVERRIDE", 1024)
+    monkeypatch.setattr(gemm_chunk, "_row_split", 0)
+    monkeypatch.setattr(gemm_chunk, "_batch_split", 0)
+
+    assert gemm_chunk.row_split() == 1024
+    assert gemm_chunk.batch_split() == 1024

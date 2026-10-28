@@ -631,10 +631,12 @@ class disable_weight_init:
             return None
 
         def forward_comfy_cast_weights(self, input):
+            """The linear, with the weights cast to the input's dtype."""
             with CastBiasWeightContext(self, input, offloadable=True) as (weight, bias):
                 return comfy.gemm_chunk.linear(input, weight, bias)
 
         def forward(self, input):
+            """The linear, split into chunks when the backend gets large GEMMs wrong."""
             run_every_op()
             if self.comfy_cast_weights or len(self.weight_function) > 0 or len(self.bias_function) > 0:
                 return self.forward_comfy_cast_weights(input)

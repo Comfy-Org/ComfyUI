@@ -103,6 +103,7 @@ def batch_split():
 
 
 def _chunks(size, limit):
+    """The (start, end) ranges to split a size into."""
     if limit == 0 or size <= limit:
         return [(0, size)]
     return [(s, min(s + limit, size)) for s in range(0, size, limit)]
