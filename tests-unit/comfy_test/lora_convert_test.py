@@ -207,7 +207,7 @@ def test_load_lora_converts_krea2_fused_qkv_lora():
     messages, patches = _capture_warnings(lambda: comfy.lora.load_lora(sd, key_map))
 
     assert len(patches) == 3
-    assert not any(message.startswith("lora key not loaded: " + MAIN_PREFIX) for message in messages)
+    assert not any(message.startswith("lora key not loaded: " + prefix) for message in messages)
     offset = 0
     for proj, size in zip("qkv", (MAIN_IN, 1536, 1536)):
         key = "diffusion_model.blocks.0.attn." + {"q": "wq", "k": "wk", "v": "wv"}[proj] + ".weight"
