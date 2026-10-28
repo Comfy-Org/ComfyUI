@@ -42,6 +42,8 @@ class CONDRegular:
         return True
 
     def concat(self, others):
+        if len(others) == 0:
+            return self.cond
         conds = [self.cond]
         for x in others:
             conds.append(x.cond)
