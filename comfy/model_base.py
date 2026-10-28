@@ -2434,6 +2434,7 @@ class SenseNovaU15(BaseModel):
                 text_input_ids, kwargs.get("reference_latents"),
                 comfy.ldm.sensenova.model.MERGED_PATCH_SIZE, dtype,
                 image_only=kwargs.get("prompt_type") == "negative",
+                expand_images=not kwargs.get("sensenova_interleave_expanded", False),
             )
 
             hooks = kwargs.get("hooks")
@@ -2486,7 +2487,9 @@ class SenseNovaU15(BaseModel):
             out["reference_images"] = [1, 3, reference_pixels]
         text_input_ids = kwargs.get("text_input_ids")
         if text_input_ids is not None:
-            if reference_grids:
+            if kwargs.get("sensenova_interleave_expanded", False):
+                length = text_input_ids.shape[1]
+            elif reference_grids:
                 length = comfy.ldm.sensenova.conditioning.conditioned_input_length(
                     text_input_ids.shape[1],
                     reference_grids,

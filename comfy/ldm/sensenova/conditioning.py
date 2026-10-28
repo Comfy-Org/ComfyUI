@@ -52,7 +52,7 @@ def preprocess_references(images):
 
 def prepare_prefix_inputs(
     input_ids, reference_images, patch_size, dtype, *,
-    image_only=False,
+    image_only=False, expand_images=True, append_image_start=True,
 ):
     """Prepare reference tokens, normalized images, positions and attention mask."""
 
@@ -66,7 +66,11 @@ def prepare_prefix_inputs(
         )
         for image in reference_images
     ]
-    input_ids = condition_input_ids(input_ids, reference_grids, image_only=image_only)
+    if expand_images:
+        input_ids = condition_input_ids(
+            input_ids, reference_grids,
+            image_only=image_only, append_image_start=append_image_start,
+        )
     indexes = thw_indexes(input_ids, reference_grids)
     return input_ids, reference_images, indexes, block_causal_mask(indexes, dtype=dtype)
 
@@ -84,7 +88,9 @@ def _image_label_tokens(index):
     return (IMAGE_LABEL_ID, HYPHEN_ID, *digits, COLON_ID)
 
 
-def conditioned_input_length(input_length, reference_grids, image_only=False):
+def conditioned_input_length(
+    input_length, reference_grids, image_only=False, append_image_start=True
+):
     """Return the token length after inserting reference-image blocks."""
 
     image_token_count = sum(height * width for height, width in reference_grids)
@@ -93,6 +99,7 @@ def conditioned_input_length(input_length, reference_grids, image_only=False):
             image_token_count
             + 9
             + 2 * len(reference_grids)
+            - int(not append_image_start)
         )
     label_count = (
         sum(len(_image_label_tokens(index)) for index in range(len(reference_grids)))
@@ -103,7 +110,7 @@ def conditioned_input_length(input_length, reference_grids, image_only=False):
 
 
 def condition_input_ids(
-    input_ids, reference_grids, image_only=False
+    input_ids, reference_grids, image_only=False, append_image_start=True
 ):
     """Insert reference-image token blocks into a SenseNova prompt."""
 
@@ -119,7 +126,7 @@ def condition_input_ids(
                 ASSISTANT_ID,
                 NEWLINE_ID,
             ]
-            + [IMAGE_START_ID]
+            + ([IMAGE_START_ID] if append_image_start else [])
         )
         return torch.tensor([values], dtype=torch.long, device=input_ids.device)
 
