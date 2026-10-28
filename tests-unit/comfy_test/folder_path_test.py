@@ -137,6 +137,26 @@ def test_get_save_image_path_allows_output_subfolder_symlink(tmp_path):
     assert folder_paths.is_lexically_within_directory(output_dir, full_output_folder) is True
 
 
+@pytest.mark.skipif(os.name != "nt", reason="directory junctions are Windows-only")
+def test_get_save_image_path_allows_output_subfolder_junction(tmp_path):
+    # A junction needs no symlink privilege, so this runs even where the symlink test skips.
+    import _winapi
+
+    output_dir = str(tmp_path / "output")
+    dest = str(tmp_path / "other_volume")
+    os.makedirs(output_dir)
+    os.makedirs(dest)
+    _winapi.CreateJunction(dest, os.path.join(output_dir, "extra"))
+
+    full_output_folder, filename, counter, subfolder, filename_prefix = folder_paths.get_save_image_path("extra/shot", output_dir)
+    assert os.path.samefile(full_output_folder, dest)
+    assert filename == "shot"
+    assert counter == 1
+    assert subfolder == "extra"
+    assert filename_prefix == "extra/shot"
+    assert folder_paths.is_lexically_within_directory(output_dir, full_output_folder) is True
+
+
 def test_base_path_changes(set_base_dir):
     test_dir = os.path.abspath("/test/dir")
     set_base_dir(test_dir)
