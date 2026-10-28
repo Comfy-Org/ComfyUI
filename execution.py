@@ -161,6 +161,19 @@ class CacheSet:
 
 SENSITIVE_EXTRA_DATA_KEYS = ("auth_token_comfy_org", "api_key_comfy_org")
 
+def unwrap_value(value):
+    """The value a node receives for an input, with the `__value__` wrapper taken off.
+
+    The wrapper lets a widget hold a list without that list being read as a link to
+    another node. It is taken off here, when the value is handed to the node, rather
+    than in validate_inputs(), so the prompt that is stored and handed back out keeps
+    the wrapper and can be loaded again.
+    """
+    if isinstance(value, dict) and "__value__" in value:
+        return value["__value__"]
+    return value
+
+
 def get_input_data(inputs, class_def, unique_id, execution_list=None, dynprompt=None, extra_data={}):
     is_v3 = issubclass(class_def, _ComfyNodeInternal)
     v3_data: io.V3Data = {}
@@ -171,7 +184,7 @@ def get_input_data(inputs, class_def, unique_id, execution_list=None, dynprompt=
     input_data_all = {}
     missing_keys = {}
     for x in inputs:
-        input_data = inputs[x]
+        input_data = unwrap_value(inputs[x])
         _, input_category, input_info = get_input_info(class_def, x, valid_inputs)
         def mark_missing():
             missing_keys[x] = True
@@ -998,22 +1011,27 @@ async def validate_inputs(prompt_id, prompt, item, validated, visiting=None):
                 # This is used to pass list widget values to execution,
                 # as by default list value is reserved to represent the
                 # connection between nodes.
-                if isinstance(val, dict):
-                    if "__value__" in val:
-                        val = val["__value__"]
-                        inputs[x] = val
+                # The unwrap is NOT written back to `inputs`: that dict belongs to the
+                # caller's prompt, which is stored in /history and in the saved image's
+                # `prompt` chunk. Stripping the wrapper there makes an array widget's
+                # value indistinguishable from a node link when the prompt is loaded
+                # again, so the widget comes back empty. unwrap_value() in
+                # get_input_data() unwraps for execution instead.
+                wrapped = isinstance(val, dict) and "__value__" in val
+                if wrapped:
+                    val = val["__value__"]
 
                 if input_type == "INT":
                     val = int(val)
-                    inputs[x] = val
                 if input_type == "FLOAT":
                     val = float(val)
-                    inputs[x] = val
                 if input_type == "STRING":
                     val = str(val)
-                    inputs[x] = val
                 if input_type == "BOOLEAN":
                     val = bool(val)
+                # a coerced value still goes back to the prompt, as it always has, but
+                # never in a way that unwraps it
+                if not wrapped and input_type in ("INT", "FLOAT", "STRING", "BOOLEAN"):
                     inputs[x] = val
             except Exception as ex:
                 error = {
