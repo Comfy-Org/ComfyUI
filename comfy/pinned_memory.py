@@ -7,6 +7,12 @@ import comfy_aimdo.host_buffer
 import comfy_aimdo.torch
 import torch
 
+def flush_pin(module, module_pin):
+    if module_pin.get("dirty", False):
+        value = comfy.memory_management.interpret_gathered_like([module.weight], module_pin["pin"])[0]
+        comfy.memory_management.write_tensor_file_slice(module.weight, value)
+        module_pin["dirty"] = False
+
 def _add_to_bucket(module, module_pin, buckets, size, priority):
     bucket = buckets.setdefault(size, [])
     entry = [-priority, 0, module]
@@ -15,6 +21,8 @@ def _add_to_bucket(module, module_pin, buckets, size, priority):
     module_pin["balancer_entry"] = entry
 
 def _steal_pin(module, stack, buckets, size, priority, subset):
+    if module._pin_state["writable"]:
+        return False
     bucket = buckets.get(size)
     if bucket is None:
         return False
@@ -28,6 +36,8 @@ def _steal_pin(module, stack, buckets, size, priority, subset):
     if priority <= -bucket[-1][0]:
         return False
 
+    # The victim's pin may still be the source of a queued copy, and the caller overwrites it next.
+    comfy.model_management.sync_all_offload_streams()
     *_, victim = bucket.pop()
     module_pin = module._pins[subset]
     victim_pin = victim._pins[subset]
@@ -116,6 +126,8 @@ def pin_memory(module, subset="weights", size=None):
         return _steal_pin(module, stack, buckets, size, priority, subset)
 
     module_pin["pin"] = pin
+    if pin_state["writable"]:
+        module._pin_subset = subset
     stack.append((module, offset))
     module_pin["registered"] = True
     module_pin["stack_index"] = len(stack) - 1

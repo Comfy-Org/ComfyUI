@@ -87,6 +87,8 @@ class Gemma4_31B_Config(Gemma4Config):
     num_hidden_layers: int = 60
     num_attention_heads: int = 32
     num_key_value_heads: int = 16
+    num_global_key_value_heads = 4
+    attention_k_eq_v = True
     vision_bidirectional = True
     sliding_attention = [1024, 1024, 1024, 1024, 1024, False]
     hidden_size_per_layer_input: int = 0

@@ -114,6 +114,14 @@ class CONDConstant(CONDRegular):
         return [1]
 
 
+class CONDKVCache(CONDConstant):
+    def can_concat(self, other):
+        return self.cond.keys() == other.cond.keys()
+
+    def concat(self, others):
+        return {device: [self.cond[device]] + [c.cond[device] for c in others] for device in self.cond}
+
+
 class CONDList(CONDRegular):
     def __init__(self, cond):
         self.cond = cond

@@ -22,3 +22,16 @@ class CrystalUpscalerImage(BaseModel):
 
 class CrystalUpscalerResult(BaseModel):
     images: list[CrystalUpscalerImage] = Field(...)
+
+
+class CrystalVideoUpscalerRequest(BaseModel):
+    video_url: str = Field(...)
+    scale_factor: float = Field(..., ge=1, le=200)
+
+
+class CrystalVideoUpscalerVideo(BaseModel):
+    url: str = Field(...)
+
+
+class CrystalVideoUpscalerResult(BaseModel):
+    video: CrystalVideoUpscalerVideo = Field(...)

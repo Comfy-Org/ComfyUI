@@ -299,16 +299,18 @@ class DiTBlock(nn.Module):
 
 
 class FinalLayer(nn.Module):
-    def __init__(self, hidden, t_dim, video_dim, audio_dim, eps, apply_silu=True, adaln_dtype=None,
+    def __init__(self, hidden, t_dim, video_dim, audio_dim, eps, apply_silu=True, adaln_dtype=None, pdd_steps=1,
                  dtype=None, device=None, operations=None):
         super().__init__()
+        self.video_dim = video_dim
         self.norm = operations.RMSNorm(hidden, eps=eps, dtype=dtype, device=device)
         self.adaln_proj = AdalnProj(t_dim, hidden, 2, 1, apply_silu=apply_silu,
                                     dtype=adaln_dtype if adaln_dtype is not None else dtype,
                                     device=device, operations=operations)
-        # output heads are the checkpoint's fp32 island; norm/adaln are stored at model dtype
-        self.video_out = operations.Linear(hidden, video_dim, bias=True, dtype=torch.float32, device=device)
-        self.audio_out = operations.Linear(hidden, audio_dim, bias=True, dtype=torch.float32, device=device)
+        # output heads are the checkpoint's fp32 island; norm/adaln are stored at model dtype.
+        # a PDD checkpoint ships pdd_steps stacked heads per stream (a PDD LoRA grows plain heads to the same layout)
+        self.video_out = operations.Linear(hidden, video_dim * pdd_steps, bias=True, dtype=torch.float32, device=device)
+        self.audio_out = operations.Linear(hidden, audio_dim * pdd_steps, bias=True, dtype=torch.float32, device=device)
 
     def forward(self, x, t_emb, video_seg, audio_seg, sigma, sample_sigmas, shifts):
         # video_seg / audio_seg: (start, stop, row) of the target streams, where row
@@ -319,7 +321,7 @@ class FinalLayer(nn.Module):
             a, b, row = seg
             return (self.norm(x[a:b]) * (1.0 + _mod_row(scale, row, scale.dtype)) + _mod_row(shift, row, shift.dtype)).to(torch.float32)
 
-        n = self.video_out.weight.shape[0] // self.video_out.out_features
+        n = self.video_out.weight.shape[0] // self.video_dim
         if n == 1:
             return self.video_out(mod(video_seg)), self.audio_out(mod(audio_seg))
 
@@ -478,7 +480,7 @@ class MiniMaxH3Model(nn.Module):
                  timestep_input_dim=256, time_embed_hidden_size=5376, time_embed_dim=2688,
                  rope_inv_freq_len=16, norm_eps=1e-5, qk_norm_eps=1e-5, final_norm_eps=1e-5,
                  sigma_shift_video=12.0, sigma_shift_audio=3.0,
-                 adaln_curve_grid=None, gate_compress=False,
+                 adaln_curve_grid=None, gate_compress=False, pdd_steps=1,
                  image_model=None, dtype=None, device=None, operations=None, **kwargs):
         super().__init__()
         self.dtype = dtype
@@ -513,7 +515,7 @@ class MiniMaxH3Model(nn.Module):
                      dtype=dtype, device=device, operations=operations)
             for _ in range(num_layers)])
         self.final_layer = FinalLayer(hidden_size, time_embed_dim, video_patch_dim, audio_latents_dim,
-                                      final_norm_eps, **curve, dtype=dtype, device=device, operations=operations)
+                                      final_norm_eps, **curve, pdd_steps=pdd_steps, dtype=dtype, device=device, operations=operations)
 
     def preprocess_text_embeds(self, text_states):
         """[B, L, text_dim] Qwen states -> [B, L, hidden] refined text embeds."""

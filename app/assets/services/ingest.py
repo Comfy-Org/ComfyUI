@@ -13,12 +13,14 @@ import errno
 import logging
 import mimetypes
 import os
+import re
 import shutil
 from typing import Any, NamedTuple, Sequence
 
 from sqlalchemy import false, func, select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, aliased
 
+import folder_paths
 from app.assets import mode
 from app.assets.database.models import Asset, AssetContent, AssetTag
 from app.assets.database.queries.records import (
@@ -82,6 +84,77 @@ def _extract_system_metadata_sync(
     if dims:
         system_metadata.update(dims)
     return system_metadata
+
+
+def _live_sibling_preview_id(session: Session, content_id: str) -> str | None:
+    """A ``preview``-tagged preview another record of the same content has, if its file is still there.
+
+    A preview tagged otherwise was nominated by hand for that record, not made for the bytes.
+    """
+    preview = aliased(Asset)
+    preview_content = aliased(AssetContent)
+    rows = session.execute(
+        select(Asset.preview_id, preview_content.path)
+        .join(preview, preview.id == Asset.preview_id)
+        .join(preview_content, preview_content.id == preview.content_id)
+        .join(AssetTag, (AssetTag.asset_id == preview.id) & (AssetTag.tag_name == "preview"))
+        .where(
+            Asset.content_id == content_id,
+            preview_content.is_missing == false(),
+        )
+        .order_by(Asset.created_at.desc())
+    )
+    # previews/ is never scanned, so a file removed by hand still reads as live.
+    return next((preview_id for preview_id, path in rows if os.path.isfile(path)), None)
+
+
+_PREVIEW_FILENAME = re.compile(r"[0-9a-f]{64}\.(jpg|webp)")
+
+
+def _probe_output_preview(preview_ref: dict | None) -> tuple[str, str, int, int, os.stat_result] | None:
+    """The file a save node named as its output's preview: trusted by name, so stat only."""
+    if preview_ref is None:
+        return None
+    try:
+        filename = preview_ref["filename"]
+        if not isinstance(filename, str) or not _PREVIEW_FILENAME.fullmatch(filename):
+            raise ValueError(f"not a preview file name: {filename!r}")
+        path = os.path.join(folder_paths.get_previews_directory(), filename)
+        return path, filename, int(preview_ref["width"]), int(preview_ref["height"]), os.stat(path)
+    except Exception:
+        logging.warning("Ignoring the preview named for an output: %r", preview_ref, exc_info=True)
+        return None
+
+
+def _link_output_preview(session: Session, record: Asset, preview: tuple[str, str, int, int, os.stat_result]) -> None:
+    """Link the output to its preview's record, creating it on first use; never fails the output."""
+    path, filename, width, height, stat_result = preview
+    try:
+        with session.begin_nested():
+            if not os.path.isfile(path):
+                return  # deleted with its last user since the probe; the write lock rules out a later delete
+            content, _ = create_content_reporting_insert(
+                session, path, f"blake3:{filename.partition('.')[0]}", stat_result.st_size, get_mtime_ns(stat_result)
+            )
+            preview_id = session.scalar(
+                select(Asset.id)
+                .join(AssetTag, (AssetTag.asset_id == Asset.id) & (AssetTag.tag_name == "preview"))
+                .where(Asset.content_id == content.id)
+                .limit(1)
+            )
+            if preview_id is None:
+                preview_id = create_record(
+                    session,
+                    content.id,
+                    filename,
+                    mime_type="image/webp" if filename.endswith(".webp") else "image/jpeg",
+                    tags=["preview"],
+                    system_metadata={"kind": "image", "width": width, "height": height},
+                ).id
+            record.preview_id = preview_id
+            session.flush()
+    except Exception:
+        logging.warning("Could not link the preview %s", filename, exc_info=True)
 
 
 def _discard_unreferenced_content(session: Session, content_id: str) -> None:
@@ -212,6 +285,9 @@ def _create_upload_record(
 ) -> Asset:
     if preview_id is not None and session.get(Asset, preview_id) is None:
         raise ValueError(f"preview_id {preview_id!r} does not reference an existing asset")
+    if preview_id is None:
+        # Same bytes, same picture: reuse the preview instead of generating another.
+        preview_id = _live_sibling_preview_id(session, content_id)
     record = create_record(
         session,
         content_id,
@@ -710,6 +786,9 @@ def register_cached_output(
                     tags=path_tags,
                     system_metadata=system_metadata,
                 )
+                sibling_preview_id = _live_sibling_preview_id(session, existing.id)
+                if sibling_preview_id is not None:
+                    record.preview_id = sibling_preview_id
                 session.commit()
             except Exception:
                 session.rollback()
@@ -718,6 +797,7 @@ def register_cached_output(
             record_content_id = record.content_id
             record_job_id = record.job_id
             record_name = record.name
+            record_preview_id = record.preview_id
     except Exception:
         logging.exception("Failed to register cached output: %s", locator)
         return None
@@ -727,13 +807,15 @@ def register_cached_output(
         content_id=record_content_id,
         job_id=record_job_id,
         name=record_name,
+        preview_id=record_preview_id,
     )
 
 
 def register_executed_output(
-    abs_path: str, job_id: str | None = None
+    abs_path: str, job_id: str | None = None, preview_ref: dict | None = None
 ) -> RegisteredAsset | None:
     locator = os.path.abspath(abs_path)
+    preview = _probe_output_preview(preview_ref)
     try:
         stat_result = os.stat(locator, follow_symlinks=True)
         size_bytes = stat_result.st_size
@@ -769,11 +851,14 @@ def register_executed_output(
                     tags=path_tags,
                     system_metadata=system_metadata,
                 )
+                if preview is not None:
+                    _link_output_preview(session, record, preview)
                 # Read before commit: expiry would reload them in a second write transaction.
                 record_id = record.id
                 record_content_id = record.content_id
                 record_job_id = record.job_id
                 record_name = record.name
+                record_preview_id = record.preview_id
                 session.commit()
             except Exception:
                 session.rollback()
@@ -789,4 +874,5 @@ def register_executed_output(
         content_id=record_content_id,
         job_id=record_job_id,
         name=record_name,
+        preview_id=record_preview_id,
     )

@@ -21,6 +21,11 @@ from comfy_api_nodes.apis.bfl import (
     Flux2ProGenerateRequest,
     Flux3ImageRequest,
     Flux3ImageToVideoRequest,
+    Flux3MaxKeyframe,
+    Flux3MaxResult,
+    Flux3MaxStatusResponse,
+    Flux3MaxSubmitResponse,
+    Flux3MaxVideoRequest,
     Flux3TextToVideoRequest,
     Flux3VideoContinuationRequest,
 )
@@ -1010,10 +1015,11 @@ _FLUX3_ASPECT_RATIOS = ["auto", "21:9", "2:1", "16:9", "4:3", "1:1", "3:4", "9:1
 _FLUX3_MIN_DURATION = 5
 _FLUX3_MAX_DURATION = 20
 _FLUX3_DURATIONS = ["auto"] + [str(i) for i in range(_FLUX3_MIN_DURATION, _FLUX3_MAX_DURATION + 1)]
-_FLUX3_RESOLUTIONS = {"720p": "hd", "1080p": "fhd"}
+_FLUX3_RESOLUTIONS = {"720p": "hd", "1080p": "fhd", "1440p": "qhd", "2160p": "uhd"}
 _FLUX3_MAX_IMAGES = 10
 _FLUX3_MIN_IMAGE_SIDE = 256
 _FLUX3_MAX_IMAGE_ASPECT = 64
+_FLUX3_MAX_START_VIDEO_PIXELS = 3840 * 2160
 
 
 def _flux3_validate_image(image: torch.Tensor) -> None:
@@ -1069,8 +1075,7 @@ def _flux3_parse_times(value: str, image_count: int, duration: int | str) -> lis
 class Flux3VideoNodeBase(IO.ComfyNode):
     """Shared widgets, request plumbing and polling for the FLUX 3 generation modes."""
 
-    RATE_HD: float
-    RATE_FHD: float
+    RATES: dict[str, float]
 
     @classmethod
     def common_inputs(cls) -> list:
@@ -1145,7 +1150,7 @@ class Flux3VideoNodeBase(IO.ComfyNode):
             depends_on=IO.PriceBadgeDepends(widgets=["resolution", "duration"]),
             expr=f"""
                 (
-                  $rate := widgets.resolution = "1080p" ? {cls.RATE_FHD} : {cls.RATE_HD};
+                  $rate := $lookup({json.dumps(cls.RATES)}, widgets.resolution);
                   $type(widgets.duration) = "string" and widgets.duration != "auto"
                     ? {{"type":"usd","usd": $rate * $number(widgets.duration)}}
                     : {{"type":"usd","usd": $rate, "format": {{"suffix": "/second"}}}}
@@ -1192,8 +1197,7 @@ async def _bfl_video_execute(
 
 
 class Flux3TextToVideoNode(Flux3VideoNodeBase):
-    RATE_HD = 0.2431
-    RATE_FHD = 0.4147
+    RATES = {"720p": 0.2431, "1080p": 0.4147, "1440p": 0.572, "2160p": 1.144}
 
     @classmethod
     def define_schema(cls) -> IO.Schema:
@@ -1240,8 +1244,7 @@ class Flux3TextToVideoNode(Flux3VideoNodeBase):
 
 
 class Flux3ImageToVideoNode(Flux3VideoNodeBase):
-    RATE_HD = 0.2431
-    RATE_FHD = 0.4147
+    RATES = {"720p": 0.2431, "1080p": 0.4147, "1440p": 0.572, "2160p": 1.144}
 
     @classmethod
     def define_schema(cls) -> IO.Schema:
@@ -1338,8 +1341,7 @@ class Flux3ImageToVideoNode(Flux3VideoNodeBase):
 
 
 class Flux3VideoContinuationNode(Flux3VideoNodeBase):
-    RATE_HD = 0.5863
-    RATE_FHD = 0.7579
+    RATES = {"720p": 0.5863, "1080p": 0.7579, "1440p": 0.9295, "2160p": 1.3585}
 
     @classmethod
     def define_schema(cls) -> IO.Schema:
@@ -1350,7 +1352,10 @@ class Flux3VideoContinuationNode(Flux3VideoNodeBase):
             description="Continues a video with FLUX 3: the new clip carries on from the final frames "
             "of the one you provide.",
             inputs=[
-                IO.Video.Input("video", tooltip="The clip to continue."),
+                IO.Video.Input(
+                    "video",
+                    tooltip="The clip to continue. Clips over 3840x2160 pixels in area are downscaled to fit.",
+                ),
                 IO.String.Input(
                     "prompt",
                     multiline=True,
@@ -1383,6 +1388,7 @@ class Flux3VideoContinuationNode(Flux3VideoNodeBase):
         seed: int,
     ) -> IO.NodeOutput:
         fields = cls.common_fields(prompt, aspect_ratio, duration, resolution, generate_audio, safety_tolerance)
+        video = downscale_video_to_max_pixels(video, _FLUX3_MAX_START_VIDEO_PIXELS)
         url = await upload_video_to_comfyapi(cls, video, wait_label="Uploading source video")
         request = Flux3VideoContinuationRequest(start_video=url, **fields)
         return await _bfl_video_execute(cls, _FLUX3_VIDEO_ENDPOINT, request)
@@ -1649,9 +1655,9 @@ class Flux3ImageNode(IO.ComfyNode):
     def define_schema(cls) -> IO.Schema:
         return IO.Schema(
             node_id="Flux3ImageNode",
-            display_name="Flux 3 Image",
+            display_name="FLUX 3 Image",
             category="partner/image/BFL",
-            description="Generates an image with FLUX 3 from a prompt, or edits and combines up to 10 "
+            description="Generates an image with FLUX 3 Image from a prompt, or edits and combines up to 10 "
             "reference images. Refer to the references in the prompt as image 1, image 2, and so on.",
             inputs=[
                 IO.String.Input(
@@ -1788,6 +1794,272 @@ class Flux3ImageNode(IO.ComfyNode):
         return IO.NodeOutput(await download_url_to_image_tensor(response.result["sample"]))
 
 
+_FLUX3MAX_ENDPOINT = "/proxy/fal/blackforestlabs/flux-3-max"
+_FLUX3MAX_FPS = 24
+_FLUX3MAX_MAX_PROMPT_LENGTH = 50000
+
+
+class Flux3MaxVideoNodeBase(IO.ComfyNode):
+
+    @classmethod
+    def common_inputs(cls) -> list:
+        return [
+            IO.Combo.Input(
+                "aspect_ratio",
+                options=_FLUX3_ASPECT_RATIOS,
+                default="auto",
+                tooltip="Output aspect ratio. 'auto' is 16:9 for text prompts and follows the first image otherwise.",
+            ),
+            IO.Combo.Input(
+                "duration",
+                options=[str(i) for i in range(_FLUX3_MIN_DURATION, _FLUX3_MAX_DURATION + 1)],
+                default="5",
+                tooltip="Clip length in seconds.",
+            ),
+            IO.Combo.Input(
+                "resolution",
+                options=["720p", "1080p"],
+                default="720p",
+                tooltip="Output resolution.",
+            ),
+            IO.Combo.Input(
+                "reasoning_level",
+                options=["low", "high"],
+                default="high",
+                tooltip="How much the model reasons about and expands the prompt before generating. "
+                "'high' takes longer; the price is the same.",
+            ),
+            IO.Boolean.Input(
+                "generate_audio",
+                default=True,
+                tooltip="Generate synchronized audio. Off produces a video with no audio track.",
+            ),
+            IO.Int.Input(
+                "seed",
+                default=42,
+                min=0,
+                max=2147483646,
+                control_after_generate=True,
+                tooltip="Seed controls whether the node should re-run; "
+                "results are non-deterministic regardless of seed.",
+            ),
+        ]
+
+    @classmethod
+    def common_fields(
+        cls,
+        prompt: str,
+        aspect_ratio: str,
+        duration: str,
+        resolution: str,
+        reasoning_level: str,
+        generate_audio: bool,
+        seed: int,
+    ) -> dict:
+        validate_string(prompt, field_name="prompt", min_length=1, max_length=_FLUX3MAX_MAX_PROMPT_LENGTH)
+        return {
+            "prompt": prompt,
+            "aspect_ratio": aspect_ratio,
+            "duration": int(duration),
+            "resolution": resolution,
+            "reasoning_level": reasoning_level,
+            "generate_audio": generate_audio,
+            "seed": seed,
+        }
+
+    @classmethod
+    def price_badge(cls) -> IO.PriceBadge:
+        return IO.PriceBadge(
+            depends_on=IO.PriceBadgeDepends(widgets=["resolution", "duration"]),
+            expr="""
+                (
+                  $promo := $now() < "2026-11-07T00:00:00.000Z";
+                  $rate := widgets.resolution = "1080p"
+                    ? ($promo ? 0.103675 : 0.4147)
+                    : ($promo ? 0.060775 : 0.2431);
+                  {"type":"usd","usd": $rate * $number(widgets.duration)}
+                )
+                """,
+        )
+
+
+async def _flux3max_execute(
+    cls: type[IO.ComfyNode], route: str, request: Flux3MaxVideoRequest
+) -> IO.NodeOutput:
+    submit = await sync_op(
+        cls,
+        ApiEndpoint(path=f"{_FLUX3MAX_ENDPOINT}/{route}", method="POST"),
+        response_model=Flux3MaxSubmitResponse,
+        data=request,
+    )
+    await poll_op(
+        cls,
+        ApiEndpoint(path=f"{_FLUX3MAX_ENDPOINT}/requests/{submit.request_id}/status"),
+        response_model=Flux3MaxStatusResponse,
+        status_extractor=lambda r: r.status,
+        completed_statuses=["COMPLETED"],
+        queued_statuses=["IN_QUEUE"],
+    )
+    result = await sync_op(
+        cls,
+        ApiEndpoint(path=f"{_FLUX3MAX_ENDPOINT}/requests/{submit.request_id}"),
+        response_model=Flux3MaxResult,
+    )
+    return IO.NodeOutput(await download_url_to_video_output(result.video.url))
+
+
+class Flux3MaxTextToVideoNode(Flux3MaxVideoNodeBase):
+
+    @classmethod
+    def define_schema(cls) -> IO.Schema:
+        return IO.Schema(
+            node_id="Flux3MaxTextToVideoNode",
+            display_name="FLUX 3 Max Text to Video",
+            category="partner/video/BFL",
+            description="Generates a video with synchronized audio from a text prompt via FLUX 3 Max.",
+            inputs=[
+                IO.String.Input(
+                    "prompt",
+                    multiline=True,
+                    default="",
+                    tooltip="What you want, in plain language. Describe ambient sound, music and speech "
+                    "separately for layered audio.",
+                ),
+                *cls.common_inputs(),
+            ],
+            outputs=[IO.Video.Output()],
+            hidden=[
+                IO.Hidden.auth_token_comfy_org,
+                IO.Hidden.api_key_comfy_org,
+                IO.Hidden.unique_id,
+            ],
+            is_api_node=True,
+            price_badge=cls.price_badge(),
+        )
+
+    @classmethod
+    async def execute(
+        cls,
+        prompt: str,
+        aspect_ratio: str,
+        duration: str,
+        resolution: str,
+        reasoning_level: str,
+        generate_audio: bool,
+        seed: int,
+    ) -> IO.NodeOutput:
+        request = Flux3MaxVideoRequest(
+            **cls.common_fields(prompt, aspect_ratio, duration, resolution, reasoning_level, generate_audio, seed)
+        )
+        return await _flux3max_execute(cls, "text-to-video", request)
+
+
+class Flux3MaxImageToVideoNode(Flux3MaxVideoNodeBase):
+
+    @classmethod
+    def define_schema(cls) -> IO.Schema:
+        return IO.Schema(
+            node_id="Flux3MaxImageToVideoNode",
+            display_name="FLUX 3 Max Image to Video",
+            category="partner/video/BFL",
+            description="Animates 1 to 10 images with FLUX 3 Max. Each image becomes a frame of the clip: "
+            "one image opens it, two become its first and last frame, and more are spread across it "
+            "or pinned to times you choose.",
+            inputs=[
+                IO.String.Input(
+                    "prompt",
+                    multiline=True,
+                    default="",
+                    tooltip="How the scene should move and sound.",
+                ),
+                IO.Autogrow.Input(
+                    "keyframes",
+                    template=IO.Autogrow.TemplatePrefix(
+                        IO.Image.Input("image", tooltip="Keyframe image."),
+                        prefix="image_",
+                        min=1,
+                        max=_FLUX3_MAX_IMAGES,
+                    ),
+                    tooltip="1 to 10 images, in playback order.",
+                ),
+                IO.DynamicCombo.Input(
+                    "placement",
+                    options=[
+                        IO.DynamicCombo.Option("spread across the clip", []),
+                        IO.DynamicCombo.Option(
+                            "at times",
+                            [
+                                IO.String.Input(
+                                    "times",
+                                    default="0",
+                                    tooltip="One time in seconds per image, comma-separated and "
+                                    "increasing, e.g. '0, 2.5, 5'.",
+                                ),
+                            ],
+                        ),
+                    ],
+                    tooltip="'spread across the clip' puts the first image at the start, the last at the end "
+                    "and the rest evenly between; 'at times' pins every image to a second you choose.",
+                ),
+                *cls.common_inputs(),
+            ],
+            outputs=[IO.Video.Output()],
+            hidden=[
+                IO.Hidden.auth_token_comfy_org,
+                IO.Hidden.api_key_comfy_org,
+                IO.Hidden.unique_id,
+            ],
+            is_api_node=True,
+            price_badge=cls.price_badge(),
+        )
+
+    @classmethod
+    async def execute(
+        cls,
+        prompt: str,
+        keyframes: IO.Autogrow.Type,
+        placement: dict,
+        aspect_ratio: str,
+        duration: str,
+        resolution: str,
+        reasoning_level: str,
+        generate_audio: bool,
+        seed: int,
+    ) -> IO.NodeOutput:
+        fields = cls.common_fields(prompt, aspect_ratio, duration, resolution, reasoning_level, generate_audio, seed)
+        images = [
+            image
+            for batch in keyframes.values()
+            if batch is not None
+            for image in (batch if batch.ndim == 4 else [batch])
+        ]
+        if len(images) > _FLUX3_MAX_IMAGES:
+            raise ValueError(f"FLUX 3 Max supports at most {_FLUX3_MAX_IMAGES} keyframe images, got {len(images)}.")
+        if not images:
+            raise ValueError("Connect at least one keyframe image.")
+        times = None
+        if placement["placement"] == "at times":
+            times = _flux3_parse_times(placement["times"], len(images), fields["duration"])
+        urls = await upload_images_to_comfyapi(
+            cls, images, max_images=_FLUX3_MAX_IMAGES, wait_label="Uploading keyframes"
+        )
+        if times is None and len(urls) <= 2:
+            request = Flux3MaxVideoRequest(
+                image_url=urls[0], end_image_url=urls[1] if len(urls) == 2 else None, **fields
+            )
+            return await _flux3max_execute(cls, "image-to-video", request)
+        if times is None:
+            last_frame = fields["duration"] * _FLUX3MAX_FPS
+            frames = [round(i * last_frame / (len(urls) - 1)) for i in range(len(urls))]
+        else:
+            frames = [round(time * _FLUX3MAX_FPS) for time in times]
+        request = Flux3MaxVideoRequest(
+            keyframes=[Flux3MaxKeyframe(image_url=url, frame_index=frame) for url, frame in zip(urls, frames)],
+            **fields,
+        )
+        return await _flux3max_execute(cls, "keyframes-to-video", request)
+
+
 class BFLExtension(ComfyExtension):
     @override
     async def get_node_list(self) -> list[type[IO.ComfyNode]]:
@@ -1808,6 +2080,8 @@ class BFLExtension(ComfyExtension):
             FluxVideoUpscaleNode,
             FluxVideoEditNode,
             Flux3ImageNode,
+            Flux3MaxTextToVideoNode,
+            Flux3MaxImageToVideoNode,
         ]
 
 

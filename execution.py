@@ -43,12 +43,12 @@ from comfy_execution.graph_utils import GraphBuilder, is_link
 from comfy_execution.validation import LoopValidationError, validate_loops, validate_node_input
 from comfy_execution.progress import get_progress_state, reset_progress_state, add_progress_handler, WebUIProgressHandler
 from comfy_execution.utils import CurrentNodeContext
-from comfy_execution.asset_enrichment import register_executed_outputs, emit_cached_output
+from comfy_execution.asset_enrichment import register_executed_outputs, emit_cached_output, take_asset_previews
 from comfy_execution.media_enrichment import enrich_output_with_media_metadata
 from comfy_api.internal import _ComfyNodeInternal, _NodeOutputInternal, first_real_override, is_class, make_locked_method_func
 from comfy_api.latest import io, _io
 from comfy_execution.cache_provider import _has_cache_providers, _get_cache_providers, _logger as _cache_logger
-from app.assets.manager import AssetManager, default_asset_manager
+from app.assets.manager import AssetManager, NoAssets
 
 if TYPE_CHECKING:
     from comfy_execution.server_protocol import ExecutionServer
@@ -565,6 +565,7 @@ async def execute(server: "ExecutionServer", dynprompt, caches, current_item, ex
                 return (ExecutionResult.PENDING, None, None)
         cache_ui_value = ui_outputs.get(unique_id)
         if len(output_ui) > 0:
+            asset_previews = take_asset_previews(output_ui)
             output_ui = enrich_output_with_media_metadata(output_ui)
             meta = {
                 "node_id": unique_id,
@@ -572,7 +573,7 @@ async def execute(server: "ExecutionServer", dynprompt, caches, current_item, ex
                 "parent_node": parent_node_id,
                 "real_node_id": real_node_id,
             }
-            enriched_output_ui = register_executed_outputs(output_ui, prompt_id, asset_manager)
+            enriched_output_ui = register_executed_outputs(output_ui, prompt_id, asset_manager, asset_previews)
             ui_outputs[unique_id] = {"meta": meta, "output": enriched_output_ui}
             cache_ui_value = {"meta": meta, "output": output_ui}
             if server.client_id is not None:
@@ -667,7 +668,7 @@ class PromptExecutor:
         self.cache_args = cache_args
         self.cache_type = cache_type
         self.server = server
-        self.asset_manager = asset_manager if asset_manager is not None else default_asset_manager()
+        self.asset_manager = asset_manager if asset_manager is not None else NoAssets(args)
         self.prompt_model_tracker = comfy.model_patcher.PromptModelTracker()
         self.reset()
 
@@ -784,6 +785,7 @@ class PromptExecutor:
                 while not execution_list.is_empty():
                     node_id, error, ex = await execution_list.stage_node_execution()
                     if error is not None:
+                        self.success = False
                         self.handle_execution_error(prompt_id, dynamic_prompt.original_prompt, current_outputs, executed, error, ex)
                         break
 

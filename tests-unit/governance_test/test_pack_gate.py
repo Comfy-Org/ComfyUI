@@ -385,7 +385,7 @@ def test_real_main_rejects_unknown_pack_without_manager(tmp_path: Path) -> None:
         "import runpy, sys\n"
         "from app import governance\n"
         "governance.initialize = lambda: governance.set_custom_node_policy('allowlist', frozenset(), {})\n"
-        f"sys.argv = [{str(MAIN_PATH)!r}, '--base-directory', {str(tmp_path)!r}, '--cpu', '--disable-api-nodes', '--quick-test-for-ci']\n"
+        f"sys.argv = [{str(MAIN_PATH)!r}, '--base-directory', {str(tmp_path)!r}, '--cpu', '--disable-api-nodes', '--disable-assets', '--quick-test-for-ci']\n"
         f"runpy.run_path({str(MAIN_PATH)!r}, run_name='__main__')\n"
     )
 
