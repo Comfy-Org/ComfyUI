@@ -76,6 +76,32 @@ def test_bmm_split_matches_unsplit(monkeypatch):
     assert torch.allclose(out, torch.bmm(a, b), atol=1e-6)
 
 
+def test_bmm_without_a_split_is_the_plain_op(monkeypatch):
+    monkeypatch.setattr(gemm_chunk, "_OVERRIDE", 0)
+    a = torch.randn(6, 9, 3)
+    b = torch.randn(6, 3, 4)
+    expected = torch.bmm(a, b)
+    calls = _count_calls(monkeypatch, gemm_chunk.torch, "bmm")
+
+    out = gemm_chunk.bmm(a, b)
+
+    assert len(calls) == 1
+    assert torch.equal(out, expected)
+
+
+def test_bmm_that_fits_in_one_chunk_is_the_plain_op(monkeypatch):
+    _force_split(monkeypatch, 4)
+    a = torch.randn(4, 4, 3)
+    b = torch.randn(4, 3, 4)
+    expected = torch.bmm(a, b)
+    calls = _count_calls(monkeypatch, gemm_chunk.torch, "bmm")
+
+    out = gemm_chunk.bmm(a, b)
+
+    assert len(calls) == 1
+    assert torch.equal(out, expected)
+
+
 def test_einsum_split_matches_unsplit(monkeypatch):
     _force_split(monkeypatch, 4)
     p = torch.randn(10, 4)

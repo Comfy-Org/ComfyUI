@@ -136,9 +136,11 @@ def bmm(a, b):
     """torch.bmm, split over the batch count and over the rows of each batch element."""
     rows = row_split()
     batches = batch_split()
-    if not _split_needed(a) or (rows == 0 and batches == 0):
+    if not _split_needed(a):
         return torch.bmm(a, b)
     B, M, _ = a.shape
+    if (rows == 0 or M <= rows) and (batches == 0 or B <= batches):
+        return torch.bmm(a, b)
     out = torch.empty((B, M, b.shape[-1]), dtype=a.dtype, device=a.device)
     for b0, b1 in _chunks(B, batches):
         for s0, s1 in _chunks(M, rows):
