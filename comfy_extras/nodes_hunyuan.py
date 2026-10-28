@@ -234,7 +234,7 @@ class LatentUpscaleModelLoader(io.ComfyNode):
                 in_blocks=len({k.split(".")[1] for k in sd if k.startswith("in_blocks.") and ".in_layers." in k}),
                 out_blocks=len({k.split(".")[1] for k in sd if k.startswith("out_blocks.") and ".in_layers." in k}),
                 temporal_kernel=sd["in_blocks.1.dwconv.weight"].shape[2],
-                dtype=comfy.model_management.vae_dtype(allowed_dtypes=[torch.bfloat16, torch.float32]),
+                dtype=comfy.model_management.vae_dtype(allowed_dtypes=[torch.float16, torch.bfloat16, torch.float32]),
                 operations=comfy.ops.disable_weight_init)
             comfy.model_management.archive_model_dtypes(model)
             model_patcher = comfy.model_patcher.CoreModelPatcher(model, load_device=comfy.model_management.get_torch_device(), offload_device=comfy.model_management.unet_offload_device(), fast_disk=fast_disk)
