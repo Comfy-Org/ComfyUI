@@ -2455,6 +2455,9 @@ class SenseNovaU15(BaseModel):
                 prefix_keys, prefix_values, prefix_time = (
                     self.diffusion_model.preprocess_prefix(
                         *prefix_args,
+                        transformer_options={
+                            "prefetch_dynamic_vbars": self.current_patcher is not None and self.current_patcher.is_dynamic(),
+                        },
                     )
                 )
                 out["prefix_keys"] = SenseNovaSharedList(prefix_keys)

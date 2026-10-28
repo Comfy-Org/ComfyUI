@@ -3,6 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 import comfy.patcher_extension
+import comfy.model_prefetch
 import comfy.utils
 from comfy.ldm.common_dit import pad_to_patch_size
 from comfy.ldm.flux.math import apply_rope1
@@ -328,17 +329,19 @@ class Attention(nn.Module):
         rope,
         prefix_key,
         prefix_value,
+        cache_position,
         transformer_options,
     ):
         """Decode tokens against an existing attention KV prefix."""
 
         query, key, value = self._project(hidden_states, rope, False)
-        key = torch.cat((prefix_key, key), dim=2)
-        value = torch.cat((prefix_value, value), dim=2)
+        end = cache_position + key.shape[2]
+        prefix_key[:, :, cache_position:end].copy_(key)
+        prefix_value[:, :, cache_position:end].copy_(value)
         output = optimized_attention(
             AttentionTensorContainer(query),
-            AttentionTensorContainer(key),
-            AttentionTensorContainer(value),
+            AttentionTensorContainer(prefix_key[:, :, :end]),
+            AttentionTensorContainer(prefix_value[:, :, :end]),
             NUM_HEADS,
             mask=None,
             skip_reshape=True,
@@ -346,7 +349,7 @@ class Attention(nn.Module):
             enable_gqa=True,
             preferred_attention=self.comfy_attention,
         )
-        return self.o_proj(output), key, value
+        return self.o_proj(output), prefix_key, prefix_value
 
 
 class DecoderLayer(nn.Module):
@@ -366,6 +369,15 @@ class DecoderLayer(nn.Module):
         )
         self.post_attention_layernorm_mot_gen = operations.RMSNorm(
             HIDDEN_SIZE, eps=1e-6, device=device, dtype=dtype
+        )
+
+    def text_modules(self):
+        return (
+            self.input_layernorm, self.post_attention_layernorm, self.mlp,
+            self.self_attn.q_proj, self.self_attn.k_proj,
+            self.self_attn.v_proj, self.self_attn.o_proj,
+            self.self_attn.q_norm, self.self_attn.k_norm,
+            self.self_attn.q_norm_hw, self.self_attn.k_norm_hw,
         )
 
     def forward_prefix(self, prefix, prefix_rope, prefix_mask, transformer_options):
@@ -399,6 +411,7 @@ class DecoderLayer(nn.Module):
         rope,
         prefix_key,
         prefix_value,
+        cache_position,
         transformer_options,
     ):
         """Decode tokens through one transformer layer and extend its KV state."""
@@ -408,6 +421,7 @@ class DecoderLayer(nn.Module):
             rope,
             prefix_key,
             prefix_value,
+            cache_position,
             transformer_options,
         )
         hidden_states = hidden_states + attention
@@ -572,16 +586,26 @@ class SenseNovaU15(nn.Module):
         prefix_rope = _prepare_mrope(prefix_indexes, prefix.device, prefix.dtype)
         if transformer_options is None:
             transformer_options = {}
-        for layer_index, layer in enumerate(self.language_model.model.layers):
-            transformer_options["block_index"] = layer_index
-            prefix, prefix_key, prefix_value = layer.forward_prefix(
-                prefix,
-                prefix_rope,
-                prefix_mask,
-                transformer_options,
-            )
-            prefix_keys.append(prefix_key)
-            prefix_values.append(prefix_value)
+        prefetch = comfy.model_prefetch.make_prefetch_queue(
+            [layer.text_modules() for layer in self.language_model.model.layers],
+            prefix.device, transformer_options,
+        )
+        with comfy.model_prefetch.malloc_graph_scope(prefix.device):
+            for layer_index, layer in enumerate(self.language_model.model.layers):
+                comfy.model_prefetch.prefetch_queue_pop(prefetch, prefix.device, layer, prefix.dtype, malloc_scope="prefix")
+                transformer_options["block_index"] = layer_index
+                output, prefix_key, prefix_value = layer.forward_prefix(
+                    prefix,
+                    prefix_rope,
+                    prefix_mask,
+                    transformer_options,
+                )
+                with comfy.model_prefetch.pause_malloc_graph():
+                    prefix_keys.append(prefix_key.clone())
+                    prefix_values.append(prefix_value.clone())
+                prefix.copy_(output)
+                del output, prefix_key, prefix_value
+            comfy.model_prefetch.prefetch_queue_pop(prefetch, prefix.device, None, malloc_scope="prefix")
         return prefix, prefix_keys, prefix_values, prefix_time
 
     def preprocess_prefix(
@@ -617,6 +641,8 @@ class SenseNovaU15(nn.Module):
         prefix_values,
         prefix_time,
         transformer_options=None,
+        *,
+        cache_position,
     ):
         hidden_states = self.language_model.model.embed_tokens(token[:, None])
         positions = prefix_time[:, None]
@@ -630,17 +656,27 @@ class SenseNovaU15(nn.Module):
         next_values = []
         if transformer_options is None:
             transformer_options = {}
-        for layer_index, layer in enumerate(self.language_model.model.layers):
-            transformer_options["block_index"] = layer_index
-            hidden_states, key, value = layer.forward_decode(
-                hidden_states,
-                rope,
-                prefix_keys[layer_index],
-                prefix_values[layer_index],
-                transformer_options,
-            )
-            next_keys.append(key)
-            next_values.append(value)
+        prefetch = comfy.model_prefetch.make_prefetch_queue(
+            [layer.text_modules() for layer in self.language_model.model.layers],
+            hidden_states.device, transformer_options,
+        )
+        with comfy.model_prefetch.malloc_graph_scope(hidden_states.device):
+            for layer_index, layer in enumerate(self.language_model.model.layers):
+                comfy.model_prefetch.prefetch_queue_pop(prefetch, hidden_states.device, layer, hidden_states.dtype, malloc_scope="decode")
+                transformer_options["block_index"] = layer_index
+                output, key, value = layer.forward_decode(
+                    hidden_states,
+                    rope,
+                    prefix_keys[layer_index],
+                    prefix_values[layer_index],
+                    cache_position,
+                    transformer_options,
+                )
+                hidden_states.copy_(output)
+                del output
+                next_keys.append(key)
+                next_values.append(value)
+            comfy.model_prefetch.prefetch_queue_pop(prefetch, hidden_states.device, None, malloc_scope="decode")
         return hidden_states, next_keys, next_values, prefix_time + 1
 
     def generate_thinking_tokens(
@@ -708,6 +744,7 @@ class SenseNovaU15(nn.Module):
             )
         )
         next_token = self._next_text_token(hidden_states)
+        del hidden_states
         token_ids = []
         for step in range(max_tokens):
             if interrupt is not None:
@@ -722,6 +759,13 @@ class SenseNovaU15(nn.Module):
                 return token_ids, token_id
             if step + 1 == max_tokens:
                 break
+            if step == 0:
+                for cache in (prefix_keys, prefix_values):
+                    for layer_index in range(len(cache)):
+                        batch, heads, length, head_dim = cache[layer_index].shape
+                        buffer = cache[layer_index].new_empty((batch, heads, length + max_tokens - 1, head_dim))
+                        buffer[:, :, :length].copy_(cache[layer_index])
+                        cache[layer_index] = buffer
             hidden_states, prefix_keys, prefix_values, prefix_time = (
                 self._decode_text_token(
                     next_token,
@@ -729,9 +773,11 @@ class SenseNovaU15(nn.Module):
                     prefix_values,
                     prefix_time,
                     transformer_options,
+                    cache_position=text_input_ids.shape[1] + step,
                 )
             )
             next_token = self._next_text_token(hidden_states)
+            del hidden_states
 
         return token_ids, None
 

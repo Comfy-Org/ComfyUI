@@ -5,6 +5,7 @@ import torch
 from typing_extensions import override
 
 import comfy.model_management
+import comfy.model_prefetch
 import comfy.utils
 from comfy.ldm.sensenova.conditioning import (
     IMAGE_CONTEXT_ID,
@@ -18,6 +19,7 @@ from comfy.ldm.sensenova.interleave import (
     expand_interleave_inputs,
     prefix_arguments,
 )
+from comfy.ldm.sensenova.model import HEAD_DIM, NUM_KV_HEADS, NUM_LAYERS
 from comfy.ldm.sensenova.sampling import SenseNovaModelSampling
 from comfy_api.latest import ComfyExtension, io, ui
 from comfy_execution.graph_utils import ExecutionBlocker
@@ -391,21 +393,29 @@ def append_interleave_image(metadata, latent_samples):
 
 @contextmanager
 def _generation_context(model, metadata, max_tokens):
-    comfy.model_management.load_models_gpu([model])
+    prefix_length = model.model.extra_conds_shapes(**metadata)["prefix_mask"][-1]
+    dtype_size = comfy.model_management.dtype_size(model.model.get_dtype_inference())
+    kv_bytes = 2 * NUM_LAYERS * NUM_KV_HEADS * HEAD_DIM * (prefix_length + max_tokens) * dtype_size
+    comfy.model_management.load_models_gpu([model], memory_required=kv_bytes)
     with comfy.model_management.cuda_device_context(model.load_device):
         try:
             model.pre_run()
             prefix_args = prefix_arguments(
                 metadata, model.load_device, model.model.get_dtype_inference(), image_only=False
             )
+            transformer_options = model.model_options.get("transformer_options", {}).copy()
+            transformer_options["prefetch_dynamic_vbars"] = model.is_dynamic()
             options = {
-                "transformer_options": model.model_options.get("transformer_options", {}).copy(),
+                "transformer_options": transformer_options,
                 "progress": comfy.utils.ProgressBar(max_tokens).update_absolute,
                 "interrupt": comfy.model_management.throw_exception_if_processing_interrupted,
             }
             yield model.model.diffusion_model, prefix_args, options
         finally:
-            model.cleanup()
+            try:
+                comfy.model_prefetch.cleanup_prefetch_queues()
+            finally:
+                model.cleanup()
 
 
 def _decode_generated_text(clip, token_ids):
