@@ -4,7 +4,7 @@ import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 
-import server
+from middleware.origin_middleware import create_origin_only_middleware
 
 pytestmark = pytest.mark.asyncio
 
@@ -25,7 +25,7 @@ async def ok(request):
     ("POST", "/", NAVIGATION, 403),
 ])
 async def test_cross_site_requests(method, path, headers, expected):
-    app = web.Application(middlewares=[server.create_origin_only_middleware()])
+    app = web.Application(middlewares=[create_origin_only_middleware()])
     app.router.add_route("*", "/", ok)
     app.router.add_route("*", "/api/queue", ok)
     async with TestClient(TestServer(app)) as client:
