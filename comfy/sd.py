@@ -1095,6 +1095,7 @@ class VAE:
                 self.memory_used_encode = lambda shape, dtype: estimate_encode_memory(shape[2], shape[3], shape[4], dtype)
                 if noncausal:
                     self.memory_used_decode = lambda shape, dtype: estimate_decode_memory_noncausal(shape[2], shape[3], shape[4], dtype)
+                    self._tile_bounded_shape = lambda shape, *tiles: tuple(shape)  # the whole clip decodes at once; tile sizes do not bound memory
                 else:
                     self.memory_used_decode = lambda shape, dtype: estimate_decode_memory(self.upscale_ratio[0](shape[2]), shape[3] * self.upscale_ratio[1], shape[4] * self.upscale_ratio[2], dtype)
             elif "pre_block.attn.zero_k_bias" in sd:  # MiniMax H3 audio VAE (DAC encoder + BigVGAN decoder)
