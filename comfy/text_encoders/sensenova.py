@@ -34,15 +34,20 @@ SYSTEM_MESSAGE = (
 )
 
 
-def build_generation_prompt(text):
+def build_generation_prompt(text, thinking=False):
+    """Build a SenseNova image-generation chat prompt."""
+
+    assistant = "<think>\n" if thinking else "<think>\n\n</think>\n\n<img>"
     return (
         f"<|im_start|>system\n{SYSTEM_MESSAGE}<|im_end|>\n"
         f"<|im_start|>user\n{text}<|im_end|>\n"
-        "<|im_start|>assistant\n<think>\n\n</think>\n\n<img>"
+        f"<|im_start|>assistant\n{assistant}"
     )
 
 
 def build_unconditional_prompt():
+    """Build the negative image-generation prompt."""
+
     return "<|im_start|>user\n<|im_end|>\n<|im_start|>assistant\n<img>"
 
 
@@ -108,7 +113,12 @@ class SenseNovaTokenizer(sd1_clip.SD1Tokenizer):
         )
 
     def tokenize_with_weights(self, text, return_word_ids=False, **kwargs):
-        prompt = build_generation_prompt(text) if text else build_unconditional_prompt()
+        thinking = kwargs.pop("thinking", False)
+        prompt = (
+            build_generation_prompt(text, thinking=thinking)
+            if text or thinking
+            else build_unconditional_prompt()
+        )
         tokens = super().tokenize_with_weights(
             prompt,
             return_word_ids=return_word_ids,
