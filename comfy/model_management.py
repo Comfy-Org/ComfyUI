@@ -29,6 +29,7 @@ import weakref
 import gc
 import os
 from contextlib import contextmanager, nullcontext
+import comfy.gemm_chunk
 import comfy.memory_management
 import comfy.system_memory
 import comfy.utils
@@ -939,6 +940,11 @@ def free_memory(memory_required, device, keep_loaded=[], for_dynamic=False, pins
 def load_models_gpu(models, memory_required=0, force_patch_weights=False, minimum_memory_required=None, force_full_load=False):
     cleanup_models_gc()
     global vram_state
+
+    # The GPU is only measured once, before the first model runs: a ROCm build
+    # whose BLAS gets large GEMMs wrong needs them split, and that has to be
+    # known before the first forward pass captures a CUDA graph.
+    comfy.gemm_chunk.measure(get_torch_device())
 
     inference_memory = minimum_inference_memory()
     extra_mem = max(inference_memory, memory_required + extra_reserved_memory())

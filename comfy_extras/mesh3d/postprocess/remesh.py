@@ -8,6 +8,7 @@ from typing import Optional, Tuple
 import numpy as np
 import torch
 import scipy.spatial
+import comfy.gemm_chunk
 import comfy.quant_ops
 import comfy.utils
 from tqdm import tqdm as _tqdm
@@ -279,9 +280,9 @@ def _dual_contour(vox_keys: torch.Tensor, corner_udf: torch.Tensor,
                 n_per_edge[flat_mask] = normals_at_q
                 n_per_edge = n_per_edge.reshape(-1, 12, 3)
 
-                A = torch.einsum('vec,ved->vcd', n_per_edge, n_per_edge)        # (n, 3, 3)
+                A = comfy.gemm_chunk.einsum('vec,ved->vcd', n_per_edge, n_per_edge)  # (n, 3, 3)
                 n_dot_p = (n_per_edge * crossing_pts).sum(dim=-1)
-                b = torch.einsum('ve,vec->vc', n_dot_p, n_per_edge)             # (n, 3)
+                b = comfy.gemm_chunk.einsum('ve,vec->vc', n_dot_p, n_per_edge)       # (n, 3)
 
                 # Tikhonov regularisation, in place on the fresh einsum outputs
                 reg = 1e-2
