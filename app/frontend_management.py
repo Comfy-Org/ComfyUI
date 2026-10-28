@@ -166,10 +166,14 @@ class FrontEndProvider:
         elif version == "prerelease":
             return self.latest_prerelease
         else:
-            for release in self.all_releases:
-                if release["tag_name"] in [version, f"v{version}"]:
-                    return release
-            raise ValueError(f"Version {version} not found in releases")
+            tags = [version] if version.startswith("v") else [f"v{version}", version]
+            for tag in tags:
+                response = requests.get(f"{self.release_url}/tags/{tag}", timeout=REQUEST_TIMEOUT)
+                if response.status_code == 404:
+                    continue
+                response.raise_for_status()
+                return response.json()
+            raise ValueError(f"Version {version} not found in {self.owner}/{self.repo} releases")
 
 
 def download_release_asset_zip(release: Release, destination_path: str) -> None:
