@@ -63,16 +63,22 @@ def test_blend_keeps_spatial_resize_for_unequal_batches():
     """Matching the batch must not stop image2 from being resized to image1."""
     image1 = images(1, 0.1, size=4)
     image2 = images(3, 0.5, size=8)
+    # A gradient, so a wrong resize method cannot pass on the pixel values.
+    image2 = image2 + torch.arange(8 * 8, dtype=image2.dtype).view(1, 8, 8, 1) / 100
 
     out = Blend.execute(image1, image2, 0.5, "normal").result[0]
 
     assert out.shape == (3, 4, 4, 3)
+    resized_image2 = torch.nn.functional.interpolate(
+        image2.permute(0, 3, 1, 2), size=(4, 4), mode="bicubic"
+    ).permute(0, 2, 3, 1)
+    torch.testing.assert_close(out, (image1 + resized_image2) * 0.5)
 
 
 def test_image2_is_resized_before_it_is_repeated():
     """Resizing after repeating would copy a large image2 across the whole batch."""
     image1 = images(16, 0.1, size=4)
-    image2 = images(1, 0.5, size=64)
+    image2 = images(2, 0.5, size=64)
     resized_batches = []
 
     real_upscale = comfy.utils.common_upscale
@@ -84,7 +90,7 @@ def test_image2_is_resized_before_it_is_repeated():
     with mock.patch.object(comfy.utils, "common_upscale", spy):
         out = Blend.execute(image1, image2, 0.5, "normal").result[0]
 
-    assert resized_batches == [1]
+    assert resized_batches == [2]
     assert out.shape == (16, 4, 4, 3)
 
 
