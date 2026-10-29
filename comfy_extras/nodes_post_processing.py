@@ -39,6 +39,9 @@ class Blend(io.ComfyNode):
     def execute(cls, image1: torch.Tensor, image2: torch.Tensor, blend_factor: float, blend_mode: str) -> io.NodeOutput:
         image1, image2 = node_helpers.image_alpha_fix(image1, image2)
         image2 = image2.to(image1.device)
+        batch_size = max(image1.shape[0], image2.shape[0])
+        image1 = comfy.utils.repeat_to_batch_size(image1, batch_size)
+        image2 = comfy.utils.repeat_to_batch_size(image2, batch_size)
         if image1.shape != image2.shape:
             image2 = image2.permute(0, 3, 1, 2)
             image2 = comfy.utils.common_upscale(image2, image1.shape[2], image1.shape[1], upscale_method='bicubic', crop='center')
