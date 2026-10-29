@@ -4,6 +4,7 @@ import torch.nn.functional as F
 
 import comfy.patcher_extension
 import comfy.model_prefetch
+import comfy.ops
 import comfy.utils
 from comfy.ldm.common_dit import pad_to_patch_size
 from comfy.ldm.flux.math import apply_rope1
@@ -532,7 +533,11 @@ class SenseNovaU15(nn.Module):
     def _prepare_prefix(
         self, text_input_ids, reference_images, prefix_indexes, prefix_mask
     ):
-        prefix = self.language_model.model.embed_tokens(text_input_ids)
+        embed = self.language_model.model.embed_tokens
+        if hasattr(embed, "_v") and embed.weight_lowvram_function is None and len(embed.weight_function) == 0 and comfy.ops.vbar_above_watermark(embed):
+            prefix = embed.host_rows(text_input_ids)
+        else:
+            prefix = embed(text_input_ids)
         if reference_images:
             reference_embeds = [
                 self.vision_model(_pad_to_merged_patch_size(reference))
@@ -641,7 +646,11 @@ class SenseNovaU15(nn.Module):
         rope,
         transformer_options=None,
     ):
-        hidden_states.copy_(self.language_model.model.embed_tokens(token[:, None]))
+        embed = self.language_model.model.embed_tokens
+        if hasattr(embed, "_v") and embed.weight_lowvram_function is None and len(embed.weight_function) == 0 and comfy.ops.vbar_above_watermark(embed):
+            hidden_states.copy_(embed.host_rows(token[:, None], out_dtype=hidden_states.dtype))
+        else:
+            hidden_states.copy_(embed(token[:, None]))
         if caches:
             caches[0].prepare(1)
         if transformer_options is None:
@@ -729,6 +738,7 @@ class SenseNovaU15(nn.Module):
                 transformer_options,
             )
         )
+        comfy.model_prefetch.cleanup_malloc_graph()
         next_token = self._next_text_token(hidden_states)
         decode_hidden = torch.empty_like(hidden_states[:, -1:])
         del hidden_states

@@ -1401,7 +1401,7 @@ def test_sensenova_interleave_negative_modes_preserve_generation_and_decode(
 
     image = torch.full((1, 32, 32, 3), 0.5)
     text, images, thinking = SenseNovaDecode.execute(
-        clip=clip, conditioning=second.args[0], image=image,
+        clip=clip, conditioning=second.args[0], samples={"samples": torch.zeros(1, 3, 32, 32)},
     ).args
     assert text == "K<image>"
     assert thinking == ""
@@ -1946,7 +1946,7 @@ def test_sensenova_decode_includes_pending_image_once_without_mutating_history()
 
     for _ in range(2):
         text, images, thinking = SenseNovaDecode.execute(
-            clip=tokenizer, conditioning=conditioning, image=final_image,
+            clip=tokenizer, conditioning=conditioning, samples={"samples": torch.ones(1, 3, 64, 32)},
         ).args
         assert text == "before<image>between<image>"
         assert thinking == ""
@@ -1958,8 +1958,7 @@ def test_sensenova_decode_includes_pending_image_once_without_mutating_history()
     assert metadata["sensenova_interleave_pending_image"] is True
 
 
-@pytest.mark.parametrize("with_image", [False, True])
-def test_sensenova_decode_accepts_pending_latent_without_mutating_history(with_image):
+def test_sensenova_decode_accepts_pending_latent_without_mutating_history():
     metadata = expand_interleave_metadata(
         {"text_input_ids": _generation_input_ids()[:, :-1]}, image_only=False,
     )
@@ -1968,12 +1967,11 @@ def test_sensenova_decode_accepts_pending_latent_without_mutating_history(with_i
     metadata = append_interleave_tokens(metadata, [151670], True)
     conditioning = [[torch.empty(1), metadata]]
     samples = {"samples": torch.tensor([[[[-2.0, 0.0, 2.0]]]]).expand(1, 3, 1, 3).clone()}
-    inputs = {"image": torch.ones(1, 1, 3, 3)} if with_image else {}
 
     for _ in range(2):
         text, images, thinking = SenseNovaDecode.execute(
             clip=SenseNovaQwenTokenizer(), conditioning=conditioning,
-            samples=samples, **inputs,
+            samples=samples,
         ).args
         assert text == "<image><image>"
         assert thinking == ""
@@ -2012,7 +2010,6 @@ def test_sensenova_decode_text_only_and_ignores_stale_image(generated, expected_
 
     text, images, thinking = SenseNovaDecode.execute(
         clip=tokenizer, conditioning=[[torch.empty(1), metadata]],
-        image=torch.ones(1, 32, 32, 3),
         samples={"samples": torch.ones(1, 3, 32, 32)},
     ).args
 
@@ -2025,7 +2022,7 @@ def test_sensenova_decode_text_only_and_ignores_stale_image(generated, expected_
 
 def test_sensenova_decode_has_typed_inputs_and_image_list_output():
     schema = SenseNovaDecode.GET_SCHEMA()
-    assert [value.id for value in schema.inputs] == ["clip", "conditioning", "image", "samples"]
+    assert [value.id for value in schema.inputs] == ["clip", "conditioning", "samples"]
     assert [value.display_name for value in schema.outputs] == ["text", "images", "thinking"]
     assert schema.outputs[1].is_output_list is True
     assert not schema.is_input_list

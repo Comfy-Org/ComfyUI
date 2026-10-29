@@ -2423,10 +2423,10 @@ class SenseNovaU15(BaseModel):
     def get_dynamic_vram__units(self):
         language = self.diffusion_model.language_model
         units = [layer.text_modules() for layer in language.model.layers]
-        units.extend([language.model.embed_tokens, language.model.norm])
+        units.append(language.model.norm)
         if self.diffusion_model.has_lm_head:
             units.append(language.lm_head)
-        return units, []
+        return units, [language.model.embed_tokens]
 
     def process_timestep(self, timestep, **kwargs):
         base_timestep = timestep / self.model_sampling.multiplier
