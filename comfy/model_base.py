@@ -2294,14 +2294,33 @@ class MiniMaxH3(BaseModel):
         return [primary_indices, [a for k in primary_indices for a in range(edges[k], edges[k + 1])]]
 
     def _window_payload(self, payload, window):
-        # keyframes anchor pixel frames of the full video: keep the ones starting inside the window, re-anchored to its start
+        # keyframes anchor the full video's timeline: keep the part of each guide inside the window, cropped and re-anchored to it
         starts = self._latent_pixel_starts(window.total_frames)
         first, last = window.index_list[0], window.index_list[-1]
         origin = starts[first]
         if getattr(window, "causal_anchor_index", None) is not None:
             origin -= comfy.ldm.minimax.model.FRAME_PER_TOKEN[0]  # the anchor latent takes the window's first time slot
-        keyframes = [{**kf, "resolved_frame_index": kf["resolved_frame_index"] - origin}
-                     for kf in payload["keyframes"] if starts[first] <= kf["resolved_frame_index"] < starts[last + 1]]
+        audio_window = window.get_window_for_modality(1)
+        a0, a1 = audio_window.index_list[0], audio_window.index_list[-1] + 1
+        rescale = comfy.ldm.minimax.model.FRAME_RESCALE
+        keyframes = []
+        for kf in payload["keyframes"]:
+            f = kf["resolved_frame_index"]
+            latent = kf.get("latent")
+            if latent is not None:
+                # crop at the guide's 5-latent chunk starts so the clip keeps its 1,4,4,4,4 frame pattern
+                guide_starts = self._latent_pixel_starts(latent.shape[2])
+                chunks = [g for g in range(0, latent.shape[2], 5) if starts[first] <= f + guide_starts[g] < starts[last + 1]]
+                if chunks:
+                    keyframes.append({"resolved_frame_index": f + guide_starts[chunks[0]] - origin,
+                                      "latent": latent[:, :, chunks[0]:chunks[-1] + 5]})
+            audio = kf.get("audio_latent")
+            if audio is not None:
+                # audio guide frame j sits at rescale * f + j on the shared time axis; the window's audio starts at a0
+                t = rescale * f
+                j0, j1 = max(0, math.ceil(a0 - t)), min(audio.shape[-1], math.ceil(a1 - t))
+                if j1 > j0:
+                    keyframes.append({"resolved_frame_index": (t + j0 - a0) / rescale, "audio_latent": audio[..., j0:j1]})
         payload = {k: v for k, v in payload.items() if k != "layout"}  # forward rebuilds it for the window
         payload["keyframes"] = keyframes
         payload.update(self._cond_latents(keyframes, payload.get("refs")))
