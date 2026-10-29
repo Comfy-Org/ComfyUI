@@ -1211,6 +1211,21 @@ class TestExecution:
         assert job['status'] == 'completed'
         assert output.id in job['outputs'], "Cached outputs must appear in job outputs without a client_id"
 
+    def test_cached_output_meta_names_its_own_node(self, client: ComfyClient, builder: GraphBuilder):
+        """Two identical previews share a cache entry; each must keep its own meta in the job detail."""
+        g = builder
+        image = g.node("StubImage", content="BLACK", height=32, width=32, batch_size=1)
+        first = g.node("PreviewImage", images=image.out(0))
+        second = g.node("PreviewImage", images=image.out(0))
+
+        result = client.run(g)
+        job = client.get_job(result.get_prompt_id())
+
+        meta = job['execution_meta']
+        for node in (first, second):
+            assert meta[node.id]['node_id'] == node.id
+            assert meta[node.id]['display_node'] == node.id
+
     def _create_history_item(self, client, builder):
         g = GraphBuilder(prefix="offset_test")
         input_node = g.node(

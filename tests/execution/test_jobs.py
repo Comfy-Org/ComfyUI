@@ -686,7 +686,7 @@ class TestNormalizeHistoryItem:
     def test_include_outputs_returns_execution_meta(self):
         """Detail view should expose each node's display node as execution_meta."""
         meta = {
-            '15.0.0.3': {'node_id': '3', 'display_node': '15', 'parent_node': '15', 'real_node_id': '3'},
+            '15.0.0.3': {'node_id': '15.0.0.3', 'display_node': '15', 'parent_node': '15', 'real_node_id': '3'},
             '9': {'node_id': '9', 'display_node': '9', 'parent_node': None, 'real_node_id': '9'},
         }
         history_item = {

@@ -384,3 +384,23 @@ def test_emit_cached_sends_enriched_output_to_client(output_path_environment) ->
     assert event == "executed"
     assert client_id == "client-1"
     assert payload["output"]["images"][0]["id"] is not None
+
+
+def test_cached_output_records_the_current_nodes_meta(output_path_environment) -> None:
+    """A cache entry shared by two nodes must not carry the first node's meta into the second's history."""
+    manager = InMemoryAssets()
+    server = _Server(client_id="client-1")
+    ui_outputs: dict = {}
+    cached = _CacheEntry(ui=_wrapper("shared.png", node_id="4"), outputs=[])
+    current_meta = {
+        "node_id": "7",
+        "display_node": "7",
+        "parent_node": None,
+        "real_node_id": "7",
+    }
+
+    register_executed_outputs(_output("shared.png"), "seed-job", manager)
+    emit_cached_output(server, "7", "7", cached, "prompt-1", ui_outputs, manager, meta=current_meta)
+
+    assert ui_outputs["7"]["meta"] == current_meta
+    assert cached.ui["meta"]["node_id"] == "4"
