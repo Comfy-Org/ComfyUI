@@ -126,11 +126,15 @@ def register_cached_outputs(ui_wrapper: dict | None, job_id: str, asset_manager:
     return enriched
 
 
-def emit_cached_output(server: "ExecutionServer", node_id: str, display_node_id: str, cached: "CacheEntry", prompt_id: str, ui_outputs: dict, asset_manager: "AssetManager") -> None:
+def emit_cached_output(server: "ExecutionServer", node_id: str, display_node_id: str, cached: "CacheEntry", prompt_id: str, ui_outputs: dict, asset_manager: "AssetManager", meta: dict | None = None) -> None:
     if node_id in ui_outputs:
         return
     enriched = register_cached_outputs(cached.ui, prompt_id, asset_manager)
     if enriched is not None:
+        # The cache entry may have been written by another node with the same
+        # inputs, so record this node's meta rather than the writer's.
+        if meta is not None:
+            enriched["meta"] = meta
         ui_outputs[node_id] = enriched
     if server.client_id is None:
         return
