@@ -953,7 +953,7 @@ def _hailuo03_reference_inputs():
                 min=0,
             ),
             tooltip="Subject or style reference images, referred to in the prompt "
-            "as 'Image 1'..'Image 9' in connection order. Up to 9 images.",
+            "as @Image1..@Image9 in connection order. Up to 9 images.",
         ),
         IO.Autogrow.Input(
             "reference_videos",
@@ -963,7 +963,7 @@ def _hailuo03_reference_inputs():
                 min=0,
             ),
             tooltip="Motion or scene reference videos, referred to in the prompt "
-            "as 'Video 1'..'Video 3' in connection order. Up to 3 videos, "
+            "as @Video1..@Video3 in connection order. Up to 3 videos, "
             "2-15 seconds each, 15 seconds in total.",
         ),
         IO.Autogrow.Input(
@@ -974,7 +974,7 @@ def _hailuo03_reference_inputs():
                 min=0,
             ),
             tooltip="Audio references, referred to in the prompt as "
-            "'Audio 1'..'Audio 3' in connection order. Up to 3 clips, "
+            "@Audio1..@Audio3 in connection order. Up to 3 clips, "
             "2-15 seconds each, 15 seconds in total. Cannot be used without "
             "a reference image or video.",
         ),
@@ -990,7 +990,7 @@ class MinimaxHailuo03ReferenceNode(IO.ComfyNode):
             category="partner/video/MiniMax",
             description="Generate video conditioned on reference images, videos, and audio using the "
             "MiniMax H3 models. Refer to the references in the prompt by their order: "
-            "'Image 1', 'Image 2', 'Video 1', 'Audio 1', and so on.",
+            "@Image1, @Image2, @Video1, @Audio1, and so on.",
             inputs=[
                 IO.DynamicCombo.Input(
                     "model",
@@ -1103,6 +1103,10 @@ class MinimaxHailuo03ReferenceNode(IO.ComfyNode):
         reference_audios = model.get("reference_audios", {})
         if not reference_images and not reference_videos:
             raise ValueError("At least one reference image or video is required.")
+        prompt = _hailuo03_resolve_ref_tags(
+            model["prompt"],
+            {"image": len(reference_images), "video": len(reference_videos), "audio": len(reference_audios)},
+        )
 
         is_max = model["model"] == HAILUO_03_MAX_MODEL
         min_clip_duration = 2.0 if is_max else 1.8
@@ -1184,7 +1188,7 @@ class MinimaxHailuo03ReferenceNode(IO.ComfyNode):
                 model=HAILUO_03_MAX_MODEL,
                 endpoint="reference-to-video",
                 request=Hailuo03MaxVideoRequest(
-                    prompt=model["prompt"],
+                    prompt=prompt,
                     duration=model["duration"],
                     resolution=model["resolution"],
                     prompt_expansion_mode=model["prompt_expansion_mode"],
@@ -1196,7 +1200,7 @@ class MinimaxHailuo03ReferenceNode(IO.ComfyNode):
                 ),
             )
 
-        content: list = [Hailuo03TextContent(text=model["prompt"])]
+        content: list = [Hailuo03TextContent(text=prompt)]
         for i, image in enumerate(reference_images.values(), 1):
             content.append(
                 Hailuo03ImageContent(
