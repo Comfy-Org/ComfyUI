@@ -27,6 +27,10 @@ require a configured provider, dependency, device, model or user interaction.
 ownership and consumption semantics. Its generated contract and runtime
 qualification remain pending; do not treat it as an adopted corpus revision.
 
+[Encoded media groups](encoded-media-groups.md) are an unqualified source draft.
+They use a separate managed namespace and explicit failed-entry policy; exact
+legacy naming and failure-artifact parity require a compatibility disposition.
+
 The default context currently raises `NotImplementedError` for every operation
 in these domains:
 

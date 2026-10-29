@@ -79,6 +79,10 @@ from ._civitai import InProcessCivitai
 from ._ollama import InProcessOllama
 from ._llama_cpp import InProcessLlamaCpp
 from ._deferred_audio import AudioDecodeError, AudioWindow, DeferredAudio, DeferredAudioPool
+from ._encoded_media import (
+    EncodedMediaEntry, EncodedMediaGroup, FailedEntryPolicy, MediaRole,
+    refuse_group_namespace,
+)
 
 if TYPE_CHECKING:  # keep this module import-safe / torch-free at import time
     pass
@@ -1797,6 +1801,46 @@ class AssetRef(_TypedRef):
     KIND = "ASSET"
 
 
+class MediaGroupRef(_TypedRef):
+    """Dispatch-owned output names, publication and intermediate cleanup.
+
+    Descriptors alone grant neither asset reads nor preview authority.
+    """
+
+    KIND = "MEDIA_OUTPUT_GROUP"
+
+    async def reserve(
+        self, entry_id: str, suffix: str, role: MediaRole = "final",
+    ) -> EncodedMediaEntry:
+        return await current_runtime().ops.apply("media_group.reserve", self, {
+            "entry_id": entry_id, "suffix": suffix, "role": role,
+        })
+
+    async def publish(
+        self, entry_id: str, chunks: AsyncIterable[bytes], *, max_bytes: int,
+    ) -> EncodedMediaEntry:
+        """Publish incrementally; committed ID replay does not consume chunks."""
+        return await current_runtime().ctx.output._publish_encoded_media(
+            self, entry_id, chunks, max_bytes=max_bytes,
+        )
+
+    async def entries(self) -> list[EncodedMediaEntry]:
+        return await current_runtime().ops.apply("media_group.entries", self, {})
+
+    async def remove(self, entry_id: str) -> EncodedMediaEntry:
+        """Remove an owned file while retaining its logical record."""
+        return await current_runtime().ops.apply("media_group.remove", self, {"entry_id": entry_id})
+
+    async def close(self) -> None:
+        await current_runtime().refs.release(self)
+
+    async def __aenter__(self) -> "MediaGroupRef":
+        return self
+
+    async def __aexit__(self, *_exc: object) -> None:
+        await self.close()
+
+
 class Hooks:
     """Native HookGroups retained on the host behind opaque references."""
 
@@ -2271,6 +2315,19 @@ class UiDomain(Protocol):
 
 
 class OutputDomain(Protocol):
+    async def reserve_media_group(
+        self, filename_prefix: str, *, max_bytes: int, max_entries: int,
+        timeout_seconds: float, failed_entry_policy: FailedEntryPolicy,
+        save_output: bool = True,
+    ) -> MediaGroupRef:
+        """Reserve an output/temp group under a separate managed namespace."""
+        ...
+
+    async def _publish_encoded_media(
+        self, group: MediaGroupRef, entry_id: str, chunks: AsyncIterable[bytes],
+        *, max_bytes: int,
+    ) -> EncodedMediaEntry: ...
+
     async def copy_asset(self, ref: AssetRef, *, name: str, max_bytes: int) -> AssetCopyResult: ...
 
     async def save_images(
@@ -2680,7 +2737,20 @@ class InProcessRefResolver:
         return obj
 
     async def release(self, ref: Ref) -> None:
-        self._table.pop(ref.id, None)
+        entry = self._table.pop(ref.id, None)
+        if entry is not None and type(entry[1]) is EncodedMediaGroup:
+            entry[1].close()
+
+    def close_media_groups(self) -> None:
+        errors = []
+        for kind, value in list(self._table.values()):
+            if kind == "MEDIA_OUTPUT_GROUP" and type(value) is EncodedMediaGroup:
+                try:
+                    value.close()
+                except OSError as error:
+                    errors.append(error)
+        if errors:
+            logger.error("media group directory cleanup failed: %s", errors)
 
     def clear(self) -> int:
         """Drop every entry. Returns how many.
@@ -2697,8 +2767,11 @@ class InProcessRefResolver:
         nothing waits for the collector.
         """
         n = len(self._table)
-        self._table.clear()
         self._closed = True
+        try:
+            self.close_media_groups()
+        finally:
+            self._table.clear()
         return n
 
 
@@ -5897,8 +5970,53 @@ class _InProcessUi:
         }]}
 
 
+async def _media_group_value(ref: "MediaGroupRef") -> EncodedMediaGroup:
+    if not isinstance(ref, Ref) or ref.kind != "MEDIA_OUTPUT_GROUP":
+        raise TypeError("encoded media requires a media group ref")
+    value = await current_runtime().refs.resolve(ref)
+    if type(value) is not EncodedMediaGroup:
+        raise TypeError("media group ref does not hold an owned reservation")
+    return value
+
+
 class _InProcessOutput:
+    async def reserve_media_group(
+        self, filename_prefix: str, *, max_bytes: int, max_entries: int,
+        timeout_seconds: float, failed_entry_policy: FailedEntryPolicy,
+        save_output: bool = True,
+    ) -> MediaGroupRef:
+        import folder_paths
+
+        rt = current_runtime()
+        if type(rt.refs) is not InProcessRefResolver:
+            raise NotImplementedError("media groups require a dispatch-owned ref resolver")
+        if self._media_groups_created >= 16:
+            raise ValueError("media group count exceeded for this dispatch")
+        if type(save_output) is not bool:
+            raise TypeError("media group save_output must be a boolean")
+        root = folder_paths.get_output_directory() if save_output else folder_paths.get_temp_directory()
+        group = EncodedMediaGroup(
+            root, filename_prefix, "output" if save_output else "temp",
+            max_bytes=max_bytes, max_entries=max_entries, timeout_seconds=timeout_seconds,
+            failed_entry_policy=failed_entry_policy,
+        )
+        try:
+            ref = MediaGroupRef._wrap(await rt.refs.create("MEDIA_OUTPUT_GROUP", group))
+        except BaseException:
+            group.close()
+            raise
+        self._media_groups_created += 1
+        return ref
+
+    async def _publish_encoded_media(
+        self, group: MediaGroupRef, entry_id: str, chunks: AsyncIterable[bytes],
+        *, max_bytes: int,
+    ) -> EncodedMediaEntry:
+        value = await _media_group_value(group)
+        return await value.publish(entry_id, chunks, max_bytes)
+
     async def copy_asset(self, ref: AssetRef, *, name: str, max_bytes: int):
+        refuse_group_namespace(name)
         provider = providers.asset_media_provider
         if provider is None:
             raise NotImplementedError("managed asset media provider is unavailable")
@@ -5924,6 +6042,7 @@ class _InProcessOutput:
     _IMAGE_BATCH_MAX = 4096
 
     def __init__(self, prompt: Any = None, extra_pnginfo: Any = None) -> None:
+        self._media_groups_created = 0
         self._prompt = prompt
         self._extra_pnginfo = extra_pnginfo
         self._metadata_owner = _image_metadata_owner(prompt, extra_pnginfo)
@@ -5950,6 +6069,7 @@ class _InProcessOutput:
             if subfolder else filename_prefix)
         if prefix in ("", ".", os.pardir) or prefix.startswith(os.pardir + os.sep):
             raise ValueError("output name must stay inside the output directory")
+        refuse_group_namespace(prefix)
         return prefix
 
     @classmethod
@@ -5982,6 +6102,7 @@ class _InProcessOutput:
     ) -> tuple[str, str, str, str]:
         """Validate one exact logical filename and resolve its confined target."""
         logical = str(filename).replace("\\", "/")
+        refuse_group_namespace(logical)
         if (
             not logical or "\x00" in logical or logical.startswith("/")
             or re.match(r"^[A-Za-z]:($|/)", logical)
@@ -6021,6 +6142,7 @@ class _InProcessOutput:
             confined_target = False
         if not confined_target:
             raise ValueError("image filename escapes the output directory")
+        refuse_group_namespace(os.path.relpath(target, root))
         subfolder = "/".join(parts[:-1])
         return target, logical, parts[-1], subfolder
 
@@ -6374,6 +6496,7 @@ class _InProcessOutput:
             raise ValueError("text output exceeds the 16 MiB limit")
 
         relative = os.path.normpath(str(filename))
+        refuse_group_namespace(relative)
         if (os.path.isabs(relative) or relative in ("", ".", os.pardir)
                 or relative.startswith(os.pardir + os.sep)):
             raise ValueError("text filename must stay inside its output folder")
@@ -6382,6 +6505,7 @@ class _InProcessOutput:
         target = os.path.realpath(os.path.abspath(os.path.join(root, relative)))
         if os.path.commonpath((root, target)) != root:
             raise ValueError("text filename escapes its output folder")
+        refuse_group_namespace(os.path.relpath(target, root))
         os.makedirs(os.path.dirname(target), exist_ok=True)
 
         if mode == "new_only":
@@ -9878,6 +10002,9 @@ class InProcessOps:
     def __init__(self, *, allow_deferred_audio: bool = False) -> None:
         self._deferred_audio = DeferredAudioPool()
         self._ops: dict[str, Callable[..., Awaitable["ImageRef"]]] = {
+            "media_group.reserve": self._media_group_reserve,
+            "media_group.entries": self._media_group_entries,
+            "media_group.remove": self._media_group_remove,
             "ref.describe": self._ref_describe,
             "interpolation_states.skip_mask":
                 _vendor_ops.interpolation_states_skip_mask,
@@ -10032,6 +10159,17 @@ class InProcessOps:
         window = AudioWindow(start_seconds, duration_seconds, max_decoded_bytes, timeout_seconds)
         value = await asyncio.to_thread(self._deferred_audio.capture, os.fspath(path), window, max_source_bytes)
         return AudioRef._wrap(await rt.refs.create("AUDIO", value))
+
+    async def _media_group_reserve(
+        self, group: "MediaGroupRef", entry_id: str, suffix: str, role: MediaRole = "final",
+    ) -> EncodedMediaEntry:
+        return (await _media_group_value(group)).reserve(entry_id, suffix, role)
+
+    async def _media_group_entries(self, group: "MediaGroupRef") -> list[EncodedMediaEntry]:
+        return (await _media_group_value(group)).entries()
+
+    async def _media_group_remove(self, group: "MediaGroupRef", entry_id: str) -> EncodedMediaEntry:
+        return (await _media_group_value(group)).remove(entry_id)
 
     def register_op(self, name: str, fn: Callable[..., Awaitable["ImageRef"]]) -> None:
         self._ops[name] = fn
@@ -14392,6 +14530,8 @@ async def unwrap_outputs(resolver: "RefResolver", node_output: Any) -> Any:
         return node_output
     async def resolve(value: Any) -> Any:
         if isinstance(value, Ref):
+            if value.kind == "MEDIA_OUTPUT_GROUP":
+                raise TypeError("media groups cannot escape their creating dispatch")
             return await resolver.resolve(value)
         if isinstance(value, list):
             return [await resolve(item) for item in value]
@@ -14402,6 +14542,19 @@ async def unwrap_outputs(resolver: "RefResolver", node_output: Any) -> Any:
         return value
 
     resolved = [await resolve(value) for value in args]
+    pending = list(resolved)
+    inspected: set[int] = set()
+    while pending:
+        value = pending.pop()
+        if id(value) in inspected:
+            continue
+        inspected.add(id(value))
+        if type(value) is EncodedMediaGroup or (isinstance(value, Ref) and value.kind == "MEDIA_OUTPUT_GROUP"):
+            raise TypeError("media groups cannot escape their creating dispatch")
+        if type(value) is dict:
+            pending.extend(value.values())
+        elif type(value) in (list, tuple):
+            pending.extend(value)
     from ._io import NodeOutput
 
     # Rebuilding the NodeOutput must preserve everything that is not a result.
