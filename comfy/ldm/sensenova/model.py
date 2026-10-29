@@ -9,6 +9,7 @@ from comfy.ldm.common_dit import pad_to_patch_size
 from comfy.ldm.flux.math import apply_rope1
 from comfy.ldm.modules.attention import AttentionTensorContainer, ComfyAttention, optimized_attention
 from comfy.ldm.modules.diffusionmodules.mmdit import TimestepEmbedder
+from comfy.text_encoders.llama import FixedKV
 
 from .conditioning import IMAGE_CONTEXT_ID, IM_END_ID, THINK_END_ID
 from .sampling import resolution_noise_scale
@@ -327,29 +328,31 @@ class Attention(nn.Module):
         self,
         hidden_states,
         rope,
-        prefix_key,
-        prefix_value,
-        cache_position,
+        cache,
         transformer_options,
     ):
         """Decode tokens against an existing attention KV prefix."""
 
         query, key, value = self._project(hidden_states, rope, False)
-        end = cache_position + key.shape[2]
-        prefix_key[:, :, cache_position:end].copy_(key)
-        prefix_value[:, :, cache_position:end].copy_(value)
+        key, value = key.transpose(1, 2), value.transpose(1, 2)
+        position = cache.position.view(-1, 1, 1, 1).expand_as(key)
+        cache.key.scatter_(1, position, key)
+        cache.value.scatter_(1, position, value)
+        mask = torch.zeros(
+            (hidden_states.shape[0], 1, 1, cache.key.shape[1]), device=query.device, dtype=query.dtype,
+        ).masked_fill_(torch.arange(cache.key.shape[1], device=query.device) >= cache.seqlen.view(-1, 1, 1, 1), float("-inf"))
         output = optimized_attention(
             AttentionTensorContainer(query),
-            AttentionTensorContainer(prefix_key[:, :, :end]),
-            AttentionTensorContainer(prefix_value[:, :, :end]),
+            AttentionTensorContainer(cache.key.transpose(1, 2)),
+            AttentionTensorContainer(cache.value.transpose(1, 2)),
             NUM_HEADS,
-            mask=None,
+            mask=mask,
             skip_reshape=True,
             transformer_options=transformer_options,
             enable_gqa=True,
             preferred_attention=self.comfy_attention,
         )
-        return self.o_proj(output), prefix_key, prefix_value
+        return self.o_proj(output)
 
 
 class DecoderLayer(nn.Module):
@@ -409,26 +412,22 @@ class DecoderLayer(nn.Module):
         self,
         hidden_states,
         rope,
-        prefix_key,
-        prefix_value,
-        cache_position,
+        cache,
         transformer_options,
     ):
         """Decode tokens through one transformer layer and extend its KV state."""
 
-        attention, key, value = self.self_attn.forward_decode(
+        attention = self.self_attn.forward_decode(
             self.input_layernorm(hidden_states),
             rope,
-            prefix_key,
-            prefix_value,
-            cache_position,
+            cache,
             transformer_options,
         )
         hidden_states = hidden_states + attention
         hidden_states = hidden_states + self.mlp(
             self.post_attention_layernorm(hidden_states)
         )
-        return hidden_states, key, value
+        return hidden_states
 
 
 class LanguageBackbone(nn.Module):
@@ -637,23 +636,14 @@ class SenseNovaU15(nn.Module):
     def _decode_text_token(
         self,
         token,
-        prefix_keys,
-        prefix_values,
-        prefix_time,
+        caches,
+        hidden_states,
+        rope,
         transformer_options=None,
-        *,
-        cache_position,
     ):
-        hidden_states = self.language_model.model.embed_tokens(token[:, None])
-        positions = prefix_time[:, None]
-        zeros = torch.zeros_like(positions)
-        rope = _prepare_mrope(
-            torch.stack((positions, zeros, zeros)),
-            hidden_states.device,
-            hidden_states.dtype,
-        )
-        next_keys = []
-        next_values = []
+        hidden_states.copy_(self.language_model.model.embed_tokens(token[:, None]))
+        if caches:
+            caches[0].prepare(1)
         if transformer_options is None:
             transformer_options = {}
         prefetch = comfy.model_prefetch.make_prefetch_queue(
@@ -662,22 +652,18 @@ class SenseNovaU15(nn.Module):
         )
         with comfy.model_prefetch.malloc_graph_scope(hidden_states.device):
             for layer_index, layer in enumerate(self.language_model.model.layers):
-                comfy.model_prefetch.prefetch_queue_pop(prefetch, hidden_states.device, layer, hidden_states.dtype, malloc_scope="decode")
                 transformer_options["block_index"] = layer_index
-                output, key, value = layer.forward_decode(
-                    hidden_states,
-                    rope,
-                    prefix_keys[layer_index],
-                    prefix_values[layer_index],
-                    cache_position,
-                    transformer_options,
+                cache = caches[layer_index]
+
+                def core():
+                    hidden_states.copy_(layer.forward_decode(hidden_states, rope, cache, transformer_options))
+
+                comfy.model_prefetch.prefetch_queue_pop(
+                    prefetch, hidden_states.device, layer.input_layernorm, hidden_states.dtype,
+                    core=core, enable_graph=True, malloc_scope="decode",
                 )
-                hidden_states.copy_(output)
-                del output
-                next_keys.append(key)
-                next_values.append(value)
+                cache.advance(1)
             comfy.model_prefetch.prefetch_queue_pop(prefetch, hidden_states.device, None, malloc_scope="decode")
-        return hidden_states, next_keys, next_values, prefix_time + 1
 
     def generate_thinking_tokens(
         self,
@@ -744,6 +730,7 @@ class SenseNovaU15(nn.Module):
             )
         )
         next_token = self._next_text_token(hidden_states)
+        decode_hidden = torch.empty_like(hidden_states[:, -1:])
         del hidden_states
         token_ids = []
         for step in range(max_tokens):
@@ -760,24 +747,33 @@ class SenseNovaU15(nn.Module):
             if step + 1 == max_tokens:
                 break
             if step == 0:
-                for cache in (prefix_keys, prefix_values):
-                    for layer_index in range(len(cache)):
-                        batch, heads, length, head_dim = cache[layer_index].shape
-                        buffer = cache[layer_index].new_empty((batch, heads, length + max_tokens - 1, head_dim))
-                        buffer[:, :, :length].copy_(cache[layer_index])
-                        cache[layer_index] = buffer
-            hidden_states, prefix_keys, prefix_values, prefix_time = (
-                self._decode_text_token(
-                    next_token,
-                    prefix_keys,
-                    prefix_values,
-                    prefix_time,
-                    transformer_options,
-                    cache_position=text_input_ids.shape[1] + step,
-                )
+                batch = text_input_ids.shape[0]
+                position = torch.empty((batch,), device=decode_hidden.device, dtype=torch.int64)
+                seqlen = torch.full((batch,), text_input_ids.shape[1], device=decode_hidden.device, dtype=torch.int32)
+                caches = []
+                for index in range(len(prefix_keys)):
+                    key, value = prefix_keys[index], prefix_values[index]
+                    _, heads, length, head_dim = key.shape
+                    buffer = key.new_zeros((batch, length + max_tokens - 1, heads, head_dim))
+                    cache = FixedKV(buffer, torch.zeros_like(buffer), length, position, seqlen)
+                    cache.key[:, :length].copy_(key.transpose(1, 2))
+                    cache.value[:, :length].copy_(value.transpose(1, 2))
+                    caches.append(cache)
+                    prefix_keys[index] = prefix_values[index] = None
+                    del key, value, buffer, cache
+                del prefix_keys, prefix_values
+                positions = prefix_time[:, None] + torch.arange(max_tokens - 1, device=prefix_time.device)
+                zeros = torch.zeros_like(positions)
+                ropes = _prepare_mrope(torch.stack((positions, zeros, zeros)), decode_hidden.device, decode_hidden.dtype)
+                rope = tuple(tuple(freq[:, :, :1].clone() for freq in pair) for pair in ropes)
+            else:
+                for target, source in zip(rope, ropes):
+                    for dst, src in zip(target, source):
+                        dst.copy_(src[:, :, step:step + 1])
+            self._decode_text_token(
+                next_token, caches, decode_hidden, rope, transformer_options,
             )
-            next_token = self._next_text_token(hidden_states)
-            del hidden_states
+            next_token = self._next_text_token(decode_hidden)
 
         return token_ids, None
 

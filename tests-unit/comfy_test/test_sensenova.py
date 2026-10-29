@@ -3,6 +3,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 import comfy_aimdo.host_buffer
+import comfy_kitchen
 
 from comfy.cli_args import args
 
@@ -646,9 +647,8 @@ def test_sensenova_thinking_returns_stop_without_decoding_suffix():
     )
     model._next_text_token = lambda hidden: torch.tensor([next(tokens)])
 
-    def decode(token, keys, values, prefix_time, transformer_options=None, *, cache_position):
+    def decode(token, caches, hidden, rope, transformer_options=None):
         decoded.append(int(token.item()))
-        return torch.zeros(1, 1, 1), keys, values, prefix_time + 1
 
     model._decode_text_token = decode
     progress_updates = []
@@ -681,8 +681,8 @@ def test_sensenova_thinking_decode_returns_generated_token_ids():
     )
     model._next_text_token = lambda hidden: torch.tensor([next(tokens)])
 
-    def decode(token, keys, values, prefix_time, transformer_options=None, *, cache_position):
-        return torch.zeros(1, 1, 1), keys, values, prefix_time + 1
+    def decode(token, caches, hidden, rope, transformer_options=None):
+        pass
 
     model._decode_text_token = decode
 
@@ -717,9 +717,8 @@ def test_sensenova_thinking_closes_truncated_reasoning(
     )
     model._next_text_token = lambda hidden: torch.tensor([next(token_iterator)])
 
-    def decode(token, keys, values, prefix_time, transformer_options=None, *, cache_position):
+    def decode(token, caches, hidden, rope, transformer_options=None):
         decoded.append(int(token.item()))
-        return torch.zeros(1, 1, 1), keys, values, prefix_time + 1
 
     model._decode_text_token = decode
     token_ids = model.generate_thinking_tokens(
@@ -1666,7 +1665,10 @@ def test_sensenova_generate_releases_native_prefetch_on_initialization_failure(m
     "storage_dtype,compute_dtype",
     [(torch.float32, torch.float32), (torch.float8_e4m3fn, torch.bfloat16)],
 )
-def test_sensenova_decode_attention_uses_configured_backend(storage_dtype, compute_dtype):
+@pytest.mark.parametrize("configuration", ["module", "global"])
+def test_sensenova_decode_attention_uses_configured_backend(monkeypatch, storage_dtype, compute_dtype, configuration):
+    monkeypatch.setattr(comfy_kitchen, "flash_attention_decode_is_available", lambda device: True)
+    monkeypatch.setattr(comfy_kitchen.registry, "is_available", lambda backend: True)
     attention = sensenova_model.Attention(
         device=torch.device("cpu"), dtype=storage_dtype, operations=comfy.ops.manual_cast,
     )
@@ -1681,39 +1683,45 @@ def test_sensenova_decode_attention_uses_configured_backend(storage_dtype, compu
         assert isinstance(value, sensenova_model.AttentionTensorContainer)
         assert query.take().shape == (1, 32, 1, 128)
         length = next(visible_lengths)
-        assert key.take().shape == (1, 8, length, 128)
+        assert key.take().shape == (1, 8, 5, 128)
         values = value.take()
         assert values.dtype == compute_dtype
-        assert values.shape == (1, 8, length, 128)
+        assert values.shape == (1, 8, 5, 128)
         assert torch.isfinite(values).all()
+        assert kwargs["mask"][0, 0, 0].tolist() == [0.0] * length + [float("-inf")] * (5 - length)
         assert heads == 32
         assert kwargs["enable_gqa"] is True
         return values.new_ones((1, 1, 4096))
 
-    attention.comfy_attention.function = configured_backend
+    if configuration == "module":
+        attention.comfy_attention.function = configured_backend
+    else:
+        monkeypatch.setattr(sensenova_model, "optimized_attention", configured_backend)
     hidden = torch.zeros(1, 1, 4096, dtype=compute_dtype)
     rope = tuple(
         (torch.ones(1, 1, 1, dim, dtype=compute_dtype), torch.zeros(1, 1, 1, dim, dtype=compute_dtype))
         for dim in (64, 32, 32)
     )
     prefix = torch.ones(1, 8, 2, 128, dtype=compute_dtype)
-    keys = torch.full((1, 8, 5, 128), float("nan"), dtype=compute_dtype)
-    values = torch.full_like(keys, float("nan"))
-    keys[:, :, :2].copy_(prefix)
-    values[:, :, :2].copy_(prefix)
-    for position in (2, 3):
-        output, keys, values = attention.forward_decode(hidden, rope, keys, values, position, {})
+    cache = sensenova_model.FixedKV(
+        torch.zeros(1, 5, 8, 128, dtype=compute_dtype), torch.zeros(1, 5, 8, 128, dtype=compute_dtype), 2,
+        torch.empty(1, dtype=torch.int64), torch.tensor([2], dtype=torch.int32),
+    )
+    cache.key[:, :2].copy_(prefix.transpose(1, 2))
+    cache.value[:, :2].copy_(prefix.transpose(1, 2))
+    for _ in (2, 3):
+        cache.prepare(1)
+        output = attention.forward_decode(hidden, rope, cache, {})
+        cache.advance(1)
 
         assert output.dtype == compute_dtype
         assert torch.equal(output, torch.ones_like(hidden))
-    assert keys.shape == values.shape == (1, 8, 5, 128)
-    assert keys.dtype == values.dtype == compute_dtype
-    assert torch.equal(keys[:, :, :2], prefix)
-    assert torch.equal(values[:, :, :2], prefix)
-    assert torch.count_nonzero(keys[:, :, 2:4]) == 0
-    assert torch.count_nonzero(values[:, :, 2:4]) == 0
-    assert torch.isnan(keys[:, :, 4:]).all()
-    assert torch.isnan(values[:, :, 4:]).all()
+    assert cache.key.shape == cache.value.shape == (1, 5, 8, 128)
+    assert cache.key.dtype == cache.value.dtype == compute_dtype
+    assert torch.equal(cache.key[:, :2], prefix.transpose(1, 2))
+    assert torch.equal(cache.value[:, :2], prefix.transpose(1, 2))
+    assert torch.count_nonzero(cache.key[:, 2:]) == 0
+    assert torch.count_nonzero(cache.value[:, 2:]) == 0
 
 
 def test_sensenova_interleave_text_event_stops_before_image_sampling():
@@ -1725,15 +1733,15 @@ def test_sensenova_interleave_text_event_stops_before_image_sampling():
             self.tokens = iter((101, 151670))
 
         def _preprocess_prefix_state(self, *args):
-            return 0, [torch.zeros(1, 1, 1, 1)], [torch.zeros(1, 1, 1, 1)], torch.tensor([3])
+            return torch.zeros(1, 1, 1), [torch.zeros(1, 1, 1, 1)], [torch.zeros(1, 1, 1, 1)], torch.tensor([3])
 
         def _next_text_token(self, hidden):
             return torch.tensor([next(self.tokens)])
 
         def _decode_text_token(
-            self, token, keys, values, prefix_time, transformer_options=None, *, cache_position
+            self, token, caches, hidden, rope, transformer_options=None
         ):
-            return 0, keys, values, prefix_time + 1
+            pass
 
     event = generate_text_event(
         Model(),
@@ -1762,15 +1770,15 @@ def test_sensenova_interleave_generate_can_resume_after_ksampler(monkeypatch, st
                 assert args[1][0].dtype == torch.float32
                 assert args[3].dtype == torch.float32
             self.tokens = self.stages.pop(0)
-            return 0, [torch.zeros(1, 1, 1, 1)], [torch.zeros(1, 1, 1, 1)], torch.tensor([3])
+            return torch.zeros(1, 1, 1), [torch.zeros(1, 1, 1, 1)], [torch.zeros(1, 1, 1, 1)], torch.tensor([3])
 
         def _next_text_token(self, hidden):
             return torch.tensor([next(self.tokens)])
 
         def _decode_text_token(
-            self, token, keys, values, prefix_time, transformer_options=None, *, cache_position
+            self, token, caches, hidden, rope, transformer_options=None
         ):
-            return 0, keys, values, prefix_time + 1
+            pass
 
     diffusion_model = DiffusionModel()
     calls = []
@@ -1834,7 +1842,7 @@ def test_sensenova_interleave_generate_can_resume_after_ksampler(monkeypatch, st
         clip=Clip(),
         conditioning=first_positive,
         negative=first_negative,
-        samples={"samples": torch.zeros(1, 3, 32, 64)},
+        samples={"samples": torch.tensor([-2.0, 2.0]).repeat(1, 3, 32, 32)},
         max_think_tokens=8,
     )
     second_positive, second_text, second_negative, requested = second.args
@@ -1847,6 +1855,7 @@ def test_sensenova_interleave_generate_can_resume_after_ksampler(monkeypatch, st
     assert negative_ids[0, -3:].tolist() == [151669, 151669, 151671]
     assert len(second_positive[0][1]["reference_latents"]) == 1
     assert second_positive[0][1]["reference_latents"][0].shape == (1, 32, 64, 3)
+    assert second_positive[0][1]["reference_latents"][0][0, 0, :2, 0].tolist() == [-0.5, 1.5]
     assert second_positive[0][1]["sensenova_interleave_pending_image"] is False
     # The second prefix already contains the sampled image's two patch tokens.
     assert memory_budgets == [3_440_640, 5_160_960]
@@ -1949,6 +1958,35 @@ def test_sensenova_decode_includes_pending_image_once_without_mutating_history()
     assert metadata["sensenova_interleave_pending_image"] is True
 
 
+@pytest.mark.parametrize("with_image", [False, True])
+def test_sensenova_decode_accepts_pending_latent_without_mutating_history(with_image):
+    metadata = expand_interleave_metadata(
+        {"text_input_ids": _generation_input_ids()[:, :-1]}, image_only=False,
+    )
+    metadata = append_interleave_tokens(metadata, [151670], True)
+    metadata = append_interleave_image(metadata, torch.zeros(1, 3, 32, 64))
+    metadata = append_interleave_tokens(metadata, [151670], True)
+    conditioning = [[torch.empty(1), metadata]]
+    samples = {"samples": torch.tensor([[[[-2.0, 0.0, 2.0]]]]).expand(1, 3, 1, 3).clone()}
+    inputs = {"image": torch.ones(1, 1, 3, 3)} if with_image else {}
+
+    for _ in range(2):
+        text, images, thinking = SenseNovaDecode.execute(
+            clip=SenseNovaQwenTokenizer(), conditioning=conditioning,
+            samples=samples, **inputs,
+        ).args
+        assert text == "<image><image>"
+        assert thinking == ""
+        assert len(images) == 2
+        assert torch.equal(images[0], torch.full((1, 32, 64, 3), 0.5))
+        assert images[1].shape == (1, 1, 3, 3)
+        assert images[1][0, 0, :, 0].tolist() == [0.0, 0.5, 1.0]
+
+    assert samples["samples"][0, 0, 0].tolist() == [-2.0, 0.0, 2.0]
+    assert len(metadata["reference_latents"]) == 1
+    assert metadata["sensenova_interleave_pending_image"] is True
+
+
 @pytest.mark.parametrize(
     ("generated", "expected_text", "expected_thinking"),
     [
@@ -1975,6 +2013,7 @@ def test_sensenova_decode_text_only_and_ignores_stale_image(generated, expected_
     text, images, thinking = SenseNovaDecode.execute(
         clip=tokenizer, conditioning=[[torch.empty(1), metadata]],
         image=torch.ones(1, 32, 32, 3),
+        samples={"samples": torch.ones(1, 3, 32, 32)},
     ).args
 
     assert text == expected_text
@@ -1986,7 +2025,7 @@ def test_sensenova_decode_text_only_and_ignores_stale_image(generated, expected_
 
 def test_sensenova_decode_has_typed_inputs_and_image_list_output():
     schema = SenseNovaDecode.GET_SCHEMA()
-    assert [value.id for value in schema.inputs] == ["clip", "conditioning", "image"]
+    assert [value.id for value in schema.inputs] == ["clip", "conditioning", "image", "samples"]
     assert [value.display_name for value in schema.outputs] == ["text", "images", "thinking"]
     assert schema.outputs[1].is_output_list is True
     assert not schema.is_input_list

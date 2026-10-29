@@ -505,6 +505,11 @@ class SenseNovaDecode(io.ComfyNode):
                     optional=True,
                     tooltip="Last sampled image, if the loop ended on an image request.",
                 ),
+                io.Latent.Input(
+                    "samples",
+                    optional=True,
+                    tooltip="Last KSampler pixel latent. Takes precedence over image when both are connected.",
+                ),
             ],
             outputs=[
                 io.String.Output(display_name="text"),
@@ -519,12 +524,15 @@ class SenseNovaDecode(io.ComfyNode):
         clip,
         conditioning,
         image=None,
+        samples=None,
     ) -> io.NodeOutput:
         if len(conditioning) != 1 or "sensenova_interleave_start" not in conditioning[0][1]:
             raise ValueError(
                 "SenseNova Decode requires interleave conditioning from SenseNova Generate."
             )
         metadata = conditioning[0][1]
+        if metadata["sensenova_interleave_pending_image"] and samples is not None:
+            metadata = append_interleave_image(metadata, samples["samples"])
         token_ids = metadata["text_input_ids"][0, metadata["sensenova_interleave_start"]:].tolist()
         text_parts = []
         text_tokens = []
