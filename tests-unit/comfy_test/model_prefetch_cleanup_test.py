@@ -84,3 +84,28 @@ def test_cleanup_unpins_later_queues_when_an_earlier_one_fails(monkeypatch):
     # The first failure is re-raised, but only after every other queue was cleaned up.
     assert not hasattr(later, "_prefetch")
     assert model_prefetch.PREFETCH_QUEUES == []
+
+
+def test_failed_unpin_still_clears_prefetch_markers(monkeypatch):
+    # A module whose unpin raised must not keep _prefetch, or a later cast would skip
+    # the fresh cast and reuse the stale transfer state. The rest of the group is still cleaned.
+    calls = []
+
+    def vbar_unpin(v):
+        calls.append(v)
+        if v == "first":
+            raise RuntimeError("unpin failed")
+
+    monkeypatch.setattr(model_prefetch.comfy_aimdo.model_vbar, "vbar_unpin", vbar_unpin)
+    first = torch.nn.Linear(4, 4)
+    second = torch.nn.Linear(4, 4)
+    for module, v in ((first, "first"), (second, "second")):
+        module._v = v
+        module._prefetch = {"signature": "sig"}
+    model_prefetch.PREFETCH_QUEUES = [[(None, (first, [first, second])), None]]
+
+    with pytest.raises(RuntimeError, match="unpin failed"):
+        model_prefetch.cleanup_prefetch_queues()
+    assert calls == ["first", "second"]
+    assert not hasattr(first, "_prefetch")
+    assert not hasattr(second, "_prefetch")

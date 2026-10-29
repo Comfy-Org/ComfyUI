@@ -123,20 +123,35 @@ def pin_modules(comfy_modules, device, dtype=None):
     return offload_stream, fully_faulted
 
 def cleanup_prefetched_modules(module, comfy_modules):
+    # Always drop the _prefetch marker, even if unpinning fails: a stale marker makes cast_bias_weight
+    # skip the fresh cast and read the old transfer state. Clean up every module, then raise the first error.
+    first_error = None
     for s in comfy_modules:
         prefetch = getattr(s, "_prefetch", None)
         if prefetch is None:
             continue
-        for param_key in ("weight", "bias"):
-            lowvram_fn = getattr(s, param_key + "_lowvram_function", None)
-            if lowvram_fn is not None:
-                lowvram_fn.clear_prepared()
-        if prefetch["signature"] is not None:
-            comfy_aimdo.model_vbar.vbar_unpin(s._v)
-        delattr(s, "_prefetch")
+        try:
+            for param_key in ("weight", "bias"):
+                lowvram_fn = getattr(s, param_key + "_lowvram_function", None)
+                if lowvram_fn is not None:
+                    lowvram_fn.clear_prepared()
+            if prefetch["signature"] is not None:
+                comfy_aimdo.model_vbar.vbar_unpin(s._v)
+        except Exception as e:
+            if first_error is None:
+                first_error = e
+        finally:
+            delattr(s, "_prefetch")
     if getattr(module, "_v_block_faulted", False):
-        comfy_aimdo.model_vbar.vbar_unpin(module._v_block)
-        del module._v_block_faulted
+        try:
+            comfy_aimdo.model_vbar.vbar_unpin(module._v_block)
+        except Exception as e:
+            if first_error is None:
+                first_error = e
+        finally:
+            del module._v_block_faulted
+    if first_error is not None:
+        raise first_error
 
 def _drop_graph(module):
     graph = getattr(module, "_comfy_graph", None)
