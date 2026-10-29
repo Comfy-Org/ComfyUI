@@ -42,6 +42,8 @@ class CONDRegular:
         return True
 
     def concat(self, others):
+        if len(others) == 0:
+            return self.cond
         conds = [self.cond]
         for x in others:
             conds.append(x.cond)
@@ -80,6 +82,8 @@ class CONDCrossAttn(CONDRegular):
         return True
 
     def concat(self, others):
+        if len(others) == 0:
+            return self.cond
         conds = [self.cond]
         crossattn_max_len = self.cond.shape[1]
         for x in others:
@@ -143,6 +147,8 @@ class CONDList(CONDRegular):
         return True
 
     def concat(self, others):
+        if len(others) == 0:
+            return list(self.cond)
         out = []
         for i in range(len(self.cond)):
             o = [self.cond[i]]

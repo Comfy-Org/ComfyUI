@@ -1031,24 +1031,35 @@ class VAE:
                 #Force cast it for --disable-dynamic-vram users until there is a true core fix.
                 if not comfy.memory_management.aimdo_enabled:
                     self.disable_offload = True
-            elif "decoder.transformer_blocks.0.scale1" in sd or "encoder.down.5.block.0.nin_shortcut.weight" in sd:  # MiniMax H3 video VAE, or just its decoder / encoder
+            elif "decoder.transformer_blocks.0.scale1" in sd or "decoder.blocks.0.scale1" in sd or "encoder.down.5.block.0.nin_shortcut.weight" in sd or ("blocks.0.scale1" in sd and "x_embedder.weight" in sd):  # MiniMax H3 video VAE (stock or Sol decoder), or just its decoder / encoder
+                if "blocks.0.scale1" in sd:  # Sol-H3-VAE as released: the decoder unprefixed, possibly merged with the H3 encoder
+                    top = ("encoder", "quant_conv", "post_quant_conv", "latents_mean", "latents_std")
+                    sd = {k if k.split(".")[0] in top else "decoder." + k: v for k, v in sd.items()}
+                    sd.setdefault("latents_mean", torch.tensor(comfy.ldm.minimax.vae.LATENTS_MEAN))
+                    sd.setdefault("latents_std", torch.tensor(comfy.ldm.minimax.vae.LATENTS_STD))
                 minimax_ops = comfy.ops.disable_weight_init
                 minimax_quant = comfy.utils.detect_layer_quantization(sd, "")
                 if minimax_quant is not None:  # int8+convrot quantized decoder
                     minimax_ops = comfy.ops.mixed_precision_ops(minimax_quant, dtype if dtype is not None else torch.float16)
-                minimax_layers = sum(k.startswith("decoder.transformer_blocks.") and k.endswith(".scale1") for k in sd)
+                noncausal = "decoder.blocks.0.scale1" in sd  # Sol-H3-VAE: distilled whole-clip decoder
+                block_prefix = "decoder.blocks." if noncausal else "decoder.transformer_blocks."
+                minimax_layers = sum(k.startswith(block_prefix) and k.endswith(".scale1") for k in sd)
                 still_frame = None
-                if metadata is not None and metadata.get("h3_t1_direct") == "true":  # decoder fine-tuned for single-latent stills
+                if metadata is not None and metadata.get("h3_t1_direct") == "true" and not noncausal:  # stock decoder fine-tuned for single-latent stills
                     still_frame = int(metadata.get("h3_t1_output_slice", 3))
                 # LightVAE Lite encoders prune resnet blocks down to their shortcut
                 minimax_kept = {(int(k.split(".")[2]), int(k.split(".")[4])) for k in sd if k.startswith("encoder.down.") and k.endswith(".conv1.weight")}
-                self.first_stage_model = comfy.ldm.minimax.vae.MiniMaxH3VideoVAE(operations=minimax_ops, num_layers=minimax_layers, still_frame=still_frame, encoder_kept_blocks=minimax_kept, encoder="encoder.conv_in.weight" in sd, decoder=minimax_layers > 0)
+                self.first_stage_model = comfy.ldm.minimax.vae.MiniMaxH3VideoVAE(operations=minimax_ops, num_layers=minimax_layers, still_frame=still_frame, encoder_kept_blocks=minimax_kept, encoder="encoder.conv_in.weight" in sd, decoder=minimax_layers > 0, noncausal_decoder=noncausal)
                 self.latent_channels = 24
                 self.latent_dim = 3
                 # frames 17k+5 <-> latents 5k+2, 16x spatial
                 self.upscale_ratio = (lambda a: max(1, (a - 2) // 5 * 17 + 5), 16, 16)
                 self.upscale_index_formula = (4, 16, 16)
                 self.downscale_ratio = (lambda a: max(1, (a - 5) // 17 * 5 + 2) if a > 1 else 1, 16, 16)
+                if noncausal:
+                    # four frames per latent, the first latent of every 5-latent block keeps one: 4t - 3*ceil(t/5)
+                    self.upscale_ratio = (lambda a: 4 * a - 3 * -(-a // 5), 16, 16)
+                    self.downscale_ratio = (lambda a: a // 17 * 5 + -(-(a % 17 + 3) // 4) if a % 17 else max(1, a // 17 * 5), 16, 16)
                 self.downscale_index_formula = (4, 16, 16)
                 self.working_dtypes = [torch.float16, torch.float32]
                 # the model tiles internally (256px spatial, 17-frame temporal chunks)
@@ -1071,8 +1082,22 @@ class VAE:
                     frames = min(frames, chunk_frames + 2)
                     return (9.5 * frames * height * width + fixed) * model_management.dtype_size(dtype) * 1.03
 
+                def estimate_decode_memory_noncausal(latent_t, latent_h, latent_w, dtype):
+                    # the residual stream for the whole clip, plus a ring of blocks' q/k/v/attention output
+                    # and one block's qkv/FFN/attention-batch temporaries
+                    decoder = self.first_stage_model.decoder
+                    if latent_t == 1:  # a still decodes as a block of copies
+                        latent_t = decoder.block
+                    tokens = latent_t * latent_h * latent_w
+                    block = min(latent_t, decoder.block) * latent_h * latent_w + decoder.num_global
+                    return (tokens + block * (decoder.ring * 4 + 20)) * decoder.dim * model_management.dtype_size(dtype) * 1.1
+
                 self.memory_used_encode = lambda shape, dtype: estimate_encode_memory(shape[2], shape[3], shape[4], dtype)
-                self.memory_used_decode = lambda shape, dtype: estimate_decode_memory(self.upscale_ratio[0](shape[2]), shape[3] * self.upscale_ratio[1], shape[4] * self.upscale_ratio[2], dtype)
+                if noncausal:
+                    self.memory_used_decode = lambda shape, dtype: estimate_decode_memory_noncausal(shape[2], shape[3], shape[4], dtype)
+                    self._tile_bounded_shape = lambda shape, *tiles: tuple(shape)  # the whole clip decodes at once; tile sizes do not bound memory
+                else:
+                    self.memory_used_decode = lambda shape, dtype: estimate_decode_memory(self.upscale_ratio[0](shape[2]), shape[3] * self.upscale_ratio[1], shape[4] * self.upscale_ratio[2], dtype)
             elif "pre_block.attn.zero_k_bias" in sd:  # MiniMax H3 audio VAE (DAC encoder + BigVGAN decoder)
                 self.first_stage_model = comfy.ldm.minimax.audio_vae.MiniMaxH3AudioVAE()
                 self.latent_channels = 32
