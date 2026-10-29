@@ -157,7 +157,11 @@ class FrontEndProvider:
         # GitHub returns releases in reverse chronological order, so the first pre-release is the
         # latest. Stop there instead of paging through every release: each page is one request
         # against the 60/hour unauthenticated GitHub API limit.
-        release = next((release for release in self.iter_releases() if release["prerelease"]), None)
+        # Reuse the full list if a caller already fetched it (cached_property stores it on the instance).
+        releases = self.__dict__.get("all_releases")
+        if releases is None:
+            releases = self.iter_releases()
+        release = next((release for release in releases if release["prerelease"]), None)
 
         if release is None:
             raise ValueError("No pre-releases found")

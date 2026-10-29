@@ -138,7 +138,7 @@ def _prerelease(tag):
 
 def test_get_release_prerelease_stops_at_first_page(mock_releases):
     provider = FrontEndProvider(owner="test-owner", repo="test-repo")
-    first_page = [_prerelease("v3.0.0-rc1"), *mock_releases]
+    first_page = [_prerelease("v3.0.0-rc1"), *mock_releases, _prerelease("v2.5.0-rc1")]
     # side_effect with one page: a second request raises StopIteration instead of looping forever.
     with patch(
         "app.frontend_management.requests.get",
@@ -173,6 +173,14 @@ def test_get_release_prerelease_none_found(mock_releases):
     with patch("app.frontend_management.requests.get", return_value=_release_page(mock_releases)):
         with pytest.raises(ValueError, match="No pre-releases found"):
             provider.get_release("prerelease")
+
+
+def test_get_release_prerelease_reuses_fetched_release_list(mock_releases):
+    provider = FrontEndProvider(owner="test-owner", repo="test-repo")
+    provider.all_releases = [*mock_releases, _prerelease("v1.5.0-rc1")]
+
+    # The autouse no_network guard fails the test if this makes a request.
+    assert provider.get_release("prerelease")["tag_name"] == "v1.5.0-rc1"
 
 
 def test_all_releases_collects_every_page(mock_releases):
