@@ -454,7 +454,7 @@ async def execute(server: "ExecutionServer", dynprompt, caches, current_item, ex
     class_def = nodes.NODE_CLASS_MAPPINGS[class_type]
     cached = await caches.outputs.get(unique_id)
     if cached is not None:
-        emit_cached_output(server, unique_id, display_node_id, cached, prompt_id, ui_outputs, asset_manager, meta=_node_meta(dynprompt, unique_id))
+        emit_cached_output(server, unique_id, _node_meta(dynprompt, unique_id), cached, prompt_id, ui_outputs, asset_manager)
         get_progress_state().finish_progress(unique_id)
         execution_list.cache_update(unique_id, cached)
         return (ExecutionResult.SUCCESS, None, None)
@@ -826,8 +826,7 @@ class PromptExecutor:
                             continue
                         cached = await self.caches.outputs.get(node_id)
                         if cached is not None:
-                            display_node_id = dynamic_prompt.get_display_node_id(node_id)
-                            emit_cached_output(self.server, node_id, display_node_id, cached, prompt_id, ui_node_outputs, self.asset_manager, meta=_node_meta(dynamic_prompt, node_id))
+                            emit_cached_output(self.server, node_id, _node_meta(dynamic_prompt, node_id), cached, prompt_id, ui_node_outputs, self.asset_manager)
                     self.add_message("execution_success", { "prompt_id": prompt_id }, broadcast=False)
 
                 ui_outputs = {}
