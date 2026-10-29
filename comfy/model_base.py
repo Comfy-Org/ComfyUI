@@ -2308,9 +2308,12 @@ class MiniMaxH3(BaseModel):
             f = kf["resolved_frame_index"]
             latent = kf.get("latent")
             if latent is not None:
-                # crop at the guide's 5-latent chunk starts so the clip keeps its 1,4,4,4,4 frame pattern
-                guide_starts = self._latent_pixel_starts(latent.shape[2])
-                chunks = [g for g in range(0, latent.shape[2], 5) if starts[first] <= f + guide_starts[g] < starts[last + 1]]
+                # crop at the guide's 5-latent chunk starts so the clip keeps its 1,4,4,4,4 frame pattern; a chunk
+                # overlapping the window's start is kept and may begin a few frames before its origin
+                vt = latent.shape[2]
+                guide_starts = self._latent_pixel_starts(vt)
+                chunks = [g for g in range(0, vt, 5)
+                          if f + guide_starts[g] < starts[last + 1] and f + guide_starts[min(g + 5, vt)] > starts[first]]
                 if chunks:
                     keyframes.append({"resolved_frame_index": f + guide_starts[chunks[0]] - origin,
                                       "latent": latent[:, :, chunks[0]:chunks[-1] + 5]})
