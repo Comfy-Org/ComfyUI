@@ -360,6 +360,39 @@ class BriaVideoEraseRequest(BaseModel):
     output_container_and_codec: str = Field(...)
 
 
+class BriaGuidedRemoveBackgroundRequest(BaseModel):
+    image: str = Field(...)
+    prompt: str = Field(..., description="What the cutout keeps, for example 'only the chair'.")
+    visual_input_content_moderation: bool = Field(
+        False, description="If true, returns 422 on input image moderation failure."
+    )
+    visual_output_content_moderation: bool = Field(
+        False, description="If true, returns 422 on visual output moderation failure."
+    )
+
+
+class BriaProductHoldingRequest(BaseModel):
+    person_image: str = Field(...)
+    product_images: list[str] = Field(..., description="One to three images of the product.")
+    instruction: str | None = Field(None, description="Extra direction appended to the built-in instruction.")
+    aspect_ratio: str | None = Field(None, description="Omitted keeps the person image's aspect ratio.")
+    seed: int = Field(...)
+    visual_output_content_moderation: bool = Field(
+        False, description="If true, returns 422 on visual output moderation failure."
+    )
+
+
+class BriaVirtualTryOnRequest(BaseModel):
+    person_image: str = Field(...)
+    garment_images: list[str] = Field(..., description="One to three garment or accessory images.")
+    instruction: str | None = Field(None, description="Extra direction appended to the built-in instruction.")
+    aspect_ratio: str | None = Field(None, description="Omitted keeps the person image's aspect ratio.")
+    seed: int = Field(...)
+    visual_output_content_moderation: bool = Field(
+        False, description="If true, returns 422 on visual output moderation failure."
+    )
+
+
 class BriaFiboEditResult(BaseModel):
     image_url: str = Field(...)
     structured_prompt: str | None = Field(None)

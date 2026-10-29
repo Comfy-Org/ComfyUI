@@ -621,6 +621,39 @@ class MiniMaxH3FunControlNetApply(io.ComfyNode):
         return io.NodeOutput(model_patched)
 
 
+class MiniMaxH3LatentUpscaleWithModel(io.ComfyNode):
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="MiniMaxH3LatentUpscaleWithModel",
+            display_name="MiniMax H3 Latent Upscale With Model",
+            category="model/latent/minimax",
+            description="Resizes the video of a MiniMax H3 latent with a latent upscale model; audio passes through unchanged.",
+            inputs=[
+                io.LatentUpscaleModel.Input("model"),
+                io.Latent.Input("samples"),
+                io.Int.Input("width", default=2560, min=32, max=nodes.MAX_RESOLUTION, step=32),
+                io.Int.Input("height", default=1440, min=32, max=nodes.MAX_RESOLUTION, step=32),
+            ],
+            outputs=[io.Latent.Output()],
+        )
+
+    @classmethod
+    def execute(cls, model, samples, width, height) -> io.NodeOutput:
+        latents = samples["samples"]
+        video = latents.tensors[0] if latents.is_nested else latents
+        size = (video.shape[2], height // 16, width // 16)
+        if size == tuple(video.shape[2:]):
+            return io.NodeOutput(samples)
+        comfy.model_management.load_models_gpu([model], memory_required=model.model.memory_required(video.shape, size))
+        upscaled = model.model(video.to(device=model.load_device, dtype=model.model_dtype()), size)
+        upscaled = upscaled.to(device=comfy.model_management.intermediate_device(), dtype=video.dtype)
+        out = samples.copy()
+        out["samples"] = comfy.nested_tensor.NestedTensor((upscaled, latents.tensors[1])) if latents.is_nested else upscaled
+        out.pop("noise_mask", None)
+        return io.NodeOutput(out)
+
+
 class MiniMaxH3Extension(ComfyExtension):
     async def get_node_list(self):
         return [
@@ -630,6 +663,7 @@ class MiniMaxH3Extension(ComfyExtension):
             MiniMaxH3ReferenceToVideo,
             MiniMaxH3SigmaShift,
             MiniMaxH3FunControlNetApply,
+            MiniMaxH3LatentUpscaleWithModel,
             ]
 
 

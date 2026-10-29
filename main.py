@@ -18,6 +18,7 @@ import folder_paths
 import time
 from comfy.cli_args import enables_dynamic_vram
 from app import governance
+from app import product_tips
 from app.logger import setup_logger
 console_log_level = get_console_log_level(args.verbose)
 file_log_outputs = get_file_log_outputs(args.verbose)
@@ -408,6 +409,10 @@ def prompt_worker(q, server_instance, asset_manager):
                 else:
                     logging.info("Prompt executed in {:.2f} seconds".format(execution_time), extra={'color': 'green'})
 
+                job_hint = product_tips.get_relevant_job_hint(args, os.environ, e.success, extra_data)
+                if job_hint is not None:
+                    logging.info(job_hint)
+
             flags = q.get_flags()
             free_memory = flags.get("free_memory", False)
 
@@ -590,7 +595,7 @@ def start_comfyui(asyncio_loop=None):
         stop_startup("missing_packages", f"The assets system needs packages that could not be imported: {missing}.\n"
                                          f"{get_missing_requirements_message()}\n{WITHOUT_ASSETS}")
     asset_manager: AssetManager = default_asset_manager()
-    feature_flags.SERVER_FEATURE_FLAGS["assets"] = asset_manager.enabled
+    feature_flags.set_server_feature("assets", asset_manager.enabled)
     if not asset_manager.enabled:
         cleanup_temp_filesystem()
 
@@ -682,6 +687,8 @@ if __name__ == "__main__":
     event_loop, prompt_server, start_all_func = start_comfyui()
     try:
         x = start_all_func()
+        if product_tips.tips_enabled(args, os.environ):
+            logging.info(product_tips.COMFY_API_STARTUP_TIP)
         app.logger.print_startup_warnings()
         event_loop.run_until_complete(x)
     except KeyboardInterrupt:

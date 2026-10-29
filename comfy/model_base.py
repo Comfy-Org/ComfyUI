@@ -276,6 +276,9 @@ class BaseModel(torch.nn.Module):
     def encode_adm(self, **kwargs):
         return None
 
+    def get_writable_model(self, conds, noise_shape, model_options, device):
+        return None
+
     def concat_cond(self, **kwargs):
         if len(self.concat_keys) > 0:
             cond_concat = []
@@ -2724,6 +2727,35 @@ class QwenImage21(QwenImage):
             diffusion_model.current_patcher = patcher
             diffusion_model.reset_prefix_cache(patcher is not None and len(patcher.hook_patches) == 0)
 
+    def get_writable_model(self, conds, noise_shape, model_options, device):
+        transformer_options = model_options.get("transformer_options", {})
+        options = transformer_options.get("qwen_image21_cache", {})
+        model = self.diffusion_model
+        if options.get("device", "auto") != "auto" or not model.can_cache_prefix(transformer_options):
+            return None
+
+        heads = model.transformer_blocks[0].attn.heads
+        slots = []
+        for conditions in conds.values():
+            for cond in conditions:
+                cond["model_conds"] = c = cond["model_conds"].copy()
+                length = c["c_crossattn"].cond.shape[1]
+                if "ref_latents" in c:
+                    length += sum(t.shape[-2] * t.shape[-1] for t in c["ref_latents"].cond)
+                shape = (noise_shape[0], 2, length, heads, model.inner_dim // heads)
+                slot = comfy.ldm.qwen_image21.model.PrefixCacheSlot(shape, len(model.transformer_blocks), self.get_dtype_inference(), options.get("dtype", "default"))
+                slots.append((c, slot))
+
+        cache = comfy.ldm.qwen_image21.model.KVCacheModel([slot for _, slot in slots])
+        cache_bytes = sum(p.numel() * p.element_size() for p in cache.parameters())
+        if not (self.current_patcher.get_free_memory(device) > 4 * cache_bytes or
+                comfy.model_management.ensure_pin_budget(cache_bytes, evict_active=False)):
+            return None
+
+        for c, slot in slots:
+            c.setdefault("prefix_cache", comfy.conds.CONDKVCache({})).cond[device] = slot
+        return cache
+
     def extra_conds(self, **kwargs):
         out = super().extra_conds(**kwargs)
         image_slots = kwargs.get("image_slots", None)
@@ -2800,6 +2832,7 @@ class Krea2(BaseModel):
 class MOSSImage(BaseModel):
     def __init__(self, model_config, model_type=ModelType.FLOW, device=None):
         super().__init__(model_config, model_type, device=device, unet_model=comfy.ldm.moss_image.model.MOSSImage)
+        self.memory_usage_factor_conds = ("ref_latents",)
 
     def extra_conds(self, **kwargs):
         out = super().extra_conds(**kwargs)
@@ -2807,6 +2840,30 @@ class MOSSImage(BaseModel):
         # rope positions follow the true text length, so no repeat padding: cond and uncond of different lengths run separately
         if cross_attn is not None:
             out['c_crossattn'] = comfy.conds.CONDRegular(cross_attn)
+        context_attention_bias = kwargs.get("context_attention_bias", None)
+        if context_attention_bias is not None:
+            out['context_attention_bias'] = comfy.conds.CONDRegular(context_attention_bias)
+        ref_latents = kwargs.get("reference_latents", None)
+        if ref_latents:
+            # control adapters widen video_embedder, the references carry no control
+            channels = self.diffusion_model.video_embedder.weight.shape[1]
+            ref_latents = [torch.nn.functional.pad(self.process_latent_in(lat), (0, 0, 0, 0, 0, channels - lat.shape[1])) for lat in ref_latents]
+            ref_latents_method = kwargs.get("reference_latents_method", None)
+            if ref_latents_method is not None:
+                out['ref_latents_method'] = comfy.conds.CONDConstant(ref_latents_method)
+            if ref_latents_method not in ("index", "index_timestep_zero") and torch.is_inference_mode_enabled() and kwargs.get("hooks") is None:
+                # references that attend only to each other at t = 0: their keys and values are computed once, not every step; equal ones batch without copies
+                device, dtype = kwargs["device"], self.get_dtype_inference()
+                out['ref_kv'] = comfy.conds.CONDConstant(self.diffusion_model.preprocess_refs([lat.to(device=device, dtype=dtype) for lat in ref_latents]))
+            else:
+                out['ref_latents'] = comfy.conds.CONDList(ref_latents)
+        return out
+
+    def extra_conds_shapes(self, **kwargs):
+        out = {}
+        ref_latents = kwargs.get("reference_latents", None)
+        if ref_latents is not None:
+            out['ref_latents'] = list([1, 128, sum(map(lambda a: math.prod(a.size()), ref_latents)) // 128])
         return out
 
     def concat_cond(self, **kwargs):
