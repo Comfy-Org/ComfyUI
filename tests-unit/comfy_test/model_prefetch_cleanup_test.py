@@ -52,3 +52,15 @@ def test_cleanup_resets_queues_when_entry_cleanup_fails(monkeypatch):
     # A failed cleanup must not poison every later node on the worker.
     assert model_prefetch.PREFETCH_QUEUES == []
     model_prefetch.cleanup_prefetch_queues()
+
+
+@pytest.mark.parametrize("pending_unit", [tuple, list])
+def test_cleanup_skips_unreached_grouped_head(pending_unit):
+    # Interrupted between popping the consumed slot and pinning the next one: the
+    # head of the queue is still the raw (head, mtp) group, not a pinned slot.
+    queue = [pending_unit((torch.nn.Linear(4, 4), MTPHead())), None]
+    model_prefetch.PREFETCH_QUEUES = [queue]
+
+    model_prefetch.cleanup_prefetch_queues()
+
+    assert model_prefetch.PREFETCH_QUEUES == []
