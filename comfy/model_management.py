@@ -768,7 +768,7 @@ class LoadedModel:
 
     def is_dead(self):
         real_model = self.real_model
-        return real_model is not None and (real_model() is None or self.model is None)
+        return real_model is not None and real_model() is not None and self.model is None
 
 
 def use_more_memory(extra_memory, loaded_models, device):
