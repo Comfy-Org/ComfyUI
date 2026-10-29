@@ -558,6 +558,12 @@ def get_save_image_path(filename_prefix: str, output_dir: str, image_width=0, im
     if "%" in filename_prefix:
         filename_prefix = compute_vars(filename_prefix, image_width, image_height)
 
+    if os.path.normpath(filename_prefix).replace("\\", "/").split("/")[0].casefold() == ".comfy-media":
+        raise PermissionError("managed media group names require their owning lease")
+    resolved = os.path.relpath(os.path.realpath(os.path.join(output_dir, filename_prefix)), os.path.realpath(output_dir))
+    if resolved.replace("\\", "/").split("/")[0].casefold() == ".comfy-media":
+        raise PermissionError("managed media group names require their owning lease")
+
     subfolder = os.path.dirname(os.path.normpath(filename_prefix))
     filename = os.path.basename(os.path.normpath(filename_prefix))
 

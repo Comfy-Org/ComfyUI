@@ -8,6 +8,10 @@ from ._sdk import (  # noqa: F401
     AudioDecodeError,
     AudioEncoderRef,
     AudioRef,
+    MediaGroupRef,
+    EncodedMediaEntry,
+    MediaRole,
+    FailedEntryPolicy,
     BackgroundRemovalModelRef,
     BrushNetRef,
     ClipRef,
@@ -75,6 +79,10 @@ from ._sdk import (  # noqa: F401
 
 __all__ = [
     "AudioDecodeError",
+    "MediaGroupRef",
+    "EncodedMediaEntry",
+    "MediaRole",
+    "FailedEntryPolicy",
     'AssetCopyResult',
     'VideoPreviewDescriptor',
     'AssetMediaProvider',
