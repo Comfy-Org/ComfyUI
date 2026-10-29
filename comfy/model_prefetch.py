@@ -160,6 +160,7 @@ def cleanup_prefetch_queues():
     queues = PREFETCH_QUEUES
     # Reset before walking so a failing entry can't leave stale queues behind for every later node.
     PREFETCH_QUEUES = []
+    first_error = None
     for queue in queues:
         # Only the head can have been pinned, as (offload_stream, (module, comfy_modules)). Later
         # entries, and a head that was not reached yet, still hold the raw module or module group.
@@ -167,13 +168,20 @@ def cleanup_prefetch_queues():
         if not isinstance(head, tuple) or len(head) != 2 or not isinstance(head[1], tuple):
             continue
         prefetched_module, comfy_modules = head[1]
-        cleanup_prefetched_modules(prefetched_module, comfy_modules)
+        try:
+            cleanup_prefetched_modules(prefetched_module, comfy_modules)
+        except Exception as e:
+            # Keep unpinning the other queues; report the first failure once they are done.
+            if first_error is None:
+                first_error = e
     GRAPH_WARMED_MODULES.clear()
     if MALLOC_GRAPH_USED:
         logging.info("Comfy model compiler graph breaks: %d, rogues: %d", MALLOC_GRAPH_BREAKS, MALLOC_GRAPH_ROGUES)
     MALLOC_GRAPH_BREAKS = 0
     MALLOC_GRAPH_ROGUES = 0
     MALLOC_GRAPH_USED = False
+    if first_error is not None:
+        raise first_error
 
 def prefetch_queue_pop(queue, device, module, dtype=None, core=None, enable_graph=False, generator=None, malloc_scope=None):
     malloc_graph = MALLOC_GRAPHS.get(threading.get_ident())

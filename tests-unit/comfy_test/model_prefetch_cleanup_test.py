@@ -64,3 +64,23 @@ def test_cleanup_skips_unreached_grouped_head(pending_unit):
     model_prefetch.cleanup_prefetch_queues()
 
     assert model_prefetch.PREFETCH_QUEUES == []
+
+
+def test_cleanup_unpins_later_queues_when_an_earlier_one_fails(monkeypatch):
+    real_cleanup = model_prefetch.cleanup_prefetched_modules
+    failing = torch.nn.Linear(4, 4)
+    later = torch.nn.Linear(4, 4)
+
+    def cleanup(module, comfy_modules):
+        if module is failing:
+            raise RuntimeError("unpin failed")
+        real_cleanup(module, comfy_modules)
+
+    monkeypatch.setattr(model_prefetch, "cleanup_prefetched_modules", cleanup)
+    model_prefetch.PREFETCH_QUEUES = [[_prefetched(failing), None], [_prefetched(later), None]]
+
+    with pytest.raises(RuntimeError, match="unpin failed"):
+        model_prefetch.cleanup_prefetch_queues()
+    # The first failure is re-raised, but only after every other queue was cleaned up.
+    assert not hasattr(later, "_prefetch")
+    assert model_prefetch.PREFETCH_QUEUES == []
