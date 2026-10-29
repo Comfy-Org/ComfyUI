@@ -1,11 +1,13 @@
 import pytest
 import torch
+from unittest import mock
 
 from comfy.cli_args import args as cli_args
 
 if not torch.cuda.is_available():
     cli_args.cpu = True
 
+import comfy.utils  # noqa: E402
 from comfy_extras.nodes_post_processing import Blend  # noqa: E402
 
 MODES = ["normal", "multiply", "screen", "overlay", "soft_light", "difference"]
@@ -45,6 +47,18 @@ def test_blend_matches_batches_cyclically(mode, image1_batch, image2_batch):
     torch.testing.assert_close(image2, original2)
 
 
+def test_equal_batches_blend_each_pair():
+    """Two equally sized batches blend pairwise, pixel for pixel."""
+    image1 = images(2, 0.1)
+    image2 = images(2, 0.5)
+
+    out = Blend.execute(image1, image2, 0.5, "normal").result[0]
+
+    expected = (image1 + image2) * 0.5
+    torch.testing.assert_close(out, expected)
+    assert out.shape == image1.shape
+
+
 def test_blend_keeps_spatial_resize_for_unequal_batches():
     """Matching the batch must not stop image2 from being resized to image1."""
     image1 = images(1, 0.1, size=4)
@@ -55,13 +69,39 @@ def test_blend_keeps_spatial_resize_for_unequal_batches():
     assert out.shape == (3, 4, 4, 3)
 
 
-def test_equal_batches_are_unchanged():
-    """The common case of two equally sized batches must not be altered."""
-    image1 = images(2, 0.1)
-    image2 = images(2, 0.5)
+def test_image2_is_resized_before_it_is_repeated():
+    """Resizing after repeating would copy a large image2 across the whole batch."""
+    image1 = images(16, 0.1, size=4)
+    image2 = images(1, 0.5, size=64)
+    resized_batches = []
 
-    out = Blend.execute(image1, image2, 0.5, "normal").result[0]
+    real_upscale = comfy.utils.common_upscale
 
-    expected = Blend.execute(image1, image2, 0.5, "normal").result[0]
-    torch.testing.assert_close(out, expected)
-    assert out.shape == image1.shape
+    def spy(samples, width, height, upscale_method, crop):
+        resized_batches.append(samples.shape[0])
+        return real_upscale(samples, width, height, upscale_method, crop)
+
+    with mock.patch.object(comfy.utils, "common_upscale", spy):
+        out = Blend.execute(image1, image2, 0.5, "normal").result[0]
+
+    assert resized_batches == [1]
+    assert out.shape == (16, 4, 4, 3)
+
+
+def test_a_single_image_is_not_repeated():
+    """A lone image broadcasts against the batch, so it never needs copying."""
+    image1 = images(1, 0.1)
+    image2 = images(3, 0.5)
+    repeated = []
+
+    real_repeat = comfy.utils.repeat_to_batch_size
+
+    def spy(tensor, batch_size, dim=0):
+        repeated.append(tensor.shape[0])
+        return real_repeat(tensor, batch_size, dim)
+
+    with mock.patch.object(comfy.utils, "repeat_to_batch_size", spy):
+        out = Blend.execute(image1, image2, 0.5, "normal").result[0]
+
+    assert repeated == []
+    assert out.shape == (3, 4, 4, 3)
