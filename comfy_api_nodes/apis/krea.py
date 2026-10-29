@@ -30,7 +30,7 @@ class Krea3GenerateImageRequest(BaseModel):
     aspect_ratio: str | None = Field(default=None)
     seed: int = Field(...)
     image_urls: list[str] | None = Field(default=None)
-    regional_edit: bool = Field(...)
+    regional_edit: bool | None = Field(default=None)
 
 
 class KreaJobResult(BaseModel):

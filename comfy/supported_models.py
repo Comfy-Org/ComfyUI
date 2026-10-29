@@ -43,6 +43,7 @@ import comfy.text_encoders.hidream_o1
 import comfy.text_encoders.sensenova
 import comfy.text_encoders.pixeldit
 import comfy.text_encoders.moss_image
+import comfy.text_encoders.fibo2
 
 from . import supported_models_base
 from . import latent_formats
@@ -2067,6 +2068,34 @@ class MOSSImage(supported_models_base.BASE):
         hunyuan_detect = comfy.text_encoders.hunyuan_video.llama_detect(state_dict, "{}qwen35_9b.transformer.".format(pref))
         return supported_models_base.ClipTarget(comfy.text_encoders.moss_image.MOSSImageTokenizer, comfy.text_encoders.moss_image.te(**hunyuan_detect))
 
+class Fibo2(supported_models_base.BASE):
+    unet_config = {
+        "image_model": "fibo2",
+    }
+
+    sampling_settings = {
+        "shift": 1.15,
+    }
+
+    memory_usage_factor = 17.0
+
+    unet_extra_config = {}
+    latent_format = latent_formats.Flux2
+
+    supported_inference_dtypes = [torch.bfloat16, torch.float32]
+
+    vae_key_prefix = ["vae."]
+    text_encoder_key_prefix = ["text_encoders."]
+
+    def get_model(self, state_dict, prefix="", device=None):
+        out = model_base.Fibo2(self, device=device)
+        return out
+
+    def clip_target(self, state_dict={}):
+        pref = self.text_encoder_key_prefix[0]
+        hunyuan_detect = comfy.text_encoders.hunyuan_video.llama_detect(state_dict, "{}qwen3vl_4b.transformer.".format(pref))
+        return supported_models_base.ClipTarget(comfy.text_encoders.fibo2.Fibo2Tokenizer, comfy.text_encoders.fibo2.te(**hunyuan_detect))
+
 class MageFlow(supported_models_base.BASE):
     unet_config = {
         "image_model": "mage_flow",
@@ -2719,6 +2748,7 @@ models = [
     Ideogram4,
     Krea2,
     MOSSImage,
+    Fibo2,
     Flux2,
     Flux3,
     Lens,

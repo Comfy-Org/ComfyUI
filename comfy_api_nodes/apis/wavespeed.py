@@ -14,16 +14,6 @@ class FlashVSRRequest(BaseModel):
     duration: float = Field(...)
 
 
-class TaskCreatedDataResponse(BaseModel):
-    id: str = Field(...)
-
-
-class TaskCreatedResponse(BaseModel):
-    code: int = Field(...)
-    message: str = Field(...)
-    data: TaskCreatedDataResponse | None = Field(None)
-
-
 class TaskResultDataResponse(BaseModel):
     status: str = Field(...)
     outputs: list[str] = Field([])

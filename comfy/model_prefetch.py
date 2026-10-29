@@ -97,6 +97,8 @@ def cleanup_malloc_graph():
         if graph._comfy_active:
             graph.abort()
             graph._comfy_active = False
+        else:
+            comfy.model_management.synchronize()
         for module in graph._comfy_cuda_graph_modules:
             _drop_graph(module)
         MALLOC_GRAPH_ROGUES += graph.rogue_count
@@ -159,14 +161,13 @@ def cleanup_prefetch_queues():
     # Reset before walking so a failing entry can't leave stale queues behind for every later node.
     PREFETCH_QUEUES = []
     for queue in queues:
-        for entry in queue:
-            # Only pinned slots are (offload_stream, (module, comfy_modules)); slots not yet
-            # reached still hold the raw module or module group passed to make_prefetch_queue.
-            if not isinstance(entry, tuple) or len(entry) != 2 or not isinstance(entry[1], tuple):
-                continue
-            prefetched_module, comfy_modules = entry[1]
-            if comfy_modules is not None:
-                cleanup_prefetched_modules(prefetched_module, comfy_modules)
+        # Only the head can have been pinned, as (offload_stream, (module, comfy_modules)). Later
+        # entries, and a head that was not reached yet, still hold the raw module or module group.
+        head = queue[0] if queue else None
+        if not isinstance(head, tuple) or len(head) != 2 or not isinstance(head[1], tuple):
+            continue
+        prefetched_module, comfy_modules = head[1]
+        cleanup_prefetched_modules(prefetched_module, comfy_modules)
     GRAPH_WARMED_MODULES.clear()
     if MALLOC_GRAPH_USED:
         logging.info("Comfy model compiler graph breaks: %d, rogues: %d", MALLOC_GRAPH_BREAKS, MALLOC_GRAPH_ROGUES)
@@ -238,6 +239,8 @@ def prefetch_queue_pop(queue, device, module, dtype=None, core=None, enable_grap
                 if hasattr(s, "_v"):
                     comfy_modules.append(s)
 
+        # Keep partially pinned groups reachable if pinning raises.
+        queue[0] = (None, (module, comfy_modules))
         offload_stream, fully_faulted = pin_modules(comfy_modules, device, dtype)
         queue[0] = (offload_stream, (module, comfy_modules))
 

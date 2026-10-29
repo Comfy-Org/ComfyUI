@@ -8,6 +8,7 @@ import logging
 import re
 
 import torch
+from pydantic import BaseModel
 from typing_extensions import override
 
 from comfy_api.latest import IO, ComfyExtension, Input
@@ -47,8 +48,12 @@ from comfy_api_nodes.apis.kling import (
     Kling3TurboText2VideoRequest,
     Kling3TurboContent,
     Kling3TurboImage2VideoRequest,
-    Kling3TurboCreateResponse,
-    Kling3TurboQueryResponse,
+    Kling4Content,
+    Kling4ContentsRequest,
+    Kling4Settings,
+    Kling4Text2VideoRequest,
+    KlingTaskCreateResponse,
+    KlingTaskQueryResponse,
     KlingSolutionContent,
     KlingSolutionCreateResponse,
     KlingSolutionQueryResponse,
@@ -2124,14 +2129,25 @@ def build_turbo_shot_prompt(multi_prompt: list[MultiPromptEntry]) -> str:
     return "; ".join(f"shot {i}, {int(e.duration)}, {e.prompt}" for i, e in enumerate(multi_prompt, 1)) + ";"
 
 
-def _turbo_video_url(response: Kling3TurboQueryResponse) -> str:
-    """Extract the result video URL from a /tasks response (data[].outputs[] where type == 'video')."""
-    task = response.data[0] if response.data else None
-    if task and task.outputs:
-        for output in task.outputs:
-            if output.type == "video" and output.url:
-                return output.url
-    raise RuntimeError(f"Kling 3.0 Turbo task finished without a video output: {response.model_dump()}")
+async def _run_kling_task(cls: type[IO.ComfyNode], path: str, data: BaseModel) -> IO.NodeOutput:
+    create = await sync_op(
+        cls,
+        ApiEndpoint(path=path, method="POST"),
+        response_model=KlingTaskCreateResponse,
+        data=data,
+    )
+    if not (create.data and create.data.id):
+        raise RuntimeError(f"Kling task creation failed. Code: {create.code}, Message: {create.message}")
+    response = await poll_op(
+        cls,
+        ApiEndpoint(path="/proxy/kling/tasks", query_params={"task_ids": create.data.id}),
+        response_model=KlingTaskQueryResponse,
+        status_extractor=lambda r: (r.data[0].status if r.data else None),
+    )
+    for output in response.data[0].outputs or []:
+        if output.type == "video" and output.url:
+            return IO.NodeOutput(await download_url_to_video_output(output.url))
+    raise RuntimeError(f"Kling task finished without a video output: {response.model_dump()}")
 
 
 async def execute_kling_turbo(
@@ -2150,34 +2166,22 @@ async def execute_kling_turbo(
         contents = [Kling3TurboContent(type="first_frame", url=tensor_to_base64_string(start_frame))]
         if prompt:
             contents.insert(0, Kling3TurboContent(type="prompt", text=prompt))
-        create = await sync_op(
+        return await _run_kling_task(
             cls,
-            ApiEndpoint(path="/proxy/kling/image-to-video/kling-3.0-turbo", method="POST"),
-            response_model=Kling3TurboCreateResponse,
-            data=Kling3TurboImage2VideoRequest(
+            "/proxy/kling/image-to-video/kling-3.0-turbo",
+            Kling3TurboImage2VideoRequest(
                 contents=contents,
                 settings=Kling3TurboSettings(resolution=resolution, duration=duration),  # i2v: no aspect_ratio
             ),
         )
-    else:
-        create = await sync_op(
-            cls,
-            ApiEndpoint(path="/proxy/kling/text-to-video/kling-3.0-turbo", method="POST"),
-            response_model=Kling3TurboCreateResponse,
-            data=Kling3TurboText2VideoRequest(
-                prompt=prompt,
-                settings=Kling3TurboSettings(resolution=resolution, aspect_ratio=aspect_ratio, duration=duration),
-            ),
-        )
-    if not (create.data and create.data.id):
-        raise RuntimeError(f"Kling 3.0 Turbo create failed. Code: {create.code}, Message: {create.message}")
-    final_response = await poll_op(
+    return await _run_kling_task(
         cls,
-        ApiEndpoint(path="/proxy/kling/tasks", query_params={"task_ids": create.data.id}),
-        response_model=Kling3TurboQueryResponse,
-        status_extractor=lambda r: (r.data[0].status if r.data else None),
+        "/proxy/kling/text-to-video/kling-3.0-turbo",
+        Kling3TurboText2VideoRequest(
+            prompt=prompt,
+            settings=Kling3TurboSettings(resolution=resolution, aspect_ratio=aspect_ratio, duration=duration),
+        ),
     )
-    return IO.NodeOutput(await download_url_to_video_output(_turbo_video_url(final_response)))
 
 
 class KlingVideoNode(IO.ComfyNode):
@@ -2753,6 +2757,440 @@ class KlingTryOnNode(IO.ComfyNode):
         return IO.NodeOutput(await download_url_to_image_tensor(final_response.data[0].outputs[0].url))
 
 
+def _kling4_resolution() -> IO.Combo.Input:
+    return IO.Combo.Input("resolution", options=["720p", "1080p"])
+
+
+def _kling4_duration() -> IO.Int.Input:
+    return IO.Int.Input("duration", default=5, min=3, max=30, display_mode=IO.NumberDisplay.slider)
+
+
+def _kling4_seed() -> IO.Int.Input:
+    return IO.Int.Input(
+        "seed",
+        default=42,
+        min=0,
+        max=2147483647,
+        display_mode=IO.NumberDisplay.number,
+        control_after_generate=True,
+        tooltip="Seed controls whether the node should re-run; results are non-deterministic regardless of seed.",
+    )
+
+
+def _kling4_omni_aspect_ratio(tooltip: str) -> IO.Combo.Input:
+    return IO.Combo.Input("aspect_ratio", options=["adaptive", "16:9", "9:16", "1:1", "21:9"], tooltip=tooltip)
+
+
+def _kling4_reference_images() -> IO.Autogrow.Input:
+    return IO.Autogrow.Input(
+        "reference_images",
+        template=IO.Autogrow.TemplateNames(
+            IO.Image.Input("reference_image"),
+            names=[f"image_{i}" for i in range(1, 11)],
+            min=0,
+        ),
+    )
+
+
+def _kling4_reference_videos(names: list[str]) -> IO.Autogrow.Input:
+    return IO.Autogrow.Input(
+        "reference_videos",
+        template=IO.Autogrow.TemplateNames(
+            IO.Video.Input("reference_video"),
+            names=names,
+            min=0,
+        ),
+        tooltip="Each video and all videos together must be 3-30 seconds long.",
+    )
+
+
+def _kling4_price_badge() -> IO.PriceBadge:
+    return IO.PriceBadge(
+        depends_on=IO.PriceBadgeDepends(widgets=["model.resolution", "model.duration"]),
+        expr="""
+        (
+          $rate := $lookup(widgets, "model.resolution") = "1080p" ? 0.33605 : 0.22451;
+          {"type":"usd","usd": $rate * $lookup(widgets, "model.duration")}
+        )
+        """,
+    )
+
+
+def _kling4_prompt(prompt: str, images: int, videos: int) -> str:
+    def repl(match: re.Match) -> str:
+        kind = match.group(1).lower()
+        index = int(match.group(2) or 1)
+        count = images if kind == "image" else videos
+        if not 1 <= index <= count:
+            raise ValueError(f"The prompt mentions {match.group(0)}, but {count} {kind} input(s) are connected.")
+        return f"@{kind}_{index}"
+
+    return re.sub(r"(?<!\w)@(image|video)(\d*)(?!\w)", repl, prompt, flags=re.IGNORECASE | re.ASCII)
+
+
+def _validate_kling4_images(images: list[torch.Tensor]) -> None:
+    if len(images) > 10:
+        raise ValueError(f"Kling 4.0 accepts at most 10 images, got {len(images)}.")
+    for image in images:
+        validate_image_dimensions(image, min_width=300, min_height=300)
+        validate_image_aspect_ratio(image, (2, 5), (5, 2), strict=False)
+
+
+def _validate_kling4_videos(videos: list[Input.Video]) -> None:
+    for video in videos:
+        validate_video_duration(video, min_duration=3, max_duration=30)
+        validate_video_dimensions(video, min_width=700, min_height=700, max_width=4553, max_height=4553)
+        width, height = video.get_dimensions()
+        if width * height > 8294400:
+            raise ValueError(f"Video is {width}x{height}; Kling 4.0 accepts at most 8,294,400 pixels (3840x2160).")
+        if not 0.4 <= width / height <= 2.5:
+            raise ValueError(f"Video is {width}x{height}; the aspect ratio must be between 2:5 and 5:2.")
+        if video.get_frame_rate() < 23:
+            raise ValueError(f"Video frame rate must be at least 24 fps, got {float(video.get_frame_rate()):.2f} fps.")
+    total = sum(video.get_duration() for video in videos)
+    if total > 30.05:
+        raise ValueError(f"All videos together must be at most 30 seconds long, got {total:.2f}s.")
+
+
+async def _kling4_media_contents(
+    cls: type[IO.ComfyNode], images: list[torch.Tensor], videos: list[tuple[str, Input.Video]]
+) -> list[Kling4Content]:
+    contents = []
+    if images:
+        urls = await upload_images_to_comfyapi(cls, images, max_images=10, wait_label="Uploading reference images")
+        contents.extend(Kling4Content(type="refer_image", url=url, id=f"image_{i}") for i, url in enumerate(urls, 1))
+    for i, (video_type, video) in enumerate(videos, 1):
+        url = await upload_video_to_comfyapi(cls, video, wait_label=f"Uploading video {i}")
+        contents.append(Kling4Content(type=video_type, url=url, id=f"video_{i}"))
+    return contents
+
+
+class Kling4TextToVideoNode(IO.ComfyNode):
+
+    @classmethod
+    def define_schema(cls) -> IO.Schema:
+        return IO.Schema(
+            node_id="Kling4TextToVideoNode",
+            display_name="Kling 4.0 Text to Video",
+            category="partner/video/Kling",
+            description="Generate a video with audio from a text prompt.",
+            inputs=[
+                IO.DynamicCombo.Input(
+                    "model",
+                    options=[
+                        IO.DynamicCombo.Option(
+                            "kling-4.0",
+                            [
+                                IO.String.Input("prompt", multiline=True, default=""),
+                                _kling4_resolution(),
+                                IO.Combo.Input("aspect_ratio", options=["16:9", "9:16", "1:1", "21:9"]),
+                                _kling4_duration(),
+                                _kling4_seed(),
+                            ],
+                        ),
+                    ],
+                ),
+            ],
+            outputs=[
+                IO.Video.Output(),
+            ],
+            hidden=[
+                IO.Hidden.auth_token_comfy_org,
+                IO.Hidden.api_key_comfy_org,
+                IO.Hidden.unique_id,
+            ],
+            is_api_node=True,
+            price_badge=_kling4_price_badge(),
+        )
+
+    @classmethod
+    async def execute(cls, model: dict) -> IO.NodeOutput:
+        validate_string(model["prompt"], min_length=1, max_length=26000)
+        return await _run_kling_task(
+            cls,
+            f"/proxy/kling/text-to-video/{model['model']}",
+            Kling4Text2VideoRequest(
+                prompt=model["prompt"],
+                settings=Kling4Settings(
+                    resolution=model["resolution"], aspect_ratio=model["aspect_ratio"], duration=model["duration"]
+                ),
+            ),
+        )
+
+
+class Kling4ImageToVideoNode(IO.ComfyNode):
+
+    @classmethod
+    def define_schema(cls) -> IO.Schema:
+        return IO.Schema(
+            node_id="Kling4ImageToVideoNode",
+            display_name="Kling 4.0 Image to Video",
+            category="partner/video/Kling",
+            description="Generate a video with audio through up to 10 keyframes. "
+            "Middle frames are spaced evenly; the video takes the aspect ratio of the first keyframe.",
+            inputs=[
+                IO.DynamicCombo.Input(
+                    "model",
+                    options=[
+                        IO.DynamicCombo.Option(
+                            "kling-4.0",
+                            [
+                                IO.Image.Input("first_frame", optional=True),
+                                IO.Autogrow.Input(
+                                    "middle_frames",
+                                    template=IO.Autogrow.TemplateNames(
+                                        IO.Image.Input("middle_frame"),
+                                        names=[f"middle_frame_{i}" for i in range(1, 9)],
+                                        min=0,
+                                    ),
+                                    optional=True,
+                                ),
+                                IO.Image.Input("last_frame", optional=True),
+                                IO.String.Input(
+                                    "prompt",
+                                    multiline=True,
+                                    default="",
+                                    tooltip="Optional. Refer to the frames as @Image1, @Image2, ... "
+                                    "in order: first frame, middle frames, last frame.",
+                                ),
+                                _kling4_resolution(),
+                                _kling4_duration(),
+                                _kling4_seed(),
+                            ],
+                        ),
+                    ],
+                ),
+            ],
+            outputs=[
+                IO.Video.Output(),
+            ],
+            hidden=[
+                IO.Hidden.auth_token_comfy_org,
+                IO.Hidden.api_key_comfy_org,
+                IO.Hidden.unique_id,
+            ],
+            is_api_node=True,
+            price_badge=_kling4_price_badge(),
+        )
+
+    @classmethod
+    async def execute(cls, model: dict) -> IO.NodeOutput:
+        frames = [
+            ("middle_frame", image) for batch in model["middle_frames"].values() if batch is not None for image in batch
+        ]
+        if model["first_frame"] is not None:
+            frames.insert(0, ("first_frame", model["first_frame"][0]))
+        if model["last_frame"] is not None:
+            frames.append(("last_frame", model["last_frame"][0]))
+        if not frames:
+            raise ValueError("Connect at least one frame: first_frame, a middle frame or last_frame.")
+        _validate_kling4_images([image for _, image in frames])
+        prompt = _kling4_prompt(model["prompt"], len(frames), 0)
+        validate_string(prompt, max_length=26000)
+        urls = await upload_images_to_comfyapi(
+            cls, [image for _, image in frames], max_images=10, wait_label="Uploading frames"
+        )
+        contents = [
+            Kling4Content(type=frame_type, url=url, id=f"image_{i}")
+            for i, ((frame_type, _), url) in enumerate(zip(frames, urls), 1)
+        ]
+        if prompt.strip():
+            contents.insert(0, Kling4Content(type="prompt", text=prompt))
+        return await _run_kling_task(
+            cls,
+            f"/proxy/kling/image-to-video/{model['model']}",
+            Kling4ContentsRequest(
+                contents=contents,
+                settings=Kling4Settings(resolution=model["resolution"], duration=model["duration"]),
+            ),
+        )
+
+
+class Kling4ReferenceToVideoNode(IO.ComfyNode):
+
+    @classmethod
+    def define_schema(cls) -> IO.Schema:
+        return IO.Schema(
+            node_id="Kling4ReferenceToVideoNode",
+            display_name="Kling 4.0 Reference to Video",
+            category="partner/video/Kling",
+            description="Generate a video with audio from reference images and videos, "
+            "optionally starting or ending on given frames.",
+            inputs=[
+                IO.DynamicCombo.Input(
+                    "model",
+                    options=[
+                        IO.DynamicCombo.Option(
+                            "kling-4.0",
+                            [
+                                _kling4_reference_images(),
+                                _kling4_reference_videos([f"video_{i}" for i in range(1, 6)]),
+                                IO.Image.Input(
+                                    "first_frame",
+                                    optional=True,
+                                    tooltip="Counts toward the 10-image limit together with the reference images.",
+                                ),
+                                IO.Image.Input(
+                                    "last_frame",
+                                    optional=True,
+                                    tooltip="Counts toward the 10-image limit together with the reference images.",
+                                ),
+                                IO.String.Input(
+                                    "prompt",
+                                    multiline=True,
+                                    default="",
+                                    tooltip="Refer to the inputs as @Image1, @Image2, ... and @Video1, @Video2, ...",
+                                ),
+                                _kling4_resolution(),
+                                _kling4_omni_aspect_ratio(
+                                    "adaptive follows the prompt, then the first frame or the reference videos, "
+                                    "otherwise 16:9."
+                                ),
+                                _kling4_duration(),
+                                _kling4_seed(),
+                            ],
+                        ),
+                    ],
+                ),
+            ],
+            outputs=[
+                IO.Video.Output(),
+            ],
+            hidden=[
+                IO.Hidden.auth_token_comfy_org,
+                IO.Hidden.api_key_comfy_org,
+                IO.Hidden.unique_id,
+            ],
+            is_api_node=True,
+            price_badge=IO.PriceBadge(
+                depends_on=IO.PriceBadgeDepends(
+                    widgets=["model.resolution", "model.duration"],
+                    input_groups=["model.reference_videos"],
+                ),
+                expr="""
+                (
+                  $hd := $lookup(widgets, "model.resolution") = "1080p";
+                  $duration := $lookup(widgets, "model.duration");
+                  $exists(inputGroups) and $lookup(inputGroups, "model.reference_videos") > 0
+                    ? (
+                        $rate := $hd ? 0.20163 : 0.13442;
+                        {"type":"range_usd","min_usd": $rate * 2 * $duration,"max_usd": $rate * (30 + $duration)}
+                      )
+                    : {"type":"usd","usd": ($hd ? 0.33605 : 0.22451) * $duration}
+                )
+                """,
+            ),
+        )
+
+    @classmethod
+    async def execute(cls, model: dict) -> IO.NodeOutput:
+        images = [image for batch in model["reference_images"].values() if batch is not None for image in batch]
+        videos = [video for video in model["reference_videos"].values() if video is not None]
+        keyframes = [(name, model[name][0]) for name in ("first_frame", "last_frame") if model[name] is not None]
+        _validate_kling4_images(images + [image for _, image in keyframes])
+        _validate_kling4_videos(videos)
+        prompt = _kling4_prompt(model["prompt"], len(images), len(videos))
+        validate_string(prompt, min_length=1, max_length=26000)
+        if model["first_frame"] is not None:
+            prompt = f"The video starts exactly on @first_frame. {prompt}"
+        if model["last_frame"] is not None:
+            prompt = f"{prompt} The video ends exactly on @last_frame."
+        contents = [Kling4Content(type="prompt", text=prompt)]
+        contents.extend(await _kling4_media_contents(cls, images, [("feature_video", video) for video in videos]))
+        for name, image in keyframes:
+            url = await upload_image_to_comfyapi(cls, image, wait_label=f"Uploading {name.replace('_', ' ')}")
+            contents.append(Kling4Content(type=name, url=url, id=name))
+        return await _run_kling_task(
+            cls,
+            f"/proxy/kling/omni-video/{model['model']}",
+            Kling4ContentsRequest(
+                contents=contents,
+                settings=Kling4Settings(
+                    resolution=model["resolution"], aspect_ratio=model["aspect_ratio"], duration=model["duration"]
+                ),
+            ),
+        )
+
+
+class Kling4EditVideoNode(IO.ComfyNode):
+
+    @classmethod
+    def define_schema(cls) -> IO.Schema:
+        return IO.Schema(
+            node_id="Kling4EditVideoNode",
+            display_name="Kling 4.0 Edit Video",
+            category="partner/video/Kling",
+            description="Edit a video with a text prompt and optional reference images and videos. "
+            "The result has the same length as the input video.",
+            inputs=[
+                IO.DynamicCombo.Input(
+                    "model",
+                    options=[
+                        IO.DynamicCombo.Option(
+                            "kling-4.0",
+                            [
+                                IO.Video.Input(
+                                    "video_1",
+                                    tooltip="The video to edit, 3-30 seconds. The output keeps its length.",
+                                ),
+                                _kling4_reference_videos([f"video_{i}" for i in range(2, 6)]),
+                                _kling4_reference_images(),
+                                IO.String.Input(
+                                    "prompt",
+                                    multiline=True,
+                                    default="",
+                                    tooltip="Describe what to change and what to keep. Refer to the input video as "
+                                    "@Video1, the reference videos as @Video2, ... and the images as @Image1, ...",
+                                ),
+                                _kling4_resolution(),
+                                _kling4_omni_aspect_ratio("adaptive keeps the aspect ratio of the input video."),
+                                _kling4_seed(),
+                            ],
+                        ),
+                    ],
+                ),
+            ],
+            outputs=[
+                IO.Video.Output(),
+            ],
+            hidden=[
+                IO.Hidden.auth_token_comfy_org,
+                IO.Hidden.api_key_comfy_org,
+                IO.Hidden.unique_id,
+            ],
+            is_api_node=True,
+            price_badge=IO.PriceBadge(
+                depends_on=IO.PriceBadgeDepends(widgets=["model.resolution"], input_groups=["model.reference_videos"]),
+                expr="""
+                (
+                  $rate := $lookup(widgets, "model.resolution") = "1080p" ? 0.20163 : 0.13442;
+                  $exists(inputGroups) and $lookup(inputGroups, "model.reference_videos") > 0
+                    ? {"type":"range_usd","min_usd": $rate,"max_usd": $rate * 2,"format":{"suffix":"/second of input video"}}
+                    : {"type":"usd","usd": $rate * 2,"format":{"suffix":"/second of input video"}}
+                )
+                """,
+            ),
+        )
+
+    @classmethod
+    async def execute(cls, model: dict) -> IO.NodeOutput:
+        images = [image for batch in model["reference_images"].values() if batch is not None for image in batch]
+        videos = [("base_video", model["video_1"])]
+        videos += [("feature_video", v) for v in model["reference_videos"].values() if v is not None]
+        _validate_kling4_images(images)
+        _validate_kling4_videos([v for _, v in videos])
+        prompt = _kling4_prompt(model["prompt"], len(images), len(videos))
+        validate_string(prompt, min_length=1, max_length=26000)
+        return await _run_kling_task(
+            cls,
+            f"/proxy/kling/omni-video/{model['model']}",
+            Kling4ContentsRequest(
+                contents=[Kling4Content(type="prompt", text=prompt), *await _kling4_media_contents(cls, images, videos)],
+                settings=Kling4Settings(resolution=model["resolution"], aspect_ratio=model["aspect_ratio"]),
+            ),
+        )
+
+
 class KlingExtension(ComfyExtension):
     @override
     async def get_node_list(self) -> list[type[IO.ComfyNode]]:
@@ -2776,6 +3214,10 @@ class KlingExtension(ComfyExtension):
             KlingFirstLastFrameNode,
             KlingAvatarNode,
             KlingTryOnNode,
+            Kling4TextToVideoNode,
+            Kling4ImageToVideoNode,
+            Kling4ReferenceToVideoNode,
+            Kling4EditVideoNode,
         ]
 
 
