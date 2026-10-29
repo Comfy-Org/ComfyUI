@@ -5,6 +5,7 @@ from ._sdk import (  # noqa: F401
     AssetCatalogueMetadataProvider,
     AssetRef,
     AssetsDomain,
+    AudioDecodeError,
     AudioEncoderRef,
     AudioRef,
     BackgroundRemovalModelRef,
@@ -73,6 +74,7 @@ from ._sdk import (  # noqa: F401
 )
 
 __all__ = [
+    "AudioDecodeError",
     'AssetCopyResult',
     'VideoPreviewDescriptor',
     'AssetMediaProvider',

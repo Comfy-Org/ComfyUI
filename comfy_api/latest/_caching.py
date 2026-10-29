@@ -3,6 +3,29 @@ from typing import Optional
 from dataclasses import dataclass
 
 
+def allows_external_cache(value: object) -> bool:
+    """Respect a value's optional non-consuming external-storage refusal.
+
+    Managed values can declare ``_comfy_external_cacheable = False``. Neither
+    this predicate nor local memory sizing may realize such a value. Existing
+    values and providers retain their default storage behavior.
+    """
+    pending = [value]
+    seen: set[int] = set()
+    while pending:
+        item = pending.pop()
+        if id(item) in seen:
+            continue
+        seen.add(id(item))
+        if getattr(item, "_comfy_external_cacheable", True) is False:
+            return False
+        if type(item) is dict:
+            pending.extend(item.values())
+        elif type(item) in (list, tuple):
+            pending.extend(item)
+    return True
+
+
 @dataclass
 class CacheContext:
     node_id: str

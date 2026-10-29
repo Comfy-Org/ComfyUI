@@ -23,6 +23,10 @@ other domains have native implementations. Individual operations can still
 require a configured provider, dependency, device, model or user interaction.
 `OpNotSupported` reports an unavailable resource operation.
 
+[Deferred AUDIO](deferred-audio.md) is a source draft with explicit managed
+ownership and consumption semantics. Its generated contract and runtime
+qualification remain pending; do not treat it as an adopted corpus revision.
+
 The default context currently raises `NotImplementedError` for every operation
 in these domains:
 

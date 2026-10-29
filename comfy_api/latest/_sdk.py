@@ -78,6 +78,7 @@ from ._cloud_media import InProcessImgBB, InProcessLuma, InProcessSenseNova
 from ._civitai import InProcessCivitai
 from ._ollama import InProcessOllama
 from ._llama_cpp import InProcessLlamaCpp
+from ._deferred_audio import AudioDecodeError, AudioWindow, DeferredAudio, DeferredAudioPool
 
 if TYPE_CHECKING:  # keep this module import-safe / torch-free at import time
     pass
@@ -1752,6 +1753,33 @@ class UpscaleModelRef(_TypedRef):
 
 class AudioRef(ValueRef):
     KIND = "AUDIO"
+
+    @classmethod
+    async def from_asset(
+        cls, asset: "AssetRef", *, max_source_bytes: int,
+        max_decoded_bytes: int, timeout_seconds: float,
+        start_seconds: float = 0.0, duration_seconds: Optional[float] = None,
+        decode_policy: Literal["stream0_pcm_f32_v1"] = "stream0_pcm_f32_v1",
+    ) -> "AudioRef":
+        """Capture immutable encoded audio; decode only on actual consumption.
+
+        Time is measured from the first decoded sample, at the native rate.
+        Internal edge transfer is lazy. Explicit value/raw reads, ordinary
+        mapping reads and audio encoders consume the value. Bounds are requests
+        under the provider's policy, not permission to choose operator quotas.
+        """
+        return await current_runtime().ops.apply("audio.defer", asset, {
+            "start_seconds": start_seconds, "duration_seconds": duration_seconds,
+            "max_source_bytes": max_source_bytes, "max_decoded_bytes": max_decoded_bytes,
+            "timeout_seconds": timeout_seconds, "decode_policy": decode_policy,
+        })
+
+    async def value(self) -> Any:
+        """Consume AUDIO; Guest buffer reads still require raw permission."""
+        value = await current_runtime().refs.resolve(self)
+        if type(value) is DeferredAudio:
+            return await value.materialize_async()
+        return value
 
 
 class VideoRef(_TypedRef):
@@ -6945,6 +6973,8 @@ class _InProcessOutput:
         audio_value = None
         if audio is not None:
             audio_value = await rt.refs.resolve(audio)
+            if type(audio_value) is DeferredAudio:
+                audio_value = await audio_value.materialize_async()
             if (not isinstance(audio_value, dict)
                     or "waveform" not in audio_value
                     or "sample_rate" not in audio_value):
@@ -9845,7 +9875,8 @@ class InProcessOps:
     registry: core ships a closed primitive set; ``register_op`` extends it
     (an overlay subclasses or registers richer ops)."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, allow_deferred_audio: bool = False) -> None:
+        self._deferred_audio = DeferredAudioPool()
         self._ops: dict[str, Callable[..., Awaitable["ImageRef"]]] = {
             "ref.describe": self._ref_describe,
             "interpolation_states.skip_mask":
@@ -9981,6 +10012,26 @@ class InProcessOps:
             "sam.segment_video": _vendor_ops.sam_segment_video,
             "upscale_model.upscale": self._upscale_model_upscale,
         }
+        if allow_deferred_audio:
+            self._ops["audio.defer"] = self._audio_defer
+
+    async def _audio_defer(
+        self, asset: "AssetRef", *, start_seconds: float = 0.0,
+        duration_seconds: Optional[float] = None,
+        max_source_bytes: int, max_decoded_bytes: int, timeout_seconds: float,
+        decode_policy: str = "stream0_pcm_f32_v1",
+    ) -> "AudioRef":
+        if not isinstance(asset, Ref) or asset.kind != "ASSET":
+            raise TypeError("deferred audio requires an ASSET ref")
+        if decode_policy != "stream0_pcm_f32_v1":
+            raise ValueError("unsupported audio decode policy")
+        rt = current_runtime()
+        path = await rt.refs.resolve(asset)
+        if not isinstance(path, (str, os.PathLike)):
+            raise TypeError("deferred audio requires a file asset")
+        window = AudioWindow(start_seconds, duration_seconds, max_decoded_bytes, timeout_seconds)
+        value = await asyncio.to_thread(self._deferred_audio.capture, os.fspath(path), window, max_source_bytes)
+        return AudioRef._wrap(await rt.refs.create("AUDIO", value))
 
     def register_op(self, name: str, fn: Callable[..., Awaitable["ImageRef"]]) -> None:
         self._ops[name] = fn
@@ -14203,6 +14254,8 @@ def _is_interpolation_states(v: Any) -> bool:
 #: this module must not import.
 def _ref_type_for(v: Any) -> tuple[type, str]:
     """Choose the narrowest handle that preserves the value's authority."""
+    if type(v) is DeferredAudio:
+        return AudioRef, "AUDIO"
     if _looks_like_tensor(v) and getattr(v, "ndim", None) == 1:
         return SigmasRef, "SIGMAS"
     if _looks_like_tensor(v):
@@ -14390,7 +14443,7 @@ class Providers:
         self.asset_media_provider: Optional[AssetMediaProvider] = None
         self.execution_backend: ExecutionBackend = InProcessExecutionBackend()
         self.ctx_provider: CtxProvider = InProcessCtxProvider()
-        self.ops_provider: OpsProvider = InProcessOps()
+        self.ops_provider: OpsProvider = InProcessOps(allow_deferred_audio=True)
         self.ref_resolver_factory: Callable[[], RefResolver] = InProcessRefResolver
         self.asset_catalogue_metadata_provider: Optional[
             AssetCatalogueMetadataProvider] = None
