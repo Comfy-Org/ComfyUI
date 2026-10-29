@@ -322,7 +322,10 @@ class BasicCache:
         return None
 
     def _is_external_cacheable_value(self, value):
-        return hasattr(value, 'outputs') and hasattr(value, 'ui')
+        from comfy_api.latest._caching import allows_external_cache
+
+        return (hasattr(value, 'outputs') and hasattr(value, 'ui')
+                and allows_external_cache(value.outputs))
 
     def _get_class_type(self, node_id):
         if not self.initialized or not self.dynprompt:
@@ -612,12 +615,20 @@ class RAMPressureCache(LRUCache):
                 nonlocal ram_usage, oom_ram_usage
                 if outputs is None:
                     return
+                if hasattr(outputs, "_comfy_cache_tensors"):
+                    extra_bytes = getattr(outputs, "_comfy_cache_extra_bytes", lambda: 0)()
+                    ram_usage += extra_bytes
+                    oom_ram_usage += extra_bytes
+                    scan_list_for_ram_usage(outputs._comfy_cache_tensors())
+                    return
                 if isinstance(outputs, Mapping):
                     outputs = outputs.values()
                 elif not isinstance(outputs, (list, tuple)):
                     outputs = (outputs,)
                 for output in outputs:
-                    if isinstance(output, (list, tuple, Mapping)):
+                    if hasattr(output, "_comfy_cache_tensors"):
+                        scan_list_for_ram_usage(output)
+                    elif isinstance(output, (list, tuple, Mapping)):
                         scan_list_for_ram_usage(output)
                     elif isinstance(output, torch.Tensor) and output.device.type == 'cpu':
                         storage = output.untyped_storage()
@@ -629,8 +640,6 @@ class RAMPressureCache(LRUCache):
                     elif is_model_patcher_output(output) and self.used_generation[key] != self.generation:
                         #old ModelPatchers are the first to go
                         oom_ram_usage = 1e30
-                    elif hasattr(output, "_comfy_cache_tensors"):
-                        scan_list_for_ram_usage(output._comfy_cache_tensors())
             try:
                 scan_list_for_ram_usage(cache_entry.outputs)
             except Exception:
