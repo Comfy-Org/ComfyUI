@@ -2,6 +2,7 @@ import argparse
 import logging
 import os
 import re
+import shutil
 import sys
 import tempfile
 import zipfile
@@ -403,8 +404,8 @@ comfyui-workflow-templates is not installed.
             Path(cls.CUSTOM_FRONTENDS_ROOT) / provider.folder_name / semantic_version
         )
         if not os.path.exists(web_root):
+            os.makedirs(web_root)
             try:
-                os.makedirs(web_root, exist_ok=True)
                 logging.info(
                     "Downloading frontend(%s) version(%s) to (%s)",
                     provider.folder_name,
@@ -413,10 +414,9 @@ comfyui-workflow-templates is not installed.
                 )
                 logging.debug(release)
                 download_release_asset_zip(release, destination_path=web_root)
-            finally:
-                # Clean up the directory if it is empty, i.e. the download failed
-                if not os.listdir(web_root):
-                    os.rmdir(web_root)
+            except Exception:
+                shutil.rmtree(web_root)
+                raise
 
         return web_root
 

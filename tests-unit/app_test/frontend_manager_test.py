@@ -1,4 +1,6 @@
 import argparse
+import io
+import zipfile
 from types import SimpleNamespace
 from unittest.mock import Mock, patch, mock_open
 
@@ -138,11 +140,9 @@ def test_init_frontend_invalid_provider():
 def mock_os_functions():
     with (
         patch("app.frontend_management.os.makedirs") as mock_makedirs,
-        patch("app.frontend_management.os.listdir") as mock_listdir,
-        patch("app.frontend_management.os.rmdir") as mock_rmdir,
+        patch("app.frontend_management.shutil.rmtree") as mock_rmtree,
     ):
-        mock_listdir.return_value = []  # Simulate empty directory
-        yield mock_makedirs, mock_listdir, mock_rmdir
+        yield mock_makedirs, mock_rmtree
 
 
 @pytest.fixture
@@ -152,20 +152,65 @@ def mock_download():
         yield mock
 
 
-def test_finally_block(mock_os_functions, mock_download, mock_provider):
+def test_failed_download_cleanup(mock_os_functions, mock_download, mock_provider):
     # Arrange
-    mock_makedirs, mock_listdir, mock_rmdir = mock_os_functions
+    mock_makedirs, mock_rmtree = mock_os_functions
     version_string = "test-owner/test-repo@1.0.0"
 
     # Act & Assert
-    with pytest.raises(Exception):
+    with pytest.raises(Exception, match="Download failed"):
         FrontendManager.init_frontend_unsafe(version_string, mock_provider)
 
     # Assert
     mock_makedirs.assert_called_once()
     mock_download.assert_called_once()
-    mock_listdir.assert_called_once()
-    mock_rmdir.assert_called_once()
+    mock_rmtree.assert_called_once_with(mock_download.call_args.kwargs["destination_path"])
+
+
+@pytest.mark.parametrize("version", ["1.0.0", "v1.0.0", "latest", "prerelease"])
+def test_failed_frontend_extraction_is_retried(tmp_path, mock_provider, version):
+    archive = io.BytesIO()
+    with zipfile.ZipFile(archive, "w") as zip_file:
+        zip_file.writestr("assets/app.js", "console.log('frontend')")
+        zip_file.writestr("index.html", "<html>frontend</html>")
+    valid_zip = archive.getvalue()
+    corrupt_zip = valid_zip.replace(b"<html>frontend</html>", b"<html>corrupt!</html>")
+    release = mock_provider.get_release("1.0.0")
+    response = Mock(content=corrupt_zip)
+
+    with (
+        patch.object(FrontendManager, "CUSTOM_FRONTENDS_ROOT", str(tmp_path)),
+        patch.object(FrontEndProvider, "get_release", return_value=release),
+        patch("app.frontend_management.requests.get", return_value=response) as download,
+        patch.object(FrontendManager, "default_frontend_path", return_value="/default/path"),
+    ):
+        version_string = f"test-owner/test-repo@{version}"
+        assert FrontendManager.init_frontend(version_string) == "/default/path"
+        response.content = valid_zip
+        frontend_path = FrontendManager.init_frontend(version_string)
+        assert FrontendManager.init_frontend(version_string) == frontend_path
+
+    assert download.call_count == 2
+    assert (tmp_path / "test-owner_test-repo" / "1.0.0" / "index.html").read_text() == "<html>frontend</html>"
+    assert frontend_path == str(tmp_path / "test-owner_test-repo" / "1.0.0")
+
+
+def test_frontend_cleanup_does_not_remove_existing_directory(tmp_path, mock_provider):
+    cached = tmp_path / "test-owner_test-repo" / "1.0.0"
+
+    def create_existing_directory(*args, **kwargs):
+        cached.mkdir(parents=True)
+        (cached / "index.html").write_text("existing frontend")
+        raise FileExistsError
+
+    with (
+        patch.object(FrontendManager, "CUSTOM_FRONTENDS_ROOT", str(tmp_path)),
+        patch("app.frontend_management.os.makedirs", side_effect=create_existing_directory),
+    ):
+        with pytest.raises(FileExistsError):
+            FrontendManager.init_frontend_unsafe("test-owner/test-repo@1.0.0", mock_provider)
+
+    assert (cached / "index.html").read_text() == "existing frontend"
 
 
 @pytest.mark.parametrize("version", ["1.0.0", "v1.0.0"])
