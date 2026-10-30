@@ -90,6 +90,7 @@ class CustomNodeManager:
         return translations
 
     def add_routes(self, routes, webapp, loadedModules):
+        """Register custom-node workflow template and translation routes."""
 
         example_workflow_folder_names = ["example_workflows", "example", "examples", "workflow", "workflows"]
 
