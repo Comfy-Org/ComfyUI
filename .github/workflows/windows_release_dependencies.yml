@@ -53,15 +53,15 @@ jobs:
             echo If you just want to update normally, close this and run update_comfyui.bat instead.
             echo -
             pause
-            ..\python_embeded\python.exe -s -m pip install --upgrade torch torchvision torchaudio ${{ inputs.xformers }} --index-url https://download.pytorch.org/whl/cu${{ inputs.cu }}
+            ..\python_embeded\python.exe -s -m pip install --upgrade torch torchvision torchaudio ${{ inputs.xformers }} --index-url https://download.pytorch.org/whl/cu${{ inputs.cu }} || (pause & exit /b 1)
             ..\python_embeded\python.exe -s -m pip list --format=freeze | findstr /b /c:torch== /c:torchvision== /c:torchaudio== > torch_constraints.txt
             ..\python_embeded\python.exe -s -m pip install --upgrade -r ../ComfyUI/requirements.txt pygit2 -c torch_constraints.txt
             pause" > update_comfyui_and_python_dependencies.bat
 
             grep -v comfy requirements.txt > requirements_nocomfyui.txt
-            python -m pip wheel --no-cache-dir torch torchvision torchaudio ${{ inputs.xformers }} --index-url https://download.pytorch.org/whl/cu${{ inputs.cu }} -w ./temp_wheel_dir
-            ls temp_wheel_dir | sed -nE 's/^(torch|torchvision|torchaudio)-([^-]+)-.*/\1==\2/p' > torch_constraints.txt
-            python -m pip wheel --no-cache-dir ${{ inputs.extra_dependencies }} -r requirements_nocomfyui.txt pygit2 -c torch_constraints.txt --find-links ./temp_wheel_dir -w ./temp_wheel_dir
+            python -m pip wheel --no-cache-dir torch torchvision torchaudio ${{ inputs.xformers }} ${{ inputs.extra_dependencies }} --index-url https://download.pytorch.org/whl/cu${{ inputs.cu }} -w ./torch_wheel_dir
+            ls torch_wheel_dir | sed -nE 's/^(torch|torchvision|torchaudio)-([^-]+)-.*/\1==\2/p' > torch_constraints.txt
+            python -m pip wheel --no-cache-dir torch torchvision torchaudio ${{ inputs.xformers }} ${{ inputs.extra_dependencies }} --extra-index-url https://download.pytorch.org/whl/cu${{ inputs.cu }} -r requirements_nocomfyui.txt pygit2 -c torch_constraints.txt --find-links ./torch_wheel_dir -w ./temp_wheel_dir
             python -m pip install --no-cache-dir ./temp_wheel_dir/*
             echo installed basic
             ls -lah temp_wheel_dir
