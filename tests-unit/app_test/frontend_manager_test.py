@@ -173,6 +173,7 @@ def test_interrupted_frontend_download_cleanup(tmp_path, mock_provider, partial)
     interruption = KeyboardInterrupt("Download interrupted")
 
     def interrupted_download(release, destination_path):
+        """Interrupt before or after writing a partial frontend asset."""
         if partial:
             (cached / "asset.js").write_text("partial")
         raise interruption
