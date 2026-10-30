@@ -5,6 +5,8 @@ import logging
 
 
 def is_equal(x, y):
+    if x is y:
+        return True
     if torch.is_tensor(x) and torch.is_tensor(y):
         return torch.equal(x, y)
     elif isinstance(x, dict) and isinstance(y, dict):
