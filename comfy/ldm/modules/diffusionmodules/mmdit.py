@@ -303,13 +303,11 @@ class SelfAttention(nn.Module):
             raise ValueError(qk_norm)
 
     def _kitchen_qkv(self, x):
-        # QKV linear + bias + per-head q/k RMSNorm in one comfy-kitchen op
+        # QKV linear + bias + per-head q/k RMSNorm in one comfy-kitchen op; measured faster on ROCm only
         ck = getattr(comfy.quant_ops, "ck", None)
-        if (ck is None or not hasattr(ck, "linear_qk_rms_norm") or not isinstance(self.ln_q, RMSNorm)
-                or self.ln_q.weight is None or comfy.model_management.in_training
-                # a quantized weight the device can multiply natively keeps its own GEMM
-                or (isinstance(self.qkv.weight, comfy.quant_ops.QuantizedTensor)
-                    and not getattr(self.qkv, "_full_precision_mm", False))):
+        if (ck is None or not hasattr(ck, "linear_qk_rms_norm") or not comfy.model_management.is_amd()
+                or not isinstance(self.ln_q, RMSNorm) or self.ln_q.weight is None
+                or comfy.model_management.in_training):
             return None
         weight, bias, offload_stream = comfy.ops.cast_bias_weight(self.qkv, x, offloadable=True)
         try:
