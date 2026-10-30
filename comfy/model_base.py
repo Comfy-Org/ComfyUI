@@ -2261,7 +2261,7 @@ class MiniMaxH3(BaseModel):
         if cross_attn is not None and latent_shapes is not None and len(latent_shapes) > 1:
             # packed layout built once per sampling run, h/w rounded up to the DiT's 2x2 patch
             vs = latent_shapes[0]
-            if len(vs) < 5:
+            if len(vs) != 5:
                 raise ValueError(
                     "MiniMaxH3 expects a video+audio latent whose video stream is 5D "
                     "(batch, channels, frames, height, width), got {}. Check that the latent "
