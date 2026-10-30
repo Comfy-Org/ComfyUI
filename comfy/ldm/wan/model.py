@@ -7,6 +7,7 @@ import torch.nn as nn
 from einops import rearrange
 
 from comfy.ldm.modules.attention import AttentionTensorContainer, ComfyAttention, optimized_attention
+import comfy.ldm.modules.attention
 from comfy.ldm.flux.layers import EmbedND
 from comfy.ldm.flux.math import apply_rope1, rope
 import comfy.ldm.common_dit
@@ -59,12 +60,63 @@ class WanSelfAttention(nn.Module):
         self.norm_q = operation_settings.get("operations").RMSNorm(dim, eps=eps, elementwise_affine=True, device=operation_settings.get("device"), dtype=operation_settings.get("dtype")) if qk_norm else nn.Identity()
         self.norm_k = operation_settings.get("operations").RMSNorm(dim, eps=eps, elementwise_affine=True, device=operation_settings.get("device"), dtype=operation_settings.get("dtype")) if qk_norm else nn.Identity()
 
+    def forward_kitchen(self, x, freqs, transformer_options):
+        """Self-attention through comfy-kitchen kernels where it has them: q/k RMSNorm over the
+        full dim + RoPE in one op, and flash attention. Returns None, leaving the call to
+        forward's own code, unless kitchen has a non-eager kernel for at least one of the two;
+        its Triton backend is opt-in (--enable-triton-backend), so by default it returns None."""
+        ck = getattr(comfy.quant_ops, "ck", None)
+        # rms_rope(norm_over_heads=True) ships in the same comfy-kitchen release as flash_attn
+        if (ck is None or not hasattr(ck, "flash_attn") or type(self) is not WanSelfAttention
+                or comfy.model_management.in_training or transformer_options.get("patches", {}).get("attn1_patch")
+                or x.dim() != 3 or not x.is_contiguous()):
+            return None
+        b, s, n, d = *x.shape[:2], self.num_heads, self.head_dim
+        # q, k and v leave their projections with x's shape, dtype and device, so x stands in
+        # for them (and a dim-wide row of x for the norm weights) when asking kitchen
+        x4 = x.view(b, s, n, d)
+        fuse_rope = (isinstance(self.norm_q, torch.nn.RMSNorm) and isinstance(self.norm_k, torch.nn.RMSNorm)
+                     and self.norm_q.weight is not None and self.norm_k.weight is not None
+                     and self.norm_q.eps is not None and self.norm_q.eps == self.norm_k.eps
+                     and comfy.quant_ops.ck_has_kernel("rms_rope", q=x4, k=x4, freqs_cis=freqs, q_scale=x[0, 0], k_scale=x[0, 0],
+                                                       epsilon=self.norm_q.eps, norm_over_heads=True))
+        fuse_attn = (self.comfy_attention.function is None and "optimized_attention_override" not in transformer_options
+                     and comfy.ldm.modules.attention.optimized_attention is comfy.ldm.modules.attention.attention_pytorch
+                     and comfy.quant_ops.ck_has_kernel("flash_attn", q=x4, k=x4, v=x4, scale=None))
+        if not (fuse_rope or fuse_attn):
+            return None
+
+        q = self.q(x)
+        k = self.k(x)
+        if fuse_rope:
+            q_scale, _, q_stream = comfy.ops.cast_bias_weight(self.norm_q, q, offloadable=True)
+            k_scale, _, k_stream = comfy.ops.cast_bias_weight(self.norm_k, k, offloadable=True)
+            q, k = ck.rms_rope(q.view(b, s, n, d), k.view(b, s, n, d), freqs, q_scale, k_scale, self.norm_q.eps,
+                               norm_over_heads=True)
+            comfy.ops.uncast_bias_weight(self.norm_q, q_scale, None, q_stream)
+            comfy.ops.uncast_bias_weight(self.norm_k, k_scale, None, k_stream)
+        else:
+            q = apply_rope1(self.norm_q(q).view(b, s, n, d), freqs)
+            k = apply_rope1(self.norm_k(k).view(b, s, n, d), freqs)
+        v = self.v(x)
+        if fuse_attn:
+            x = ck.flash_attn(q, k, v.view(b, s, n, d)).view(b, s, n * d)
+        else:
+            x = optimized_attention(AttentionTensorContainer(q.reshape(b, s, n * d)), AttentionTensorContainer(k.reshape(b, s, n * d)),
+                                    AttentionTensorContainer(v), heads=self.num_heads, preferred_attention=self.comfy_attention,
+                                    transformer_options=transformer_options)
+        return self.o(x)
+
     def forward(self, x, freqs, transformer_options={}):
         r"""
         Args:
             x(Tensor): Shape [B, L, num_heads, C / num_heads]
             freqs(Tensor): Rope freqs, shape [1024, C / num_heads / 2]
         """
+        out = self.forward_kitchen(x, freqs, transformer_options)
+        if out is not None:
+            return out
+
         patches = transformer_options.get("patches", {})
 
         b, s, n, d = *x.shape[:2], self.num_heads, self.head_dim

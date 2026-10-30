@@ -282,3 +282,17 @@ __all__ = [
     "QUANT_ALGOS",
     "register_layout_op",
 ]
+
+
+def ck_has_kernel(name, **kwargs):
+    """Whether comfy-kitchen would run a non-eager kernel for this call of op ``name``.
+
+    Lets a model take a kitchen-only path just where a kernel exists and keep its own code
+    otherwise; with the Triton backend disabled (the default) most such calls resolve to eager.
+    """
+    if not _CK_AVAILABLE or not hasattr(ck, name):
+        return False
+    try:
+        return ck.registry.get_capable_backend(name, kwargs) != "eager"
+    except ck.NoCapableBackendError:
+        return False
