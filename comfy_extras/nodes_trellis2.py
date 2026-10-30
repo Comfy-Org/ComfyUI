@@ -395,7 +395,7 @@ class Trellis2UpsampleStage(IO.ComfyNode):
             num_tokens = max(qu.shape[0] for qu in quant_unique_list)
             if max_tokens <= 0 or num_tokens < max_tokens or hr_resolution <= 1024:
                 break
-            hr_resolution -= 128
+            hr_resolution = max(1024, hr_resolution - 128)  # API prompts can skip the 128 step
         if hr_resolution != target_resolution:
             logging.info(f"Trellis2UpsampleStage: resolution reduced from {target_resolution} to {hr_resolution} "
                          f"for max_tokens={max_tokens} ({num_tokens} tokens).")
