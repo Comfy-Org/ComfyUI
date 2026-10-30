@@ -8,6 +8,7 @@ from einops import rearrange
 from comfy.ldm.modules.diffusionmodules.model import vae_attention, torch_cat_if_needed
 
 import comfy.ops
+import comfy.quant_ops
 ops = comfy.ops.disable_weight_init
 
 CACHE_T = 2
@@ -22,6 +23,18 @@ class CausalConv3d(ops.Conv3d):
         super().__init__(*args, **kwargs)
         self._padding = 2 * self.padding[0]
         self.padding = (0, self.padding[1], self.padding[2])
+
+    def _conv_forward(self, input, weight, bias, autopad=None, *args, **kwargs):
+        # comfy-kitchen conv3d_hw_same where it has a non-eager kernel for the call (its Triton
+        # backend is opt-in); otherwise the stock conv below
+        w = weight[:, :, -input.shape[2]:] if autopad == "causal_zero" else weight
+        if (tuple(self.stride) == (1, 1, 1) and tuple(self.dilation) == (1, 1, 1) and self.groups == 1
+                and self.padding_mode == "zeros" and not isinstance(w, comfy.quant_ops.QuantizedTensor)
+                and w.dim() == 5 and tuple(self.padding) == (0, w.shape[3] // 2, w.shape[4] // 2)
+                and w.shape[3] % 2 == 1 and w.shape[4] % 2 == 1
+                and comfy.quant_ops.ck_has_kernel("conv3d_hw_same", x=input, weight=w, bias=bias, upsample=1)):
+            return comfy.quant_ops.ck.conv3d_hw_same(input, w, bias, 1)
+        return super()._conv_forward(input, weight, bias, autopad, *args, **kwargs)
 
     def forward(self, x, cache_x=None, cache_list=None, cache_idx=None):
         if cache_list is not None:
