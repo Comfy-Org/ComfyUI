@@ -20,6 +20,7 @@ from ._helpers import (
     diagnose_connectivity,
     get_comfy_api_headers,
     is_processing_interrupted,
+    refresh_partner_token,
     sleep_with_interrupt,
     to_aiohttp_url,
 )
@@ -69,6 +70,10 @@ async def download_url_to_bytesio(
         if cls is None:
             raise ValueError("For relative 'cloud' paths, the `cls` parameter is required.")
         url = urljoin(default_base_url().rstrip("/") + "/", url.lstrip("/"))
+        try:
+            await refresh_partner_token(cls)
+        except asyncio.CancelledError:
+            raise ProcessingInterrupted("Task cancelled") from None
         headers = get_comfy_api_headers(cls)
 
     while True:
@@ -92,7 +97,7 @@ async def download_url_to_bytesio(
             with contextlib.suppress(Exception):
                 request_logger.log_request_response(operation_id=op_id, request_method="GET", request_url=url)
 
-            session = aiohttp.ClientSession(timeout=timeout_cfg)
+            session = aiohttp.ClientSession(timeout=timeout_cfg, trust_env=True)
             stop_evt = asyncio.Event()
 
             async def _monitor():
@@ -212,7 +217,7 @@ async def download_url_to_bytesio(
             diag = await diagnose_connectivity()
             if not diag["internet_accessible"]:
                 raise LocalNetworkError(
-                    "Unable to connect to the network. Please check your internet connection and try again."
+                    "Unable to connect to the network. Please check your internet connection or proxy settings and try again."
                 ) from e
             raise ApiServerError("The remote service appears unreachable at this time.") from e
         finally:

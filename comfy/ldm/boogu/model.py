@@ -12,7 +12,7 @@ from einops import rearrange
 
 import comfy.ldm.common_dit
 import comfy.ldm.omnigen.omnigen2
-from comfy.ldm.modules.attention import optimized_attention_masked
+from comfy.ldm.modules.attention import AttentionTensorContainer, ComfyAttention, optimized_attention_masked
 from comfy.ldm.omnigen.omnigen2 import (
     OmniGen2RotaryPosEmbed,
     Lumina2CombinedTimestepCaptionEmbedding,
@@ -58,6 +58,7 @@ class BooguDoubleStreamProcessor(nn.Module):
         query = torch.cat([instruct_q, img_q], dim=1)
         key = torch.cat([instruct_k, img_k], dim=1)
         value = torch.cat([instruct_v, img_v], dim=1)
+        del instruct_q, instruct_k, instruct_v, img_q, img_k, img_v
 
         query = query.view(batch_size, -1, attn.heads, attn.dim_head)
         key = key.view(batch_size, -1, attn.kv_heads, attn.dim_head)
@@ -70,12 +71,12 @@ class BooguDoubleStreamProcessor(nn.Module):
             query = apply_rotary_emb(query, rotary_emb)
             key = apply_rotary_emb(key, rotary_emb)
 
-        query = query.transpose(1, 2)
-        key = key.transpose(1, 2)
-        value = value.transpose(1, 2)
+        query = AttentionTensorContainer(query.transpose(1, 2))
+        key = AttentionTensorContainer(key.transpose(1, 2))
+        value = AttentionTensorContainer(value.transpose(1, 2))
 
         gqa_kwargs = {"enable_gqa": True} if attn.kv_heads < attn.heads else {}
-        hidden_states = optimized_attention_masked(query, key, value, attn.heads, attention_mask, skip_reshape=True, transformer_options=transformer_options, **gqa_kwargs)
+        hidden_states = optimized_attention_masked(query, key, value, attn.heads, attention_mask, skip_reshape=True, preferred_attention=attn.comfy_attention, transformer_options=transformer_options, **gqa_kwargs)
 
         # Split back to instruction/image, apply per-stream output projections, recombine.
         instruct_hidden_states = self.instruct_out(hidden_states[:, :L_instruct])
@@ -90,6 +91,7 @@ class BooguJointAttention(nn.Module):
     # Holds the shared q/k RMSNorm + final output projection
     def __init__(self, dim, head_dim, heads, kv_heads, eps=1e-5, dtype=None, device=None, operations=None):
         super().__init__()
+        self.comfy_attention = ComfyAttention()
         self.heads = heads
         self.kv_heads = kv_heads
         self.dim_head = head_dim

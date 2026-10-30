@@ -7,9 +7,57 @@ into ``AssetReference.system_metadata``.
 from __future__ import annotations
 
 import logging
+import struct
 from typing import Any
 
 logger = logging.getLogger(__name__)
+
+_EXR_MAGIC = b"\x76\x2f\x31\x01"
+_EXR_MAX_ATTRIBUTES = 1024
+
+
+def _read_cstring(f) -> bytes:
+    out = bytearray()
+    while len(out) <= 255:
+        b = f.read(1)
+        if not b or b == b"\0":
+            return bytes(out)
+        out += b
+    raise ValueError("EXR header name too long")
+
+
+def read_exr_windows(file_path: str) -> tuple[tuple[int, int], tuple[int, int]] | None:
+    """(display, data) window sizes as (width, height), read from the header alone.
+
+    Pillow can't open EXR, and opening it with PyAV buffers the whole file.
+    """
+    windows: dict[bytes, tuple[int, int]] = {}
+    try:
+        with open(file_path, "rb") as f:
+            if f.read(4) != _EXR_MAGIC:
+                return None
+            f.read(4)  # version and flags
+            for _ in range(_EXR_MAX_ATTRIBUTES):
+                name = _read_cstring(f)
+                if not name:
+                    break
+                _read_cstring(f)  # attribute type
+                (size,) = struct.unpack("<i", f.read(4))
+                if size < 0:
+                    return None
+                if name in (b"displayWindow", b"dataWindow") and size == 16:
+                    if name in windows:
+                        return None  # decoders differ on which copy applies
+                    x_min, y_min, x_max, y_max = struct.unpack("<4i", f.read(16))
+                    windows[name] = (x_max - x_min + 1, y_max - y_min + 1)
+                else:
+                    f.seek(size, 1)
+    except (OSError, ValueError, struct.error):
+        return None
+    display, data = windows.get(b"displayWindow"), windows.get(b"dataWindow")
+    if display is None or data is None or min(*display, *data) <= 0:
+        return None
+    return display, data
 
 
 def extract_image_dimensions(
@@ -33,6 +81,12 @@ def extract_image_dimensions(
     """
     if mime_type is not None and not mime_type.startswith("image/"):
         return None
+    if mime_type == "image/x-exr":
+        windows = read_exr_windows(file_path)
+        if windows is None:
+            return None
+        (width, height), _ = windows
+        return {"kind": "image", "width": width, "height": height}
 
     try:
         from PIL import Image, UnidentifiedImageError

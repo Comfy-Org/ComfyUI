@@ -5,6 +5,7 @@ import torch
 from PIL import Image, ImageDraw, ImageEnhance, ImageFont
 from typing_extensions import override
 
+import nodes
 from comfy_api.latest import ComfyExtension, io
 from comfy_extras.color_util import hex_to_rgb, normalize_palette, readable_color
 
@@ -361,6 +362,9 @@ class CreateBoundingBoxes(io.ComfyNode):
         ui = {"dims": [width, height]}
         if incoming:
             ui["input_bboxes"] = incoming
+        if background is not None and len(background) > 0:
+            saved = nodes.PreviewImage().save_images(background[:1], "comfy.bboxes.background")
+            ui["background_images"] = saved["ui"]["images"]
         return io.NodeOutput(
             preview,
             fractions_to_bbox_frame(regions, width, height),

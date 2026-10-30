@@ -482,8 +482,7 @@ class TestExecution:
         { "extra_args" : ["--cache-classic"], "should_cache_results" : True },
         { "extra_args" : ["--cache-lru", 100], "should_cache_results" : True },
         { "extra_args" : ["--cache-none"], "should_cache_results" : False },
-        # TODO: re-enable once the --enable-assets execution runs stop flaking.
-        # {"extra_args": ["--enable-assets"], "should_cache_results": True, "assets": True},
+        {"extra_args": [], "should_cache_results": True, "assets": True},
     ])
     def server(self, args_pytest, request, tmp_path_factory):
         # Start server
@@ -497,7 +496,10 @@ class TestExecution:
             '--cpu',
         ]
         pargs += [ str(param) for param in request.param["extra_args"] ]
-        if assets_enabled:
+        if not assets_enabled:
+            pargs.append('--disable-assets')
+        else:
+            pargs.append('--enable-assets')
             assets_tmp_dir = tmp_path_factory.mktemp("execution-assets")
             database_path = assets_tmp_dir / "assets.db"
             capture_path = assets_tmp_dir / "server.log"
@@ -785,6 +787,14 @@ class TestExecution:
         except Exception as e:
             assert 'prompt_id' in e.args[0], f"Did not get back a proper error message: {e}"
             assert e.args[0]['node_id'] == generator.id, "Error should have been on the generator node"
+            prompt_id = e.args[0]['prompt_id']
+
+        for _ in range(100):
+            history = client.get_history(prompt_id)
+            if prompt_id in history:
+                break
+            time.sleep(0.1)
+        assert history[prompt_id]['status']['status_str'] == 'error'
 
     def test_missing_node_error(self, client: ComfyClient, builder: GraphBuilder):
         g = builder

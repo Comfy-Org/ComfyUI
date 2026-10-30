@@ -25,10 +25,6 @@ class Krea2Tokenizer(comfy.text_encoders.qwen3vl.Qwen3VLTokenizer):
         super().__init__(embedding_directory=embedding_directory, tokenizer_data=tokenizer_data, model_type="qwen3vl_4b")
         self.llama_template = KREA2_TEMPLATE  # conditioning template; image text-gen uses qwen3vl's default image template.
 
-    def tokenize_with_weights(self, text, return_word_ids=False, llama_template=None, images=[], prevent_empty_text=False, thinking=True, **kwargs):
-        # Krea2 conditions on the no-think template; thinking=True drops the empty <think> block qwen3vl adds.
-        return super().tokenize_with_weights(text, return_word_ids=return_word_ids, llama_template=llama_template, images=images, prevent_empty_text=prevent_empty_text, thinking=thinking, **kwargs)
-
 
 class Krea2Qwen3VLClipModel(comfy.text_encoders.qwen3vl.Qwen3VLClipModel):
     def __init__(self, device="cpu", dtype=None, attention_mask=True, model_options={}):

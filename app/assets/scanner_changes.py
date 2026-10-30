@@ -9,7 +9,7 @@ missing row; with hashing off, its size and modification time must match.
 from __future__ import annotations
 
 import os
-from collections.abc import Iterable
+from collections.abc import Iterator
 from typing import Literal
 
 import sqlalchemy as sa
@@ -22,7 +22,7 @@ from app.assets.database.queries.records import (
     mark_content_missing,
     unset_content_missing,
 )
-from app.assets.helpers import path_prefix_matcher, sql_path_under_prefix, to_stored_hash
+from app.assets.helpers import path_prefix_matcher, sql_path_under_prefix_batches, to_stored_hash
 from app.assets.services.file_utils import get_mtime_ns
 from app.assets.services.path_utils import compute_loader_path, get_name_and_tags_from_asset_path
 from app.assets.services.snapshot_hash import snapshot_hash
@@ -57,7 +57,7 @@ def recover_missing_content(
         return "no_match"
     occupied = session.scalar(
         sa.select(AssetContent.id)
-        .where(AssetContent.path == path, AssetContent.is_missing.is_(False))
+        .where(AssetContent.path == path, AssetContent.is_missing == sa.false())
         .limit(1)
     )
     if occupied is not None:
@@ -259,12 +259,12 @@ def drain_pending_verifications(session: Session, limit: int | None = None) -> i
     return processed
 
 
-def live_contents_under_prefixes(session: Session, prefixes: list[str]) -> Iterable[AssetContent]:
+def live_contents_under_prefixes(session: Session, prefixes: list[str]) -> Iterator[AssetContent]:
     """Stream the live contents under the prefixes in batches; consume it inside the session."""
-    if not prefixes:
-        return []
-    stmt = sa.select(AssetContent).where(
-        AssetContent.is_missing.is_(False),
-        sa.or_(*(sql_path_under_prefix(AssetContent.path, prefix) for prefix in prefixes)),
-    )
-    return session.scalars(stmt.execution_options(yield_per=500))
+    seen: set[str] = set()
+    for under_prefixes in sql_path_under_prefix_batches(AssetContent.path, prefixes):
+        stmt = sa.select(AssetContent).where(AssetContent.is_missing.is_(False), under_prefixes)
+        for content in session.scalars(stmt.execution_options(yield_per=500)):
+            if content.id not in seen:
+                seen.add(content.id)
+                yield content
