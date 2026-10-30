@@ -59,12 +59,12 @@ class CustomNodeManager:
 
         for folder in folder_paths.get_folder_paths("custom_nodes"):
             # Sort glob results for deterministic ordering
-            for custom_node_dir in sorted(glob.glob(os.path.join(folder, "*/"))):
+            for custom_node_dir in sorted(glob.glob(os.path.join(glob.escape(folder), "*/"))):
                 locales_dir = os.path.join(custom_node_dir, "locales")
                 if not os.path.exists(locales_dir):
                     continue
 
-                for lang_dir in glob.glob(os.path.join(locales_dir, "*/")):
+                for lang_dir in glob.glob(os.path.join(glob.escape(locales_dir), "*/")):
                     lang_code = os.path.basename(os.path.dirname(lang_dir))
 
                     if lang_code not in translations:
@@ -101,7 +101,7 @@ class CustomNodeManager:
 
             for folder in folder_paths.get_folder_paths("custom_nodes"):
                 for folder_name in example_workflow_folder_names:
-                    pattern = os.path.join(folder, f"*/{folder_name}/*.json")
+                    pattern = os.path.join(glob.escape(folder), f"*/{folder_name}/*.json")
                     matched_files = glob.glob(pattern)
                     files.extend(matched_files)
 
