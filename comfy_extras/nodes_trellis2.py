@@ -330,6 +330,10 @@ class Trellis2UpsampleStage(IO.ComfyNode):
                 IO.Vae.Input("vae"),
                 IO.Int.Input("target_resolution", default=1024, min=1024, max=2048, step=128,
                              tooltip="Voxel resolution of the upsampled shape. Higher = more detail, more VRAM."),
+                IO.Int.Input("max_tokens", default=49152, min=0, max=1048576, step=4096, optional=True, advanced=True,
+                             tooltip="Sparse voxel budget for the second shape pass. The resolution is lowered in "
+                                     "steps of 128 (not below 1024) until every sample fits, as in the original "
+                                     "pipeline. 0 = always use target_resolution."),
             ],
             outputs=[
                 IO.Conditioning.Output(display_name="positive"),
@@ -353,7 +357,7 @@ class Trellis2UpsampleStage(IO.ComfyNode):
         return quant.unique(dim=0)
 
     @classmethod
-    def execute(cls, positive, negative, shape_latent, vae, target_resolution):
+    def execute(cls, positive, negative, shape_latent, vae, target_resolution, max_tokens=49152):
         device = comfy.model_management.get_torch_device()
         vae.prepare_decode(shape_latent["samples"].shape)
 
@@ -383,10 +387,18 @@ class Trellis2UpsampleStage(IO.ComfyNode):
                 sample_hr_coords.append(shape_vae.upsample_shape(slat_i.to(vae.vae_dtype), upsample_times=4))
 
         hr_resolution = target_resolution
-        quant_unique_list = [
-            cls._quantize_unique(hr_coords_i, lr_resolution, hr_resolution, pixal3d_mode)
-            for hr_coords_i in sample_hr_coords
-        ]
+        while True:
+            quant_unique_list = [
+                cls._quantize_unique(hr_coords_i, lr_resolution, hr_resolution, pixal3d_mode)
+                for hr_coords_i in sample_hr_coords
+            ]
+            num_tokens = max(qu.shape[0] for qu in quant_unique_list)
+            if max_tokens <= 0 or num_tokens < max_tokens or hr_resolution <= 1024:
+                break
+            hr_resolution -= 128
+        if hr_resolution != target_resolution:
+            logging.info(f"Trellis2UpsampleStage: resolution reduced from {target_resolution} to {hr_resolution} "
+                         f"for max_tokens={max_tokens} ({num_tokens} tokens).")
 
         # Rewrite batch column to match per-sample offset and concat.
         per_sample_counts = []
