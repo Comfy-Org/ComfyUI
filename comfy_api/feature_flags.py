@@ -123,8 +123,14 @@ _CORE_FEATURE_FLAGS: dict[str, Any] = {
     "assets": not args.disable_assets,
 }
 
-# CLI-provided flags cannot overwrite core flags. Startup code may: main.py sets "assets".
-_cli_flags = {k: v for k, v in _parse_cli_feature_flags().items() if k not in _CORE_FEATURE_FLAGS}
+# Owned by app.deploy_to_cloud, which sets it via set_server_feature.
+_SERVER_SET_FEATURE_FLAGS = ("deploy_to_cloud",)
+
+# CLI-provided flags cannot overwrite core or server-set flags. Startup code may: main.py sets "assets".
+_cli_flags = {
+    k: v for k, v in _parse_cli_feature_flags().items()
+    if k not in _CORE_FEATURE_FLAGS and k not in _SERVER_SET_FEATURE_FLAGS
+}
 
 SERVER_FEATURE_FLAGS: dict[str, Any] = {**_CORE_FEATURE_FLAGS, **_cli_flags}
 
@@ -180,3 +186,8 @@ def get_server_features() -> dict[str, Any]:
         Dictionary of server feature flags
     """
     return SERVER_FEATURE_FLAGS.copy()
+
+
+def set_server_feature(name: str, value: Any) -> None:
+    """Set a server feature flag reported to clients and returned by get_server_features."""
+    SERVER_FEATURE_FLAGS[name] = value

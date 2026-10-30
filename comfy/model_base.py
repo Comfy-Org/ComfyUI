@@ -342,6 +342,10 @@ class BaseModel(torch.nn.Module):
         Use comfy.context_windows.slice_cond() for common cases."""
         return None
 
+    def context_window_modality_dims(self, latent_shapes, dim):
+        """Temporal dim of each stream of a packed multimodal latent for context windows."""
+        return [dim] * len(latent_shapes)
+
     def extra_conds(self, **kwargs):
         out = {}
         concat_cond = self.concat_cond(**kwargs)
@@ -2238,13 +2242,10 @@ class MiniMaxH3(BaseModel):
         keyframes = kwargs.get("minimax_keyframes", None)
         if keyframes is not None:
             payload["keyframes"] = keyframes
-            payload["cond_video_latents"] = [kf["latent"] for kf in keyframes if kf.get("latent") is not None]
-            payload["cond_audio_latents"] = [kf["audio_latent"] for kf in keyframes if kf.get("audio_latent") is not None]
         refs = kwargs.get("minimax_refs", None)
         if refs is not None:
             payload["refs"] = refs
-            payload["cond_video_latents"] = payload.get("cond_video_latents", []) + [r["latent"] for r in refs if "latent" in r]
-            payload["cond_audio_latents"] = payload.get("cond_audio_latents", []) + [r["audio_latent"] for r in refs if r.get("audio_latent") is not None]
+        payload.update(self._cond_latents(keyframes, refs))
         if kwargs.get("minimax_visual_cond_noise_aug", None) is not None:
             payload["visual_cond_noise_aug"] = kwargs["minimax_visual_cond_noise_aug"]
         if kwargs.get("minimax_audio_cond_noise_aug", None) is not None:
@@ -2266,6 +2267,74 @@ class MiniMaxH3(BaseModel):
                 refs=payload.get("refs"))
         out['minimax_payload'] = comfy.conds.CONDConstant(payload)
         return out
+
+    @staticmethod
+    def _cond_latents(keyframes, refs):
+        # condition latents in packed-layout order: keyframes, then references
+        keyframes, refs = keyframes or [], refs or []
+        return {"cond_video_latents": [kf["latent"] for kf in keyframes if kf.get("latent") is not None] + [r["latent"] for r in refs if "latent" in r],
+                "cond_audio_latents": [kf["audio_latent"] for kf in keyframes if kf.get("audio_latent") is not None] + [r["audio_latent"] for r in refs if r.get("audio_latent") is not None]}
+
+    def context_window_modality_dims(self, latent_shapes, dim):
+        # audio is [B, C, 2, T], time on the last axis
+        return [dim] + [len(s) - 1 for s in latent_shapes[1:]]
+
+    @staticmethod
+    def _latent_pixel_starts(latent_t):
+        # pixel frame each video latent starts at, plus the end of the last one
+        starts = [0]
+        for k in range(latent_t):
+            starts.append(starts[-1] + comfy.ldm.minimax.model.FRAME_PER_TOKEN[k % 5])
+        return starts
+
+    def map_context_window_to_modalities(self, primary_indices, latent_shapes, dim):
+        # the streams share one time axis: split the audio at the video latents' pixel frame boundaries
+        starts = self._latent_pixel_starts(latent_shapes[0][dim])
+        edges = [round(s * latent_shapes[1][-1] / starts[-1]) for s in starts]
+        return [primary_indices, [a for k in primary_indices for a in range(edges[k], edges[k + 1])]]
+
+    def _window_payload(self, payload, window):
+        # keyframes anchor the full video's timeline: keep the part of each guide inside the window, cropped and re-anchored to it
+        starts = self._latent_pixel_starts(window.total_frames)
+        first, last = window.index_list[0], window.index_list[-1]
+        origin = starts[first]
+        if getattr(window, "causal_anchor_index", None) is not None:
+            origin -= comfy.ldm.minimax.model.FRAME_PER_TOKEN[0]  # the anchor latent takes the window's first time slot
+        audio_window = window.get_window_for_modality(1)
+        a0, a1 = audio_window.index_list[0], audio_window.index_list[-1] + 1
+        rescale = comfy.ldm.minimax.model.FRAME_RESCALE
+        keyframes = []
+        for kf in payload["keyframes"]:
+            f = kf["resolved_frame_index"]
+            latent = kf.get("latent")
+            if latent is not None:
+                # crop at the guide's 5-latent chunk starts so the clip keeps its 1,4,4,4,4 frame pattern; a chunk
+                # overlapping the window's start is kept and may begin a few frames before its origin
+                vt = latent.shape[2]
+                guide_starts = self._latent_pixel_starts(vt)
+                chunks = [g for g in range(0, vt, 5)
+                          if f + guide_starts[g] < starts[last + 1] and f + guide_starts[min(g + 5, vt)] > starts[first]]
+                if chunks:
+                    keyframes.append({"resolved_frame_index": f + guide_starts[chunks[0]] - origin,
+                                      "latent": latent[:, :, chunks[0]:chunks[-1] + 5]})
+            audio = kf.get("audio_latent")
+            if audio is not None:
+                # audio guide frame j sits at rescale * f + j on the shared time axis; the window's audio starts at a0
+                t = rescale * f
+                j0, j1 = max(0, math.ceil(a0 - t)), min(audio.shape[-1], math.ceil(a1 - t))
+                if j1 > j0:
+                    keyframes.append({"resolved_frame_index": (t + j0 - a0) / rescale, "audio_latent": audio[..., j0:j1]})
+        payload = {k: v for k, v in payload.items() if k != "layout"}  # forward rebuilds it for the window
+        payload["keyframes"] = keyframes
+        payload.update(self._cond_latents(keyframes, payload.get("refs")))
+        return payload
+
+    def resize_cond_for_context_window(self, cond_key, cond_value, window, x_in, device, retain_index_list=[]):
+        if cond_key == "audio_denoise_mask":
+            return cond_value._copy_with(window.get_window_for_modality(1).get_tensor(cond_value.cond, device))
+        if cond_key == "minimax_payload" and cond_value.cond.get("keyframes"):
+            return cond_value._copy_with(self._window_payload(cond_value.cond, window))
+        return super().resize_cond_for_context_window(cond_key, cond_value, window, x_in, device, retain_index_list=retain_index_list)
 
     def _pool_masks_to_token_grid(self, masks):
         # pool the per-pixel masks to the label grid with amax: video per 2x2 DiT patch, audio per latent frame
@@ -2840,6 +2909,9 @@ class MOSSImage(BaseModel):
         # rope positions follow the true text length, so no repeat padding: cond and uncond of different lengths run separately
         if cross_attn is not None:
             out['c_crossattn'] = comfy.conds.CONDRegular(cross_attn)
+        context_attention_bias = kwargs.get("context_attention_bias", None)
+        if context_attention_bias is not None:
+            out['context_attention_bias'] = comfy.conds.CONDRegular(context_attention_bias)
         ref_latents = kwargs.get("reference_latents", None)
         if ref_latents:
             # control adapters widen video_embedder, the references carry no control

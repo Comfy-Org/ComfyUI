@@ -104,10 +104,14 @@ ASSET_FORMAT_HEADER = "Comfy-Asset-Format"
 ASSET_FORMAT_URL = "url"
 _IDEMPOTENT_REPLAYED_HEADER = "Idempotent-Replayed"
 _ERROR_TYPE_HEADER = "X-Comfy-Error-Type"
-_IDEMPOTENCY_IN_FLIGHT = "idempotency_in_flight"
-_IDEMPOTENCY_TERMINAL = frozenset({"idempotency_consumed", "idempotency_mismatch"})
+_IDEMPOTENCY_IN_FLIGHT = frozenset({"idempotency_in_flight", "concurrency_limit_exceeded"})
+_IDEMPOTENCY_TERMINAL = frozenset({"idempotency_consumed", "idempotency_mismatch", "invalid_input"})
 _IDEMPOTENCY_IN_FLIGHT_WAIT = 2.0
 _IDEMPOTENCY_IN_FLIGHT_MAX_WAIT = 30.0
+_ROUTER_QUEUE_STATUS = {"IN_QUEUE": "queued", "IN_PROGRESS": "processing", "COMPLETED": "completed"}
+_ROUTER_POLL_INTERVAL = 2.0
+_ROUTER_MAX_POLL_INTERVAL = 10.0
+_ROUTER_MAX_POLL_ATTEMPTS = 720
 
 PRICE_CREDITS_HEADER = "X-Comfy-Credits-Used"
 """Proxy response header with the actual cost in Comfy credits. When present on any successful proxied response,
@@ -359,6 +363,9 @@ async def poll_op_raw(
     cancel_endpoint: ApiEndpoint | None = None,
     cancel_timeout: float = 10.0,
     extra_text: str | None = None,
+    max_poll_interval: float | None = None,
+    queue_position_extractor: Callable[[dict[str, Any]], int | None] | None = None,
+    server_estimate_includes_queue: bool = True,
 ) -> dict[str, Any]:
     """
     Polls an endpoint until the task reaches a terminal state. Displays time while queued/processing,
@@ -377,18 +384,41 @@ async def poll_op_raw(
     progress_bar = utils.ProgressBar(100) if progress_extractor else None
     last_progress: int | None = None
 
-    server_estimate = _server_estimates_by_execution.pop(cls, None)
-    if server_estimate is not None:
-        state = _PollUIState(
-            started=started,
-            estimated_duration=server_estimate.p50_seconds,
-            estimated_p90=server_estimate.p90_seconds,
-            estimate_includes_queue=True,
-        )
-    else:
-        state = _PollUIState(started=started, estimated_duration=estimated_duration)
-    estimate_bar = utils.ProgressBar(100) if progress_bar is None and server_estimate is not None else None
+    state = _PollUIState(started=started, estimated_duration=estimated_duration)
+    estimate_bar: utils.ProgressBar | None = None
+
+    def _adopt_server_estimate():
+        nonlocal estimate_bar
+        server_estimate = _server_estimates_by_execution.pop(cls, None)
+        if server_estimate is None:
+            return
+        if not server_estimate_includes_queue and state.estimated_duration is None:
+            state.base_processing_elapsed = 0.0
+            state.active_since = time.monotonic()
+        state.estimated_duration = server_estimate.p50_seconds
+        state.estimated_p90 = server_estimate.p90_seconds
+        state.estimate_includes_queue = server_estimate_includes_queue
+        if progress_bar is None and estimate_bar is None:
+            estimate_bar = utils.ProgressBar(100)
+
+    _adopt_server_estimate()
     stop_ticker = asyncio.Event()
+
+    async def _cancel():
+        if cancel_endpoint:
+            with contextlib.suppress(Exception):
+                await sync_op_raw(
+                    cls,
+                    cancel_endpoint,
+                    timeout=cancel_timeout,
+                    max_retries=0,
+                    max_retries_on_rate_limit=0,
+                    wait_label="Cancelling task",
+                    as_binary=False,
+                    final_label_on_success=None,
+                    monitor_progress=False,
+                    idempotent=False,
+                )
 
     async def _ticker():
         """Emit a UI update every second while polling is in progress."""
@@ -402,7 +432,8 @@ async def poll_op_raw(
                     (now - state.active_since) if state.active_since is not None else 0.0
                 )
                 if estimate_bar is not None:
-                    pct = _estimate_progress_pct(now - state.started, state.estimated_duration, state.estimated_p90)
+                    estimate_elapsed = now - state.started if state.estimate_includes_queue else proc_elapsed
+                    pct = _estimate_progress_pct(estimate_elapsed, state.estimated_duration, state.estimated_p90)
                     if pct != last_estimate_pct:
                         try:
                             estimate_bar.update_absolute(pct, total=100)
@@ -427,6 +458,8 @@ async def poll_op_raw(
             logging.debug("Polling ticker exited: %s", exc)
 
     ticker_task = asyncio.create_task(_ticker())
+    interval = poll_interval
+    last_status: str | int | None = None
     try:
         while consumed_attempts < max_poll_attempts:
             try:
@@ -447,21 +480,15 @@ async def poll_op_raw(
                 if not isinstance(resp_json, dict):
                     raise Exception("Polling endpoint returned non-JSON response.")
             except ProcessingInterrupted:
-                if cancel_endpoint:
-                    with contextlib.suppress(Exception):
-                        await sync_op_raw(
-                            cls,
-                            cancel_endpoint,
-                            timeout=cancel_timeout,
-                            max_retries=0,
-                            wait_label="Cancelling task",
-                            as_binary=False,
-                            final_label_on_success=None,
-                            monitor_progress=False,
-                            idempotent=False,
-                        )
+                await _cancel()
+                raise
+            except (LocalNetworkError, ApiServerError):
+                raise
+            except Exception:
+                await _cancel()
                 raise
 
+            _adopt_server_estimate()
             try:
                 status = _normalize_status_value(status_extractor(resp_json))
             except Exception as e:
@@ -503,6 +530,10 @@ async def poll_op_raw(
 
             state.is_queued = is_queued
             state.status_label = status or ("Queued" if is_queued else "Processing")
+            if is_queued and queue_position_extractor:
+                position = queue_position_extractor(resp_json)
+                if position is not None:
+                    state.status_label = f"{state.status_label} ({position} ahead)"
             if status in completed_states:
                 if state.active_since is not None:
                     state.base_processing_elapsed += now_ts - state.active_since
@@ -534,31 +565,26 @@ async def poll_op_raw(
                 logging.error(msg)
                 raise Exception(msg)
 
+            if max_poll_interval is not None:
+                interval = poll_interval if status != last_status else min(interval + 1.0, max_poll_interval)
+                last_status = status
             try:
-                await sleep_with_interrupt(poll_interval, cls, None, None)
+                await sleep_with_interrupt(interval, cls, None, None)
             except ProcessingInterrupted:
-                if cancel_endpoint:
-                    with contextlib.suppress(Exception):
-                        await sync_op_raw(
-                            cls,
-                            cancel_endpoint,
-                            timeout=cancel_timeout,
-                            max_retries=0,
-                            wait_label="Cancelling task",
-                            as_binary=False,
-                            final_label_on_success=None,
-                            monitor_progress=False,
-                            idempotent=False,
-                        )
+                await _cancel()
                 raise
             if not is_queued:
                 consumed_attempts += 1
 
+        await _cancel()
         raise Exception(
             f"Polling timed out after {max_poll_attempts} non-queued attempts "
-            f"(~{int(max_poll_attempts * poll_interval)}s of active polling)."
+            f"(~{int(max_poll_attempts * (max_poll_interval or poll_interval))}s of active polling)."
         )
     except ProcessingInterrupted:
+        raise
+    except asyncio.CancelledError:
+        await _cancel()
         raise
     except (LocalNetworkError, ApiServerError):
         raise
@@ -568,6 +594,54 @@ async def poll_op_raw(
         stop_ticker.set()
         with contextlib.suppress(Exception):
             await ticker_task
+
+
+async def router_op_raw(
+    cls: type[IO.ComfyNode],
+    model: str,
+    *,
+    data: dict[str, Any] | BaseModel,
+) -> dict[str, Any]:
+    requests_path = f"/v2/models/{model}/requests"
+    submit = await sync_op_raw(
+        cls, ApiEndpoint(path=requests_path, method="POST"), data=data, final_label_on_success=None
+    )
+    path = f"{requests_path}/{submit['request_id']}"
+    started = time.monotonic()
+    status = await poll_op_raw(
+        cls,
+        ApiEndpoint(path=f"{path}/status"),
+        status_extractor=lambda r: _ROUTER_QUEUE_STATUS.get(r["status"], "processing"),
+        queue_position_extractor=lambda r: r.get("queue_position"),
+        completed_statuses=["completed"],
+        failed_statuses=[],
+        queued_statuses=["queued"],
+        poll_interval=_ROUTER_POLL_INTERVAL,
+        max_poll_interval=_ROUTER_MAX_POLL_INTERVAL,
+        max_poll_attempts=_ROUTER_MAX_POLL_ATTEMPTS,
+        server_estimate_includes_queue=False,
+        cancel_endpoint=ApiEndpoint(path=f"{path}/cancel", method="PUT"),
+    )
+    failed = bool(status.get("error_type"))
+    return await sync_op_raw(
+        cls,
+        ApiEndpoint(path=path),
+        timeout=120.0,
+        max_retries=0 if failed else 10,
+        retry_backoff=1.4,
+        max_retries_on_rate_limit=0 if failed else 16,
+        progress_origin_ts=started,
+    )
+
+
+async def router_op(
+    cls: type[IO.ComfyNode],
+    model: str,
+    *,
+    response_model: type[M],
+    data: dict[str, Any] | BaseModel,
+) -> M:
+    return _validate_or_raise(response_model, await router_op_raw(cls, model, data=data))
 
 
 def _display_text(
@@ -619,8 +693,12 @@ def _display_time_progress(
                 time_line += " (taking longer than usual)"
         elif is_queued is False:
             pe = processing_elapsed_seconds if processing_elapsed_seconds is not None else elapsed_seconds
-            remaining = max(0, int(estimated_total) - int(pe))
-            time_line += f" (~{remaining}s remaining)"
+            if estimated_p90 is None or pe < estimated_total:
+                time_line += f" (~{max(0, int(estimated_total) - int(pe))}s remaining)"
+            elif pe < estimated_p90:
+                time_line += " (should finish soon)"
+            else:
+                time_line += " (taking longer than usual)"
     text = f"{time_line}\n\n{extra_text}" if extra_text else time_line
     _display_text(node_cls, text, status=status, price=price)
 
@@ -717,6 +795,12 @@ def _response_detail(body: Any) -> str:
         for key in ("detail", "message"):
             if isinstance(body.get(key), str) and body[key]:
                 return body[key]
+        if isinstance(body.get("detail"), list):
+            return "; ".join(
+                f"{'.'.join(str(p) for p in e.get('loc', [])[1:]) or 'body'}: {e.get('msg')}"
+                for e in body["detail"]
+                if isinstance(e, dict)
+            )
     return ""
 
 
@@ -745,7 +829,7 @@ def _friendly_http_message(status: int, body: Any) -> str:
         return "Unauthorized: Please login first to use this node."
     if status == 402:
         return "Payment Required: Please add credits to your account to use this node."
-    if status == 409:
+    if status == 409 and not (isinstance(body, dict) and body.get("error_type")):
         return "There is a problem with your account. Please contact support@comfy.org."
     if status == 429:
         return "Rate Limit Exceeded: The server returned 429 after all retry attempts. Please wait and try again."
@@ -793,6 +877,8 @@ def _idempotency_error_message(error_type: str, body: Any) -> str:
             f"Run the node again. ({error_type})"
         )
     detail = _response_detail(body)
+    if error_type == "invalid_input" and detail:
+        return f"{detail} ({error_type})"
     suffix = f"{error_type}: {detail}" if detail else error_type
     return f"The server rejected the retry of this request as different from the original attempt. ({suffix})"
 
@@ -937,7 +1023,7 @@ async def _request_base(cfg: _RequestConfig, expect_binary: bool):
                 monitor_task = asyncio.create_task(_monitor(stop_event, start_time))
 
             timeout = aiohttp.ClientTimeout(total=cfg.timeout)
-            sess = aiohttp.ClientSession(timeout=timeout)
+            sess = aiohttp.ClientSession(timeout=timeout, trust_env=True)
 
             if cfg.content_type == "multipart/form-data" and method != "GET":
                 payload_headers.pop("Content-Type", None)
@@ -1023,7 +1109,7 @@ async def _request_base(cfg: _RequestConfig, expect_binary: bool):
                     is_rl = resp.status == 429 or (
                         cfg.is_rate_limited is not None and cfg.is_rate_limited(resp.status, body)
                     )
-                    if keyed and resp.status == 409 and error_type == _IDEMPOTENCY_IN_FLIGHT:
+                    if keyed and resp.status == 409 and error_type in _IDEMPOTENCY_IN_FLIGHT:
                         remaining = cfg.timeout - (time.monotonic() - first_attempt_ts)
                         if remaining <= 0:
                             msg = (
@@ -1213,7 +1299,7 @@ async def _request_base(cfg: _RequestConfig, expect_binary: bool):
                 )
                 raise LocalNetworkError(
                     "Unable to connect to the API server due to local network issues. "
-                    "Please check your internet connection and try again."
+                    "Please check your internet connection or proxy settings and try again."
                 ) from e
             request_logger.log_request_response(
                 operation_id=operation_id,

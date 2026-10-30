@@ -29,6 +29,12 @@
 
 ## Architecture Boundaries
 
+- Keep `comfy/` limited to model implementations and their supporting inference
+  infrastructure, consistent with its current scope: model detection, loading,
+  and conversion; encoders, tokenizers, and latent formats; conditioning,
+  sampling, and model patching; tensor operations, quantization, and device,
+  memory, and offload management. Put UI, API/server, workflow/queue, application
+  persistence, and other product-level logic outside `comfy/`.
 - Keep each layer focused on the concepts it owns. Do not leak UI, API,
   workflow, queue, persistence, telemetry, model-loading, node, or execution
   concerns into unrelated layers just because it is convenient to pass data

@@ -106,7 +106,7 @@ async def _request_partner_token_renewal(lineage: str, sid: str, token: str) -> 
         if is_processing_interrupted():
             return None
         try:
-            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=max(deadline - time.monotonic(), 1.0))) as session:
+            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=max(deadline - time.monotonic(), 1.0)), trust_env=True) as session:
                 async with session.post(url, headers={"Authorization": f"Bearer {token}"}) as resp:
                     if 400 <= resp.status < 500:
                         logging.warning("Comfy API refused to renew the sign-in token (HTTP %s).", resp.status)
@@ -249,7 +249,7 @@ async def diagnose_connectivity() -> dict[str, bool]:
     # to correctly detect that Chinese users with working internet do have working internet.
     internet_probe_urls = ("https://www.google.com", "https://www.baidu.com")
 
-    async with aiohttp.ClientSession(timeout=timeout) as session:
+    async with aiohttp.ClientSession(timeout=timeout, trust_env=True) as session:
         async def _probe(url: str) -> bool:
             try:
                 async with session.get(url) as resp:
