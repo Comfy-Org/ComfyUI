@@ -414,7 +414,7 @@ comfyui-workflow-templates is not installed.
                 )
                 logging.debug(release)
                 download_release_asset_zip(release, destination_path=web_root)
-            except Exception:
+            except BaseException:
                 shutil.rmtree(web_root)
                 raise
 

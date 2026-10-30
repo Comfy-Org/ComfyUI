@@ -167,6 +167,27 @@ def test_failed_download_cleanup(mock_os_functions, mock_download, mock_provider
     mock_rmtree.assert_called_once_with(mock_download.call_args.kwargs["destination_path"])
 
 
+@pytest.mark.parametrize("partial", [False, True])
+def test_interrupted_frontend_download_cleanup(tmp_path, mock_provider, partial):
+    cached = tmp_path / "test-owner_test-repo" / "1.0.0"
+    interruption = KeyboardInterrupt("Download interrupted")
+
+    def interrupted_download(release, destination_path):
+        if partial:
+            (cached / "asset.js").write_text("partial")
+        raise interruption
+
+    with (
+        patch.object(FrontendManager, "CUSTOM_FRONTENDS_ROOT", str(tmp_path)),
+        patch("app.frontend_management.download_release_asset_zip", side_effect=interrupted_download),
+    ):
+        with pytest.raises(KeyboardInterrupt) as error:
+            FrontendManager.init_frontend_unsafe("test-owner/test-repo@1.0.0", mock_provider)
+
+    assert error.value is interruption
+    assert not cached.exists()
+
+
 @pytest.mark.parametrize("version", ["1.0.0", "v1.0.0", "latest", "prerelease"])
 def test_failed_frontend_extraction_is_retried(tmp_path, mock_provider, version):
     archive = io.BytesIO()
