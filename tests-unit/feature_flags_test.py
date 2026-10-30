@@ -11,7 +11,7 @@ from comfy_api.feature_flags import (
     _coerce_flag_value,
     _parse_cli_feature_flags,
 )
-from comfy.comfy_api_env import (
+from app.comfy_api_env import (
     environment_overrides_for_base,
     get_environment_overrides,
     normalize_comfy_api_base,
@@ -160,6 +160,11 @@ class TestParseCliFeatureFlags:
         result = _parse_cli_feature_flags()
         assert result == {"show_signin_button": True}
 
+    @pytest.mark.parametrize("key", ["partner_node_token", "local_web_sso"])
+    def test_frontend_strict_bool_flags_parse_to_bool(self, monkeypatch, key):
+        monkeypatch.setattr("comfy_api.feature_flags.args", type("Args", (), {"feature_flag": [f"{key}=true"]})())
+        assert _parse_cli_feature_flags()[key] is True
+
     def test_missing_equals_defaults_to_true(self, monkeypatch):
         """Bare flag without '=' is treated as the string 'true' (and coerced if registered)."""
         monkeypatch.setattr("comfy_api.feature_flags.args", type("Args", (), {"feature_flag": ["show_signin_button", "valid=1"]})())
@@ -232,7 +237,7 @@ class TestComfyApiEnv:
     def test_environment_overrides_only_for_staging_tier(self, monkeypatch):
         def set_base(url):
             monkeypatch.setattr(
-                "comfy.comfy_api_env.args",
+                "app.comfy_api_env.args",
                 type("Args", (), {"comfy_api_base": url})(),
             )
 
@@ -248,7 +253,7 @@ class TestComfyApiEnv:
     def test_server_features_never_carry_env_overrides(self, monkeypatch):
         """The WebSocket capability handshake must stay free of routing keys."""
         monkeypatch.setattr(
-            "comfy.comfy_api_env.args",
+            "app.comfy_api_env.args",
             type("Args", (), {"comfy_api_base": "https://pr-7.testenvs.comfy.org"})(),
         )
         features = get_server_features()

@@ -457,3 +457,17 @@ def test_the_rescan_yields_the_gil_per_dir_entry_and_row(roots, monkeypatch):
     # once per dir walked, per entry listed, and per file path built
     assert len(walk_yields) == len(dirs) + entries + len(files)
     assert len(row_yields) == 2 * len(files)  # reading the live rows, then diffing them
+
+
+def test_output_rescan_counts_its_listings_and_row_stats(roots, session):
+    files = _warm_catalog(roots["output"])
+    _scan()
+    files[0].unlink()
+    seeder = seeder_module._AssetSeeder()
+    seeder._scan_state = state = seeder_module._ScanState()
+    seeder._phase = seeder_module.ScanPhase.FAST
+
+    seeder._run_fast_phase(OUTPUT_ONLY)
+
+    assert state.dirs_listed == 4  # output, a, b, b/c
+    assert state.files_statted == 1  # only the row its listing lacks is stat'ed

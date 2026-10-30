@@ -24,6 +24,7 @@ import ctypes
 import os
 import comfy.memory_management
 import comfy.storage
+from comfy.anonymous_file import create_anonymous_file
 import safetensors.torch
 import numpy as np
 from PIL import Image
@@ -84,6 +85,38 @@ _TYPES = {
 }
 
 _SAFETENSORS_MAX_HEADER_SIZE = 100_000_000
+
+
+def create_safetensors(tensors, metadata=None):
+    """Return zero-valued tensor descriptors and their open backing file, owned by the caller."""
+    types = {dtype: name for name, dtype in _TYPES.items()}
+    header = {} if metadata is None else {"__metadata__": metadata}
+    offset = 0
+    for name, tensor in sorted(tensors.items(), key=lambda item: (-item[1].element_size(), item[0])):
+        size = tensor.numel() * tensor.element_size()
+        header[name] = {"dtype": types[tensor.dtype], "shape": list(tensor.shape), "data_offsets": [offset, offset + size]}
+        offset += size
+
+    encoded = json.dumps(header, separators=(",", ":")).encode("utf-8")
+    encoded += b" " * (-len(encoded) % 8)
+    data_offset = 8 + len(encoded)
+
+    f = create_anonymous_file(data_offset + offset)
+    try:
+        f.write(struct.pack("<Q", len(encoded)))
+        f.write(encoded)
+
+        lock = threading.Lock()
+        state_dict = {}
+        for name, tensor in tensors.items():
+            start, end = header[name]["data_offsets"]
+            value = torch.empty(tensor.shape, dtype=tensor.dtype, device="meta")
+            value.untyped_storage()._comfy_tensor_file_slice = comfy.memory_management.TensorFileSlice(f, lock, data_offset + start, end - start)
+            state_dict[name] = value
+        return state_dict, f
+    except BaseException:
+        f.close()
+        raise
 
 
 def _invalid_safetensors_error(message, ckpt):

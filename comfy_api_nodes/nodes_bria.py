@@ -1,6 +1,4 @@
-import av
 import torch
-from av.codec import CodecContext
 from pydantic import BaseModel
 from typing_extensions import override
 
@@ -14,10 +12,13 @@ from comfy_api_nodes.apis.bria import (
     BriaExpandRequest,
     BriaExpandResponse,
     BriaFiboEditResponse,
+    BriaGenerateImageRequest,
     BriaGenFillRequest,
+    BriaGuidedRemoveBackgroundRequest,
     BriaImageEditResponse,
     BriaImageResultResponse,
     BriaIncreaseResolutionRequest,
+    BriaProductHoldingRequest,
     BriaRelightRequest,
     BriaRemoveBackgroundRequest,
     BriaRemoveBackgroundResponse,
@@ -32,6 +33,7 @@ from comfy_api_nodes.apis.bria import (
     BriaVideoEraseRequest,
     BriaVideoGreenScreenRequest,
     BriaVideoReplaceBackgroundRequest,
+    BriaVirtualTryOnRequest,
     InputModerationSettings,
 )
 from comfy_api_nodes.util import (
@@ -48,12 +50,16 @@ from comfy_api_nodes.util import (
     upload_video_to_comfyapi,
     validate_string,
     validate_video_duration,
+    video_to_images_and_mask,
 )
 
 BRIA_MAX_OUTPUT_SIDE = 8192
+BRIA_MAX_CANVAS_AREA = 25_000_000
 BRIA_MIN_RATIO = 0.5
 BRIA_MAX_RATIO = 3.0
 BRIA_MIN_SHORT_SIDE = 224
+BRIA_ASPECT_RATIOS = ["1:1", "2:3", "3:2", "3:4", "4:3", "4:5", "5:4", "9:16", "16:9"]
+BRIA_FIBO_2_ASPECT_RATIOS = ["16:10", "10:16", "2:1", "1:2", "21:9", "9:21", "3:1", "1:3", "4:1", "1:4", "5:1", "1:5"]
 
 
 def _upscaled_output_side(height: int, width: int, multiplier: int) -> int:
@@ -71,9 +77,9 @@ class BriaImageEditNode(IO.ComfyNode):
     def define_schema(cls):
         return IO.Schema(
             node_id="BriaImageEditNode",
-            display_name="Bria FIBO Image Edit",
+            display_name="Bria FIBO 2.0 Image Edit",
             category="partner/image/Bria",
-            description="Edit images using Bria latest model",
+            description="Edit images using Bria FIBO 2.0.",
             inputs=[
                 IO.Combo.Input("model", options=["FIBO"]),
                 IO.Image.Input("image"),
@@ -149,7 +155,7 @@ class BriaImageEditNode(IO.ComfyNode):
             ],
             is_api_node=True,
             price_badge=IO.PriceBadge(
-                expr="""{"type":"usd","usd":0.04}""",
+                expr="""{"type":"usd","usd":0.0572}""",
             ),
         )
 
@@ -169,9 +175,16 @@ class BriaImageEditNode(IO.ComfyNode):
     ) -> IO.NodeOutput:
         if not prompt and not structured_prompt:
             raise ValueError("One of prompt or structured_prompt is required to be non-empty.")
+        if prompt and structured_prompt:
+            raise ValueError("Use either prompt or structured_prompt, not both.")
         mask_url = None
         if mask is not None:
-            mask_url = await upload_image_to_comfyapi(cls, convert_mask_to_image(mask), wait_label="Uploading mask")
+            if mask.shape[-2:] != image.shape[1:3]:
+                raise ValueError(
+                    f"Mask must be the same size as the image: image is {image.shape[2]}x{image.shape[1]}, "
+                    f"mask is {mask.shape[-1]}x{mask.shape[-2]}."
+                )
+            mask_url = await upload_image_to_comfyapi(cls, _mask_to_binary_image(mask, "edit"), wait_label="Uploading mask")
         response = await sync_op(
             cls,
             ApiEndpoint(path="proxy/bria/v2/image/edit", method="POST"),
@@ -503,8 +516,7 @@ class BriaExpandImage(IO.ComfyNode):
                 IO.DynamicCombo.Input(
                     "expand_mode",
                     options=[
-                        *[IO.DynamicCombo.Option(ratio, []) for ratio in
-                          ["1:1", "2:3", "3:2", "3:4", "4:3", "4:5", "5:4", "9:16", "16:9"]],
+                        *[IO.DynamicCombo.Option(ratio, []) for ratio in BRIA_ASPECT_RATIOS],
                         IO.DynamicCombo.Option(
                             "custom_ratio",
                             [
@@ -633,17 +645,32 @@ class BriaExpandImage(IO.ComfyNode):
             canvas_size = [expand_mode["canvas_width"], expand_mode["canvas_height"]]
             original_image_size = [expand_mode["image_width"], expand_mode["image_height"]]
             original_image_location = [expand_mode["image_x"], expand_mode["image_y"]]
-        elif mode == "custom_ratio":
-            ratio_width, ratio_height = expand_mode["ratio_width"], expand_mode["ratio_height"]
-            aspect_ratio = ratio_width / ratio_height
-            if not BRIA_MIN_RATIO <= aspect_ratio <= BRIA_MAX_RATIO:
-                raise ValueError(
-                    f"Bria accepts a width-to-height ratio between {BRIA_MIN_RATIO} and {BRIA_MAX_RATIO}: "
-                    f"{ratio_width}:{ratio_height} is {aspect_ratio:.4f}. "
-                    f"Use the manual expand mode to reach a canvas of any shape."
-                )
+            x, y = original_image_location
+            if x <= 0 and y <= 0 and x + original_image_size[0] >= canvas_size[0] and y + original_image_size[1] >= canvas_size[1]:
+                raise ValueError("The image covers the whole canvas, so there is nothing to expand.")
         else:
-            aspect_ratio = mode
+            if mode == "custom_ratio":
+                ratio_width, ratio_height = expand_mode["ratio_width"], expand_mode["ratio_height"]
+                aspect_ratio = ratio_width / ratio_height
+                if not BRIA_MIN_RATIO <= aspect_ratio <= BRIA_MAX_RATIO:
+                    raise ValueError(
+                        f"Bria accepts a width-to-height ratio between {BRIA_MIN_RATIO} and {BRIA_MAX_RATIO}: "
+                        f"{ratio_width}:{ratio_height} is {aspect_ratio:.4f}. "
+                        f"Use the manual expand mode to reach a canvas of any shape."
+                    )
+            else:
+                ratio_width, ratio_height = map(int, mode.split(":"))
+                aspect_ratio = mode
+            ratio = ratio_width / ratio_height
+            height, width = image.shape[1], image.shape[2]
+            canvas_width, canvas_height = max(width, int(height * ratio)), max(height, int(width / ratio))
+            if (canvas_width, canvas_height) == (width, height):
+                return IO.NodeOutput(_drop_alpha(image[:1]), "")
+            if canvas_width * canvas_height > BRIA_MAX_CANVAS_AREA:
+                raise ValueError(
+                    f"Expanding {width}x{height} to {ratio_width}:{ratio_height} needs a {canvas_width}x{canvas_height} "
+                    f"canvas, but Bria allows at most {BRIA_MAX_CANVAS_AREA} pixels. Downscale the image first."
+                )
         response = await sync_op(
             cls,
             ApiEndpoint(path="/proxy/bria/v2/image/edit/expand", method="POST"),
@@ -1011,28 +1038,6 @@ class BriaVideoReplaceBackground(IO.ComfyNode):
         return IO.NodeOutput(await download_url_to_video_output(response.result.video_url))
 
 
-def _video_to_images_and_mask(video: Input.Video) -> tuple[Input.Image, Input.Mask]:
-    """Decode a transparent webm (VP9 + alpha) into image frames and an alpha mask.
-
-    VP9 keeps its alpha in a side layer that PyAV's default vp9 decoder drops, so the frames
-    are decoded with libvpx-vp9. Returns RGB images [B,H,W,3] in 0..1 and a mask [B,H,W]
-    following the Load Image convention (1 = transparent) for compositing or Save WEBM.
-    """
-    rgb_frames: list[torch.Tensor] = []
-    alpha_frames: list[torch.Tensor] = []
-    with av.open(video.get_stream_source(), mode="r") as container:
-        stream = container.streams.video[0]
-        decoder = CodecContext.create("libvpx-vp9", "r") if stream.codec_context.name == "vp9" else None
-        for packet in container.demux(stream):
-            for frame in (decoder.decode(packet) if decoder is not None else packet.decode()):
-                rgba = torch.from_numpy(frame.to_ndarray(format="rgba")).float() / 255.0
-                rgb_frames.append(rgba[..., :3])
-                alpha_frames.append(rgba[..., 3])
-    images = torch.stack(rgb_frames) if rgb_frames else torch.zeros(0, 0, 0, 3)
-    mask = (1.0 - torch.stack(alpha_frames)) if alpha_frames else torch.zeros((images.shape[0], 64, 64))
-    return images, mask
-
-
 class BriaTransparentVideoBackground(IO.ComfyNode):
 
     @classmethod
@@ -1097,7 +1102,7 @@ class BriaTransparentVideoBackground(IO.ComfyNode):
             response_model=BriaRemoveVideoBackgroundResponse,
         )
         video_out = await download_url_to_video_output(response.result.video_url)
-        images, mask = _video_to_images_and_mask(video_out)
+        images, mask = video_to_images_and_mask(video_out)
         return IO.NodeOutput(images, mask)
 
 
@@ -1120,6 +1125,7 @@ BRIA_LIGHT_DIRECTIONS = ["front", "side", "bottom", "top-down"]
 BRIA_SEASONS = ["spring", "summer", "autumn", "winter"]
 BRIA_FAILED_STATUSES = ["error", "unknown"]
 BRIA_MAX_REFERENCE_IMAGES = 10
+BRIA_MAX_PRODUCT_IMAGES = 3
 BRIA_VIDEO_ERASE_MAX_DURATION = 5.1
 BRIA_VIDEO_ERASE_MIN_FPS = 20
 BRIA_VIDEO_ERASE_MAX_FPS = 30
@@ -1154,7 +1160,7 @@ def _structured_prompt_output() -> IO.String.Output:
     return IO.String.Output(
         id="structured_prompt",
         display_name="structured_prompt",
-        tooltip="Structured description of the edited image, for a follow-up edit with Bria FIBO Image Edit.",
+        tooltip="Structured description of the edited image, for a follow-up edit with Bria FIBO 2.0 Image Edit.",
     )
 
 
@@ -1180,6 +1186,105 @@ async def _run_fibo_edit(cls: type[IO.ComfyNode], path: str, data: BaseModel) ->
         await download_url_to_image_tensor(response.result.image_url),
         response.result.structured_prompt or "",
     )
+
+
+class BriaImageGenerate(IO.ComfyNode):
+
+    @classmethod
+    def define_schema(cls):
+        return IO.Schema(
+            node_id="BriaImageGenerate",
+            display_name="Bria FIBO 2.0 Image Generate",
+            category="partner/image/Bria",
+            description="Generate an image from a text prompt, a reference image or a structured prompt "
+            "using Bria FIBO 2.0.",
+            inputs=[
+                IO.String.Input("prompt", multiline=True, default=""),
+                IO.String.Input(
+                    "structured_prompt",
+                    multiline=True,
+                    default="",
+                    tooltip="JSON structured prompt from a previous Bria FIBO result. With the same seed it "
+                    "recreates that image; change the JSON or add a prompt to refine it.",
+                ),
+                IO.Combo.Input(
+                    "aspect_ratio",
+                    options=BRIA_ASPECT_RATIOS + BRIA_FIBO_2_ASPECT_RATIOS,
+                    default="1:1",
+                    tooltip="16:10 and the ratios after it need 1MP and exactly one of prompt or structured_prompt.",
+                ),
+                IO.Combo.Input("resolution", options=["1MP", "4MP"]),
+                IO.Int.Input(
+                    "seed",
+                    default=42,
+                    min=1,
+                    max=2147483647,
+                    display_mode=IO.NumberDisplay.number,
+                    control_after_generate=True,
+                ),
+                _moderation_combo("prompt_content_moderation", "visual_input_moderation", "visual_output_moderation"),
+                IO.Image.Input(
+                    "image",
+                    optional=True,
+                    tooltip="Reference image to draw on. The result is a new image at the selected aspect ratio, "
+                    "not an edit of this one.",
+                ),
+            ],
+            outputs=[
+                IO.Image.Output(),
+                IO.String.Output(
+                    id="structured_prompt",
+                    display_name="structured_prompt",
+                    tooltip="Structured description of the generated image, to recreate or refine it with this node.",
+                ),
+            ],
+            hidden=[
+                IO.Hidden.auth_token_comfy_org,
+                IO.Hidden.api_key_comfy_org,
+                IO.Hidden.unique_id,
+            ],
+            is_api_node=True,
+            price_badge=IO.PriceBadge(
+                expr='{"type":"usd","usd":0.0572}',
+            ),
+        )
+
+    @classmethod
+    async def execute(
+        cls,
+        prompt: str,
+        structured_prompt: str,
+        aspect_ratio: str,
+        resolution: str,
+        seed: int,
+        moderation: InputModerationSettings,
+        image: Input.Image | None = None,
+    ) -> IO.NodeOutput:
+        if not prompt and not structured_prompt and image is None:
+            raise ValueError("Provide a prompt, a structured_prompt or a reference image.")
+        if image is not None and structured_prompt:
+            raise ValueError("Use either a reference image or a structured_prompt, not both.")
+        if aspect_ratio in BRIA_FIBO_2_ASPECT_RATIOS and (resolution == "4MP" or bool(prompt) == bool(structured_prompt)):
+            raise ValueError(f"Aspect ratio {aspect_ratio} needs 1MP and exactly one of prompt or structured_prompt.")
+        images = None
+        if image is not None:
+            images = [await upload_image_to_comfyapi(cls, _drop_alpha(image), wait_label="Uploading image")]
+        visual_input, visual_output = _visual_moderation(moderation)
+        return await _run_fibo_edit(
+            cls,
+            "/proxy/bria/v2/image/generate",
+            BriaGenerateImageRequest(
+                prompt=prompt or None,
+                structured_prompt=structured_prompt or None,
+                images=images,
+                aspect_ratio=aspect_ratio,
+                resolution=resolution,
+                seed=seed,
+                prompt_content_moderation=moderation.get("prompt_content_moderation", False),
+                visual_input_content_moderation=visual_input,
+                visual_output_content_moderation=visual_output,
+            ),
+        )
 
 
 class BriaEraseByText(IO.ComfyNode):
@@ -1720,6 +1825,236 @@ class BriaReplaceImageBackground(IO.ComfyNode):
         )
 
 
+def _flatten_on_white(image: torch.Tensor) -> torch.Tensor:
+    if image.shape[-1] != 4:
+        return image
+    alpha = image[..., 3:]
+    return torch.addcmul(1.0 - alpha, image[..., :3], alpha)
+
+
+def _collect_product_images(images: dict, subject: str) -> list[torch.Tensor]:
+    flat = [image for batch in images.values() if batch is not None for image in batch]
+    if len(flat) > BRIA_MAX_PRODUCT_IMAGES:
+        raise ValueError(f"At most {BRIA_MAX_PRODUCT_IMAGES} {subject} images are supported, got {len(flat)}.")
+    return [_flatten_on_white(image) for image in flat]
+
+
+def _product_inputs(subject: str, tooltip: str) -> list:
+    return [
+        IO.Image.Input("person_image"),
+        IO.Autogrow.Input(
+            f"{subject}_images",
+            template=IO.Autogrow.TemplateNames(
+                IO.Image.Input(f"{subject}_image"),
+                names=[f"{subject}_image_{i}" for i in range(1, BRIA_MAX_PRODUCT_IMAGES + 1)],
+                min=1,
+            ),
+            tooltip=tooltip,
+        ),
+        IO.String.Input(
+            "instruction",
+            multiline=True,
+            default="",
+            tooltip="Optional extra direction added to Bria's built-in instruction, such as which hand to use "
+            "or which way the label faces.",
+        ),
+        IO.Combo.Input(
+            "aspect_ratio",
+            options=["auto"] + BRIA_ASPECT_RATIOS,
+            tooltip="auto keeps the person photo's framing at about 1 megapixel. A fixed ratio returns 0.6 to 1 "
+            "megapixel, for example 768x1024 for 3:4.",
+        ),
+        IO.Int.Input(
+            "seed",
+            default=42,
+            min=1,
+            max=2147483647,
+            display_mode=IO.NumberDisplay.number,
+            control_after_generate=True,
+        ),
+        _moderation_combo("visual_output_moderation"),
+    ]
+
+
+async def _run_product_edit(cls: type[IO.ComfyNode], path: str, data: BaseModel) -> IO.NodeOutput:
+    submitted = await sync_op(
+        cls,
+        ApiEndpoint(path=path, method="POST"),
+        data=data,
+        response_model=BriaStatusResponse,
+    )
+    response = await _poll_bria(cls, submitted.request_id, BriaImageResultResponse)
+    return IO.NodeOutput(await download_url_to_image_tensor(response.result.image_url))
+
+
+class BriaGuidedRemoveBackground(IO.ComfyNode):
+
+    @classmethod
+    def define_schema(cls):
+        return IO.Schema(
+            node_id="BriaGuidedRemoveBackground",
+            display_name="Bria Guided Remove Background",
+            category="partner/image/Bria",
+            description="Remove the background from an image with Bria, keeping what the prompt describes. "
+            "The original pixels come back at full resolution with a new alpha channel. For a plain cutout, "
+            "Bria Remove Image Background costs less.",
+            inputs=[
+                IO.Image.Input("image"),
+                IO.String.Input(
+                    "prompt",
+                    multiline=True,
+                    default="",
+                    tooltip="What to keep, drop or narrow to, such as 'the person with the mat and the plant', "
+                    "'the woman at her desk without the lamp' or 'only the chair'. A prompt that matches nothing "
+                    "returns a fully transparent image.",
+                ),
+                _moderation_combo("visual_input_moderation", "visual_output_moderation"),
+            ],
+            outputs=[IO.Image.Output()],
+            hidden=[
+                IO.Hidden.auth_token_comfy_org,
+                IO.Hidden.api_key_comfy_org,
+                IO.Hidden.unique_id,
+            ],
+            is_api_node=True,
+            price_badge=IO.PriceBadge(
+                expr='{"type":"usd","usd":0.0429}',
+            ),
+        )
+
+    @classmethod
+    async def execute(cls, image: Input.Image, prompt: str, moderation: InputModerationSettings) -> IO.NodeOutput:
+        validate_string(prompt, field_name="prompt", min_length=1)
+        visual_input, visual_output = _visual_moderation(moderation)
+        submitted = await sync_op(
+            cls,
+            ApiEndpoint(path="/proxy/bria/v2/image/edit/remove_background/guided", method="POST"),
+            data=BriaGuidedRemoveBackgroundRequest(
+                image=await upload_image_to_comfyapi(cls, image, total_pixels=None, wait_label="Uploading image"),
+                prompt=prompt,
+                visual_input_content_moderation=visual_input,
+                visual_output_content_moderation=visual_output,
+            ),
+            response_model=BriaStatusResponse,
+        )
+        response = await _poll_bria(cls, submitted.request_id, BriaImageResultResponse)
+        return IO.NodeOutput(await download_url_to_image_tensor(response.result.image_url))
+
+
+class BriaProductHolding(IO.ComfyNode):
+
+    @classmethod
+    def define_schema(cls):
+        return IO.Schema(
+            node_id="BriaProductHolding",
+            display_name="Bria Product Holding",
+            category="partner/image/Bria",
+            description="Put a product in a person's hands with Bria. The person's identity, pose and background "
+            "are kept and the scene is re-rendered at about 1 megapixel.",
+            inputs=_product_inputs(
+                "product",
+                f"1-{BRIA_MAX_PRODUCT_IMAGES} images of one product: the product itself, its packaging, another "
+                "angle or a companion item. A batched input counts once per image. Transparent areas are treated "
+                "as white.",
+            ),
+            outputs=[IO.Image.Output()],
+            hidden=[
+                IO.Hidden.auth_token_comfy_org,
+                IO.Hidden.api_key_comfy_org,
+                IO.Hidden.unique_id,
+            ],
+            is_api_node=True,
+            price_badge=IO.PriceBadge(
+                expr='{"type":"usd","usd":0.0572}',
+            ),
+        )
+
+    @classmethod
+    async def execute(
+        cls,
+        person_image: Input.Image,
+        product_images: dict,
+        instruction: str,
+        aspect_ratio: str,
+        seed: int,
+        moderation: InputModerationSettings,
+    ) -> IO.NodeOutput:
+        products = _collect_product_images(product_images, "product")
+        return await _run_product_edit(
+            cls,
+            "/proxy/bria/v2/image/edit/product/holding",
+            BriaProductHoldingRequest(
+                person_image=await upload_image_to_comfyapi(
+                    cls, _drop_alpha(person_image), wait_label="Uploading person image"
+                ),
+                product_images=await upload_images_to_comfyapi(
+                    cls, products, max_images=BRIA_MAX_PRODUCT_IMAGES, wait_label="Uploading product images"
+                ),
+                instruction=instruction or None,
+                aspect_ratio=None if aspect_ratio == "auto" else aspect_ratio,
+                seed=seed,
+                visual_output_content_moderation=moderation.get("visual_output_moderation", False),
+            ),
+        )
+
+
+class BriaVirtualTryOn(IO.ComfyNode):
+
+    @classmethod
+    def define_schema(cls):
+        return IO.Schema(
+            node_id="BriaVirtualTryOn",
+            display_name="Bria Virtual Try-On",
+            category="partner/image/Bria",
+            description="Dress a person in garments or accessories with Bria. The person's identity, pose and "
+            "background are kept and the scene is re-rendered at about 1 megapixel.",
+            inputs=_product_inputs(
+                "garment",
+                f"1-{BRIA_MAX_PRODUCT_IMAGES} garments or accessories worn together, each replacing the matching "
+                "item the person wears. A batched input counts once per image. Transparent areas are treated "
+                "as white.",
+            ),
+            outputs=[IO.Image.Output()],
+            hidden=[
+                IO.Hidden.auth_token_comfy_org,
+                IO.Hidden.api_key_comfy_org,
+                IO.Hidden.unique_id,
+            ],
+            is_api_node=True,
+            price_badge=IO.PriceBadge(
+                expr='{"type":"usd","usd":0.0572}',
+            ),
+        )
+
+    @classmethod
+    async def execute(
+        cls,
+        person_image: Input.Image,
+        garment_images: dict,
+        instruction: str,
+        aspect_ratio: str,
+        seed: int,
+        moderation: InputModerationSettings,
+    ) -> IO.NodeOutput:
+        garments = _collect_product_images(garment_images, "garment")
+        return await _run_product_edit(
+            cls,
+            "/proxy/bria/v2/image/edit/product/virtual-tryon",
+            BriaVirtualTryOnRequest(
+                person_image=await upload_image_to_comfyapi(
+                    cls, _drop_alpha(person_image), wait_label="Uploading person image"
+                ),
+                garment_images=await upload_images_to_comfyapi(
+                    cls, garments, max_images=BRIA_MAX_PRODUCT_IMAGES, wait_label="Uploading garment images"
+                ),
+                instruction=instruction or None,
+                aspect_ratio=None if aspect_ratio == "auto" else aspect_ratio,
+                seed=seed,
+                visual_output_content_moderation=moderation.get("visual_output_moderation", False),
+            ),
+        )
+
+
 class BriaVideoEraser(IO.ComfyNode):
 
     @classmethod
@@ -1834,6 +2169,7 @@ class BriaExtension(ComfyExtension):
     async def get_node_list(self) -> list[type[IO.ComfyNode]]:
         return [
             BriaImageEditNode,
+            BriaImageGenerate,
             BriaRemoveImageBackground,
             BriaGenFill,
             BriaEraser,
@@ -1851,6 +2187,9 @@ class BriaExtension(ComfyExtension):
             BriaReseason,
             BriaEraseForeground,
             BriaReplaceImageBackground,
+            BriaGuidedRemoveBackground,
+            BriaProductHolding,
+            BriaVirtualTryOn,
             BriaVideoEraser,
         ]
 

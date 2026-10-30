@@ -173,8 +173,18 @@ class ResnetBlock3D(nn.Module):
         return self.conv2(h, pre_norm=self.norm2, residual=x)
 
 
+class ResnetShortcut3D(nn.Module):
+    # resnet block pruned down to its shortcut (LightVAE Lite encoder)
+    def __init__(self, in_channels, out_channels):
+        super().__init__()
+        self.nin_shortcut = CausalConv3d(in_channels, out_channels, kernel_size=1) if in_channels != out_channels else nn.Identity()
+
+    def forward(self, x):
+        return self.nin_shortcut(x)
+
+
 class EncoderFCN3D(nn.Module):
-    def __init__(self, ch, ch_mult, space_down, time_down, num_res_blocks, in_channels, z_channels, double_z=True):
+    def __init__(self, ch, ch_mult, space_down, time_down, num_res_blocks, in_channels, z_channels, double_z=True, kept_blocks=None):
         super().__init__()
         self.num_levels = len(ch_mult)
         if isinstance(num_res_blocks, int):
@@ -192,8 +202,9 @@ class EncoderFCN3D(nn.Module):
             down = nn.Module()
             down.block = nn.ModuleList()
             for i in range(self.num_res_blocks[i_level]):
+                block = ResnetBlock3D if kept_blocks is None or (i_level, i) in kept_blocks else ResnetShortcut3D
                 down.block.append(
-                    ResnetBlock3D(
+                    block(
                         in_channels=block_in[i_level] if i == 0 else block_mid[i_level],
                         out_channels=block_mid[i_level],
                     )
@@ -226,6 +237,12 @@ class EncoderFCN3D(nn.Module):
 
 
 # ViT3D decoder
+
+def unpatchify(output, B, T, H, W, out_channels, patch_size_t, patch_size):
+    # [B, T*H*W, C*pt*p*p] token patches -> [B, C, T*pt, H*p, W*p] pixels
+    output = output.view(B, T, H, W, out_channels, patch_size_t, patch_size, patch_size)
+    return output.permute(0, 4, 1, 5, 2, 6, 3, 7).reshape(B, out_channels, T * patch_size_t, H * patch_size, W * patch_size)
+
 
 def create_token_ids(patch_dims, device, dtype):
     coords_list = []
@@ -269,9 +286,8 @@ class FeedForward(nn.Module):
 
     def forward(self, x, pre_norm, residual, residual_scale):
         # norm, gated silu and residual addcmul fold into the INT8 kernels
-        h = comfy.ops.linear_input_act(self.w1, x, "rms_norm", pre_norm.weight, pre_norm.eps)
-        return comfy.ops.linear_input_act(
-            self.w2, h, "swiglu", residual=residual, residual_scale=residual_scale)
+        h = comfy.ops.linear_input_act(self.w1, x, "rms_norm", act_weight=pre_norm)
+        return comfy.ops.linear_input_act(self.w2, h, "swiglu", residual=residual, residual_scale=residual_scale)
 
 
 class Attention(nn.Module):
@@ -287,36 +303,44 @@ class Attention(nn.Module):
         self.to_qkv = operations.Linear(inner_dim, inner_dim * 3, bias=bias)
         self.to_out = operations.Linear(inner_dim, inner_dim, bias=bias)
 
-    def forward(self, x, rotary_pos_emb, pre_norm, residual, residual_scale):
+    def forward(self, x, rotary_pos_emb, pre_norm, residual=None, residual_scale=None):
+        out = self.attend(x, rotary_pos_emb, pre_norm)
+        return comfy.ops.linear_input_act(self.to_out, out, None, residual=residual, residual_scale=residual_scale)
+
+    def attend(self, x, rotary_pos_emb, pre_norm):
+        # [B, L, dim] -> attention output [B, L, dim], before the out-projection
         batch_size, seq_len, _ = x.shape
 
-        qkv = comfy.ops.linear_input_act(self.to_qkv, x, "rms_norm", pre_norm.weight, pre_norm.eps)
+        qkv = comfy.ops.linear_input_act(self.to_qkv, x, "rms_norm", act_weight=pre_norm)
         qkv = qkv.view(batch_size, seq_len, -1, 3 * self.dim_head)
         query, key, value = torch.chunk(qkv, 3, dim=-1)
 
         if rotary_pos_emb is not None:
-            # fused per-head RMSNorm + partial split-half rope, in place when autograd is off
-            rms_rope = (comfy.quant_ops.ck.rms_rope_split_half if torch.is_grad_enabled()
-                        else comfy.quant_ops.ck.rms_rope_split_half_)
-            # the eager fallback does no device alignment, so a CPU-resident (offloaded)
-            # buffer must be moved to the input's device before the fused call
-            query, key = rms_rope(
-                query, key, rotary_pos_emb, self.qk_norm_scale.to(query.device),
-                epsilon=self.norm_q.eps, rot_dim=rotary_pos_emb.shape[-3] * 2)
+            query, key = self.rms_rope(query, key, rotary_pos_emb)
         else:
             query = comfy.rmsnorm.rms_norm(query, self.norm_q.weight, self.norm_q.eps)
             key = comfy.rmsnorm.rms_norm(key, self.norm_k.weight, self.norm_k.eps)
 
-        query, key, value = (t.transpose(1, 2) for t in (query, key, value))
+        return self.attention(*(t.transpose(1, 2) for t in (query, key, value)))
+
+    def rms_rope(self, query, key, rotary_pos_emb):
+        # fused per-head RMSNorm + partial split-half rope, in place when autograd is off
+        rms_rope = (comfy.quant_ops.ck.rms_rope_split_half if torch.is_grad_enabled()
+                    else comfy.quant_ops.ck.rms_rope_split_half_)
+        # the eager fallback does no device alignment, so a CPU-resident (offloaded)
+        # buffer must be moved to the input's device before the fused call
+        return rms_rope(query, key, rotary_pos_emb, self.qk_norm_scale.to(query.device),
+                        epsilon=self.norm_q.eps, rot_dim=rotary_pos_emb.shape[-3] * 2)
+
+    def attention(self, query, key, value):
+        # [B, heads, L, dh] (any key length) -> [B, L, dim]
         # an int8 decoder already accepts int8 numerics; fp16 keeps exact flash
         if isinstance(self.to_qkv.weight, comfy.ops.QuantizedTensor) and COMFY_KITCHEN_INT8_ATTENTION_IS_AVAILABLE:
             out = comfy.quant_ops.ck.int8_attention(query, key, value)
-            out = out.transpose(1, 2).reshape(batch_size, seq_len, -1)
+            out = out.transpose(1, 2).reshape(query.shape[0], query.shape[2], -1)
         else:
             out = optimized_attention(query, key, value, self.heads, skip_reshape=True)
-        return comfy.ops.linear_input_act(
-            self.to_out, torch.nan_to_num(out), None,
-            residual=residual, residual_scale=residual_scale)
+        return torch.nan_to_num(out)
 
 
 class TransformerBlock(nn.Module):
@@ -337,10 +361,13 @@ class TransformerBlock(nn.Module):
         return comfy.ops.cast_to_input(scale, x)
 
     def forward(self, x, rotary_pos_emb=None):
-        x = self.attn(x, rotary_pos_emb, pre_norm=self.norm1,
-                      residual=x, residual_scale=self._residual_scale(self.scale1, x))
-        return self.ff(x, pre_norm=self.norm2,
-                       residual=x, residual_scale=self._residual_scale(self.scale2, x))
+        return self.post_attention(self.attn.attend(x, rotary_pos_emb, self.norm1), x)
+
+    def post_attention(self, out, x):
+        # out-projection and feed-forward, each adding its scaled residual
+        x = comfy.ops.linear_input_act(self.attn.to_out, out, None,
+                                       residual=x, residual_scale=self._residual_scale(self.scale1, x))
+        return self.ff(x, pre_norm=self.norm2, residual=x, residual_scale=self._residual_scale(self.scale2, x))
 
 
 class ViT3DDecoder(nn.Module):
@@ -388,20 +415,128 @@ class ViT3DDecoder(nn.Module):
 
         output = self.proj_out(self.norm_out(h))
 
-        output = output[:, :num_patches, :]
+        return unpatchify(output[:, :num_patches, :], B, latent_T, latent_H, latent_W,
+                          self.out_channels, self.patch_size_t, self.patch_size)
 
-        output = output.view(
-            B, latent_T, latent_H, latent_W,
-            self.out_channels, self.patch_size_t, self.patch_size, self.patch_size,
-        )
-        output = output.permute(0, 4, 1, 5, 2, 6, 3, 7).contiguous()
-        output = output.reshape(
-            B, self.out_channels,
-            latent_T * self.patch_size_t,
-            latent_H * self.patch_size,
-            latent_W * self.patch_size,
-        )
-        return output
+
+class NonCausalViT3DDecoder(nn.Module):
+    """Sol-H3-VAE decoder: the ViT decoder pruned to 24 layers and distilled to decode a whole clip at once, so
+    there is no spatial tiling and no temporal overlap recompute. Attention is local: 16x16-token spatial windows
+    over 5-latent temporal windows (odd layers shift both by half a window), plus 5 global tokens per native
+    5-latent block that attend to their whole block and are visible to every window of it. Rope ids are window-local.
+
+    Tokens live in block-major rows (a block's tokens, then its global rows), so every linear layer runs on plain
+    row chunks and only the residual stream and one layer's q/k/v ever span the clip."""
+
+    max_windows = 64  # spatial windows per attention call
+    ring = 2  # blocks of q/k/v/attention output live at once: a temporal window spans at most two blocks
+
+    def __init__(self, patch_size=16, patch_size_t=4, in_channels=24, out_channels=3, num_layers=24, heads=32, dim_head=64,
+                 rope_theta=100.0, rope_dim_ratio=0.75, bias=True, eps=1e-5, num_register_tokens=4,
+                 window=16, block=5, time_shift=2, frames_to_trim=3, operations=ops):
+        super().__init__()
+        dim = heads * dim_head
+        self.patch_size, self.patch_size_t, self.out_channels = patch_size, patch_size_t, out_channels
+        self.heads, self.dim_head, self.dim = heads, dim_head, dim
+        self.window, self.block, self.time_shift, self.frames_to_trim = window, block, time_shift, frames_to_trim
+        self.num_global = num_register_tokens + 1
+        self.x_embedder = operations.Linear(in_channels, dim, bias=bias)
+        self.register_tokens = nn.Parameter(torch.empty(1, num_register_tokens, dim))
+        self.blocks = nn.ModuleList(
+            [TransformerBlock(heads=heads, dim_head=dim_head, bias=bias, eps=eps, operations=operations)
+             for _ in range(num_layers)])
+        self.norm_out = ops.LayerNorm(dim, eps=eps)
+        self.proj_out = operations.Linear(dim, out_channels * patch_size_t * patch_size * patch_size, bias=bias)
+        self.pos_embed = RotaryEmbeddingND(int(dim_head * rope_dim_ratio), rope_theta, n_dim=3)
+
+    def _build_geometry(self, T, H, W):
+        """CPU index tables for one latent shape: clip rows are block-major (a block's tokens in (t, y, x) order,
+        then its global rows); q/k/v and attention outputs live in ring slots, slot b % ring holding block b."""
+        ws, tb, S, R, HW = self.window, self.block, self.num_global, self.ring, H * W
+        nb = -(-T // tb)
+        starts = [min(b * tb, T) * HW + b * S for b in range(nb + 1)]
+        slot_rows = tb * HW + S
+        t = torch.arange(T)
+        tblk = t // tb
+        row = (torch.tensor(starts)[tblk] + (t - tblk * tb) * HW)[:, None, None] + torch.arange(HW).view(H, W)
+        slot = row + ((tblk % R) * slot_rows - torch.tensor(starts)[tblk])[:, None, None]
+        glob = torch.tensor(starts[1:])[:, None] - S + torch.arange(S)
+        gslot = glob + ((torch.arange(nb) % R) * slot_rows - torch.tensor(starts[:nb]))[:, None]
+        geo = {"rows": list(zip(starts, starts[1:])), "slot_rows": slot_rows, "tok": row.reshape(-1),
+               "glob": glob.reshape(-1), "gslot": gslot, "shifts": []}
+
+        def spans(n, shift, size):  # [lo, hi) of the windows along one axis, shifted by `shift`, clipped to [0, n)
+            edges = ((max(i * size - shift, 0), min((i + 1) * size - shift, n)) for i in range(-(-(n + shift) // size)))
+            return [(lo, hi) for lo, hi in edges if hi > lo]
+
+        for s, st in ((0, 0), (ws // 2, self.time_shift)):
+            # window-local rope ids in [-1, 1]; global rows keep 0, i.e. no rotation
+            axes = [((torch.arange(n) + o) % m + 0.5) / m * 2 - 1 for n, o, m in ((T, st, tb), (H, s, ws), (W, s, ws))]
+            ids = torch.zeros(starts[-1], 3)
+            ids[row.reshape(-1)] = torch.stack(torch.meshgrid(*axes, indexing="ij"), -1).reshape(-1, 3)
+            # a temporal window runs once its last block is in; a block's out-proj runs once its last window has
+            windows_at, done_at = [[] for _ in range(nb)], [0] * nb
+            for t_lo, t_hi in spans(T, st, tb):
+                blocks = sorted({t_lo // tb, (t_hi - 1) // tb})
+                gk = gslot[blocks].reshape(-1)
+                groups = {}  # spatial windows batched by shape; keys = own tokens + the blocks' global rows
+                for y_lo, y_hi in spans(H, s, ws):
+                    for x_lo, x_hi in spans(W, s, ws):
+                        qi = slot[t_lo:t_hi, y_lo:y_hi, x_lo:x_hi].reshape(-1)
+                        groups.setdefault(len(qi), []).append((qi, torch.cat([qi, gk])))
+                for wins in groups.values():
+                    for c in range(0, len(wins), self.max_windows):
+                        windows_at[blocks[-1]].append(tuple(torch.stack(t) for t in zip(*wins[c:c + self.max_windows])))
+                for b in blocks:
+                    done_at[b] = max(done_at[b], blocks[-1])
+            blocks_at = [[c for c in range(nb) if done_at[c] == b] for b in range(nb)]
+            geo["shifts"].append({"ids": ids, "windows_at": windows_at, "blocks_at": blocks_at})
+        return geo
+
+    def iter_decode(self, z):
+        """z: [1, C, T, H, W] -> yields (first frame index, pixels [1, 3, F, 16H, 16W]) per native block.
+
+        Only the residual stream spans the clip; each layer streams over blocks with a ring of q/k/v slots."""
+        _, C, T, H, W = z.shape
+        heads, dh, D, S, R = self.heads, self.dim_head, self.dim, self.num_global, self.ring
+        dev = z.device
+        geo = self._build_geometry(T, H, W)
+        rows, slot_rows = geo["rows"], geo["slot_rows"]
+        gslot = geo["gslot"].to(dev)
+        shifts = [(sh["ids"].to(dev), [[(qi.to(dev), ki.to(dev)) for qi, ki in wins] for wins in sh["windows_at"]],
+                   sh["blocks_at"]) for sh in geo["shifts"]]
+        x = torch.empty(rows[-1][1], D, dtype=z.dtype, device=dev)
+        x[geo["tok"].to(dev)] = self.x_embedder(z[0].permute(1, 2, 3, 0).reshape(-1, C))
+        x[geo["glob"].to(dev)] = torch.cat([comfy.ops.cast_to_input(self.register_tokens[0], x), x.new_zeros(1, D)], 0).repeat(len(rows), 1)
+        q, k, v = (torch.empty(R * slot_rows, heads, dh, dtype=z.dtype, device=dev) for _ in range(3))
+        attn_out = torch.empty(R * slot_rows, D, dtype=z.dtype, device=dev)
+        for li, blk in enumerate(self.blocks):
+            attn, (ids, windows_at, blocks_at) = blk.attn, shifts[li % 2]
+            for b, (r0, r1) in enumerate(rows):
+                s0 = (b % R) * slot_rows
+                s1 = s0 + r1 - r0
+                qkv = comfy.ops.linear_input_act(attn.to_qkv, x[r0:r1], "rms_norm", act_weight=blk.norm1)
+                qq, kk, vv = qkv.view(1, r1 - r0, heads, 3 * dh).chunk(3, -1)
+                qq, kk = attn.rms_rope(qq, kk, self.pos_embed(ids[None, r0:r1].to(z.dtype)))
+                q[s0:s1], k[s0:s1], v[s0:s1] = qq[0], kk[0], vv[0]
+                for qi, ki in windows_at[b]:
+                    attn_out[qi] = attn.attention(*(t.transpose(1, 2) for t in (q[qi], k[ki], v[ki])))
+                # the global rows attend to their whole block: too few queries to be worth re-quantizing the block
+                gs = gslot[b]
+                attn_out[gs] = optimized_attention(*(t[None].transpose(1, 2) for t in (q[gs], k[s0:s1], v[s0:s1])),
+                                                   heads, skip_reshape=True)[0]
+                for c in blocks_at[b]:
+                    c0, c1 = rows[c]
+                    cs = (c % R) * slot_rows
+                    x[c0:c1] = blk.post_attention(attn_out[cs:cs + c1 - c0], x[c0:c1])
+        del q, k, v, attn_out, shifts
+        f0 = 0
+        for r0, r1 in rows:
+            y = unpatchify(self.proj_out(self.norm_out(x[r0:r1 - S]))[None], 1, (r1 - r0 - S) // (H * W), H, W,
+                           self.out_channels, self.patch_size_t, self.patch_size)
+            y = y[:, :, self.frames_to_trim:]  # the first latent of a block keeps one of its four frames
+            yield f0, y
+            f0 += y.shape[2]
 
 
 # Full VAE
@@ -427,6 +562,11 @@ class MiniMaxH3VideoVAE(nn.Module):
         tiling=True,
         operations=ops,
         num_layers=36,
+        still_frame=None,
+        encoder_kept_blocks=None,
+        encoder=True,
+        decoder=True,
+        noncausal_decoder=False,
     ):
         super().__init__()
         self.vae_ratio = int(math.prod(space_down))
@@ -440,31 +580,42 @@ class MiniMaxH3VideoVAE(nn.Module):
         self.token_overlap = (-token_drop) % self.tokens_chunk_size
         self.frame_overlap = max(self.token_overlap * self.vae_ratio_t - self.frame_pre_padding, 0)
 
+        # a decoder fine-tuned to decode one latent directly keeps this output frame of it
+        if still_frame is not None and not 0 <= still_frame < self.vae_ratio_t:
+            raise ValueError(f"still_frame must be in [0, {self.vae_ratio_t}), got {still_frame}")
+        self.still_frame = still_frame
+
         # spatial tiling parameters
         self.tiling = tiling
         self.tile_size = tile_size
         self.tile_overlap_min = tile_overlap_min
 
-        self.encoder = EncoderFCN3D(
-            ch=ch,
-            ch_mult=list(ch_mult),
-            space_down=list(space_down),
-            time_down=list(time_down),
-            num_res_blocks=num_res_blocks,
-            in_channels=in_channels,
-            z_channels=z_channels,
-            double_z=True,
-        )
-        self.quant_conv = ops.Conv3d(z_channels * 2, 2 * embed_dim, 1)
-        self.post_quant_conv = ops.Conv3d(embed_dim, z_channels, 1)
-        self.decoder = ViT3DDecoder(
-            patch_size=self.vae_ratio,
-            patch_size_t=self.vae_ratio_t,
-            in_channels=z_channels,
-            out_channels=out_ch,
-            num_layers=num_layers,
-            operations=operations,
-        )
+        if encoder:
+            self.encoder = EncoderFCN3D(
+                ch=ch,
+                ch_mult=list(ch_mult),
+                space_down=list(space_down),
+                time_down=list(time_down),
+                num_res_blocks=num_res_blocks,
+                in_channels=in_channels,
+                z_channels=z_channels,
+                double_z=True,
+                kept_blocks=encoder_kept_blocks,
+            )
+            self.quant_conv = ops.Conv3d(z_channels * 2, 2 * embed_dim, 1)
+        # Sol-H3-VAE: a distilled decoder that takes the whole clip at once, no tiling or temporal chunking
+        self.noncausal = noncausal_decoder
+        if decoder:
+            self.post_quant_conv = ops.Conv3d(embed_dim, z_channels, 1)
+            decoder_cls = NonCausalViT3DDecoder if noncausal_decoder else ViT3DDecoder
+            self.decoder = decoder_cls(
+                patch_size=self.vae_ratio,
+                patch_size_t=self.vae_ratio_t,
+                in_channels=z_channels,
+                out_channels=out_ch,
+                num_layers=num_layers,
+                operations=operations,
+            )
 
         self.register_buffer("latents_mean", torch.tensor(LATENTS_MEAN))
         self.register_buffer("latents_std", torch.tensor(LATENTS_STD))
@@ -489,7 +640,10 @@ class MiniMaxH3VideoVAE(nn.Module):
 
     def decode_output_shape(self, input_shape):
         b, c, t, h, w = input_shape
-        if t == 1:
+        if self.noncausal:
+            # four frames per latent, the first latent of every 5-latent block keeps one
+            frames = t * self.vae_ratio_t - self.decoder.frames_to_trim * -(-t // self.decoder.block)
+        elif t == 1:
             frames = 1
         else:
             pad_tokens, num_chunks = self._decode_temporal_chunks(t)
@@ -501,10 +655,10 @@ class MiniMaxH3VideoVAE(nn.Module):
             return self.tiled_encode(x)
         return self._encode_moments(x)
 
-    def _adaptive_decode(self, z):
+    def _adaptive_decode(self, z, frames=slice(None)):
         if self.tiling:
-            return self.tiled_decode(z)
-        return self._decode_pixels(z)
+            return self.tiled_decode(z, frames)
+        return self._decode_pixels(z)[:, :, frames]
 
     # spatial tiling
 
@@ -598,7 +752,7 @@ class MiniMaxH3VideoVAE(nn.Module):
             group = slices[k:k + batch]
             yield from self._decode_pixels(torch.cat(group)).chunk(len(group))
 
-    def tiled_decode(self, z):
+    def tiled_decode(self, z, frames=slice(None)):
         height, width = z.shape[-2] * self.vae_ratio, z.shape[-1] * self.vae_ratio
         y_idx, y_len, y_overlap = self.split_tiles(height)
         x_idx, x_len, x_overlap = self.split_tiles(width)
@@ -616,7 +770,7 @@ class MiniMaxH3VideoVAE(nn.Module):
             out_x = 0
             # enumerate would retain the previous tile while the next batch decodes.
             for j in range(len(x_idx)):
-                tile = next(tiles)
+                tile = next(tiles)[:, :, frames]
                 if i > 0:
                     tile = self.blend(strip[..., :, x_idx[j]:x_idx[j] + x_len[j]], tile, y_overlap[i - 1], dim=-2)
                 if j > 0:
@@ -706,6 +860,24 @@ class MiniMaxH3VideoVAE(nn.Module):
             num_chunks += 1
         return pad_tokens, num_chunks
 
+    def decode_noncausal(self, z, output_buffer=None):
+        # the whole clip decodes in one pass; blocks of finalized frames stream out as they come off the head
+        if output_buffer is None:
+            output_buffer = torch.empty(self.decode_output_shape(z.shape), dtype=torch.float32,
+                                        device=comfy.model_management.intermediate_device())
+        still = z.shape[2] == 1
+        if still:
+            # a lone latent decodes badly here too; the first frame of a full block of copies is as good as
+            # the stock decoder's still path
+            z = z.repeat(1, 1, self.decoder.block, 1, 1)
+        for i in range(z.shape[0]):
+            for f0, part in self.decoder.iter_decode(self.post_quant_conv(z[i:i + 1])):
+                if still:
+                    output_buffer[i:i + 1].copy_(self._finalize_pixels(part[:, :, :1]))
+                    break
+                output_buffer[i:i + 1, :, f0:f0 + part.shape[2]].copy_(self._finalize_pixels(part))
+        return output_buffer
+
     def decode_temporal(self, z, output_buffer=None):
         chunk_dec = self.tokens_chunk_size * self.vae_ratio_t
         split_count = int(self.token_drop > 0) + 1
@@ -793,6 +965,7 @@ class MiniMaxH3VideoVAE(nn.Module):
         return self.encode(x)
 
     def decode_tiled(self, z, **kwargs):
+        # tiling is always on internally (the Sol decoder cannot tile at all); ignore tiling fallbacks
         return self.decode(z)
 
     def decode(self, z, output_buffer=None):
@@ -801,8 +974,17 @@ class MiniMaxH3VideoVAE(nn.Module):
         latents_std = self.latents_std.view(1, -1, 1, 1, 1).to(z)
         z = z * latents_std + latents_mean
 
+        if self.noncausal:
+            return self.decode_noncausal(z, output_buffer)
         if z.shape[2] == 1:
-            dec = self._finalize_pixels(self._adaptive_decode(z)[:, :, -1:, :, :])
+            if self.still_frame is not None:
+                dec = self._adaptive_decode(z, slice(self.still_frame, self.still_frame + 1))
+            else:
+                # A still latent is the first latent of a clip and decodes badly alone: decode it as a
+                # full clip of copies and keep only its first real frame.
+                first = slice(self.frame_pre_padding, self.frame_pre_padding + 1)
+                dec = self._adaptive_decode(z.repeat(1, 1, self.tokens_chunk_size, 1, 1), first)
+            dec = self._finalize_pixels(dec)
             if output_buffer is None:
                 return dec
             output_buffer.copy_(dec)

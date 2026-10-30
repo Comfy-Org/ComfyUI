@@ -533,7 +533,7 @@ class OpenAIGPTImageNodeV2(IO.ComfyNode):
                         ),
                         IO.DynamicCombo.Option(
                             "gpt-image-2",
-                            _gpt_image_2_model_inputs(("auto", "opaque", "transparent"), GPT_IMAGE_QUALITIES),
+                            _gpt_image_2_model_inputs(("auto", "opaque"), GPT_IMAGE_QUALITIES),
                         ),
                         IO.DynamicCombo.Option("gpt-image-1.5", _gpt_image_legacy_model_inputs()),
                         IO.DynamicCombo.Option("gpt-image-1", _gpt_image_legacy_model_inputs()),

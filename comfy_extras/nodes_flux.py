@@ -1,3 +1,4 @@
+import json
 import node_helpers
 import comfy.utils
 from typing_extensions import override
@@ -161,7 +162,7 @@ class FluxKontextMultiReferenceLatentMethod(io.ComfyNode):
                 io.Conditioning.Input("conditioning"),
                 io.Combo.Input(
                     "reference_latents_method",
-                    options=["offset", "index", "uxo/uno", "index_timestep_zero"],
+                    options=["offset", "index", "uxo/uno", "index_timestep_zero", "index_timestep_zero_isolated", "index_timestep_zero_text_start"],
                     advanced=True,
                 ),
             ],
@@ -300,6 +301,35 @@ class FluxKVCache(io.ComfyNode):
 
         return io.NodeOutput(m)
 
+class Flux3LayoutPrompt(io.ComfyNode):
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="Flux3LayoutPrompt",
+            display_name="FLUX 3 Image Layout Prompt",
+            category="model/conditioning/flux",
+            description="Appends the boxes from Create Bounding Boxes to a FLUX 3 Image prompt as its layout table.",
+            inputs=[
+                io.String.Input("prompt", multiline=True, dynamic_prompts=True,
+                                tooltip="The prompt text. Cite box N as <obj_N> to tie words to it."),
+                io.Array.Input("element", tooltip="Prompt elements from the node Create Bounding Boxes. Colour palettes are not used, describe colours in the description."),
+            ],
+            outputs=[io.String.Output(display_name="prompt")],
+            is_experimental=True,
+        )
+
+    @classmethod
+    def execute(cls, prompt, element) -> io.NodeOutput:
+        rows = []
+        for i, el in enumerate(element if isinstance(element, list) else []):
+            desc = el.get("desc", "")
+            if el.get("type") == "text" and el.get("text"):
+                desc = f'{desc} "{el["text"]}"'.strip()
+            rows.append({"id": f"obj_{i + 1}", "bbox": el["bbox"], "desc": desc})
+        if not rows:
+            return io.NodeOutput(prompt)
+        return io.NodeOutput(f"{prompt.rstrip()} {json.dumps(rows, ensure_ascii=False)}")
+
 class FluxExtension(ComfyExtension):
     @override
     async def get_node_list(self) -> list[type[io.ComfyNode]]:
@@ -312,6 +342,7 @@ class FluxExtension(ComfyExtension):
             EmptyFlux2LatentImage,
             Flux2Scheduler,
             FluxKVCache,
+            Flux3LayoutPrompt,
         ]
 
 

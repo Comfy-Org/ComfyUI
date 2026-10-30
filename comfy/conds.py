@@ -5,6 +5,8 @@ import logging
 
 
 def is_equal(x, y):
+    if x is y:
+        return True
     if torch.is_tensor(x) and torch.is_tensor(y):
         return torch.equal(x, y)
     elif isinstance(x, dict) and isinstance(y, dict):
@@ -42,6 +44,8 @@ class CONDRegular:
         return True
 
     def concat(self, others):
+        if len(others) == 0:
+            return self.cond
         conds = [self.cond]
         for x in others:
             conds.append(x.cond)
@@ -80,6 +84,8 @@ class CONDCrossAttn(CONDRegular):
         return True
 
     def concat(self, others):
+        if len(others) == 0:
+            return self.cond
         conds = [self.cond]
         crossattn_max_len = self.cond.shape[1]
         for x in others:
@@ -114,6 +120,14 @@ class CONDConstant(CONDRegular):
         return [1]
 
 
+class CONDKVCache(CONDConstant):
+    def can_concat(self, other):
+        return self.cond.keys() == other.cond.keys()
+
+    def concat(self, others):
+        return {device: [self.cond[device]] + [c.cond[device] for c in others] for device in self.cond}
+
+
 class CONDList(CONDRegular):
     def __init__(self, cond):
         self.cond = cond
@@ -135,6 +149,8 @@ class CONDList(CONDRegular):
         return True
 
     def concat(self, others):
+        if len(others) == 0:
+            return list(self.cond)
         out = []
         for i in range(len(self.cond)):
             o = [self.cond[i]]

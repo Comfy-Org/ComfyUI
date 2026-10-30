@@ -1,0 +1,53 @@
+name: "Windows ARM64 Release dependencies"
+
+on:
+  workflow_dispatch:
+    inputs:
+      python_minor:
+        description: 'Python minor version'
+        required: true
+        type: string
+        default: "14"
+      python_patch:
+        description: 'Python patch version'
+        required: true
+        type: string
+        default: "8"
+
+jobs:
+  build_dependencies:
+    runs-on: windows-11-arm
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: 3.${{ inputs.python_minor }}.${{ inputs.python_patch }}
+          architecture: arm64
+
+      - shell: bash
+        run: |
+          echo "@echo off
+          call update_comfyui.bat nopause
+          echo -
+          echo This will try to update pytorch and all python dependencies.
+          echo -
+          echo If you just want to update normally, close this and run update_comfyui.bat instead.
+          echo -
+          pause
+          ..\python_embeded\python.exe -s -m pip install --upgrade --pre --extra-index-url https://pypi.nvidia.com/nvtorch_oot_nightly torch torchvision torchaudio -r ../ComfyUI/requirements.txt pygit2
+          pause" > update_comfyui_and_python_dependencies.bat
+
+          python -m pip install --pre --extra-index-url 'https://pypi.nvidia.com/nvtorch_oot_nightly' torch torchvision torchaudio
+          python -m pip freeze > requirements_torch.txt
+          grep -v comfy requirements.txt > requirements_nocomfyui.txt
+          python -m pip wheel --extra-index-url https://pypi.nvidia.com/nvtorch_oot_nightly -r requirements_torch.txt -r requirements_nocomfyui.txt pygit2 -w ./nvidia_arm64_python_deps
+          python -m pip install --no-index ./nvidia_arm64_python_deps/*
+          python -m pip check
+          tar cf nvidia_arm64_python_deps.tar nvidia_arm64_python_deps
+
+      - uses: actions/cache/save@v4
+        with:
+          path: |
+            nvidia_arm64_python_deps.tar
+            update_comfyui_and_python_dependencies.bat
+          key: ${{ runner.os }}-build-nvidia_arm64-${{ inputs.python_minor }}

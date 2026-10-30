@@ -1,23 +1,11 @@
 import sqlite3
+from contextlib import closing
 
 import pytest
-from sqlalchemy import text
+from sqlalchemy import event, text
+from sqlalchemy.engine import Engine
 
 from app.database import db as db_module
-
-
-@pytest.fixture
-def file_db(tmp_path, monkeypatch):
-    db_path = str(tmp_path / "comfyui.db")
-    monkeypatch.setattr(db_module.args, "database_url", f"sqlite:///{db_path}")
-    monkeypatch.setattr(db_module, "Session", None)
-    monkeypatch.setattr(db_module, "WriteSession", None)
-    monkeypatch.setattr(db_module, "_db_lock", None)
-    db_module._init_file_db(db_module.args.database_url)
-    yield db_path
-    db_module.Session.kw["bind"].dispose()
-    db_module.WriteSession.kw["bind"].dispose()
-    db_module._db_lock.release(force=True)
 
 
 def _other_writer_can_begin(db_path):
@@ -35,6 +23,55 @@ def _other_writer_can_begin(db_path):
 def test_file_db_uses_wal(file_db):
     with db_module.create_session() as session:
         assert session.execute(text("PRAGMA journal_mode")).scalar_one() == "wal"
+
+
+@pytest.fixture
+def extra_wal_synchronous(monkeypatch):
+    # Not SQLite's FULL or WAL default on any build, so only the hooks can produce it.
+    monkeypatch.setattr(db_module, "WAL_SYNCHRONOUS", "EXTRA")
+
+
+@pytest.mark.parametrize("factory", ["Session", "WriteSession"])
+def test_wal_connections_get_the_wal_synchronous_setting(extra_wal_synchronous, file_db, factory):
+    engine = getattr(db_module, factory).kw["bind"]
+    # The read engine's first may be the connection opened before WAL was on; holding it
+    # makes the second a fresh one through the engine's connect hook.
+    with closing(engine.raw_connection()) as first, closing(engine.raw_connection()) as second:
+        values = [c.cursor().execute("PRAGMA synchronous").fetchone()[0] for c in (first, second)]
+    assert values == [3, 3]  # EXTRA
+
+
+@pytest.fixture
+def refused_wal():
+    """Stand in for a filesystem that refuses WAL: the request leaves the rollback journal on."""
+
+    def refuse(conn, cursor, statement, parameters, context, executemany):
+        if statement == "PRAGMA journal_mode=WAL":
+            statement = "PRAGMA journal_mode=DELETE"
+        return statement, parameters
+
+    event.listen(Engine, "before_cursor_execute", refuse, retval=True)
+    yield
+    event.remove(Engine, "before_cursor_execute", refuse)
+
+
+@pytest.fixture
+def refused_wal_db(extra_wal_synchronous, refused_wal, file_db):
+    """The file database initialised while WAL is refused (fixtures resolve in this order)."""
+    return file_db
+
+
+@pytest.mark.parametrize("factory", ["Session", "WriteSession"])
+def test_synchronous_is_left_alone_when_wal_is_refused(refused_wal_db, factory):
+    with closing(sqlite3.connect(":memory:")) as plain:
+        build_default = plain.execute("PRAGMA synchronous").fetchone()[0]
+    engine = getattr(db_module, factory).kw["bind"]
+    # Two, so the second is a fresh connection through the engine's connect hooks.
+    with closing(engine.raw_connection()) as first, closing(engine.raw_connection()) as second:
+        for conn in (first, second):
+            cursor = conn.cursor()
+            assert cursor.execute("PRAGMA journal_mode").fetchone()[0] == "delete"
+            assert cursor.execute("PRAGMA synchronous").fetchone()[0] == build_default
 
 
 def test_write_session_takes_the_write_lock_before_its_first_write(file_db):
