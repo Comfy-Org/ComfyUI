@@ -365,4 +365,23 @@ class LoRAAdapter(WeightAdapterBase):
             hidden = op(x, down, **kw_dict)
             out = op(hidden, up)
 
+        if (not torch.is_grad_enabled() and type(out) is torch.Tensor
+                and (not torch.is_tensor(scale) or scale.ndim == 0)
+                and torch.result_type(out, scale) == out.dtype):
+            return out.mul_(scale)
         return out * scale
+
+    def bypass_forward(self, org_forward, x, *args, **kwargs):
+        # The native h() owns its projection output; base output may alias caller state.
+        if torch.is_grad_enabled() or getattr(self.h, "__func__", None) is not LoRAAdapter.h:
+            return super().bypass_forward(org_forward, x, *args, **kwargs)
+
+        base_out = org_forward(x, *args, **kwargs)
+        h_out = self.h(x, base_out)
+        if (type(base_out) is torch.Tensor and type(h_out) is torch.Tensor
+                and h_out.shape == base_out.shape and h_out.dtype == base_out.dtype
+                and h_out.stride() == base_out.stride()):
+            torch.add(base_out, h_out, out=h_out)
+            del base_out
+            return self.g(h_out)
+        return self.g(base_out + h_out)
