@@ -399,7 +399,7 @@ class QwenImage21Transformer2DModel(nn.Module):
             if n > 0:
                 parts.append(txt[:, start:end])
                 ids.append(torch.arange(pos, pos + n, device=x.device, dtype=torch.float32).unsqueeze(1).expand(n, 3))
-                segments.append((length, length + n, torch.ones((n, length + n), dtype=torch.bool, device=x.device).tril(length)))
+                segments.append((length, length + n, torch.full((n, length + n), -torch.inf, dtype=x.dtype, device=x.device).triu(length + 1)))
                 pos += n
                 length += n
             h, w = img.shape[-2:]
