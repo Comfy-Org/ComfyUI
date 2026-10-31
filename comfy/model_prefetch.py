@@ -8,10 +8,12 @@ import torch
 
 import comfy_aimdo.malloc_graph
 import comfy_aimdo.model_vbar
+import comfy_aimdo.torch
 from comfy.cli_args import args
 import comfy.memory_management
 import comfy.model_management
 import comfy.ops
+from comfy.quant_ops import QuantizedTensor
 
 PREFETCH_QUEUES = []
 GRAPH_WARMED_MODULES = weakref.WeakSet()
@@ -120,6 +122,20 @@ def pin_modules(comfy_modules, device, dtype=None):
     if fully_faulted and dtype is not None:
         for comfy_module in comfy_modules:
             comfy.ops.resolve_cast_module_with_vbar(comfy_module, dtype, device, dtype, None, False, return_weights=False)
+        relayout = []
+        for s in comfy_modules:
+            if s._v_relayout:
+                continue
+            s._v_relayout = True
+            group = s._combined_linear
+            if group is not None and s is group.linears[0]:
+                group.prepare(device)
+                relayout.append(group)
+            relayout.append(s)
+        for s in relayout:
+            # FIXME: Make this non_gemv_specific.
+            if isinstance(s, (comfy.ops.MixedPrecisionOp, comfy.ops.CombinedLinear)) and s.comfy_gemv_optimized and isinstance(s._v_weight, QuantizedTensor) and not s._full_precision_mm:
+                s._v_weight = s._v_weight.optimize_for_gemv(comfy_aimdo.torch.aimdo_to_tensor(s._v, device))
     return offload_stream, fully_faulted
 
 def cleanup_prefetched_modules(module, comfy_modules):

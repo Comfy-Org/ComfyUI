@@ -180,9 +180,27 @@ def cast_modules_with_vbar(comfy_modules, dtype, device, bias_dtype, non_blockin
         cast_buffer_offset += buffer_size
         return buffer
 
+    group_faults = {}
     for s in comfy_modules:
-        signature = comfy_aimdo.model_vbar.vbar_fault(s._v)
-        resident = comfy_aimdo.model_vbar.vbar_signature_compare(signature, s._v_signature)
+        group = s._combined_linear
+        if group is None or group._v_weight is None:
+            signature = comfy_aimdo.model_vbar.vbar_fault(s._v)
+            resident = comfy_aimdo.model_vbar.vbar_signature_compare(signature, s._v_signature)
+        else:
+            # A combined group's members hold each other's bytes, so one member's miss
+            # is a miss for all of them. Fault the peers now; each keeps that fault's
+            # pin as its own, so every member must be in comfy_modules. An uncombined
+            # group's members fault individually above, which also keeps the
+            # single-module cast path from pinning peers it never releases.
+            if s not in group_faults:
+                for m in group.linears:
+                    signature = comfy_aimdo.model_vbar.vbar_fault(m._v)
+                    group_faults[m] = (signature, comfy_aimdo.model_vbar.vbar_signature_compare(signature, m._v_signature))
+                if not all(group_faults[m][1] for m in group.linears):
+                    group._v_weight = None
+                    for m in group.linears:
+                        group_faults[m] = (group_faults[m][0], False)
+            signature, resident = group_faults.pop(s)
         if return_faulted and (signature is None or not resident):
             fully_faulted = False
         prefetch = {
@@ -305,12 +323,9 @@ def resolve_cast_module_with_vbar(s, dtype, device, bias_dtype, compute_dtype, w
         weight = params[0]
         bias = params[1]
         if prefetch["signature"] is not None:
-            # FIXME: Make this non_gemv_specific.
-            if (isinstance(s, MixedPrecisionOp) and s.comfy_gemv_optimized and isinstance(weight, QuantizedTensor) and not s._full_precision_mm
-                    and s.weight_lowvram_function is None and len(s.weight_function) == 0):
-                weight = weight.optimize_for_gemv(xfer_dest)
             s._v_weight = weight
             s._v_bias = bias
+            s._v_relayout = False
         s._v_signature = prefetch["signature"]
 
     def post_cast(s, param_key, x, dtype, resident, update_weight):
@@ -508,6 +523,7 @@ class CastWeightBiasOp:
     comfy_force_forward = False
     weight_function = []
     bias_function = []
+    _combined_linear = None
 
 class WritableWeight(torch.nn.Module, CastWeightBiasOp):
     """One runtime tensor, either realized or cast from writable file backing."""
@@ -1078,8 +1094,60 @@ def _try_quantized_linear_input_act(x, weight, bias, input_act, act_weight, act_
         )
 
 
+class CombinedLinear:
+    """A residency-scoped combination of consecutive VBAR linears, not a parameter-owning module.
+
+    All members must belong to one prefetch unit, so they fault, resolve and miss together.
+    Once combined, the members' weights are gone and the model is committed to the
+    combined weight until a miss reloads them. The model owns the split path.
+    """
+    # The model opts the combined weight into small-M layout, as it does per MixedPrecisionOp.
+    comfy_gemv_optimized = False
+    # prepare declines full-precision members, so the combined weight never is.
+    _full_precision_mm = False
+
+    def __init__(self, linears):
+        self.linears = linears
+        self._v = None
+        self._v_weight = None
+        for linear in self.linears:
+            linear._combined_linear = self
+
+    def prepare(self, device):
+        """Concatenate the members' resident weights in place; they are gone afterwards."""
+        weights = []
+        for s in self.linears:
+            # FIXME: add bias support if ever needed
+            if (not isinstance(s, MixedPrecisionOp) or not isinstance(s._v_weight, QuantizedTensor)
+                    or s._full_precision_mm or s.comfy_force_forward or s.bias is not None):
+                return
+            weights.append(s._v_weight)
+        # Members are loaded back to back, so their VBAR allocations are consecutive in member order.
+        v = (self.linears[0]._v[0], min(s._v[1] for s in self.linears), sum(s._v[2] for s in self.linears))
+        weight = comfy.memory_management.cat_gathered(weights, comfy_aimdo.torch.aimdo_to_tensor(v, device))
+        if weight is None:
+            return
+        self._v = v
+        self._v_weight = weight
+        for s in self.linears:
+            s._v_weight = None
+
+    def forward(self, x):
+        return self.linear_input_act(x, None)
+
+    def linear_input_act(self, x, input_act, act_weight=None, act_eps=0.0,
+                         residual=None, residual_scale=None):
+        run_every_op()
+        if self._v_weight is None:
+            return NotImplemented
+        return _try_quantized_linear_input_act(x, self._v_weight, None, input_act, act_weight, act_eps,
+                                               residual, residual_scale)
+
+
 def linear_input_act(linear, x, input_act, act_weight=None, act_eps=0.0,
                      residual=None, residual_scale=None):
+    if isinstance(linear, CombinedLinear):
+        return linear.linear_input_act(x, input_act, act_weight, act_eps, residual, residual_scale)
     run_every_op()
     weight = linear.weight
     quantized = isinstance(weight, QuantizedTensor)

@@ -32,9 +32,125 @@ def test_mlp_folded_norm_matches_eager_norm():
     x = torch.randn(1, 3, 16)
     for merged in (False, True):
         mlp = _mlp(merged)
+        assert set(mlp.state_dict()) == (
+            {"gate_up_proj.weight", "down_proj.weight"} if merged else
+            {"gate_proj.weight", "up_proj.weight", "down_proj.weight"}
+        )
         for add in (False, True):
             norm = _norm(add)
             assert torch.equal(mlp(x, norm=norm), mlp(norm(x)))
+
+
+def test_combined_gate_up_declines_without_running_split_or_activation():
+    mlp = _mlp(False)
+    combined = mlp.combined_gate_up
+    x = torch.randn(2, 16)
+    original = x.clone()
+    assert combined.forward(x) is NotImplemented
+    # An unsupported request must escape to the model, not enter the eager
+    # activation fallback (which would reject this activation name).
+    assert comfy.ops.linear_input_act(combined, x, "model_owned_activation") is NotImplemented
+    assert torch.equal(x, original)
+    assert [name for name, _ in mlp.named_modules()] == ["", "gate_proj", "up_proj", "down_proj"]
+
+
+def test_w6a8_packed_and_combined_on_hit_including_lora():
+    import comfy.lora
+    import comfy.model_patcher
+    import comfy.model_prefetch
+    from comfy.quant_ops import QuantizedTensor
+
+    if not comfy.memory_management.aimdo_enabled or not torch.cuda.is_available():
+        pytest.skip("requires initialized CUDA DynamicVRAM")
+
+    torch.manual_seed(53)
+    device = torch.device("cuda:0")
+    ops = comfy.ops.mixed_precision_ops(compute_dtype=torch.bfloat16)
+
+    class Projections(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.a = ops.Linear(512, 96, bias=False)
+            self.b = ops.Linear(512, 160, bias=False)
+            self.c = ops.Linear(512, 128, bias=False)
+            for layer in (self.a, self.b, self.c):
+                weight = QuantizedTensor.from_float(
+                    torch.randn(layer.out_features, 512, dtype=torch.bfloat16) * 0.03,
+                    "AsymW4A8Int8Layout", bits=6, convrot_groupsize=256,
+                )
+                layer.weight = torch.nn.Parameter(weight, requires_grad=False)
+                layer.quant_format = "w6a8_int8"
+                layer.layout_type = weight.layout_cls
+                layer.comfy_gemv_optimized = True
+            self.combined = comfy.ops.CombinedLinear((self.a, self.b))
+            self.combined.comfy_gemv_optimized = True
+
+        def get_dynamic_vram__units(self):
+            return [self], []
+
+        def forward(self, x):
+            ab = self.combined.forward(x)
+            if ab is NotImplemented:
+                ab = torch.cat((self.a(x), self.b(x)), dim=-1)
+            return torch.cat((ab, self.c(x)), dim=-1)
+
+    model = Projections()
+    members = (model.a, model.b, model.c)
+    canonical = [s.weight.dequantize().to(device) for s in members]
+    base = comfy.model_patcher.ModelPatcherDynamic(model, device, torch.device("cpu"))
+    tensors = {}
+    for name in ("a", "c"):
+        tensors[f"{name}.lora_up.weight"] = torch.randn(getattr(model, name).out_features, 4) * 0.1
+        tensors[f"{name}.lora_down.weight"] = torch.randn(4, 512) * 0.1
+    patches = comfy.lora.load_lora(tensors, {"a": "a.weight", "c": "c.weight"})
+    lora = base.clone()
+    assert set(lora.add_patches(patches, strength_patch=0.75)) == {"a.weight", "c.weight"}
+    x = torch.randn(3, 512, device=device, dtype=torch.bfloat16)
+
+    def step(packed, expected=None):
+        comfy.model_prefetch.pin_modules(members, device, x.dtype)
+        try:
+            assert (model.combined._v_weight is not None) == packed
+            out = model(x)
+            if packed:
+                # Combined members give up their own weights; the combined weight and c pack.
+                assert model.a._v_weight is None and model.b._v_weight is None
+                assert model.combined._v_weight.params.mma_packed and model.c._v_weight.params.mma_packed
+                if expected:
+                    # Un-rotation on dequantize is a batched matmul whose rounding depends on the row count.
+                    torch.testing.assert_close(model.combined._v_weight.dequantize(), torch.cat(expected[:2]))
+                    torch.testing.assert_close(model.c._v_weight.dequantize(), expected[2])
+            else:
+                assert not any(s._v_weight.params.mma_packed for s in members)
+            return out.clone()
+        finally:
+            comfy.model_prefetch.cleanup_prefetched_modules(model, members)
+
+    def check(split, packed):
+        # The packed GEMM shares the int8 grid and int32 accumulation; only the fp32 epilogue order differs.
+        torch.testing.assert_close(packed.float(), split.float(), atol=2e-2, rtol=1e-2)
+
+    try:
+        # The first pin after a load misses and runs the canonical layout; packing
+        # and combining happen on the next hit.
+        base.partially_load(device)
+        split = step(False)
+        packed = [step(True, canonical), step(True, canonical)]
+        assert torch.equal(packed[0], packed[1])
+        check(split, packed[0])
+
+        # The baked patch is what gets packed and combined.
+        lora.partially_load(device)
+        patched = [step(False), step(True)]
+        assert not torch.equal(split, patched[0])
+        check(*patched)
+
+        base.partially_load(device)
+        assert torch.equal(split, step(False))
+        assert torch.equal(packed[0], step(True, canonical))
+    finally:
+        torch.cuda.synchronize()
+        base.unpatch_model(unpatch_weights=True)
 
 
 def test_rms_norm_scale_adds_one_without_caching():
