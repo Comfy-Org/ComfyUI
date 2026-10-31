@@ -789,12 +789,13 @@ class VideoFromFile(VideoInput):
 
         streams = [video_stream] if audio_stream is None else [video_stream, audio_stream]
         pts_step = max(1, int(round((1 / rate) / video_stream.time_base)))
+        encoder_time_base = video_stream.time_base if preserve_source_timestamps else 1 / rate
         video_done = False
         audio_done = audio_stream is None
         video_pts_offset = None
         last_video_pts = None
         last_video_end = None
-        # rebased pts -> true display duration: the mp4 muxer pads the last sample with 1/rate otherwise
+        # encoder pts -> true display duration: the mp4 muxer pads the last sample with 1/rate otherwise
         video_frame_durations = {}
         source_size = None
         rotation_k = 0
@@ -809,6 +810,9 @@ class VideoFromFile(VideoInput):
         output = None
         out_video = None
         out_audio = None
+
+        def encoder_pts(pts):
+            return round(pts * video_stream.time_base / encoder_time_base)
 
         def audio_frame_from_ndarray(nd_planar):
             frame = av.AudioFrame.from_ndarray(np.ascontiguousarray(nd_planar), format="fltp", layout=layout)
@@ -986,7 +990,7 @@ class VideoFromFile(VideoInput):
                                 frame_duration = frame_output_end - frame.pts
                         last_video_pts = frame.pts
                         last_video_end = frame.pts + frame_duration
-                        video_frame_durations[frame.pts] = frame_duration
+                        video_frame_durations[encoder_pts(frame.pts)] = encoder_pts(last_video_end) - encoder_pts(frame.pts)
                         # the decoded pict_type would force x264's frame types (intra-only
                         # sources like MJPEG/ProRes would come out all-keyframe)
                         frame.pict_type = 0
@@ -1033,10 +1037,11 @@ class VideoFromFile(VideoInput):
                 raise ValueError(f"No decodable video frames found in file '{self.__file}'")
             if out_audio is not None and not audio_done:
                 drain_audio(final=True)
-            window_fill = last_video_end - last_video_pts if video_done and last_video_pts is not None else 0
+            last_packet_pts = None if last_video_pts is None else encoder_pts(last_video_pts)
+            window_fill = encoder_pts(last_video_end) - last_packet_pts if video_done and last_packet_pts is not None else 0
             for out_packet in out_video.encode(None):
                 duration = video_frame_durations.pop(out_packet.pts, 0)
-                if out_packet.pts == last_video_pts:
+                if out_packet.pts == last_packet_pts:
                     duration = max(duration, window_fill)
                 out_packet.duration = duration
                 output.mux(out_packet)
@@ -1344,6 +1349,7 @@ class VideoFromList(VideoInput):
         audio_pts = 0
         signature = None
         video_offset = Fraction()
+        last_dts = None
 
         def mux_audio_frames(frames, end_pts):
             nonlocal audio_pts
@@ -1503,6 +1509,10 @@ class VideoFromList(VideoInput):
                             packet.pts = int((Fraction(packet.pts) * time_base - origin + video_offset) / time_base)
                             video_end = max(video_end, Fraction(packet.pts + (packet.duration or 0)) * time_base)
                         packet.dts = int((Fraction(packet.dts) * time_base - origin + video_offset) / time_base)
+                        # a chunk with more B-frame delay than the previous one starts decoding before it ends
+                        if last_dts is not None and Fraction(packet.dts) * time_base <= last_dts:
+                            packet.dts = math.floor(last_dts / time_base) + 1
+                        last_dts = Fraction(packet.dts) * time_base
                         packet.stream = output_video
                         for packet in filter_hevc_packet(hevc_filter, packet) if hevc_filter else (packet,):
                             packet.stream = output_video
