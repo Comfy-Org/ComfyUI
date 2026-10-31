@@ -919,7 +919,7 @@ def apply_empty_x_to_equal_area(conds, uncond, name, uncond_fill_func):
             else:
                 uncond_other.append((x, t))
 
-    if len(uncond_cnets) > 0:
+    if len(uncond_cnets) > 0 or len(uncond_other) == 0:
         return
 
     for x in range(len(cond_cnets)):
