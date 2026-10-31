@@ -921,7 +921,10 @@ class LTXVConcatAVLatent(io.ComfyNode):
         dims = [i for i in range(reference.ndim) if reference.shape[i] != audio.shape[i]]
         if len(dims) == 0:
             return audio, noise_mask
-        if len(dims) > 1 or dims[0] < 2:
+        # 1D audio latents are time-first [B, T, C], so their time axis sits one
+        # dimension lower than in the [B, C, ..., T] layouts of 2D+ VAEs. The
+        # batch axis (dim 0) is never fitted.
+        if len(dims) > 1 or dims[0] == 0 or (dims[0] < 2 and reference.ndim != 3):
             raise ValueError("audio latent {} cannot be fitted to {}".format(tuple(audio.shape), tuple(reference.shape)))
 
         dim, length = dims[0], reference.shape[dims[0]]

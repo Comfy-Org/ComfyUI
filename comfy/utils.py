@@ -1384,6 +1384,14 @@ def reshape_mask(input_mask, output_shape):
     dims = len(output_shape) - 2
 
     if dims == 1:
+        if len(input_mask.shape) == 4:
+            # 2D mask image onto a 1D latent: the rows carry no information and the
+            # columns are the latent's time axis. Interpolate the columns onto the
+            # time axis and expand the result across the latent's channels.
+            input_mask = input_mask.mean(dim=2)
+            input_mask = torch.nn.functional.interpolate(input_mask, size=(output_shape[1],), mode="linear")
+            input_mask = input_mask.squeeze(1).unsqueeze(-1).expand(-1, -1, output_shape[2])
+            return repeat_to_batch_size(input_mask, output_shape[0])
         scale_mode = "linear"
 
     if dims == 2:
