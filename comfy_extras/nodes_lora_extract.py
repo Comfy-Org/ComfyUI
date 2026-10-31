@@ -126,7 +126,7 @@ class LoraSave(io.ComfyNode):
         if text_encoder_diff is not None:
             output_sd = calc_lora_model(text_encoder_diff.patcher, rank, "", "text_encoders.", output_sd, lora_type, bias_diff=bias_diff)
 
-        output_checkpoint = f"{filename}_{counter:05}_.safetensors"
+        output_checkpoint = f"{filename}_{counter:05}.safetensors"
         output_checkpoint = os.path.join(full_output_folder, output_checkpoint)
 
         comfy.utils.save_torch_file(output_sd, output_checkpoint, metadata=None)
