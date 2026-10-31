@@ -186,6 +186,7 @@ def build_extra_conds(
             attention_mask=None,
             skip_vision_start_token=[0] * K + [1] + [1] * K,
             fix_point=4096,
+            text_len=new_txt_len,
         )
 
         # tms + target_image + ref_patches are all gen.
