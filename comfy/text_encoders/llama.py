@@ -1,7 +1,8 @@
 import torch
 import torch.nn as nn
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional, Any, Tuple
+import contextlib
 import math
 from tqdm import tqdm
 import comfy.utils
@@ -28,6 +29,33 @@ class FixedKV:
     index: int
     position: torch.Tensor
     seqlen: torch.Tensor
+    storage: Any = field(default=None, init=False)
+
+    def state_tensors(self):
+        return {"key": (self, "key"), "value": (self, "value")}
+
+    def checkpoint_state(self):
+        return {"index": self.index}
+
+    def restore_state(self, state):
+        self.index = state["index"]
+
+    @contextlib.contextmanager
+    def cast(self, device):
+        if self.storage is None:
+            yield
+            return
+        fields = self.state_tensors()
+        originals = {key: getattr(owner, name) for key, (owner, name) in fields.items()}
+        with contextlib.ExitStack() as stack:
+            try:
+                for key, (owner, name) in fields.items():
+                    value, _ = stack.enter_context(self.storage[key].access(device))
+                    setattr(owner, name, value)
+                yield
+            finally:
+                for key, (owner, name) in fields.items():
+                    setattr(owner, name, originals[key])
 
     def prepare(self, num_tokens):
         self.position.copy_(self.seqlen)
@@ -43,6 +71,10 @@ class FixedKV:
 @dataclass
 class FixedKVState(FixedKV):
     tracker: dict = None
+
+    def restore_state(self, state):
+        super().restore_state(state)
+        self.tracker["step"] = None
 
     def prepare(self, num_tokens):
         tree = self.tracker["tree"]
@@ -112,6 +144,9 @@ class FixedKVCache(FixedKVState):
 
 class Int8FixedKVCache(FixedKVState):
     # INT8 prefix with a bounded BF16 window for page updates and speculative commits.
+    def state_tensors(self):
+        return {**super().state_tensors(), **{"packed_" + name: (self.packed, name) for name in ("key", "value", "key_scale", "value_scale")}}
+
     @classmethod
     def zeros(cls, batch, kv_heads, capacity, head_dim, device, dtype, shared):
         packed = Int8DecodeCache(batch, kv_heads, capacity, device)
@@ -120,7 +155,7 @@ class Int8FixedKVCache(FixedKVState):
         key = torch.zeros((batch, kv_heads, window, head_dim), device=device, dtype=dtype)
         cache = cls(key, torch.zeros_like(key), 0, *shared)
         cache.packed = packed
-        cache.chain_mask = torch.tensor([(1 << (r + 1)) - 1 for r in range(SPEC_ROWS)], dtype=torch.int32, device=device)
+        cache.chain_mask = torch.tensor([(1 << (r + 1)) - 1 for r in range(SPEC_ROWS)], dtype=torch.int32, device=cache.position.device)
         return cache
 
     def append(self, xk, xv):
@@ -147,6 +182,30 @@ class Int8FixedKVCache(FixedKVState):
         tree = self.tracker["tree"]
         mask = tree.mask if tree is not None else self.chain_mask[:seq]
         return comfy_kitchen.flash_attention_decode_tree_merge(out, lse, xq, xk, xv, mask, torch.empty_like(out))
+
+class KVCacheModel(nn.Module):
+    comfy_writable = True
+
+    def __init__(self, caches, extra_caches=()):
+        super().__init__()
+        self.caches = caches
+        self.extra_caches = list(extra_caches)
+        self.layers = nn.ModuleList()
+        for cache in self.caches + self.extra_caches:
+            layer = nn.ModuleDict({key: comfy.ops.WritableWeight(getattr(owner, name).shape, getattr(owner, name).dtype)
+                                  for key, (owner, name) in cache.state_tensors().items()})
+            self.layers.append(layer)
+            cache.storage = layer
+
+    def get_dynamic_vram__units(self):
+        return self.layers, []
+
+    def checkpoint_state(self):
+        return [cache.checkpoint_state() for cache in self.caches + self.extra_caches]
+
+    def restore_state(self, state):
+        for cache, saved in zip(self.caches + self.extra_caches, state, strict=True):
+            cache.restore_state(saved)
 
 @dataclass
 class Llama2Config:
@@ -1048,7 +1107,8 @@ class Llama2_(nn.Module):
             elif intermediate_output < 0:
                 intermediate_output = len(self.layers) + intermediate_output
 
-        prefetch_queue = comfy.model_prefetch.make_prefetch_queue(list(self.layers), x.device, {"prefetch_dynamic_vbars": self.prefetch_dynamic_vbars and past_key_values is not None})
+        prefetch_modules = [(layer, kv.storage) if kv.storage is not None else layer for layer, kv in zip(self.layers, past_key_values)] if fixed_kv else list(self.layers)
+        prefetch_queue = comfy.model_prefetch.make_prefetch_queue(prefetch_modules, x.device, {"prefetch_dynamic_vbars": self.prefetch_dynamic_vbars and past_key_values is not None})
         next_key_values = list(past_key_values) if past_key_values is not None else []
         for i, layer in enumerate(self.layers):
             if all_intermediate is not None:
@@ -1067,13 +1127,14 @@ class Llama2_(nn.Module):
                 # Plain FixedKV shares GPU counters; prepare once, eager or graph-replayed.
                 if i == 0 and type(past_kv) is FixedKV:
                     past_kv.prepare(seq_len)
-                output, current_kv = layer(
-                    x=x,
-                    attention_mask=mask,
-                    freqs_cis=freqs_cis,
-                    optimized_attention=optimized_attention,
-                    past_key_value=past_kv,
-                )
+                with past_kv.cast(x.device) if fixed_kv else contextlib.nullcontext():
+                    output, current_kv = layer(
+                        x=x,
+                        attention_mask=mask,
+                        freqs_cis=freqs_cis,
+                        optimized_attention=optimized_attention,
+                        past_key_value=past_kv,
+                    )
                 if enable_graph:
                     x.copy_(output)
                 else:
@@ -1191,7 +1252,27 @@ class BaseGenerate:
     def init_kv_cache(self, batch, max_cache_len, device, execution_dtype):
         return self.model.init_kv_cache(batch, max_cache_len, device, execution_dtype)
 
-    def generate(self, embeds=None, do_sample=True, max_length=256, temperature=1.0, top_k=50, top_p=0.9, min_p=0.0, repetition_penalty=1.0, seed=42, stop_tokens=None, initial_tokens=[], execution_dtype=None, min_tokens=0, presence_penalty=0.0, initial_input_ids=None, position_ids=None, deepstack_embeds=None, visual_pos_masks=None, embeds_info=None):
+    def prefill(self, embeds, past_key_values, position_ids=None, **kwargs):
+        return self.model.forward(None, embeds=embeds, attention_mask=None, past_key_values=past_key_values, position_ids=position_ids, **kwargs)
+
+    def cache_capacity(self, needed, state):
+        """The cache length for a generation that needs this many tokens on top of the state's."""
+        return needed
+
+    def restore_generation_state(self, state, cache, generator):
+        if "caches" in state:
+            cache.restore_state(state["caches"])
+        if generator is not None and "rng" in state:
+            generator.set_state(torch.tensor(state["rng"], dtype=torch.uint8))
+
+    def save_generation_state(self, state, cache, ids, generator, capacity, position):
+        # pending is the last sampled token, fed at position on the next turn
+        state.update(length=cache.caches[0].index, capacity=capacity, pending=ids[-1:], position=position, caches=cache.checkpoint_state(),
+                     penalty_tokens=sorted(set(state.get("penalty_tokens", []) + ids)))
+        if generator is not None:
+            state["rng"] = generator.get_state().tolist()
+
+    def generate(self, embeds=None, do_sample=True, max_length=256, temperature=1.0, top_k=50, top_p=0.9, min_p=0.0, repetition_penalty=1.0, seed=42, stop_tokens=None, initial_tokens=[], execution_dtype=None, min_tokens=0, presence_penalty=0.0, initial_input_ids=None, position_ids=None, deepstack_embeds=None, visual_pos_masks=None, embeds_info=None, prepare_runtime_model=None, generation_state=None):
         device = embeds.device
 
         if stop_tokens is None:
@@ -1207,10 +1288,15 @@ class BaseGenerate:
         if embeds.ndim == 2:
             embeds = embeds.unsqueeze(0)
 
-        max_cache_len = embeds.shape[1] + max_length
-        past_key_values = self.init_kv_cache(embeds.shape[0], max_cache_len, device, execution_dtype)
-
+        state = {} if generation_state is None else generation_state
+        max_cache_len = self.cache_capacity(state.get("length", 0) + embeds.shape[1] + max_length, state)
+        initial_tokens = state.get("penalty_tokens", initial_tokens)
         generator = torch.Generator(device=device).manual_seed(seed) if do_sample else None
+        cache = past_key_values = self.init_kv_cache(embeds.shape[0], max_cache_len, device, execution_dtype)
+        if isinstance(cache, KVCacheModel):
+            cache = prepare_runtime_model(cache)
+            self.restore_generation_state(state, cache, generator)
+            past_key_values = cache.caches
 
         generated_token_ids = []
         pbar = comfy.utils.ProgressBar(max_length)
@@ -1256,7 +1342,10 @@ class BaseGenerate:
                 if step == 0 and deepstack_embeds is not None:
                     extra["deepstack_embeds"] = deepstack_embeds
                     extra["visual_pos_masks"] = visual_pos_masks
-                x, _, past_key_values = self.model.forward(None, embeds=embeds, attention_mask=None, past_key_values=past_key_values, input_ids=current_input_ids, position_ids=position_ids, **extra, embeds_info=(embeds_info if step == 0 else None))
+                if step == 0:
+                    x, _, past_key_values = self.prefill(embeds, past_key_values, position_ids=position_ids, input_ids=current_input_ids, **extra, embeds_info=embeds_info)
+                else:
+                    x, _, past_key_values = self.model.forward(None, embeds=embeds, attention_mask=None, past_key_values=past_key_values, input_ids=current_input_ids, position_ids=position_ids, **extra, embeds_info=None)
                 logits = self.logits(x)[:, -1]
                 if penalty_mask is None and do_sample and penalize:
                     # allocated on the (unbracketed) first step; later steps only index_fill_ it
@@ -1290,6 +1379,8 @@ class BaseGenerate:
         finally:
             comfy.model_prefetch.cleanup_prefetch_queues()
 
+        if isinstance(cache, KVCacheModel):
+            self.save_generation_state(state, cache, generated_token_ids, generator, max_cache_len, cache.caches[0].index if next_pos is None else next_pos)
         return generated_token_ids
 
     def processed_probs(self, logits, temperature, top_k, top_p, min_p, repetition_penalty, token_history, presence_penalty=0.0, penalty_mask=None):

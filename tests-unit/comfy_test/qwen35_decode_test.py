@@ -9,7 +9,10 @@ from comfy.cli_args import args as cli_args
 if not torch.cuda.is_available():
     cli_args.cpu = True
 
+import comfy.model_management  # noqa: E402
 import comfy.ops  # noqa: E402
+import comfy.model_state  # noqa: E402
+from comfy.model_patcher import ModelPatcher  # noqa: E402
 from comfy.text_encoders.llama import MLP, RMSNorm  # noqa: E402
 
 
@@ -337,6 +340,16 @@ def _tiny_model(monkeypatch, layers=4, head_dim=64):
     for name, p in model.named_parameters():
         p.data = torch.randn_like(p) * (0.05 if "norm" in name else 0.3)
     model.model.lm_head.weight.data[:8] *= 4  # a few likely tokens, so some drafts survive
+
+    # Generation loads its KV cache into a model state, as CLIP.generate does; each test ends its node.
+    monkeypatch.setattr(comfy.model_management, "EPHEMERAL_MODELS", [])
+    generate = model.generate
+
+    def generate_with_cache(*args, prepare_runtime_model=None, **kwargs):
+        state = comfy.model_state.ModelState()
+        comfy.model_management.register_ephemeral_model(state)
+        return generate(*args, prepare_runtime_model=prepare_runtime_model or (lambda cache: state.load(cache, torch.device("cpu"))), **kwargs)
+    model.generate = generate_with_cache
     return model
 
 
@@ -408,6 +421,31 @@ def test_adaptive_switch_preserves_sequential_output(monkeypatch, sampled):
     expected = model.generate(embeds.clone(), mtp=False, **settings)
     assert model.generate(embeds.clone(), mtp=True, **settings) == expected
     assert len(set(switches)) == 4, switches
+
+
+@pytest.mark.parametrize("mtp", [False, "3", "tree2s2"])
+def test_continuation_from_model_state_matches_uninterrupted_generation(monkeypatch, tmp_path, mtp):
+    model = _tiny_model(monkeypatch)
+    embeds = torch.randn(1, 5, 64)
+    expected = model.generate(embeds.clone(), do_sample=False, max_length=20, mtp=False)
+    for cutoff in (2, 4, 7, 9):
+        path = str(tmp_path / f"{cutoff}.safetensors")
+        state = comfy.model_state.ModelState(path)
+        first = model.generate(embeds.clone(), do_sample=False, max_length=cutoff, mtp=mtp, generation_state=state.metadata,
+                               prepare_runtime_model=lambda cache: state.load(cache, torch.device("cpu")))
+        assert state.metadata["length"] == embeds.shape[1] + cutoff - 1
+        assert state.metadata["pending"] == first[-1:]
+        state.save()
+        state.release()
+
+        # The next turn reopens the saved file, as a later prompt would.
+        saved = comfy.model_state.ModelState(path, create="never")
+        pending = model.model.embed_tokens(torch.tensor([saved.metadata["pending"]]))
+        rest = model.generate(pending, do_sample=False, max_length=20 - cutoff, mtp=mtp, generation_state=saved.metadata,
+                              position_ids=torch.tensor([[saved.metadata["position"]]]),
+                              prepare_runtime_model=lambda cache: saved.load(cache, torch.device("cpu")))
+        saved.release()
+        assert first + rest == expected
 
 
 class _FakePacked:
@@ -508,8 +546,6 @@ def _attention_config(config):
 def test_checkpoint_and_lora_attention_select_each_kv_layer(monkeypatch):
     import comfy.ldm.modules.attention as attention
     import comfy.lora
-    from comfy.model_patcher import ModelPatcher
-    import comfy.text_encoders.llama as llama
     import comfy.text_encoders.qwen35 as qwen35
     from comfy.text_encoders.llama import FixedKVCache
 
@@ -517,7 +553,6 @@ def test_checkpoint_and_lora_attention_select_each_kv_layer(monkeypatch):
     monkeypatch.setattr(qwen35.comfy_kitchen, "int8_attention_is_available", lambda device: True)
     monkeypatch.setattr(qwen35.comfy_kitchen, "sol_attn_is_available", lambda device: False)
     monkeypatch.setattr(qwen35, "int8_decode_is_available", lambda device: True)
-    monkeypatch.setattr(llama, "Int8DecodeCache", _FakePacked)
     monkeypatch.setattr(cli_args, "use_ck_attention", False)
     model = _tiny_model(monkeypatch, layers=8, head_dim=256)
     key = "model.layers.3.self_attn.comfy_attention.config"
@@ -532,7 +567,7 @@ def test_checkpoint_and_lora_attention_select_each_kv_layer(monkeypatch):
     def cache_types():
         kv = model.init_kv_cache(1, 32, device, torch.bfloat16)
         draft = model.mtp.layers[0].self_attn.init_kv_cache(1, 32, device, torch.bfloat16, {})
-        return type(kv[3]), type(kv[7]), type(draft)
+        return type(kv.caches[3]), type(kv.caches[7]), type(draft)
 
     assert cache_types() == (qwen35.Int8FixedKVCache, FixedKVCache, qwen35.Int8FixedKVCache)
     monkeypatch.setattr(qwen35.comfy_kitchen, "sol_attn_is_available", lambda device: True)

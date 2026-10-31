@@ -25,7 +25,16 @@ def write_tensor_file_slice(tensor, source, stream=None):
         raise ValueError("Writable tensors require an exact file descriptor and a complete contiguous source")
 
     with info.lock:
-        if source.device.type == "cuda":
+        if not aimdo_enabled and not source.is_meta:
+            # The native transfer pool only exists once dynamic VRAM is initialised.
+            source = source.cpu()
+            view = memoryview((ctypes.c_ubyte * size).from_address(source.data_ptr()))
+            info.file_ref.seek(info.offset)
+            done = 0
+            while done < size:
+                done += info.file_ref.write(view[done:])
+            view.release()
+        elif source.device.type == "cuda":
             stream = torch.cuda.current_stream(source.device) if stream is None else stream
             comfy_aimdo.host_buffer.write_device_to_file(info.file_ref, info.offset, size,
                                                         stream.cuda_stream, source.data_ptr(), source.device.index)

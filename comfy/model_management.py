@@ -634,6 +634,8 @@ except:
 
 current_loaded_models: list[LoadedModel] = []
 
+EPHEMERAL_MODELS = []
+
 DIRTY_MMAPS = set()
 
 PIN_PRESSURE_HYSTERESIS = 256 * 1024 * 1024
@@ -1079,6 +1081,14 @@ def archive_model_dtypes(model):
         for buf_name, buf in module.named_buffers(recurse=False):
             setattr(module, f"{buf_name}_comfy_model_dtype", buf.dtype)
 
+
+def register_ephemeral_model(state):
+    """Keep a model state loaded until the node ends, then release it."""
+    EPHEMERAL_MODELS.append(state)
+
+def cleanup_ephemeral_models():
+    while EPHEMERAL_MODELS:
+        EPHEMERAL_MODELS.pop().release()
 
 def cleanup_models():
     to_delete = []

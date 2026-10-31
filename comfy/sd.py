@@ -97,6 +97,7 @@ import comfy.text_encoders.moss_image
 import comfy.text_encoders.fibo2
 
 import comfy.model_patcher
+import comfy.model_state
 import comfy.lora
 import comfy.lora_convert
 import comfy.hooks
@@ -476,7 +477,8 @@ class CLIP:
     def get_key_patches(self):
         return self.patcher.get_key_patches()
 
-    def generate(self, tokens, do_sample=True, max_length=256, temperature=1.0, top_k=50, top_p=0.95, min_p=0.0, repetition_penalty=1.0, seed=None, presence_penalty=0.0, mtp=True):
+    def generate(self, tokens, do_sample=True, max_length=256, temperature=1.0, top_k=50, top_p=0.95, min_p=0.0, repetition_penalty=1.0, seed=None, presence_penalty=0.0, mtp=True, state=None):
+        """Generate tokens; a model state continues the generation it holds and is left loaded for its owner."""
         self.cond_stage_model.reset_clip_options()
 
         self.load_model(tokens)
@@ -484,7 +486,11 @@ class CLIP:
         self.cond_stage_model.set_clip_options({"layer": None})
         self.cond_stage_model.set_clip_options({"execution_device": device})
 
+        if state is None:
+            state = comfy.model_state.ModelState()
+            model_management.register_ephemeral_model(state)
         with model_management.cuda_device_context(device), comfy.ops.use_quantized_matmul(self.cond_stage_model, device):
+            self.cond_stage_model.set_clip_options({"prepare_runtime_model": lambda model: state.load(model, device), "generation_state": state.metadata})
             return self.cond_stage_model.generate(tokens, do_sample=do_sample, max_length=max_length, temperature=temperature, top_k=top_k, top_p=top_p, min_p=min_p, repetition_penalty=repetition_penalty, seed=seed, presence_penalty=presence_penalty, mtp=mtp)
 
     def decode(self, token_ids, skip_special_tokens=True):

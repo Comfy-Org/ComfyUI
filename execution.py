@@ -553,6 +553,7 @@ async def execute(server: "ExecutionServer", dynprompt, caches, current_item, ex
                     comfy.model_prefetch.cleanup_prefetch_queues()
                     comfy.model_management.reset_cast_buffers()
                     comfy_aimdo.model_vbar.vbars_reset_watermark_limits()
+                comfy.model_management.cleanup_ephemeral_models()
 
             if has_pending_tasks:
                 pending_async_nodes[unique_id] = output_data

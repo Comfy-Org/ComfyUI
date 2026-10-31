@@ -134,9 +134,27 @@ def cleanup_prefetched_modules(module, comfy_modules):
         if prefetch["signature"] is not None:
             comfy_aimdo.model_vbar.vbar_unpin(s._v)
         delattr(s, "_prefetch")
-    if getattr(module, "_v_block_faulted", False):
-        comfy_aimdo.model_vbar.vbar_unpin(module._v_block)
-        del module._v_block_faulted
+    for block in getattr(module, "_v_blocks_faulted", ()):
+        comfy_aimdo.model_vbar.vbar_unpin(block)
+    if hasattr(module, "_v_blocks_faulted"):
+        del module._v_blocks_faulted
+
+def fault_graph_blocks(module, blocks):
+    signatures = []
+    pinned = []
+    try:
+        for block in blocks:
+            signature = comfy_aimdo.model_vbar.vbar_fault(block)
+            if signature is None:
+                return None
+            pinned.append(block)
+            signatures.append(signature)
+        module._v_blocks_faulted = pinned
+        pinned = []
+        return signatures
+    finally:
+        for block in pinned:
+            comfy_aimdo.model_vbar.vbar_unpin(block)
 
 def _drop_graph(module):
     graph = getattr(module, "_comfy_graph", None)
@@ -197,14 +215,16 @@ def prefetch_queue_pop(queue, device, module, dtype=None, core=None, enable_grap
             malloc_graph.resume()
             GRAPH_CAPTURE_STREAMS[device] = capture_stream
 
-    signature = None
+    prefetch = queue[1]
+    prefetch_modules = prefetch if isinstance(prefetch, (list, tuple)) else (prefetch,)
+    blocks = [root._v_block for root in prefetch_modules if getattr(root, "_v_block", None) is not None] if enable_graph else []
+    signatures = None
     graph_hit = False
     graph = getattr(module, "_comfy_graph", None) if enable_graph else None
     if graph is not None:
-        signature = comfy_aimdo.model_vbar.vbar_fault(module._v_block)
-        if signature is not None:
-            module._v_block_faulted = True
-            graph_hit = comfy_aimdo.model_vbar.vbar_signature_compare(signature, graph["signature"])
+        signatures = fault_graph_blocks(module, blocks)
+        if signatures is not None:
+            graph_hit = all(comfy_aimdo.model_vbar.vbar_signature_compare(a, b) for a, b in zip(signatures, graph["signatures"]))
 
     if malloc_graph is not None and malloc_scope is not None:
         if malloc_graph.iterate(malloc_scope if module is not None and not graph_hit else None):
@@ -225,10 +245,8 @@ def prefetch_queue_pop(queue, device, module, dtype=None, core=None, enable_grap
         return
 
     fully_faulted = False
-    prefetch = queue[0]
     if prefetch is not None:
         comfy_modules = []
-        prefetch_modules = prefetch if isinstance(prefetch, (list, tuple)) else (prefetch,)
         for root in prefetch_modules:
             for s in root.modules():
                 if hasattr(s, "_v"):
@@ -241,11 +259,9 @@ def prefetch_queue_pop(queue, device, module, dtype=None, core=None, enable_grap
 
     if core is not None:
         if enable_graph and fully_faulted and module in GRAPH_WARMED_MODULES:
-            if signature is None:
-                signature = comfy_aimdo.model_vbar.vbar_fault(module._v_block)
-                if signature is not None:
-                    module._v_block_faulted = True
-            if signature is not None:
+            if signatures is None:
+                signatures = fault_graph_blocks(module, blocks)
+            if signatures is not None:
                 _drop_graph(module)
                 malloc_graph.pause()
                 graph = torch.cuda.CUDAGraph()
@@ -264,7 +280,7 @@ def prefetch_queue_pop(queue, device, module, dtype=None, core=None, enable_grap
                 malloc_graph.resume(sync=True)
                 comfy.model_management.current_stream(device).wait_stream(capture_stream)
                 graph.replay()
-                module._comfy_graph = {"graph": graph, "signature": signature}
+                module._comfy_graph = {"graph": graph, "signatures": signatures}
                 malloc_graph._comfy_cuda_graph_modules.add(module)
                 return
         if capture_stream is None:

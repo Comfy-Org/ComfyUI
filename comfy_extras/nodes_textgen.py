@@ -41,19 +41,24 @@ class TextGenerate(io.ComfyNode):
                 io.Boolean.Input("use_default_template", optional=True, default=True, tooltip="Use the built in system prompt/template if the model has one.", advanced=True),
                 io.Combo.Input("mtp", options=["auto", "off", "2", "3", "4", "5", "tree2s1", "tree2s2", "tree3s1", "tree4s1m8"], default="auto", optional=True, tooltip="Speculative decoding with the checkpoint's multi-token-prediction head. No effect without MTP weights. auto adapts the draft depth and breadth to observed token matches and execution cost; 2-5 pins a constant draft depth; tree modes pin both breadth and depth. Sampled output stays correctly distributed but differs from non-MTP output for the same seed."),
                 io.String.Input("system_prompt", force_input=True, optional=True, tooltip="Replaces the system prompt in the model's chat template. Ignored when the default template is not used."),
+                io.ModelState.Input("state", optional=True, tooltip="Continues the conversation held by this model state and extends it with this turn. The prompt should be a single text turn."),
             ],
             outputs=[
                 io.String.Output(display_name="generated_text"),
                 io.String.Output(display_name="thinking"),
+                io.ModelState.Output(display_name="state", tooltip="The input state after this turn; save or copy it from here."),
             ],
         )
 
     @classmethod
-    def execute(cls, clip, prompt, max_length, sampling_mode, image=None, thinking=False, use_default_template=True, video=None, audio=None, mtp="auto", system_prompt="") -> io.NodeOutput:
+    def execute(cls, clip, prompt, max_length, sampling_mode, image=None, thinking=False, use_default_template=True, video=None, audio=None, mtp="auto", system_prompt="", state=None) -> io.NodeOutput:
 
         mtp = {"off": False, "auto": True}.get(mtp, mtp)
 
-        tokens = clip.tokenize(prompt, image=image, skip_template=not use_default_template, min_length=1, thinking=thinking, video=video, audio=audio, system_prompt=system_prompt if use_default_template else "")
+        # the system prompt opens a conversation; later turns continue it
+        if not use_default_template or (state is not None and state.metadata):
+            system_prompt = ""
+        tokens = clip.tokenize(prompt, image=image, skip_template=not use_default_template, min_length=1, thinking=thinking, video=video, audio=audio, system_prompt=system_prompt)
 
         # Get sampling parameters from dynamic combo
         do_sample = sampling_mode.get("sampling_mode") == "on"
@@ -76,7 +81,8 @@ class TextGenerate(io.ComfyNode):
             repetition_penalty=repetition_penalty,
             presence_penalty=presence_penalty,
             seed=seed,
-            mtp=mtp
+            mtp=mtp,
+            state=state,
         )
 
         generated_text = clip.decode(generated_ids)
@@ -90,7 +96,7 @@ class TextGenerate(io.ComfyNode):
             if not prompt.rstrip().endswith("<think>") and not clip.decode(prompt_ids[-4:]).rstrip().endswith("<think>"):
                 reasoning, text = "", generated_text
 
-        return io.NodeOutput(text.strip(), reasoning.replace("<think>", "", 1).strip())
+        return io.NodeOutput(text.strip(), reasoning.replace("<think>", "", 1).strip(), state)
 
 
 LTX2_T2V_SYSTEM_PROMPT = """You are a Creative Assistant. Given a user's raw input prompt describing a scene or concept, expand it into a detailed video generation prompt with specific visuals and integrated audio to guide a text-to-video model.
@@ -233,8 +239,8 @@ class TextGenerateLTX2Prompt(TextGenerate):
             node_id="TextGenerateLTX2Prompt",
             display_name="Generate LTX2 Prompt",
             category=parent_schema.category,
-            inputs=parent_schema.inputs,
-            outputs=parent_schema.outputs,
+            inputs=[i for i in parent_schema.inputs if i.id != "state"],
+            outputs=parent_schema.outputs[:2],
             search_aliases=["prompt enhance", "LLM", "gemma"],
         )
 
