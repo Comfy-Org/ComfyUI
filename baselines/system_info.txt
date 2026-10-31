@@ -1,0 +1,36 @@
+=== ComfyUI ROCm Stable Baseline ===
+Date: 2026-06-20
+
+--- Python ---
+Python: 3.12.10
+
+--- PyTorch / ROCm ---
+torch:      2.7.0a0+git3f903c3
+CUDA avail: True
+Device:     AMD Radeon(TM) 8050S Graphics
+VRAM (GB):  14.37
+ROCm/HIP:   6.5.25205-c1c2abe52
+
+--- torch packages ---
+torch: 2.7.0a0+git3f903c3
+torchvision: 0.22.0+9eb57cd
+torchaudio: 2.6.0a0+1a8f621
+
+--- ComfyUI ---
+Version: 0.24.0
+Backend: ROCm 6.5 (scottt/rocm-TheRock gfx1151 wheel)
+Tested:  SD1.5 512x512 20steps ~5 it/s, stable
+
+--- Wheel sources (gfx1151 / Strix Halo) ---
+torch:       scottt/rocm-TheRock v6.5.0rc-pytorch/torch-2.7.0a0+git3f903c3-cp312-cp312-win_amd64.whl
+torchvision: scottt/rocm-TheRock v6.5.0rc-pytorch/torchvision-0.22.0+9eb57cd-cp312-cp312-win_amd64.whl
+torchaudio:  scottt/rocm-TheRock v6.5.0rc-pytorch/torchaudio-2.6.0a0+1a8f621-cp312-cp312-win_amd64.whl
+numpy:       pinned to <2 (1.26.4) for wheel compatibility
+
+--- Startup ---
+cd %USERPROFILE%\ComfyUI
+.\\venv\\Scripts\\activate
+python main.py
+
+--- Saved workflow ---
+baselines/workflows/sd15_test_rocm_workflow.json
