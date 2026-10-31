@@ -551,21 +551,31 @@ class VideoFromFile(VideoInput):
                             # Fix non-deterministic video decode when the video width is not a multiple of 32
                             # For non-yuvj pixel formats: most H.264/H.265 video and static images (e.g. lossy WebP via LoadImage)
                             # Pad both axes to a multiple of 32 and smear the border so the alignment padding never bleeds into the cropped edges
+                            src = frame
+                            if frame.width % 2 and frame.format.is_planar and frame.format.chroma_width(frame.width) != frame.width:
+                                # pad rounds a chroma-subsampled input width down to even, which drops the last column: repeat it first
+                                src = av.VideoFrame(frame.width + 1, frame.height, frame.format.name)
+                                src.pts, src.colorspace, src.color_range = frame.pts, frame.colorspace, frame.color_range
+                                for i, (plane, out_plane) in enumerate(zip(frame.planes, src.planes)):
+                                    bpp = sum((c.bits + 7) // 8 for c in frame.format.components if c.plane == i)
+                                    pixels = np.frombuffer(plane, np.uint8).reshape(plane.height, plane.line_size)[:, :plane.width * bpp].reshape(plane.height, plane.width, bpp)
+                                    out_rows = np.frombuffer(out_plane, np.uint8).reshape(out_plane.height, out_plane.line_size)
+                                    out_rows[:, :out_plane.width * bpp] = np.pad(pixels, ((0, 0), (0, out_plane.width - plane.width), (0, 0)), mode='edge').reshape(plane.height, -1)
                             if align_graph is None:
-                                pad_w = ((frame.width + 31) // 32) * 32
-                                pad_h = ((frame.height + 31) // 32) * 32
+                                pad_w = ((src.width + 31) // 32) * 32
+                                pad_h = ((src.height + 31) // 32) * 32
                                 g = av.filter.Graph()
-                                g_src = g.add_buffer(width=frame.width, height=frame.height,
-                                                     format=frame.format.name, time_base=video_stream.time_base)
+                                g_src = g.add_buffer(width=src.width, height=src.height,
+                                                     format=src.format.name, time_base=video_stream.time_base)
                                 g_pad = g.add('pad', f'{pad_w}:{pad_h}:0:0')
-                                g_fill = g.add('fillborders', f'left=0:right={pad_w - frame.width}:top=0:bottom={pad_h - frame.height}:mode=smear')
+                                g_fill = g.add('fillborders', f'left=0:right={pad_w - src.width}:top=0:bottom={pad_h - src.height}:mode=smear')
                                 g_sink = g.add('buffersink')
                                 g_src.link_to(g_pad)
                                 g_pad.link_to(g_fill)
                                 g_fill.link_to(g_sink)
                                 g.configure()
                                 align_graph = (g, g_src, g_sink)
-                            align_graph[1].push(frame)
+                            align_graph[1].push(src)
                             img = np.ascontiguousarray(align_graph[2].pull().to_ndarray(format=image_format)[:frame.height, :frame.width])
                         else:
                             img = frame.to_ndarray(format=image_format)
