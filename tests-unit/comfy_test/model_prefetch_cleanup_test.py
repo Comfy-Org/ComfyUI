@@ -109,3 +109,20 @@ def test_failed_unpin_still_clears_prefetch_markers(monkeypatch):
     assert calls == ["first", "second"]
     assert not hasattr(first, "_prefetch")
     assert not hasattr(second, "_prefetch")
+
+
+def test_malloc_graph_cleanup_failure_still_cleans_queues(monkeypatch):
+    # After a GPU failure the graph abort can raise too. Queues and _prefetch markers must not
+    # survive into the next node, and the graph error still reaches the caller.
+    def boom():
+        raise RuntimeError("graph abort failed")
+
+    monkeypatch.setattr(model_prefetch, "cleanup_malloc_graph", boom)
+    module = torch.nn.Linear(4, 4)
+    model_prefetch.PREFETCH_QUEUES = [[_prefetched(module), None]]
+
+    with pytest.raises(RuntimeError, match="graph abort failed"):
+        model_prefetch.cleanup_prefetch_queues()
+
+    assert model_prefetch.PREFETCH_QUEUES == []
+    assert not hasattr(module, "_prefetch")

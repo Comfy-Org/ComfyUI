@@ -171,11 +171,14 @@ def cleanup_prefetch_queues():
     global MALLOC_GRAPH_ROGUES
     global MALLOC_GRAPH_USED
 
-    cleanup_malloc_graph()
     queues = PREFETCH_QUEUES
     # Reset before walking so a failing entry can't leave stale queues behind for every later node.
     PREFETCH_QUEUES = []
     first_error = None
+    try:
+        cleanup_malloc_graph()
+    except Exception as e:
+        first_error = e
     for queue in queues:
         # Only the head can have been pinned, as (offload_stream, (module, comfy_modules)). Later
         # entries, and a head that was not reached yet, still hold the raw module or module group.
