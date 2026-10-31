@@ -313,7 +313,7 @@ class GetVideoComponents(io.ComfyNode):
             search_aliases=["extract frames", "split video", "video to images", "demux"],
             display_name="Get Video Components",
             category="video",
-            description="Extracts video frames, audio, frame rate, bit depth, and color space.",
+            description="Extracts video frames, audio, frame rate, frame count, bit depth, and color space.",
             inputs=[
                 io.Video.Input("video", tooltip="The video to extract components from."),
             ],
@@ -323,6 +323,7 @@ class GetVideoComponents(io.ComfyNode):
                 io.Float.Output(display_name="fps"),
                 io.Combo.Output(display_name="bit_depth"),
                 io.Combo.Output(display_name="color_space"),
+                io.Int.Output(display_name="frame_count"),
             ],
         )
 
@@ -335,6 +336,7 @@ class GetVideoComponents(io.ComfyNode):
             float(components.frame_rate),
             video.get_bit_depth(),
             video.get_color_space(),
+            components.images.shape[0],
         )
 
 
