@@ -507,6 +507,7 @@ def test_prune_before_scan_emits_marked_missing_with_pruning_stage(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     scan_seeder._prune_first = True
+    scan_seeder._prune_pending = scan_seeder._scan_prunes = True
     scan_seeder._phase = ScanPhase.FAST
     monkeypatch.setattr(seeder_module, "get_owned_prefixes", lambda: ())
     monkeypatch.setattr(
@@ -574,6 +575,7 @@ def test_scan_prune_failure_is_reported_and_the_scan_still_runs(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     scan_seeder._prune_first = True
+    scan_seeder._prune_pending = scan_seeder._scan_prunes = True
     scan_seeder._phase = ScanPhase.FAST
     fast_phase_roots: list[tuple[str, ...]] = []
     monkeypatch.setattr(seeder_module, "get_owned_prefixes", lambda: [])
