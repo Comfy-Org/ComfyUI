@@ -175,7 +175,6 @@ class PositionNet(nn.Module):
     def forward(self, boxes, masks, positive_embeddings):
         B, N, _ = boxes.shape
         masks = masks.unsqueeze(-1)
-        positive_embeddings = positive_embeddings
 
         # embedding position (it may includes padding as placeholder)
         xyxy_embedding = self.fourier_embedder(boxes)  # B*N*4 --> B*N*C
