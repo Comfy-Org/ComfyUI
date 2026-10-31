@@ -9,6 +9,7 @@ from einops import rearrange
 from .vae import AttentionBlock, CausalConv3d, RMS_norm
 
 import comfy.ops
+import comfy.quant_ops
 ops = comfy.ops.disable_weight_init
 
 CACHE_T = 2
@@ -55,6 +56,28 @@ class Resample(nn.Module):
         else:
             self.resample = nn.Identity()
 
+    def kitchen_upsample_conv(self, x):
+        """The nearest x2 upsample + 3x3 conv of the upsample modes as one comfy-kitchen
+        conv3d_hw_same(upsample=2) call, when kitchen has a non-eager kernel for it (its Triton
+        backend is opt-in). Returns None to run self.resample as it is."""
+        if self.mode not in ("upsample2d", "upsample3d") or type(self) is not Resample:
+            return None
+        up, conv = self.resample[0], self.resample[1]
+        if (up.mode != "nearest-exact" or tuple(float(s) for s in up.scale_factor) != (2.0, 2.0)
+                or tuple(conv.kernel_size) != (3, 3) or tuple(conv.stride) != (1, 1) or tuple(conv.padding) != (1, 1)
+                or tuple(conv.dilation) != (1, 1) or conv.groups != 1 or conv.padding_mode != "zeros"):
+            return None
+        weight, bias, offload_stream = comfy.ops.cast_bias_weight(conv, x, offloadable=True)
+        try:
+            if isinstance(weight, comfy.quant_ops.QuantizedTensor):
+                return None
+            w = weight.unsqueeze(2)
+            if not comfy.quant_ops.ck_has_kernel("conv3d_hw_same", x=x, weight=w, bias=bias, upsample=2):
+                return None
+            return comfy.quant_ops.ck.conv3d_hw_same(x, w, bias, 2)
+        finally:
+            comfy.ops.uncast_bias_weight(conv, weight, bias, offload_stream)
+
     def forward(self, x, feat_cache=None, feat_idx=[0]):
         b, c, t, h, w = x.size()
         if self.mode == "upsample3d":
@@ -95,6 +118,10 @@ class Resample(nn.Module):
                     x = torch.stack((x[:, 0, :, :, :, :], x[:, 1, :, :, :, :]),
                                     3)
                     x = x.reshape(b, c, t * 2, h, w)
+        if feat_cache is not None:
+            out = self.kitchen_upsample_conv(x)
+            if out is not None:
+                return out  # upsample modes have no downsample3d tail
         t = x.shape[2]
         x = rearrange(x, "b c t h w -> (b t) c h w")
         if feat_cache is None and self.mode in ("upsample2d", "upsample3d"):
@@ -168,12 +195,34 @@ class ResidualBlock(nn.Module):
             CausalConv3d(in_dim, out_dim, 1)
             if in_dim != out_dim else nn.Identity())
 
+    def kitchen_norm_silu(self, layer, x):
+        """Runs an RMS_norm of the residual branch and the SiLU right after it as one comfy-kitchen
+        l2_norm_silu kernel, when kitchen has a non-eager one for x (its Triton backend is opt-in).
+        Returns (output, the SiLU to skip), or None to run the layers as they are."""
+        if type(self) is not ResidualBlock or not isinstance(layer, RMS_norm) or not layer.channel_first or layer.bias is not None:
+            return None
+        layers = list(self.residual)
+        i = next(j for j, m in enumerate(layers) if m is layer)
+        if i + 1 >= len(layers) or not isinstance(layers[i + 1], nn.SiLU):
+            return None
+        gamma = layer.gamma.to(x)
+        if not comfy.quant_ops.ck_has_kernel("l2_norm_silu", x=x, weight=gamma, scale=layer.scale, eps=1e-12):
+            return None
+        return comfy.quant_ops.ck.l2_norm_silu(x, gamma, layer.scale, 1e-12), layers[i + 1]
+
     def forward(self, x, feat_cache=None, feat_idx=[0]):
         if feat_cache is None:
             # single image: the whole block runs in strips so its intermediates never exist at full size
             return strip_apply(lambda s: self.residual(s).add_(self.shortcut(s)), x, halo=2)
         old_x = x
+        skip = None
         for layer in self.residual:
+            if layer is skip:
+                continue
+            fused = self.kitchen_norm_silu(layer, x)
+            if fused is not None:
+                x, skip = fused
+                continue
             if isinstance(layer, CausalConv3d) and feat_cache is not None:
                 idx = feat_idx[0]
                 cache_x = x[:, :, -CACHE_T:, :, :].clone()
