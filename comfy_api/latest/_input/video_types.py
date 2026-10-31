@@ -91,6 +91,9 @@ class VideoInput(ABC):
             return self
         from .._input_impl.video_types import VideoFromComponents
 
+        color_space = self.get_color_space()
+        if color_space == "auto":
+            color_space = "sRGB"
         cx, cy, cw, ch = rect
         return VideoFromComponents(
             VideoComponents(
@@ -103,6 +106,7 @@ class VideoInput(ABC):
                 else None,
             ),
             bit_depth=self.get_bit_depth(),
+            color_space=color_space,
         )
 
     def get_stream_source(self) -> Union[str, io.BytesIO]:
