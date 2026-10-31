@@ -4,7 +4,13 @@ from fractions import Fraction
 from typing import Optional, Union, IO
 import io
 import av
-from .._util import VideoContainer, VideoCodec, VideoComponents, normalize_crop_rect
+from .._util import (
+    VideoContainer,
+    VideoCodec,
+    VideoComponents,
+    normalize_crop_rect,
+    apply_spatial_ops,
+)
 
 class VideoInput(ABC):
     """
@@ -105,6 +111,60 @@ class VideoInput(ABC):
             bit_depth=self.get_bit_depth(),
         )
 
+    def as_resized(
+        self,
+        width: int,
+        height: int,
+        upscale_method: str,
+        crop: str = "disabled",
+        post_crop: tuple[int, int, int, int] | None = None,
+    ) -> VideoInput:
+        """
+        Create a new VideoInput scaled to width x height with comfy.utils.common_upscale.
+
+        upscale_method and crop take the same values as the Resize Image/Mask node, so
+        the result matches that node's IMAGE output. post_crop is an exact pixel
+        rectangle applied after the scale, without the even alignment as_cropped()
+        performs; it exists for the node's "scale to multiple" cover crop.
+
+        Only the spatial geometry changes. Frame timing, frame count, frame rate and
+        audio are left untouched.
+
+        Default implementation materializes the video via get_components();
+        subclasses should override with lazier strategies when possible.
+        """
+        ops = [("scale", int(width), int(height), upscale_method, crop)]
+        if post_crop is not None:
+            ops.append(("crop", *(int(value) for value in post_crop)))
+        components = self.get_components()
+        from .._input_impl.video_types import VideoFromComponents
+
+        # VideoFromComponents takes None for "do not force a color space", which is what
+        # "auto" means here; forwarding "auto" itself would be rejected as unsupported.
+        # Anything else goes through so an unsupported value still fails there.
+        color_space = self.get_color_space()
+        if color_space == "auto":
+            color_space = None
+        alpha = components.alpha
+        if alpha is not None:
+            # alpha is a MaskInput, so it may arrive as [B, H, W] or with an explicit
+            # trailing channel; give it back in the shape it came in.
+            if alpha.ndim == 4:
+                alpha = apply_spatial_ops(alpha.squeeze(-1), ops, is_mask=True).unsqueeze(-1)
+            else:
+                alpha = apply_spatial_ops(alpha, ops, is_mask=True)
+        return VideoFromComponents(
+            VideoComponents(
+                images=apply_spatial_ops(components.images, ops),
+                audio=components.audio,
+                frame_rate=components.frame_rate,
+                metadata=components.metadata,
+                alpha=alpha,
+            ),
+            bit_depth=self.get_bit_depth(),
+            color_space=color_space,
+        )
+
     def get_stream_source(self) -> Union[str, io.BytesIO]:
         """
         Get a streamable source for the video. This allows processing without
@@ -120,6 +180,19 @@ class VideoInput(ABC):
         self.save_to(buffer)
         buffer.seek(0)
         return buffer
+
+    def has_pending_frame_edits(self) -> bool:
+        """
+        Whether this video holds frame edits that its stream source does not contain yet.
+
+        True means get_stream_source() still returns the unedited stream, so callers that
+        would otherwise copy those packets have to re-encode instead. It describes this
+        video alone; it says nothing about the container, codec, bit depth or quality a
+        caller may additionally be asking for.
+
+        Default: no editing, so the stream source can be reused.
+        """
+        return False
 
     def get_active_trim_window(self) -> tuple[float, float]:
         """Return the active trim as ``(start_time, duration)`` in seconds (start_time normalized
@@ -138,6 +211,16 @@ class VideoInput(ABC):
         """
         components = self.get_components()
         return components.images.shape[2], components.images.shape[1]
+
+    def get_display_dimensions(self) -> tuple[int, int]:
+        """
+        Returns the dimensions the video is meant to be displayed at, as (width, height).
+
+        This is the size geometry should be computed against. It differs from
+        get_dimensions() only for container-rotated sources, where get_dimensions()
+        reports the coded size; that inconsistency is deliberately left alone here.
+        """
+        return self.get_dimensions()
 
     def get_bit_depth(self) -> int:
         """
