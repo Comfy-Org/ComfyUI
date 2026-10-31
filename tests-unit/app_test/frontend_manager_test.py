@@ -1,6 +1,6 @@
 import argparse
 from types import SimpleNamespace
-from unittest.mock import patch, mock_open
+from unittest.mock import Mock, patch, mock_open
 
 import pytest
 from requests.exceptions import HTTPError
@@ -28,7 +28,7 @@ def mock_releases():
         ),
         Release(
             id=2,
-            tag_name="2.0.0",
+            tag_name="v2.0.0",
             name="Release 2.0.0",
             prerelease=False,
             created_at="2022-02-01T00:00:00Z",
@@ -40,12 +40,30 @@ def mock_releases():
 
 
 @pytest.fixture
-def mock_provider(mock_releases):
+def mock_github(mock_releases):
+    """Serve release lookups by tag from mock_releases and record the requested URLs."""
+    releases_by_tag = {release["tag_name"]: release for release in mock_releases}
+    requested_urls = []
+
+    def fake_get(url, timeout=None):
+        requested_urls.append(url)
+        release = releases_by_tag.get(url.rsplit("/", 1)[-1])
+        return SimpleNamespace(
+            status_code=200 if release else 404,
+            json=lambda: release,
+            raise_for_status=lambda: None,
+        )
+
+    with patch("app.frontend_management.requests.get", side_effect=fake_get):
+        yield requested_urls
+
+
+@pytest.fixture
+def mock_provider(mock_releases, mock_github):
     provider = FrontEndProvider(
         owner="test-owner",
         repo="test-repo",
     )
-    provider.all_releases = mock_releases
     provider.latest_release = mock_releases[1]
     FrontendManager.PROVIDERS = [provider]
     return provider
@@ -60,10 +78,30 @@ def clear_cache():
     app.frontend_management.COMFY_PACKAGE_VERSIONS = []
 
 
-def test_get_release(mock_provider, mock_releases):
-    version = "1.0.0"
-    release = mock_provider.get_release(version)
+def test_get_release(mock_provider, mock_releases, mock_github):
+    release = mock_provider.get_release("2.0.0")
+
+    assert release == mock_releases[1]
+    assert mock_github == ["https://api.github.com/repos/test-owner/test-repo/releases/tags/v2.0.0"]
+
+
+def test_get_release_without_v_prefix_tag(mock_provider, mock_releases, mock_github):
+    release = mock_provider.get_release("1.0.0")
+
     assert release == mock_releases[0]
+    assert mock_github == [
+        "https://api.github.com/repos/test-owner/test-repo/releases/tags/v1.0.0",
+        "https://api.github.com/repos/test-owner/test-repo/releases/tags/1.0.0",
+    ]
+
+
+def test_get_release_rate_limited(mock_provider):
+    response = Mock(status_code=403)
+    response.raise_for_status.side_effect = HTTPError("403 rate limit exceeded")
+    with patch("app.frontend_management.requests.get", return_value=response) as mock_get:
+        with pytest.raises(HTTPError):
+            mock_provider.get_release("2.0.0")
+    mock_get.assert_called_once()
 
 
 def test_get_release_latest(mock_provider, mock_releases):
@@ -84,9 +122,9 @@ def test_init_frontend_default():
     assert frontend_path == FrontendManager.default_frontend_path()
 
 
-def test_init_frontend_invalid_version():
+def test_init_frontend_invalid_version(mock_github):
     version_string = "test-owner/test-repo@1.100.99"
-    with pytest.raises(HTTPError):
+    with pytest.raises(ValueError):
         FrontendManager.init_frontend_unsafe(version_string)
 
 
@@ -128,6 +166,21 @@ def test_finally_block(mock_os_functions, mock_download, mock_provider):
     mock_download.assert_called_once()
     mock_listdir.assert_called_once()
     mock_rmdir.assert_called_once()
+
+
+@pytest.mark.parametrize("version", ["1.0.0", "v1.0.0"])
+def test_init_frontend_uses_cached_version(tmp_path, version):
+    cached = tmp_path / "test-owner_test-repo" / "1.0.0"
+    cached.mkdir(parents=True)
+
+    with (
+        patch.object(FrontendManager, "CUSTOM_FRONTENDS_ROOT", str(tmp_path)),
+        patch.object(FrontEndProvider, "get_release", side_effect=HTTPError("403 rate limit exceeded")),
+        patch.object(FrontendManager, "default_frontend_path", return_value="/default/path"),
+    ):
+        frontend_path = FrontendManager.init_frontend(f"test-owner/test-repo@{version}")
+
+    assert frontend_path == str(cached)
 
 
 def test_parse_version_string():
