@@ -33,7 +33,17 @@ def _warp_core(image, flow, grid_x, grid_y):
     dx = flow[:, 0].float() / (W * 0.5)
     dy = flow[:, 1].float() / (H * 0.5)
     grid = torch.stack([grid_x[None, None, :] + dx, grid_y[None, :, None] + dy], dim=3)
-    return F.grid_sample(image.float(), grid, mode="bilinear", padding_mode="border", align_corners=False).to(dtype)
+    padding_mode = "border"
+    if image.device.type == "mps":
+        # MPS does not implement "border" padding. With align_corners=False the valid
+        # sampling range is +-(1 - 1/size) per axis (grid[..., 0] is x -> width,
+        # grid[..., 1] is y -> height), so clamping there makes "zeros" produce
+        # results identical to "border".
+        bx = 1.0 - 1.0 / image.shape[-1]
+        by = 1.0 - 1.0 / image.shape[-2]
+        grid = torch.stack([grid[..., 0].clamp(-bx, bx), grid[..., 1].clamp(-by, by)], dim=-1)
+        padding_mode = "zeros"
+    return F.grid_sample(image.float(), grid, mode="bilinear", padding_mode=padding_mode, align_corners=False).to(dtype)
 
 
 def build_image_pyramid(image, pyramid_levels):
