@@ -11,6 +11,7 @@ def load_extra_path_config(yaml_path):
         conf = config[c]
         if conf is None:
             continue
+        conf = conf.copy()
         base_path = None
         if "base_path" in conf:
             base_path = conf.pop("base_path")
