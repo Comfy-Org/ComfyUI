@@ -6,6 +6,38 @@ import torch
 from comfy_api.latest import ComfyExtension, io
 from comfy_extras.nodes_audio import VAEEncodeAudio
 
+
+def _ltxv_audio_vae_names():
+    names = folder_paths.get_filename_list("checkpoints")
+    checkpoint_set = set(names)
+    seen = set(names)
+    for name in folder_paths.get_filename_list("vae"):
+        if name in checkpoint_set:
+            suffixed = f"{name} (vae)"
+            if suffixed not in seen:
+                seen.add(suffixed)
+                names.append(suffixed)
+        elif name not in seen:
+            seen.add(name)
+            names.append(name)
+    return names
+
+
+def _ltxv_audio_vae_path(name: str) -> str:
+    if name.endswith(" (vae)"):
+        p = folder_paths.get_full_path("vae", name[:-6])
+        if p is not None:
+            return p
+    else:
+        p = folder_paths.get_full_path("checkpoints", name)
+        if p is not None:
+            return p
+        p = folder_paths.get_full_path("vae", name)
+        if p is not None:
+            return p
+    return folder_paths.get_full_path_or_raise("checkpoints", name)
+
+
 class LTXVAudioVAELoader(io.ComfyNode):
     @classmethod
     def define_schema(cls) -> io.Schema:
@@ -16,7 +48,7 @@ class LTXVAudioVAELoader(io.ComfyNode):
             inputs=[
                 io.Combo.Input(
                     "ckpt_name",
-                    options=folder_paths.get_filename_list("checkpoints"),
+                    options=_ltxv_audio_vae_names(),
                     tooltip="Audio VAE checkpoint to load.",
                 )
             ],
@@ -25,7 +57,7 @@ class LTXVAudioVAELoader(io.ComfyNode):
 
     @classmethod
     def execute(cls, ckpt_name: str) -> io.NodeOutput:
-        ckpt_path = folder_paths.get_full_path_or_raise("checkpoints", ckpt_name)
+        ckpt_path = _ltxv_audio_vae_path(ckpt_name)
         sd, metadata = comfy.utils.load_torch_file(ckpt_path, return_metadata=True)
         sd = comfy.utils.state_dict_prefix_replace(sd, {"audio_vae.": "autoencoder.", "vocoder.": "vocoder."}, filter_keys=True)
         vae = comfy.sd.VAE(sd=sd, metadata=metadata)
