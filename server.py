@@ -26,7 +26,7 @@ import struct
 import ssl
 import socket
 import ipaddress
-from PIL import Image, ImageOps
+from PIL import Image, ImageOps, UnidentifiedImageError
 from PIL.PngImagePlugin import PngInfo
 from io import BytesIO
 
@@ -644,8 +644,15 @@ class PromptServer():
                     file = os.path.join(output_dir, filename)
 
                 if os.path.isfile(file):
+                    preview_img = None
                     if 'preview' in request.rel_url.query:
-                        with Image.open(file) as img:
+                        try:
+                            preview_img = Image.open(file)
+                        except UnidentifiedImageError:
+                            # PIL can't decode this format (e.g. EXR): serve the raw file below.
+                            pass
+                    if preview_img is not None:
+                        with preview_img as img:
                             preview_info = request.rel_url.query['preview'].split(';')
                             image_format = preview_info[0]
                             if image_format not in ['webp', 'jpeg'] or 'a' in request.rel_url.query.get('channel', ''):
