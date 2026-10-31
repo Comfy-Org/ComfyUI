@@ -80,6 +80,9 @@ if args.enable_manager:
     import comfyui_manager
 
 
+from comfy.path_utils import is_subpath as _is_subpath  # noqa: E402
+
+
 def valid_workflow_metadata(json_data: dict) -> Optional[dict]:
     """The metadata a client may attach to a prompt's websocket messages.
 
@@ -483,7 +486,7 @@ class PromptServer():
                 full_output_folder = os.path.join(upload_dir, os.path.normpath(subfolder))
                 filepath = os.path.abspath(os.path.join(full_output_folder, filename))
 
-                if os.path.commonpath((upload_dir, filepath)) != upload_dir:
+                if not _is_subpath(filepath, upload_dir):
                     return web.Response(status=400), None, None
 
                 if not os.path.exists(full_output_folder):
@@ -574,7 +577,7 @@ class PromptServer():
 
                 if original_ref.get("subfolder", "") != "":
                     full_output_dir = os.path.join(output_dir, original_ref["subfolder"])
-                    if os.path.commonpath((os.path.abspath(full_output_dir), output_dir)) != output_dir:
+                    if not _is_subpath(full_output_dir, output_dir):
                         return web.Response(status=403)
                     output_dir = full_output_dir
 
@@ -636,7 +639,7 @@ class PromptServer():
 
                     if "subfolder" in request.rel_url.query:
                         full_output_dir = os.path.join(output_dir, request.rel_url.query["subfolder"])
-                        if os.path.commonpath((os.path.abspath(full_output_dir), output_dir)) != output_dir:
+                        if not _is_subpath(full_output_dir, output_dir):
                             return web.Response(status=403)
                         output_dir = full_output_dir
 
