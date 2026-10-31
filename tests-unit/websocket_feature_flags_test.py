@@ -51,6 +51,30 @@ class TestWebSocketFeatureFlags:
             sockets_metadata, "legacy_client", "supports_preview_metadata"
         ) is False
 
+    def test_stale_connection_cannot_overwrite_replacement_features(self):
+        """Test that feature negotiation only updates the current connection."""
+        client_id = "reconnecting_client"
+        stale_metadata = {"feature_flags": {}}
+        replacement_metadata = {"feature_flags": {}}
+        sockets_metadata = {client_id: replacement_metadata}
+
+        assert feature_flags.try_set_connection_feature_flags(
+            sockets_metadata,
+            client_id,
+            replacement_metadata,
+            {"supports_preview_metadata": True},
+        ) is True
+        assert feature_flags.try_set_connection_feature_flags(
+            sockets_metadata,
+            client_id,
+            stale_metadata,
+            {"supports_preview_metadata": False},
+        ) is False
+        assert sockets_metadata[client_id] is replacement_metadata
+        assert sockets_metadata[client_id]["feature_flags"] == {
+            "supports_preview_metadata": True
+        }
+
     def test_feature_negotiation_message_format(self):
         """Test the format of feature negotiation messages."""
         # Client message format
