@@ -436,17 +436,25 @@ def _is_intermediate_output(dynprompt, node_id):
     return getattr(class_def, 'HAS_INTERMEDIATE_OUTPUT', False)
 
 
+def _node_meta(dynprompt, unique_id) -> dict:
+    return {
+        "node_id": unique_id,
+        "display_node": dynprompt.get_display_node_id(unique_id),
+        "parent_node": dynprompt.get_parent_node_id(unique_id),
+        "real_node_id": dynprompt.get_real_node_id(unique_id),
+    }
+
+
 async def execute(server: "ExecutionServer", dynprompt, caches, current_item, extra_data, executed, prompt_id, execution_list, pending_subgraph_results, pending_async_nodes, ui_outputs, asset_manager: AssetManager):
     unique_id = current_item
     real_node_id = dynprompt.get_real_node_id(unique_id)
     display_node_id = dynprompt.get_display_node_id(unique_id)
-    parent_node_id = dynprompt.get_parent_node_id(unique_id)
     inputs = dynprompt.get_node(unique_id)['inputs']
     class_type = dynprompt.get_node(unique_id)['class_type']
     class_def = nodes.NODE_CLASS_MAPPINGS[class_type]
     cached = await caches.outputs.get(unique_id)
     if cached is not None:
-        emit_cached_output(server, unique_id, display_node_id, cached, prompt_id, ui_outputs, asset_manager)
+        emit_cached_output(server, unique_id, _node_meta(dynprompt, unique_id), cached, prompt_id, ui_outputs, asset_manager)
         get_progress_state().finish_progress(unique_id)
         execution_list.cache_update(unique_id, cached)
         return (ExecutionResult.SUCCESS, None, None)
@@ -567,12 +575,7 @@ async def execute(server: "ExecutionServer", dynprompt, caches, current_item, ex
         if len(output_ui) > 0:
             asset_previews = take_asset_previews(output_ui)
             output_ui = enrich_output_with_media_metadata(output_ui)
-            meta = {
-                "node_id": unique_id,
-                "display_node": display_node_id,
-                "parent_node": parent_node_id,
-                "real_node_id": real_node_id,
-            }
+            meta = _node_meta(dynprompt, unique_id)
             enriched_output_ui = register_executed_outputs(output_ui, prompt_id, asset_manager, asset_previews)
             ui_outputs[unique_id] = {"meta": meta, "output": enriched_output_ui}
             cache_ui_value = {"meta": meta, "output": output_ui}
@@ -823,8 +826,7 @@ class PromptExecutor:
                             continue
                         cached = await self.caches.outputs.get(node_id)
                         if cached is not None:
-                            display_node_id = dynamic_prompt.get_display_node_id(node_id)
-                            emit_cached_output(self.server, node_id, display_node_id, cached, prompt_id, ui_node_outputs, self.asset_manager)
+                            emit_cached_output(self.server, node_id, _node_meta(dynamic_prompt, node_id), cached, prompt_id, ui_node_outputs, self.asset_manager)
                     self.add_message("execution_success", { "prompt_id": prompt_id }, broadcast=False)
 
                 ui_outputs = {}
