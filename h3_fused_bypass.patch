@@ -1,0 +1,33 @@
+# 回移植 ComfyUI d91ed5f5b7fa60fa18464c2ad7c80254da2f0f29，适配0.33接口。
+# https://github.com/Comfy-Org/ComfyUI/commit/d91ed5f5b7fa60fa18464c2ad7c80254da2f0f29
+--- a/comfy/ops.py
++++ b/comfy/ops.py
+@@ -482,4 +482,5 @@
+ class CastWeightBiasOp:
+     comfy_cast_weights = False
++    comfy_force_forward = False
+     weight_function = []
+     bias_function = []
+@@ -966,6 +967,7 @@
+     """
+     weight = linear.weight
+     if (comfy.model_management.in_training
++            or getattr(linear, "comfy_force_forward", False)
+             or not isinstance(weight, QuantizedTensor)
+             or weight._layout_cls != "TensorWiseINT8Layout"
+             or getattr(weight._params, "transposed", False)):
+--- a/comfy/weight_adapter/bypass.py
++++ b/comfy/weight_adapter/bypass.py
+@@ -201,4 +201,6 @@
+         self.original_forward = self.module.forward
++        self.original_force_forward = getattr(self.module, "comfy_force_forward", False)
++        self.module.comfy_force_forward = True
+         self.module.forward = self._bypass_forward
+         logging.debug(
+             f"[BypassHook] Injected bypass forward for {type(self.module).__name__} (adapter={type(self.adapter).__name__})"
+@@ -257,4 +259,5 @@
+         self.module.forward = self.original_forward
++        self.module.comfy_force_forward = self.original_force_forward
+         self.original_forward = None
+         logging.debug(
+             f"[BypassHook] Ejected bypass forward for {type(self.module).__name__}"
