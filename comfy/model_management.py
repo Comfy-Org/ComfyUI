@@ -437,6 +437,14 @@ def is_amd():
             return True
     return False
 
+def dynamic_vram_supported():
+    if is_nvidia():
+        return True
+    if is_amd() and rocm_version >= (7, 14):
+        arch = torch.cuda.get_device_properties(get_torch_device()).gcnArchName.split(":")[0]
+        return arch != "gfx1031"
+    return False
+
 def amd_min_version(device=None, min_rdna_version=0):
     if not is_amd():
         return False
