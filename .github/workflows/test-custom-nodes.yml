@@ -1,0 +1,71 @@
+# Reproduces, in CI, the check the stable-release bar currently asks a person
+# to do by hand: "A staff member reproduces a break in KJNodes,
+# VideoHelperSuite or ComfyUI-Manager" stops a release.
+#
+# Installs those three packs at the commits pinned in
+# tests/custom_nodes/manifest.json, starts the server on CPU, and holds each
+# pack against it: did it import, did it register the nodes it is known for,
+# did it quietly register fewer, are its node schemas well formed, do the
+# routes it adds answer.
+#
+# This runs third-party setup and runtime code, so the checkout keeps no
+# credentials and the job is read-only.
+name: Test custom node packs
+
+on:
+  push:
+    branches: [ main, master, release/** ]
+  pull_request:
+    branches: [ main, master, release/** ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+    - name: Checkout ComfyUI
+      uses: actions/checkout@v4
+      with:
+        persist-credentials: false
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.12'
+
+    - name: Install requirements
+      run: |
+        python -m pip install --upgrade pip
+        pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+        pip install -r requirements.txt
+        pip install pytest wait-for-it
+
+    - name: Install the pinned custom node packs
+      run: |
+        python tests/custom_nodes/install_pinned_packs.py
+        for requirements in custom_nodes/*/requirements.txt; do
+          echo "installing $requirements"
+          pip install -r "$requirements"
+        done
+
+    - name: Start ComfyUI server
+      run: |
+        python main.py --cpu 2>&1 | tee console_output.log &
+        wait-for-it --service 127.0.0.1:8188 -t 300
+
+    - name: Check the packs against this build
+      env:
+        COMFYUI_URL: http://127.0.0.1:8188
+        COMFYUI_STARTUP_LOG: console_output.log
+      run: python -m pytest tests/custom_nodes -q
+
+    - uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: custom-node-console-output
+        path: console_output.log
+        retention-days: 30
