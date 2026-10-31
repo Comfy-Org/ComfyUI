@@ -323,6 +323,13 @@ def test_outdated_frontend_warns_and_is_reported_alongside_the_host_state(monkey
     assert agent_host.feature_flag() == {"state": "failed", "reason": "crashed", "frontend_outdated": True}
 
 
+def test_old_pin_that_loaded_says_to_pin_newer(monkeypatch, caplog):
+    _ready_host(monkeypatch)
+    with caplog.at_level(logging.WARNING):
+        agent_host.check_frontend("1.57.0", "Comfy-Org/ComfyUI_frontend@v1.57.0")
+    assert "pin a newer version" in caplog.text and "did not load" not in caplog.text
+
+
 def test_outdated_default_frontend_says_to_update_the_package(monkeypatch, caplog):
     _ready_host(monkeypatch)
     with caplog.at_level(logging.WARNING):

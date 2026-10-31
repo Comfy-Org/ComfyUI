@@ -22,6 +22,8 @@ import importlib.metadata
 import logging
 import os
 
+from packaging.version import InvalidVersion, Version
+
 import folder_paths
 from comfy_api import feature_flags
 
@@ -83,8 +85,6 @@ def check_frontend(served: str | None, pinned: str | None) -> None:
     button isn't the only sign of it. `served` is None when the version is unknown;
     `pinned` is what --front-end-version asked for, if it asked. The host's state
     is left alone: it describes the host, and a newer frontend can still use it."""
-    from packaging.version import InvalidVersion, Version
-
     global _frontend_outdated
     if _failure is not None or _host is None or served is None:
         return
@@ -93,7 +93,12 @@ def check_frontend(served: str | None, pinned: str | None) -> None:
             return
     except InvalidVersion:
         return
-    cause = f"check the log above for why {pinned} did not load" if pinned else "update comfyui-frontend-package"
+    if not pinned:
+        cause = "update comfyui-frontend-package"
+    elif pinned.rpartition("@")[2].lstrip("v") == served:
+        cause = f"pin a newer version than {pinned}"
+    else:
+        cause = f"check the log above for why {pinned} did not load"
     logging.warning(f"Frontend {served} is too old for the agent panel, which needs {MIN_FRONTEND_VERSION} or newer, so it won't appear: {cause}.")
     _frontend_outdated = True
     emit_event("frontend_outdated", served=served, pinned=pinned)
