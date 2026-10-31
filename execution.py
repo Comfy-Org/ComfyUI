@@ -40,6 +40,13 @@ from comfy_execution.graph import (
     get_input_info,
 )
 from comfy_execution.graph_utils import GraphBuilder, is_link
+from comfy_execution.failure_kind import (
+    FAILURE_KIND_EXECUTION_BLOCKED,
+    FAILURE_KIND_INTERRUPTED,
+    classify_exception,
+    failure_metadata,
+    hint_lines as failure_kind_hints,
+)
 from comfy_execution.validation import LoopValidationError, validate_loops, validate_node_input
 from comfy_execution.progress import get_progress_state, reset_progress_state, add_progress_handler, WebUIProgressHandler
 from comfy_execution.utils import CurrentNodeContext
@@ -535,6 +542,7 @@ async def execute(server: "ExecutionServer", dynprompt, caches, current_item, ex
                         "traceback": [],
                         "current_inputs": [],
                         "current_outputs": [],
+                        **failure_metadata(FAILURE_KIND_EXECUTION_BLOCKED),
                     }
                     server.send_sync("execution_error", mes, server.client_id)
                     return ExecutionBlocker(None)
@@ -624,6 +632,7 @@ async def execute(server: "ExecutionServer", dynprompt, caches, current_item, ex
         # skip formatting inputs/outputs
         error_details = {
             "node_id": real_node_id,
+            **failure_metadata(FAILURE_KIND_INTERRUPTED),
         }
 
         return (ExecutionResult.FAILURE, error_details, iex)
@@ -638,22 +647,27 @@ async def execute(server: "ExecutionServer", dynprompt, caches, current_item, ex
 
         logging.error(f"!!! Exception during processing !!! {ex}")
         logging.error(traceback.format_exc())
-        tips = ""
 
-        if comfy.model_management.is_oom(ex):
-            tips = "This error means you ran out of memory on your GPU.\n\nTIPS: If the workflow worked before you might have accidentally set the batch_size to a large number."
+        is_oom = comfy.model_management.is_oom(ex)
+        if is_oom:
             logging.info("Memory summary:\n{}".format(comfy.model_management.debug_memory_summary()))
             logging.error("Got an OOM, unloading all loaded models.")
             comfy.model_management.unload_all_models()
-        elif isinstance(ex, RuntimeError) and ("mat1 and mat2 shapes" in str(ex)) and "Sampler" in class_type:
-            tips = "\n\nTIPS: If you have any \"Load CLIP\" or \"*CLIP Loader\" nodes in your workflow connected to this sampler node make sure the correct file(s) and type is selected."
+
+        # 失败分类是**事实**，随 error_details 发给客户端机器可读；
+        # 人读的提示走下面的 logging，不塞进 exception_message ——
+        # 拼在消息里的提示没法被程序判断（只能被正则猜，实测 5 条文案漏 3 条）。
+        failure_kind = classify_exception(ex, is_oom=is_oom, class_type=class_type)
+        for hint in failure_kind_hints(failure_kind):
+            logging.info(f"HINT [{failure_kind}] {hint}")
 
         error_details = {
             "node_id": real_node_id,
-            "exception_message": "{}\n{}".format(ex, tips),
+            "exception_message": str(ex),
             "exception_type": exception_type,
             "traceback": traceback.format_tb(tb),
-            "current_inputs": input_data_formatted
+            "current_inputs": input_data_formatted,
+            **failure_metadata(failure_kind),
         }
 
         return (ExecutionResult.FAILURE, error_details, ex)
@@ -712,6 +726,11 @@ class PromptExecutor:
                 "current_inputs": error["current_inputs"],
                 "current_outputs": list(current_outputs),
             }
+            # 机器可读的失败分类：用 .get() 兜底，这样任何还没跟上新契约的
+            # error_details 产出方（例如将来新增的分支）不会让这里 KeyError。
+            for key in ("failure_kind", "retryable", "hints"):
+                if key in error:
+                    mes[key] = error[key]
             self.add_message("execution_error", mes, broadcast=False)
 
     def _notify_prompt_lifecycle(self, event: str, prompt_id: str):
