@@ -30,6 +30,8 @@ def execution_list():
     result.execution_cache = {node_id: {} for node_id in result.pendingNodes}
     result.execution_cache_listeners = {node_id: set() for node_id in result.pendingNodes}
     result.execution_cache_listeners["start"] = {("first", 0), ("end", 0)}
+    result.consumers = {}
+    result.completed = set()
     result.externalBlocks = 0
     result.externalBlockResults = {}
     result.unblockedEvent = asyncio.Event()
