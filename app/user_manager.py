@@ -92,7 +92,16 @@ class UserManager():
 
             # prevent leaving /{type}/{user}
             path = os.path.abspath(os.path.join(user_root, file))
-            if os.path.commonpath((user_root, path)) != user_root:
+            # commonpath() raises ValueError when the two paths are on
+            # different Windows drives, so a request for an absolute path on
+            # another drive (e.g. /userdata/C:%5C... while the user directory
+            # is on D:) escaped as an unhandled 500 instead of being rejected.
+            # A path on another drive is, by definition, not inside user_root.
+            try:
+                inside_user_root = os.path.commonpath((user_root, path)) == user_root
+            except ValueError:
+                inside_user_root = False
+            if not inside_user_root:
                 return None
 
         parent = os.path.split(path)[0]
