@@ -203,7 +203,7 @@ def load_bypass_lora_for_models(model, clip, lora, strength_model, strength_clip
         injections = manager.create_injections(new_modelpatcher.model)
 
         if manager.get_hook_count() > 0:
-            new_modelpatcher.set_injections("bypass_lora", injections)
+            new_modelpatcher.set_injections("bypass_lora", (new_modelpatcher.get_injections("bypass_lora") or []) + injections)
     else:
         new_modelpatcher = None
 
@@ -226,7 +226,7 @@ def load_bypass_lora_for_models(model, clip, lora, strength_model, strength_clip
 
         clip_injections = clip_manager.create_injections(new_clip.cond_stage_model)
         if clip_manager.get_hook_count() > 0:
-            new_clip.patcher.set_injections("bypass_lora", clip_injections)
+            new_clip.patcher.set_injections("bypass_lora", (new_clip.patcher.get_injections("bypass_lora") or []) + clip_injections)
     else:
         new_clip = None
 
