@@ -13,6 +13,7 @@ import torch.nn.functional as F
 from einops import rearrange
 
 import comfy.model_management
+import comfy.quant_ops
 import comfy.patcher_extension
 import comfy.ldm.common_dit
 import comfy.utils
@@ -81,7 +82,14 @@ class Attention(nn.Module):
         q = rearrange(q, "B L (H D) -> B H L D", H=self.heads)
         k = rearrange(k, "B L (H D) -> B H L D", H=self.kvheads)
         v = rearrange(v, "B L (H D) -> B H L D", H=self.kvheads)
-        q, k = self.qknorm(q, k)
+        fused_rope = freqs is not None and not comfy.model_management.in_training and "attn1_patch" not in transformer_patches
+        if fused_rope:
+            # fp32 weights: in bf16 the (1 + scale) would round to steps of 1/128
+            q_scale = comfy.model_management.cast_to(self.qknorm.qnorm.scale, dtype=torch.float32, device=q.device) + 1.0
+            k_scale = comfy.model_management.cast_to(self.qknorm.knorm.scale, dtype=torch.float32, device=k.device) + 1.0
+            q, k = comfy.quant_ops.ck.rms_rope(q, k, freqs, q_scale, k_scale, self.qknorm.qnorm.eps)
+        else:
+            q, k = self.qknorm(q, k)
 
         if "block_index" in transformer_options and "attn1_patch" in transformer_patches:
             for p in transformer_patches["attn1_patch"]:
@@ -89,7 +97,7 @@ class Attention(nn.Module):
                 q, k, v = out.get("q", q), out.get("k", k), out.get("v", v)
                 freqs, mask = out.get("pe", freqs), out.get("attn_mask", mask)
 
-        if freqs is not None:
+        if freqs is not None and not fused_rope:
             q, k = apply_rope(q, k, freqs)
         if self.kvheads != self.heads:
             rep = self.heads // self.kvheads
