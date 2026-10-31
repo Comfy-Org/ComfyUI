@@ -3,8 +3,8 @@ name: CI - Cursor Review
 # Thin caller for the shared reusable cursor-review workflow in
 # Comfy-Org/github-workflows. The review logic (panel matrix, judge
 # consolidation, prompts, extract/post/notify scripts) lives there as the
-# single source of truth, so this repo only carries the repo-specific diff
-# excludes.
+# single source of truth, so this repo only carries the repo-specific
+# generated/vendored globs.
 
 on:
   pull_request:
@@ -23,16 +23,30 @@ jobs:
     # SHA-pinned per zizmor `unpinned-uses: hash-pin`. Bump this SHA to pick up
     # upstream changes; keep `workflows_ref` matching so prompts/scripts load
     # from the same commit as the workflow definition.
-    uses: Comfy-Org/github-workflows/.github/workflows/cursor-review.yml@964d5aad37cbfb57c5b23961d42c2fd85868bf1d # github-workflows main (964d5aa)
+    #
+    # This bump crosses the panel's model refresh: three labs instead of four
+    # (the Gemini cells were retired upstream after a findings-attribution
+    # review), each remaining lane one reasoning notch lower, the Anthropic
+    # cell on Opus 5.5, and a panel cell now ends once it has submitted its
+    # findings instead of running on to the wall-clock cap. A cell that never
+    # reports `status: ok` is still not stopped, so a hung cell fails as
+    # before.
+    uses: Comfy-Org/github-workflows/.github/workflows/cursor-review.yml@06f835f96accfd84d0a0929777d602837402608c # github-workflows main (06f835f)
     with:
-      workflows_ref: 964d5aad37cbfb57c5b23961d42c2fd85868bf1d
-      diff_excludes: >-
-        :!**/.claude/**
-        :!**/dist/**
-        :!**/vendor/**
-        :!**/*.generated.*
-        :!**/*.min.js
-        :!**/*.min.css
+      workflows_ref: 06f835f96accfd84d0a0929777d602837402608c
+      # At this pin `diff_excludes` only trims the reviewed diff, not the
+      # diff-size gate, so the paths this repo used to pass there live here
+      # instead: `extra_generated_globs` drops them from BOTH. Supplying it
+      # replaces upstream's default list, so the defaults are restated before
+      # this repo's own `**/.claude/**`. Plain globs, not `:!` pathspecs.
+      extra_generated_globs: >-
+        **/node_modules/**
+        **/dist/**
+        **/vendor/**
+        **/*.generated.*
+        **/*.min.js
+        **/*.min.css
+        **/.claude/**
     secrets:
       CURSOR_API_KEY: ${{ secrets.CURSOR_API_KEY }}
       SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
