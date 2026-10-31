@@ -277,6 +277,15 @@ parser.add_argument(
 database_default_path = os.path.abspath(
     os.path.join(os.path.dirname(__file__), "..", "user", "comfyui.db")
 )
+def positive_history_limit(value):
+    limit = int(value)
+    if limit <= 0:
+        raise argparse.ArgumentTypeError("history limit must be positive")
+    return limit
+
+
+parser.add_argument("--enable-history", action="store_true", help="Persist terminal workflow/prompt/output history in the local database. Workflow content may be sensitive; detailed error diagnostics are reduced. Disabling this flag does not erase saved history.")
+parser.add_argument("--history-limit", type=positive_history_limit, default=10000, help="Maximum saved terminal records with --enable-history (default: 10000).")
 parser.add_argument("--database-url", type=str, default=None, help="Specify the database URL, e.g. for an in-memory database you can use 'sqlite:///:memory:'. Defaults to 'comfyui.db' in the effective user directory.")
 parser.add_argument("--enable-assets", action="store_true", help="Enable the assets system (API routes, database synchronization, and background scanning). Off by default.")
 parser.add_argument("--disable-assets", action="store_true", help="Disable the assets system, even when --enable-assets is also given.")

@@ -95,7 +95,8 @@ def test_corrupt_database(db_path, caplog):
     error = _startup_error(caplog, kind="corrupt")
 
     assert f"The asset database '{db_path}' is corrupt (file is not a database)." in error
-    assert "Move that file aside, or delete it, and start again" in error
+    assert "Preserve a backup before recovery" in error
+    assert "will not contain saved execution history" in error
 
 
 @pytest.mark.skipif(sys.platform == "win32" or os.geteuid() == 0, reason="needs POSIX permissions enforced")
@@ -125,7 +126,7 @@ def test_failed_upgrade(db_path, caplog):
     error = _startup_error(caplog, kind="other")
 
     assert f"Could not open or upgrade the asset database '{db_path}': no such table" in error
-    assert "If the database is damaged, move that file aside and start again" in error
+    assert "If the database is damaged, preserve it for recovery" in error
     assert "delete it" not in error
     assert "Error upgrading database" not in error  # its traceback is at DEBUG
     assert "Run with --verbose DEBUG for the full error." in error

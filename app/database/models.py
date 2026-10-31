@@ -1,7 +1,7 @@
 from typing import Any
 from datetime import datetime
-from sqlalchemy import MetaData
-from sqlalchemy.orm import DeclarativeBase
+from sqlalchemy import Integer, MetaData, Text
+from sqlalchemy.orm import DeclarativeBase, mapped_column
 
 NAMING_CONVENTION = {
     "ix": "ix_%(table_name)s_%(column_0_N_name)s",
@@ -28,3 +28,11 @@ def to_dict(obj: Any, include_none: bool = False) -> dict[str, Any]:
     return out
 
 # TODO: Define models here
+
+
+class ExecutionHistory(Base):
+    __tablename__ = "execution_history"
+    sequence = mapped_column(Integer, primary_key=True)
+    prompt_id = mapped_column(Text, nullable=False, unique=True)
+    format_version = mapped_column(Integer, nullable=False)
+    record_json = mapped_column(Text, nullable=False)

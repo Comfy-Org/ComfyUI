@@ -1,3 +1,4 @@
+from comfy_execution.history import HistoryStorageError, unavailable_history_record
 import copy
 import heapq
 import inspect
@@ -1313,6 +1314,26 @@ class PromptQueue:
         self.currently_running = {}
         self.history = {}
         self.flags = {}
+        self.history_mutex = threading.Lock()
+        self.history_store = None
+        self.history_failure_count = 0
+
+    def initialize_history(self, store):
+        with self.mutex:
+            if self.history_store is not None or self.task_counter or self.queue or self.history:
+                raise RuntimeError("History must be initialized before processing")
+            self.history = store.load()
+            self.history_store = store
+
+    def history_persistence_status(self):
+        with self.mutex:
+            return {"enabled": self.history_store is not None,
+                    "healthy": self.history_failure_count == 0,
+                    "failure_count": self.history_failure_count}
+
+    def _history_failed(self, error):
+        self.history_failure_count += 1
+        logging.error("History persistence failed (reason=%s). The result may only exist in memory.", error.reason)
 
     def put(self, item):
         with self.mutex:
@@ -1340,25 +1361,35 @@ class PromptQueue:
 
     def task_done(self, item_id, history_result,
                   status: Optional['PromptQueue.ExecutionStatus'], process_item=None):
-        with self.mutex:
-            prompt = self.currently_running.pop(item_id)
-            if len(self.history) > MAXIMUM_HISTORY_SIZE:
-                self.history.pop(next(iter(self.history)))
-
-            status_dict: Optional[dict] = None
-            if status is not None:
-                status_dict = copy.deepcopy(status._asdict())
-
+        with self.history_mutex:
+            with self.mutex:
+                prompt = self.currently_running[item_id]
+            status_dict = copy.deepcopy(status._asdict()) if status is not None else None
             if process_item is not None:
                 prompt = process_item(prompt)
-
-            self.history[prompt[1]] = {
-                "prompt": prompt,
-                "outputs": {},
-                'status': status_dict,
-            }
-            self.history[prompt[1]].update(history_result)
-            self.server.queue_updated()
+            record = {"prompt": prompt, "outputs": {}, "status": status_dict}
+            record.update(history_result)
+            removed = []
+            failure = None
+            if self.history_store is not None:
+                try:
+                    record, removed = self.history_store.save(prompt[1], record)
+                except HistoryStorageError as error:
+                    record = error.record if error.record is not None else unavailable_history_record(prompt[1], status)
+                    failure = error
+            with self.mutex:
+                self.currently_running.pop(item_id)
+                if failure is not None:
+                    self._history_failed(failure)
+                if self.history_store is None and len(self.history) > MAXIMUM_HISTORY_SIZE:
+                    self.history.pop(next(iter(self.history)))
+                for prompt_id in removed:
+                    self.history.pop(prompt_id, None)
+                self.history[prompt[1]] = record
+                if self.history_store is not None:
+                    while len(self.history) > self.history_store.limit:
+                        self.history.pop(next(iter(self.history)))
+                self.server.queue_updated()
 
     # Note: slow
     def get_current_queue(self):
@@ -1443,13 +1474,27 @@ class PromptQueue:
             else:
                 return {}
 
+    def remove_history(self, ids=(), clear=False):
+        with self.history_mutex:
+            if self.history_store is not None:
+                try:
+                    self.history_store.remove(ids, clear=clear)
+                except HistoryStorageError as error:
+                    with self.mutex:
+                        self._history_failed(error)
+                    raise
+            with self.mutex:
+                if clear:
+                    self.history = {}
+                else:
+                    for prompt_id in ids:
+                        self.history.pop(prompt_id, None)
+
     def wipe_history(self):
-        with self.mutex:
-            self.history = {}
+        self.remove_history(clear=True)
 
     def delete_history_item(self, id_to_delete):
-        with self.mutex:
-            self.history.pop(id_to_delete, None)
+        self.remove_history([id_to_delete])
 
     def set_flag(self, name, data):
         with self.mutex:

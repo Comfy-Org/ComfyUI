@@ -8,6 +8,7 @@ import time
 import nodes
 import folder_paths
 import execution
+from comfy_execution.history import HistoryStorageError
 from comfy_execution.jobs import (
     JobStatus,
     get_job,
@@ -822,6 +823,7 @@ class PromptServer():
                 },
                 "devices": device_entries
             }
+            system_stats["history_persistence"] = self.prompt_queue.history_persistence_status()
             return web.json_response(system_stats)
 
         @routes.get("/features")
@@ -1304,14 +1306,16 @@ class PromptServer():
 
         @routes.post("/history")
         async def post_history(request):
-            json_data =  await request.json()
-            if "clear" in json_data:
-                if json_data["clear"]:
-                    self.prompt_queue.wipe_history()
-            if "delete" in json_data:
-                to_delete = json_data['delete']
-                for id_to_delete in to_delete:
-                    self.prompt_queue.delete_history_item(id_to_delete)
+            json_data = await request.json()
+            if not isinstance(json_data, dict) or type(json_data.get("clear", False)) is not bool:
+                return web.json_response({"error": "Invalid history mutation"}, status=400)
+            ids = json_data.get("delete", [])
+            if not isinstance(ids, list) or any(not isinstance(value, str) for value in ids):
+                return web.json_response({"error": "History delete must be a list of IDs"}, status=400)
+            try:
+                await asyncio.to_thread(self.prompt_queue.remove_history, ids, clear=json_data.get("clear", False))
+            except HistoryStorageError:
+                return web.json_response({"error": "history_storage_unavailable"}, status=503)
 
             return web.Response(status=200)
 

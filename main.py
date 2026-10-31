@@ -24,7 +24,7 @@ console_log_level = get_console_log_level(args.verbose)
 file_log_outputs = get_file_log_outputs(args.verbose)
 setup_logger(log_level=console_log_level, file_outputs=file_log_outputs, use_stdout=args.log_stdout)
 
-from app.database.db import dependencies_available, get_database_url, get_db_path, init_db, lock_holder_db_path, missing_dependencies
+from app.database.db import is_persistent_sqlite_url, dependencies_available, get_database_url, get_db_path, init_db, lock_holder_db_path, missing_dependencies
 from app.assets.event_log import error_kind
 from utils.install_util import get_missing_requirements_message
 from app.assets.lifecycle import cleanup_temp_filesystem
@@ -35,6 +35,7 @@ import faulthandler
 import logging
 import signal
 import sys
+from comfy_execution.history import HistoryStorageError
 from comfy_execution.progress import get_progress_state
 from comfy_execution.utils import get_executing_context
 from comfy_api import feature_flags
@@ -491,9 +492,14 @@ def hijack_progress(server_instance):
 
 def setup_database(asset_manager):
     if not dependencies_available():
+        if args.enable_history:
+            stop_history_startup("Database dependencies are unavailable; install requirements.txt.")
         return
 
-    if not asset_manager.enabled:
+    if args.enable_history and not is_persistent_sqlite_url(get_database_url()):
+        stop_history_startup("Persistent history requires a file-backed SQLite database.")
+
+    if not asset_manager.enabled and not args.enable_history:
         # Only the asset system uses the database, so leave it, and its lock, to a process that has assets on.
         warn_if_database_in_use()
         asset_manager.startup()
@@ -503,10 +509,17 @@ def setup_database(asset_manager):
         init_db()
         asset_manager.startup()
     except Exception as e:
+        if args.enable_history:
+            stop_history_startup(f"Cannot open or upgrade the history database (reason={error_kind(e)}). Check its path, permissions and lock; preserve the database when recovering.")
         failure, message = database_failure_message(e, get_database_url())
         if failure != "unsupported_url":  # that error repeats the URL, which can carry a password
             logging.debug("Asset database startup failed", exc_info=True)
         stop_startup(failure, message)
+
+
+def stop_history_startup(message):
+    logging.error(f"HISTORY_STARTUP_FAILED: {message}")
+    sys.exit(1)
 
 
 WITHOUT_ASSETS = "Or start ComfyUI without the assets system: --disable-assets"
@@ -550,13 +563,13 @@ def database_failure_message(error, db_url):
     elif kind == "database_corrupt":
         failure = "corrupt"
         what = f"The asset database '{location}' is corrupt ({detail})."
-        fix = ("Move that file aside, or delete it, and start again: ComfyUI creates a new database "
-               "and rebuilds the asset catalog by rescanning your files.")
+        fix = ("Preserve a backup before recovery. A new database will not contain saved execution history. ComfyUI "
+               "can rebuild only the asset catalog by rescanning your files.")
     else:
         failure = "other"
         what = f"Could not open or upgrade the asset database '{location}': {detail}"
-        fix = ("If the database is damaged, move that file aside and start again: ComfyUI creates a new "
-               "database and rebuilds the asset catalog by rescanning your files. Run with --verbose DEBUG for the full error.")
+        fix = ("If the database is damaged, preserve it for recovery. A new "
+               "database can rebuild only the asset catalog by rescanning your files. Run with --verbose DEBUG for the full error.")
     lines = [what, fix]
     if failure in ("in_use", "locked") and args.database_url is None:
         lines.append("Or give this ComfyUI its own database: --database-url sqlite:///path/to/another.db")
@@ -623,6 +636,13 @@ def start_comfyui(asyncio_loop=None):
 
     cuda_malloc_warning()
     setup_database(asset_manager)
+    if args.enable_history:
+        # SQLAlchemy is optional when history and assets are disabled.
+        from app.history import HistoryStore
+        try:
+            prompt_server.prompt_queue.initialize_history(HistoryStore(args.history_limit))
+        except HistoryStorageError as error:
+            stop_history_startup(f"Cannot restore history (reason={error.reason}). Preserve the database and check its format and integrity.")
 
     prompt_server.add_routes()
     hijack_progress(prompt_server)
