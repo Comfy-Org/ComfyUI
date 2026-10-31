@@ -85,6 +85,15 @@ def load_lora(lora, to_load, log_missing=True):
             patch_dict[bias_key(to_load[x])] = ("diff", (diff_bias,))
             loaded_keys.add(diff_bias_name)
 
+        lora_bias_name = "{}.lora_B.bias".format(x) # PEFT lora_bias, only for models whose key map lists it
+        if lora_bias_name in to_load and lora_bias_name in lora:
+            lora_bias = lora[lora_bias_name]
+            lora_down = lora.get("{}.lora_A.weight".format(x), None)
+            if alpha is not None and lora_down is not None: # PEFT scales the lora_B bias like the weight delta
+                lora_bias = lora_bias.float() * (alpha / lora_down.shape[0]) # scale in fp32: an fp16 bias can overflow
+            patch_dict[to_load[lora_bias_name]] = ("diff", (lora_bias,))
+            loaded_keys.add(lora_bias_name)
+
         set_weight_name = "{}.set_weight".format(x)
         set_weight = lora.get(set_weight_name, None)
         if set_weight is not None:
@@ -292,6 +301,31 @@ def model_lora_keys_unet(model, key_map={}):
             if k.startswith("diffusion_model.") and k.endswith(".weight"): #Official Mochi lora format
                 key_lora = k[len("diffusion_model."):-len(".weight")]
                 key_map["{}".format(key_lora)] = k
+
+    if isinstance(model, comfy.model_base.WAN21): # Diffusers/PEFT WAN lora format, names from diffusers' WAN lora conversion
+        block_keys = {"self_attn.q": "attn1.to_q", "self_attn.k": "attn1.to_k", "self_attn.v": "attn1.to_v", "self_attn.o": "attn1.to_out.0",
+                      "cross_attn.q": "attn2.to_q", "cross_attn.k": "attn2.to_k", "cross_attn.v": "attn2.to_v", "cross_attn.o": "attn2.to_out.0",
+                      "cross_attn.k_img": "attn2.add_k_proj", "cross_attn.v_img": "attn2.add_v_proj",
+                      "ffn.0": "ffn.net.0.proj", "ffn.2": "ffn.net.2"}
+        other_keys = {"text_embedding.0": "condition_embedder.text_embedder.linear_1", "text_embedding.2": "condition_embedder.text_embedder.linear_2",
+                      "time_embedding.0": "condition_embedder.time_embedder.linear_1", "time_embedding.2": "condition_embedder.time_embedder.linear_2",
+                      "time_projection.1": "condition_embedder.time_proj", "img_emb.proj.1": "condition_embedder.image_embedder.ff.net.0.proj",
+                      "img_emb.proj.3": "condition_embedder.image_embedder.ff.net.2", "head.head": "proj_out"}
+        for k in sdk:
+            if k.startswith("diffusion_model.") and k.endswith(".weight"):
+                key = k[len("diffusion_model."):-len(".weight")]
+                parts = key.split(".", 2)
+                if len(parts) == 3 and parts[0] == "blocks" and parts[2] in block_keys:
+                    key_lora = "blocks.{}.{}".format(parts[1], block_keys[parts[2]])
+                elif key in other_keys:
+                    key_lora = other_keys[key]
+                else:
+                    continue
+                bias = "{}.bias".format(k[:-len(".weight")])
+                for p in ("", "transformer."):
+                    key_map["{}{}".format(p, key_lora)] = k
+                    if bias in sd:
+                        key_map["{}{}.lora_B.bias".format(p, key_lora)] = bias # diffusers' WAN conversion emits these
 
     if isinstance(model, comfy.model_base.HunyuanVideo):
         for k in sdk:
