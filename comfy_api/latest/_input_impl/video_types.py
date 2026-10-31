@@ -414,11 +414,17 @@ class VideoFromFile(VideoInput):
                 else container.demux(video_stream)
             )
             for frame in frame_iterator:
+                # The demux path yields a trailing flush packet with pts=None and no
+                # data: it is not a frame. Skip it instead of comparing pts to None.
+                if frame.pts is None or getattr(frame, "size", 1) == 0:
+                    continue
                 if frame.pts >= start_pts:
                     break
             else:
                 raise ValueError(f"Could not determine frame count for file '{self.__file}'\nNo frames exist for start_time {self.__start_time}")
             for frame in frame_iterator:
+                if frame.pts is None or getattr(frame, "size", 1) == 0:
+                    continue
                 if end_pts is not None and frame.pts >= end_pts:
                     break
                 frame_count += 1
