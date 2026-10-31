@@ -748,11 +748,11 @@ class disable_weight_init:
             self.bias = None
             return None
 
-        def cast_weight(self, input):
+        def comfy_rmsnorm_cast_weight(self, input):
             return CastBiasWeightContext(self if self.weight is not None else None, input, offloadable=True)
 
         def forward_comfy_cast_weights(self, input):
-            with self.cast_weight(input) as (weight, bias):
+            with self.comfy_rmsnorm_cast_weight(input) as (weight, bias):
                 return torch.nn.functional.rms_norm(input, self.normalized_shape, weight, self.eps)
 
         def forward(self, *args, **kwargs):
@@ -1038,7 +1038,10 @@ INPUT_ACT_EAGER = {
 @contextlib.contextmanager
 def _input_act_weight(x, input_act, act_weight, act_eps):
     if input_act == "rms_norm" and isinstance(act_weight, torch.nn.Module):
-        with act_weight.cast_weight(x) as (weight, _):
+        cast_fn = getattr(act_weight, "comfy_rmsnorm_cast_weight", None)
+        if cast_fn is None:
+            cast_fn = act_weight.cast_weight
+        with cast_fn(x) as (weight, _):
             eps = act_weight.eps
             if eps is None:
                 eps = torch.finfo(torch.float64 if x.dtype == torch.float64 else torch.float32).eps
