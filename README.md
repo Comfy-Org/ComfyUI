@@ -24,12 +24,12 @@
 [twitter-shield]: https://img.shields.io/twitter/follow/ComfyUI
 [twitter-url]: https://x.com/ComfyUI
 
-[github-release-shield]: https://img.shields.io/github/v/release/comfyanonymous/ComfyUI?style=flat&sort=semver
-[github-release-link]: https://github.com/comfyanonymous/ComfyUI/releases
-[github-release-date-shield]: https://img.shields.io/github/release-date/comfyanonymous/ComfyUI?style=flat
-[github-downloads-shield]: https://img.shields.io/github/downloads/comfyanonymous/ComfyUI/total?style=flat
-[github-downloads-latest-shield]: https://img.shields.io/github/downloads/comfyanonymous/ComfyUI/latest/total?style=flat&label=downloads%40latest
-[github-downloads-link]: https://github.com/comfyanonymous/ComfyUI/releases
+[github-release-shield]: https://img.shields.io/github/v/release/Comfy-Org/ComfyUI?style=flat&sort=semver
+[github-release-link]: https://github.com/Comfy-Org/ComfyUI/releases
+[github-release-date-shield]: https://img.shields.io/github/release-date/Comfy-Org/ComfyUI?style=flat
+[github-downloads-shield]: https://img.shields.io/github/downloads/Comfy-Org/ComfyUI/total?style=flat
+[github-downloads-latest-shield]: https://img.shields.io/github/downloads/Comfy-Org/ComfyUI/latest/total?style=flat&label=downloads%40latest
+[github-downloads-link]: https://github.com/Comfy-Org/ComfyUI/releases
 
 <img width="1590" height="795" alt="ComfyUI Screenshot" src="https://github.com/user-attachments/assets/36e065e0-bfae-4456-8c7f-8369d5ea48a2" />
 <br>
@@ -89,7 +89,7 @@ See what ComfyUI can do with the [newer template workflows](https://comfy.org/wo
 
 ComfyUI follows a weekly release cycle targeting Monday but this regularly changes because of model releases or large changes to the codebase. There are three interconnected repositories:
 
-1. **[ComfyUI Core](https://github.com/comfyanonymous/ComfyUI)**
+1. **[ComfyUI Core](https://github.com/Comfy-Org/ComfyUI)**
    - Releases a new major stable version (e.g., v0.7.0) roughly every 2 weeks.
    - Starting from v0.4.0 patch versions will be used for fixes backported onto the current stable release.
    - Minor versions will be used for releases off the master branch.
@@ -157,7 +157,7 @@ The desktop app is the easiest and best way to use ComfyUI for new users.
 
 There is a portable standalone build for Windows that should work for running on Nvidia GPUs or for running on your CPU only. It is not recommended for regular users. Regular users should use the desktop app above.
 
-[Direct link to download (nvidia)](https://github.com/comfyanonymous/ComfyUI/releases/latest/download/ComfyUI_windows_portable_nvidia.7z)
+[Direct link to download (nvidia)](https://github.com/Comfy-Org/ComfyUI/releases/latest/download/ComfyUI_windows_portable_nvidia.7z)
 
 Simply download, extract with [7-Zip](https://7-zip.org) or with the windows explorer on recent windows versions and run. For smaller models you normally only need to put the checkpoints (the huge ckpt/safetensors files) in: ComfyUI\models\checkpoints but many of the larger models have multiple files. Make sure to follow the instructions to know which subfolder to put them in ComfyUI\models\
 
@@ -167,13 +167,13 @@ The portable above currently comes with python 3.13 and pytorch cuda 13.0. Updat
 
 #### All Official Portable Downloads:
 
-[Portable for AMD GPUs](https://github.com/comfyanonymous/ComfyUI/releases/latest/download/ComfyUI_windows_portable_amd.7z)
+[Portable for AMD GPUs](https://github.com/Comfy-Org/ComfyUI/releases/latest/download/ComfyUI_windows_portable_amd.7z)
 
-[Portable for Intel GPUs](https://github.com/comfyanonymous/ComfyUI/releases/latest/download/ComfyUI_windows_portable_intel.7z)
+[Portable for Intel GPUs](https://github.com/Comfy-Org/ComfyUI/releases/latest/download/ComfyUI_windows_portable_intel.7z)
 
-[Portable for Nvidia GPUs](https://github.com/comfyanonymous/ComfyUI/releases/latest/download/ComfyUI_windows_portable_nvidia.7z) (supports 20 series and above).
+[Portable for Nvidia GPUs](https://github.com/Comfy-Org/ComfyUI/releases/latest/download/ComfyUI_windows_portable_nvidia.7z) (supports 20 series and above).
 
-[Portable for Nvidia GPUs with pytorch cuda 12.6 and python 3.12](https://github.com/comfyanonymous/ComfyUI/releases/latest/download/ComfyUI_windows_portable_nvidia_cu126.7z) (Supports Nvidia 10 series and older GPUs, DO NOT USE THIS ON NEWER 20 SERIES AND ABOVE GPUS).
+[Portable for Nvidia GPUs with pytorch cuda 12.6 and python 3.12](https://github.com/Comfy-Org/ComfyUI/releases/latest/download/ComfyUI_windows_portable_nvidia_cu126.7z) (Supports Nvidia 10 series and older GPUs, DO NOT USE THIS ON NEWER 20 SERIES AND ABOVE GPUS).
 
 #### How do I share models between another UI and ComfyUI?
 
@@ -436,4 +436,4 @@ This approach allows you to easily switch between the stable fortnightly release
 
 ### Which GPU should I buy for this?
 
-[See this page for some recommendations](https://github.com/comfyanonymous/ComfyUI/wiki/Which-GPU-should-I-buy-for-ComfyUI)
+[See this page for some recommendations](https://github.com/Comfy-Org/ComfyUI/wiki/Which-GPU-should-I-buy-for-ComfyUI)
