@@ -1858,8 +1858,7 @@ class SeedVR2(supported_models_base.BASE):
 
     def set_inference_dtype(self, dtype, manual_cast_dtype, device=None):
         if (
-            dtype == torch.float16
-            and manual_cast_dtype is None
+            (manual_cast_dtype == torch.float16 or (dtype == torch.float16 and manual_cast_dtype is None))
             and comfy.model_management.should_use_bf16(device)
         ):
             manual_cast_dtype = torch.bfloat16
