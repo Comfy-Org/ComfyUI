@@ -1,5 +1,6 @@
 import av
 import comfy.audio
+import comfy.utils
 import torch
 import comfy.model_management
 import folder_paths
@@ -672,6 +673,10 @@ class AudioConcat(IO.ComfyNode):
             logging.info("AudioConcat: Converted mono audio2 to stereo by duplicating the channel.")
 
         waveform_1, waveform_2, output_sample_rate = match_audio_sample_rates(waveform_1, sample_rate_1, waveform_2, sample_rate_2)
+
+        batch_size = max(waveform_1.shape[0], waveform_2.shape[0])
+        waveform_1 = comfy.utils.repeat_to_batch_size(waveform_1, batch_size)
+        waveform_2 = comfy.utils.repeat_to_batch_size(waveform_2, batch_size)
 
         if direction == 'after':
             concatenated_audio = torch.cat((waveform_1, waveform_2), dim=2)
