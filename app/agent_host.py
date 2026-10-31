@@ -21,7 +21,6 @@ from __future__ import annotations
 import importlib.metadata
 import logging
 import os
-import re
 
 import folder_paths
 from comfy_api import feature_flags
@@ -79,24 +78,25 @@ def load() -> bool:
     return _failure is None
 
 
-def _parse_frontend_version(version: str) -> tuple[int, ...] | None:
-    match = re.match(r"(\d+)\.(\d+)\.(\d+)", version)
-    return tuple(int(part) for part in match.groups()) if match else None
-
-
-def check_frontend(served: str | None, requested: str | None) -> None:
+def check_frontend(served: str | None, pinned: str | None) -> None:
     """Report a frontend too old to show the agent panel, so a page with no Agent
-    button isn't the only sign of it. `served` is None when the version is unknown."""
+    button isn't the only sign of it. `served` is None when the version is unknown;
+    `pinned` is what --front-end-version asked for, if it asked. The host's state
+    is left alone: it describes the host, and a newer frontend can still use it."""
+    from packaging.version import InvalidVersion, Version
+
     global _frontend_outdated
-    served_version = _parse_frontend_version(served) if served else None
-    if served_version is None or served_version >= _parse_frontend_version(MIN_FRONTEND_VERSION):
+    if _failure is not None or _host is None or served is None:
         return
-    logging.warning(
-        f"Frontend {served} is being served (requested: {requested or 'default'}), but the agent panel needs "
-        f"{MIN_FRONTEND_VERSION} or newer, so it won't appear. If you pinned a newer frontend, check the log above for why it did not load."
-    )
+    try:
+        if Version(served) >= Version(MIN_FRONTEND_VERSION):
+            return
+    except InvalidVersion:
+        return
+    cause = f"check the log above for why {pinned} did not load" if pinned else "update comfyui-frontend-package"
+    logging.warning(f"Frontend {served} is too old for the agent panel, which needs {MIN_FRONTEND_VERSION} or newer, so it won't appear: {cause}.")
     _frontend_outdated = True
-    emit_event("agent_error", reason="frontend_outdated")
+    emit_event("frontend_outdated", served=served, pinned=pinned)
     _publish_flag()
 
 
@@ -189,8 +189,8 @@ def feature_flag():
         flag = {"state": status["state"]}
         if status.get("reason"):
             flag["reason"] = status["reason"]
-        if _frontend_outdated and flag["state"] != "failed":
-            return {"state": "failed", "reason": "frontend_outdated"}
+        if _frontend_outdated:
+            flag["frontend_outdated"] = True
         return flag
     except SystemExit:  # a wheel that exits is broken, not briefly unhealthy, so disable it
         logging.exception("The local agent's status could not be read; it is disabled.")

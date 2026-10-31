@@ -6,6 +6,7 @@ import sys
 import tempfile
 import zipfile
 import importlib
+import importlib.util
 from dataclasses import dataclass
 from functools import cached_property
 from pathlib import Path
@@ -256,8 +257,10 @@ comfyui-frontend-package is not installed.
     def served_version(cls, web_root: str) -> Optional[str]:
         """The version of the official frontend at web_root, or None if it isn't one we can identify."""
         path = Path(web_root)
-        if path.parent == Path(cls.CUSTOM_FRONTENDS_ROOT) / "Comfy-Org_ComfyUI_frontend":
-            return path.name
+        if path.parent.parent == Path(cls.CUSTOM_FRONTENDS_ROOT):
+            return path.name if path.parent.name.lower() == "comfy-org_comfyui_frontend" else None
+        if importlib.util.find_spec("comfyui_frontend_package") is None:  # default_frontend_path() would exit
+            return None
         if web_root != cls.default_frontend_path():
             return None
         try:

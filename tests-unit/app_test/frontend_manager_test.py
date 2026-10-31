@@ -1,4 +1,5 @@
 import argparse
+import sys
 from types import SimpleNamespace
 from unittest.mock import Mock, patch, mock_open
 
@@ -378,6 +379,7 @@ def test_template_asset_map_skips_missing_assets():
 def test_served_version_of_a_downloaded_frontend():
     root = FrontendManager.CUSTOM_FRONTENDS_ROOT
     assert FrontendManager.served_version(f"{root}/Comfy-Org_ComfyUI_frontend/1.59.0") == "1.59.0"
+    assert FrontendManager.served_version(f"{root}/comfy-org_comfyui_frontend/1.57.0") == "1.57.0"
 
 
 def test_served_version_ignores_other_downloaded_frontends():
@@ -386,12 +388,13 @@ def test_served_version_ignores_other_downloaded_frontends():
 
 
 def test_served_version_of_the_default_frontend():
-    with patch.object(FrontendManager, "default_frontend_path", return_value="/site/static"):
-        with patch("app.frontend_management.version", return_value="1.57.6") as installed:
-            assert FrontendManager.served_version("/site/static") == "1.57.6"
+    with patch.dict(sys.modules, {"comfyui_frontend_package": Mock()}):
+        with patch.object(FrontendManager, "default_frontend_path", return_value="/site/static"):
+            with patch("app.frontend_management.version", return_value="1.57.6") as installed:
+                assert FrontendManager.served_version("/site/static") == "1.57.6"
     installed.assert_called_once_with("comfyui-frontend-package")
 
 
-def test_served_version_of_a_custom_root_is_unknown():
-    with patch.object(FrontendManager, "default_frontend_path", return_value="/site/static"):
-        assert FrontendManager.served_version("/my/dev/dist") is None
+def test_served_version_does_not_exit_without_the_frontend_package():
+    with patch.dict(sys.modules, {"comfyui_frontend_package": None}):  # import raises ImportError
+        assert FrontendManager.served_version("/some/other/frontend") is None

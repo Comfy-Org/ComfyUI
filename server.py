@@ -35,7 +35,7 @@ from aiohttp import web
 import logging
 
 import mimetypes
-from comfy.cli_args import args
+from comfy.cli_args import args, DEFAULT_VERSION_STRING
 import comfy.utils
 import comfy.model_management
 from comfy_api import feature_flags
@@ -1327,7 +1327,8 @@ class PromptServer():
         if args.enable_agent:
             agent_host.register(self.app)
             if args.front_end_root is None:  # a custom root has no version to compare
-                agent_host.check_frontend(FrontendManager.served_version(self.web_root), args.front_end_version)
+                pinned = args.front_end_version if args.front_end_version != DEFAULT_VERSION_STRING else None
+                agent_host.check_frontend(FrontendManager.served_version(self.web_root), pinned)
         self.user_manager.add_routes(self.routes)
         self.model_file_manager.add_routes(self.routes)
         self.custom_node_manager.add_routes(self.routes, self.app, nodes.LOADED_MODULE_DIRS.items())
