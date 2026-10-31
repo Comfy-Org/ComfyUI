@@ -129,7 +129,7 @@ class SaveConditioning(io.ComfyNode):
                 raise ValueError(f"Conditioning option '{k}' ({type(v).__name__}) can't be saved.")
         full_output_folder, filename, counter, _, _ = folder_paths.get_save_image_path(filename_prefix, folder_paths.get_output_directory())
         safetensors.torch.save_file({k: v.detach().to("cpu", copy=True).contiguous() for k, v in sd.items()},
-                                    os.path.join(full_output_folder, f"{filename}_{counter:05}_.safetensors"),
+                                    os.path.join(full_output_folder, f"{filename}_{counter:05}.safetensors"),
                                     metadata={"conditioning_options": json.dumps(values)})
         return io.NodeOutput(conditioning)
 
