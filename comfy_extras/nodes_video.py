@@ -261,6 +261,26 @@ class CreateVideo(io.ComfyNode):
         return io.NodeOutput(video)
 
 
+def ordered_segment_names(segments: dict, order: io.VideoConcat.Type | None) -> list[str]:
+    requested = [name for name in dict.fromkeys((order or {}).get("order") or []) if name in segments]
+    return requested + [name for name in segments if name not in requested]
+
+
+def segment_sources(prompt: dict | None, unique_id: str | None) -> dict[str, list]:
+    inputs = ((prompt or {}).get(str(unique_id)) or {}).get("inputs") or {}
+    return {
+        key.split(".", 1)[1]: [str(link[0]), link[1]]
+        for key, link in inputs.items()
+        if key.startswith("videos.") and isinstance(link, list) and len(link) == 2
+    }
+
+
+def encode_segment(group: list[Input.Video], codec: Types.VideoCodec) -> Input.Video:
+    if len(group) == 1 and isinstance(group[0], (InputImpl.VideoFromFile, InputImpl.VideoFromList)):
+        return group[0]
+    return InputImpl.VideoFromList(group, codec=codec)
+
+
 class ConcatenateVideo(io.ComfyNode):
     @classmethod
     def define_schema(cls):
@@ -281,6 +301,12 @@ class ConcatenateVideo(io.ComfyNode):
                     ),
                     tooltip="Video segments to concatenate in input order.",
                 ),
+                io.VideoConcat.Input(
+                    "order",
+                    source="videos",
+                    optional=True,
+                    tooltip="Playback order of the connected video segments. Unlisted segments follow in input order.",
+                ),
                 io.Combo.Input(
                     "codec",
                     options=Types.VideoCodec.as_input(),
@@ -296,14 +322,32 @@ class ConcatenateVideo(io.ComfyNode):
                 ),
             ],
             outputs=[io.Video.Output(tooltip="The concatenated video.")],
+            hidden=[io.Hidden.prompt, io.Hidden.unique_id],
             is_input_list=True,
+            is_output_node=True,
+            has_intermediate_output=True,
         )
 
     @classmethod
-    def execute(cls, videos: io.Autogrow.Type, codec=None, complete_audio=None) -> io.NodeOutput:
-        videos = [video for group in videos.values() for video in group]
+    def execute(cls, videos: io.Autogrow.Type, order=None, codec=None, complete_audio=None) -> io.NodeOutput:
+        names = ordered_segment_names(videos, order[0] if order else None)
         audio = complete_audio[0] if complete_audio else None
-        return io.NodeOutput(InputImpl.VideoFromList(videos, audio, Types.VideoCodec(codec[0] if codec else "auto")))
+        video_codec = Types.VideoCodec(codec[0] if codec else "auto")
+        encoded_groups: dict[tuple[int, ...], Input.Video] = {}
+        encoded = {}
+        for name in names:
+            key = tuple(map(id, videos[name]))
+            if key not in encoded_groups:
+                encoded_groups[key] = encode_segment(videos[name], video_codec)
+            encoded[name] = encoded_groups[key]
+        result = InputImpl.VideoFromList([encoded[name] for name in names], audio, video_codec)
+        hidden = cls.hidden
+        sources = segment_sources(hidden.prompt if hidden else None, hidden.unique_id if hidden else None)
+        segments = [
+            {**save_video_preview(encoded[name]).values[0], "name": name, "source": sources.get(name)}
+            for name in names
+        ]
+        return io.NodeOutput(result, ui={**save_video_preview(result).as_dict(), "segments": segments})
 
 class GetVideoComponents(io.ComfyNode):
     @classmethod

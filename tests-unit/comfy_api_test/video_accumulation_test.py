@@ -6,12 +6,22 @@ import weakref
 from fractions import Fraction
 
 import av
+import pytest
 import torch
 
+import comfy_extras.nodes_video as nodes_video
+import folder_paths
 from comfy_api.input_impl.video_types import VideoFromComponents, VideoFromFile, VideoFromList
 from comfy_api.input.basic_types import AudioInput
+from comfy_api.latest import io as comfy_io, ui
 from comfy_api.util.video_types import VideoCodec, VideoComponents
-from comfy_extras.nodes_video import ConcatenateVideo, CreateVideo
+from comfy_extras.nodes_video import ConcatenateVideo, CreateVideo, ordered_segment_names, segment_sources
+
+
+@pytest.fixture(autouse=True)
+def isolated_temp_directory(monkeypatch, tmp_path):
+    monkeypatch.setattr(folder_paths, "get_temp_directory", lambda: str(tmp_path))
+    return tmp_path
 
 
 def test_tensor_video_encodes_to_list_owned_buffer():
@@ -47,6 +57,82 @@ def test_accumulate_flattens_groups_and_eagerly_encodes_tensors():
     assert all(reference() is None for reference in references)
 
 
+def test_concatenate_video_follows_order_widget():
+    images = [torch.full((1, 16, 16, 3), value) for value in (0.1, 0.5, 0.9)]
+    videos = [VideoFromComponents(VideoComponents(images=image, frame_rate=Fraction(8))) for image in images]
+    segments = {"video0": [videos[0]], "video1": [videos[1]], "video2": [videos[2]]}
+
+    result = ConcatenateVideo.execute(segments, order=[{"order": ["video2", "missing", "video0", "video2"]}]).result[0]
+    first_pixels = [round(chunk.get_components().images[0, 0, 0, 0].item(), 1) for chunk in result.videos]
+
+    assert first_pixels == [0.9, 0.1, 0.5]
+
+
+def test_concatenate_video_previews_the_result_and_each_segment(monkeypatch, isolated_temp_directory):
+    images = [torch.full((2, 16, 16, 3), value) for value in (0.1, 0.9)]
+    red, blue = [VideoFromComponents(VideoComponents(images=image, frame_rate=Fraction(8))) for image in images]
+    prompt = {"4": {"inputs": {"videos.video0": ["1", 0], "videos.video1": ["2", 0], "videos.video2": ["1", 0], "codec": "auto"}}}
+    monkeypatch.setattr(
+        ConcatenateVideo,
+        "hidden",
+        comfy_io.HiddenHolder.from_dict({comfy_io.Hidden.prompt: prompt, comfy_io.Hidden.unique_id: "4"}),
+    )
+
+    output = ConcatenateVideo.execute(
+        {"video0": [red], "video1": [blue], "video2": [red]},
+        order=[{"order": ["video1", "video0", "video2"]}],
+    )
+    segments = output.ui["segments"]
+
+    assert output.ui["animated"] == (True,)
+    assert [(segment["name"], segment["source"]) for segment in segments] == [
+        ("video1", ["2", 0]),
+        ("video0", ["1", 0]),
+        ("video2", ["1", 0]),
+    ]
+    assert segments[1]["filename"] == segments[2]["filename"]
+    for saved in [*output.ui["images"], *segments]:
+        assert saved["type"] == "temp"
+        with av.open(os.path.join(isolated_temp_directory, saved["subfolder"], saved["filename"])) as container:
+            assert sum(1 for _ in container.decode(video=0)) > 0
+
+
+def test_concatenate_video_encodes_each_tensor_segment_once(monkeypatch):
+    encodes = []
+    original_save_to = VideoFromComponents.save_to
+
+    def counting_save_to(self, *args, **kwargs):
+        encodes.append(self)
+        return original_save_to(self, *args, **kwargs)
+
+    monkeypatch.setattr(VideoFromComponents, "save_to", counting_save_to)
+    red, blue = [
+        VideoFromComponents(VideoComponents(images=torch.full((2, 16, 16, 3), value), frame_rate=Fraction(8)))
+        for value in (0.1, 0.9)
+    ]
+
+    output = ConcatenateVideo.execute({"video0": [red], "video1": [blue], "video2": [red]})
+
+    assert sorted(map(id, encodes)) == sorted([id(red), id(blue)])
+    assert len(output.ui["segments"]) == 3
+
+
+def test_segment_sources_reads_linked_video_inputs():
+    prompt = {"7": {"inputs": {"videos.video0": ["3", 0], "videos.video1": "not-a-link", "codec": ["9", 0]}}}
+
+    assert segment_sources(prompt, "7") == {"video0": ["3", 0]}
+    assert segment_sources(None, None) == {}
+    assert segment_sources(prompt, "missing") == {}
+
+
+def test_ordered_segment_names_falls_back_to_input_order():
+    segments = {"video0": [], "video1": [], "video2": []}
+
+    assert ordered_segment_names(segments, None) == ["video0", "video1", "video2"]
+    assert ordered_segment_names(segments, {}) == ["video0", "video1", "video2"]
+    assert ordered_segment_names(segments, {"order": ["video1"]}) == ["video1", "video0", "video2"]
+
+
 def test_concatenate_video_schema_and_intermediate_codec(monkeypatch):
     encoded_codecs = []
 
@@ -55,6 +141,11 @@ def test_concatenate_video_schema_and_intermediate_codec(monkeypatch):
         path.write(b"")
 
     monkeypatch.setattr(VideoFromComponents, "save_to", record_save)
+    monkeypatch.setattr(
+        nodes_video,
+        "save_video_preview",
+        lambda video: ui.PreviewVideo([ui.SavedResult("preview.mp4", "", comfy_io.FolderType.temp)]),
+    )
     source = VideoFromComponents(
         VideoComponents(images=torch.zeros((1, 16, 16, 3)), frame_rate=Fraction(8))
     )
@@ -69,6 +160,10 @@ def test_concatenate_video_schema_and_intermediate_codec(monkeypatch):
     assert inputs["videos"].template.input.id == "video"
     assert inputs["videos"].template.input.tooltip
     assert inputs["videos"].template.names[:2] == ["video0", "video1"]
+    assert inputs["order"].as_dict()["source"] == "videos"
+    assert inputs["order"].default == {"order": []}
+    assert inputs["order"].optional
+    assert schema.is_output_node and schema.has_intermediate_output
 
 
 def test_create_video_optional_eager_encoding(monkeypatch):
