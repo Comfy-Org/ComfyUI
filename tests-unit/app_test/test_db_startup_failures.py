@@ -251,8 +251,14 @@ def test_no_second_database_suggested_for_a_broken_one(tmp_path, monkeypatch, db
     monkeypatch.setattr(db_module, "get_legacy_default_db_path", lambda: None)
     monkeypatch.setattr(folder_paths, "get_user_directory", lambda: str(user_dir))
 
+    def refuse(src, dst):
+        raise PermissionError("held open")
+
+    monkeypatch.setattr(os, "replace", refuse)  # recovery fails, so startup stops on the corrupt file
+
     error = _startup_error(caplog, kind="corrupt")
 
+    assert "Could not move the corrupt database" in error
     assert "comfyui-2.db" not in error
 
 
