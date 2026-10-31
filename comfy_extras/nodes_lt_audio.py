@@ -16,7 +16,7 @@ class LTXVAudioVAELoader(io.ComfyNode):
             inputs=[
                 io.Combo.Input(
                     "ckpt_name",
-                    options=folder_paths.get_filename_list("checkpoints"),
+                    options=folder_paths.get_filename_list("vae"),
                     tooltip="Audio VAE checkpoint to load.",
                 )
             ],
@@ -25,7 +25,7 @@ class LTXVAudioVAELoader(io.ComfyNode):
 
     @classmethod
     def execute(cls, ckpt_name: str) -> io.NodeOutput:
-        ckpt_path = folder_paths.get_full_path_or_raise("checkpoints", ckpt_name)
+        ckpt_path = folder_paths.get_full_path_or_raise("vae", ckpt_name)
         sd, metadata = comfy.utils.load_torch_file(ckpt_path, return_metadata=True)
         sd = comfy.utils.state_dict_prefix_replace(sd, {"audio_vae.": "autoencoder.", "vocoder.": "vocoder."}, filter_keys=True)
         vae = comfy.sd.VAE(sd=sd, metadata=metadata)
@@ -181,7 +181,8 @@ class LTXAVTextEncoderLoader(io.ComfyNode):
                 ),
                 io.Combo.Input(
                     "ckpt_name",
-                    options=folder_paths.get_filename_list("checkpoints"),
+                    options=["none"] + folder_paths.get_filename_list("checkpoints"),
+                    tooltip="Optional diffusion checkpoint the text encoder was split from. Set to 'none' when the text encoder file is standalone.",
                 ),
                 io.Combo.Input(
                     "device",
@@ -196,14 +197,15 @@ class LTXAVTextEncoderLoader(io.ComfyNode):
     def execute(cls, text_encoder, ckpt_name, device="default"):
         clip_type = comfy.sd.CLIPType.LTXV
 
-        clip_path1 = folder_paths.get_full_path_or_raise("text_encoders", text_encoder)
-        clip_path2 = folder_paths.get_full_path_or_raise("checkpoints", ckpt_name)
+        clip_paths = [folder_paths.get_full_path_or_raise("text_encoders", text_encoder)]
+        if ckpt_name != "none":
+            clip_paths.append(folder_paths.get_full_path_or_raise("checkpoints", ckpt_name))
 
         model_options = {}
         if device == "cpu":
             model_options["load_device"] = model_options["offload_device"] = torch.device("cpu")
 
-        clip = comfy.sd.load_clip(ckpt_paths=[clip_path1, clip_path2], embedding_directory=folder_paths.get_folder_paths("embeddings"), clip_type=clip_type, model_options=model_options)
+        clip = comfy.sd.load_clip(ckpt_paths=clip_paths, embedding_directory=folder_paths.get_folder_paths("embeddings"), clip_type=clip_type, model_options=model_options)
         return io.NodeOutput(clip)
 
 
