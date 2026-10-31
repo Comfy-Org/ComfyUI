@@ -1016,6 +1016,10 @@ from .quant_ops import (
     TensorCoreFP8Layout,
     get_layout_class,
 )
+try:
+    from comfy_kitchen.tensor.int8_utils import _build_hadamard, _rotate_activation
+except ImportError:
+    _build_hadamard = _rotate_activation = None
 
 def _swiglu_eager(x):
     gate, up = x.chunk(2, dim=-1)
@@ -1131,6 +1135,31 @@ def linear_input_act_(x, weight, bias, input_act=None, act_weight=None, act_eps=
 # Grouped-scale integer weights that run through the shared INT8 GEMM (comfy_kitchen
 # AsymW4A8Int8Layout): format -> code width, which also fixes the packed weight width K*bits/8.
 _GROUPED_INT8_FORMATS = {"asym_w4a8_int8": 4, "w6a8_int8": 6}
+
+
+def _convrot_rotate_input(module, x):
+    """INT8 ConvRot weights are stored rotated: W = (q * scale) @ H^T, H block-diagonal with
+    group size g. Dequantizing rotates the whole weight back (N*K*g multiply-adds), but
+    x @ W^T = (x @ H) @ (q * scale)^T, and rotating the input costs M*K*g. So in the
+    full-precision path, rotate the input instead while it has fewer rows than outputs."""
+    w = module.weight
+    return (_rotate_activation is not None and module._full_precision_mm and isinstance(w, QuantizedTensor)
+            and w._layout_cls == "TensorWiseINT8Layout" and getattr(w._params, "convrot", False)
+            and not getattr(w._params, "transposed", False) and not isinstance(x, QuantizedTensor)
+            and x.numel() // max(x.shape[-1], 1) < module.out_features
+            and len(module.weight_function) == 0 and not comfy.model_management.in_training)
+
+
+def _convrot_linear(x, weight, bias):
+    qdata, scale = quant_ops.TensorWiseINT8Layout.get_plain_tensors(weight)
+    group_size = weight._params.convrot_groupsize
+    x = _rotate_activation(x, _build_hadamard(group_size, device=x.device, dtype=x.dtype), group_size)
+    scale = scale.to(dtype=x.dtype).reshape(-1)
+    if x.dtype == torch.float16:
+        # Unscaled int8 sums can overflow fp16, so scale the weight (N*K) instead of the output (M*N).
+        return torch.nn.functional.linear(x, qdata.to(dtype=x.dtype) * scale.reshape(-1, 1), bias)
+    out = torch.nn.functional.linear(x, qdata.to(dtype=x.dtype)) * scale
+    return out if bias is None else out + bias
 
 
 class QuantLinearFunc(torch.autograd.Function):
@@ -1497,6 +1526,21 @@ def mixed_precision_ops(quant_config={}, compute_dtype=torch.bfloat16, full_prec
                 want_requant=False,
                 weight_only_quant=False,
             ):
+                if not weight_only_quant and _convrot_rotate_input(self, input):
+                    # Cast in the stored dtype: casting to the input dtype (fp32 in text encoders) would dequantize.
+                    with CastBiasWeightContext(
+                        self,
+                        input=None,
+                        dtype=self.weight.dtype,
+                        device=input.device,
+                        bias_dtype=input.dtype,
+                        offloadable=True,
+                        compute_dtype=compute_dtype,
+                    ) as (weight, bias):
+                        if isinstance(weight, QuantizedTensor):
+                            return _convrot_linear(input, weight, bias)
+                        return self._forward(input, weight.to(dtype=input.dtype), bias)
+
                 if not weight_only_quant:
                     with CastBiasWeightContext(
                         self,

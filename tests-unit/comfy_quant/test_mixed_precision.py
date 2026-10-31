@@ -341,6 +341,43 @@ class TestMixedPrecisionOps(unittest.TestCase):
         finally:
             mm.supports_int8_compute = orig_supports_int8
 
+    def test_int8_convrot_full_precision_rotates_input(self):
+        """With int8 compute disabled, a ConvRot layer with fewer input rows than outputs
+        rotates the input instead of dequantizing the weight, for bf16 and fp32 inputs, and
+        matches the dequantized weight. With more rows, it dequantizes the weight."""
+        torch.manual_seed(1)
+        weight = torch.randn(512, 1024, dtype=torch.bfloat16) * 0.02
+        bias = torch.randn(512, dtype=torch.bfloat16)
+        q_weight = QuantizedTensor.from_float(weight, "TensorWiseINT8Layout", per_channel=True, convrot=True, convrot_groupsize=256)
+        state_dict = {
+            "layer.weight": q_weight._qdata,
+            "layer.bias": bias,
+            "layer.weight_scale": q_weight._params.scale,
+        }
+        layer_quant_config = {"layer": {"format": "int8_tensorwise", "convrot": True, "convrot_groupsize": 256}}
+        state_dict, _ = comfy.utils.convert_old_quants(
+            state_dict,
+            metadata={"_quantization_metadata": json.dumps({"layers": layer_quant_config})},
+        )
+        devices = ["cpu"] + (["mps"] if torch.backends.mps.is_available() else [])
+        for device in devices:
+            model = torch.nn.Module()
+            model.layer = ops.mixed_precision_ops({}, disabled={"int8_tensorwise"}).Linear(1024, 512, device="cpu", dtype=torch.bfloat16)
+            model.load_state_dict(state_dict, strict=False)
+            model.to(device)
+            self.assertTrue(model.layer._full_precision_mm)
+            for rows, rotates_input in [(154, True), (600, False)]:
+                for dtype, tol in [(torch.bfloat16, 2e-2), (torch.float16, 2e-3), (torch.float32, 1e-4)]:
+                    with self.subTest(device=device, rows=rows, dtype=dtype):
+                        x = torch.randn(2, rows // 2, 1024, device=device, dtype=dtype)
+                        dequantized = q_weight.to(device=device, dtype=dtype).dequantize()
+                        ref = torch.nn.functional.linear(x, dequantized, bias.to(device, dtype))
+                        with unittest.mock.patch.object(ops, "_convrot_linear", wraps=ops._convrot_linear) as convrot_linear:
+                            out = model.layer(x)
+                        self.assertEqual(convrot_linear.called, rotates_input)
+                        self.assertEqual(out.dtype, dtype)
+                        torch.testing.assert_close(out.float(), ref.float(), rtol=tol, atol=tol)
+
     def test_linear_input_act_respects_full_precision_mm_fallback(self):
         """linear_input_act folds an activation into the INT8 GEMM's input quantizer,
         bypassing Linear.forward entirely. On a device where the fast int8 kernel is
