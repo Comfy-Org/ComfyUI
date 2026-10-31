@@ -1,5 +1,4 @@
 import argparse
-import sys
 from types import SimpleNamespace
 from unittest.mock import Mock, patch, mock_open
 
@@ -388,7 +387,7 @@ def test_served_version_ignores_other_downloaded_frontends():
 
 
 def test_served_version_of_the_default_frontend():
-    with patch.dict(sys.modules, {"comfyui_frontend_package": Mock()}):
+    with patch("importlib.util.find_spec", return_value=Mock()):
         with patch.object(FrontendManager, "default_frontend_path", return_value="/site/static"):
             with patch("app.frontend_management.version", return_value="1.57.6") as installed:
                 assert FrontendManager.served_version("/site/static") == "1.57.6"
@@ -396,5 +395,6 @@ def test_served_version_of_the_default_frontend():
 
 
 def test_served_version_does_not_exit_without_the_frontend_package():
-    with patch.dict(sys.modules, {"comfyui_frontend_package": None}):  # import raises ImportError
-        assert FrontendManager.served_version("/some/other/frontend") is None
+    with patch("importlib.util.find_spec", return_value=None):
+        with patch.object(FrontendManager, "default_frontend_path", side_effect=SystemExit(-1)):
+            assert FrontendManager.served_version("/some/other/frontend") is None
