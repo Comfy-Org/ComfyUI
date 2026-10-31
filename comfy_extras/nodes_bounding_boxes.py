@@ -150,7 +150,7 @@ def render_preview(regions, width, height, bg=None):
     return torch.from_numpy(arr).unsqueeze(0)
 
 
-def boxes_to_regions(boxes, width: int, height: int) -> list:
+def boxes_to_regions(boxes, width: int, height: int, *, use_canvas_size: bool = False) -> list:
     regions: list = []
     if not isinstance(boxes, list):
         return regions
@@ -159,8 +159,20 @@ def boxes_to_regions(boxes, width: int, height: int) -> list:
             continue
         meta = box.get("metadata")
         meta = meta if isinstance(meta, dict) else {}
+        box_width, box_height = width, height
+        canvas_size = meta.get("_canvas_size") if use_canvas_size else None
+        if isinstance(canvas_size, dict):
+            canvas_width, canvas_height = canvas_size.get("width"), canvas_size.get("height")
+            if all(
+                isinstance(value, (int, float))
+                and not isinstance(value, bool)
+                and value > 0
+                and (isinstance(value, int) or value.is_integer())
+                for value in (canvas_width, canvas_height)
+            ):
+                box_width, box_height = canvas_width, canvas_height
         regions.append({
-            **pixels_to_fractions(box, width, height),
+            **pixels_to_fractions(box, box_width, box_height),
             "type": meta.get("type", "obj"),
             "text": meta.get("text", ""),
             "desc": meta.get("desc", ""),
@@ -357,7 +369,7 @@ class CreateBoundingBoxes(io.ComfyNode):
         applied = last_incoming if isinstance(last_incoming, list) else []
         upstream_changed = bool(incoming) and incoming != applied
         source = incoming if upstream_changed else (editor_state or [])
-        regions = boxes_to_regions(source, width, height)
+        regions = boxes_to_regions(source, width, height, use_canvas_size=not upstream_changed)
         preview = render_preview(regions, width, height, _bg_from_image(background))
         ui = {"dims": [width, height]}
         if incoming:
