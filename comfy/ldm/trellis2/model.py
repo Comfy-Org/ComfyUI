@@ -867,6 +867,9 @@ def compute_stage_proj_feats(
     cam_angle = proj_pack["camera_angle_x"].to(device)
     num_views = int(proj_pack.get("num_views", 1))
     feat_map_lr, feat_map_hr, image_resolution = _select_stage_entry(proj_pack, stage)
+    # to() only applies memory_format when it copies, so force it for MPS even when the maps are already there
+    is_mps = torch.device(device).type == "mps"
+    memory_format = torch.contiguous_format if is_mps else torch.preserve_format
 
     if coords is not None:
         if coord_resolution is None:
@@ -882,10 +885,12 @@ def compute_stage_proj_feats(
     out = None
     for v in range(num_views):
         sel = slice(v, None, num_views)
-        proj = _back_project_to_tokens(coords_world, feat_map_lr[sel].to(device), T[sel], cam_angle[sel],
+        feat_lr = feat_map_lr[sel].to(device, copy=is_mps, memory_format=memory_format)
+        proj = _back_project_to_tokens(coords_world, feat_lr, T[sel], cam_angle[sel],
                                        image_resolution=image_resolution, batch_ids=batch_ids)
         if feat_map_hr is not None:
-            proj_hr = _back_project_to_tokens(coords_world, feat_map_hr[sel].to(device), T[sel], cam_angle[sel],
+            feat_hr = feat_map_hr[sel].to(device, copy=is_mps, memory_format=memory_format)
+            proj_hr = _back_project_to_tokens(coords_world, feat_hr, T[sel], cam_angle[sel],
                                               image_resolution=image_resolution, batch_ids=batch_ids)
             proj = torch.cat([proj, proj_hr], dim=-1)
         # average views in fp32 like upstream
