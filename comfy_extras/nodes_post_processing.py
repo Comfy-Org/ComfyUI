@@ -28,7 +28,7 @@ class Blend(io.ComfyNode):
                 io.Image.Input("image1"),
                 io.Image.Input("image2"),
                 io.Float.Input("blend_factor", default=0.5, min=0.0, max=1.0, step=0.01),
-                io.Combo.Input("blend_mode", options=["normal", "multiply", "screen", "overlay", "soft_light", "difference"]),
+                io.Combo.Input("blend_mode", options=["normal", "multiply", "screen", "overlay", "soft_light", "difference", "sum"]),
             ],
             outputs=[
                 io.Image.Output(),
@@ -65,6 +65,8 @@ class Blend(io.ComfyNode):
             return torch.where(img2 <= 0.5, img1 - (1 - 2 * img2) * img1 * (1 - img1), img1 + (2 * img2 - 1) * (cls.g(img1) - img1))
         elif mode == "difference":
             return img1 - img2
+        elif mode == "sum":
+            return img1 + img2
         raise ValueError(f"Unsupported blend mode: {mode}")
 
     @classmethod
