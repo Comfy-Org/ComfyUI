@@ -419,6 +419,8 @@ class VideoFromFile(VideoInput):
             else:
                 raise ValueError(f"Could not determine frame count for file '{self.__file}'\nNo frames exist for start_time {self.__start_time}")
             for frame in frame_iterator:
+                if isinstance(frame, av.Packet) and frame.size == 0:  # demux() ends with an empty flush packet, which is not a frame
+                    continue
                 if end_pts is not None and frame.pts >= end_pts:
                     break
                 frame_count += 1
