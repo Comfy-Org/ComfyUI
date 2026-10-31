@@ -161,6 +161,8 @@ class WeightHook(Hook):
             strength = self._strength_clip
         else:
             strength = self._strength_model
+            if strength != 0:
+                comfy.lora._reject_unsupported_keyless_h3_adapter(model.model)
 
         if self.need_weight_init:
             key_map = {}
@@ -641,6 +643,8 @@ def load_hook_lora_for_models(model: ModelPatcher, clip: CLIP, lora: dict[str, t
                               strength_model: float, strength_clip: float):
     key_map = {}
     if model is not None:
+        if strength_model != 0:
+            comfy.lora._reject_unsupported_keyless_h3_adapter(model.model)
         key_map = comfy.lora.model_lora_keys_unet(model.model, key_map)
     if clip is not None:
         key_map = comfy.lora.model_lora_keys_clip(clip.cond_stage_model, key_map)
