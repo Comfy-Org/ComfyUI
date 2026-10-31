@@ -677,6 +677,9 @@ class disable_weight_init:
         def _conv_forward(self, input, weight, bias, autopad=None, *args, **kwargs):
             if autopad == "causal_zero":
                 weight = weight[:, :, -input.shape[2]:, :, :]
+            if input.shape[2:] == weight.shape[2:] and self.padding == (0, 0, 0) and self.dilation == (1, 1, 1) and self.groups == 1:
+                # the kernel covers the whole input (pre-patched ViT embeds), so this is a linear; avoids the slow conv3d fallback when cudnn/MIOpen is disabled (AMD)
+                return torch.nn.functional.linear(input.flatten(1), weight.flatten(1), bias).view(input.shape[0], weight.shape[0], 1, 1, 1)
             if NVIDIA_MEMORY_CONV_BUG_WORKAROUND and weight.dtype in (torch.float16, torch.bfloat16):
                 out = torch.cudnn_convolution(input, weight, self.padding, self.stride, self.dilation, self.groups, benchmark=False, deterministic=False, allow_tf32=True)
                 if bias is not None:
