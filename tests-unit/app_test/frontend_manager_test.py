@@ -9,6 +9,7 @@ from app.frontend_management import (
     FrontendManager,
     FrontEndProvider,
     RELEASES_PER_PAGE,
+    REQUEST_TIMEOUT,
     Release,
 )
 from comfy.cli_args import DEFAULT_VERSION_STRING
@@ -477,8 +478,12 @@ def test_prerelease_skips_releases_without_a_frontend(mock_releases):
     screenshots = {**_prerelease("evidence/pr-1"), "assets": [{"name": "shot.png", "url": "https://example.com/shot.png"}]}
     no_assets = {k: v for k, v in _prerelease("v2.1.0-rc1").items() if k != "assets"}
     page = [screenshots, no_assets, *mock_releases, _prerelease("v2.0.0-rc1")]
-    with patch("app.frontend_management.requests.get", side_effect=[_release_page(page, next_url=f"{provider.release_url}?page=2")]):
+    with patch(
+        "app.frontend_management.requests.get",
+        side_effect=[_release_page(page, next_url=f"{provider.release_url}?page=2")],
+    ) as mock_get:
         assert provider.get_release("prerelease")["tag_name"] == "v2.0.0-rc1"
+    mock_get.assert_called_once_with(provider.release_url, timeout=REQUEST_TIMEOUT)
 
 
 def test_prerelease_is_not_picked_from_older_pages(mock_releases):
@@ -488,6 +493,7 @@ def test_prerelease_is_not_picked_from_older_pages(mock_releases):
     with patch(
         "app.frontend_management.requests.get",
         side_effect=[_release_page(stable_page, next_url=f"{provider.release_url}?page=2")],
-    ):
+    ) as mock_get:
         with pytest.raises(ValueError, match="No usable pre-release"):
             provider.get_release("prerelease")
+    mock_get.assert_called_once_with(provider.release_url, timeout=REQUEST_TIMEOUT)
