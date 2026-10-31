@@ -9,6 +9,7 @@ mock_nodes.MAX_RESOLUTION = 16384
 mock_server = MagicMock()
 
 with patch.dict("sys.modules", {"nodes": mock_nodes, "server": mock_server}):
+    from comfy_api.latest._io import build_nested_inputs, get_finalized_class_inputs
     from comfy_extras.nodes_math import MathExpressionNode
 
 
@@ -42,6 +43,11 @@ class TestMathExpressionExecute:
         result = self._exec("a * 2", a=5)
         assert result[0] == 10.0
         assert result[1] == 10
+
+    def test_no_inputs(self):
+        result = self._exec("17 / 14")
+        assert result[0] == pytest.approx(17 / 14)
+        assert result[1] == 1
 
     def test_three_inputs(self):
         result = self._exec("a + b + c", a=1, b=2, c=3)
@@ -204,3 +210,27 @@ class TestMathExpressionExecute:
         # This must raise a clean ValueError, not an uncaught OverflowError.
         with pytest.raises(ValueError, match="too large to represent as a float"):
             self._exec("2 ** 3999")
+
+
+class TestMathExpressionSchema:
+    def test_value_inputs_are_optional(self):
+        live_inputs = {"expression": "17 / 14"}
+        class_inputs, _, v3_data = get_finalized_class_inputs(
+            MathExpressionNode.INPUT_TYPES(), live_inputs
+        )
+        assert list(class_inputs["required"]) == ["expression"]
+        assert "values.a" in class_inputs["optional"]
+        assert build_nested_inputs(live_inputs, v3_data)["values"] == {}
+
+    def test_two_value_slots_offered_without_requiring_them(self):
+        template = MathExpressionNode.GET_NODE_INFO_V1()["input"]["required"]["values"][1]["template"]
+        assert template["min"] == 1
+        assert "value" in template["input"]["optional"]
+
+    def test_later_value_input_without_first(self):
+        live_inputs = {"expression": "b * 2", "values.b": 21}
+        class_inputs, _, v3_data = get_finalized_class_inputs(
+            MathExpressionNode.INPUT_TYPES(), live_inputs
+        )
+        assert list(class_inputs["required"]) == ["expression"]
+        assert build_nested_inputs(live_inputs, v3_data)["values"] == {"b": 21}
