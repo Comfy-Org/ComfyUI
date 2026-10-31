@@ -3,12 +3,16 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 import comfy.patcher_extension
+import comfy.model_prefetch
+import comfy.ops
 import comfy.utils
 from comfy.ldm.common_dit import pad_to_patch_size
 from comfy.ldm.flux.math import apply_rope1
 from comfy.ldm.modules.attention import AttentionTensorContainer, ComfyAttention, optimized_attention
 from comfy.ldm.modules.diffusionmodules.mmdit import TimestepEmbedder
+from comfy.text_encoders.llama import FixedKV
 
+from .conditioning import IMAGE_CONTEXT_ID, IM_END_ID, THINK_END_ID
 from .sampling import resolution_noise_scale
 
 
@@ -321,6 +325,36 @@ class Attention(nn.Module):
         )
         return self.o_proj_mot_gen(output)
 
+    def forward_decode(
+        self,
+        hidden_states,
+        rope,
+        cache,
+        transformer_options,
+    ):
+        """Decode tokens against an existing attention KV prefix."""
+
+        query, key, value = self._project(hidden_states, rope, False)
+        key, value = key.transpose(1, 2), value.transpose(1, 2)
+        position = cache.position.view(-1, 1, 1, 1).expand_as(key)
+        cache.key.scatter_(1, position, key)
+        cache.value.scatter_(1, position, value)
+        mask = torch.zeros(
+            (hidden_states.shape[0], 1, 1, cache.key.shape[1]), device=query.device, dtype=query.dtype,
+        ).masked_fill_(torch.arange(cache.key.shape[1], device=query.device) >= cache.seqlen.view(-1, 1, 1, 1), float("-inf"))
+        output = optimized_attention(
+            AttentionTensorContainer(query),
+            AttentionTensorContainer(cache.key.transpose(1, 2)),
+            AttentionTensorContainer(cache.value.transpose(1, 2)),
+            NUM_HEADS,
+            mask=mask,
+            skip_reshape=True,
+            transformer_options=transformer_options,
+            enable_gqa=True,
+            preferred_attention=self.comfy_attention,
+        )
+        return self.o_proj(output)
+
 
 class DecoderLayer(nn.Module):
     def __init__(self, device=None, dtype=None, operations=None):
@@ -339,6 +373,15 @@ class DecoderLayer(nn.Module):
         )
         self.post_attention_layernorm_mot_gen = operations.RMSNorm(
             HIDDEN_SIZE, eps=1e-6, device=device, dtype=dtype
+        )
+
+    def text_modules(self):
+        return (
+            self.input_layernorm, self.post_attention_layernorm, self.mlp,
+            self.self_attn.q_proj, self.self_attn.k_proj,
+            self.self_attn.v_proj, self.self_attn.o_proj,
+            self.self_attn.q_norm, self.self_attn.k_norm,
+            self.self_attn.q_norm_hw, self.self_attn.k_norm_hw,
         )
 
     def forward_prefix(self, prefix, prefix_rope, prefix_mask, transformer_options):
@@ -366,6 +409,27 @@ class DecoderLayer(nn.Module):
         image = image + self.mlp_mot_gen(self.post_attention_layernorm_mot_gen(image))
         return image
 
+    def forward_decode(
+        self,
+        hidden_states,
+        rope,
+        cache,
+        transformer_options,
+    ):
+        """Decode tokens through one transformer layer and extend its KV state."""
+
+        attention = self.self_attn.forward_decode(
+            self.input_layernorm(hidden_states),
+            rope,
+            cache,
+            transformer_options,
+        )
+        hidden_states = hidden_states + attention
+        hidden_states = hidden_states + self.mlp(
+            self.post_attention_layernorm(hidden_states)
+        )
+        return hidden_states
+
 
 class LanguageBackbone(nn.Module):
     def __init__(self, device=None, dtype=None, operations=None):
@@ -386,9 +450,17 @@ class LanguageBackbone(nn.Module):
 
 
 class LanguageModel(nn.Module):
-    def __init__(self, device=None, dtype=None, operations=None):
+    def __init__(self, has_lm_head=False, device=None, dtype=None, operations=None):
         super().__init__()
         self.model = LanguageBackbone(device=device, dtype=dtype, operations=operations)
+        if has_lm_head:
+            self.lm_head = operations.Linear(
+                HIDDEN_SIZE,
+                VOCAB_SIZE,
+                bias=False,
+                device=device,
+                dtype=dtype,
+            )
 
 
 class ConvDecoder(nn.Module):
@@ -412,15 +484,25 @@ class ConvDecoder(nn.Module):
 
 class SenseNovaU15(nn.Module):
     def __init__(
-        self, image_model=None, dtype=None, device=None, operations=None, **kwargs
+        self,
+        image_model=None,
+        has_lm_head=False,
+        dtype=None,
+        device=None,
+        operations=None,
+        **kwargs,
     ):
         super().__init__()
         self.dtype = dtype
+        self.has_lm_head = has_lm_head
         self.vision_model = VisionModel(
             device=device, dtype=dtype, operations=operations
         )
         self.language_model = LanguageModel(
-            device=device, dtype=dtype, operations=operations
+            has_lm_head=has_lm_head,
+            device=device,
+            dtype=dtype,
+            operations=operations,
         )
         self.fm_modules = nn.ModuleDict(
             {
@@ -451,13 +533,17 @@ class SenseNovaU15(nn.Module):
     def _prepare_prefix(
         self, text_input_ids, reference_images, prefix_indexes, prefix_mask
     ):
-        prefix = self.language_model.model.embed_tokens(text_input_ids)
+        embed = self.language_model.model.embed_tokens
+        if hasattr(embed, "_v") and embed.weight_lowvram_function is None and len(embed.weight_function) == 0 and comfy.ops.vbar_above_watermark(embed):
+            prefix = embed.host_rows(text_input_ids)
+        else:
+            prefix = embed(text_input_ids)
         if reference_images:
             reference_embeds = [
                 self.vision_model(_pad_to_merged_patch_size(reference))
                 for reference in reference_images
             ]
-            selected = text_input_ids == 151669
+            selected = text_input_ids == IMAGE_CONTEXT_ID
             prefix = prefix.clone()
             prefix[selected] = torch.cat(reference_embeds, dim=1).reshape(
                 -1, HIDDEN_SIZE
@@ -488,12 +574,13 @@ class SenseNovaU15(nn.Module):
 
         return prefix, prefix_indexes, prefix_mask, prefix_time
 
-    def preprocess_prefix(
+    def _preprocess_prefix_state(
         self,
         text_input_ids,
         reference_images=None,
         prefix_indexes=None,
         prefix_mask=None,
+        transformer_options=None,
     ):
         prefix, prefix_indexes, prefix_mask, prefix_time = self._prepare_prefix(
             text_input_ids, reference_images, prefix_indexes, prefix_mask
@@ -501,18 +588,204 @@ class SenseNovaU15(nn.Module):
         prefix_keys = []
         prefix_values = []
         prefix_rope = _prepare_mrope(prefix_indexes, prefix.device, prefix.dtype)
-        transformer_options = {}
-        for layer_index, layer in enumerate(self.language_model.model.layers):
-            transformer_options["block_index"] = layer_index
-            prefix, prefix_key, prefix_value = layer.forward_prefix(
-                prefix,
-                prefix_rope,
+        if transformer_options is None:
+            transformer_options = {}
+        prefetch = comfy.model_prefetch.make_prefetch_queue(
+            [layer.text_modules() for layer in self.language_model.model.layers],
+            prefix.device, transformer_options,
+        )
+        with comfy.model_prefetch.malloc_graph_scope(prefix.device):
+            for layer_index, layer in enumerate(self.language_model.model.layers):
+                comfy.model_prefetch.prefetch_queue_pop(prefetch, prefix.device, layer, prefix.dtype, malloc_scope="prefix")
+                transformer_options["block_index"] = layer_index
+                output, prefix_key, prefix_value = layer.forward_prefix(
+                    prefix,
+                    prefix_rope,
+                    prefix_mask,
+                    transformer_options,
+                )
+                with comfy.model_prefetch.pause_malloc_graph():
+                    prefix_keys.append(prefix_key.clone())
+                    prefix_values.append(prefix_value.clone())
+                prefix.copy_(output)
+                del output, prefix_key, prefix_value
+            comfy.model_prefetch.prefetch_queue_pop(prefetch, prefix.device, None, malloc_scope="prefix")
+        return prefix, prefix_keys, prefix_values, prefix_time
+
+    def preprocess_prefix(
+        self,
+        text_input_ids,
+        reference_images=None,
+        prefix_indexes=None,
+        prefix_mask=None,
+        transformer_options=None,
+    ):
+        """Precompute the text and reference-image prefix KV state."""
+
+        _, prefix_keys, prefix_values, prefix_time = (
+            SenseNovaU15._preprocess_prefix_state(
+                self,
+                text_input_ids,
+                reference_images,
+                prefix_indexes,
                 prefix_mask,
                 transformer_options,
             )
-            prefix_keys.append(prefix_key)
-            prefix_values.append(prefix_value)
+        )
         return prefix_keys, prefix_values, prefix_time
+
+    def _next_text_token(self, hidden_states):
+        hidden_states = self.language_model.model.norm(hidden_states[:, -1:])
+        return self.language_model.lm_head(hidden_states)[:, -1].argmax(dim=-1)
+
+    def _decode_text_token(
+        self,
+        token,
+        caches,
+        hidden_states,
+        rope,
+        transformer_options=None,
+    ):
+        embed = self.language_model.model.embed_tokens
+        if hasattr(embed, "_v") and embed.weight_lowvram_function is None and len(embed.weight_function) == 0 and comfy.ops.vbar_above_watermark(embed):
+            hidden_states.copy_(embed.host_rows(token[:, None], out_dtype=hidden_states.dtype))
+        else:
+            hidden_states.copy_(embed(token[:, None]))
+        if caches:
+            caches[0].prepare(1)
+        if transformer_options is None:
+            transformer_options = {}
+        prefetch = comfy.model_prefetch.make_prefetch_queue(
+            [layer.text_modules() for layer in self.language_model.model.layers],
+            hidden_states.device, transformer_options,
+        )
+        with comfy.model_prefetch.malloc_graph_scope(hidden_states.device):
+            for layer_index, layer in enumerate(self.language_model.model.layers):
+                transformer_options["block_index"] = layer_index
+                cache = caches[layer_index]
+
+                def core():
+                    hidden_states.copy_(layer.forward_decode(hidden_states, rope, cache, transformer_options))
+
+                comfy.model_prefetch.prefetch_queue_pop(
+                    prefetch, hidden_states.device, layer.input_layernorm, hidden_states.dtype,
+                    core=core, enable_graph=True, malloc_scope="decode",
+                )
+                cache.advance(1)
+            comfy.model_prefetch.prefetch_queue_pop(prefetch, hidden_states.device, None, malloc_scope="decode")
+
+    def generate_thinking_tokens(
+        self,
+        text_input_ids,
+        reference_images=None,
+        prefix_indexes=None,
+        prefix_mask=None,
+        max_think_tokens=1024,
+        transformer_options=None,
+        progress=None,
+        interrupt=None,
+    ):
+        """Return thinking token IDs, closing unfinished thinking at the limit."""
+
+        token_ids, stop_token_id = self.generate_text_tokens(
+            text_input_ids,
+            reference_images,
+            prefix_indexes,
+            prefix_mask,
+            max_tokens=max_think_tokens,
+            stop_token_ids=(THINK_END_ID,),
+            transformer_options=transformer_options,
+            progress=progress,
+            interrupt=interrupt,
+        )
+        if stop_token_id != THINK_END_ID:
+            token_ids.append(THINK_END_ID)
+        return token_ids
+
+    def generate_text_tokens(
+        self,
+        text_input_ids,
+        reference_images=None,
+        prefix_indexes=None,
+        prefix_mask=None,
+        *,
+        max_tokens,
+        stop_token_ids,
+        transformer_options=None,
+        progress=None,
+        interrupt=None,
+    ):
+        """Return generated IDs and the stop token (None at the token limit).
+
+        EOS is excluded from the returned IDs; other stop tokens are included.
+        KV state is local to this call.
+        """
+
+        if not self.has_lm_head:
+            raise RuntimeError(
+                "This SenseNova checkpoint does not contain language_model.lm_head.weight, "
+                "which is required for text generation."
+            )
+        if text_input_ids.shape[0] != 1:
+            raise ValueError("SenseNova text generation currently requires a single prompt batch.")
+
+        hidden_states, prefix_keys, prefix_values, prefix_time = (
+            self._preprocess_prefix_state(
+                text_input_ids,
+                reference_images,
+                prefix_indexes,
+                prefix_mask,
+                transformer_options,
+            )
+        )
+        comfy.model_prefetch.cleanup_malloc_graph()
+        next_token = self._next_text_token(hidden_states)
+        decode_hidden = torch.empty_like(hidden_states[:, -1:])
+        del hidden_states
+        token_ids = []
+        for step in range(max_tokens):
+            if interrupt is not None:
+                interrupt()
+            token_id = int(next_token.item())
+            if token_id == IM_END_ID:
+                return token_ids, token_id
+            token_ids.append(token_id)
+            if progress is not None:
+                progress(step + 1)
+            if token_id in stop_token_ids:
+                return token_ids, token_id
+            if step + 1 == max_tokens:
+                break
+            if step == 0:
+                batch = text_input_ids.shape[0]
+                position = torch.empty((batch,), device=decode_hidden.device, dtype=torch.int64)
+                seqlen = torch.full((batch,), text_input_ids.shape[1], device=decode_hidden.device, dtype=torch.int32)
+                caches = []
+                for index in range(len(prefix_keys)):
+                    key, value = prefix_keys[index], prefix_values[index]
+                    _, heads, length, head_dim = key.shape
+                    buffer = key.new_zeros((batch, length + max_tokens - 1, heads, head_dim))
+                    cache = FixedKV(buffer, torch.zeros_like(buffer), length, position, seqlen)
+                    cache.key[:, :length].copy_(key.transpose(1, 2))
+                    cache.value[:, :length].copy_(value.transpose(1, 2))
+                    caches.append(cache)
+                    prefix_keys[index] = prefix_values[index] = None
+                    del key, value, buffer, cache
+                del prefix_keys, prefix_values
+                positions = prefix_time[:, None] + torch.arange(max_tokens - 1, device=prefix_time.device)
+                zeros = torch.zeros_like(positions)
+                ropes = _prepare_mrope(torch.stack((positions, zeros, zeros)), decode_hidden.device, decode_hidden.dtype)
+                rope = tuple(tuple(freq[:, :, :1].clone() for freq in pair) for pair in ropes)
+            else:
+                for target, source in zip(rope, ropes):
+                    for dst, src in zip(target, source):
+                        dst.copy_(src[:, :, step:step + 1])
+            self._decode_text_token(
+                next_token, caches, decode_hidden, rope, transformer_options,
+            )
+            next_token = self._next_text_token(decode_hidden)
+
+        return token_ids, None
 
     def _forward(
         self,
@@ -535,6 +808,8 @@ class SenseNovaU15(nn.Module):
         original_height, original_width = x.shape[-2:]
         x = _pad_to_merged_patch_size(x)
         batch, _, height, width = x.shape
+        # Text thinking is completed by SenseNovaGenerate before sampling.
+        # KSampler only consumes a regular or precomputed KV prefix here.
         if prefix_keys is None:
             text_input_ids, prefix_indexes, prefix_mask = _match_prefix_batch(
                 batch, text_input_ids, prefix_indexes, prefix_mask
@@ -578,7 +853,9 @@ class SenseNovaU15(nn.Module):
             prefix, prefix_indexes, prefix_mask, prefix_time = self._prepare_prefix(
                 text_input_ids, reference_images, prefix_indexes, prefix_mask
             )
-            prefix_rope = _prepare_mrope(prefix_indexes, prefix.device, prefix.dtype)
+            prefix_rope = _prepare_mrope(
+                prefix_indexes, prefix.device, prefix.dtype
+            )
         image_time = prefix_time.repeat_interleave(generation_batch)
 
         image_positions = torch.arange(image_length, dtype=torch.long, device=x.device)
