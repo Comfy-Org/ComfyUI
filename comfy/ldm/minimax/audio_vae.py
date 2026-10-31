@@ -15,6 +15,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 import comfy.ops
+from . import audio_vae_kernels
 
 ops = comfy.ops.disable_weight_init
 
@@ -48,8 +49,12 @@ class SnakeBeta(nn.Module):
         self.beta = nn.Parameter(torch.empty(in_features))
 
     def forward(self, x):
-        alpha = torch.exp(comfy.ops.cast_to_input(self.alpha, x)).view(1, -1, 1)
-        beta = torch.exp(comfy.ops.cast_to_input(self.beta, x)).view(1, -1, 1)
+        alpha = comfy.ops.cast_to_input(self.alpha, x)
+        beta = comfy.ops.cast_to_input(self.beta, x)
+        if audio_vae_kernels.can_use(x, alpha, beta) and alpha.numel() == beta.numel() == x.shape[1]:
+            return audio_vae_kernels.snake_beta(x, alpha, beta)
+        alpha = torch.exp(alpha).view(1, -1, 1)
+        beta = torch.exp(beta).view(1, -1, 1)
         return snake(x, alpha, beta)
 
 
@@ -98,6 +103,9 @@ class UpSample1d(nn.Module):
 
     def forward(self, x):
         _, C, _ = x.shape
+        if (self.ratio == 2 and self.stride == 2 and self.pad == 5 and self.pad_left == 15 and self.pad_right == 15
+                and self.filter.shape == (1, 1, 12) and audio_vae_kernels.can_use(x, self.filter)):
+            return audio_vae_kernels.fir2x(x, comfy.ops.cast_to_input(self.filter, x), up=True)
         x = F.pad(x, (self.pad, self.pad), mode="replicate")
         x = F.conv_transpose1d(x, comfy.ops.cast_to_input(self.filter.expand(C, -1, -1), x), stride=self.stride, groups=C).mul_(self.ratio)
         x = x[..., self.pad_left:-self.pad_right]
@@ -114,6 +122,9 @@ class LowPassFilter1d(nn.Module):
 
     def forward(self, x):
         _, C, _ = x.shape
+        if (self.stride == 2 and self.pad_left == 5 and self.pad_right == 6
+                and self.filter.shape == (1, 1, 12) and audio_vae_kernels.can_use(x, self.filter)):
+            return audio_vae_kernels.fir2x(x, comfy.ops.cast_to_input(self.filter, x), up=False)
         x = F.pad(x, (self.pad_left, self.pad_right), mode="replicate")
         return F.conv1d(x, comfy.ops.cast_to_input(self.filter.expand(C, -1, -1), x), stride=self.stride, groups=C)
 
