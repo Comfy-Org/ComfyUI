@@ -8,6 +8,7 @@ import zipfile
 import importlib
 from dataclasses import dataclass
 from functools import cached_property
+from itertools import islice
 from pathlib import Path
 from typing import Dict, Iterator, TypedDict, Optional
 from aiohttp import web
@@ -20,6 +21,9 @@ from utils.install_util import get_missing_requirements_message, get_required_pa
 
 from comfy.cli_args import DEFAULT_VERSION_STRING
 import app.logger
+
+
+RELEASES_PER_PAGE = 30  # GitHub's default page size for the releases API
 
 
 def frontend_install_warning_message():
@@ -114,6 +118,10 @@ class Release(TypedDict):
     assets: NotRequired[list[Asset]]
 
 
+def _has_frontend(release: Release) -> bool:
+    return any(asset["name"] == "dist.zip" for asset in release.get("assets", []))
+
+
 @dataclass
 class FrontEndProvider:
     owner: str
@@ -154,17 +162,19 @@ class FrontEndProvider:
     @cached_property
     def latest_prerelease(self) -> Release:
         """Get the latest pre-release version - even if it's older than the latest release"""
-        # GitHub returns releases in reverse chronological order, so the first pre-release is the
-        # latest. Stop there instead of paging through every release: each page is one request
-        # against the 60/hour unauthenticated GitHub API limit.
+        # GitHub returns releases in reverse chronological order, so the first usable pre-release is
+        # the latest. A pre-release without dist.zip has no frontend to install (some hold only
+        # screenshots). Look only at the newest page: each page is one request against the 60/hour
+        # unauthenticated GitHub API limit, and anything older is not a useful pre-release.
         # Reuse the full list if a caller already fetched it (cached_property stores it on the instance).
         releases = self.__dict__.get("all_releases")
         if releases is None:
             releases = self.iter_releases()
-        release = next((release for release in releases if release["prerelease"]), None)
+        recent = islice(releases, RELEASES_PER_PAGE)
+        release = next((release for release in recent if release["prerelease"] and _has_frontend(release)), None)
 
         if release is None:
-            raise ValueError("No pre-releases found")
+            raise ValueError(f"No usable pre-release in the {RELEASES_PER_PAGE} newest releases")
 
         return release
 

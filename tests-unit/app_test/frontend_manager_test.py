@@ -8,6 +8,7 @@ from requests.exceptions import HTTPError
 from app.frontend_management import (
     FrontendManager,
     FrontEndProvider,
+    RELEASES_PER_PAGE,
     Release,
 )
 from comfy.cli_args import DEFAULT_VERSION_STRING
@@ -133,6 +134,7 @@ def _prerelease(tag):
         created_at="2022-03-01T00:00:00Z",
         published_at="2022-03-01T00:00:00Z",
         body="",
+        assets=[{"name": "dist.zip", "url": "https://example.com/dist.zip"}],
     )
 
 
@@ -171,7 +173,7 @@ def test_get_release_prerelease_pages_until_found(mock_releases):
 def test_get_release_prerelease_none_found(mock_releases):
     provider = FrontEndProvider(owner="test-owner", repo="test-repo")
     with patch("app.frontend_management.requests.get", return_value=_release_page(mock_releases)):
-        with pytest.raises(ValueError, match="No pre-releases found"):
+        with pytest.raises(ValueError, match="No usable pre-release"):
             provider.get_release("prerelease")
 
 
@@ -468,3 +470,24 @@ def test_template_asset_map_skips_missing_assets():
         asset_map = FrontendManager.template_asset_map()
 
     assert asset_map == {"example.json": "/templates/example.json"}
+
+
+def test_prerelease_skips_releases_without_a_frontend(mock_releases):
+    provider = FrontEndProvider(owner="test-owner", repo="test-repo")
+    screenshots = {**_prerelease("evidence/pr-1"), "assets": [{"name": "shot.png", "url": "https://example.com/shot.png"}]}
+    no_assets = {k: v for k, v in _prerelease("v2.1.0-rc1").items() if k != "assets"}
+    page = [screenshots, no_assets, *mock_releases, _prerelease("v2.0.0-rc1")]
+    with patch("app.frontend_management.requests.get", side_effect=[_release_page(page, next_url=f"{provider.release_url}?page=2")]):
+        assert provider.get_release("prerelease")["tag_name"] == "v2.0.0-rc1"
+
+
+def test_prerelease_is_not_picked_from_older_pages(mock_releases):
+    provider = FrontEndProvider(owner="test-owner", repo="test-repo")
+    stable_page = (mock_releases * 30)[:RELEASES_PER_PAGE]
+    # side_effect with one page: a second request raises StopIteration.
+    with patch(
+        "app.frontend_management.requests.get",
+        side_effect=[_release_page(stable_page, next_url=f"{provider.release_url}?page=2")],
+    ):
+        with pytest.raises(ValueError, match="No usable pre-release"):
+            provider.get_release("prerelease")
