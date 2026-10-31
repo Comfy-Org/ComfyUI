@@ -338,14 +338,10 @@ class RegexExtract(io.ComfyNode):
                     result = ""
 
             elif mode == "All Matches":
-                matches = re.findall(regex_pattern, string, flags)
-                if matches:
-                    if isinstance(matches[0], tuple):
-                        result = join_delimiter.join([m[0] for m in matches])
-                    else:
-                        result = join_delimiter.join(matches)
-                else:
-                    result = ""
+                # finditer, not findall: findall returns the capture groups
+                # instead of the matches once the pattern has any group.
+                matches = re.finditer(regex_pattern, string, flags)
+                result = join_delimiter.join(match.group(0) for match in matches)
 
             elif mode == "First Group":
                 match = re.search(regex_pattern, string, flags)
