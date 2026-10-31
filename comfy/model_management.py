@@ -389,6 +389,9 @@ except AttributeError:
 def is_oom(e):
     if isinstance(e, OOM_EXCEPTION):
         return True
+    # MPS allocator OOM is a plain RuntimeError, not torch.AcceleratorError.
+    if isinstance(e, RuntimeError) and str(e).startswith("MPS backend out of memory"):
+        return True
     if isinstance(e, ACCELERATOR_ERROR) and (getattr(e, 'error_code', None) == 2 or "out of memory" in str(e).lower()):
         discard_cuda_async_error()
         return True
