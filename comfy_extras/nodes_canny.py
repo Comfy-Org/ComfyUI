@@ -30,8 +30,11 @@ class Canny(io.ComfyNode):
 
     @classmethod
     def execute(cls, image, low_threshold, high_threshold) -> io.NodeOutput:
-        output = canny(image[..., :3].to(device=comfy.model_management.get_torch_device(), dtype=torch.float32).movedim(-1, 1), low_threshold, high_threshold)
-        img_out = output[1].to(device=comfy.model_management.intermediate_device(), dtype=comfy.model_management.intermediate_dtype()).repeat(1, 3, 1, 1).movedim(1, -1)
+        device = comfy.model_management.get_torch_device()
+        img_out = torch.empty(image.shape[:-1] + (3,), device=comfy.model_management.intermediate_device(), dtype=comfy.model_management.intermediate_dtype())
+        for i, frame in enumerate(image[..., :3].split(1)):
+            edges = canny(frame.to(device=device, dtype=torch.float32).movedim(-1, 1), low_threshold, high_threshold)[1]
+            img_out[i] = edges[0, 0, :, :, None]
         return io.NodeOutput(img_out)
 
 
