@@ -165,7 +165,7 @@ class AssetsEnabled:
         register_assets_routes(app, user_manager)
 
     def ensure_scan_started(self) -> None:
-        asset_seeder.start(roots=("models", "input", "output"))
+        asset_seeder.start(roots=("input", "output"))
 
     def pause_background_scan(self) -> None:
         asset_seeder.pause()
