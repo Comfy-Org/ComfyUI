@@ -496,6 +496,7 @@ PRICE_BADGE_VIDEO = IO.PriceBadge(
 
 PIXVERSE_MODELS = {
     "PixVerse V6": "v6",
+    "PixVerse V6 Max": "v6-max",
 }
 
 PRICE_BADGE_PIXVERSE = IO.PriceBadge(
@@ -506,11 +507,24 @@ PRICE_BADGE_PIXVERSE = IO.PriceBadge(
     (
       $prices := {
         "pixverse v6": {
-          "360p": {"false": 0.0715, "true": 0.1001},
-          "540p": {"false": 0.1001, "true": 0.1287},
-          "720p": {"false": 0.1287, "true": 0.1716},
-          "1080p": {"false": 0.2574, "true": 0.3289}
-        }
+          "360p": {"false": 0.02431, "true": 0.034034},
+          "540p": {"false": 0.034034, "true": 0.043758},
+          "720p": {"false": 0.043758, "true": 0.058344},
+          "1080p": {"false": 0.087516, "true": 0.111826}
+        },
+        "pixverse v6 max": $now() < "2026-11-03T00:00:00.000Z"
+          ? {
+            "360p": {"false": 0.0317778, "true": 0.0444889},
+            "540p": {"false": 0.0444889, "true": 0.0572},
+            "720p": {"false": 0.0572, "true": 0.0762667},
+            "1080p": {"false": 0.1144, "true": 0.1461778}
+          }
+          : {
+            "360p": {"false": 0.0381333, "true": 0.0572},
+            "540p": {"false": 0.0572, "true": 0.0699111},
+            "720p": {"false": 0.0699111, "true": 0.0953333},
+            "1080p": {"false": 0.1398222, "true": 0.1779556}
+          }
       };
       $model := $lookup(widgets, "model");
       $table := $type($model) = "string" ? $lookup($prices, $lowercase($model)) : undefined;
@@ -538,10 +552,10 @@ PRICE_BADGE_PIXVERSE_FUSION = IO.PriceBadge(
     (
       $rates := {
         "pixverse v6": {
-          "360p": {"false": 0.0715, "true": 0.1001},
-          "540p": {"false": 0.1001, "true": 0.1287},
-          "720p": {"false": 0.1287, "true": 0.1716},
-          "1080p": {"false": 0.2574, "true": 0.3289}
+          "360p": {"false": 0.02431, "true": 0.034034},
+          "540p": {"false": 0.034034, "true": 0.043758},
+          "720p": {"false": 0.043758, "true": 0.058344},
+          "1080p": {"false": 0.087516, "true": 0.111826}
         }
       };
       $model := $lookup(widgets, "model");
@@ -567,9 +581,10 @@ def _pixverse6_inputs(
     *,
     aspect_ratio_options: list | None = None,
     with_multi_clip: bool = False,
+    with_style: bool = True,
     prompt_tooltip: str = "Prompt for the video generation.",
-    quality_tooltip: str = "Output resolution. Sets the long edge: 360p is 640px, 540p 1024px, "
-    "720p 1280px, 1080p 1920px.",
+    quality_tooltip: str = "Output resolution. The exact frame size depends on the aspect ratio, "
+    "e.g. 720p is 1280x720 at 16:9 and 960x960 at 1:1.",
 ) -> list:
     inputs = [
         IO.String.Input("prompt", multiline=True, default="", tooltip=prompt_tooltip),
@@ -626,14 +641,17 @@ def _pixverse6_inputs(
             optional=True,
             tooltip="An optional text description of undesired elements in the video.",
         ),
-        IO.Combo.Input(
-            "style",
-            options=PixverseV6Style,
-            default=PixverseV6Style.none,
-            optional=True,
-            tooltip="An optional visual style applied to the whole video.",
-        ),
     ]
+    if with_style:
+        inputs.append(
+            IO.Combo.Input(
+                "style",
+                options=PixverseV6Style,
+                default=PixverseV6Style.none,
+                optional=True,
+                tooltip="An optional visual style applied to the whole video.",
+            )
+        )
     return inputs
 
 
@@ -719,9 +737,23 @@ class PixverseV6TextToVideoNode(IO.ComfyNode):
             category="partner/video/PixVerse",
             description="Generates a video from a text prompt with PixVerse, optionally with native audio.",
             inputs=[
-                _pixverse_model_input(
-                    aspect_ratio_options=PixverseV6AspectRatio,
-                    with_multi_clip=True,
+                IO.DynamicCombo.Input(
+                    "model",
+                    options=[
+                        IO.DynamicCombo.Option(
+                            "PixVerse V6",
+                            _pixverse6_inputs(aspect_ratio_options=PixverseV6AspectRatio, with_multi_clip=True),
+                        ),
+                        IO.DynamicCombo.Option(
+                            "PixVerse V6 Max",
+                            _pixverse6_inputs(
+                                aspect_ratio_options=PixverseV6AspectRatio,
+                                with_multi_clip=True,
+                                with_style=False,
+                            ),
+                        ),
+                    ],
+                    tooltip="Model and generation settings.",
                 ),
             ],
             outputs=[IO.Video.Output()],
@@ -758,7 +790,14 @@ class PixverseV6ImageToVideoNode(IO.ComfyNode):
             "The output keeps the aspect ratio of the input image.",
             inputs=[
                 IO.Image.Input("image"),
-                _pixverse_model_input(with_multi_clip=True),
+                IO.DynamicCombo.Input(
+                    "model",
+                    options=[
+                        IO.DynamicCombo.Option("PixVerse V6", _pixverse6_inputs(with_multi_clip=True)),
+                        IO.DynamicCombo.Option("PixVerse V6 Max", _pixverse6_inputs(with_style=False)),
+                    ],
+                    tooltip="Model and generation settings.",
+                ),
             ],
             outputs=[IO.Video.Output()],
             hidden=[
@@ -779,7 +818,7 @@ class PixverseV6ImageToVideoNode(IO.ComfyNode):
             PixverseV6ImageVideoRequest(
                 **common,
                 img_id=await upload_image_to_pixverse(cls, image),
-                generate_multi_clip_switch=model["multi_clip"],
+                generate_multi_clip_switch=model.get("multi_clip"),
             ),
         )
 

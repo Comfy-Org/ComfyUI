@@ -103,10 +103,6 @@ class Ideogram4Qwen3VLTokenizer(comfy.text_encoders.qwen3vl.Qwen3VLTokenizer):
     def __init__(self, embedding_directory=None, tokenizer_data={}):
         super().__init__(embedding_directory=embedding_directory, tokenizer_data=tokenizer_data, model_type="qwen3vl_8b")
 
-    def tokenize_with_weights(self, text, return_word_ids=False, llama_template=None, images=[], prevent_empty_text=False, thinking=True, **kwargs):
-        # Ideogram 4 conditions on the no-think template; default thinking=True drops the empty think block qwen3vl adds.
-        return super().tokenize_with_weights(text, return_word_ids=return_word_ids, llama_template=llama_template, images=images, prevent_empty_text=prevent_empty_text, thinking=thinking, **kwargs)
-
 
 def te_qwen3vl(dtype_llama=None, llama_quantization_metadata=None):
     class Ideogram4Qwen3VLTEModel_(Ideogram4Qwen3VLTEModel):

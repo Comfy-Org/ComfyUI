@@ -160,6 +160,7 @@ upcast.add_argument("--dont-upcast-attention", action="store_true", help="Disabl
 
 
 parser.add_argument("--enable-manager", action="store_true", help="Enable the ComfyUI-Manager feature.")
+parser.add_argument("--enable-agent", action="store_true", help="Enable the ComfyUI agent feature.")
 manager_group = parser.add_mutually_exclusive_group()
 manager_group.add_argument("--disable-manager-ui", action="store_true", help="Disables only the ComfyUI-Manager UI and endpoints. Scheduled installations and similar background tasks will still operate.")
 manager_group.add_argument("--enable-manager-legacy-ui", action="store_true", help="Enables the legacy UI of ComfyUI-Manager. Implies --enable-manager.")
@@ -209,6 +210,7 @@ parser.add_argument("--mmap-torch-files", action="store_true", help="Use mmap wh
 parser.add_argument("--disable-mmap", action="store_true", help="Don't use mmap when loading safetensors.")
 
 parser.add_argument("--dont-print-server", action="store_true", help="Don't print server output.")
+parser.add_argument("--disable-product-tips", action="store_true", help="Hide console tips about new products from Comfy-Org. Same as setting the env var COMFYUI_DISABLE_PRODUCT_TIPS=1.")
 parser.add_argument("--quick-test-for-ci", action="store_true", help="Quick test for CI.")
 parser.add_argument("--windows-standalone-build", action="store_true", help="Windows standalone build: Enable convenient things that most people using the standalone windows build will probably enjoy (like auto opening the page on startup and turning on the assets system; --disable-assets turns it off).")
 

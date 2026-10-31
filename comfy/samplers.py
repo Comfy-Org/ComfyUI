@@ -1234,7 +1234,8 @@ class CFGGuider:
             sampler,
             comfy.patcher_extension.get_all_wrappers(comfy.patcher_extension.WrappersMP.SAMPLER_SAMPLE, extra_args["model_options"], is_model_options=True)
         )
-        samples = executor.execute(self, sigmas, extra_args, callback, noise, latent_image, denoise_mask, disable_pbar)
+        with self.model_patcher.writable_models(self.conds, noise.shape, self.model_options):
+            samples = executor.execute(self, sigmas, extra_args, callback, noise, latent_image, denoise_mask, disable_pbar)
         return self.inner_model.process_latent_out(samples.to(torch.float32))
 
     def outer_sample(self, noise, latent_image, sampler, sigmas, denoise_mask=None, callback=None, disable_pbar=False, seed=None, latent_shapes=None):

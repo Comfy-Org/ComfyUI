@@ -161,9 +161,11 @@ class KleinTokenizer(sd1_clip.SD1Tokenizer):
         super().__init__(embedding_directory=embedding_directory, tokenizer_data=tokenizer_data, name=name, tokenizer=tokenizer)
         self.llama_template = "<|im_start|>user\n{}<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
 
-    def tokenize_with_weights(self, text, return_word_ids=False, llama_template=None, system_prompt="", **kwargs):
+    def tokenize_with_weights(self, text, return_word_ids=False, llama_template=None, system_prompt="", thinking=False, **kwargs):
         if llama_template is None:
             llama_text = self.llama_template.format(text)
+            if thinking:  # hybrid Qwen3 chat template: the model opens its own think block
+                llama_text = llama_text.removesuffix("<think>\n\n</think>\n\n")
         else:
             llama_text = llama_template.format(text)
         if system_prompt:
@@ -204,9 +206,9 @@ class Flux3Tokenizer(comfy.text_encoders.qwen3vl.Qwen3VLTokenizer):
     def __init__(self, embedding_directory=None, tokenizer_data={}):
         super().__init__(embedding_directory=embedding_directory, tokenizer_data=tokenizer_data, model_type="qwen3vl_4b")
 
-    def tokenize_with_weights(self, text, return_word_ids=False, thinking=True, **kwargs):
-        # instruct template without a think block, right padded to a multiple of 80 tokens
-        tokens = super().tokenize_with_weights(text, return_word_ids=return_word_ids, thinking=thinking, **kwargs)
+    def tokenize_with_weights(self, text, return_word_ids=False, **kwargs):
+        # instruct template, right padded to a multiple of 80 tokens
+        tokens = super().tokenize_with_weights(text, return_word_ids=return_word_ids, **kwargs)
         pad = (151643, 1.0, 0) if return_word_ids else (151643, 1.0)
         for batch in tokens[self.clip_name]:
             batch.extend([pad] * (-len(batch) % 80))
