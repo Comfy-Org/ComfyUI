@@ -1,0 +1,490 @@
+{
+  "revision": 0,
+  "last_node_id": "7",
+  "last_link_id": 0,
+  "nodes": [
+    {
+      "id": 7,
+      "type": "5b702329-a5ec-4a7d-b000-213d0c04bbbd",
+      "pos": [
+        -4190,
+        6020
+      ],
+      "size": [
+        350,
+        190
+      ],
+      "flags": {},
+      "order": 2,
+      "mode": 0,
+      "inputs": [
+        {
+          "localized_name": "image",
+          "name": "image",
+          "type": "IMAGE",
+          "link": null
+        },
+        {
+          "name": "resolution_level",
+          "type": "INT",
+          "widget": {
+            "name": "resolution_level"
+          },
+          "link": null
+        },
+        {
+          "name": "batch_size",
+          "type": "INT",
+          "widget": {
+            "name": "batch_size"
+          },
+          "link": null
+        },
+        {
+          "name": "output",
+          "type": "COMBO",
+          "widget": {
+            "name": "output"
+          },
+          "link": null
+        },
+        {
+          "name": "model_name",
+          "type": "COMBO",
+          "widget": {
+            "name": "model_name"
+          },
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "localized_name": "IMAGE",
+          "name": "IMAGE",
+          "type": "IMAGE",
+          "links": []
+        }
+      ],
+      "properties": {
+        "previewExposures": []
+      },
+      "widgets_values": [
+        9,
+        4,
+        "mask",
+        "moge_3_vitg_fp16.safetensors"
+      ],
+      "widgets_values_named": {
+        "resolution_level": 9,
+        "batch_size": 4,
+        "output": "mask",
+        "model_name": "moge_3_vitg_fp16.safetensors"
+      },
+      "title": "Geometry Estimation (MoGe 3)"
+    }
+  ],
+  "links": [],
+  "version": 0.4,
+  "definitions": {
+    "subgraphs": [
+      {
+        "id": "5b702329-a5ec-4a7d-b000-213d0c04bbbd",
+        "version": 1,
+        "state": {
+          "lastGroupId": 0,
+          "lastNodeId": 8,
+          "lastLinkId": 11,
+          "lastRerouteId": 0
+        },
+        "revision": 0,
+        "config": {},
+        "name": "Geometry Estimation (MoGe 3)",
+        "description": "Estimates fine-detail monocular geometry from an input image using MoGe 3, recovering thin structures and sharp boundaries as a depth map, normal map, or mask.",
+        "inputNode": {
+          "id": -10,
+          "bounding": [
+            -4222.843118848306,
+            5870.2764474883315,
+            135.919921875,
+            148
+          ]
+        },
+        "outputNode": {
+          "id": -20,
+          "bounding": [
+            -3020.2786458333335,
+            5890.562500000001,
+            128,
+            68
+          ]
+        },
+        "inputs": [
+          {
+            "id": "79d73cb8-4bea-46a4-b51f-667917823086",
+            "name": "image",
+            "type": "IMAGE",
+            "linkIds": [
+              2
+            ],
+            "localized_name": "image",
+            "pos": [
+              -4110.923196973306,
+              5894.2764474883315
+            ]
+          },
+          {
+            "id": "7433a2b5-b40a-42d0-84f7-78d05c4fb561",
+            "name": "resolution_level",
+            "type": "INT",
+            "linkIds": [
+              8
+            ],
+            "pos": [
+              -4110.923196973306,
+              5914.2764474883315
+            ]
+          },
+          {
+            "id": "7d118489-73ef-46ca-b118-26c719144ae9",
+            "name": "batch_size",
+            "type": "INT",
+            "linkIds": [
+              9
+            ],
+            "pos": [
+              -4110.923196973306,
+              5934.2764474883315
+            ]
+          },
+          {
+            "id": "17b4dad4-b955-4c27-b929-61e89bb70a61",
+            "name": "output",
+            "type": "COMBO",
+            "linkIds": [
+              10
+            ],
+            "pos": [
+              -4110.923196973306,
+              5954.2764474883315
+            ]
+          },
+          {
+            "id": "99726d76-065b-4f44-abb7-37e47bafe353",
+            "name": "model_name",
+            "type": "COMBO",
+            "linkIds": [
+              11
+            ],
+            "pos": [
+              -4110.923196973306,
+              5974.2764474883315
+            ]
+          }
+        ],
+        "outputs": [
+          {
+            "id": "5cbd5fcf-5810-4e2d-a5fc-3b4ba3577d9a",
+            "name": "IMAGE",
+            "type": "IMAGE",
+            "linkIds": [
+              5
+            ],
+            "localized_name": "IMAGE",
+            "pos": [
+              -2996.2786458333335,
+              5914.562500000001
+            ]
+          }
+        ],
+        "widgets": [],
+        "nodes": [
+          {
+            "id": 1,
+            "type": "LoadMoGeModel",
+            "pos": [
+              -3990,
+              5840
+            ],
+            "size": [
+              270,
+              70
+            ],
+            "flags": {},
+            "order": 0,
+            "mode": 0,
+            "inputs": [
+              {
+                "localized_name": "model_name",
+                "name": "model_name",
+                "type": "COMBO",
+                "widget": {
+                  "name": "model_name"
+                },
+                "link": 11
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "MOGE_MODEL",
+                "name": "MOGE_MODEL",
+                "type": "MOGE_MODEL",
+                "links": [
+                  1
+                ]
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "LoadMoGeModel",
+              "models": [
+                {
+                  "name": "moge_3_vitg_fp16.safetensors",
+                  "url": "https://huggingface.co/Comfy-Org/MoGe/resolve/main/geometry_estimation/moge_3_vitg_fp16.safetensors",
+                  "directory": "geometry_estimation"
+                }
+              ]
+            },
+            "widgets_values": [
+              "moge_3_vitg_fp16.safetensors"
+            ],
+            "widgets_values_named": {
+              "model_name": "moge_3_vitg_fp16.safetensors"
+            }
+          },
+          {
+            "id": 2,
+            "type": "MoGeInference",
+            "pos": [
+              -3670,
+              5840
+            ],
+            "size": [
+              270,
+              200
+            ],
+            "flags": {},
+            "order": 1,
+            "mode": 0,
+            "inputs": [
+              {
+                "localized_name": "moge_model",
+                "name": "moge_model",
+                "type": "MOGE_MODEL",
+                "link": 1
+              },
+              {
+                "localized_name": "image",
+                "name": "image",
+                "type": "IMAGE",
+                "link": 2
+              },
+              {
+                "localized_name": "resolution_level",
+                "name": "resolution_level",
+                "type": "INT",
+                "widget": {
+                  "name": "resolution_level"
+                },
+                "link": 8
+              },
+              {
+                "localized_name": "fov_x_degrees",
+                "name": "fov_x_degrees",
+                "type": "FLOAT",
+                "widget": {
+                  "name": "fov_x_degrees"
+                },
+                "link": null
+              },
+              {
+                "localized_name": "batch_size",
+                "name": "batch_size",
+                "type": "INT",
+                "widget": {
+                  "name": "batch_size"
+                },
+                "link": 9
+              },
+              {
+                "localized_name": "force_projection",
+                "name": "force_projection",
+                "type": "BOOLEAN",
+                "widget": {
+                  "name": "force_projection"
+                },
+                "link": null
+              },
+              {
+                "localized_name": "apply_mask",
+                "name": "apply_mask",
+                "type": "BOOLEAN",
+                "widget": {
+                  "name": "apply_mask"
+                },
+                "link": null
+              },
+              {
+                "localized_name": "refine_steps",
+                "name": "refine_steps",
+                "type": "INT",
+                "widget": {
+                  "name": "refine_steps"
+                },
+                "link": null
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "moge_geometry",
+                "name": "moge_geometry",
+                "type": "MOGE_GEOMETRY",
+                "links": [
+                  4
+                ]
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "MoGeInference"
+            },
+            "widgets_values": [
+              9,
+              0,
+              4,
+              true,
+              true,
+              3
+            ],
+            "widgets_values_named": {
+              "resolution_level": 9,
+              "fov_x_degrees": 0,
+              "batch_size": 4,
+              "force_projection": true,
+              "apply_mask": true,
+              "refine_steps": 3
+            }
+          },
+          {
+            "id": 5,
+            "type": "MoGeRender",
+            "pos": [
+              -3350,
+              5840
+            ],
+            "size": [
+              270,
+              70
+            ],
+            "flags": {},
+            "order": 2,
+            "mode": 0,
+            "inputs": [
+              {
+                "localized_name": "moge_geometry",
+                "name": "moge_geometry",
+                "type": "MOGE_GEOMETRY",
+                "link": 4
+              },
+              {
+                "localized_name": "output",
+                "name": "output",
+                "type": "COMBO",
+                "widget": {
+                  "name": "output"
+                },
+                "link": 10
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "IMAGE",
+                "name": "IMAGE",
+                "type": "IMAGE",
+                "links": [
+                  5
+                ]
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "MoGeRender"
+            },
+            "widgets_values": [
+              "mask"
+            ],
+            "widgets_values_named": {
+              "output": "mask"
+            }
+          }
+        ],
+        "groups": [],
+        "links": [
+          {
+            "id": 1,
+            "origin_id": 1,
+            "origin_slot": 0,
+            "target_id": 2,
+            "target_slot": 0,
+            "type": "MOGE_MODEL"
+          },
+          {
+            "id": 4,
+            "origin_id": 2,
+            "origin_slot": 0,
+            "target_id": 5,
+            "target_slot": 0,
+            "type": "MOGE_GEOMETRY"
+          },
+          {
+            "id": 2,
+            "origin_id": -10,
+            "origin_slot": 0,
+            "target_id": 2,
+            "target_slot": 1,
+            "type": "IMAGE"
+          },
+          {
+            "id": 5,
+            "origin_id": 5,
+            "origin_slot": 0,
+            "target_id": -20,
+            "target_slot": 0,
+            "type": "IMAGE"
+          },
+          {
+            "id": 8,
+            "origin_id": -10,
+            "origin_slot": 1,
+            "target_id": 2,
+            "target_slot": 2,
+            "type": "INT"
+          },
+          {
+            "id": 10,
+            "origin_id": -10,
+            "origin_slot": 3,
+            "target_id": 5,
+            "target_slot": 1,
+            "type": "COMBO"
+          },
+          {
+            "id": 11,
+            "origin_id": -10,
+            "origin_slot": 4,
+            "target_id": 1,
+            "target_slot": 0,
+            "type": "COMBO"
+          },
+          {
+            "id": 9,
+            "origin_id": -10,
+            "origin_slot": 2,
+            "target_id": 2,
+            "target_slot": 4,
+            "type": "INT"
+          }
+        ],
+        "extra": {},
+        "category": "Preprocessors"
+      }
+    ]
+  },
+  "extra": {}
+}

@@ -1,14 +1,14 @@
 {
   "revision": 0,
-  "last_node_id": "91",
+  "last_node_id": "92",
   "last_link_id": 0,
   "nodes": [
     {
-      "id": 91,
-      "type": "fd1bad31-6e21-4106-8e7b-85465a9381f6",
+      "id": 92,
+      "type": "5e071b97-eea4-4409-8c50-bbd87ac25baf",
       "pos": [
-        -1380,
-        4190
+        3300,
+        5890
       ],
       "size": [
         380,
@@ -79,6 +79,15 @@
             "name": "conditioning_name"
           },
           "link": null
+        },
+        {
+          "name": "sampling",
+          "shape": 7,
+          "type": "COMBO",
+          "widget": {
+            "name": "sampling"
+          },
+          "link": null
         }
       ],
       "outputs": [
@@ -89,7 +98,6 @@
           "links": []
         }
       ],
-      "title": "Image Normal Estimation (Marigold V2)",
       "properties": {
         "previewExposures": []
       },
@@ -100,7 +108,8 @@
         "qwen_image_edit_2509_int8_convrot.safetensors",
         "marigold_v2_normals.safetensors",
         "marigold_v2_normals_vae.safetensors",
-        "marigold_v2_normals_conditioning.safetensors"
+        "marigold_v2_normals_conditioning.safetensors",
+        "img_to_img_velocity"
       ],
       "widgets_values_named": {
         "sampler_name": "euler",
@@ -109,8 +118,10 @@
         "unet_name": "qwen_image_edit_2509_int8_convrot.safetensors",
         "lora_name": "marigold_v2_normals.safetensors",
         "vae_name": "marigold_v2_normals_vae.safetensors",
-        "conditioning_name": "marigold_v2_normals_conditioning.safetensors"
-      }
+        "conditioning_name": "marigold_v2_normals_conditioning.safetensors",
+        "sampling": "img_to_img_velocity"
+      },
+      "title": "Image Normal Estimation (Marigold V2)"
     }
   ],
   "links": [],
@@ -118,24 +129,25 @@
   "definitions": {
     "subgraphs": [
       {
-        "id": "fd1bad31-6e21-4106-8e7b-85465a9381f6",
+        "id": "5e071b97-eea4-4409-8c50-bbd87ac25baf",
         "version": 1,
         "state": {
           "lastGroupId": 4,
-          "lastNodeId": 91,
-          "lastLinkId": 110,
+          "lastNodeId": 92,
+          "lastLinkId": 111,
           "lastRerouteId": 0
         },
         "revision": 0,
         "config": {},
         "name": "Image Normal Estimation (Marigold V2)",
+        "description": "Estimates surface normals from an input image using Marigold V2, producing a normal map of surface orientation for relighting and geometry-aware processing.",
         "inputNode": {
           "id": -10,
           "bounding": [
             -2110,
             4550,
             155.080078125,
-            208
+            228
           ]
         },
         "outputNode": {
@@ -243,6 +255,18 @@
             "pos": [
               -1978.919921875,
               4714
+            ]
+          },
+          {
+            "id": "6ac8f55e-ea1b-4384-872a-82a1c6ee9502",
+            "name": "sampling",
+            "type": "COMBO",
+            "linkIds": [
+              111
+            ],
+            "pos": [
+              -1978.919921875,
+              4734
             ]
           }
         ],
@@ -413,6 +437,7 @@
             "flags": {},
             "order": 3,
             "mode": 0,
+            "showAdvanced": true,
             "inputs": [
               {
                 "localized_name": "model",
@@ -437,7 +462,7 @@
                 "widget": {
                   "name": "sampling"
                 },
-                "link": null
+                "link": 111
               }
             ],
             "outputs": [
@@ -1166,11 +1191,18 @@
             "target_id": 29,
             "target_slot": 0,
             "type": "COMBO"
+          },
+          {
+            "id": 111,
+            "origin_id": -10,
+            "origin_slot": 8,
+            "target_id": 28,
+            "target_slot": 2,
+            "type": "COMBO"
           }
         ],
         "extra": {},
-        "category": "Preprocessors/Normal",
-        "description": "Estimates surface normals from an input image using Marigold V2, producing a normal map of surface orientation for relighting and geometry-aware processing."
+        "category": "Preprocessors/Normal"
       }
     ]
   },
