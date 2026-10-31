@@ -1869,6 +1869,8 @@ def mixed_precision_ops(quant_config={}, compute_dtype=torch.bfloat16, full_prec
     return MixedPrecisionOps
 
 def get_disabled_quant_formats(device=None):
+    if device is not None and comfy.model_management.is_device_cpu(device):
+        return set(QUANT_ALGOS) | set(_GROUPED_INT8_FORMATS)
     disabled = set()
     if not comfy.model_management.supports_nvfp4_compute(device):
         disabled.add("nvfp4")
