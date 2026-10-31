@@ -9,6 +9,9 @@ from importlib import reload
 import folder_paths
 import comfy.cli_args
 
+if os.name == "nt":
+    import _winapi
+
 
 @pytest.fixture()
 def clear_folder_paths():
@@ -140,8 +143,6 @@ def test_get_save_image_path_allows_output_subfolder_symlink(tmp_path):
 @pytest.mark.skipif(os.name != "nt", reason="directory junctions are Windows-only")
 def test_get_save_image_path_allows_output_subfolder_junction(tmp_path):
     # A junction needs no symlink privilege, so this runs even where the symlink test skips.
-    import _winapi
-
     output_dir = str(tmp_path / "output")
     dest = str(tmp_path / "other_volume")
     os.makedirs(output_dir)
