@@ -11,6 +11,35 @@ import comfy.utils
 MODULE_PATTERN = re.compile(r"lllite_dit_blocks_(\d+)_(self_attn_[qkv]_proj|cross_attn_q_proj|mlp_layer1)$")
 
 
+def _spatial_tile_image(image, tile):
+    if tile is None:
+        return image
+    fields = (
+        "top", "bottom", "left", "right", "source_height", "source_width",
+    )
+    if not isinstance(tile, dict) or any(
+        isinstance(tile.get(field), bool) or not isinstance(tile.get(field), int)
+        for field in fields
+    ):
+        raise ValueError("Anima LLLite spatial tile descriptor is invalid")
+    top, bottom = tile["top"], tile["bottom"]
+    left, right = tile["left"], tile["right"]
+    source_height, source_width = tile["source_height"], tile["source_width"]
+    if (
+        source_height < 1
+        or source_width < 1
+        or not 0 <= top < bottom <= source_height
+        or not 0 <= left < right <= source_width
+    ):
+        raise ValueError("Anima LLLite spatial tile bounds are invalid")
+    height, width = image.shape[1:3]
+    y1 = top * height // source_height
+    y2 = (bottom * height + source_height - 1) // source_height
+    x1 = left * width // source_width
+    x2 = (right * width + source_width - 1) // source_width
+    return image[:, y1:y2, x1:x2, :]
+
+
 def _group_norm(channels, device=None, dtype=None, operations=None):
     groups = 8
     while groups > 1 and channels % groups != 0:
@@ -208,8 +237,10 @@ class AnimaLLLitePatch:
 
         target_height = x.shape[-2] * 8
         target_width = x.shape[-1] * 8
+        image = _spatial_tile_image(
+            self.image, transformer_options.get("spatial_tile"))
         image = comfy.utils.common_upscale(
-            self.image.movedim(-1, 1), target_width, target_height, "bicubic", crop="center"
+            image.movedim(-1, 1), target_width, target_height, "bicubic", crop="center"
         ).clamp(0.0, 1.0)
         image = image.to(device=x.device, dtype=x.dtype) * 2.0 - 1.0
 

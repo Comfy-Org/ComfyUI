@@ -840,17 +840,17 @@ class VAELoader:
 
     CATEGORY = "model/loaders"
 
-    #TODO: scale factor?
-    def load_vae(self, vae_name):
+    @classmethod
+    def load_vae_state_dict(cls, vae_name):
         metadata = None
         vae_path = None
         if vae_name == "pixel_space":
             sd = {}
             sd["pixel_space_vae"] = torch.tensor(1.0)
-        elif vae_name in self.image_taes:
-            sd = self.load_taesd(vae_name)
+        elif vae_name in cls.image_taes:
+            sd = cls.load_taesd(vae_name)
         else:
-            if os.path.splitext(vae_name)[0] in self.video_taes:
+            if os.path.splitext(vae_name)[0] in cls.video_taes:
                 vae_path = folder_paths.get_full_path_or_raise("vae_approx", vae_name)
             else:
                 vae_path = folder_paths.get_full_path_or_raise("vae", vae_name)
@@ -860,6 +860,11 @@ class VAELoader:
                 metadata = {"tae_latent_channels": 128}
             else:
                 metadata["tae_latent_channels"] = 128
+        return sd, metadata, vae_path
+
+    #TODO: scale factor?
+    def load_vae(self, vae_name):
+        sd, metadata, vae_path = self.load_vae_state_dict(vae_name)
         vae = comfy.sd.VAE(sd=sd, metadata=metadata)
         vae.throw_exception_if_invalid()
         # Register a reload factory on the patcher so multigpu deepclones
@@ -2252,14 +2257,20 @@ def get_module_name(module_path: str) -> str:
     return base_path
 
 
-async def load_custom_node(module_path: str, ignore=set(), module_parent="custom_nodes") -> bool:
-    module_name = get_module_name(module_path)
+async def load_custom_node(
+    module_path: str,
+    ignore=set(),
+    module_parent="custom_nodes",
+    module_name: str | None = None,
+) -> bool:
+    loaded_module_name = get_module_name(module_path)
     if os.path.isfile(module_path):
         sp = os.path.splitext(module_path)
-        module_name = sp[0]
-        sys_module_name = module_name
+        loaded_module_name = sp[0]
+        sys_module_name = loaded_module_name
     elif os.path.isdir(module_path):
         sys_module_name = module_path.replace(".", "_x_")
+    registration_name = module_name or loaded_module_name
 
     try:
         logging.debug("Trying to load custom node {}".format(module_path))
@@ -2275,7 +2286,7 @@ async def load_custom_node(module_path: str, ignore=set(), module_parent="custom
         sys.modules[sys_module_name] = module
         module_spec.loader.exec_module(module)
 
-        LOADED_MODULE_DIRS[module_name] = os.path.abspath(module_dir)
+        LOADED_MODULE_DIRS[registration_name] = os.path.abspath(module_dir)
 
         try:
             from comfy_config import config_parser
@@ -2299,14 +2310,14 @@ async def load_custom_node(module_path: str, ignore=set(), module_parent="custom
         if hasattr(module, "WEB_DIRECTORY") and getattr(module, "WEB_DIRECTORY") is not None:
             web_dir = os.path.abspath(os.path.join(module_dir, getattr(module, "WEB_DIRECTORY")))
             if os.path.isdir(web_dir):
-                EXTENSION_WEB_DIRS[module_name] = web_dir
+                EXTENSION_WEB_DIRS[registration_name] = web_dir
 
         # V1 node definition
         if hasattr(module, "NODE_CLASS_MAPPINGS") and getattr(module, "NODE_CLASS_MAPPINGS") is not None:
             for name, node_cls in module.NODE_CLASS_MAPPINGS.items():
                 if name not in ignore:
                     NODE_CLASS_MAPPINGS[name] = node_cls
-                    node_cls.RELATIVE_PYTHON_MODULE = "{}.{}".format(module_parent, get_module_name(module_path))
+                    node_cls.RELATIVE_PYTHON_MODULE = "{}.{}".format(module_parent, registration_name)
             if hasattr(module, "NODE_DISPLAY_NAME_MAPPINGS") and getattr(module, "NODE_DISPLAY_NAME_MAPPINGS") is not None:
                 for name, display_name in module.NODE_DISPLAY_NAME_MAPPINGS.items():
                     if name not in ignore:
@@ -2336,7 +2347,7 @@ async def load_custom_node(module_path: str, ignore=set(), module_parent="custom
                     schema = node_cls.GET_SCHEMA()
                     if schema.node_id not in ignore:
                         NODE_CLASS_MAPPINGS[schema.node_id] = node_cls
-                        node_cls.RELATIVE_PYTHON_MODULE = "{}.{}".format(module_parent, get_module_name(module_path))
+                        node_cls.RELATIVE_PYTHON_MODULE = "{}.{}".format(module_parent, registration_name)
                         if schema.display_name is not None:
                             NODE_DISPLAY_NAME_MAPPINGS[schema.node_id] = schema.display_name
                 return True
@@ -2392,8 +2403,15 @@ async def init_external_custom_nodes():
                 logging.warning(refusal)
                 continue
 
+            v2_path = os.path.join(module_path, "v2")
+            entrypoint_path = v2_path if os.path.isdir(v2_path) else module_path
             time_before = time.perf_counter()
-            success = await load_custom_node(module_path, base_node_names, module_parent="custom_nodes")
+            success = await load_custom_node(
+                entrypoint_path,
+                base_node_names,
+                module_parent="custom_nodes",
+                module_name=possible_module,
+            )
             node_import_times.append((time.perf_counter() - time_before, module_path, success))
 
     if len(node_import_times) > 0:

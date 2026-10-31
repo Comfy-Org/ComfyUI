@@ -65,6 +65,23 @@ def test_non_string():
     assert not validate_node_input(obj1, obj2)
 
 
+def test_combo_option_lists_use_overlap_semantics():
+    received = ["normal", "karras", "ays"]
+    target = ["normal", "karras", "beta57"]
+
+    assert validate_node_input(received, target)
+    assert not validate_node_input(received, ["sgm_uniform", "simple"])
+    assert not validate_node_input(received, target, strict=True)
+    assert validate_node_input(["normal", "karras"], target, strict=True)
+
+
+def test_empty_combo_option_lists_remain_closed():
+    assert validate_node_input([], [])
+    assert not validate_node_input(["normal"], [])
+    assert not validate_node_input([], ["normal"])
+    assert validate_node_input([], ["normal"], strict=True)
+
+
 class NotEqualsOverrideTest(str):
     """Test class for ``__ne__`` override."""
 
