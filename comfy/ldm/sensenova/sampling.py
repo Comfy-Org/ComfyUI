@@ -57,7 +57,7 @@ class SenseNovaModelSampling(
             return 1.0
         if percent >= 1.0:
             return 0.0
-        return float(time_snr_shift(self.shift, 1.0 - percent))
+        return self.sigma(torch.tensor(percent * self.multiplier, dtype=torch.float32)).item()
 
     def noise_scaling(self, sigma, noise, latent_image, max_denoise=False):
         sigma = comfy.model_sampling.reshape_sigma(sigma, noise.ndim)
