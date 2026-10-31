@@ -47,6 +47,8 @@ from comfy_execution.asset_enrichment import register_executed_outputs, emit_cac
 from comfy_execution.media_enrichment import enrich_output_with_media_metadata
 from comfy_api.internal import _ComfyNodeInternal, _NodeOutputInternal, first_real_override, is_class, make_locked_method_func
 from comfy_api.latest import io, _io
+from comfy_api.latest import _execution_metadata
+from comfy_execution import upstream_variants as _upstream_variants
 from comfy_execution.cache_provider import _has_cache_providers, _get_cache_providers, _logger as _cache_logger
 from app.assets.manager import AssetManager, NoAssets
 
@@ -76,6 +78,10 @@ class IsChangedCache:
         node = self.dynprompt.get_node(node_id)
         class_type = node["class_type"]
         class_def = nodes.NODE_CLASS_MAPPINGS[class_type]
+        if {"graph.metadata", "graph.expand.upstream"}.intersection(
+                getattr(class_def, "SDK_PERMISSIONS", ()) or ()):
+            self.is_changed[node_id] = float("nan")
+            return self.is_changed[node_id]
         has_is_changed = False
         is_changed_name = None
         if issubclass(class_def, _ComfyNodeInternal) and first_real_override(class_def, "fingerprint_inputs") is not None:
@@ -109,6 +115,14 @@ class IsChangedCache:
 class CacheEntry(NamedTuple):
     ui: dict
     outputs: list
+
+
+class _MetadataCacheView:
+    def __init__(self, entries):
+        self.entries = entries
+
+    def get_cache(self, node_id, _consumer_id):
+        return self.entries.get(node_id)
 
 
 class CacheType(Enum):
@@ -159,7 +173,105 @@ class CacheSet:
         }
         return result
 
-SENSITIVE_EXTRA_DATA_KEYS = ("auth_token_comfy_org", "api_key_comfy_org")
+SENSITIVE_EXTRA_DATA_KEYS = (
+    "auth_token_comfy_org",
+    "api_key_comfy_org",
+    "comfy_secure_tenant_id",
+)
+
+
+async def _notify_execution_backend_lifecycle(
+    event: str,
+    prompt_id: str,
+    extra_data: dict,
+) -> None:
+    from comfy_api.latest import _sdk as _comfy_sdk
+
+    backend = _comfy_sdk.providers.execution_backend
+    hook = getattr(backend, f"on_prompt_{event}", None)
+    if hook is None and event == "abort":
+        hook = getattr(backend, "on_prompt_end", None)
+    if hook is not None:
+        await hook(prompt_id, extra_data)
+
+
+async def _shutdown_execution_backend() -> None:
+    from comfy_api.latest import _sdk as _comfy_sdk
+
+    hook = getattr(_comfy_sdk.providers.execution_backend, "shutdown", None)
+    if hook is not None:
+        await hook()
+
+
+async def _maintain_execution_backend() -> None:
+    from comfy_api.latest import _sdk as _comfy_sdk
+
+    hook = getattr(_comfy_sdk.providers.execution_backend, "maintenance", None)
+    if hook is not None:
+        await hook()
+
+
+def _execution_backend_maintenance_interval() -> float | None:
+    from comfy_api.latest import _sdk as _comfy_sdk
+
+    value = getattr(
+        _comfy_sdk.providers.execution_backend,
+        "maintenance_interval_seconds",
+        None,
+    )
+    if value is None:
+        return None
+    if not isinstance(value, (int, float)) or value <= 0:
+        raise ValueError("execution backend maintenance interval must be positive")
+    return float(value)
+
+_LEGACY_SDK_METHODS = {
+    "execute": "execute",
+    "VALIDATE_INPUTS": "validate_inputs",
+    "IS_CHANGED": "fingerprint_inputs",
+    "check_lazy_status": "check_lazy_status",
+}
+
+
+class _PersistentLoopRunner:
+    """`asyncio.Runner` stand-in for Python 3.10, where Runner is unavailable.
+
+    Same contract as the executor needs: one event loop that survives across
+    `run()` calls so backend state persists between prompts.
+    """
+
+    def __init__(self) -> None:
+        self._loop = asyncio.new_event_loop()
+
+    def get_loop(self):
+        return self._loop
+
+    def run(self, coro):
+        return self._loop.run_until_complete(coro)
+
+    def close(self) -> None:
+        try:
+            self._loop.run_until_complete(self._loop.shutdown_asyncgens())
+        finally:
+            self._loop.close()
+
+
+_AsyncRunner = getattr(asyncio, "Runner", _PersistentLoopRunner)
+
+
+def _sdk_seam_engaged(type_obj) -> bool:
+    """Whether this node's invocation has to go through the custom-node SDK.
+
+    False on a stock install — no overlay is registered and no node declares
+    SDK intent — which leaves the original call path untouched.
+    """
+    if (getattr(type_obj, "SDK_REFS", False)
+            or getattr(type_obj, "SDK_PERMISSIONS", ())
+            or getattr(type_obj, "SDK_REQUIRED_WEIGHTS", ())):
+        return True
+    from comfy_api.latest import _sdk as _comfy_sdk
+    return _comfy_sdk.providers.engaged
+
 
 def get_input_data(inputs, class_def, unique_id, execution_list=None, dynprompt=None, extra_data={}):
     is_v3 = issubclass(class_def, _ComfyNodeInternal)
@@ -250,6 +362,7 @@ async def resolve_map_node_over_list_results(results):
         return [x.result() if isinstance(x, asyncio.Task) else x for x in results]
 
 async def _async_map_node_over_list(prompt_id, unique_id, obj, input_data_all, func, allow_interrupt=False, execution_block_cb=None, pre_execute_cb=None, v3_data=None):
+    invocation_guard = _upstream_variants.invocation_guard(prompt_id,unique_id)
     # check if node wants the lists
     input_is_list = getattr(obj, "INPUT_IS_LIST", False)
 
@@ -264,6 +377,8 @@ async def _async_map_node_over_list(prompt_id, unique_id, obj, input_data_all, f
 
     results = []
     async def process_inputs(inputs, index=None, input_is_list=False):
+        if invocation_guard is not None:
+            invocation_guard()
         if allow_interrupt:
             nodes.before_node_execution()
         execution_block = None
@@ -280,6 +395,8 @@ async def _async_map_node_over_list(prompt_id, unique_id, obj, input_data_all, f
             if pre_execute_cb is not None and index is not None:
                 pre_execute_cb(index)
             # V3
+            _sdk_plan = None
+            _sdk_runtime = None
             if isinstance(obj, _ComfyNodeInternal) or (is_class(obj) and issubclass(obj, _ComfyNodeInternal)):
                 # if is just a class, then assign no state, just create clone
                 if is_class(obj):
@@ -295,25 +412,133 @@ async def _async_map_node_over_list(prompt_id, unique_id, obj, input_data_all, f
                 # in case of dynamic inputs, restructure inputs to expected nested dict
                 if v3_data is not None:
                     inputs = _io.build_nested_inputs(inputs, v3_data, input_is_list=input_is_list)
+                # Custom-node SDK seam: build a per-node ExecutionPlan + bind a
+                # ctx and ref resolver from the active providers. Default
+                # providers are in-process (behavior-preserving); the overlay
+                # swaps them for the isolated engine. Binding happens inside the
+                # invocation scope below so it is correct for the concurrent
+                # async-task path too.
+                if _sdk_seam_engaged(type_obj):
+                    from comfy_api.latest import _sdk as _comfy_sdk
+                    # A node declares the host capabilities it needs; the backend
+                    # decides whether to grant them. Declaring is not granting — an
+                    # out-of-process backend still gates each one at the wire, and a
+                    # registry manifest can narrow the set further. Nodes that
+                    # declare nothing (the overwhelming majority) get nothing.
+                    _sdk_perms = getattr(type_obj, "SDK_PERMISSIONS", ()) or ()
+                    _sdk_required_weights = getattr(
+                        type_obj, "SDK_REQUIRED_WEIGHTS", ()) or ()
+                    _sdk_refs_mode = bool(getattr(type_obj, "SDK_REFS", False))
+                    _sdk_plan = _comfy_sdk.ExecutionPlan(
+                        prompt_id=str(prompt_id),
+                        node_id=str(unique_id),
+                        node_type=getattr(type_obj, "__name__", "node"),
+                        node_module=getattr(type_obj, "__module__", "") or "",
+                        inputs=inputs,
+                        input_mode="refs" if _sdk_refs_mode else "values",
+                        method=func,
+                        permissions=tuple(_sdk_perms),
+                        required_weights=tuple(_sdk_required_weights),
+                        prompt=getattr(class_clone.hidden, "prompt", None),
+                        extra_pnginfo=getattr(
+                            class_clone.hidden, "extra_pnginfo", None),
+                        dynamic_prompt=getattr(
+                            class_clone.hidden, "dynprompt", None),
+                        execution_metadata=_execution_metadata.current(prompt_id),
+                    )
+                    _sdk_refs = _comfy_sdk.providers.ref_resolver_factory()
+                    _sdk_runtime = _comfy_sdk.bind_runtime(
+                        _sdk_refs,
+                        _comfy_sdk.providers.ctx_provider.build(_sdk_plan),
+                        _comfy_sdk.providers.ops_provider,
+                    )
+                    # SDK nodes see assets (refs), not buffers: wrap heavy inputs.
+                    if _sdk_refs_mode:
+                        inputs = await _comfy_sdk.wrap_inputs(_sdk_refs, inputs)
+                        # Ship the work unit on the plan so an out-of-process
+                        # backend can execute without local_call.
+                        _sdk_plan.inputs = inputs
             # V1
             else:
                 f = getattr(obj, func)
-            if inspect.iscoroutinefunction(f):
-                async def async_wrapper(f, prompt_id, unique_id, list_index, args):
-                    with CurrentNodeContext(prompt_id, unique_id, list_index):
-                        return await f(**args)
-                task = asyncio.create_task(async_wrapper(f, prompt_id, unique_id, index, args=inputs))
-                # Give the task a chance to execute without yielding
-                await asyncio.sleep(0)
-                if task.done():
-                    result = task.result()
-                    results.append(result)
+                type_obj = obj if is_class(obj) else type(obj)
+                if _sdk_seam_engaged(type_obj):
+                    _legacy_method = _LEGACY_SDK_METHODS.get(
+                        "execute" if func == getattr(type_obj, "FUNCTION", None)
+                        else func)
+                    if _legacy_method is None:
+                        raise ValueError(
+                            f"legacy node method {func!r} has no sandbox mapping")
+
+                    from comfy_api.latest import _sdk as _comfy_sdk
+                    _sdk_plan = _comfy_sdk.ExecutionPlan(
+                        prompt_id=str(prompt_id),
+                        node_id=str(unique_id),
+                        node_type=getattr(type_obj, "__name__", "node"),
+                        node_module=getattr(type_obj, "__module__", "") or "",
+                        inputs=inputs,
+                        input_mode="values",
+                        method=_legacy_method,
+                        permissions=tuple(
+                            getattr(type_obj, "SDK_PERMISSIONS", ()) or ()),
+                        required_weights=tuple(getattr(
+                            type_obj, "SDK_REQUIRED_WEIGHTS", ()) or ()),
+                        execution_metadata=_execution_metadata.current(prompt_id),
+                    )
+                    _sdk_refs = _comfy_sdk.providers.ref_resolver_factory()
+                    _sdk_runtime = _comfy_sdk.bind_runtime(
+                        _sdk_refs,
+                        _comfy_sdk.providers.ctx_provider.build(_sdk_plan),
+                        _comfy_sdk.providers.ops_provider,
+                    )
+
+            def _invoke_scope():
+                import contextlib
+                return _sdk_runtime if _sdk_runtime is not None else contextlib.nullcontext()
+
+            async def local_call():
+                if inspect.iscoroutinefunction(f):
+                    async def async_wrapper(f, prompt_id, unique_id, list_index, args):
+                        with CurrentNodeContext(prompt_id, unique_id, list_index), _invoke_scope():
+                            if invocation_guard is not None:
+                                invocation_guard()
+                            return await f(**args)
+                    task = asyncio.create_task(async_wrapper(f, prompt_id, unique_id, index, args=inputs))
+                    # Give the task a chance to execute without yielding
+                    await asyncio.sleep(0)
+                    if task.done():
+                        return task.result()
+                    return task
                 else:
-                    results.append(task)
+                    with CurrentNodeContext(prompt_id, unique_id, index), _invoke_scope():
+                        if invocation_guard is not None:
+                            invocation_guard()
+                        return f(**inputs)
+
+            if _sdk_plan is not None:
+                try:
+                    if invocation_guard is not None:
+                        invocation_guard()
+                    result = await _comfy_sdk.providers.execution_backend.dispatch(
+                        _sdk_plan, local_call, _sdk_runtime.runtime
+                    )
+                    # A sandbox backend returns refs in both modes: explicit-ref
+                    # nodes create them directly, while compatibility-mode V2
+                    # nodes have their ordinary outputs wrapped by the guest.
+                    if isinstance(result, asyncio.Task):
+                        result = await result
+                    result = await _comfy_sdk.unwrap_outputs(_sdk_refs, result)
+                finally:
+                    # The table holds this node's inputs and every intermediate
+                    # it created — for image or latent work, the largest
+                    # allocation in the process. Released here rather than left
+                    # to collection, and in `finally` because the path that most
+                    # needs it is the one where the node raised or its guest
+                    # died: that is exactly when nothing else is going to run.
+                    _sdk_refs.clear()
             else:
-                with CurrentNodeContext(prompt_id, unique_id, index):
-                    result = f(**inputs)
-                results.append(result)
+                result = await local_call()
+            results.append(result)
         else:
             results.append(execution_block)
 
@@ -441,11 +666,34 @@ async def execute(server: "ExecutionServer", dynprompt, caches, current_item, ex
     real_node_id = dynprompt.get_real_node_id(unique_id)
     display_node_id = dynprompt.get_display_node_id(unique_id)
     parent_node_id = dynprompt.get_parent_node_id(unique_id)
+    try:
+        _upstream_variants.assert_node_current(dynprompt,unique_id,caches.outputs)
+    except Exception as ex:
+        return (ExecutionResult.FAILURE,dict(node_id=real_node_id,
+            exception_message=str(ex),exception_type=full_type_name(type(ex)),
+            traceback=traceback.format_exc().splitlines(),current_inputs=[]),ex)
     inputs = dynprompt.get_node(unique_id)['inputs']
     class_type = dynprompt.get_node(unique_id)['class_type']
     class_def = nodes.NODE_CLASS_MAPPINGS[class_type]
-    cached = await caches.outputs.get(unique_id)
+    native_variant = _upstream_variants.native_control(dynprompt.get_node(unique_id))
+    try:
+        cached = None if native_variant is not None else await caches.outputs.get(unique_id)
+        guard = _upstream_variants.invocation_guard(prompt_id,unique_id)
+        if guard is not None:
+            guard()
+    except Exception as ex:
+        return (ExecutionResult.FAILURE,dict(node_id=real_node_id,
+            exception_message=str(ex),exception_type=full_type_name(type(ex)),
+            traceback=traceback.format_exc().splitlines(),current_inputs=[]),ex)
     if cached is not None:
+        metadata_owner = _execution_metadata.current(prompt_id)
+        if metadata_owner is not None and metadata_owner.observe:
+            cached_inputs, missing, _ = get_input_data(
+                inputs, class_def, unique_id, execution_list, dynprompt, extra_data)
+            if missing:
+                metadata_owner._fail(RuntimeError("cached metadata input is unavailable"))
+            else:
+                metadata_owner.record_cached(unique_id, class_def, cached_inputs, cached.outputs)
         emit_cached_output(server, unique_id, display_node_id, cached, prompt_id, ui_outputs, asset_manager)
         get_progress_state().finish_progress(unique_id)
         execution_list.cache_update(unique_id, cached)
@@ -453,6 +701,10 @@ async def execute(server: "ExecutionServer", dynprompt, caches, current_item, ex
 
     input_data_all = None
     try:
+        if native_variant is not None:
+            await _upstream_variants.execute_control(prompt_id,dynprompt,unique_id,caches,execution_list)
+            get_progress_state().finish_progress(unique_id)
+            return (ExecutionResult.SUCCESS,None,None)
         if unique_id in pending_async_nodes:
             results = []
             for r in pending_async_nodes[unique_id]:
@@ -497,9 +749,13 @@ async def execute(server: "ExecutionServer", dynprompt, caches, current_item, ex
                 server.send_sync("executing", { "node": unique_id, "display_node": display_node_id, "prompt_id": prompt_id }, server.client_id)
 
             obj = await caches.objects.get(unique_id)
+            if guard is not None:
+                guard()
             if obj is None:
                 obj = class_def()
                 await caches.objects.set(unique_id, obj)
+                if guard is not None:
+                    guard()
 
             if issubclass(class_def, _ComfyNodeInternal):
                 lazy_status_present = first_real_override(class_def, "check_lazy_status") is not None
@@ -511,6 +767,8 @@ async def execute(server: "ExecutionServer", dynprompt, caches, current_item, ex
                 v3_data_lazy["create_dynamic_tuple"] = True
                 required_inputs = await _async_map_node_over_list(prompt_id, unique_id, obj, input_data_all, "check_lazy_status", allow_interrupt=True, v3_data=v3_data_lazy)
                 required_inputs = await resolve_map_node_over_list_results(required_inputs)
+                if guard is not None:
+                    guard()
                 required_inputs = set(sum([r for r in required_inputs if isinstance(r,list)], []))
                 required_inputs = [x for x in required_inputs if isinstance(x,str) and (
                     x not in input_data_all or x in missing_keys
@@ -545,6 +803,11 @@ async def execute(server: "ExecutionServer", dynprompt, caches, current_item, ex
                 GraphBuilder.set_default_prefix(unique_id, call_index, 0)
 
             try:
+                if guard is not None:
+                    guard()
+                metadata_owner = _execution_metadata.current(prompt_id)
+                if metadata_owner is not None:
+                    metadata_owner.record_start(unique_id, class_def, input_data_all)
                 output_data, output_ui, has_subgraph, has_pending_tasks = await get_output_data(prompt_id, unique_id, obj, input_data_all, execution_block_cb=execution_block_cb, pre_execute_cb=pre_execute_cb, v3_data=v3_data)
             finally:
                 if comfy.memory_management.aimdo_enabled:
@@ -561,7 +824,8 @@ async def execute(server: "ExecutionServer", dynprompt, caches, current_item, ex
                     tasks = [x for x in output_data if isinstance(x, asyncio.Task)]
                     await asyncio.gather(*tasks, return_exceptions=True)
                     unblock()
-                asyncio.create_task(await_completion())
+                completion_task = asyncio.create_task(await_completion())
+                _upstream_variants.track_completion(completion_task)
                 return (ExecutionResult.PENDING, None, None)
         cache_ui_value = ui_outputs.get(unique_id)
         if len(output_ui) > 0:
@@ -615,9 +879,21 @@ async def execute(server: "ExecutionServer", dynprompt, caches, current_item, ex
             return (ExecutionResult.PENDING, None, None)
 
         cache_entry = CacheEntry(ui=cache_ui_value, outputs=output_data)
+        metadata_owner = _execution_metadata.current(prompt_id)
+        if metadata_owner is not None:
+            metadata_owner.record_outputs(unique_id, class_def, output_data)
         execution_list.cache_update(unique_id, cache_entry)
         await caches.outputs.set(unique_id, cache_entry)
 
+    except _upstream_variants.VariantExecutionFailure as failure:
+        details = dict(failure.details)
+        upstream_id = details['node_id']
+        original_id = dynprompt.get_real_node_id(upstream_id)
+        if original_id not in dynprompt.original_prompt:
+            original_id = dynprompt.get_real_node_id(unique_id)
+        details['node_id'] = original_id
+        details['upstream_node_id'] = upstream_id
+        return (ExecutionResult.FAILURE,details,failure.error)
     except comfy.model_management.InterruptProcessingException as iex:
         logging.info("Processing interrupted")
 
@@ -670,6 +946,10 @@ class PromptExecutor:
         self.server = server
         self.asset_manager = asset_manager if asset_manager is not None else NoAssets(args)
         self.prompt_model_tracker = comfy.model_patcher.PromptModelTracker()
+        self._runner = _AsyncRunner()
+        self._active_loop = None
+        self._active_task = None
+        self._active_lock = threading.RLock()
         self.reset()
 
     def reset(self):
@@ -712,6 +992,9 @@ class PromptExecutor:
                 "current_inputs": error["current_inputs"],
                 "current_outputs": list(current_outputs),
             }
+            for name in ('upstream_node_id','upstream_variant_id'):
+                if name in error:
+                    mes[name] = error[name]
             self.add_message("execution_error", mes, broadcast=False)
 
     def _notify_prompt_lifecycle(self, event: str, prompt_id: str):
@@ -728,7 +1011,71 @@ class PromptExecutor:
                 _cache_logger.warning(f"Cache provider {provider.__class__.__name__} error on {event}: {e}")
 
     def execute(self, prompt, prompt_id, extra_data={}, execute_outputs=[]):
-        asyncio.run(self.execute_async(prompt, prompt_id, extra_data, execute_outputs))
+        self._runner.run(
+            self._run_owned_prompt(
+                prompt,
+                prompt_id,
+                extra_data,
+                execute_outputs,
+            )
+        )
+
+    async def _run_owned_prompt(
+        self,
+        prompt,
+        prompt_id,
+        extra_data,
+        execute_outputs,
+    ):
+        task = asyncio.current_task()
+        loop = asyncio.get_running_loop()
+        with self._active_lock:
+            self._active_loop = loop
+            self._active_task = task
+        try:
+            return await self.execute_async(
+                prompt,
+                prompt_id,
+                extra_data,
+                execute_outputs,
+            )
+        finally:
+            with self._active_lock:
+                if self._active_task is task:
+                    self._active_loop = None
+                    self._active_task = None
+
+    def request_shutdown(self):
+        nodes.interrupt_processing(True)
+        with self._active_lock:
+            loop = self._active_loop
+            task = self._active_task
+        if loop is None or task is None or task.done():
+            return
+        try:
+            loop.call_soon_threadsafe(task.cancel)
+        except RuntimeError:
+            pass
+
+    def close(self):
+        runner = self._runner
+        if runner is None:
+            return
+        self._runner = None
+        try:
+            runner.run(_shutdown_execution_backend())
+        finally:
+            runner.close()
+
+    def execution_backend_maintenance_interval(self) -> float | None:
+        return _execution_backend_maintenance_interval()
+
+    def maintain_execution_backend(self) -> None:
+        if self._runner is not None:
+            try:
+                self._runner.run(_maintain_execution_backend())
+            except Exception:
+                logging.exception("execution backend maintenance failed")
 
     async def execute_async(self, prompt, prompt_id, extra_data={}, execute_outputs=[]):
         set_preview_method(extra_data.get("preview_method"))
@@ -745,14 +1092,30 @@ class PromptExecutor:
         self.add_message("execution_start", { "prompt_id": prompt_id}, broadcast=False)
 
         self._notify_prompt_lifecycle("start", prompt_id)
-        ram_headroom = int(self.cache_args["ram"] * (1024 ** 3))
-        ram_inactive_headroom = int(self.cache_args["ram_inactive"] * (1024 ** 3))
-        ram_release_callback = self.caches.outputs.ram_release if self.cache_type == CacheType.RAM_PRESSURE else None
-        comfy.memory_management.set_ram_cache_release_state(ram_release_callback, ram_headroom)
-
+        backend_reusable = False
+        metadata_scope = None
+        variant_owner = None
         try:
+            await _notify_execution_backend_lifecycle(
+                "start",
+                prompt_id,
+                extra_data,
+            )
+            ram_headroom = int(self.cache_args["ram"] * (1024 ** 3))
+            ram_inactive_headroom = int(self.cache_args["ram_inactive"] * (1024 ** 3))
+            ram_release_callback = self.caches.outputs.ram_release if self.cache_type == CacheType.RAM_PRESSURE else None
+            comfy.memory_management.set_ram_cache_release_state(ram_release_callback, ram_headroom)
             with torch.inference_mode():
                 dynamic_prompt = DynamicPrompt(prompt)
+                metadata_scope = _execution_metadata.ExecutionMetadataScope(
+                    prompt_id, dynamic_prompt, extra_data.get("extra_pnginfo"),
+                    observe=any("graph.metadata" in (
+                        getattr(nodes.NODE_CLASS_MAPPINGS[node["class_type"]], "SDK_PERMISSIONS", ()) or ())
+                        for node in prompt.values()))
+                metadata_scope.__enter__()
+                variant_owner = _upstream_variants.CoreVariantExecutionOwner(
+                    prompt_id,dynamic_prompt,self.server,extra_data,self.asset_manager)
+                variant_owner.__enter__()
                 reset_progress_state(prompt_id, dynamic_prompt)
                 add_progress_handler(WebUIProgressHandler(self.server))
                 is_changed_cache = IsChangedCache(prompt_id, dynamic_prompt, self.caches.outputs)
@@ -768,6 +1131,20 @@ class PromptExecutor:
                     node_id for node_id, result in zip(node_ids, cache_results)
                     if result is not None
                 ]
+                if metadata_scope.observe:
+                    metadata_cache = _MetadataCacheView(dict(zip(node_ids, cache_results)))
+                    for node_id, cached_entry in metadata_cache.entries.items():
+                        if cached_entry is None:
+                            continue
+                        node_info = dynamic_prompt.get_node(node_id)
+                        class_def = nodes.NODE_CLASS_MAPPINGS[node_info["class_type"]]
+                        cached_inputs, missing, _ = get_input_data(
+                            node_info["inputs"], class_def, node_id, metadata_cache,
+                            dynamic_prompt, extra_data)
+                        if missing:
+                            metadata_scope._fail(RuntimeError("cached metadata input is unavailable"))
+                            break
+                        metadata_scope.record_cached(node_id, class_def, cached_inputs, cached_entry.outputs)
 
                 comfy.model_management.cleanup_models_gc()
                 self.add_message("execution_cached",
@@ -779,6 +1156,7 @@ class PromptExecutor:
                 executed = set()
                 execution_list = ExecutionList(dynamic_prompt, self.caches.outputs, self.prompt_model_tracker.add)
                 current_outputs = self.caches.outputs.all_node_ids()
+                execution_failed = False
                 for node_id in list(execute_outputs):
                     execution_list.add_node(node_id)
 
@@ -786,6 +1164,7 @@ class PromptExecutor:
                     node_id, error, ex = await execution_list.stage_node_execution()
                     if error is not None:
                         self.success = False
+                        execution_failed = True
                         self.handle_execution_error(prompt_id, dynamic_prompt.original_prompt, current_outputs, executed, error, ex)
                         break
 
@@ -793,6 +1172,7 @@ class PromptExecutor:
                     result, error, ex = await execute(self.server, dynamic_prompt, self.caches, node_id, extra_data, executed, prompt_id, execution_list, pending_subgraph_results, pending_async_nodes, ui_node_outputs, self.asset_manager)
                     self.success = result != ExecutionResult.FAILURE
                     if result == ExecutionResult.FAILURE:
+                        execution_failed = True
                         self.handle_execution_error(prompt_id, dynamic_prompt.original_prompt, current_outputs, executed, error, ex)
                         break
                     elif result == ExecutionResult.PENDING:
@@ -839,15 +1219,35 @@ class PromptExecutor:
                 self.server.last_node_id = None
                 if comfy.model_management.DISABLE_SMART_MEMORY:
                     comfy.model_management.unload_all_models()
+                backend_reusable = not execution_failed
         finally:
-            if self.cache_type == CacheType.RAM_PRESSURE:
-                detail("RAM cache evictions: prompt=%s active=%s full=%s", prompt_id, self.caches.outputs.active_evictions, self.caches.outputs.full_evictions)
-            comfy.memory_management.set_ram_cache_release_state(None, 0)
-            self.prompt_model_tracker.end()
-            self._notify_prompt_lifecycle("end", prompt_id)
+            try:
+                if variant_owner is not None:
+                    await variant_owner.close()
+            finally:
+                if metadata_scope is not None:
+                    metadata_scope.__exit__()
+                if self.cache_type == CacheType.RAM_PRESSURE:
+                    detail("RAM cache evictions: prompt=%s active=%s full=%s", prompt_id, self.caches.outputs.active_evictions, self.caches.outputs.full_evictions)
+                comfy.memory_management.set_ram_cache_release_state(None, 0)
+                self.prompt_model_tracker.end()
+                try:
+                    try:
+                        await _notify_execution_backend_lifecycle(
+                            "end" if backend_reusable else "abort",
+                            prompt_id,
+                            extra_data,
+                        )
+                    except Exception:
+                        self.success = False
+                        logging.exception(
+                            "execution backend prompt cleanup failed"
+                        )
+                finally:
+                    self._notify_prompt_lifecycle("end", prompt_id)
 
 
-async def validate_inputs(prompt_id, prompt, item, validated, visiting=None):
+async def validate_inputs(prompt_id, prompt, item, validated, visiting=None, *, _ignore_numeric_hints=False):
     if visiting is None:
         visiting = []
 
@@ -966,7 +1366,8 @@ async def validate_inputs(prompt_id, prompt, item, validated, visiting=None):
             try:
                 visiting.append(unique_id)
                 try:
-                    r = await validate_inputs(prompt_id, prompt, o_id, validated, visiting)
+                    r = await validate_inputs(prompt_id, prompt, o_id, validated, visiting,
+                                              _ignore_numeric_hints=_ignore_numeric_hints)
                 finally:
                     visiting.pop()
                 if r[0] is False:
@@ -1031,7 +1432,7 @@ async def validate_inputs(prompt_id, prompt, item, validated, visiting=None):
                 continue
 
             if x not in validate_function_inputs and not validate_has_kwargs:
-                if "min" in extra_info and val < extra_info["min"]:
+                if not _ignore_numeric_hints and "min" in extra_info and val < extra_info["min"]:
                     error = {
                         "type": "value_smaller_than_min",
                         "message": "Value {} smaller than min of {}".format(val, extra_info["min"]),
@@ -1044,7 +1445,7 @@ async def validate_inputs(prompt_id, prompt, item, validated, visiting=None):
                     }
                     errors.append(error)
                     continue
-                if "max" in extra_info and val > extra_info["max"]:
+                if not _ignore_numeric_hints and "max" in extra_info and val > extra_info["max"]:
                     error = {
                         "type": "value_bigger_than_max",
                         "message": "Value {} bigger than max of {}".format(val, extra_info["max"]),
