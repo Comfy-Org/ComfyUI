@@ -7,8 +7,6 @@ on:
 jobs:
   send-webhook:
     runs-on: ubuntu-latest
-    env:
-      DESKTOP_REPO_DISPATCH_TOKEN: ${{ secrets.DESKTOP_REPO_DISPATCH_TOKEN }}
     steps:
       - name: Send release webhook
         env:
@@ -108,37 +106,3 @@ jobs:
             --fail --silent --show-error
           
           echo "✅ Release webhook sent successfully"
-
-      - name: Send repository dispatch to desktop
-        env:
-          DISPATCH_TOKEN: ${{ env.DESKTOP_REPO_DISPATCH_TOKEN }}
-          RELEASE_TAG: ${{ github.event.release.tag_name }}
-          RELEASE_URL: ${{ github.event.release.html_url }}
-        run: |
-          set -euo pipefail
-
-          if [ -z "${DISPATCH_TOKEN:-}" ]; then
-            echo "::error::DESKTOP_REPO_DISPATCH_TOKEN is required but not set."
-            exit 1
-          fi
-
-          PAYLOAD="$(jq -n \
-            --arg release_tag "$RELEASE_TAG" \
-            --arg release_url "$RELEASE_URL" \
-            '{
-              event_type: "comfyui_release_published",
-              client_payload: {
-                release_tag: $release_tag,
-                release_url: $release_url
-              }
-            }')"
-
-          curl -fsSL \
-            -X POST \
-            -H "Accept: application/vnd.github+json" \
-            -H "Content-Type: application/json" \
-            -H "Authorization: Bearer ${DISPATCH_TOKEN}" \
-            https://api.github.com/repos/Comfy-Org/desktop/dispatches \
-            -d "$PAYLOAD"
-
-          echo "✅ Dispatched ComfyUI release ${RELEASE_TAG} to Comfy-Org/desktop"
