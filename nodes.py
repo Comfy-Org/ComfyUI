@@ -1744,6 +1744,9 @@ class PreviewImage(SaveImage):
                 "hidden": {"prompt": "PROMPT", "extra_pnginfo": "EXTRA_PNGINFO"},
                 }
 
+_LOADIMAGE_NO_SELECTION_MSG = "LoadImage: no image file selected. Choose a file or bypass the node."
+
+
 class LoadImage:
     @classmethod
     def INPUT_TYPES(s):
@@ -1762,6 +1765,8 @@ class LoadImage:
     FUNCTION = "load_image"
 
     def load_image(self, image):
+        if not image or not str(image).strip():
+            raise ValueError(_LOADIMAGE_NO_SELECTION_MSG)
         image_path = folder_paths.get_annotated_filepath(image)
 
         dtype = comfy.model_management.intermediate_dtype()
@@ -1807,6 +1812,8 @@ class LoadImage:
 
     @classmethod
     def IS_CHANGED(s, image):
+        if not image or not str(image).strip():
+            return ""
         image_path = folder_paths.get_annotated_filepath(image)
         m = hashlib.sha256()
         with open(image_path, 'rb') as f:
@@ -1815,6 +1822,9 @@ class LoadImage:
 
     @classmethod
     def VALIDATE_INPUTS(s, image):
+        if not image or not str(image).strip():
+            return _LOADIMAGE_NO_SELECTION_MSG
+
         if not folder_paths.exists_annotated_filepath(image):
             return "Invalid image file: {}".format(image)
 
