@@ -29,6 +29,13 @@ class FixedKV:
     position: torch.Tensor
     seqlen: torch.Tensor
 
+    def reset(self):
+        self.index = 0
+        if self.position is not None:
+            self.position.zero_()
+        if self.seqlen is not None:
+            self.seqlen.zero_()
+
     def prepare(self, num_tokens):
         self.position.copy_(self.seqlen)
         self.seqlen.add_(num_tokens)
@@ -43,6 +50,13 @@ class FixedKV:
 @dataclass
 class FixedKVState(FixedKV):
     tracker: dict = None
+
+    def reset(self):
+        super().reset()
+        if self.bias is not None:
+            self.bias.fill_(torch.finfo(self.bias.dtype).min)
+        if self.tracker is not None:
+            self.tracker["step"] = -1
 
     def prepare(self, num_tokens):
         tree = self.tracker["tree"]
@@ -1209,6 +1223,9 @@ class BaseGenerate:
 
         max_cache_len = embeds.shape[1] + max_length
         past_key_values = self.init_kv_cache(embeds.shape[0], max_cache_len, device, execution_dtype)
+        for cache in past_key_values:
+            if isinstance(cache, FixedKV):
+                cache.reset()
 
         generator = torch.Generator(device=device).manual_seed(seed) if do_sample else None
 
