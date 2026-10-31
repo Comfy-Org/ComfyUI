@@ -148,20 +148,44 @@ def _decode_selected_frames(video: Input.Video, indices: list[int]) -> Input.Vid
     """
     indices_sorted = sorted(set(indices))
     max_idx = indices_sorted[-1]
+    start_time, duration = video.get_active_trim_window()
     source = video.get_stream_source()
 
     frames_by_idx: dict[int, torch.Tensor] = {}
     with av.open(source, mode="r") as container:
         stream = container.streams.video[0]
+        # Truncate the window bounds like VideoFromFile.get_components_internal and
+        # get_frame_count do, so frame counting and decoding agree on the boundaries.
+        start_pts = int(start_time / stream.time_base)
+        end_pts = int((start_time + duration) / stream.time_base) if duration else None
+        if start_pts:
+            container.seek(start_pts, stream=stream)
         wanted = set(indices_sorted)
-        for frame_idx, frame in enumerate(container.decode(stream)):
+        last_frame = None
+        frame_idx = 0
+        for frame in container.decode(stream):
+            # Skip below-window frames only when the window actually starts later;
+            # untrimmed videos may legitimately carry negative presentation timestamps.
+            if start_pts > 0 and frame.pts is not None and frame.pts < start_pts:
+                continue
+            if end_pts is not None and frame.pts is not None and frame.pts >= end_pts:
+                break
+            last_frame = frame
             if frame_idx in wanted:
                 img = frame.to_ndarray(format="rgb24")
                 frames_by_idx[frame_idx] = torch.from_numpy(img.copy()).float() / 255.0
             if frame_idx >= max_idx:
                 break
+            frame_idx += 1
 
-    stacked = torch.stack([frames_by_idx[i] for i in indices])
+    if last_frame is None:
+        raise ValueError("Sample Video Frame: no frames could be decoded from the video")
+    fallback = None
+    if any(i not in frames_by_idx for i in indices):
+        # Clamp missing indices to the last decoded frame of the window: the frame count
+        # can be estimated above the real number of frames (duration x average_rate).
+        fallback = torch.from_numpy(last_frame.to_ndarray(format="rgb24")).float() / 255.0
+    stacked = torch.stack([frames_by_idx.get(i, fallback) for i in indices])
     return InputImpl.VideoFromComponents(
         Types.VideoComponents(images=stacked, frame_rate=video.get_frame_rate())
     )
