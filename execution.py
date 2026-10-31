@@ -173,6 +173,16 @@ def get_input_data(inputs, class_def, unique_id, execution_list=None, dynprompt=
     for x in inputs:
         input_data = inputs[x]
         _, input_category, input_info = get_input_info(class_def, x, valid_inputs)
+        if (
+            input_category in ("required", "optional")
+            and isinstance(input_data, dict)
+            and "__value__" in input_data
+        ):
+            # Matches the unwrapping validate_inputs() applied in place before
+            # #17294, without modifying the stored prompt: inputs validation
+            # reads (required/optional) keep their execution semantics, while
+            # inputs it never visits are read exactly as submitted.
+            input_data = input_data["__value__"]
         def mark_missing():
             missing_keys[x] = True
             input_data_all[x] = (None,)
@@ -997,11 +1007,13 @@ async def validate_inputs(prompt_id, prompt, item, validated, visiting=None):
                 # Unwraps values wrapped in __value__ key or typed wrapper.
                 # This is used to pass list widget values to execution,
                 # as by default list value is reserved to represent the
-                # connection between nodes.
+                # connection between nodes. The prompt itself is left
+                # untouched so the submitted form is what gets stored in
+                # history and PNG metadata; get_input_data() unwraps the
+                # same way when execution reads the inputs.
                 if isinstance(val, dict):
                     if "__value__" in val:
                         val = val["__value__"]
-                        inputs[x] = val
 
                 if input_type == "INT":
                     val = int(val)
