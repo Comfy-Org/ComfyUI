@@ -21,8 +21,15 @@ depends_on = None
 
 
 def upgrade() -> None:
+    # Some databases in the wild are missing ix_tags_tag_type (created by
+    # older builds whose tags table never had the index), and an unconditional
+    # drop_index aborts the whole upgrade at startup. Only drop it if present.
+    inspector = sa.inspect(op.get_bind())
+    index_names = {index["name"] for index in inspector.get_indexes("tags")}
+
     with op.batch_alter_table("tags") as batch_op:
-        batch_op.drop_index("ix_tags_tag_type")
+        if "ix_tags_tag_type" in index_names:
+            batch_op.drop_index("ix_tags_tag_type")
         batch_op.drop_column("tag_type")
 
 
