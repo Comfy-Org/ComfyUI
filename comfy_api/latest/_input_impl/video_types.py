@@ -569,9 +569,18 @@ class VideoFromFile(VideoInput):
                             img = np.ascontiguousarray(align_graph[2].pull().to_ndarray(format=image_format)[:frame.height, :frame.width])
                         else:
                             img = frame.to_ndarray(format=image_format)
+                        display_matrix = av.sidedata.sidedata.SideDataContainer(frame).get(av.sidedata.sidedata.Type.DISPLAYMATRIX)
+                        reflected = False
+                        if display_matrix is not None:
+                            matrix = np.frombuffer(display_matrix, dtype=np.int32)
+                            reflected = int(matrix[0]) * int(matrix[4]) - int(matrix[1]) * int(matrix[3]) < 0
+                        if reflected:
+                            img = np.flipud(img)
                         rotation_quadrant = _rotation_quadrant(frame)
                         if rotation_quadrant:
-                            img = np.rot90(img, k=rotation_quadrant, axes=(0, 1)).copy()
+                            img = np.rot90(img, k=rotation_quadrant, axes=(0, 1))
+                        if reflected or rotation_quadrant:
+                            img = np.ascontiguousarray(img)
                         if self.__crop is not None:
                             if not crop_resolved:
                                 crop_rect = normalize_crop_rect(*self.__crop, img.shape[1], img.shape[0])
