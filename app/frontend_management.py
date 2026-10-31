@@ -253,6 +253,19 @@ comfyui-frontend-package is not installed.
             sys.exit(-1)
 
     @classmethod
+    def served_version(cls, web_root: str) -> Optional[str]:
+        """The version of the official frontend at web_root, or None if it isn't one we can identify."""
+        path = Path(web_root)
+        if path.parent == Path(cls.CUSTOM_FRONTENDS_ROOT) / "Comfy-Org_ComfyUI_frontend":
+            return path.name
+        if web_root != cls.default_frontend_path():
+            return None
+        try:
+            return version("comfyui-frontend-package")
+        except Exception:
+            return None
+
+    @classmethod
     def template_asset_map(cls) -> Optional[Dict[str, str]]:
         """Return a mapping of template asset names to their absolute paths."""
         try:

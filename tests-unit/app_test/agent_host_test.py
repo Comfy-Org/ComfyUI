@@ -46,6 +46,7 @@ def _reset(monkeypatch):
     monkeypatch.setattr(agent_host, "_host", None)
     monkeypatch.setattr(agent_host, "_failure", None)
     monkeypatch.setattr(agent_host, "_status_logged", False)
+    monkeypatch.setattr(agent_host, "_frontend_outdated", False)
     # The loader publishes the agent flag by mutating this shared dict; keep that
     # leakage out of other tests.
     feature_flags.SERVER_FEATURE_FLAGS.pop("agent", None)
@@ -297,3 +298,53 @@ def test_start_runs_the_host_off_the_event_loop(monkeypatch):
         loop.run_until_complete(asyncio.wait_for(_until(lambda: agent_host._host.started), 5))
     finally:
         loop.close()
+
+
+def _ready_host(monkeypatch):
+    host = FakeHost()
+    host.state["state"] = "ready"
+    _entry_points(monkeypatch, {"v1": lambda: host})
+    assert agent_host.load() is True
+    return host
+
+
+def test_outdated_frontend_warns_and_reports_unavailable(monkeypatch, caplog):
+    host = _ready_host(monkeypatch)
+    with caplog.at_level(logging.INFO):
+        agent_host.check_frontend("1.57.6", "Comfy-Org/ComfyUI_frontend@1.59.0")
+
+    assert agent_host.feature_flag() == {"state": "failed", "reason": "frontend_outdated"}
+    assert feature_flags.SERVER_FEATURE_FLAGS["agent"] == {"state": "failed", "reason": "frontend_outdated"}
+    warning = next(r.getMessage() for r in caplog.records if r.levelno == logging.WARNING)
+    assert "1.57.6" in warning and "Comfy-Org/ComfyUI_frontend@1.59.0" in warning and agent_host.MIN_FRONTEND_VERSION in warning
+    assert "[agent-event] agent_error reason=frontend_outdated" in _agent_records(caplog)
+    assert host.stopped == 0  # the host keeps running: a newer frontend can still use it
+
+
+@pytest.mark.parametrize("served", ["1.58.1", "1.59.0", "1.59.0.dev2", "2.0.0"])
+def test_supported_frontend_keeps_the_host_state(monkeypatch, served):
+    _ready_host(monkeypatch)
+    agent_host.check_frontend(served, None)
+    assert agent_host.feature_flag() == {"state": "ready"}
+
+
+@pytest.mark.parametrize("served", [None, "not-a-version"])
+def test_unknown_frontend_version_is_not_flagged(monkeypatch, served):
+    # --front-end-root or a fork: nothing to compare, so don't claim it is outdated.
+    _ready_host(monkeypatch)
+    agent_host.check_frontend(served, None)
+    assert agent_host.feature_flag() == {"state": "ready"}
+
+
+def test_host_failure_reason_wins_over_outdated_frontend(monkeypatch):
+    host = _ready_host(monkeypatch)
+    host.state.update(state="failed", reason="crashed")
+    agent_host.check_frontend("1.57.6", None)
+    assert agent_host.feature_flag() == {"state": "failed", "reason": "crashed"}
+
+
+def test_failed_load_is_not_replaced_by_outdated_frontend(monkeypatch):
+    _entry_points(monkeypatch, {})
+    assert agent_host.load() is False
+    agent_host.check_frontend("1.57.6", None)
+    assert agent_host.feature_flag() == {"state": "failed", "reason": "package_missing"}

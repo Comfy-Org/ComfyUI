@@ -373,3 +373,25 @@ def test_template_asset_map_skips_missing_assets():
         asset_map = FrontendManager.template_asset_map()
 
     assert asset_map == {"example.json": "/templates/example.json"}
+
+
+def test_served_version_of_a_downloaded_frontend():
+    root = FrontendManager.CUSTOM_FRONTENDS_ROOT
+    assert FrontendManager.served_version(f"{root}/Comfy-Org_ComfyUI_frontend/1.59.0") == "1.59.0"
+
+
+def test_served_version_ignores_other_downloaded_frontends():
+    root = FrontendManager.CUSTOM_FRONTENDS_ROOT
+    assert FrontendManager.served_version(f"{root}/someone_ComfyUI_frontend/1.2.3") is None
+
+
+def test_served_version_of_the_default_frontend():
+    with patch.object(FrontendManager, "default_frontend_path", return_value="/site/static"):
+        with patch("app.frontend_management.version", return_value="1.57.6") as installed:
+            assert FrontendManager.served_version("/site/static") == "1.57.6"
+    installed.assert_called_once_with("comfyui-frontend-package")
+
+
+def test_served_version_of_a_custom_root_is_unknown():
+    with patch.object(FrontendManager, "default_frontend_path", return_value="/site/static"):
+        assert FrontendManager.served_version("/my/dev/dist") is None
