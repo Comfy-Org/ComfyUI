@@ -282,8 +282,15 @@ def _init_file_db(db_url):
 # roll back recent commits but cannot corrupt the database. "FULL" is SQLite's default.
 WAL_SYNCHRONOUS = "NORMAL"
 
+# PRAGMA statements don't accept bound parameters, so the value can't be passed through
+# the DBAPI's parameter substitution. Restrict it to SQLite's known synchronous levels
+# before formatting it into the statement, so the string can never carry injected SQL.
+_VALID_SYNCHRONOUS_LEVELS = {"OFF", "NORMAL", "FULL", "EXTRA"}
+
 
 def _set_wal_synchronous(dbapi_connection, connection_record=None):
+    if WAL_SYNCHRONOUS not in _VALID_SYNCHRONOUS_LEVELS:
+        raise ValueError(f"Invalid WAL_SYNCHRONOUS value: {WAL_SYNCHRONOUS!r}")
     dbapi_connection.execute(f"PRAGMA synchronous={WAL_SYNCHRONOUS}")
 
 
