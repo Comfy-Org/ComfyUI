@@ -2,6 +2,7 @@ import logging
 import re
 import threading
 import time
+from datetime import datetime
 from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from unittest.mock import Mock
@@ -143,6 +144,7 @@ def _run_faulting_fast_phase(
         job_id: str | None,
         loader_path: str | None,
         tags: list[str],
+        created_at: datetime,
     ) -> Asset:
         if name == "broken.bin":
             raise original_fault
@@ -154,6 +156,7 @@ def _run_faulting_fast_phase(
             job_id=job_id,
             loader_path=loader_path,
             tags=tags,
+            created_at=created_at,
         )
 
     monkeypatch.setattr(scanner_module, "create_session", database_session)

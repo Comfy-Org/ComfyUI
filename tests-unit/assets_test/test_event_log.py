@@ -48,6 +48,7 @@ VALID_VALUES: dict[str, list[object]] = {
     "error_kind": sorted(ERROR_KINDS),
     "hashing_enabled": [True, False],
     "site": ["discovery", "enrich"],
+    "reason": ["too_large", "decode_failed", "write_failed"],
 }
 
 

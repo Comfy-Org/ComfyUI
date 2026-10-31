@@ -78,6 +78,10 @@ EXPECTED_CALL_SITES: frozenset[CallSite] = frozenset(
         CallSite(
             "app/assets/scanner_admission.py", "tick_watch_list", "scanner.watch_seed_failed"
         ),
+        # preview generation outcomes, for rollout failure rates
+        CallSite("app/assets/previews.py", "generate_upload_preview", "previews.generated"),
+        CallSite("app/assets/previews.py", "_emit_failed", "previews.generation_failed"),
+        CallSite("app/assets/previews.py", "_emit_error", "previews.generation_failed"),
     }
 )
 

@@ -87,7 +87,7 @@ def held_lock(tmp_path):
 
 def test_running_assets_off_instance_does_not_block_an_assets_on_start(tmp_path):
     # A previous assets-on run leaves the database and its lock file behind, as on a real install.
-    first = _quick_start(tmp_path)
+    first = _quick_start(tmp_path, "--enable-assets")
     assert first.returncode == 0, first.stderr
 
     port = _free_port()
@@ -105,7 +105,7 @@ def test_running_assets_off_instance_does_not_block_an_assets_on_start(tmp_path)
         except AssertionError as e:
             raise AssertionError(f"{e}\n{server_log.read_text()[-4000:]}") from None
 
-        second = _quick_start(tmp_path)
+        second = _quick_start(tmp_path, "--enable-assets")
 
         assert server.poll() is None
     finally:
@@ -116,8 +116,9 @@ def test_running_assets_off_instance_does_not_block_an_assets_on_start(tmp_path)
     assert LOCK_HELD not in second.stderr
 
 
-def test_assets_off_start_warns_and_continues_when_the_database_is_held(tmp_path, held_lock):
-    result = _quick_start(tmp_path, "--disable-assets")
+@pytest.mark.parametrize("flags", [(), ("--disable-assets",)])
+def test_assets_off_start_warns_and_continues_when_the_database_is_held(tmp_path, held_lock, flags):
+    result = _quick_start(tmp_path, *flags)
 
     assert result.returncode == 0, result.stderr
     assert IN_USE in result.stderr
@@ -127,7 +128,7 @@ def test_assets_off_start_warns_and_continues_when_the_database_is_held(tmp_path
 
 
 def test_assets_on_start_still_fails_when_the_database_is_held(tmp_path, held_lock):
-    result = _quick_start(tmp_path)
+    result = _quick_start(tmp_path, "--enable-assets")
 
     assert result.returncode == 1, result.stderr
     assert LOCK_HELD in result.stderr

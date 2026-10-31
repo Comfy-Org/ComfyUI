@@ -40,6 +40,7 @@ import comfy.ldm.hydit.models
 import comfy.ldm.audio.dit
 import comfy.ldm.audio.embedders
 import comfy.ldm.flux.model
+import comfy.ldm.flux3.model
 import comfy.ldm.lens.model
 import comfy.ldm.lightricks.model
 import comfy.ldm.hunyuan_video.model
@@ -82,6 +83,8 @@ import comfy.ldm.sensenova.conditioning
 import comfy.ldm.sensenova.model
 from comfy.ldm.sensenova.sampling import SenseNovaModelSampling, time_snr_shift
 import comfy.ldm.depth_anything_3.model
+import comfy.ldm.moss_image.model
+import comfy.ldm.fibo2.model
 
 import comfy.model_management
 import comfy.patcher_extension
@@ -273,6 +276,9 @@ class BaseModel(torch.nn.Module):
     def encode_adm(self, **kwargs):
         return None
 
+    def get_writable_model(self, conds, noise_shape, model_options, device):
+        return None
+
     def concat_cond(self, **kwargs):
         if len(self.concat_keys) > 0:
             cond_concat = []
@@ -335,6 +341,10 @@ class BaseModel(torch.nn.Module):
         Return a sliced cond object, or None to fall through to default handling.
         Use comfy.context_windows.slice_cond() for common cases."""
         return None
+
+    def context_window_modality_dims(self, latent_shapes, dim):
+        """Temporal dim of each stream of a packed multimodal latent for context windows."""
+        return [dim] * len(latent_shapes)
 
     def extra_conds(self, **kwargs):
         out = {}
@@ -1096,6 +1106,39 @@ class Flux2(Flux):
                 cross_attn = torch.nn.functional.pad(cross_attn, (0, 0, target_text_len - cross_attn.shape[1], 0))
             out['c_crossattn'] = comfy.conds.CONDRegular(cross_attn)
         return out
+
+
+class Flux3(BaseModel):
+    def __init__(self, model_config, model_type=ModelType.FLUX, device=None):
+        super().__init__(model_config, model_type, device=device, unet_model=comfy.ldm.flux3.model.Flux3)
+        self.memory_usage_factor_conds = ("ref_latents",)
+
+    def extra_conds(self, **kwargs):
+        out = super().extra_conds(**kwargs)
+        cross_attn = kwargs.get("cross_attn", None)
+        ref_latents = kwargs.get("reference_latents", None)
+        if ref_latents is not None:
+            ref_latents = [self.process_latent_in(lat) for lat in ref_latents]
+        # the DiT attends to every text token, so no padding: cond and uncond of different lengths run separately
+        if cross_attn is not None and torch.is_inference_mode_enabled() and kwargs.get("hooks") is None and not self.diffusion_model.flow_map:
+            # the t = 0 early blocks of text and references depend on the conditioning alone: run them once, not every step
+            # (a flow map also modulates them with each step's target time)
+            device, dtype = kwargs["device"], self.get_dtype_inference()
+            refs = [lat.to(device=device, dtype=dtype) for lat in ref_latents] if ref_latents else None
+            txt_states, ref_states = self.diffusion_model.preprocess_conds(cross_attn.to(device=device, dtype=dtype), refs)
+            del out['c_crossattn']
+            out['txt_states'] = comfy.conds.CONDRegular(txt_states)
+            if ref_states is not None:
+                out['ref_states'] = comfy.conds.CONDRegular(ref_states)
+                out['ref_shapes'] = comfy.conds.CONDConstant([tuple(lat.shape[-2:]) for lat in ref_latents])
+            return out
+        if cross_attn is not None:
+            out['c_crossattn'] = comfy.conds.CONDRegular(cross_attn)
+        if ref_latents is not None:
+            out['ref_latents'] = comfy.conds.CONDList(ref_latents)
+        return out
+
+    extra_conds_shapes = Flux.extra_conds_shapes
 
 
 class Lens(BaseModel):
@@ -2199,13 +2242,10 @@ class MiniMaxH3(BaseModel):
         keyframes = kwargs.get("minimax_keyframes", None)
         if keyframes is not None:
             payload["keyframes"] = keyframes
-            payload["cond_video_latents"] = [kf["latent"] for kf in keyframes if kf.get("latent") is not None]
-            payload["cond_audio_latents"] = [kf["audio_latent"] for kf in keyframes if kf.get("audio_latent") is not None]
         refs = kwargs.get("minimax_refs", None)
         if refs is not None:
             payload["refs"] = refs
-            payload["cond_video_latents"] = payload.get("cond_video_latents", []) + [r["latent"] for r in refs if "latent" in r]
-            payload["cond_audio_latents"] = payload.get("cond_audio_latents", []) + [r["audio_latent"] for r in refs if r.get("audio_latent") is not None]
+        payload.update(self._cond_latents(keyframes, refs))
         if kwargs.get("minimax_visual_cond_noise_aug", None) is not None:
             payload["visual_cond_noise_aug"] = kwargs["minimax_visual_cond_noise_aug"]
         if kwargs.get("minimax_audio_cond_noise_aug", None) is not None:
@@ -2227,6 +2267,74 @@ class MiniMaxH3(BaseModel):
                 refs=payload.get("refs"))
         out['minimax_payload'] = comfy.conds.CONDConstant(payload)
         return out
+
+    @staticmethod
+    def _cond_latents(keyframes, refs):
+        # condition latents in packed-layout order: keyframes, then references
+        keyframes, refs = keyframes or [], refs or []
+        return {"cond_video_latents": [kf["latent"] for kf in keyframes if kf.get("latent") is not None] + [r["latent"] for r in refs if "latent" in r],
+                "cond_audio_latents": [kf["audio_latent"] for kf in keyframes if kf.get("audio_latent") is not None] + [r["audio_latent"] for r in refs if r.get("audio_latent") is not None]}
+
+    def context_window_modality_dims(self, latent_shapes, dim):
+        # audio is [B, C, 2, T], time on the last axis
+        return [dim] + [len(s) - 1 for s in latent_shapes[1:]]
+
+    @staticmethod
+    def _latent_pixel_starts(latent_t):
+        # pixel frame each video latent starts at, plus the end of the last one
+        starts = [0]
+        for k in range(latent_t):
+            starts.append(starts[-1] + comfy.ldm.minimax.model.FRAME_PER_TOKEN[k % 5])
+        return starts
+
+    def map_context_window_to_modalities(self, primary_indices, latent_shapes, dim):
+        # the streams share one time axis: split the audio at the video latents' pixel frame boundaries
+        starts = self._latent_pixel_starts(latent_shapes[0][dim])
+        edges = [round(s * latent_shapes[1][-1] / starts[-1]) for s in starts]
+        return [primary_indices, [a for k in primary_indices for a in range(edges[k], edges[k + 1])]]
+
+    def _window_payload(self, payload, window):
+        # keyframes anchor the full video's timeline: keep the part of each guide inside the window, cropped and re-anchored to it
+        starts = self._latent_pixel_starts(window.total_frames)
+        first, last = window.index_list[0], window.index_list[-1]
+        origin = starts[first]
+        if getattr(window, "causal_anchor_index", None) is not None:
+            origin -= comfy.ldm.minimax.model.FRAME_PER_TOKEN[0]  # the anchor latent takes the window's first time slot
+        audio_window = window.get_window_for_modality(1)
+        a0, a1 = audio_window.index_list[0], audio_window.index_list[-1] + 1
+        rescale = comfy.ldm.minimax.model.FRAME_RESCALE
+        keyframes = []
+        for kf in payload["keyframes"]:
+            f = kf["resolved_frame_index"]
+            latent = kf.get("latent")
+            if latent is not None:
+                # crop at the guide's 5-latent chunk starts so the clip keeps its 1,4,4,4,4 frame pattern; a chunk
+                # overlapping the window's start is kept and may begin a few frames before its origin
+                vt = latent.shape[2]
+                guide_starts = self._latent_pixel_starts(vt)
+                chunks = [g for g in range(0, vt, 5)
+                          if f + guide_starts[g] < starts[last + 1] and f + guide_starts[min(g + 5, vt)] > starts[first]]
+                if chunks:
+                    keyframes.append({"resolved_frame_index": f + guide_starts[chunks[0]] - origin,
+                                      "latent": latent[:, :, chunks[0]:chunks[-1] + 5]})
+            audio = kf.get("audio_latent")
+            if audio is not None:
+                # audio guide frame j sits at rescale * f + j on the shared time axis; the window's audio starts at a0
+                t = rescale * f
+                j0, j1 = max(0, math.ceil(a0 - t)), min(audio.shape[-1], math.ceil(a1 - t))
+                if j1 > j0:
+                    keyframes.append({"resolved_frame_index": (t + j0 - a0) / rescale, "audio_latent": audio[..., j0:j1]})
+        payload = {k: v for k, v in payload.items() if k != "layout"}  # forward rebuilds it for the window
+        payload["keyframes"] = keyframes
+        payload.update(self._cond_latents(keyframes, payload.get("refs")))
+        return payload
+
+    def resize_cond_for_context_window(self, cond_key, cond_value, window, x_in, device, retain_index_list=[]):
+        if cond_key == "audio_denoise_mask":
+            return cond_value._copy_with(window.get_window_for_modality(1).get_tensor(cond_value.cond, device))
+        if cond_key == "minimax_payload" and cond_value.cond.get("keyframes"):
+            return cond_value._copy_with(self._window_payload(cond_value.cond, window))
+        return super().resize_cond_for_context_window(cond_key, cond_value, window, x_in, device, retain_index_list=retain_index_list)
 
     def _pool_masks_to_token_grid(self, masks):
         # pool the per-pixel masks to the label grid with amax: video per 2x2 DiT patch, audio per latent frame
@@ -2688,6 +2796,35 @@ class QwenImage21(QwenImage):
             diffusion_model.current_patcher = patcher
             diffusion_model.reset_prefix_cache(patcher is not None and len(patcher.hook_patches) == 0)
 
+    def get_writable_model(self, conds, noise_shape, model_options, device):
+        transformer_options = model_options.get("transformer_options", {})
+        options = transformer_options.get("qwen_image21_cache", {})
+        model = self.diffusion_model
+        if options.get("device", "auto") != "auto" or not model.can_cache_prefix(transformer_options):
+            return None
+
+        heads = model.transformer_blocks[0].attn.heads
+        slots = []
+        for conditions in conds.values():
+            for cond in conditions:
+                cond["model_conds"] = c = cond["model_conds"].copy()
+                length = c["c_crossattn"].cond.shape[1]
+                if "ref_latents" in c:
+                    length += sum(t.shape[-2] * t.shape[-1] for t in c["ref_latents"].cond)
+                shape = (noise_shape[0], 2, length, heads, model.inner_dim // heads)
+                slot = comfy.ldm.qwen_image21.model.PrefixCacheSlot(shape, len(model.transformer_blocks), self.get_dtype_inference(), options.get("dtype", "default"))
+                slots.append((c, slot))
+
+        cache = comfy.ldm.qwen_image21.model.KVCacheModel([slot for _, slot in slots])
+        cache_bytes = sum(p.numel() * p.element_size() for p in cache.parameters())
+        if not (self.current_patcher.get_free_memory(device) > 4 * cache_bytes or
+                comfy.model_management.ensure_pin_budget(cache_bytes, evict_active=False)):
+            return None
+
+        for c, slot in slots:
+            c.setdefault("prefix_cache", comfy.conds.CONDKVCache({})).cond[device] = slot
+        return cache
+
     def extra_conds(self, **kwargs):
         out = super().extra_conds(**kwargs)
         image_slots = kwargs.get("image_slots", None)
@@ -2760,6 +2897,73 @@ class Krea2(BaseModel):
         if ref_latents is not None:
             out['ref_latents'] = list([1, 16, sum(map(lambda a: math.prod(a.size()), ref_latents)) // 16])
         return out
+
+class MOSSImage(BaseModel):
+    def __init__(self, model_config, model_type=ModelType.FLOW, device=None):
+        super().__init__(model_config, model_type, device=device, unet_model=comfy.ldm.moss_image.model.MOSSImage)
+        self.memory_usage_factor_conds = ("ref_latents",)
+
+    def extra_conds(self, **kwargs):
+        out = super().extra_conds(**kwargs)
+        cross_attn = kwargs.get("cross_attn", None)
+        # rope positions follow the true text length, so no repeat padding: cond and uncond of different lengths run separately
+        if cross_attn is not None:
+            out['c_crossattn'] = comfy.conds.CONDRegular(cross_attn)
+        context_attention_bias = kwargs.get("context_attention_bias", None)
+        if context_attention_bias is not None:
+            out['context_attention_bias'] = comfy.conds.CONDRegular(context_attention_bias)
+        ref_latents = kwargs.get("reference_latents", None)
+        if ref_latents:
+            # control adapters widen video_embedder, the references carry no control
+            channels = self.diffusion_model.video_embedder.weight.shape[1]
+            ref_latents = [torch.nn.functional.pad(self.process_latent_in(lat), (0, 0, 0, 0, 0, channels - lat.shape[1])) for lat in ref_latents]
+            ref_latents_method = kwargs.get("reference_latents_method", None)
+            if ref_latents_method is not None:
+                out['ref_latents_method'] = comfy.conds.CONDConstant(ref_latents_method)
+            if ref_latents_method not in ("index", "index_timestep_zero") and torch.is_inference_mode_enabled() and kwargs.get("hooks") is None:
+                # references that attend only to each other at t = 0: their keys and values are computed once, not every step; equal ones batch without copies
+                device, dtype = kwargs["device"], self.get_dtype_inference()
+                out['ref_kv'] = comfy.conds.CONDConstant(self.diffusion_model.preprocess_refs([lat.to(device=device, dtype=dtype) for lat in ref_latents]))
+            else:
+                out['ref_latents'] = comfy.conds.CONDList(ref_latents)
+        return out
+
+    def extra_conds_shapes(self, **kwargs):
+        out = {}
+        ref_latents = kwargs.get("reference_latents", None)
+        if ref_latents is not None:
+            out['ref_latents'] = list([1, 128, sum(map(lambda a: math.prod(a.size()), ref_latents)) // 128])
+        return out
+
+    def concat_cond(self, **kwargs):
+        # control adapters widen video_embedder, zeros are no control
+        noise = kwargs["noise"]
+        channels = self.diffusion_model.video_embedder.weight.shape[1] - noise.shape[1]
+        if channels <= 0:
+            return None
+        image = kwargs.get("concat_latent_image", None)
+        if image is None:
+            return noise.new_zeros((noise.shape[0], channels) + noise.shape[2:])
+        image = utils.common_upscale(image.to(kwargs["device"]), noise.shape[-1], noise.shape[-2], "bilinear", "center")
+        return utils.resize_to_batch_size(self.process_latent_in(image), noise.shape[0])
+
+class Fibo2(BaseModel):
+    def __init__(self, model_config, model_type=ModelType.FLUX, device=None):
+        super().__init__(model_config, model_type, device=device, unet_model=comfy.ldm.fibo2.model.Fibo2)
+        self.memory_usage_factor_conds = ("ref_latents",)
+
+    def extra_conds(self, **kwargs):
+        out = super().extra_conds(**kwargs)
+        cross_attn = kwargs.get("cross_attn", None)
+        # the gist token count follows the true text length, so no repeat padding: cond and uncond of different lengths run separately
+        if cross_attn is not None:
+            out['c_crossattn'] = comfy.conds.CONDRegular(cross_attn)
+        ref_latents = kwargs.get("reference_latents", None)
+        if ref_latents is not None:
+            out['ref_latents'] = comfy.conds.CONDList([self.process_latent_in(lat) for lat in ref_latents])
+        return out
+
+    extra_conds_shapes = Flux.extra_conds_shapes
 
 class HunyuanImage21(BaseModel):
     def __init__(self, model_config, model_type=ModelType.FLOW, device=None):

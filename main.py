@@ -18,6 +18,7 @@ import folder_paths
 import time
 from comfy.cli_args import enables_dynamic_vram
 from app import governance
+from app import product_tips
 from app.logger import setup_logger
 console_log_level = get_console_log_level(args.verbose)
 file_log_outputs = get_file_log_outputs(args.verbose)
@@ -27,7 +28,6 @@ from app.database.db import dependencies_available, get_database_url, get_db_pat
 from app.assets.event_log import error_kind
 from utils.install_util import get_missing_requirements_message
 from app.assets.lifecycle import cleanup_temp_filesystem
-from app.assets.manager import AssetManager, default_asset_manager
 import itertools
 import utils.extra_config
 from utils.mime_types import init_mime_types
@@ -38,6 +38,7 @@ import sys
 from comfy_execution.progress import get_progress_state
 from comfy_execution.utils import get_executing_context
 from comfy_api import feature_flags
+import app.agent_host
 
 if __name__ == "__main__":
     #NOTE: These do not do anything on core ComfyUI, they are for custom nodes.
@@ -55,11 +56,11 @@ if __name__ == "__main__":
         os.environ["CUDA_VISIBLE_DEVICES"] = "0"
         logging.warning("On windows we are currently forcing single GPU mode in ComfyUI due to a Nvidia related issue, if you want to disable this use: --cuda-device all")
 
+    if args.enable_asset_hashing and args.disable_assets:
+        logging.warning("--enable-asset-hashing is ignored because the assets system is off. Start ComfyUI with --enable-assets, and without --disable-assets, to use it.")
+
     if args.disable_api_nodes:
         logging.warning("--disable-api-nodes is deprecated and will be removed in a future version. It currently behaves like --offline. Use --offline to keep the frontend offline, or --disable-partner-nodes to only disable partner nodes.")
-
-    if args.enable_assets:
-        logging.warning("--enable-assets is deprecated and does nothing: the assets system is on unless ComfyUI is started with --disable-assets.")
 
 faulthandler.enable(file=sys.stderr, all_threads=args.debug_hang)
 if __name__ == "__main__" and args.debug_hang:
@@ -79,15 +80,7 @@ import comfy_aimdo.control
 
 if enables_dynamic_vram():
     simple_vram_headroom = None if args.reserve_vram is None else int(args.reserve_vram * 1024 ** 3)
-    try:
-        comfy_aimdo.control.init(simple_vram_headroom=simple_vram_headroom, nvml_pressure=not args.disable_nvml_pressure)
-    except TypeError:
-        # comfy-aimdo 0.4.10 protocol.
-        try:
-            comfy_aimdo.control.init(simple_vram_headroom=simple_vram_headroom)
-        except TypeError:
-            # comfy-aimdo 0.4.9 protocol.
-            comfy_aimdo.control.init()
+    comfy_aimdo.control.init(simple_vram_headroom=simple_vram_headroom, nvml_pressure=not args.disable_nvml_pressure)
 
 if os.name == "nt":
     os.environ['MIMALLOC_PURGE_DELAY'] = '0'
@@ -136,6 +129,11 @@ def handle_comfyui_manager_unavailable():
     args.enable_manager = False
 
 
+if args.enable_agent:
+    logging.info("[agent-event] flag_enabled")
+    app.agent_host.load()  # a failure stays reported: the agent's paths answer 503 with the reason
+
+
 def apply_custom_paths():
     # extra model paths
     extra_model_paths_config_path = os.path.join(os.path.dirname(os.path.realpath(__file__)), "extra_model_paths.yaml")
@@ -172,6 +170,11 @@ def apply_custom_paths():
         input_dir = os.path.abspath(args.input_directory)
         logging.info(f"Setting input directory to: {input_dir}")
         folder_paths.set_input_directory(input_dir)
+
+    if args.previews_directory:
+        previews_dir = os.path.abspath(args.previews_directory)
+        logging.info(f"Setting previews directory to: {previews_dir}")
+        folder_paths.set_previews_directory(previews_dir)
 
     if args.user_directory:
         user_dir = os.path.abspath(args.user_directory)
@@ -264,6 +267,7 @@ import comfy.utils
 
 import execution
 import server
+from app.assets.manager import AssetManager, default_asset_manager  # imports torch, so not before the check above
 from protocol import BinaryEventTypes
 import nodes
 import comfy.model_management
@@ -404,6 +408,10 @@ def prompt_worker(q, server_instance, asset_manager):
                     logging.info(f"Prompt executed in {execution_time}", extra={'color': 'green'})
                 else:
                     logging.info("Prompt executed in {:.2f} seconds".format(execution_time), extra={'color': 'green'})
+
+                job_hint = product_tips.get_relevant_job_hint(args, os.environ, e.success, extra_data)
+                if job_hint is not None:
+                    logging.info(job_hint)
 
             flags = q.get_flags()
             free_memory = flags.get("free_memory", False)
@@ -566,7 +574,7 @@ WARNING WARNING WARNING WARNING WARNING
 
 Another ComfyUI is already using this install's asset database:
   {db_path}
-This ComfyUI was started with --disable-assets, so it doesn't use that database and will start anyway.
+This ComfyUI doesn't have the assets system on, so it doesn't use that database and will start anyway.
 ________________________________________________________________________
 """.strip()
     )
@@ -587,7 +595,7 @@ def start_comfyui(asyncio_loop=None):
         stop_startup("missing_packages", f"The assets system needs packages that could not be imported: {missing}.\n"
                                          f"{get_missing_requirements_message()}\n{WITHOUT_ASSETS}")
     asset_manager: AssetManager = default_asset_manager()
-    feature_flags.SERVER_FEATURE_FLAGS["assets"] = asset_manager.enabled
+    feature_flags.set_server_feature("assets", asset_manager.enabled)
     if not asset_manager.enabled:
         cleanup_temp_filesystem()
 
@@ -636,6 +644,15 @@ def start_comfyui(asyncio_loop=None):
             webbrowser.open(f"{scheme}://{address}:{port}")
         call_on_start = startup_server
 
+    if args.enable_agent:
+        open_browser = call_on_start
+
+        def start_agent(scheme, address, port):
+            if open_browser is not None:
+                open_browser(scheme, address, port)
+            app.agent_host.start(prompt_server, scheme, address, port)
+        call_on_start = start_agent
+
     async def start_all():
         await prompt_server.setup()
         await run(prompt_server, address=args.listen, port=args.port, verbose=not args.dont_print_server, call_on_start=call_on_start)
@@ -670,9 +687,12 @@ if __name__ == "__main__":
     event_loop, prompt_server, start_all_func = start_comfyui()
     try:
         x = start_all_func()
+        if product_tips.tips_enabled(args, os.environ):
+            logging.info(product_tips.COMFY_API_STARTUP_TIP)
         app.logger.print_startup_warnings()
         event_loop.run_until_complete(x)
     except KeyboardInterrupt:
         logging.info("\nStopped server")
     finally:
+        app.agent_host.stop()
         prompt_server.asset_manager.shutdown()
