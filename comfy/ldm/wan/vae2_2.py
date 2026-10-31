@@ -56,28 +56,6 @@ class Resample(nn.Module):
         else:
             self.resample = nn.Identity()
 
-    def kitchen_upsample_conv(self, x):
-        """The nearest x2 upsample + 3x3 conv of the upsample modes as one comfy-kitchen
-        conv3d_hw_same(upsample=2) call, when kitchen has a non-eager kernel for it (its Triton
-        backend is opt-in). Returns None to run self.resample as it is."""
-        if self.mode not in ("upsample2d", "upsample3d") or type(self) is not Resample:
-            return None
-        up, conv = self.resample[0], self.resample[1]
-        if (up.mode != "nearest-exact" or tuple(float(s) for s in up.scale_factor) != (2.0, 2.0)
-                or tuple(conv.kernel_size) != (3, 3) or tuple(conv.stride) != (1, 1) or tuple(conv.padding) != (1, 1)
-                or tuple(conv.dilation) != (1, 1) or conv.groups != 1 or conv.padding_mode != "zeros"):
-            return None
-        weight, bias, offload_stream = comfy.ops.cast_bias_weight(conv, x, offloadable=True)
-        try:
-            if isinstance(weight, comfy.quant_ops.QuantizedTensor):
-                return None
-            w = weight.unsqueeze(2)
-            if not comfy.quant_ops.ck_has_kernel("conv3d_hw_same", x=x, weight=w, bias=bias, upsample=2):
-                return None
-            return comfy.quant_ops.ck.conv3d_hw_same(x, w, bias, 2)
-        finally:
-            comfy.ops.uncast_bias_weight(conv, weight, bias, offload_stream)
-
     def forward(self, x, feat_cache=None, feat_idx=[0]):
         b, c, t, h, w = x.size()
         if self.mode == "upsample3d":
@@ -118,10 +96,6 @@ class Resample(nn.Module):
                     x = torch.stack((x[:, 0, :, :, :, :], x[:, 1, :, :, :, :]),
                                     3)
                     x = x.reshape(b, c, t * 2, h, w)
-        if feat_cache is not None:
-            out = self.kitchen_upsample_conv(x)
-            if out is not None:
-                return out  # upsample modes have no downsample3d tail
         t = x.shape[2]
         x = rearrange(x, "b c t h w -> (b t) c h w")
         if feat_cache is None and self.mode in ("upsample2d", "upsample3d"):
