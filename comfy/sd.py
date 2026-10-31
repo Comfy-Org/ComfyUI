@@ -494,7 +494,9 @@ class CLIP:
         return self.patcher.is_dynamic()
 
 class VAE:
-    def __init__(self, sd=None, device=None, config=None, dtype=None, metadata=None):
+    def __init__(self, sd=None, device=None, config=None, dtype=None, metadata=None, no_init=False):
+        if no_init:
+            return
         fast_disk = comfy.storage.state_dict_fast_disk(sd)
         is_seedvr2_vae = "decoder.up_blocks.2.upsamplers.0.upscale_conv.weight" in sd
         if not is_seedvr2_vae and 'decoder.up_blocks.0.resnets.0.norm1.weight' in sd.keys(): #diffusers format
@@ -1165,6 +1167,44 @@ class VAE:
 
         logging.info("VAE load device: {}, offload device: {}, dtype: {}".format(self.device, offload_device, self.vae_dtype))
         self.model_size()
+
+    def clone(self):
+        n = VAE(no_init=True)
+        n.patcher = self.patcher.clone()
+        n.first_stage_model = self.first_stage_model
+        n.memory_used_encode = self.memory_used_encode
+        n.memory_used_decode = self.memory_used_decode
+        n.downscale_ratio = self.downscale_ratio
+        n.upscale_ratio = self.upscale_ratio
+        n.latent_channels = self.latent_channels
+        n.latent_dim = self.latent_dim
+        n.output_channels = self.output_channels
+        n.pad_channel_value = self.pad_channel_value
+        n.process_input = self.process_input
+        n.process_output = self.process_output
+        n.working_dtypes = self.working_dtypes.copy()
+        n.disable_offload = self.disable_offload
+        n.not_video = self.not_video
+        n.size = self.size
+        n.downscale_index_formula = self.downscale_index_formula
+        n.upscale_index_formula = self.upscale_index_formula
+        n.extra_1d_channel = self.extra_1d_channel
+        n.crop_input = self.crop_input
+        n.handles_tiling = self.handles_tiling
+        n.format_encoded = self.format_encoded
+        n.audio_sample_rate = self.audio_sample_rate
+        n.device = self.device
+        n.vae_dtype = self.vae_dtype
+        n.output_device = self.output_device
+        if hasattr(self, "conv_out_channels"):
+            n.conv_out_channels = self.conv_out_channels
+        if hasattr(self, "audio_sample_rate_output"):
+            n.audio_sample_rate_output = self.audio_sample_rate_output
+        if hasattr(self, "autoencoder"):
+            n.autoencoder = self.autoencoder
+        if "_tile_bounded_shape" in self.__dict__:
+            n._tile_bounded_shape = self._tile_bounded_shape
+        return n
 
     def model_size(self):
         if self.size is not None:

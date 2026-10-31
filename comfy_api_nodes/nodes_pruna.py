@@ -1,10 +1,15 @@
+import uuid
+from io import BytesIO
+
 from typing_extensions import override
 
-from comfy_api.latest import IO, ComfyExtension, Input
+from comfy_api.latest import IO, ComfyExtension, Input, Types
 from comfy_api_nodes.apis.pruna import (
     PrunaPredictionRequest,
     PrunaPredictionResponse,
     PrunaPredictionStatusResponse,
+    PrunaUpscaleInput,
+    PrunaUpscaleRequest,
     PrunaVideoInput,
 )
 from comfy_api_nodes.util import (
@@ -13,6 +18,7 @@ from comfy_api_nodes.util import (
     poll_op,
     sync_op,
     upload_audio_to_comfyapi,
+    upload_file_to_comfyapi,
     upload_image_to_comfyapi,
     validate_audio_duration,
     validate_images_aspect_ratio_closeness,
@@ -27,6 +33,10 @@ FPS_OPTIONS = ["24", "48"]
 DURATIONS = ["auto"] + [str(i) for i in range(1, 21)]
 MAX_PROMPT_LENGTH = 5000
 MIN_AUDIO_DURATION = 1.0
+UPSCALE_FRAME_LIMITS = {"720p": 2400, "1080p": 1200, "2K": 600, "4K": 300}
+UPSCALE_FPS_OPTIONS = ["source", "16", "24", "25", "30", "48", "50", "60"]
+UPSCALE_MAX_VIDEO_BYTES = 512 * 1024 * 1024
+UPSCALE_MAX_PIXELS_BELOW_2K = 10_000_000
 
 
 def _generation_inputs() -> list:
@@ -187,12 +197,14 @@ def _video_input(model: dict, **media: str | None) -> PrunaVideoInput:
     )
 
 
-async def _generate_video(cls: type[IO.ComfyNode], model_id: str, video_input: PrunaVideoInput) -> IO.NodeOutput:
+async def _generate_video(
+    cls: type[IO.ComfyNode], model_id: str, request: PrunaPredictionRequest | PrunaUpscaleRequest
+) -> IO.NodeOutput:
     submitted = await sync_op(
         cls,
         ApiEndpoint(path=f"{PREDICTIONS_PATH}/{model_id}", method="POST"),
         response_model=PrunaPredictionResponse,
-        data=PrunaPredictionRequest(input=video_input),
+        data=request,
     )
     result = await poll_op(
         cls,
@@ -243,7 +255,7 @@ class PrunaTextToVideoNode(IO.ComfyNode):
         return await _generate_video(
             cls,
             model["model"],
-            _video_input(model, aspect_ratio=model["aspect_ratio"], audio=audio_url),
+            PrunaPredictionRequest(input=_video_input(model, aspect_ratio=model["aspect_ratio"], audio=audio_url)),
         )
 
 
@@ -292,7 +304,101 @@ class PrunaImageToVideoNode(IO.ComfyNode):
         return await _generate_video(
             cls,
             model["model"],
-            _video_input(model, image=first_frame_url, last_frame_image=last_frame_url, audio=audio_url),
+            PrunaPredictionRequest(
+                input=_video_input(model, image=first_frame_url, last_frame_image=last_frame_url, audio=audio_url)
+            ),
+        )
+
+
+class PrunaPVideoUpscaleNode(IO.ComfyNode):
+    @classmethod
+    def define_schema(cls):
+        return IO.Schema(
+            node_id="PrunaPVideoUpscaleNode",
+            display_name="Pruna P-Video Upscale",
+            category="partner/video/Pruna",
+            description="Upscales a video to 720p, 1080p, 2K or 4K using Pruna P-Video Upscale, "
+            "keeping its aspect ratio and audio.",
+            inputs=[
+                IO.Video.Input(
+                    "video",
+                    tooltip="Video to upscale, up to 512 MiB.",
+                ),
+                IO.Combo.Input(
+                    "target",
+                    options=list(UPSCALE_FRAME_LIMITS),
+                    default="1080p",
+                    tooltip="Output pixel area: 720p about 0.9 megapixels, 1080p 2.1, 2K 3.7, 4K 8.3. "
+                    "A video already this large keeps its size and is only enhanced. Maximum length: "
+                    "2400, 1200, 600 or 300 frames, about 100, 50, 25 or 12.5 seconds at 24 fps.",
+                ),
+                IO.Combo.Input(
+                    "fps",
+                    options=UPSCALE_FPS_OPTIONS,
+                    default="source",
+                    tooltip="Output frame rate. 'source' keeps the rate of the video, up to 60. "
+                    "A higher rate is interpolated. Output above 30 fps costs twice as much.",
+                ),
+                IO.Boolean.Input(
+                    "turbo",
+                    default=False,
+                    tooltip="Faster upscale with softer detail, at the same price.",
+                ),
+            ],
+            outputs=[
+                IO.Video.Output(),
+            ],
+            hidden=[
+                IO.Hidden.auth_token_comfy_org,
+                IO.Hidden.api_key_comfy_org,
+                IO.Hidden.unique_id,
+            ],
+            is_api_node=True,
+            price_badge=IO.PriceBadge(
+                depends_on=IO.PriceBadgeDepends(widgets=["target", "fps"]),
+                expr="""
+                (
+                  $rates := $now() < "2026-11-12T17:00:00.000Z"
+                    ? {"720p": 0.00715, "1080p": 0.0143, "2k": 0.0286, "4k": 0.0572}
+                    : {"720p": 0.0143, "1080p": 0.0286, "2k": 0.0572, "4k": 0.1144};
+                  $rate := $lookup($rates, $string(widgets.target));
+                  widgets.fps = "source"
+                    ? {"type":"range_usd","min_usd": $rate,"max_usd": $rate * 2,"format": {"suffix": "/s"}}
+                    : {"type":"usd","usd": $number(widgets.fps) > 30 ? $rate * 2 : $rate,"format": {"suffix": "/s"}}
+                )
+                """,
+            ),
+        )
+
+    @classmethod
+    async def execute(cls, video: Input.Video, target: str, fps: str, turbo: bool):
+        width, height = video.get_dimensions()
+        if target in ("720p", "1080p") and width * height > UPSCALE_MAX_PIXELS_BELOW_2K:
+            raise ValueError(f"Videos above 10 megapixels (got {width}x{height}) need target 2K or 4K.")
+        output_fps = min(float(video.get_frame_rate()), 60) if fps == "source" else int(fps)
+        frames = round(video.get_duration() * min(output_fps, 30))
+        if frames > UPSCALE_FRAME_LIMITS[target]:
+            raise ValueError(
+                f"Video is too long for {target}: it needs {frames} frames (counted at up to 30 fps), "
+                f"the limit is {UPSCALE_FRAME_LIMITS[target]}. Use a shorter clip, a lower target or a lower fps."
+            )
+        video_bytes = BytesIO()
+        video.save_to(video_bytes, format=Types.VideoContainer.MP4, codec=Types.VideoCodec.H264)
+        video_size = video_bytes.getbuffer().nbytes
+        if video_size > UPSCALE_MAX_VIDEO_BYTES:
+            raise ValueError(f"Video size ({video_size / 1024 / 1024:.1f} MiB) exceeds the 512 MiB limit.")
+        video_url = await upload_file_to_comfyapi(cls, video_bytes, f"{uuid.uuid4()}.mp4", "video/mp4", "Uploading video")
+        return await _generate_video(
+            cls,
+            "p-video-upscale",
+            PrunaUpscaleRequest(
+                input=PrunaUpscaleInput(
+                    video=video_url,
+                    target=target.lower(),
+                    fps=None if fps == "source" else int(fps),
+                    turbo=turbo,
+                )
+            ),
         )
 
 
@@ -302,6 +408,7 @@ class PrunaExtension(ComfyExtension):
         return [
             PrunaTextToVideoNode,
             PrunaImageToVideoNode,
+            PrunaPVideoUpscaleNode,
         ]
 
 
