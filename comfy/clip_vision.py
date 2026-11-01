@@ -3,6 +3,8 @@ import os
 import json
 import logging
 
+import torch
+
 import comfy.ops
 import comfy.model_patcher
 import comfy.model_management
@@ -63,8 +65,31 @@ class ClipVisionModel():
     def get_sd(self):
         return self.model.state_dict()
 
-    def encode_image(self, image, crop=True):
+    def encode_image(self, image, crop=True, batch_size=64):
         comfy.model_management.load_model_gpu(self.patcher)
+        # Encode in batches: activation VRAM grows linearly with frame count, so encoding a
+        # long video in one shot OOMs. Frames share no cross-attention, so batching is exact.
+        outputs = None
+        tensor_outputs = {}
+        for i in range(0, image.shape[0], batch_size):
+            chunk = self.encode_image_chunk(image[i:i + batch_size], crop)
+            if outputs is None:
+                outputs = chunk
+                for key in vars(outputs):
+                    if key != "image_sizes" and outputs[key] is not None:
+                        tensor_outputs[key] = [outputs[key]]
+                continue
+            for key in vars(outputs):
+                if key == "image_sizes":
+                    outputs[key].extend(chunk[key])
+                elif outputs[key] is not None:
+                    tensor_outputs[key].append(chunk[key])
+        for key, tensors in tensor_outputs.items():
+            if len(tensors) > 1:
+                outputs[key] = torch.cat(tensors, dim=0)
+        return outputs
+
+    def encode_image_chunk(self, image, crop=True):
         if self.model_type == "siglip2_vision_model":
             pixel_values = comfy.clip_model.siglip2_preprocess(image.to(self.load_device), size=self.image_size, patch_size=self.config.get("patch_size", 16), num_patches=self.config.get("num_patches", 256), mean=self.image_mean, std=self.image_std, crop=crop).float()
         else:
@@ -82,7 +107,10 @@ class ClipVisionModel():
         else:
             outputs["penultimate_hidden_states"] = out[1].to(comfy.model_management.intermediate_device())
 
-        outputs["mm_projected"] = out[3]
+        if out[3] is not None:
+            outputs["mm_projected"] = out[3].to(comfy.model_management.intermediate_device())
+        else:
+            outputs["mm_projected"] = None
         return outputs
 
 def convert_to_transformers(sd, prefix):
