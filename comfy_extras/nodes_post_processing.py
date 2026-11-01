@@ -291,8 +291,8 @@ def finalize_image_mask_input(input: torch.Tensor, is_type_image: bool) -> torch
 def scale_by(input: torch.Tensor, multiplier: float, scale_method: str) -> torch.Tensor:
     is_type_image = is_image(input)
     input = init_image_mask_input(input, is_type_image)
-    width = round(input.shape[-1] * multiplier)
-    height = round(input.shape[-2] * multiplier)
+    width = max(1, round(input.shape[-1] * multiplier))
+    height = max(1, round(input.shape[-2] * multiplier))
 
     input = comfy.utils.common_upscale(input, width, height, scale_method, "disabled")
     input = finalize_image_mask_input(input, is_type_image)
@@ -320,10 +320,10 @@ def scale_longer_dimension(input: torch.Tensor, longer_size: int, scale_method: 
     height = input.shape[-2]
 
     if height > width:
-        width = round((width / height) * longer_size)
+        width = max(1, round((width / height) * longer_size))
         height = longer_size
     elif width > height:
-        height = round((height / width) * longer_size)
+        height = max(1, round((height / width) * longer_size))
         width = longer_size
     else:
         height = longer_size
@@ -340,10 +340,10 @@ def scale_shorter_dimension(input: torch.Tensor, shorter_size: int, scale_method
     height = input.shape[-2]
 
     if height < width:
-        width = round((width / height) * shorter_size)
+        width = max(1, round((width / height) * shorter_size))
         height = shorter_size
     elif width < height:
-        height = round((height / width) * shorter_size)
+        height = max(1, round((height / width) * shorter_size))
         width = shorter_size
     else:
         height = shorter_size
@@ -359,8 +359,8 @@ def scale_total_pixels(input: torch.Tensor, megapixels: float, scale_method: str
     total = int(megapixels * 1024 * 1024)
 
     scale_by = math.sqrt(total / (input.shape[-1] * input.shape[-2]))
-    width = round(input.shape[-1] * scale_by)
-    height = round(input.shape[-2] * scale_by)
+    width = max(1, round(input.shape[-1] * scale_by))
+    height = max(1, round(input.shape[-2] * scale_by))
 
     input = comfy.utils.common_upscale(input, width, height, scale_method, "disabled")
     input = finalize_image_mask_input(input, is_type_image)
