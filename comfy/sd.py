@@ -142,6 +142,35 @@ def load_lora_for_models(model, clip, lora, strength_model, strength_clip, lora_
     return (new_modelpatcher, new_clip)
 
 
+def _split_patch_key(key):
+    """(weight key, offset or None, function or None) of a load_lora patch key;
+    a tuple key targets a slice of a fused weight: (key, (dim, start, size)[, function])."""
+    if isinstance(key, str):
+        return key, None, None
+    return key[0], key[1], key[2] if len(key) > 2 else None
+
+
+def _add_bypass_adapters(manager, bypass_patches, sd_keys, strength, loaded_keys):
+    """Register every adapter whose weight is in sd_keys; record the patch keys it consumed."""
+    for key, adapter in bypass_patches.items():
+        weight_key, offset, function = _split_patch_key(key)
+        if weight_key not in sd_keys:
+            continue
+        if function is not None:
+            logging.warning(f"[BypassLoRA] {key}: a weight function has no bypass form; adapter skipped")
+            continue
+        manager.add_adapter(weight_key, adapter, strength=strength, offset=offset)
+        loaded_keys.add(key)
+
+
+def _bypass_injection_name(patcher):
+    """A name not used by an earlier bypass load on this patcher, so chained loads stack."""
+    n = 0
+    while "bypass_lora_{}".format(n) in patcher.injections:
+        n += 1
+    return "bypass_lora_{}".format(n)
+
+
 def load_bypass_lora_for_models(model, clip, lora, strength_model, strength_clip):
     """
     Load LoRA in bypass mode without modifying base model weights.
@@ -192,18 +221,12 @@ def load_bypass_lora_for_models(model, clip, lora, strength_model, strength_clip
         # Apply adapter patches via bypass injection
         manager = comfy.weight_adapter.BypassInjectionManager()
         model_sd_keys = set(new_modelpatcher.model.state_dict().keys())
-
-        for key, adapter in bypass_patches.items():
-            if key in model_sd_keys:
-                manager.add_adapter(key, adapter, strength=strength_model)
-                k.add(key)
-            else:
-                logging.warning(f"[BypassLoRA] Adapter key not in model state_dict: {key}")
+        _add_bypass_adapters(manager, bypass_patches, model_sd_keys, strength_model, k)
 
         injections = manager.create_injections(new_modelpatcher.model)
 
         if manager.get_hook_count() > 0:
-            new_modelpatcher.set_injections("bypass_lora", injections)
+            new_modelpatcher.set_injections(_bypass_injection_name(new_modelpatcher), injections)
     else:
         new_modelpatcher = None
 
@@ -218,15 +241,11 @@ def load_bypass_lora_for_models(model, clip, lora, strength_model, strength_clip
         # Apply adapter patches via bypass injection
         clip_manager = comfy.weight_adapter.BypassInjectionManager()
         clip_sd_keys = set(new_clip.cond_stage_model.state_dict().keys())
-
-        for key, adapter in bypass_patches.items():
-            if key in clip_sd_keys:
-                clip_manager.add_adapter(key, adapter, strength=strength_clip)
-                k1.add(key)
+        _add_bypass_adapters(clip_manager, bypass_patches, clip_sd_keys, strength_clip, k1)
 
         clip_injections = clip_manager.create_injections(new_clip.cond_stage_model)
         if clip_manager.get_hook_count() > 0:
-            new_clip.patcher.set_injections("bypass_lora", clip_injections)
+            new_clip.patcher.set_injections(_bypass_injection_name(new_clip.patcher), clip_injections)
     else:
         new_clip = None
 
