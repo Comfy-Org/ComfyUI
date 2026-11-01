@@ -190,6 +190,8 @@ def is_wsl():
         return True
     elif version.endswith("microsoft-standard-WSL2"):
         return True
+    if os.environ.get("WSL_DISTRO_NAME"):
+        return True
     return False
 
 def get_torch_device():
