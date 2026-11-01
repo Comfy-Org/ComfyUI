@@ -9,7 +9,7 @@ import importlib
 from dataclasses import dataclass
 from functools import cached_property
 from pathlib import Path
-from typing import Dict, TypedDict, Optional
+from typing import Dict, Iterator, TypedDict, Optional
 from aiohttp import web
 from importlib.metadata import version
 
@@ -127,20 +127,22 @@ class FrontEndProvider:
     def release_url(self) -> str:
         return f"https://api.github.com/repos/{self.owner}/{self.repo}/releases"
 
-    @cached_property
-    def all_releases(self) -> list[Release]:
-        releases = []
+    def iter_releases(self) -> Iterator[Release]:
+        """Yield releases newest first, fetching the next page only when the caller needs it."""
         api_url = self.release_url
         while api_url:
             response = requests.get(api_url, timeout=REQUEST_TIMEOUT)
             response.raise_for_status()  # Raises an HTTPError if the response was an error
-            releases.extend(response.json())
+            yield from response.json()
             # GitHub uses the Link header to provide pagination links. Check if it exists and update api_url accordingly.
             if "next" in response.links:
                 api_url = response.links["next"]["url"]
             else:
                 api_url = None
-        return releases
+
+    @cached_property
+    def all_releases(self) -> list[Release]:
+        return list(self.iter_releases())
 
     @cached_property
     def latest_release(self) -> Release:
@@ -152,13 +154,19 @@ class FrontEndProvider:
     @cached_property
     def latest_prerelease(self) -> Release:
         """Get the latest pre-release version - even if it's older than the latest release"""
-        release = [release for release in self.all_releases if release["prerelease"]]
+        # GitHub returns releases in reverse chronological order, so the first pre-release is the
+        # latest. Stop there instead of paging through every release: each page is one request
+        # against the 60/hour unauthenticated GitHub API limit.
+        # Reuse the full list if a caller already fetched it (cached_property stores it on the instance).
+        releases = self.__dict__.get("all_releases")
+        if releases is None:
+            releases = self.iter_releases()
+        release = next((release for release in releases if release["prerelease"]), None)
 
-        if not release:
+        if release is None:
             raise ValueError("No pre-releases found")
 
-        # GitHub returns releases in reverse chronological order, so first is latest
-        return release[0]
+        return release
 
     def get_release(self, version: str) -> Release:
         if version == "latest":

@@ -998,7 +998,7 @@ class Qwen35(BaseLlama, BaseGenerate, torch.nn.Module):
             draft_freqs.copy_(freqs_at(p))
             host_rows = hasattr(embed, "_v") and embed.weight_lowvram_function is None and len(embed.weight_function) == 0 and comfy.ops.vbar_above_watermark(embed)
             queue = comfy.model_prefetch.make_prefetch_queue(
-                [None if host_rows else embed, (head, self.mtp)], device,
+                [None if host_rows else embed, [head, self.mtp]], device,
                 {"prefetch_dynamic_vbars": self.model.prefetch_dynamic_vbars})
 
             def embed_core():
