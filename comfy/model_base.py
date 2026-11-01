@@ -189,7 +189,10 @@ class BaseModel(torch.nn.Module):
             self.diffusion_model.requires_grad_(False)
             self.diffusion_model.eval()
             if comfy.model_management.force_channels_last():
-                self.diffusion_model.to(memory_format=torch.channels_last)
+                # channels_last only exists for 4D tensors: models with Conv3d weights (e.g. Wan) fail on a whole-model .to()
+                for p in self.diffusion_model.parameters():
+                    if p.ndim == 4:
+                        p.data = p.data.contiguous(memory_format=torch.channels_last)
                 logging.debug("using channels last mode for diffusion model")
             logging.info("model weight dtype {}, manual cast: {}".format(self.get_dtype(), self.manual_cast_dtype))
             comfy.model_management.archive_model_dtypes(self.diffusion_model)
