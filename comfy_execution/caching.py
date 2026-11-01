@@ -522,7 +522,7 @@ def cache_ram_from_prompt(prompt, total_ram_gb):
             inactive = float(inputs.get("inactive", 25.0))
             if math.isnan(active) or math.isnan(inactive):
                 raise ValueError
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             logging.warning("Cache RAM Settings: active and inactive must be numbers, ignoring the node.")
             continue
         if inputs.get("unit", "percent") == "percent":

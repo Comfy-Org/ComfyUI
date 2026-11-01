@@ -26,6 +26,7 @@ SAMPLER = {"class_type": "KSampler", "inputs": {"seed": 1}}
         ({"2": settings("nan", 25)}, None),
         ({"2": settings(10, float("nan"))}, None),
         ({"2": settings(10, float("inf"), "GB")}, (10.0, 128.0)),
+        ({"2": settings(10 ** 400, 25)}, None),
     ],
 )
 def test_cache_ram_from_prompt(prompt, expected):
