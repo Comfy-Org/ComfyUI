@@ -506,6 +506,18 @@ RAM_CACHE_OLD_WORKFLOW_OOM_MULTIPLIER = 1.3
 
 RAM_CACHE_LARGE_INTERMEDIATE = 512 * 1024 ** 2
 
+def ram_cache_thresholds(total_ram_gb, cache_ram):
+    active = min(10.0, max(2.0, total_ram_gb * 0.10))
+    if len(cache_ram) > 0:
+        active = cache_ram[0]
+    #Up to 64GB other workflows' outputs aren't kept (#14089). Above it, keep them while 25% of RAM is free (128GB at 512GB, #15068).
+    inactive = min(128.0, total_ram_gb)
+    if total_ram_gb > 64.0:
+        inactive = max(active, min(128.0, total_ram_gb * 0.25))
+    if len(cache_ram) > 1:
+        inactive = cache_ram[1]
+    return active, inactive
+
 
 def all_outputs_dynamic(outputs):
     if outputs is None:
@@ -527,10 +539,14 @@ class RAMPressureCache(LRUCache):
         self.timestamps = {}
         self.active_evictions = False
         self.full_evictions = False
+        self.inactive_evicted = 0
+        self.inactive_freed = 0
 
     async def set_prompt(self, dynprompt, node_ids, is_changed_cache):
         self.active_evictions = False
         self.full_evictions = False
+        self.inactive_evicted = 0
+        self.inactive_freed = 0
         await super().set_prompt(dynprompt, node_ids, is_changed_cache)
 
     def clean_unused(self):
@@ -606,6 +622,7 @@ class RAMPressureCache(LRUCache):
             bisect.insort(clean_list, (oom_score, self.timestamps[key], key, ram_usage))
 
         freed = 0
+        evicted = 0
         while virtual_memory_available() < target and clean_list:
             _, _, key, ram_usage = clean_list.pop()
             del self.cache[key]
@@ -613,8 +630,13 @@ class RAMPressureCache(LRUCache):
             self.timestamps.pop(key, None)
             self.children.pop(key, None)
             freed += ram_usage
+            evicted += 1
         if freed and free_active:
             self.active_evictions = True
             if min_entry_size == 0:
                 self.full_evictions = True
+        elif not free_active:
+            #Model entries aren't sized, so count entries too
+            self.inactive_evicted += evicted
+            self.inactive_freed += freed
         return freed

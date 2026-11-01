@@ -843,7 +843,8 @@ class PromptExecutor:
                     comfy.model_management.unload_all_models()
         finally:
             if self.cache_type == CacheType.RAM_PRESSURE:
-                detail("RAM cache evictions: prompt=%s active=%s full=%s", prompt_id, self.caches.outputs.active_evictions, self.caches.outputs.full_evictions)
+                outputs = self.caches.outputs
+                detail("RAM cache evictions: prompt=%s active=%s full=%s inactive=%d (%.2fGB)", prompt_id, outputs.active_evictions, outputs.full_evictions, outputs.inactive_evicted, outputs.inactive_freed / (1024 ** 3))
             comfy.memory_management.set_ram_cache_release_state(None, 0)
             self.prompt_model_tracker.end()
             self._notify_prompt_lifecycle("end", prompt_id)
