@@ -221,7 +221,7 @@ def save_checkpoint(model, clip=None, vae=None, clip_vision=None, filename_prefi
             for x in extra_pnginfo:
                 metadata[x] = json.dumps(extra_pnginfo[x])
 
-    output_checkpoint = f"{filename}_{counter:05}_.safetensors"
+    output_checkpoint = f"{filename}_{counter:05}.safetensors"
     output_checkpoint = os.path.join(full_output_folder, output_checkpoint)
 
     comfy.sd.save_checkpoint(output_checkpoint, model, clip, vae, clip_vision, metadata=metadata, extra_keys=extra_keys)
@@ -297,7 +297,7 @@ class CLIPSave:
 
             full_output_folder, filename, counter, subfolder, filename_prefix_ = folder_paths.get_save_image_path(filename_prefix_, self.output_dir)
 
-            output_checkpoint = f"{filename}_{counter:05}_.safetensors"
+            output_checkpoint = f"{filename}_{counter:05}.safetensors"
             output_checkpoint = os.path.join(full_output_folder, output_checkpoint)
 
             current_clip_sd = comfy.utils.state_dict_prefix_replace(current_clip_sd, replace_prefix)
@@ -333,7 +333,7 @@ class VAESave:
                 for x in extra_pnginfo:
                     metadata[x] = json.dumps(extra_pnginfo[x])
 
-        output_checkpoint = f"{filename}_{counter:05}_.safetensors"
+        output_checkpoint = f"{filename}_{counter:05}.safetensors"
         output_checkpoint = os.path.join(full_output_folder, output_checkpoint)
 
         comfy.utils.save_torch_file(vae.get_sd(), output_checkpoint, metadata=metadata)

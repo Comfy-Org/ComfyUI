@@ -37,7 +37,7 @@ class SaveWEBM(io.ComfyNode):
             filename_prefix, folder_paths.get_output_directory(), images[0].shape[1], images[0].shape[0]
         )
 
-        file = f"{filename}_{counter:05}_.webm"
+        file = f"{filename}_{counter:05}.webm"
         container = av.open(os.path.join(full_output_folder, file), mode="w")
 
         if cls.hidden.prompt is not None:
@@ -194,7 +194,7 @@ class SaveVideo(io.ComfyNode):
                 metadata["prompt"] = cls.hidden.prompt
             if len(metadata) > 0:
                 saved_metadata = metadata
-        file = f"{filename}_{counter:05}_.{Types.VideoContainer.get_extension(format_name)}"
+        file = f"{filename}_{counter:05}.{Types.VideoContainer.get_extension(format_name)}"
         video.save_to(
             os.path.join(full_output_folder, file),
             format=Types.VideoContainer(format_name),
@@ -412,7 +412,7 @@ def save_video_preview(video: Input.Video) -> ui.PreviewVideo:
         "ComfyUI_temp_video", folder_paths.get_temp_directory(), 0, 0
     )
     preview_format = Types.VideoContainer.MP4
-    file = f"{filename}_{counter:05}_.{Types.VideoContainer.get_extension(preview_format)}"
+    file = f"{filename}_{counter:05}.{Types.VideoContainer.get_extension(preview_format)}"
     full_path = os.path.join(full_output_folder, file)
     video.save_to(
         full_path,
