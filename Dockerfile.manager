@@ -1,0 +1,15 @@
+FROM comfyui-sos-comfyui:latest
+
+WORKDIR /app
+COPY manager_requirements.txt seedvr2_requirements.txt ./
+COPY custom_nodes/ComfyUI-See-through/requirements.txt /tmp/seethrough-requirements.txt
+COPY custom_nodes/ComfyUI-anima-pose-control/requirements.txt /tmp/anima-pose-control-requirements.txt
+RUN pip install --no-cache-dir --timeout 120 --retries 10 -r manager_requirements.txt \
+    && pip install --no-cache-dir --timeout 120 --retries 10 "transformers==4.50.3" \
+    && pip install --no-cache-dir --timeout 120 --retries 10 -r seedvr2_requirements.txt \
+    && pip install --no-cache-dir --timeout 120 --retries 10 -r /tmp/seethrough-requirements.txt \
+    && pip install --no-cache-dir --timeout 120 --retries 10 -r /tmp/anima-pose-control-requirements.txt
+
+COPY manager_resolver_constraints.txt /app/manager_requirements.txt
+
+CMD ["python", "main.py", "--listen", "0.0.0.0", "--port", "8188", "--enable-manager-legacy-ui", "--disable-cuda-malloc", "--reserve-vram", "1.5"]
