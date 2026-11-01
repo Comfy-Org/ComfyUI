@@ -89,6 +89,17 @@ def test_create_video_node_bit_depth_options():
     assert bit_depth_input.default == "auto"
 
 
+@pytest.mark.parametrize("codec", ["none", "h264"])
+def test_create_video_accepts_existing_workflow_widgets(codec):
+    widgets = [30, "auto", "sRGB", codec]
+    inputs = [input for input in CreateVideo.define_schema().inputs if input.id not in ("images", "audio")]
+    values = dict(zip((input.id for input in inputs), widgets))
+
+    assert values["codec"] == codec
+    assert "chroma_subsampling" not in values
+    assert all(values[input.id] in input.options for input in inputs if input.id in values and hasattr(input, "options"))
+
+
 @pytest.mark.parametrize(
     "codec,expected_suffix,expected_codec",
     [
