@@ -262,13 +262,14 @@ class MaskComposite(IO.ComfyNode):
                 IO.Mask.Input("source"),
                 IO.Int.Input("x", default=0, min=0, max=nodes.MAX_RESOLUTION, step=1),
                 IO.Int.Input("y", default=0, min=0, max=nodes.MAX_RESOLUTION, step=1),
-                IO.Combo.Input("operation", options=["multiply", "add", "subtract", "and", "or", "xor"]),
+                IO.Combo.Input("operation", options=["multiply", "add", "subtract", "and", "or", "xor", "max", "min"], tooltip="\"multiply\", \"add\", \"subtract\", \"max\" and \"min\" are arithmetic and keep intermediate (feathered) values; \"max\"/\"min\" are union/intersection of soft masks. \"and\", \"or\" and \"xor\" are boolean: each mask is split into 0 or 1 at \"threshold\" first."),
+                IO.Float.Input("threshold", default=0.5, min=0.0, max=1.0, step=0.001, optional=True, tooltip="Cut point for the boolean operations: \"and\", \"or\" and \"xor\" treat a pixel as set when its value is strictly above this. The arithmetic operations ignore it. The default 0.5 matches the previous behaviour; 0.0 keeps every non-zero pixel."),
             ],
             outputs=[IO.Mask.Output()],
         )
 
     @classmethod
-    def execute(cls, destination, source, x, y, operation) -> IO.NodeOutput:
+    def execute(cls, destination, source, x, y, operation, threshold=0.5) -> IO.NodeOutput:
         output = destination.reshape((-1, destination.shape[-2], destination.shape[-1])).clone()
         source = source.reshape((-1, source.shape[-2], source.shape[-1]))
         source = source.to(output.device)
@@ -286,12 +287,21 @@ class MaskComposite(IO.ComfyNode):
             output[:, top:bottom, left:right] = destination_portion + source_portion
         elif operation == "subtract":
             output[:, top:bottom, left:right] = destination_portion - source_portion
+        # The boolean operations below binarize at "threshold" instead of the
+        # previous hardcoded .round(). Strictly-greater is deliberate: torch
+        # rounds half to even, so 0.5 used to become 0, and "> 0.5" reproduces
+        # that exactly at the default. It also gives threshold=0.0 the useful
+        # meaning "every pixel that is present at all counts".
         elif operation == "and":
-            output[:, top:bottom, left:right] = torch.bitwise_and(destination_portion.round().bool(), source_portion.round().bool()).float()
+            output[:, top:bottom, left:right] = torch.bitwise_and(destination_portion > threshold, source_portion > threshold).float()
         elif operation == "or":
-            output[:, top:bottom, left:right] = torch.bitwise_or(destination_portion.round().bool(), source_portion.round().bool()).float()
+            output[:, top:bottom, left:right] = torch.bitwise_or(destination_portion > threshold, source_portion > threshold).float()
         elif operation == "xor":
-            output[:, top:bottom, left:right] = torch.bitwise_xor(destination_portion.round().bool(), source_portion.round().bool()).float()
+            output[:, top:bottom, left:right] = torch.bitwise_xor(destination_portion > threshold, source_portion > threshold).float()
+        elif operation == "max":
+            output[:, top:bottom, left:right] = torch.max(destination_portion, source_portion)
+        elif operation == "min":
+            output[:, top:bottom, left:right] = torch.min(destination_portion, source_portion)
 
         output = torch.clamp(output, 0.0, 1.0)
 
