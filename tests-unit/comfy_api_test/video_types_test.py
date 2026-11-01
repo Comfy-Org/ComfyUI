@@ -3,9 +3,11 @@ import torch
 import tempfile
 import os
 import sys
+import gc
 import av
 import io
 import numpy as np
+from PIL import Image, ImageOps
 from fractions import Fraction
 from comfy_api.input_impl.video_types import VideoFromFile, VideoFromComponents
 from comfy_api.latest._util.video_types import normalize_crop_rect
@@ -133,6 +135,34 @@ def test_video_from_file_get_dimensions(simple_video_file):
     width, height = video.get_dimensions()
     assert width == 4
     assert height == 4
+
+
+@pytest.mark.parametrize("orientation", range(1, 9))
+def test_video_from_file_applies_exif_orientation(tmp_path, orientation):
+    pixels = np.random.default_rng(0).integers(0, 256, (32, 48, 3), dtype=np.uint8)
+    path = tmp_path / "oriented.jpg"
+    exif = Image.Exif()
+    exif[274] = orientation
+    Image.fromarray(pixels).save(path, quality=95, subsampling=0, exif=exif)
+
+    with Image.open(path) as image:
+        expected = np.asarray(ImageOps.exif_transpose(image).convert("RGB"))
+    actual = VideoFromFile(str(path)).get_components().images[0].numpy() * 255
+
+    assert actual.shape == expected.shape
+    assert np.abs(actual - expected).mean() < 1
+
+
+def test_video_from_file_releases_side_data(tmp_path):
+    path = tmp_path / "frame.jpg"
+    Image.new("RGB", (32, 32)).save(path)
+    gc.collect()
+    container_type = av.sidedata.sidedata.SideDataContainer
+    before = sum(type(obj) is container_type for obj in gc.get_objects())
+
+    VideoFromFile(str(path)).get_components()
+
+    assert sum(type(obj) is container_type for obj in gc.get_objects()) == before
 
 
 @pytest.mark.parametrize("pixel_type,storage_dtype", [("half", np.float16), ("float", np.float32)])
