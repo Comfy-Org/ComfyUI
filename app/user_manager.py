@@ -82,7 +82,7 @@ class UserManager():
         path = user_root
 
         # prevent leaving /{type}
-        if os.path.commonpath((root_dir, user_root)) != root_dir:
+        if not folder_paths.is_within_directory(root_dir, user_root):
             return None
 
         if file is not None:
@@ -92,7 +92,7 @@ class UserManager():
 
             # prevent leaving /{type}/{user}
             path = os.path.abspath(os.path.join(user_root, file))
-            if os.path.commonpath((user_root, path)) != user_root:
+            if not folder_paths.is_within_directory(user_root, path):
                 return None
 
         parent = os.path.split(path)[0]
@@ -129,6 +129,9 @@ class UserManager():
                 return web.json_response({"storage": "server", "users": self.users})
             else:
                 user_dir = self.get_request_user_filepath(request, None, create_dir=False)
+                if not user_dir:
+                    return web.Response(status=403, text="Invalid user directory")
+
                 return web.json_response({
                     "storage": "server",
                     "migrated": os.path.exists(user_dir)
