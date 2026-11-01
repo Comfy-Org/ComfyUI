@@ -8,6 +8,7 @@ from typing import Sequence, Mapping, Dict
 from comfy.model_patcher import is_model_patcher_output
 from comfy.system_memory import virtual_memory_available
 from comfy_execution.graph import DynamicPrompt
+from comfy_execution.utils import current_prompt_id
 from abc import ABC, abstractmethod
 
 import nodes
@@ -151,30 +152,57 @@ class CacheKeySetInputSignature(CacheKeySet):
 class BasicCache:
     def __init__(self, key_class, enable_providers=False):
         self.key_class = key_class
-        self.initialized = False
         self.enable_providers = enable_providers
-        self.dynprompt: DynamicPrompt
-        self.cache_key_set: CacheKeySet
+        # Entries are shared between prompts; keys are resolved through the prompt bound for the
+        # current execution context, so several in-flight prompts can use one cache.
+        self.prompts: Dict[str | None, tuple[DynamicPrompt, CacheKeySet, object]] = {}
+        self.ended = set()
         self.cache = {}
         self.subcaches = {}
         self._pending_store_tasks: set = set()
 
+    @property
+    def initialized(self):
+        return current_prompt_id.get() in self.prompts
+
+    @property
+    def dynprompt(self) -> DynamicPrompt:
+        return self.prompts[current_prompt_id.get()][0]
+
+    @property
+    def cache_key_set(self) -> CacheKeySet:
+        return self.prompts[current_prompt_id.get()][1]
+
+    @property
+    def is_changed_cache(self):
+        return self.prompts[current_prompt_id.get()][2]
+
     async def set_prompt(self, dynprompt, node_ids, is_changed_cache):
-        self.dynprompt = dynprompt
-        self.cache_key_set = self.key_class(dynprompt, node_ids, is_changed_cache)
-        await self.cache_key_set.add_keys(node_ids)
-        self.is_changed_cache = is_changed_cache
-        self.initialized = True
+        for prompt_id in self.ended:
+            self.prompts.pop(prompt_id, None)
+        self.ended.clear()
+        cache_key_set = self.key_class(dynprompt, node_ids, is_changed_cache)
+        await cache_key_set.add_keys(node_ids)
+        self.prompts[current_prompt_id.get()] = (dynprompt, cache_key_set, is_changed_cache)
+
+    def end_prompt(self):
+        """The prompt's entries stop being preserved; its binding stays readable until the next prompt binds."""
+        self.ended.add(current_prompt_id.get())
+        for subcache in self.subcaches.values():
+            subcache.end_prompt()
 
     def all_node_ids(self):
         assert self.initialized
         node_ids = self.cache_key_set.all_node_ids()
         for subcache in self.subcaches.values():
-            node_ids = node_ids.union(subcache.all_node_ids())
+            if subcache.initialized:
+                node_ids = node_ids.union(subcache.all_node_ids())
         return node_ids
 
     def _clean_cache(self):
-        preserve_keys = set(self.cache_key_set.get_used_keys())
+        preserve_keys = set()
+        for _, cache_key_set, _ in self.prompts.values():
+            preserve_keys.update(cache_key_set.get_used_keys())
         to_remove = []
         for key in self.cache:
             if key not in preserve_keys:
@@ -183,7 +211,9 @@ class BasicCache:
             del self.cache[key]
 
     def _clean_subcaches(self):
-        preserve_subcaches = set(self.cache_key_set.get_used_subcache_keys())
+        preserve_subcaches = set()
+        for _, cache_key_set, _ in self.prompts.values():
+            preserve_subcaches.update(cache_key_set.get_used_subcache_keys())
 
         to_remove = []
         for key in self.subcaches:
@@ -312,7 +342,7 @@ class BasicCache:
         return hasattr(value, 'outputs') and hasattr(value, 'ui')
 
     def _get_class_type(self, node_id):
-        if not self.initialized or not self.dynprompt:
+        if not self.initialized:
             return ''
         try:
             return self.dynprompt.get_node(node_id).get('class_type', '')
@@ -411,6 +441,9 @@ class HierarchicalCache(BasicCache):
 class NullCache:
 
     async def set_prompt(self, dynprompt, node_ids, is_changed_cache):
+        pass
+
+    def end_prompt(self):
         pass
 
     def all_node_ids(self):
