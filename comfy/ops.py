@@ -176,7 +176,15 @@ def cast_modules_with_vbar(comfy_modules, dtype, device, bias_dtype, non_blockin
             return torch.empty((buffer_size,), dtype=torch.uint8, device=device)
 
         cast_buffer = comfy.model_management.get_aimdo_cast_buffer(offload_stream, device)
-        buffer = comfy_aimdo.torch.aimdo_to_tensor(cast_buffer.get(buffer_size, cast_buffer_offset), device)
+        try:
+            alloc = cast_buffer.get(buffer_size, cast_buffer_offset)
+        except RuntimeError:
+            # A prefetched block can ask for more cast buffer than this device
+            # can grow. Fall over to the torch allocator so the normal eviction
+            # and OOM handling applies instead of failing the whole prompt.
+            comfy.model_management.soft_empty_cache()
+            return torch.empty((buffer_size,), dtype=torch.uint8, device=device)
+        buffer = comfy_aimdo.torch.aimdo_to_tensor(alloc, device)
         cast_buffer_offset += buffer_size
         return buffer
 
