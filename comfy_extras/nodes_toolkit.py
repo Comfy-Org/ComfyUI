@@ -1,3 +1,6 @@
+import asyncio
+import time
+
 from typing_extensions import override
 from comfy_api.latest import ComfyExtension, io
 
@@ -52,12 +55,39 @@ class GetItemFromList(io.ComfyNode):
         return io.NodeOutput(list[index[0]])
 
 
+class Sleep(io.ComfyNode):
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="ComfySleepNode",
+            display_name="Sleep",
+            category="utilities",
+            description="Delays execution for the given amount of time, then passes the input through unchanged.",
+            search_aliases=["delay", "wait"],
+            inputs=[
+                io.AnyType.Input("value"),
+                io.Float.Input("seconds", default=1.0, min=0.0, max=86400.0, step=0.01),
+                io.Boolean.Input("asynchronous", default=True, tooltip="Allow other nodes and workflows to execute while we are sleeping"),
+            ],
+            outputs=[io.AnyType.Output()],
+        )
+
+    @classmethod
+    async def execute(cls, value, seconds, asynchronous) -> io.NodeOutput:
+        if asynchronous:
+            await asyncio.sleep(seconds)
+        else:
+            time.sleep(seconds)
+        return io.NodeOutput(value)
+
+
 class ToolkitExtension(ComfyExtension):
     @override
     async def get_node_list(self) -> list[type[io.ComfyNode]]:
         return [
             CreateList,
             GetItemFromList,
+            Sleep,
         ]
 
 
