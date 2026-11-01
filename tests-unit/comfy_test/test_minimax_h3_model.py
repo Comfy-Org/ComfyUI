@@ -2,9 +2,11 @@ import weakref
 
 import pytest
 import torch
+import torch.utils.checkpoint as cp
 from torch import nn
 
-from comfy.ldm.minimax.model import MiniMaxH3Model, PackedLayout, time_shift_sigma
+import comfy.model_management
+from comfy.ldm.minimax.model import MiniMaxH3Model, PackedLayout, _mod_gate, time_shift_sigma
 from comfy.model_sampling import CONST
 
 
@@ -113,3 +115,119 @@ def test_embed_and_pack_releases_intermediates(conditioning):
     assert torch.equal(slices["video"], outputs["video"])
     assert torch.equal(slices["audio"], outputs["audio"])
     assert torch.equal(slices["text"], context[0])
+
+
+NUM_BLOCKS = 32
+GATE_SEQ = 16
+GATE_DIM = 32
+
+
+def _upstream_mod_gate(x, gate, other, segments):
+    """The pre-fix implementation, kept here to prove the fixture can fail."""
+    for a, b, row in segments:
+        x[a:b].addcmul_(other[a:b], gate[row].to(x.dtype))
+    return x
+
+
+def _run_mod_gate_chain(monkeypatch, use_checkpoint, reentrant=False):
+    """Thread a stream through NUM_BLOCKS gated residuals and backprop."""
+    monkeypatch.setattr(comfy.model_management, "in_training", True)
+    torch.manual_seed(0)
+    base = torch.randn(GATE_SEQ, GATE_DIM, requires_grad=True)
+    gates = [torch.full((1, GATE_DIM), 0.2 + 0.001 * i).requires_grad_() for i in range(NUM_BLOCKS)]
+    others = [torch.randn(GATE_SEQ, GATE_DIM) for _ in range(NUM_BLOCKS)]
+    segments = [(0, GATE_SEQ, 0)]
+
+    h = base * 1.0
+    for i in range(NUM_BLOCKS):
+        if use_checkpoint:
+            h = cp.checkpoint(_mod_gate, h, gates[i], others[i], segments, use_reentrant=reentrant)
+        else:
+            h = _mod_gate(h, gates[i], others[i], segments)
+
+    h.square().mean().backward()
+    return base.grad, [g.grad for g in gates]
+
+
+def test_mod_gate_training_chain_backward_produces_finite_gradients(monkeypatch):
+    base_grad, gate_grads = _run_mod_gate_chain(monkeypatch, use_checkpoint=False)
+    assert base_grad is not None
+    assert torch.isfinite(base_grad).all()
+    assert all(torch.isfinite(g).all() for g in gate_grads)
+
+
+@pytest.mark.parametrize("reentrant", [False, True])
+def test_mod_gate_training_chain_survives_gradient_checkpointing(monkeypatch, reentrant):
+    """The pre-fix in-place update raises here; the out-of-place path must not."""
+    base_grad, gate_grads = _run_mod_gate_chain(monkeypatch, use_checkpoint=True, reentrant=reentrant)
+    assert base_grad is not None
+    assert torch.isfinite(base_grad).all()
+    assert all(torch.isfinite(g).all() for g in gate_grads)
+
+
+def test_mod_gate_pre_fix_implementation_actually_fails(monkeypatch):
+    """Guards the guard: confirms the in-place update is the thing that breaks."""
+    monkeypatch.setattr(comfy.model_management, "in_training", True)
+    torch.manual_seed(0)
+    base = torch.randn(GATE_SEQ, GATE_DIM, requires_grad=True)
+    gates = [torch.full((1, GATE_DIM), 0.2).requires_grad_() for _ in range(NUM_BLOCKS)]
+    others = [torch.randn(GATE_SEQ, GATE_DIM) for _ in range(NUM_BLOCKS)]
+    segments = [(0, GATE_SEQ, 0)]
+
+    h = base * 1.0
+    for i in range(NUM_BLOCKS):
+        h = cp.checkpoint(_upstream_mod_gate, h, gates[i], others[i], segments, use_reentrant=False)
+
+    with pytest.raises(RuntimeError, match="inplace"):
+        h.square().mean().backward()
+
+
+def test_mod_gate_training_does_not_mutate_the_stream(monkeypatch):
+    monkeypatch.setattr(comfy.model_management, "in_training", True)
+    x = torch.randn(GATE_SEQ, GATE_DIM)
+    original = x.clone()
+    gate = torch.full((2, GATE_DIM), 0.3)
+    other = torch.randn(GATE_SEQ, GATE_DIM)
+
+    out = _mod_gate(x, gate, other, [(0, 6, 0), (6, GATE_SEQ, 1)])
+
+    assert torch.equal(x, original)
+    assert out is not x
+
+
+def test_mod_gate_training_matches_the_in_place_math(monkeypatch):
+    monkeypatch.setattr(comfy.model_management, "in_training", True)
+    torch.manual_seed(1)
+    x = torch.randn(GATE_SEQ, GATE_DIM)
+    other = torch.randn(GATE_SEQ, GATE_DIM)
+    gate = torch.stack([torch.full((GATE_DIM,), 0.1), torch.full((GATE_DIM,), 0.3)])
+    segments = [(0, 6, 0), (6, GATE_SEQ, 1)]
+
+    out = _mod_gate(x.clone(), gate, other, segments)
+
+    expected = x.clone()
+    expected[0:6] += other[0:6] * gate[0]
+    expected[6:] += other[6:] * gate[1]
+    assert torch.allclose(out, expected, atol=1e-6)
+
+
+def test_mod_gate_training_keeps_every_row(monkeypatch):
+    """Zero gates must return the stream: the reconstruction cannot drop segments."""
+    monkeypatch.setattr(comfy.model_management, "in_training", True)
+    x = torch.randn(GATE_SEQ, GATE_DIM)
+    gate = torch.zeros((3, GATE_DIM))
+    other = torch.randn(GATE_SEQ, GATE_DIM)
+
+    out = _mod_gate(x.clone(), gate, other, [(0, 5, 0), (5, 12, 1), (12, GATE_SEQ, 2)])
+
+    assert torch.allclose(out, x, atol=1e-6)
+
+
+def test_mod_gate_gradients_match_between_checkpointed_and_plain(monkeypatch):
+    """Checkpointing must not change the gradients the update is based on."""
+    plain_base, plain_gates = _run_mod_gate_chain(monkeypatch, use_checkpoint=False)
+    ckpt_base, ckpt_gates = _run_mod_gate_chain(monkeypatch, use_checkpoint=True)
+
+    assert torch.allclose(plain_base, ckpt_base, atol=1e-5)
+    for a, b in zip(plain_gates, ckpt_gates):
+        assert torch.allclose(a, b, atol=1e-5)
