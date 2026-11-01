@@ -340,6 +340,9 @@ class MiniMaxH3ReferenceToVideo(io.ComfyNode):
             ref_items.append({"type": "video", "data": qwen_frames,
                               "timestamps": [i / 2.0 for i in range(len(sample_idx))]})
             if vae is None:
+                if soundtrack is not None and audio_vae is not None:
+                    audio_latent, ref_audio_t = _encode_ref_audio(audio_vae, soundtrack)
+                    ref_blocks.append({"kind": "audio", "ref_audio_t": ref_audio_t, "audio_latent": audio_latent})
                 continue
             z = vae.encode(frames)
             audio_latent, ref_audio_t = (None, 0)
