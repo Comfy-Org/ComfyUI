@@ -234,9 +234,7 @@ class MiniMaxH3AddGuide(io.ComfyNode):
                 audio_latent = audio_latent[..., :max_rt].clone()
             keyframe["audio_latent"] = audio_latent
 
-        keyframes = list(positive[0][1].get("minimax_keyframes", []))
-        keyframes.append(keyframe)
-        positive = node_helpers.conditioning_set_values(positive, {"minimax_keyframes": keyframes})
+        positive = node_helpers.conditioning_set_values(positive, {"minimax_keyframes": [keyframe]}, append=True)
         return io.NodeOutput(positive)
 
 
