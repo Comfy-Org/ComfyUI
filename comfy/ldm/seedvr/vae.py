@@ -450,17 +450,18 @@ class MemoryState(Enum):
     UNSET = 3
 
 
-def _frame_chunked(owner, run, source, chunk, memory_state, memory_cache, frame_pixels):
+def _frame_chunked(owner, run, source, chunk, memory_state, memory_cache, frame_pixels, working_bytes):
     """``run(source, memory_state, memory_cache)`` over a causal, spatial-only stage ``chunk`` frames at
     a time, the cache carrying state between chunks: exact, and only a chunk's activations are live.
     ``source`` is a 1-list the stage pops, so no caller keeps its input alive (the input of a module
-    call is held until that module returns)."""
+    call is held until that module returns). ``working_bytes`` is the pass's working-set estimate,
+    which a cache made here must fit beside to stay on the GPU."""
     if not chunk or source[0].size(2) <= chunk:
         return run(source, memory_state, memory_cache)
     local_cache = memory_state == MemoryState.DISABLED or memory_cache is None
     if local_cache:
         # under the same host-memory policy as a sliced pass
-        memory_cache = CausalMemoryCache(offload=_offload_caches_for(frame_pixels))
+        memory_cache = CausalMemoryCache(offload=_offload_caches_for(frame_pixels, working_bytes, source[0].device))
         memory_state = MemoryState.INITIALIZING
     outs = []
     try:
@@ -1202,9 +1203,11 @@ class Encoder3D(nn.Module):
 
     def forward(self, sample, memory_state, memory_cache):
         frame_pixels = sample.size(-2) * sample.size(-1)
+        working_bytes = _encode_working_bytes(frame_pixels, sample.dtype)
         source = [sample]
         del sample
-        box = [_frame_chunked(self, self._head, source, self.head_frames, memory_state, memory_cache, frame_pixels)]
+        box = [_frame_chunked(self, self._head, source, self.head_frames, memory_state, memory_cache, frame_pixels,
+                              working_bytes)]
         for down_block in self.down_blocks[self.head_blocks:]:
             box = [down_block.run(box, memory_state, memory_cache)]
         sample = self.mid_block(box.pop(), memory_state, memory_cache)
@@ -1265,6 +1268,7 @@ class Decoder3D(nn.Module):
         # frame at a time, each of its output frames going on through the spatial-only tail as it is made.
         ups = sum(1 for blk in self.up_blocks[self.temporal_up_num - 1:] if blk.upsamplers is not None)
         frame_pixels = sample.size(-2) * sample.size(-1) * 4 ** ups
+        working_bytes = _decode_working_bytes(frame_pixels, sample.dtype)
         up = last.upsamplers[0]
 
         def upsample_and_tail(source, state, cache):
@@ -1273,11 +1277,11 @@ class Decoder3D(nn.Module):
                         for n, box in enumerate(up.frames(source, state, cache))]
                 return torch.cat(outs, dim=2)
             box = [up.run(source, state, cache)]
-            return _frame_chunked(self, self._tail, box, self.tail_frames, state, cache, frame_pixels)
+            return _frame_chunked(self, self._tail, box, self.tail_frames, state, cache, frame_pixels, working_bytes)
         source = [sample]
         del sample
         return _frame_chunked(last, upsample_and_tail, source, self.tail_frames and max(1, self.tail_frames // up.temporal_ratio),
-                              memory_state, memory_cache, frame_pixels)
+                              memory_state, memory_cache, frame_pixels, working_bytes)
 
 
 class VideoAutoencoderKLWrapper(nn.Module):
