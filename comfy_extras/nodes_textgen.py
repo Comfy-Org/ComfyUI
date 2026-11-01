@@ -1,6 +1,8 @@
 from comfy_api.latest import ComfyExtension, io
 from typing_extensions import override
 
+import comfy.model_state
+
 VIDEO_TOOLTIP = "Video frames as image batch. Assumed to be 24 FPS; subsampled to the model's frame rate internally."
 
 class TextGenerateV2(io.ComfyNode):
@@ -43,15 +45,18 @@ class TextGenerateV2(io.ComfyNode):
                 io.Boolean.Input("use_default_template", optional=True, default=True, tooltip="Use the built in system prompt/template if the model has one.", advanced=True),
                 io.Combo.Input("mtp", options=["auto", "off", "2", "3", "4", "5", "tree2s1", "tree2s2", "tree3s1", "tree4s1m8"], default="auto", optional=True, tooltip="Speculative decoding with the checkpoint's multi-token-prediction head. No effect without MTP weights. auto adapts the draft depth and breadth to observed token matches and execution cost; 2-5 pins a constant draft depth; tree modes pin both breadth and depth. Sampled output stays correctly distributed but differs from non-MTP output for the same seed."),
                 io.String.Input("system_prompt", force_input=True, optional=True, tooltip="Replaces the system prompt in the model's chat template. Ignored when the default template is not used."),
+                io.ModelState.Input("state", optional=True, tooltip="Continues the conversation held by this model state and extends it with this turn. The prompt should be a single text turn."),
             ],
             outputs=[
                 io.String.Output(display_name="generated_text"),
                 io.String.Output(display_name="thinking"),
+                io.ModelState.Output(display_name="state", tooltip="A copy of the input state extended by this turn; the input is left as it was."),
             ],
+            hidden=[io.Hidden.unique_id, io.Hidden.dynprompt],
         )
 
     @classmethod
-    def execute(cls, clip, prompt, max_length, sampling_mode, image=None, thinking=False, use_default_template=True, video=None, audio=None, mtp="auto", system_prompt="", images: io.Autogrow.Type = None, videos: io.Autogrow.Type = None, audios: io.Autogrow.Type = None) -> io.NodeOutput:
+    def execute(cls, clip, prompt, max_length, sampling_mode, image=None, thinking=False, use_default_template=True, video=None, audio=None, mtp="auto", system_prompt="", images: io.Autogrow.Type = None, videos: io.Autogrow.Type = None, audios: io.Autogrow.Type = None, state=None) -> io.NodeOutput:
 
         mtp = {"off": False, "auto": True}.get(mtp, mtp)
 
@@ -59,7 +64,11 @@ class TextGenerateV2(io.ComfyNode):
         videos = [v for v in (videos or {}).values() if v is not None]
         audios = [a for a in (audios or {}).values() if a is not None]
 
-        tokens = clip.tokenize(prompt, image=image, images=images, skip_template=not use_default_template, min_length=1, thinking=thinking, video=video, videos=videos, audio=audio, audios=audios, system_prompt=system_prompt if use_default_template else "")
+        # the system prompt opens a conversation; later turns continue it
+        if not use_default_template or (state is not None and state.metadata):
+            system_prompt = ""
+        state = comfy.model_state.ModelState() if state is None else state.copy()
+        tokens = clip.tokenize(prompt, image=image, images=images, skip_template=not use_default_template, min_length=1, thinking=thinking, video=video, videos=videos, audio=audio, audios=audios, system_prompt=system_prompt)
 
         # Get sampling parameters from dynamic combo
         do_sample = sampling_mode.get("sampling_mode") == "on"
@@ -82,8 +91,13 @@ class TextGenerateV2(io.ComfyNode):
             repetition_penalty=repetition_penalty,
             presence_penalty=presence_penalty,
             seed=seed,
-            mtp=mtp
+            mtp=mtp,
+            state=state,
         )
+        # the output is written back only when something consumes it; otherwise it is released after the node
+        dynprompt = cls.hidden.dynprompt
+        if any(value == [cls.hidden.unique_id, 2] for node_id in dynprompt.all_node_ids() for value in dynprompt.get_node(node_id)["inputs"].values()):
+            state.flush()
 
         generated_text = clip.decode(generated_ids)
 
@@ -96,7 +110,7 @@ class TextGenerateV2(io.ComfyNode):
             if not prompt.rstrip().endswith("<think>") and not clip.decode(prompt_ids[-4:]).rstrip().endswith("<think>"):
                 reasoning, text = "", generated_text
 
-        return io.NodeOutput(text.strip(), reasoning.replace("<think>", "", 1).strip())
+        return io.NodeOutput(text.strip(), reasoning.replace("<think>", "", 1).strip(), state)
 
 
 class TextGenerate(TextGenerateV2):
@@ -118,6 +132,7 @@ class TextGenerate(TextGenerateV2):
             is_deprecated=True,
             inputs=[old_inputs.get(i.id, i) for i in parent_schema.inputs],
             outputs=parent_schema.outputs,
+            hidden=parent_schema.hidden,
         )
 
 
@@ -261,8 +276,9 @@ class TextGenerateLTX2Prompt(TextGenerate):
             node_id="TextGenerateLTX2Prompt",
             display_name="Generate LTX2 Prompt",
             category=parent_schema.category,
-            inputs=parent_schema.inputs,
-            outputs=parent_schema.outputs,
+            inputs=[i for i in parent_schema.inputs if i.id != "state"],
+            outputs=parent_schema.outputs[:2],
+            hidden=parent_schema.hidden,
             search_aliases=["prompt enhance", "LLM", "gemma"],
         )
 
