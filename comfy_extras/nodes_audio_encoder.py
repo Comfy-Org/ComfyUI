@@ -71,6 +71,29 @@ class SheetSage2AudioToABC(io.ComfyNode):
         return io.NodeOutput(audio_encoder.generate_abc(audio["waveform"], audio["sample_rate"], melody_only=mode == "melody"))
 
 
+class SpeechToText(io.ComfyNode):
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="SpeechToText",
+            display_name="Speech to Text",
+            category="audio",
+            description="Transcribes speech with a Phonon-2 / Parakeet TDT audio encoder.",
+            inputs=[
+                io.AudioEncoder.Input("audio_encoder"),
+                io.Audio.Input("audio"),
+            ],
+            outputs=[
+                io.String.Output(display_name="text", is_output_list=True),
+                io.String.Output(display_name="timestamps", is_output_list=True),
+            ],
+        )
+
+    @classmethod
+    def execute(cls, audio_encoder, audio):
+        return io.NodeOutput(*audio_encoder.transcribe(audio["waveform"], audio["sample_rate"]))
+
+
 class AudioEncoder(ComfyExtension):
     @override
     async def get_node_list(self) -> list[type[io.ComfyNode]]:
@@ -78,6 +101,7 @@ class AudioEncoder(ComfyExtension):
             AudioEncoderLoader,
             AudioEncoderEncode,
             SheetSage2AudioToABC,
+            SpeechToText,
         ]
 
 
