@@ -264,7 +264,6 @@ def attention_basic(q, k, v, heads, mask=None, attn_precision=None, skip_reshape
 
     scale = kwargs.get("scale", dim_head ** -0.5)
 
-    h = heads
     if skip_reshape:
         if kwargs.get("enable_gqa", False):
             k, v = comfy.ops.repeat_kv_for_gqa(k, v, q.shape[-3], -3)
@@ -286,17 +285,15 @@ def attention_basic(q, k, v, heads, mask=None, attn_precision=None, skip_reshape
 
     if exists(mask):
         if mask.dtype == torch.bool:
-            mask = rearrange(mask, 'b ... -> b (...)') #TODO: check if this bool part matches pytorch attention
-            max_neg_value = -torch.finfo(sim.dtype).max
-            mask = repeat(mask, 'b j -> (b h) () j', h=h)
-            sim.masked_fill_(~mask, max_neg_value)
+            additive = torch.zeros_like(mask, dtype=sim.dtype)
+            additive.masked_fill_(~mask, torch.finfo(sim.dtype).min)
+            mask = additive
+        if len(mask.shape) == 2:
+            bs = 1
         else:
-            if len(mask.shape) == 2:
-                bs = 1
-            else:
-                bs = mask.shape[0]
-            mask = mask.reshape(bs, -1, mask.shape[-2], mask.shape[-1]).expand(b, heads, -1, -1).reshape(-1, mask.shape[-2], mask.shape[-1])
-            sim.add_(mask)
+            bs = mask.shape[0]
+        mask = mask.reshape(bs, -1, mask.shape[-2], mask.shape[-1]).expand(b, heads, -1, -1)
+        sim.view(b, heads, -1, mask.shape[-1]).add_(mask)
 
     # attention, what we cannot get enough of
     sim = sim.softmax(dim=-1)
@@ -370,6 +367,10 @@ def attention_sub_quad(query, key, value, heads, mask=None, attn_precision=None,
         query_chunk_size = 512
 
     if mask is not None:
+        if mask.dtype == torch.bool:
+            additive = torch.zeros_like(mask, dtype=query.dtype)
+            additive.masked_fill_(~mask, torch.finfo(query.dtype).min)
+            mask = additive
         if len(mask.shape) == 2:
             bs = 1
         else:
@@ -447,11 +448,15 @@ def attention_split(q, k, v, heads, mask=None, attn_precision=None, skip_reshape
                             f'Need: {mem_required/64/gb:0.1f}GB free, Have:{mem_free_total/gb:0.1f}GB free')
 
     if mask is not None:
+        if mask.dtype == torch.bool:
+            additive = torch.zeros_like(mask, dtype=q.dtype)
+            additive.masked_fill_(~mask, torch.finfo(q.dtype).min)
+            mask = additive
         if len(mask.shape) == 2:
             bs = 1
         else:
             bs = mask.shape[0]
-        mask = mask.reshape(bs, -1, mask.shape[-2], mask.shape[-1]).expand(b, heads, -1, -1).reshape(-1, mask.shape[-2], mask.shape[-1])
+        mask = mask.reshape(bs, -1, mask.shape[-2], mask.shape[-1]).expand(b, heads, -1, -1)
 
     # print("steps", steps, mem_required, mem_free_total, modifier, q.element_size(), tensor_size)
     first_op_done = False
@@ -468,13 +473,10 @@ def attention_split(q, k, v, heads, mask=None, attn_precision=None, skip_reshape
                     s1 = einsum('b i d, b j d -> b i j', q[:, i:end], k) * scale
 
                 if mask is not None:
-                    if len(mask.shape) == 2:
-                        s1 += mask[i:end]
+                    if mask.shape[2] == 1:
+                        s1.view(b, heads, -1, mask.shape[-1]).add_(mask)
                     else:
-                        if mask.shape[1] == 1:
-                            s1 += mask
-                        else:
-                            s1 += mask[:, i:end]
+                        s1.view(b, heads, -1, mask.shape[-1]).add_(mask[:, :, i:end])
 
                 s2 = s1.softmax(dim=-1).to(v.dtype)
                 del s1
@@ -560,18 +562,21 @@ def attention_xformers(q, k, v, heads, mask=None, attn_precision=None, skip_resh
         # add a singleton heads dimension
         if mask.ndim == 3:
             mask = mask.unsqueeze(1)
-        # pad to a multiple of 8
-        pad = 8 - mask.shape[-1] % 8
-        # the xformers docs says that it's allowed to have a mask of shape (1, Nq, Nk)
-        # but when using separated heads, the shape has to be (B, H, Nq, Nk)
-        # in flux, this matrix ends up being over 1GB
-        # here, we create a mask with the same batch/head size as the input mask (potentially singleton or full)
-        mask_out = torch.empty([mask.shape[0], mask.shape[1], q.shape[1], mask.shape[-1] + pad], dtype=q.dtype, device=q.device)
-
-        mask_out[..., :mask.shape[-1]] = mask
-        # doesn't this remove the padding again??
-        mask = mask_out[..., :mask.shape[-1]]
-        mask = mask.expand(b, heads, -1, -1)
+        # bool masks mark valid positions, convert them to an additive bias
+        if mask.dtype == torch.bool:
+            additive = torch.zeros_like(mask, dtype=q.dtype)
+            additive.masked_fill_(~mask, torch.finfo(q.dtype).min)
+            mask = additive
+        # xformers requires every bias stride except the last to be 128-bit
+        # aligned, so pad the key dimension and slice it back instead of
+        # copying masks that are already aligned
+        alignment = 128 // torch.finfo(q.dtype).bits
+        if mask.dtype != q.dtype or mask.stride(-1) > 1 or any(s % alignment for s in mask.stride()[:-1]):
+            pad = -mask.shape[-1] % alignment
+            padded = torch.empty(mask.shape[:-1] + (mask.shape[-1] + pad,), dtype=q.dtype, device=q.device)
+            padded[..., :mask.shape[-1]] = mask
+            mask = padded[..., :mask.shape[-1]]
+        mask = mask.expand(b, heads, q.shape[1], -1)
 
     out = xformers.ops.memory_efficient_attention(q, k, v, attn_bias=mask, scale=kwargs.get("scale", None))
 
