@@ -87,6 +87,7 @@ import comfy.ldm.moss_image.model
 import comfy.ldm.fibo2.model
 
 import comfy.model_management
+import comfy.utils
 import comfy.patcher_extension
 import comfy.conds
 import comfy.ops
@@ -2473,16 +2474,28 @@ class SenseNovaSharedRegular(comfy.conds.CONDRegular):
         return self._copy_with(self.cond)
 
 class SenseNovaSharedList(comfy.conds.CONDList):
+    """Keep a list-valued SenseNova prefix at one copy per guidance branch."""
+
     def process_cond(self, batch_size, **kwargs):
         return self._copy_with(self.cond)
 
 class SenseNovaU15(BaseModel):
-    PATCH_SIZE = 32
+    """ComfyUI model wrapper for SenseNova U1.5 image generation."""
+
+    PATCH_SIZE = comfy.ldm.sensenova.model.MERGED_PATCH_SIZE
 
     def __init__(self, model_config, model_type=ModelType.FLOW, device=None):
         super().__init__(model_config, model_type, device=device, unet_model=comfy.ldm.sensenova.model.SenseNovaU15)
         self.model_sampling = SenseNovaModelSampling(model_config)
         self.memory_usage_factor_conds = ("reference_images",)
+
+    def get_dynamic_vram__units(self):
+        language = self.diffusion_model.language_model
+        units = [layer.text_modules() for layer in language.model.layers]
+        units.append(language.model.norm)
+        if self.diffusion_model.has_lm_head:
+            units.append(language.lm_head)
+        return units, [language.model.embed_tokens]
 
     def process_timestep(self, timestep, **kwargs):
         base_timestep = timestep / self.model_sampling.multiplier
@@ -2493,45 +2506,35 @@ class SenseNovaU15(BaseModel):
         text_input_ids = kwargs.get("text_input_ids")
         if text_input_ids is not None:
             device = kwargs["device"]
-            reference_images = kwargs.get("reference_latents")
-            if reference_images is not None:
-                reference_images = comfy.ldm.sensenova.conditioning.preprocess_references(reference_images)
-            image_only = kwargs.get("prompt_type") == "negative"
-            indexes = None
-            prefix_mask = None
-            if reference_images:
-                reference_grids = [
-                    (
-                        max(1, math.ceil(image.shape[-2] / self.PATCH_SIZE)),
-                        max(1, math.ceil(image.shape[-1] / self.PATCH_SIZE)),
-                    )
-                    for image in reference_images
-                ]
-                text_input_ids = comfy.ldm.sensenova.conditioning.condition_input_ids(
-                    text_input_ids,
-                    reference_grids,
-                    image_only=image_only,
-                )
-                indexes = comfy.ldm.sensenova.conditioning.thw_indexes(text_input_ids, reference_grids)
-                prefix_mask = comfy.ldm.sensenova.conditioning.block_causal_mask(
-                    indexes, dtype=self.get_dtype_inference()
-                )
+            dtype = self.get_dtype_inference()
+            text_input_ids, reference_images, indexes, prefix_mask = comfy.ldm.sensenova.conditioning.prepare_prefix_inputs(
+                text_input_ids, kwargs.get("reference_latents"),
+                comfy.ldm.sensenova.model.MERGED_PATCH_SIZE, dtype,
+                image_only=kwargs.get("prompt_type") == "negative",
+                expand_images=not kwargs.get("sensenova_interleave_expanded", False),
+            )
 
-            if kwargs.get("hooks") is None:
-                dtype = self.get_dtype_inference()
+            hooks = kwargs.get("hooks")
+            if hooks is None:
+                prefix_args = (
+                    text_input_ids.to(device=device),
+                    [
+                        image.to(device=device, dtype=dtype)
+                        for image in reference_images
+                    ]
+                    if reference_images
+                    else None,
+                    indexes.to(device=device) if indexes is not None else None,
+                    prefix_mask.to(device=device)
+                    if prefix_mask is not None
+                    else None,
+                )
                 prefix_keys, prefix_values, prefix_time = (
                     self.diffusion_model.preprocess_prefix(
-                        text_input_ids.to(device=device),
-                        [
-                            image.to(device=device, dtype=dtype)
-                            for image in reference_images
-                        ]
-                        if reference_images
-                        else None,
-                        indexes.to(device=device) if indexes is not None else None,
-                        prefix_mask.to(device=device)
-                        if prefix_mask is not None
-                        else None,
+                        *prefix_args,
+                        transformer_options={
+                            "prefetch_dynamic_vbars": self.current_patcher is not None and self.current_patcher.is_dynamic(),
+                        },
                     )
                 )
                 out["prefix_keys"] = SenseNovaSharedList(prefix_keys)
@@ -2548,23 +2551,25 @@ class SenseNovaU15(BaseModel):
     def extra_conds_shapes(self, **kwargs):
         images = kwargs.get("reference_latents")
         images = comfy.ldm.sensenova.conditioning.split_reference_batches(images) if images is not None else []
+        patch_size = comfy.ldm.sensenova.model.MERGED_PATCH_SIZE
         reference_grids = [
             (
-                max(1, math.ceil(image.shape[-3] / self.PATCH_SIZE)),
-                max(1, math.ceil(image.shape[-2] / self.PATCH_SIZE)),
+                max(1, math.ceil(image.shape[-3] / patch_size)),
+                max(1, math.ceil(image.shape[-2] / patch_size)),
             )
             for image in images
         ]
         reference_pixels = sum(
-            height * width * self.PATCH_SIZE**2
-            for height, width in reference_grids
+            height * width * patch_size**2 for height, width in reference_grids
         )
         out = {}
         if reference_pixels:
             out["reference_images"] = [1, 3, reference_pixels]
         text_input_ids = kwargs.get("text_input_ids")
         if text_input_ids is not None:
-            if reference_grids:
+            if kwargs.get("sensenova_interleave_expanded", False):
+                length = text_input_ids.shape[1]
+            elif reference_grids:
                 length = comfy.ldm.sensenova.conditioning.conditioned_input_length(
                     text_input_ids.shape[1],
                     reference_grids,

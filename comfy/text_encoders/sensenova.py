@@ -33,17 +33,53 @@ SYSTEM_MESSAGE = (
     "user's input language."
 )
 
+INTERLEAVE_SYSTEM_MESSAGE = (
+    "You are a multimodal assistant capable of reasoning with both text and images. "
+    "You support two modes:\n\n"
+    "Think Mode: When reasoning is needed, you MUST start with a <think></think> block "
+    "and place all reasoning inside it. You MUST interleave text with generated images "
+    "using tags like <image1>, <image2>. Images can ONLY be generated between <think> and "
+    "</think>, and may be referenced in the final answer.\n\n"
+    "Non-Think Mode: When no reasoning is needed, directly provide the answer without reasoning. "
+    "Do not use tags like <image1>, <image2>; present any images naturally alongside the text.\n\n"
+    "After the think block, always provide a concise, user-facing final answer. "
+    "The answer may include text, images, or both. Match the user's language in both reasoning "
+    "and the final answer."
+)
 
-def build_generation_prompt(text):
+
+def build_generation_prompt(text, thinking=False):
+    """Build a SenseNova image-generation chat prompt."""
+
+    assistant = "<think>\n" if thinking else "<think>\n\n</think>\n\n<img>"
     return (
         f"<|im_start|>system\n{SYSTEM_MESSAGE}<|im_end|>\n"
         f"<|im_start|>user\n{text}<|im_end|>\n"
-        "<|im_start|>assistant\n<think>\n\n</think>\n\n<img>"
+        f"<|im_start|>assistant\n{assistant}"
     )
 
 
 def build_unconditional_prompt():
+    """Build the negative image-generation prompt."""
+
     return "<|im_start|>user\n<|im_end|>\n<|im_start|>assistant\n<img>"
+
+
+def build_interleave_prompt(text, thinking=False):
+    """Build a chat prompt that allows interleaved text and image events."""
+
+    assistant = "" if thinking else "<think>\n\n</think>\n\n"
+    return (
+        f"<|im_start|>system\n{INTERLEAVE_SYSTEM_MESSAGE}<|im_end|>\n"
+        f"<|im_start|>user\n{text}<|im_end|>\n"
+        f"<|im_start|>assistant\n{assistant}"
+    )
+
+
+def build_interleave_unconditional_prompt():
+    """Build the negative interleave prompt."""
+
+    return "<|im_start|>user\n<|im_end|>\n<|im_start|>assistant\n"
 
 
 class SenseNovaQwen2Tokenizer:
@@ -108,7 +144,20 @@ class SenseNovaTokenizer(sd1_clip.SD1Tokenizer):
         )
 
     def tokenize_with_weights(self, text, return_word_ids=False, **kwargs):
-        prompt = build_generation_prompt(text) if text else build_unconditional_prompt()
+        thinking = kwargs.pop("thinking", False)
+        mode = kwargs.pop("mode", "image")
+        if mode == "interleave":
+            prompt = (
+                build_interleave_prompt(text, thinking=thinking)
+                if text or thinking
+                else build_interleave_unconditional_prompt()
+            )
+        else:
+            prompt = (
+                build_generation_prompt(text, thinking=thinking)
+                if text or thinking
+                else build_unconditional_prompt()
+            )
         tokens = super().tokenize_with_weights(
             prompt,
             return_word_ids=return_word_ids,
