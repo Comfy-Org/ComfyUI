@@ -271,6 +271,7 @@ from app.assets.manager import AssetManager, default_asset_manager  # imports to
 from protocol import BinaryEventTypes
 import nodes
 import comfy.model_management
+import torch
 import comfyui_version
 import app.logger
 import hook_breaker_ac10a0
@@ -335,7 +336,6 @@ def cuda_malloc_warning():
 
 
 def prompt_worker(q, server_instance, asset_manager):
-    current_time: float = 0.0
     cache_ram = 0
     cache_ram_inactive = 0
     if not args.cache_classic and not args.cache_none and args.cache_lru <= 0:
@@ -355,63 +355,90 @@ def prompt_worker(q, server_instance, asset_manager):
         cache_type = execution.CacheType.NONE
 
     e = execution.PromptExecutor(server_instance, cache_type=cache_type, cache_args={ "lru" : args.cache_lru, "ram" : cache_ram, "ram_inactive" : cache_ram_inactive }, asset_manager=asset_manager )
+    q.interrupt_prompt = e.interrupt
+    with torch.inference_mode():
+        asyncio.run(prompt_worker_loop(q, server_instance, asset_manager, e))
+
+
+async def prompt_worker_loop(q, server_instance, asset_manager, e):
+    """Runs queued prompts as tasks on this loop. A prompt starts only while every in-flight
+    prompt is blocked on async nodes; the executor arbitrates node execution between them."""
+    current_time: float = 0.0
     last_gc_collect = 0
     need_gc = False
     gc_collect_interval = 10.0
     background_scan_paused = False
+    running = set()
+    changed = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    q.on_change = lambda: loop.call_soon_threadsafe(changed.set)
+
+    async def run_prompt(item, item_id):
+        execution_start_time = time.perf_counter()
+        prompt_id = item[1]
+        server_instance.workflow_metadata[prompt_id] = item[3].get("workflow_metadata", {})
+
+        sensitive = item[5]
+        extra_data = item[3].copy()
+        for k in sensitive:
+            extra_data[k] = sensitive[k]
+
+        try:
+            run = await e.execute_async(item[2], prompt_id, extra_data, item[4])
+        finally:
+            server_instance.workflow_metadata.pop(prompt_id)
+
+        remove_sensitive = lambda prompt: prompt[:5] + prompt[6:]
+        q.task_done(item_id,
+                    run.history_result,
+                    status=execution.PromptQueue.ExecutionStatus(
+                        status_str='success' if run.success else 'error',
+                        completed=run.success,
+                        messages=run.status_messages), process_item=remove_sensitive)
+        if q.get_tasks_remaining() == 0:
+            # Nothing else is queued, so let the background scan run now rather than on the next GC tick.
+            asset_manager.resume_background_scan()
+        if run.client_id is not None:
+            server_instance.send_sync("executing", {"node": None, "prompt_id": prompt_id}, run.client_id)
+
+        execution_time = time.perf_counter() - execution_start_time
+
+        # Log Time in a more readable way after 10 minutes
+        if execution_time > 600:
+            execution_time = time.strftime("%H:%M:%S", time.gmtime(execution_time))
+            logging.info(f"Prompt executed in {execution_time}", extra={'color': 'green'})
+        else:
+            logging.info("Prompt executed in {:.2f} seconds".format(execution_time), extra={'color': 'green'})
+
+        job_hint = product_tips.get_relevant_job_hint(args, os.environ, run.success, extra_data)
+        if job_hint is not None:
+            logging.info(job_hint)
 
     while True:
         try:
-            timeout = 1000.0
-            if need_gc:
-                timeout = max(gc_collect_interval - (current_time - last_gc_collect), 0.0)
+            for task in [t for t in running if t.done()]:
+                running.remove(task)
+                need_gc = True
+                task.result()
 
-            queue_item = q.get(timeout=timeout)
+            await e.wait_for_start()
+            queue_item = q.get(timeout=0)
             if queue_item is not None:
                 item, item_id = queue_item
-                execution_start_time = time.perf_counter()
-                prompt_id = item[1]
-                server_instance.last_prompt_id = prompt_id
-                server_instance.workflow_metadata = item[3].get("workflow_metadata", {})
-
-                sensitive = item[5]
-                extra_data = item[3].copy()
-                for k in sensitive:
-                    extra_data[k] = sensitive[k]
-
                 asset_manager.pause_background_scan()
                 background_scan_paused = True
-                e.execute(item[2], prompt_id, extra_data, item[4])
+                task = asyncio.create_task(run_prompt(item, item_id))
+                task.add_done_callback(lambda t: changed.set())
+                running.add(task)
+                # Let the run register with the executor before asking whether another may start.
+                await asyncio.sleep(0)
+                continue
 
-                need_gc = True
-
-                remove_sensitive = lambda prompt: prompt[:5] + prompt[6:]
-                q.task_done(item_id,
-                            e.history_result,
-                            status=execution.PromptQueue.ExecutionStatus(
-                                status_str='success' if e.success else 'error',
-                                completed=e.success,
-                                messages=e.status_messages), process_item=remove_sensitive)
-                if q.get_tasks_remaining() == 0:
-                    # Nothing else is queued, so let the background scan run now rather than on the next GC tick.
-                    asset_manager.resume_background_scan()
-                if server_instance.client_id is not None:
-                    server_instance.send_sync("executing", {"node": None, "prompt_id": prompt_id}, server_instance.client_id)
-                server_instance.workflow_metadata = {}
-
-                current_time = time.perf_counter()
-                execution_time = current_time - execution_start_time
-
-                # Log Time in a more readable way after 10 minutes
-                if execution_time > 600:
-                    execution_time = time.strftime("%H:%M:%S", time.gmtime(execution_time))
-                    logging.info(f"Prompt executed in {execution_time}", extra={'color': 'green'})
-                else:
-                    logging.info("Prompt executed in {:.2f} seconds".format(execution_time), extra={'color': 'green'})
-
-                job_hint = product_tips.get_relevant_job_hint(args, os.environ, e.success, extra_data)
-                if job_hint is not None:
-                    logging.info(job_hint)
+            if running:
+                # Flags, cache resets and GC touch state the in-flight prompts are using.
+                await changed.wait()
+                changed.clear()
+                continue
 
             flags = q.get_flags()
             free_memory = flags.get("free_memory", False)
@@ -438,6 +465,15 @@ def prompt_worker(q, server_instance, asset_manager):
                     asset_manager.queue_output_scan()
                     asset_manager.resume_background_scan()
                     background_scan_paused = False
+
+            timeout = 1000.0
+            if need_gc:
+                timeout = max(gc_collect_interval - (current_time - last_gc_collect), 0.0)
+            try:
+                await asyncio.wait_for(changed.wait(), timeout)
+            except asyncio.TimeoutError:
+                pass
+            changed.clear()
         # BaseException is deliberate. This runs on the worker thread, so Ctrl-C lands in
         # the main thread instead, and resume only flips the seeder's pause state.
         except BaseException:
@@ -470,20 +506,21 @@ def hijack_progress(server_instance):
         if node_id is None:
             node_id = server_instance.last_node_id
         progress = {"value": value, "max": total, "prompt_id": prompt_id, "node": node_id}
-        get_progress_state().update_progress(node_id, value, total, preview_image)
+        registry = get_progress_state()
+        registry.update_progress(node_id, value, total, preview_image)
 
-        server_instance.send_sync("progress", progress, server_instance.client_id)
+        server_instance.send_sync("progress", progress, registry.client_id)
         if preview_image is not None:
             # Only send old method if client doesn't support preview metadata
             if not feature_flags.supports_feature(
                 server_instance.sockets_metadata,
-                server_instance.client_id,
+                registry.client_id,
                 "supports_preview_metadata",
             ):
                 server_instance.send_sync(
                     BinaryEventTypes.UNENCODED_PREVIEW_IMAGE,
                     preview_image,
-                    server_instance.client_id,
+                    registry.client_id,
                 )
 
     comfy.utils.set_progress_bar_global_hook(hook)
