@@ -181,6 +181,7 @@ def cast_modules_with_vbar(comfy_modules, dtype, device, bias_dtype, non_blockin
         return buffer
 
     group_faults = {}
+    dropped_groups = []
     for s in comfy_modules:
         group = s._combined_linear
         if group is None or group._v_weight is None:
@@ -197,7 +198,9 @@ def cast_modules_with_vbar(comfy_modules, dtype, device, bias_dtype, non_blockin
                     signature = comfy_aimdo.model_vbar.vbar_fault(m._v)
                     group_faults[m] = (signature, comfy_aimdo.model_vbar.vbar_signature_compare(signature, m._v_signature))
                 if not all(group_faults[m][1] for m in group.linears):
-                    group._v_weight = None
+                    # Dropped after the loop: a member that already holds its group fault
+                    # must not fall into the uncombined branch and take a second pin.
+                    dropped_groups.append(group)
                     for m in group.linears:
                         group_faults[m] = (group_faults[m][0], False)
             signature, resident = group_faults.pop(s)
@@ -297,6 +300,8 @@ def cast_modules_with_vbar(comfy_modules, dtype, device, bias_dtype, non_blockin
         prefetch["needs_cast"] = needs_cast
         s._prefetch = prefetch
 
+    for group in dropped_groups:
+        group._v_weight = None
     if return_faulted:
         return offload_stream, fully_faulted
     return offload_stream
