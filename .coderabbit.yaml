@@ -29,6 +29,18 @@ reviews:
   in_progress_fortune: false
   enable_prompt_for_ai_agents: true
 
+  pre_merge_checks:
+    title:
+      mode: "error"
+      requirements: |
+        Pull requests that add or modify Partner Node implementations or
+        provider metadata under comfy_api_nodes/ must start their title with
+        "[Partner Nodes] ". Prefer the existing form
+        "[Partner Nodes] type(Provider): concise description" when a
+        conventional-commit type and provider apply. Do not require this
+        prefix for unrelated changes, even when they touch shared API-node
+        infrastructure or tests.
+
   path_filters:
     - "!comfy_api_nodes/apis/**"
     - "!**/generated/*.pyi"
