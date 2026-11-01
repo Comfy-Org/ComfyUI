@@ -328,8 +328,9 @@ class PromptServer():
         routes = web.RouteTableDef()
         self.routes = routes
         self.last_node_id = None
+        self.last_prompt_id = None
         self.client_id = None
-        self.workflow_metadata = {}
+        self.workflow_metadata = {} # prompt_id -> metadata merged into that prompt's messages
 
         self.on_prompt_handlers = []
 
@@ -1281,13 +1282,13 @@ class PromptServer():
                         break
 
                 if should_interrupt:
-                    nodes.interrupt_processing()
+                    self.prompt_queue.interrupt_prompt(prompt_id)
                 else:
                     logging.info(f"Prompt {prompt_id} is not currently running, skipping interrupt")
             else:
                 # No prompt_id provided, do a global interrupt
                 logging.info("Global interrupt (no prompt_id specified)")
-                nodes.interrupt_processing()
+                self.prompt_queue.interrupt_prompt(None)
 
             return web.Response(status=200)
 
@@ -1502,7 +1503,7 @@ class PromptServer():
     def send_sync(self, event, data, sid=None):
         if self.workflow_metadata:
             if isinstance(data, dict) and "prompt_id" in data:
-                data = {**self.workflow_metadata, **data}
+                data = {**self.workflow_metadata.get(data["prompt_id"], {}), **data}
             elif (
                 event == BinaryEventTypes.PREVIEW_IMAGE_WITH_METADATA
                 and isinstance(data, tuple)
@@ -1511,10 +1512,9 @@ class PromptServer():
                 and "prompt_id" in data[1]
             ):
                 # Merged here rather than at publication: messages wait in the
-                # queue, so by the time publish_loop sends a preview the next
-                # prompt may already have replaced workflow_metadata, and the
-                # frame would carry the wrong workflow.
-                data = (data[0], {**self.workflow_metadata, **data[1]})
+                # queue, so by the time publish_loop sends a preview the
+                # prompt may already have finished and dropped its metadata.
+                data = (data[0], {**self.workflow_metadata.get(data[1]["prompt_id"], {}), **data[1]})
 
         self.loop.call_soon_threadsafe(
             self.messages.put_nowait, (event, data, sid))
