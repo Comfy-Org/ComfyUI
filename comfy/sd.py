@@ -194,8 +194,9 @@ def load_bypass_lora_for_models(model, clip, lora, strength_model, strength_clip
         model_sd_keys = set(new_modelpatcher.model.state_dict().keys())
 
         for key, adapter in bypass_patches.items():
-            if key in model_sd_keys:
-                manager.add_adapter(key, adapter, strength=strength_model)
+            sd_key, offset = key if isinstance(key, tuple) else (key, None)
+            if sd_key in model_sd_keys:
+                manager.add_adapter(sd_key, adapter, strength=strength_model, offset=offset)
                 k.add(key)
             else:
                 logging.warning(f"[BypassLoRA] Adapter key not in model state_dict: {key}")
@@ -220,8 +221,9 @@ def load_bypass_lora_for_models(model, clip, lora, strength_model, strength_clip
         clip_sd_keys = set(new_clip.cond_stage_model.state_dict().keys())
 
         for key, adapter in bypass_patches.items():
-            if key in clip_sd_keys:
-                clip_manager.add_adapter(key, adapter, strength=strength_clip)
+            sd_key, offset = key if isinstance(key, tuple) else (key, None)
+            if sd_key in clip_sd_keys:
+                clip_manager.add_adapter(sd_key, adapter, strength=strength_clip, offset=offset)
                 k1.add(key)
 
         clip_injections = clip_manager.create_injections(new_clip.cond_stage_model)
