@@ -137,6 +137,14 @@ parser.add_argument("--preview-method", type=LatentPreviewMethod, default=Latent
 
 parser.add_argument("--preview-size", type=int, default=512, help="Sets the maximum preview size for sampler nodes.")
 
+def positive_int(value: str) -> int:
+    number = int(value)
+    if number < 1:
+        raise argparse.ArgumentTypeError(f"'{value}' must be a positive integer.")
+    return number
+
+parser.add_argument("--preview-interval", type=positive_int, default=1, help="Decode a live preview every N sampling steps. The last step is always previewed.")
+
 cache_group = parser.add_mutually_exclusive_group()
 cache_group.add_argument("--cache-ram", nargs='*', type=float, default=[], metavar="GB", help="Use RAM pressure caching with the specified headroom thresholds. This is the default caching mode. The first value sets the active-cache threshold; the optional second value sets the inactive-cache/pin threshold. Defaults when no values are provided: active 10%% of system RAM (min 2GB, max 10GB), inactive 100%% of system RAM (max 128GB).")
 cache_group.add_argument("--cache-classic", action="store_true", help="Use the old style (aggressive) caching.")
