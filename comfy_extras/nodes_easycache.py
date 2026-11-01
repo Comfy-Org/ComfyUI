@@ -11,10 +11,29 @@ if TYPE_CHECKING:
 
 def _extract_tensor(data, output_channels):
     """Extract tensor from data, handling both single tensors and lists."""
-    if isinstance(data, list):
-        # LTX2 AV tensors: [video, audio]
-        return data[0][:, :output_channels], data[1][:, :output_channels]
+    if isinstance(data, (list, tuple)):
+        # AV tensors: [video, audio]; each stream keeps its own channel layout
+        return data[0], data[1]
     return data[:, :output_channels], None
+
+
+def _expand_stream(x, shape):
+    """Expand ``x`` to ``shape`` when it is a repetition of the stream (distilled
+    K6 repeats the input into n_grid output grids); ``x`` when the shapes already
+    match or do not repeat."""
+    if x.shape == shape:
+        return x
+    if x.ndim != len(shape):
+        return x
+    repeat = []
+    for dim_x, dim_s in zip(x.shape, shape):
+        if dim_x == dim_s:
+            repeat.append(1)
+        elif dim_x > 0 and dim_s % dim_x == 0:
+            repeat.append(dim_s // dim_x)
+        else:
+            return x
+    return x.repeat(repeat)
 
 
 def easycache_forward_wrapper(executor, *args, **kwargs):
@@ -32,11 +51,18 @@ def easycache_forward_wrapper(executor, *args, **kwargs):
         return executor(*args, **kwargs)
     # prepare next x_prev
     has_first_cond_uuid = easycache.has_first_cond_uuid(uuids)
-    next_x_prev = x
     input_change = None
     do_easycache = easycache.should_do_easycache(sigmas)
     if do_easycache:
         easycache.check_metadata(x)
+        # models that repeat the input into n_grid output grids (distilled K6)
+        # are cached in the output layout
+        video_diff = easycache.uuid_cache_diffs.get(uuids[0])
+        if video_diff is not None:
+            x = _expand_stream(x, video_diff.shape)
+        audio_diff = easycache.uuid_cache_diffs_audio.get(uuids[0])
+        if audio_diff is not None and ax is not None:
+            ax = _expand_stream(ax, audio_diff.shape)
         # if there isn't a cache diff for current conds, we cannot skip this step
         can_apply_cache_diff = easycache.can_apply_cache_diff(uuids)
         # if first cond marked this step for skipping, skip it and use appropriate cached values
@@ -90,11 +116,14 @@ def easycache_forward_wrapper(executor, *args, **kwargs):
         if easycache.verbose:
             logging.info(f"EasyCache [verbose] - output_change_rate: {output_change_rate}")
     # TODO: allow cache_diff to be offloaded
-    easycache.update_cache_diff(output, next_x_prev, uuids)
+    x = _expand_stream(x, output.shape)
+    if audio_output is not None:
+        ax = _expand_stream(ax, audio_output.shape)
+    easycache.update_cache_diff(output, x, uuids)
     if audio_output is not None:
         easycache.update_cache_diff(audio_output, ax, uuids, is_audio=True)
     if has_first_cond_uuid:
-        easycache.x_prev_subsampled = easycache.subsample(next_x_prev, uuids)
+        easycache.x_prev_subsampled = easycache.subsample(x, uuids)
         easycache.output_prev_subsampled = easycache.subsample(output, uuids)
         easycache.output_prev_norm = output.flatten().abs().mean()
         if easycache.verbose:
