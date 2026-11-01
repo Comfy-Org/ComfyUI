@@ -123,6 +123,8 @@ def _save_video_codec_input(supported_codecs: list[str], *, optional=False, hidd
                 ],
             )
         )
+    if "prores" in supported_codecs:
+        codec_options.append(io.DynamicCombo.Option("prores", []))
     return io.DynamicCombo.Input(
         "codec",
         options=codec_options,
@@ -148,14 +150,15 @@ class SaveVideo(io.ComfyNode):
                 io.DynamicCombo.Input(
                     "format",
                     options=[
-                        io.DynamicCombo.Option("auto", [_save_video_codec_input(["auto", "h264", "av1"])]),
+                        io.DynamicCombo.Option("auto", [_save_video_codec_input(["auto", "h264", "av1", "prores"])]),
                         io.DynamicCombo.Option("mp4", [_save_video_codec_input(["auto", "h264", "av1"])]),
-                        io.DynamicCombo.Option("mkv", [_save_video_codec_input(["auto", "h264", "av1"])]),
+                        io.DynamicCombo.Option("mkv", [_save_video_codec_input(["auto", "h264", "av1", "prores"])]),
                         io.DynamicCombo.Option("webm", [_save_video_codec_input(["auto", "av1"])]),
+                        io.DynamicCombo.Option("mov", [_save_video_codec_input(["prores"])]),
                     ],
-                    tooltip="The output container. Auto uses MP4 for Auto/H.264 and WebM for AV1. MP4, MKV, and WebM select a specific container.",
+                    tooltip="Auto uses MOV for ProRes, WebM for AV1, and MP4 otherwise.",
                 ),
-                _save_video_codec_input(["auto", "h264", "av1"], optional=True, hidden=True),
+                _save_video_codec_input(["auto", "h264", "av1", "prores"], optional=True, hidden=True),
             ],
             hidden=[io.Hidden.prompt, io.Hidden.extra_pnginfo],
             is_output_node=True,
@@ -170,10 +173,10 @@ class SaveVideo(io.ComfyNode):
         else:
             format_name = format
         if codec is None:
-            codec = {"codec": "auto"}
+            codec = {"codec": "prores" if format_name == "mov" else "auto"}
         codec_name = codec["codec"]
         if format_name == "auto":
-            format_name = "webm" if codec_name == "av1" else "mp4"
+            format_name = {"av1": "webm", "prores": "mov"}.get(codec_name, "mp4")
         encoding = codec.get("encoding") or {}
         width, height = video.get_dimensions()
         full_output_folder, filename, counter, subfolder, filename_prefix = folder_paths.get_save_image_path(
@@ -232,6 +235,13 @@ class CreateVideo(io.ComfyNode):
                     tooltip="Colorspace of the input images. HDR selects BT.2020/HLG and HDR PQ selects BT.2020/PQ.",
                 ),
                 io.Combo.Input(
+                    "chroma_subsampling",
+                    options=["auto", "444", "422", "420"],
+                    default="auto",
+                    optional=True,
+                    tooltip="444 keeps full color resolution, 422 halves horizontal color resolution, and 420 halves both axes. Auto uses the codec default. Unsupported choices use the closest supported mode and print a console warning.",
+                ),
+                io.Combo.Input(
                     "codec",
                     options=["none", *Types.VideoCodec.as_input()],
                     default="none",
@@ -247,7 +257,7 @@ class CreateVideo(io.ComfyNode):
 
     @classmethod
     def execute(
-        cls, images: Input.Image, fps: float, audio: Optional[Input.Audio] = None, bit_depth: int | str = "auto", color_space: str = "sRGB", codec: str = "none",
+        cls, images: Input.Image, fps: float, audio: Optional[Input.Audio] = None, bit_depth: int | str = "auto", color_space: str = "sRGB", codec: str = "none", chroma_subsampling: str = "auto",
     ) -> io.NodeOutput:
         if bit_depth == "auto":
             bit_depth = 10 if color_space in ("HDR", "HDR PQ") else 8
@@ -255,6 +265,7 @@ class CreateVideo(io.ComfyNode):
             Types.VideoComponents(images=images, audio=audio, frame_rate=Fraction(fps)),
             bit_depth=bit_depth,
             color_space=color_space,
+            chroma_subsampling=None if chroma_subsampling == "auto" else chroma_subsampling,
         )
         if codec != "none":
             video = InputImpl.VideoFromList([video], codec=Types.VideoCodec(codec))
