@@ -2,6 +2,7 @@ import asyncio
 import bisect
 import itertools
 import logging
+import math
 import time
 import torch
 from typing import Sequence, Mapping, Dict
@@ -512,10 +513,15 @@ def cache_ram_from_prompt(prompt, total_ram_gb):
     for node in prompt.values():
         if node.get("class_type") != "CacheRAMSettings":
             continue
-        inputs = node.get("inputs", {})
+        inputs = node.get("inputs")
+        if not isinstance(inputs, Mapping):
+            logging.warning("Cache RAM Settings: node has no inputs, ignoring it.")
+            continue
         try:
             active = float(inputs.get("active", 10.0))
             inactive = float(inputs.get("inactive", 25.0))
+            if math.isnan(active) or math.isnan(inactive):
+                raise ValueError
         except (TypeError, ValueError):
             logging.warning("Cache RAM Settings: active and inactive must be numbers, ignoring the node.")
             continue
