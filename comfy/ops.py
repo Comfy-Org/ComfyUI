@@ -25,6 +25,7 @@ import comfy.model_management
 from comfy.cli_args import args, PerformanceFeature
 import comfy.float
 import json
+import comfy.gemm_chunk
 import comfy.memory_management
 import comfy.pinned_memory
 import comfy.rmsnorm
@@ -630,15 +631,17 @@ class disable_weight_init:
             return None
 
         def forward_comfy_cast_weights(self, input):
+            """The linear, with the weights cast to the input's dtype."""
             with CastBiasWeightContext(self, input, offloadable=True) as (weight, bias):
-                return torch.nn.functional.linear(input, weight, bias)
+                return comfy.gemm_chunk.linear(input, weight, bias)
 
-        def forward(self, *args, **kwargs):
+        def forward(self, input):
+            """The linear, split into chunks when the backend gets large GEMMs wrong."""
             run_every_op()
             if self.comfy_cast_weights or len(self.weight_function) > 0 or len(self.bias_function) > 0:
-                return self.forward_comfy_cast_weights(*args, **kwargs)
+                return self.forward_comfy_cast_weights(input)
             else:
-                return super().forward(*args, **kwargs)
+                return comfy.gemm_chunk.linear(input, self.weight, self.bias)
 
     class Conv1d(torch.nn.Conv1d, CastWeightBiasOp):
         def reset_parameters(self):
@@ -1112,7 +1115,7 @@ def linear_input_act_(x, weight, bias, input_act=None, act_weight=None, act_eps=
     its norm-weight cast context; a tensor uses the supplied act_eps directly.
     """
     if input_act is None and residual is None:
-        return torch.nn.functional.linear(x, weight, bias)
+        return comfy.gemm_chunk.linear(x, weight, bias)
 
     out = _try_quantized_linear_input_act(x, weight, bias, input_act, act_weight, act_eps,
                                           residual, residual_scale)
@@ -1125,7 +1128,7 @@ def linear_input_act_(x, weight, bias, input_act=None, act_weight=None, act_eps=
             and fp16_accumulation and _fp16_linear_wanted(x)):
         return quant_ops.ck.fp16_linear(x, weight, bias, residual=residual, residual_scale=residual_scale)
 
-    return _linear_residual(torch.nn.functional.linear(x, weight, bias), residual, residual_scale)
+    return _linear_residual(comfy.gemm_chunk.linear(x, weight, bias), residual, residual_scale)
 
 
 # Grouped-scale integer weights that run through the shared INT8 GEMM (comfy_kitchen
