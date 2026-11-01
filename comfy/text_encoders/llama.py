@@ -677,6 +677,7 @@ class Attention(nn.Module):
             self.q_proj = ops.Linear(config.hidden_size, self.inner_size, bias=config.qkv_bias, device=device, dtype=dtype)
             self.k_proj = ops.Linear(config.hidden_size, self.kv_size, bias=config.qkv_bias, device=device, dtype=dtype)
             self.v_proj = ops.Linear(config.hidden_size, self.kv_size, bias=config.qkv_bias, device=device, dtype=dtype)
+            self.combined_qkv = comfy.ops.CombinedLinear((self.q_proj, self.k_proj, self.v_proj))
         self.o_proj = ops.Linear(self.inner_size, config.hidden_size, bias=False, device=device, dtype=dtype)
 
         self.q_norm = None
@@ -701,9 +702,13 @@ class Attention(nn.Module):
         if self.merged_qkv:
             xq, xk, xv = self.qkv_proj(hidden_states).split((self.inner_size, self.kv_size, self.kv_size), dim=-1)
         else:
-            xq = self.q_proj(hidden_states)
-            xk = self.k_proj(hidden_states)
-            xv = self.v_proj(hidden_states)
+            qkv = self.combined_qkv.forward(hidden_states)
+            if qkv is NotImplemented:
+                xq = self.q_proj(hidden_states)
+                xk = self.k_proj(hidden_states)
+                xv = self.v_proj(hidden_states)
+            else:
+                xq, xk, xv = qkv.split((self.inner_size, self.kv_size, self.kv_size), dim=-1)
 
         xq = xq.view(batch_size, seq_length, self.num_heads, self.head_dim).transpose(1, 2)
         xk = xk.view(batch_size, seq_length, self.num_kv_heads, self.head_dim).transpose(1, 2)
@@ -783,6 +788,7 @@ class MLP(nn.Module):
         else:
             self.gate_proj = ops.Linear(config.hidden_size, intermediate_size, bias=False, device=device, dtype=dtype)
             self.up_proj = ops.Linear(config.hidden_size, intermediate_size, bias=False, device=device, dtype=dtype)
+            self.combined_gate_up = comfy.ops.CombinedLinear((self.gate_proj, self.up_proj))
         self.down_proj = ops.Linear(intermediate_size, config.hidden_size, bias=False, device=device, dtype=dtype)
         if config.mlp_activation == "silu":
             self.activation = torch.nn.functional.silu
@@ -793,14 +799,15 @@ class MLP(nn.Module):
 
     def forward(self, x, norm=None):
         # norm: the block's pre-norm, folded into the merged projection's input quantizer where supported
-        if self.merged_mlp:
-            if norm is not None:
-                x = comfy.ops.linear_input_act(self.gate_up_proj, x, "rms_norm", norm.scale(), norm.eps)
-            else:
-                x = self.gate_up_proj(x)
+        gate_up = self.gate_up_proj if self.merged_mlp else self.combined_gate_up
+        if norm is not None:
+            combined = comfy.ops.linear_input_act(gate_up, x, "rms_norm", norm.scale(), norm.eps)
+        else:
+            combined = comfy.ops.linear_input_act(gate_up, x, None)
+        if combined is not NotImplemented:
             if self.merged_input_act is not None:
-                return comfy.ops.linear_input_act(self.down_proj, x, self.merged_input_act)
-            gate, up = x.chunk(2, dim=-1)
+                return comfy.ops.linear_input_act(self.down_proj, combined, self.merged_input_act)
+            gate, up = combined.chunk(2, dim=-1)
             return self.down_proj(self.activation(gate) * up)
         if norm is not None:
             x = norm(x)
