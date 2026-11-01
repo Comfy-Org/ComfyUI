@@ -7,7 +7,7 @@ requires-python = ">=3.10"
 
 [project.urls]
 homepage = "https://www.comfy.org/"
-repository = "https://github.com/comfyanonymous/ComfyUI"
+repository = "https://github.com/Comfy-Org/ComfyUI"
 documentation = "https://docs.comfy.org/"
 
 [tool.ruff]
