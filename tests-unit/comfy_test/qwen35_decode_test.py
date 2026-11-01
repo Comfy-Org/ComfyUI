@@ -424,6 +424,29 @@ def test_adaptive_switch_preserves_sequential_output(monkeypatch, sampled):
     assert len(set(switches)) == 4, switches
 
 
+@pytest.mark.parametrize("mtp", [False, "3", "tree2s2"])
+def test_continuation_from_model_state_matches_uninterrupted_generation(monkeypatch, tmp_path, mtp):
+    model = _tiny_model(monkeypatch)
+    embeds = torch.randn(1, 5, 64)
+    expected = model.generate(embeds.clone(), do_sample=False, max_length=20, mtp=False)
+    for cutoff in (2, 4, 7, 9):
+        path = str(tmp_path / f"{cutoff}.safetensors")
+        state = comfy.model_state.ModelState.open(path)
+        first = model.generate(embeds.clone(), do_sample=False, max_length=cutoff, mtp=mtp, model_state=state)
+        assert state.metadata["length"] == embeds.shape[1] + cutoff - 1
+        assert state.metadata["pending"] == first[-1:]
+        state.flush()
+        state.save(path)
+
+        # The next turn reopens the saved file, as a later prompt would.
+        saved = comfy.model_state.ModelState.open(path, create="never")
+        pending = model.model.embed_tokens(torch.tensor([saved.metadata["pending"]]))
+        rest = model.generate(pending, do_sample=False, max_length=20 - cutoff, mtp=mtp, model_state=saved,
+                              position_ids=torch.tensor([[saved.metadata["position"]]]))
+        saved.release()
+        assert first + rest == expected
+
+
 class _FakePacked:
     # Int8DecodeCache boundary with 4-row pages: records the BF16 refreshes it is asked for
     def __init__(self, batch, heads, capacity, device):
