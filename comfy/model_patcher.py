@@ -55,9 +55,6 @@ class PromptModelTracker:
     def __init__(self):
         self.models = {}
 
-    def start(self):
-        self.end()
-
     def add(self, outputs):
         if isinstance(outputs, collections.abc.Mapping):
             outputs = outputs.values()
@@ -89,9 +86,11 @@ class PromptModelTracker:
                 self.models[key] = model
                 model.set_in_use_by_current_prompt(True)
 
-    def end(self):
-        for model in self.models.values():
-            model.set_in_use_by_current_prompt(False)
+    def end(self, still_running=()):
+        """Release this prompt's models, except those another in-flight prompt's tracker holds."""
+        for key, model in self.models.items():
+            if not any(key in other.models for other in still_running):
+                model.set_in_use_by_current_prompt(False)
         self.models.clear()
 
 def set_model_options_patch_replace(model_options, patch, name, block_name, number, transformer_index=None):
