@@ -2,5 +2,7 @@
 
 /CODEOWNERS @comfyanonymous
 /AGENTS.md @comfyanonymous
+/CLAUDE.md @comfyanonymous
+/docs/agents/ @comfyanonymous
 /.ci/ @comfyanonymous
 /.github/ @comfyanonymous
