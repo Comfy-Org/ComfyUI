@@ -205,13 +205,13 @@ async def test_dynamic_lazy_inputs_execute_only_when_requested(monkeypatch, kind
     assert valid, errors
     server = SimpleNamespace(client_id=None, send_sync=Mock())
     executor = execution.PromptExecutor(server, cache_type=execution.CacheType.NONE, cache_args={"ram": 0, "ram_inactive": 0})
-    await executor.execute_async(prompt, "lazy", execute_outputs=outputs)
+    run = await executor.execute_async(prompt, "lazy", execute_outputs=outputs)
 
-    assert executor.success, executor.status_messages
+    assert run.success, run.status_messages
     first = 2.0 if request_first or not lazy else None
     second = 3.0 if not lazy else None
     assert sorted(executed) == [value for value in [first, second] if value is not None]
     expected = {"item0": first, "item1": second}
     if kind == "combo":
         expected["rows"] = "on"
-    assert executor.history_result["outputs"]["consumer"]["rows"] == [expected]
+    assert run.history_result["outputs"]["consumer"]["rows"] == [expected]

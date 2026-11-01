@@ -57,6 +57,9 @@ class Server:
     last_prompt_id = None
     client_id = None
 
+    def __init__(self) -> None:
+        self.workflow_metadata = {}
+
 
 class AssetManager:
     def __init__(self, resume_error: RuntimeError | None = None) -> None:
@@ -72,18 +75,29 @@ class AssetManager:
             raise self.resume_error
 
 
+class Run:
+    history_result = {}
+    success = True
+    status_messages = []
+    client_id = None
+
+
 class Executor:
     def __init__(self, *args, **kwargs) -> None:
-        self.history_result = {}
-        self.success = True
-        self.status_messages = []
+        pass
 
-    def execute(self, *args, **kwargs) -> None:
-        return None
+    def interrupt(self, prompt_id=None) -> None:
+        pass
+
+    async def wait_for_start(self) -> None:
+        pass
+
+    async def execute_async(self, *args, **kwargs) -> Run:
+        return Run()
 
 
 class ExecuteFailureExecutor(Executor):
-    def execute(self, *args, **kwargs) -> None:
+    async def execute_async(self, *args, **kwargs) -> Run:
         raise RuntimeError("forced execute failure")
 
 
