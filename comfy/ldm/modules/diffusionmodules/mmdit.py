@@ -9,6 +9,8 @@ from einops import rearrange, repeat
 from .util import timestep_embedding
 import comfy.ops
 import comfy.ldm.common_dit
+import comfy.model_management
+import comfy.quant_ops
 
 def default(x, y):
     if x is not None:
@@ -300,7 +302,28 @@ class SelfAttention(nn.Module):
         else:
             raise ValueError(qk_norm)
 
+    def _kitchen_qkv(self, x):
+        # QKV linear + bias + per-head q/k RMSNorm in one comfy-kitchen op; measured faster on ROCm only
+        ck = getattr(comfy.quant_ops, "ck", None)
+        if (ck is None or not hasattr(ck, "linear_qk_rms_norm") or not comfy.model_management.is_amd()
+                or not isinstance(self.ln_q, RMSNorm) or self.ln_q.weight is None
+                or comfy.model_management.in_training):
+            return None
+        weight, bias, offload_stream = comfy.ops.cast_bias_weight(self.qkv, x, offloadable=True)
+        try:
+            w = weight.dequantize() if isinstance(weight, comfy.quant_ops.QuantizedTensor) else weight
+            q_scale = comfy.model_management.cast_to(self.ln_q.weight, dtype=x.dtype, device=x.device)
+            k_scale = comfy.model_management.cast_to(self.ln_k.weight, dtype=x.dtype, device=x.device)
+            q, k, v = ck.linear_qk_rms_norm(x, w.to(x.dtype), None if bias is None else bias.to(x.dtype),
+                                            q_scale, k_scale, self.head_dim, self.ln_q.eps)
+        finally:
+            comfy.ops.uncast_bias_weight(self.qkv, weight, bias, offload_stream)
+        return (q.reshape(q.shape[0], q.shape[1], -1), k.reshape(k.shape[0], k.shape[1], -1), v)
+
     def pre_attention(self, x: torch.Tensor) -> torch.Tensor:
+        fused = self._kitchen_qkv(x)
+        if fused is not None:
+            return fused
         B, L, C = x.shape
         qkv = self.qkv(x)
         q, k, v = split_qkv(qkv, self.head_dim)
