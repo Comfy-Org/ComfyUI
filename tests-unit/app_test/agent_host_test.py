@@ -297,3 +297,14 @@ def test_start_runs_the_host_off_the_event_loop(monkeypatch):
         loop.run_until_complete(asyncio.wait_for(_until(lambda: agent_host._host.started), 5))
     finally:
         loop.close()
+
+
+@pytest.mark.parametrize("eps", [{}, {"v9": FakeHost}])
+def test_the_install_hint_upgrades_from_agent_requirements(monkeypatch, caplog, eps):
+    # agent_requirements.txt names the package without a version, so a plain
+    # `pip install -r` leaves an old or placeholder comfy-agent in place.
+    _entry_points(monkeypatch, eps)
+    with caplog.at_level(logging.WARNING):
+        agent_host.load()
+    req = os.path.join(_comfy_path(), "agent_requirements.txt")
+    assert any(f"pip install -U -r {req}" in r.getMessage() for r in caplog.records)
