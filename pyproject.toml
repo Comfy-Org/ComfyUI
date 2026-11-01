@@ -1,6 +1,6 @@
 [project]
 name = "ComfyUI"
-version = "0.42.0"
+version = "0.43.0"
 readme = "README.md"
 license = { file = "LICENSE" }
 requires-python = ">=3.10"
@@ -28,7 +28,7 @@ lint.ignore = ["E501", "E722", "E731", "E712", "E402", "E741"]
 exclude = ["*.ipynb", "**/generated/*.pyi"]
 
 [tool.pylint]
-master.py-version = "3.10"
+master.py-version = "3.12"
 master.extension-pkg-allow-list = [
   "pydantic",
 ]

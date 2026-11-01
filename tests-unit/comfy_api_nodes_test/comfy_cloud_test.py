@@ -632,7 +632,7 @@ def _stub_download_session(monkeypatch, responses):
     seen_allow_redirects = []
 
     class Session:
-        def __init__(self, timeout):
+        def __init__(self, timeout, trust_env):
             pass
 
         async def get(self, url, headers, allow_redirects=True):

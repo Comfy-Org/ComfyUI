@@ -779,7 +779,7 @@ class TopazVideoEnhance(IO.ComfyNode):
             raise NotImplementedError(
                 "Large files are not currently supported. Please open an issue in the ComfyUI repository."
             )
-        async with aiohttp.ClientSession(headers={"Content-Type": "video/mp4"}) as session:
+        async with aiohttp.ClientSession(headers={"Content-Type": "video/mp4"}, trust_env=True) as session:
             if isinstance(src_video_stream, BytesIO):
                 src_video_stream.seek(0)
                 async with session.put(upload_res.urls[0], data=src_video_stream, raise_for_status=True) as res:
@@ -1122,7 +1122,7 @@ class TopazVideoEnhanceV2(IO.ComfyNode):
             raise NotImplementedError(
                 "Large files are not currently supported. Please open an issue in the ComfyUI repository."
             )
-        async with aiohttp.ClientSession(headers={"Content-Type": "video/mp4"}) as session:
+        async with aiohttp.ClientSession(headers={"Content-Type": "video/mp4"}, trust_env=True) as session:
             if isinstance(src_video_stream, BytesIO):
                 src_video_stream.seek(0)
                 async with session.put(upload_res.urls[0], data=src_video_stream, raise_for_status=True) as res:

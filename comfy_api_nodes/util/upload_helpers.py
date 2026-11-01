@@ -291,7 +291,7 @@ async def upload_file(
                 request_data=f"[File data {len(data)} bytes]",
             )
 
-            sess = aiohttp.ClientSession(timeout=timeout)
+            sess = aiohttp.ClientSession(timeout=timeout, trust_env=True)
             req = sess.put(upload_url, data=data, headers=headers, skip_auto_headers=skip_auto_headers)
             req_task = asyncio.create_task(req)
 
@@ -368,7 +368,7 @@ async def upload_file(
             diag = await diagnose_connectivity()
             if not diag["internet_accessible"]:
                 raise LocalNetworkError(
-                    "Unable to connect to the network. Please check your internet connection and try again."
+                    "Unable to connect to the network. Please check your internet connection or proxy settings and try again."
                 ) from e
             raise ApiServerError("The API service appears unreachable at this time.") from e
         finally:

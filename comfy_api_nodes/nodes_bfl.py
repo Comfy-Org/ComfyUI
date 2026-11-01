@@ -1395,8 +1395,58 @@ class Flux3VideoContinuationNode(Flux3VideoNodeBase):
 
 
 _FLUX_VIDEO_UPSCALE_MODES = {"creative": 1, "precise": 0}
-_FLUX_VIDEO_UPSCALE_MAX_INPUT_PIXELS = 3840 * 2160
+_FLUX_VIDEO_UPSCALE_MAX_INPUT_PIXELS = 2560 * 1440
 _FLUX_VIDEO_UPSCALE_MAX_ASPECT_RATIO = 4.0
+_FLUX_VIDEO_UPSCALE_TARGETS = {"2K": (2560, 1440), "4K": (3840, 2160), "1080p": (1920, 1080)}
+
+
+async def _flux_video_upscale(
+    cls: type[IO.ComfyNode],
+    video: Input.Video,
+    target_resolution: dict,
+    mode: str,
+    prompt: str,
+    auto_downscale: bool,
+    safety_tolerance: int,
+) -> IO.NodeOutput:
+    validate_video_duration(video, min_duration=1.0, max_duration=20.0)
+    validate_video_dimensions(video, min_width=64, min_height=64)
+    width, height = video.get_dimensions()
+    if max(width, height) > _FLUX_VIDEO_UPSCALE_MAX_ASPECT_RATIO * min(width, height):
+        raise ValueError(f"Video aspect ratio must be between 1:4 and 4:1, got {width}x{height}.")
+    target = target_resolution["target_resolution"]
+    if target == "by factor":
+        if auto_downscale:
+            video = downscale_video_to_max_pixels(video, _FLUX_VIDEO_UPSCALE_MAX_INPUT_PIXELS)
+        elif width * height > _FLUX_VIDEO_UPSCALE_MAX_INPUT_PIXELS:
+            raise ValueError(
+                f"Video must be at most 2560x1440 pixels in area, got {width}x{height}. "
+                "Enable auto_downscale or use a smaller video."
+            )
+        upscale_factor = round(target_resolution["upscale_factor"], 1)
+    else:
+        box_w, box_h = _FLUX_VIDEO_UPSCALE_TARGETS[target]
+        if height > width:
+            box_w, box_h = box_h, box_w
+        fit = min(box_w / width, box_h / height)
+        if fit < 1.5:
+            if not auto_downscale:
+                raise ValueError(
+                    f"A {width}x{height} video is too large to upscale to {target}. "
+                    "Enable auto_downscale or use a smaller video."
+                )
+            video = downscale_video_to_max_pixels(video, int(width * height * (fit / 1.5) ** 2))
+            width, height = video.get_dimensions()
+        upscale_factor = min(max(min(box_w / width, box_h / height), 1.5), 3.0)
+    url = await upload_video_to_comfyapi(cls, video, wait_label="Uploading source video")
+    request = BFLFluxVideoUpscaleRequest(
+        input_video=url,
+        upscale_factor=upscale_factor,
+        creativity=_FLUX_VIDEO_UPSCALE_MODES[mode],
+        prompt=prompt.strip() or None,
+        safety_tolerance=safety_tolerance,
+    )
+    return await _bfl_video_execute(cls, _FLUX_VIDEO_UPSCALE_ENDPOINT, request, poll_via_proxy=True)
 
 
 class FluxVideoUpscaleNode(IO.ComfyNode):
@@ -1405,7 +1455,7 @@ class FluxVideoUpscaleNode(IO.ComfyNode):
     def define_schema(cls) -> IO.Schema:
         return IO.Schema(
             node_id="FluxVideoUpscaleNode",
-            display_name="Flux Video Upscale",
+            display_name="Flux Video Upscale (Legacy)",
             category="partner/video/BFL",
             description="Upscales a video 1.5 to 3 times with FLUX super-resolution, either preserving "
             "the source precisely or creatively enhancing its detail.",
@@ -1442,7 +1492,7 @@ class FluxVideoUpscaleNode(IO.ComfyNode):
                 IO.Boolean.Input(
                     "auto_downscale",
                     default=True,
-                    tooltip="Automatically downscale sources larger than 3840x2160 pixels in area to fit "
+                    tooltip="Automatically downscale sources larger than 2560x1440 pixels in area to fit "
                     "the input limit. Aspect ratio is preserved; smaller videos are untouched.",
                 ),
                 IO.Int.Input(
@@ -1476,12 +1526,13 @@ class FluxVideoUpscaleNode(IO.ComfyNode):
                     (
                       $precise := widgets.mode = "precise";
                       {"type":"range_usd",
-                       "min_usd": $precise ? 0.212 : 0.297,
-                       "max_usd": $precise ? 0.848 : 1.188,
-                       "format": {"approximate": true, "suffix": "/s", "note": "(1080p-4K output)"}}
+                       "min_usd": $precise ? 0.09897583 : 0.14139404,
+                       "max_usd": $precise ? 0.6863424 : 0.98048914,
+                       "format": {"approximate": true, "suffix": "/s", "note": "(1080p-5K output)"}}
                     )
                 """,
             ),
+            is_deprecated=True,
         )
 
     @classmethod
@@ -1495,27 +1546,136 @@ class FluxVideoUpscaleNode(IO.ComfyNode):
         safety_tolerance: int,
         seed: int,
     ) -> IO.NodeOutput:
-        validate_video_duration(video, min_duration=1.0, max_duration=20.0)
-        validate_video_dimensions(video, min_width=64, min_height=64)
-        width, height = video.get_dimensions()
-        if max(width, height) > _FLUX_VIDEO_UPSCALE_MAX_ASPECT_RATIO * min(width, height):
-            raise ValueError(f"Video aspect ratio must be between 1:4 and 4:1, got {width}x{height}.")
-        if auto_downscale:
-            video = downscale_video_to_max_pixels(video, _FLUX_VIDEO_UPSCALE_MAX_INPUT_PIXELS)
-        elif width * height > _FLUX_VIDEO_UPSCALE_MAX_INPUT_PIXELS:
-            raise ValueError(
-                f"Video must be at most 3840x2160 pixels in area, got {width}x{height}. "
-                "Enable auto_downscale or use a smaller video."
-            )
-        url = await upload_video_to_comfyapi(cls, video, wait_label="Uploading source video")
-        request = BFLFluxVideoUpscaleRequest(
-            input_video=url,
-            upscale_factor=round(upscale_factor, 1),
-            creativity=_FLUX_VIDEO_UPSCALE_MODES[mode],
-            prompt=prompt.strip() or None,
-            safety_tolerance=safety_tolerance,
+        return await _flux_video_upscale(
+            cls,
+            video,
+            {"target_resolution": "by factor", "upscale_factor": upscale_factor},
+            mode,
+            prompt,
+            auto_downscale,
+            safety_tolerance,
         )
-        return await _bfl_video_execute(cls, _FLUX_VIDEO_UPSCALE_ENDPOINT, request, poll_via_proxy=True)
+
+
+class FluxVideoUpscaleNodeV2(IO.ComfyNode):
+
+    @classmethod
+    def define_schema(cls) -> IO.Schema:
+        return IO.Schema(
+            node_id="FluxVideoUpscaleNodeV2",
+            display_name="Flux Video Upscale",
+            category="partner/video/BFL",
+            description="Upscales a video to 1080p, 2K or 4K, or 1.5 to 3 times, with FLUX super-resolution, "
+            "either preserving the source precisely or creatively enhancing its detail.",
+            inputs=[
+                IO.Video.Input(
+                    "video",
+                    tooltip="Source clip of 1 to 20 seconds with an aspect ratio between 1:4 and 4:1. "
+                    "The output is rendered at 24 fps and capped at about 14.4 megapixels per frame.",
+                ),
+                IO.DynamicCombo.Input(
+                    "target_resolution",
+                    options=[
+                        *[IO.DynamicCombo.Option(target, []) for target in _FLUX_VIDEO_UPSCALE_TARGETS],
+                        IO.DynamicCombo.Option(
+                            "by factor",
+                            [
+                                IO.Float.Input(
+                                    "upscale_factor",
+                                    default=2.0,
+                                    min=1.5,
+                                    max=3.0,
+                                    step=0.1,
+                                    tooltip="Output size relative to the source. Very large sources are "
+                                    "upscaled by less than the requested factor because of the per-frame cap.",
+                                ),
+                            ],
+                        ),
+                    ],
+                    tooltip="2K, 4K and 1080p fit the output inside 2560x1440, 3840x2160 or 1920x1080 "
+                    "(turned for portrait clips). A source too small to fill it at the maximum 3x is "
+                    "upscaled 3x and comes out smaller.",
+                ),
+                IO.Combo.Input(
+                    "mode",
+                    options=list(_FLUX_VIDEO_UPSCALE_MODES),
+                    default="creative",
+                    tooltip="'creative' restores and invents fine detail, best for generated footage, "
+                    "textures and scenery. 'precise' sharpens the source without changing it, "
+                    "for faces, products and real footage.",
+                ),
+                IO.String.Input(
+                    "prompt",
+                    multiline=True,
+                    default="",
+                    tooltip="Optional description of the clip that steers the enhanced detail. "
+                    "Leave empty for a neutral upscale.",
+                ),
+                IO.Boolean.Input(
+                    "auto_downscale",
+                    default=True,
+                    tooltip="Downscale sources that are too large instead of rejecting them: above 2560x1440 "
+                    "pixels in area, or above two thirds of the target resolution (the minimum factor is "
+                    "1.5x). Aspect ratio is preserved.",
+                ),
+                IO.Int.Input(
+                    "safety_tolerance",
+                    default=2,
+                    min=0,
+                    max=4,
+                    advanced=True,
+                    tooltip="Moderation tolerance, 0 is the strictest.",
+                ),
+                IO.Int.Input(
+                    "seed",
+                    default=42,
+                    min=0,
+                    max=0xFFFFFFFF,
+                    control_after_generate=True,
+                    tooltip="Seed to determine if node should re-run; FLUX picks its own seed, so "
+                    "actual results are nondeterministic regardless of this value.",
+                ),
+            ],
+            outputs=[IO.Video.Output()],
+            hidden=[
+                IO.Hidden.auth_token_comfy_org,
+                IO.Hidden.api_key_comfy_org,
+                IO.Hidden.unique_id,
+            ],
+            is_api_node=True,
+            price_badge=IO.PriceBadge(
+                depends_on=IO.PriceBadgeDepends(widgets=["target_resolution", "mode"]),
+                expr="""
+                    (
+                      $rates := widgets.mode = "precise"
+                        ? {"1080p": 0.09897583, "2k": 0.17595703, "4k": 0.39590332}
+                        : {"1080p": 0.14139404, "2k": 0.25136719, "4k": 0.56557617};
+                      $rate := $lookup($rates, $string(widgets.target_resolution));
+                      $rate
+                        ? {"type":"usd","usd": $rate, "format": {"approximate": true, "suffix": "/s"}}
+                        : {"type":"range_usd",
+                           "min_usd": $lookup($rates, "1080p"),
+                           "max_usd": widgets.mode = "precise" ? 0.6863424 : 0.98048914,
+                           "format": {"approximate": true, "suffix": "/s", "note": "(1080p-5K output)"}}
+                    )
+                """,
+            ),
+        )
+
+    @classmethod
+    async def execute(
+        cls,
+        video: Input.Video,
+        target_resolution: dict,
+        mode: str,
+        prompt: str,
+        auto_downscale: bool,
+        safety_tolerance: int,
+        seed: int,
+    ) -> IO.NodeOutput:
+        return await _flux_video_upscale(
+            cls, video, target_resolution, mode, prompt, auto_downscale, safety_tolerance
+        )
 
 
 _FLUX_VIDEO_EDIT_FPS = 24
@@ -2078,6 +2238,7 @@ class BFLExtension(ComfyExtension):
             Flux3ImageToVideoNode,
             Flux3VideoContinuationNode,
             FluxVideoUpscaleNode,
+            FluxVideoUpscaleNodeV2,
             FluxVideoEditNode,
             Flux3ImageNode,
             Flux3MaxTextToVideoNode,

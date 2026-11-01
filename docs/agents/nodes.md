@@ -19,9 +19,6 @@ Detailed rules referenced from [AGENTS.md](../../AGENTS.md).
 
 ## Inputs and Outputs
 
-- Conditioning nodes should normally output conditioning only. Do not expose
-  input or intermediate images as convenience outputs for downstream sizing or
-  routing; use the existing image path or a dedicated image operation instead.
 - Nodes should output only values they own. Do not add pass-through outputs for
   workflow convenience unless the node is explicitly an output node. Existing
   models, latents, conditioning, or other inputs should flow directly to the
