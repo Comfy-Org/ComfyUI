@@ -151,6 +151,12 @@ knowledge_base:
         rollout, or merge-order evidence. Continue using the repository as
         review context, but omit routine search inventories and no-match results
         that do not provide decision-relevant evidence.
+        Treat changes to frontend-consumed HTTP or WebSocket routes,
+        request/response schemas, error semantics, asset paths, node metadata,
+        feature flags, and package versions as material by default. When the
+        frontend contains a consumer or test for a changed contract, surface
+        that evidence and state whether coordinated changes or rollout are
+        required; do not suppress it as a routine no-match result.
     - repository: "Comfy-Org/comfy-kitchen"
       instructions: |
         Owns optimized inference operations and kernels used by ComfyUI. Check
