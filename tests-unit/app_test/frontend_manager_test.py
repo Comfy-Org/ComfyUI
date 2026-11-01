@@ -70,6 +70,17 @@ def mock_provider(mock_releases, mock_github):
 
 
 @pytest.fixture(autouse=True)
+def no_network():
+    """Fail any GitHub request a test did not mock, so the unit tests never hit the network."""
+
+    def refuse(url, *args, **kwargs):
+        raise AssertionError(f"unexpected network request to {url}")
+
+    with patch("app.frontend_management.requests.get", side_effect=refuse):
+        yield
+
+
+@pytest.fixture(autouse=True)
 def clear_cache():
     import utils.install_util
     import app.frontend_management
@@ -104,6 +115,85 @@ def test_get_release_rate_limited(mock_provider):
     mock_get.assert_called_once()
 
 
+def _release_page(releases, next_url=None):
+    return SimpleNamespace(
+        status_code=200,
+        json=lambda: releases,
+        raise_for_status=lambda: None,
+        links={"next": {"url": next_url}} if next_url else {},
+    )
+
+
+def _prerelease(tag):
+    return Release(
+        id=3,
+        tag_name=tag,
+        name=tag,
+        prerelease=True,
+        created_at="2022-03-01T00:00:00Z",
+        published_at="2022-03-01T00:00:00Z",
+        body="",
+    )
+
+
+def test_get_release_prerelease_stops_at_first_page(mock_releases):
+    provider = FrontEndProvider(owner="test-owner", repo="test-repo")
+    first_page = [_prerelease("v3.0.0-rc1"), *mock_releases, _prerelease("v2.5.0-rc1")]
+    # side_effect with one page: a second request raises StopIteration instead of looping forever.
+    with patch(
+        "app.frontend_management.requests.get",
+        side_effect=[_release_page(first_page, next_url=f"{provider.release_url}?page=2")],
+    ) as mock_get:
+        release = provider.get_release("prerelease")
+
+    assert release["tag_name"] == "v3.0.0-rc1"
+    assert [call.args[0] for call in mock_get.call_args_list] == [provider.release_url]
+
+
+def test_get_release_prerelease_pages_until_found(mock_releases):
+    provider = FrontEndProvider(owner="test-owner", repo="test-repo")
+    page2_url = f"{provider.release_url}?page=2"
+    pages = {
+        provider.release_url: _release_page(mock_releases, next_url=page2_url),
+        page2_url: _release_page([_prerelease("v1.5.0-rc1")], next_url=f"{provider.release_url}?page=3"),
+    }
+    def fake_get(url, timeout=None):
+        assert url in pages, f"unexpected request to {url}"
+        return pages[url]
+
+    with patch("app.frontend_management.requests.get", side_effect=fake_get) as mock_get:
+        release = provider.get_release("prerelease")
+
+    assert release["tag_name"] == "v1.5.0-rc1"
+    assert [call.args[0] for call in mock_get.call_args_list] == [provider.release_url, page2_url]
+
+
+def test_get_release_prerelease_none_found(mock_releases):
+    provider = FrontEndProvider(owner="test-owner", repo="test-repo")
+    with patch("app.frontend_management.requests.get", return_value=_release_page(mock_releases)):
+        with pytest.raises(ValueError, match="No pre-releases found"):
+            provider.get_release("prerelease")
+
+
+def test_get_release_prerelease_reuses_fetched_release_list(mock_releases):
+    provider = FrontEndProvider(owner="test-owner", repo="test-repo")
+    provider.all_releases = [*mock_releases, _prerelease("v1.5.0-rc1")]
+
+    # The autouse no_network guard fails the test if this makes a request.
+    assert provider.get_release("prerelease")["tag_name"] == "v1.5.0-rc1"
+
+
+def test_all_releases_collects_every_page(mock_releases):
+    provider = FrontEndProvider(owner="test-owner", repo="test-repo")
+    page2_url = f"{provider.release_url}?page=2"
+    pages = {
+        provider.release_url: _release_page(mock_releases[:1], next_url=page2_url),
+        page2_url: _release_page(mock_releases[1:]),
+    }
+    with patch("app.frontend_management.requests.get", side_effect=lambda url, timeout=None: pages[url]):
+        assert provider.all_releases == mock_releases
+
+
 def test_get_release_latest(mock_provider, mock_releases):
     version = "latest"
     release = mock_provider.get_release(version)
@@ -130,8 +220,13 @@ def test_init_frontend_invalid_version(mock_github):
 
 def test_init_frontend_invalid_provider():
     version_string = "invalid/invalid@latest"
-    with pytest.raises(HTTPError):
-        FrontendManager.init_frontend_unsafe(version_string)
+    response = Mock(status_code=404)
+    response.raise_for_status.side_effect = HTTPError("404 Not Found")
+    with patch("app.frontend_management.requests.get", return_value=response) as mock_get:
+        with pytest.raises(HTTPError):
+            FrontendManager.init_frontend_unsafe(version_string)
+    mock_get.assert_called_once()
+    assert mock_get.call_args.args[0] == "https://api.github.com/repos/invalid/invalid/releases/latest"
 
 
 @pytest.fixture

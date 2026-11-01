@@ -250,3 +250,71 @@ class Hailuo03MaxVideoRequest(BaseModel):
 class Hailuo03MaxVideoResult(BaseModel):
     video: Hailuo03MaxVideoFile = Field(...)
     expanded_prompt: str | None = Field(None)
+
+
+class Hailuo03MaxRecastRequest(BaseModel):
+    video_url: str = Field(...)
+    reference_image_urls: list[str] = Field(...)
+    prompt: str | None = Field(None)
+    resolution: str = Field(...)
+    enhance_realism: bool = Field(...)
+    seed: int = Field(...)
+
+
+class Hailuo03MaxExtendVideoRequest(BaseModel):
+    video_url: str = Field(...)
+    prompt: str = Field(...)
+    reference_audio_urls: list[str] | None = Field(None)
+    duration: int = Field(...)
+    resolution: str = Field(...)
+    aspect_ratio: str = Field(...)
+    output: str = Field(...)
+    enable_prompt_expansion: bool = Field(...)
+    seed: int = Field(...)
+
+
+class Hailuo03MaxReframeVideoRequest(BaseModel):
+    video_url: str = Field(...)
+    aspect_ratio: str = Field(...)
+    resolution: str = Field(...)
+    prompt: str | None = Field(None)
+    seed: int = Field(...)
+
+
+class Hailuo03MaxInsertVideoRequest(BaseModel):
+    video_url: str = Field(...)
+    start_time: float = Field(...)
+    resume_time: float = Field(...)
+    duration: int = Field(...)
+    resolution: str = Field(...)
+    prompt: str | None = Field(None)
+    reference_image_urls: list[str] | None = Field(None)
+    reference_video_urls: list[str] | None = Field(None)
+    color_match: bool = Field(...)
+    enable_prompt_expansion: bool = Field(...)
+    seed: int = Field(...)
+
+
+class Hailuo03MaxLipSyncRequest(BaseModel):
+    image_url: str = Field(...)
+    audio_url: str = Field(...)
+    resolution: str = Field(...)
+    enable_transcription: bool = Field(...)
+    seed: int = Field(...)
+
+
+class Hailuo03MaxCameraKeyframe(BaseModel):
+    time: float = Field(...)
+    azimuth: float = Field(...)
+    elevation: float = Field(...)
+    distance: float = Field(...)
+
+
+class Hailuo03MaxCameraControlsRequest(BaseModel):
+    image_url: str = Field(...)
+    prompt: str | None = Field(None)
+    camera_trajectory: list[Hailuo03MaxCameraKeyframe] = Field(...)
+    duration: int = Field(...)
+    resolution: str = Field(...)
+    prompt_expansion_mode: str = Field(...)
+    seed: int = Field(...)
