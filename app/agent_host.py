@@ -48,14 +48,16 @@ def load() -> bool:
         entry_points = {ep.name: ep for ep in importlib.metadata.entry_points(group=ENTRY_POINT_GROUP)}
         if PROTOCOL not in entry_points:
             # Some comfy-agent is installed (other protocols present) -> "update";
-            # nothing there -> "install".
+            # nothing there -> "install". The file names the package without a
+            # version, so only `-U` moves an old or placeholder install.
+            req = os.path.join(os.path.dirname(os.path.abspath(folder_paths.__file__)), "agent_requirements.txt")
+            install = f"pip install -U -r {req}"
             if entry_points:
-                logging.warning(f"The installed comfy-agent offers agent protocols {sorted(entry_points)}; this ComfyUI needs {PROTOCOL}. Update comfy-agent to use the agent.")
+                logging.warning(f"The installed comfy-agent offers agent protocols {sorted(entry_points)}; this ComfyUI needs {PROTOCOL}. Update it with `{install}` to use the agent.")
                 _failure = {"state": "failed", "reason": "outdated"}
                 emit_event("agent_error", reason="outdated")
             else:
-                req = os.path.join(os.path.dirname(os.path.abspath(folder_paths.__file__)), "agent_requirements.txt")
-                logging.warning(f"`--enable-agent` was passed but the comfy-agent package is not installed, so the agent is disabled. Its requirements are in {req}.")
+                logging.warning(f"`--enable-agent` was passed but the comfy-agent package is not installed, so the agent is disabled. Install it with `{install}`.")
                 _failure = {"state": "failed", "reason": "package_missing"}
                 emit_event("package_missing")
             _publish_flag()
