@@ -373,13 +373,13 @@ class GrowMask(IO.ComfyNode):
         mask = mask.reshape((-1, mask.shape[-2], mask.shape[-1]))
         out = []
         for m in mask:
-            output = m.numpy()
+            output = m.cpu().numpy()
             for _ in range(abs(expand)):
                 if expand < 0:
                     output = scipy.ndimage.grey_erosion(output, footprint=kernel)
                 else:
                     output = scipy.ndimage.grey_dilation(output, footprint=kernel)
-            output = torch.from_numpy(output)
+            output = torch.from_numpy(output).to(m.device)
             out.append(output)
         return IO.NodeOutput(torch.stack(out, dim=0))
 
