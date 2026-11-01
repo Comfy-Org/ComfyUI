@@ -1082,16 +1082,13 @@ def archive_model_dtypes(model):
             setattr(module, f"{buf_name}_comfy_model_dtype", buf.dtype)
 
 
-def register_ephemeral_model(patcher, model):
-    """Keep a writable model loaded until the node ends, then drop its patcher before its weights."""
-    EPHEMERAL_MODELS.append((patcher, model))
+def register_ephemeral_model(state):
+    """Keep a model state loaded until the node ends, then release whatever was not flushed."""
+    EPHEMERAL_MODELS.append(state)
 
 def cleanup_ephemeral_models():
     while EPHEMERAL_MODELS:
-        patcher, model = EPHEMERAL_MODELS.pop()
-        patcher.discard_writes()
-        del patcher
-        del model
+        EPHEMERAL_MODELS.pop().release()
 
 def cleanup_models():
     to_delete = []
