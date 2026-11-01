@@ -51,7 +51,7 @@ def load() -> bool:
             # nothing there -> "install". The file names the package without a
             # version, so only `-U` moves an old or placeholder install.
             req = os.path.join(os.path.dirname(os.path.abspath(folder_paths.__file__)), "agent_requirements.txt")
-            install = f"pip install -U -r {req}"
+            install = f'pip install -U -r "{req}"'
             if entry_points:
                 logging.warning(f"The installed comfy-agent offers agent protocols {sorted(entry_points)}; this ComfyUI needs {PROTOCOL}. Update it with `{install}` to use the agent.")
                 _failure = {"state": "failed", "reason": "outdated"}
