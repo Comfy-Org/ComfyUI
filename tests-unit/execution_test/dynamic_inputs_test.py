@@ -156,6 +156,46 @@ async def test_legacy_validation_rejection_is_recorded_even_without_inputs(monke
     }]
 
 
+@pytest.mark.parametrize("received_options,input_options,expected", [
+    (["simple", "karras"], ["simple", "karras", "AYS SD1"], True),
+    (["karras", "simple"], ["simple", "karras"], True),
+    (["simple", "karras", "unsupported"], ["simple", "karras"], False),
+    (["simple", "karras"], ["karras", "exponential"], False),
+])
+async def test_legacy_combo_link_validation(monkeypatch, received_options, input_options, expected):
+    class Source:
+        RETURN_TYPES = (received_options,)
+
+        @classmethod
+        def INPUT_TYPES(cls):
+            return {"required": {}}
+
+    class Consumer:
+        RETURN_TYPES = ()
+        OUTPUT_NODE = True
+
+        @classmethod
+        def INPUT_TYPES(cls):
+            return {"required": {"scheduler": (input_options,)}}
+
+    monkeypatch.setitem(nodes.NODE_CLASS_MAPPINGS, "Source", Source)
+    monkeypatch.setitem(nodes.NODE_CLASS_MAPPINGS, "Consumer", Consumer)
+    prompt = {
+        "source": {"class_type": "Source", "inputs": {}},
+        "consumer": {"class_type": "Consumer", "inputs": {"scheduler": ["source", 0]}},
+    }
+    valid, _, outputs, errors = await execution.validate_prompt("combo", prompt, None)
+
+    assert valid is expected
+    if expected:
+        assert outputs == ["consumer"]
+        assert errors == {}
+    else:
+        assert outputs == []
+        assert [error["type"] for error in errors["consumer"]["errors"]] == ["return_type_mismatch"]
+        assert errors["consumer"]["errors"][0]["extra_info"]["input_name"] == "scheduler"
+
+
 @pytest.mark.parametrize("kind", ["combo", "autogrow"])
 @pytest.mark.parametrize("lazy,request_first", [(True, False), (True, True), (False, False)])
 async def test_dynamic_lazy_inputs_execute_only_when_requested(monkeypatch, kind, lazy, request_first):
