@@ -2,7 +2,7 @@
   "id": "84318cde-a839-41d4-8632-df6d7c50ffc5",
   "revision": 0,
   "last_node_id": 256,
-  "last_link_id": 403,
+  "last_link_id": 407,
   "nodes": [
     {
       "id": 256,
@@ -118,8 +118,8 @@
         "version": 1,
         "state": {
           "lastGroupId": 14,
-          "lastNodeId": 256,
-          "lastLinkId": 403,
+          "lastNodeId": 225,
+          "lastLinkId": 407,
           "lastRerouteId": 0
         },
         "revision": 0,
@@ -225,7 +225,7 @@
             "name": "IMAGE",
             "type": "IMAGE",
             "linkIds": [
-              400
+              404
             ],
             "pos": [
               1310,
@@ -1255,6 +1255,89 @@
               "Node name for S&R": "MaskPreview"
             },
             "widgets_values": []
+          },
+          {
+            "id": 225,
+            "type": "ImageCompositeMasked",
+            "pos": [
+              980,
+              1100
+            ],
+            "size": [
+              330,
+              100
+            ],
+            "flags": {},
+            "order": 10,
+            "mode": 0,
+            "inputs": [
+              {
+                "localized_name": "destination",
+                "name": "destination",
+                "type": "IMAGE",
+                "link": 405
+              },
+              {
+                "localized_name": "source",
+                "name": "source",
+                "type": "IMAGE",
+                "link": 406
+              },
+              {
+                "localized_name": "mask",
+                "name": "mask",
+                "shape": 7,
+                "type": "MASK",
+                "link": 407
+              },
+              {
+                "localized_name": "x",
+                "name": "x",
+                "type": "INT",
+                "widget": {
+                  "name": "x"
+                },
+                "link": null
+              },
+              {
+                "localized_name": "y",
+                "name": "y",
+                "type": "INT",
+                "widget": {
+                  "name": "y"
+                },
+                "link": null
+              },
+              {
+                "localized_name": "resize_source",
+                "name": "resize_source",
+                "type": "BOOLEAN",
+                "widget": {
+                  "name": "resize_source"
+                },
+                "link": null
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "IMAGE",
+                "name": "IMAGE",
+                "type": "IMAGE",
+                "links": [
+                  404
+                ]
+              }
+            ],
+            "properties": {
+              "cnr_id": "comfy-core",
+              "ver": "0.3.64",
+              "Node name for S&R": "ImageCompositeMasked"
+            },
+            "widgets_values": [
+              0,
+              0,
+              false
+            ]
           }
         ],
         "groups": [
@@ -1473,14 +1556,6 @@
             "type": "MASK"
           },
           {
-            "id": 110,
-            "origin_id": 8,
-            "origin_slot": 0,
-            "target_id": -20,
-            "target_slot": 0,
-            "type": "IMAGE"
-          },
-          {
             "id": 394,
             "origin_id": -10,
             "origin_slot": 2,
@@ -1513,14 +1588,6 @@
             "type": "IMAGE"
           },
           {
-            "id": 400,
-            "origin_id": 8,
-            "origin_slot": 0,
-            "target_id": -20,
-            "target_slot": 0,
-            "type": "IMAGE"
-          },
-          {
             "id": 401,
             "origin_id": -10,
             "origin_slot": 3,
@@ -1543,6 +1610,38 @@
             "target_id": 84,
             "target_slot": 0,
             "type": "COMBO"
+          },
+          {
+            "id": 405,
+            "origin_id": -10,
+            "origin_slot": 0,
+            "target_id": 225,
+            "target_slot": 0,
+            "type": "IMAGE"
+          },
+          {
+            "id": 406,
+            "origin_id": 8,
+            "origin_slot": 0,
+            "target_id": 225,
+            "target_slot": 1,
+            "type": "IMAGE"
+          },
+          {
+            "id": 407,
+            "origin_id": -10,
+            "origin_slot": 1,
+            "target_id": 225,
+            "target_slot": 2,
+            "type": "MASK"
+          },
+          {
+            "id": 404,
+            "origin_id": 225,
+            "origin_slot": 0,
+            "target_id": -20,
+            "target_slot": 0,
+            "type": "IMAGE"
           }
         ],
         "extra": {
