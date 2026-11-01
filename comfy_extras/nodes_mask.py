@@ -348,6 +348,34 @@ class FeatherMask(IO.ComfyNode):
     feather = execute  # TODO: remove
 
 
+class BlurMask(IO.ComfyNode):
+    @classmethod
+    def define_schema(cls):
+        return IO.Schema(
+            node_id="BlurMask",
+            search_aliases=["gaussian blur mask", "soften mask", "smooth mask"],
+            display_name="Blur Mask",
+            category="image/mask",
+            description="Gaussian-blur a mask so interior edges soften. Feather Mask only fades the canvas borders.",
+            inputs=[
+                IO.Mask.Input("mask"),
+                IO.Float.Input("sigma", default=1.0, min=0.0, max=1024.0, step=0.01),
+            ],
+            outputs=[IO.Mask.Output()],
+        )
+
+    @classmethod
+    def execute(cls, mask, sigma) -> IO.NodeOutput:
+        mask = mask.reshape((-1, mask.shape[-2], mask.shape[-1]))
+        if sigma <= 0:
+            return IO.NodeOutput(mask)
+        out = []
+        for m in mask:
+            output = scipy.ndimage.gaussian_filter(m.cpu().numpy(), sigma=sigma, mode="nearest")
+            out.append(torch.from_numpy(output).to(mask.device))
+        return IO.NodeOutput(torch.stack(out, dim=0))
+
+
 class GrowMask(IO.ComfyNode):
     @classmethod
     def define_schema(cls):
@@ -447,6 +475,7 @@ class MaskExtension(ComfyExtension):
             CropMask,
             MaskComposite,
             FeatherMask,
+            BlurMask,
             GrowMask,
             ThresholdMask,
             MaskPreview,
