@@ -1103,8 +1103,12 @@ class CombinedLinear:
     """
     # The model opts the combined weight into small-M layout, as it does per MixedPrecisionOp.
     comfy_gemv_optimized = False
-    # prepare declines full-precision members, so the combined weight never is.
-    _full_precision_mm = False
+
+    @property
+    def _full_precision_mm(self):
+        # The members' flag is live: a text encoder lifts it for generate (use_quantized_matmul)
+        # and restores it for encode, and the combined weight must follow the same contract.
+        return self.linears[0]._full_precision_mm
 
     def __init__(self, linears):
         self.linears = linears
@@ -1140,6 +1144,10 @@ class CombinedLinear:
         run_every_op()
         if self._v_weight is None:
             return NotImplemented
+        if self._full_precision_mm:
+            x = _eager_input_act(x, input_act, act_weight, act_eps)
+            out = torch.nn.functional.linear(x, self._v_weight.to(dtype=x.dtype).dequantize())
+            return _linear_residual(out, residual, residual_scale)
         return _try_quantized_linear_input_act(x, self._v_weight, None, input_act, act_weight, act_eps,
                                                residual, residual_scale)
 
