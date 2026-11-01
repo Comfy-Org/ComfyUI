@@ -62,6 +62,7 @@ if dependencies_available():
 from app import agent_host
 from app.user_manager import UserManager
 from app.model_manager import ModelFileManager
+from app.model_compat import ModelCompatManager
 from app.custom_node_manager import CustomNodeManager
 from app.subgraph_manager import SubgraphManager
 from app import deploy_to_cloud
@@ -264,6 +265,7 @@ class PromptServer():
         self.asset_manager = asset_manager
         self.user_manager = UserManager()
         self.model_file_manager = ModelFileManager()
+        self.model_compat_manager = ModelCompatManager()
         self.custom_node_manager = CustomNodeManager()
         self.subgraph_manager = SubgraphManager()
         self.node_replace_manager = NodeReplaceManager()
@@ -1328,6 +1330,7 @@ class PromptServer():
             agent_host.register(self.app)
         self.user_manager.add_routes(self.routes)
         self.model_file_manager.add_routes(self.routes)
+        self.model_compat_manager.add_routes(self.routes)
         self.custom_node_manager.add_routes(self.routes, self.app, nodes.LOADED_MODULE_DIRS.items())
         self.subgraph_manager.add_routes(self.routes, nodes.LOADED_MODULE_DIRS.items())
         self.node_replace_manager.add_routes(self.routes)
@@ -1348,6 +1351,9 @@ class PromptServer():
         self.app.add_routes(self.routes)
         # Registered after the /api duplication above, so these exist only under /api.
         self.deploy_to_cloud_routes.add_routes(self.app)
+
+        # The model compatibility sidebar tab ships with ComfyUI, served like a custom node's web directory.
+        nodes.EXTENSION_WEB_DIRS.setdefault("model_compat", ModelCompatManager.WEB_DIR)
 
         # Add routes from web extensions.
         for name, dir in nodes.EXTENSION_WEB_DIRS.items():
