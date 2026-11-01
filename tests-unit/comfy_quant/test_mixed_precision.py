@@ -377,19 +377,25 @@ class TestMixedPrecisionOps(unittest.TestCase):
         )
         torch.testing.assert_close(output, expected)
 
-    def test_supports_int8_compute_treats_mps_mode_as_unsupported_when_device_is_none(self):
+    def test_supports_int8_compute_gates_mps_mode_on_torch_version_when_device_is_none(self):
         """Call sites (like pick_operations' default) may omit load_device. On an
-        MPS machine that must still report int8 as unsupported instead of
-        silently defaulting to True, matching supports_fp64's handling of the
-        same device=None case (see Comfy-Org/ComfyUI#16136)."""
+        MPS machine that must still apply the MPS torch version gate (torch._int_mm
+        is only implemented for MPS since 2.15) instead of silently defaulting to
+        True, matching supports_fp64's handling of the same device=None case
+        (see Comfy-Org/ComfyUI#16136)."""
         import comfy.model_management as mm
 
         orig_cpu_state = mm.cpu_state
+        orig_torch_version = mm.torch_version_numeric
         mm.cpu_state = mm.CPUState.MPS
         try:
+            mm.torch_version_numeric = (2, 14)
             self.assertFalse(mm.supports_int8_compute(None))
+            mm.torch_version_numeric = (2, 15)
+            self.assertTrue(mm.supports_int8_compute(None))
         finally:
             mm.cpu_state = orig_cpu_state
+            mm.torch_version_numeric = orig_torch_version
 
     def test_convrot_w4a4_loads_into_params(self):
         """ConvRot W4A4 checkpoints must load as the dedicated kitchen layout."""
