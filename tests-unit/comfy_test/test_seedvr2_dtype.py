@@ -31,6 +31,22 @@ def test_seedvr2_fp16_manual_cast_only_for_bf16_device(monkeypatch):
     assert fp16_config.manual_cast_dtype is None
 
 
+def test_seedvr2_fp8_fp16_manual_cast_moves_to_bf16(monkeypatch):
+    monkeypatch.setattr(
+        comfy.supported_models.comfy.model_management,
+        "should_use_bf16",
+        lambda device=None: True,
+    )
+
+    config = comfy.supported_models.SeedVR2({"image_model": "seedvr2"})
+    config.set_inference_dtype(torch.float8_e4m3fn, torch.float16)
+    assert config.manual_cast_dtype is torch.bfloat16
+
+    config = comfy.supported_models.SeedVR2({"image_model": "seedvr2"})
+    config.set_inference_dtype(torch.float8_e4m3fn, torch.float32)
+    assert config.manual_cast_dtype is torch.float32
+
+
 def test_seedvr2_text_conditioning_accepts_cfg1_single_branch():
     context = torch.arange(6, dtype=torch.float32).reshape(1, 3, 2)
 
