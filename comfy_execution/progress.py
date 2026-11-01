@@ -10,6 +10,7 @@ if TYPE_CHECKING:
     from comfy_execution.server_protocol import ExecutionServer
 from protocol import BinaryEventTypes
 from comfy_api import feature_flags
+from comfy_execution.utils import current_prompt_id
 
 PreviewImageTuple = Tuple[str, Image.Image, Optional[int]]
 
@@ -182,7 +183,7 @@ class WebUIProgressHandler(ProgressHandler):
         # Send a combined progress_state message with all node states
         # Include client_id to ensure message is only sent to the initiating client
         self.server_instance.send_sync(
-            "progress_state", {"prompt_id": prompt_id, "nodes": active_nodes}, self.server_instance.client_id
+            "progress_state", {"prompt_id": prompt_id, "nodes": active_nodes}, self.registry.client_id
         )
 
     @override
@@ -208,7 +209,7 @@ class WebUIProgressHandler(ProgressHandler):
             # Only send new format if client supports it
             if feature_flags.supports_feature(
                 self.server_instance.sockets_metadata,
-                self.server_instance.client_id,
+                self.registry.client_id,
                 "supports_preview_metadata",
             ):
                 metadata = {
@@ -225,7 +226,7 @@ class WebUIProgressHandler(ProgressHandler):
                 self.server_instance.send_sync(
                     BinaryEventTypes.PREVIEW_IMAGE_WITH_METADATA,
                     (image, metadata),
-                    self.server_instance.client_id,
+                    self.registry.client_id,
                 )
 
     @override
@@ -239,9 +240,10 @@ class ProgressRegistry:
     Registry that maintains node progress state and notifies registered handlers.
     """
 
-    def __init__(self, prompt_id: str, dynprompt: "DynamicPrompt"):
+    def __init__(self, prompt_id: str, dynprompt: "DynamicPrompt", client_id: str | None = None):
         self.prompt_id = prompt_id
         self.dynprompt = dynprompt
+        self.client_id = client_id
         self.nodes: Dict[str, NodeProgressState] = {}
         self.handlers: Dict[str, ProgressHandler] = {}
 
@@ -318,18 +320,26 @@ class ProgressRegistry:
         for handler in self.handlers.values():
             handler.reset()
 
-# Global registry instance
+# One registry per in-flight prompt, looked up through the prompt's execution context. Callers
+# outside any prompt context (threads spawned by nodes) get the prompt currently executing nodes.
+progress_registries: Dict[str, ProgressRegistry] = {}
 global_progress_registry: ProgressRegistry | None = None
 
-def reset_progress_state(prompt_id: str, dynprompt: "DynamicPrompt") -> None:
+def reset_progress_state(prompt_id: str, dynprompt: "DynamicPrompt", client_id: str | None = None) -> None:
+    progress_registries[prompt_id] = ProgressRegistry(prompt_id, dynprompt, client_id)
+
+
+def activate_progress_state(prompt_id: str) -> None:
     global global_progress_registry
+    global_progress_registry = progress_registries[prompt_id]
 
-    # Reset existing handlers if registry exists
-    if global_progress_registry is not None:
-        global_progress_registry.reset_handlers()
 
-    # Create new registry
-    global_progress_registry = ProgressRegistry(prompt_id, dynprompt)
+def clear_progress_state(prompt_id: str) -> None:
+    global global_progress_registry
+    registry = progress_registries.pop(prompt_id)
+    registry.reset_handlers()
+    if global_progress_registry is registry:
+        global_progress_registry = None
 
 
 def add_progress_handler(handler: ProgressHandler) -> None:
@@ -340,10 +350,12 @@ def add_progress_handler(handler: ProgressHandler) -> None:
 
 def get_progress_state() -> ProgressRegistry:
     global global_progress_registry
-    if global_progress_registry is None:
+    registry = progress_registries.get(current_prompt_id.get(), global_progress_registry)
+    if registry is None:
         from comfy_execution.graph import DynamicPrompt
 
         global_progress_registry = ProgressRegistry(
             prompt_id="", dynprompt=DynamicPrompt({})
         )
-    return global_progress_registry
+        registry = global_progress_registry
+    return registry
