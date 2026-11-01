@@ -9,7 +9,7 @@ from typing import Any
 import folder_paths
 
 logger = logging.getLogger(__name__)
-_SENSITIVE_HEADERS = {"authorization", "x-api-key"}
+_SENSITIVE_HEADERS = {"authorization", "x-api-key", "cookie", "set-cookie"}
 
 
 def get_log_directory():
@@ -116,7 +116,7 @@ def log_request_response(
         if response_status_code is not None:
             log_content.append(f"Status Code: {response_status_code}")
         if response_headers:
-            log_content.append(f"Headers:\n{_format_data_for_logging(response_headers)}")
+            log_content.append(f"Headers:\n{_format_data_for_logging(_redact_headers(response_headers))}")
         if response_content is not None:
             log_content.append(f"Content:\n{_format_data_for_logging(response_content)}")
         if error_message:
