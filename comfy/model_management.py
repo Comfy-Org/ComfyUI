@@ -897,6 +897,7 @@ def free_memory(memory_required, device, keep_loaded=[], for_dynamic=False, pins
     unloaded_model = []
     can_unload = []
     unloaded_models = []
+    partially_unloaded = False
 
     for i in range(len(current_loaded_models) -1, -1, -1):
         shift_model = current_loaded_models[i]
@@ -914,11 +915,18 @@ def free_memory(memory_required, device, keep_loaded=[], for_dynamic=False, pins
             if current_loaded_models[i].model.is_dynamic() and for_dynamic:
                 #don't actually unload dynamic models for the sake of other dynamic models
                 #as that works on-demand.
+                if memory_to_free > 0:
+                    freed = current_loaded_models[i].model.partially_unload(current_loaded_models[i].model.offload_device, memory_to_free)
+                    if freed > 0:
+                        partially_unloaded = True
                 memory_required -= current_loaded_models[i].model.loaded_size()
                 memory_to_free = 0
-        if memory_to_free > 0 and current_loaded_models[i].model_unload(memory_to_free):
-            logging.debug(f"Unloading {current_loaded_models[i].model.model.__class__.__name__}")
-            unloaded_model.append(i)
+        if memory_to_free > 0:
+            if current_loaded_models[i].model_unload(memory_to_free):
+                logging.debug(f"Unloading {current_loaded_models[i].model.model.__class__.__name__}")
+                unloaded_model.append(i)
+            else:
+                partially_unloaded = True
 
     for i in sorted(unloaded_model, reverse=True):
         unloaded_models.append(current_loaded_models.pop(i))
@@ -927,7 +935,7 @@ def free_memory(memory_required, device, keep_loaded=[], for_dynamic=False, pins
         ensure_pin_budget(pins_required)
         ensure_pin_registerable(pins_required)
 
-    if len(unloaded_model) > 0:
+    if len(unloaded_model) > 0 or partially_unloaded:
         soft_empty_cache()
     elif device is not None:
         if vram_state != VRAMState.HIGH_VRAM:
@@ -1009,6 +1017,18 @@ def load_models_gpu(models, memory_required=0, force_patch_weights=False, minimu
             if free_mem < minimum_memory_required:
                 models_l = free_memory(minimum_memory_required, device, for_dynamic=free_for_dynamic)
                 logging.info("{} models unloaded.".format(len(models_l)))
+
+            free_mem = get_free_memory(device)
+            if free_mem < minimum_memory_required:
+                for loaded_model in models_to_load:
+                    if loaded_model.device == device and loaded_model.model.is_dynamic():
+                        mem_to_free = minimum_memory_required - free_mem
+                        freed = loaded_model.model.partially_unload(loaded_model.model.offload_device, mem_to_free)
+                        if freed > 0:
+                            soft_empty_cache()
+                            free_mem = get_free_memory(device)
+                            if free_mem >= minimum_memory_required:
+                                break
 
     for loaded_model in models_to_load:
         model = loaded_model.model
