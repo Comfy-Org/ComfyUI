@@ -86,12 +86,13 @@ class PromptModelTracker:
                 if not isinstance(model, ModelPatcher) or not model.is_dynamic():
                     continue
                 key = (id(model.model), model.load_device)
-                self.models[key] = model
-                model.set_in_use_by_current_prompt(True)
+                if key not in self.models:
+                    model.acquire_prompt_ref()
+                    self.models[key] = model
 
     def end(self):
         for model in self.models.values():
-            model.set_in_use_by_current_prompt(False)
+            model.release_prompt_ref()
         self.models.clear()
 
 def set_model_options_patch_replace(model_options, patch, name, block_name, number, transformer_index=None):
@@ -1828,7 +1829,7 @@ class ModelPatcherDynamic(ModelPatcher):
                 "hostbufs_initialized": False,
                 "failed": False,
                 "active": False,
-                "current_prompt": False,
+                "prompt_refs": 0,
             }
 
     def is_dynamic(self):
@@ -1841,19 +1842,19 @@ class ModelPatcherDynamic(ModelPatcher):
         try:
             model.load_state_dict(state, assign=True)
             patcher = ModelPatcherDynamic(model, self.load_device, torch.device("cpu"), fast_disk=self.fast_disk)
-            self.set_additional_models("writable", [patcher])
+            patcher.acquire_prompt_ref()
             # Loading reverses this list; the writable model gets priority over its owner.
             comfy.model_management.load_models_gpu([patcher, self])
-            patcher.set_in_use_by_current_prompt(True)
             yield patcher
         finally:
+            if patcher is not None:
+                patcher.release_prompt_ref()
             with comfy.model_management.cuda_device_context(self.load_device):
                 # The final forward may still be using the allocation graph's pages.
                 comfy.model_management.synchronize()
                 comfy.model_prefetch.cleanup_prefetch_queues()
                 comfy.model_prefetch.cleanup_malloc_graph()
                 if patcher is not None:
-                    self.remove_additional_models("writable")
                     vbar = model.dynamic_vbars.pop(patcher.load_device, None)
                     if vbar is not None:
                         vbar.close()
@@ -1863,8 +1864,13 @@ class ModelPatcherDynamic(ModelPatcher):
                     comfy.model_management.unload_model_and_clones(patcher, unload_additional_models=False)
                 file.close()
 
-    def set_in_use_by_current_prompt(self, in_use):
-        self.model.dynamic_pins[self.load_device]["current_prompt"] = in_use
+    def acquire_prompt_ref(self):
+        self.model.dynamic_pins[self.load_device]["prompt_refs"] += 1
+
+    def release_prompt_ref(self):
+        pin_state = self.model.dynamic_pins[self.load_device]
+        assert pin_state["prompt_refs"] > 0
+        pin_state["prompt_refs"] -= 1
 
     def _vbar_get(self, create=False):
         if self.load_device == torch.device("cpu"):

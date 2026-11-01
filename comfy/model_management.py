@@ -664,7 +664,7 @@ def models_for_pin_eviction(active, current_prompt=None):
             continue
         pin_state = model.model.dynamic_pins[model.load_device]
         if ((active is None or pin_state["active"] == active) and
-            (current_prompt is None or pin_state["current_prompt"] == current_prompt)):
+            (current_prompt is None or (pin_state["prompt_refs"] > 0) == current_prompt)):
             yield model
 
 def free_model_pins(size, subsets, current_prompt, active, registrations=False):
