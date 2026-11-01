@@ -20,6 +20,13 @@ SEEDVR2_LATENT_CHANNELS = 16
 # VAE temporal caches: int8-packed (rotated, per-token scales) between slices.
 SEEDVR2_VAE_CACHE_QUANT_BYTES = 64 * 1024 ** 2         # tails at or above this size are packed.
 SEEDVR2_CACHE_BYTES_PER_FRAME_PIXEL = 6200             # host-held caches and parked frames, per output-frame pixel.
+# The caches stay on the GPU when free VRAM covers the pass's working set and the caches times this.
+# Parked on the host, every slice sends them over PCIe and back: an untiled 81-frame 720p decode on an
+# RTX 5090 moves about 450 GB that way and spends 15 of its 19 s copying. The margin covers the small
+# tails and frame pieces that residency also keeps on the GPU and cudaMallocAsync's fragmentation: the
+# measured reserved peak of an untiled pass came to 0.96-1.04x of working set plus caches at 720p and
+# 960p, so this leaves 10-15% to spare.
+SEEDVR2_RESIDENT_CACHE_HEADROOM = 1.25
 
 # VAE decode estimate: the free VRAM an untiled decode needs under cudaMallocAsync (ComfyUI's default),
 # fitted 2-7% above the measured floor from 480p to 4K. Flat in clip length: the decoded frames go

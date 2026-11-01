@@ -21,6 +21,7 @@ from comfy.ldm.seedvr.constants import (
     SEEDVR2_DECODE_BYTES_PER_FRAME_PIXEL,
     SEEDVR2_DECODE_FIXED_BYTES,
     SEEDVR2_CACHE_BYTES_PER_FRAME_PIXEL,
+    SEEDVR2_RESIDENT_CACHE_HEADROOM,
     SEEDVR2_DECODE_LAB_BYTES_PER_OUTPUT_PIXEL,
     SEEDVR2_ENCODE_BYTES_PER_PIXEL,
     SEEDVR2_ENCODE_FIXED_BYTES,
@@ -411,10 +412,35 @@ def _eager_factor(dtype, factor):
     return 1 if dtype == torch.float16 else factor * dtype.itemsize / 2
 
 
-def _offload_caches_for(frame_pixels):
-    """Whether a pass over this frame area keeps its packed caches in host memory: when there is
-    room for them, reclaiming RAM from inactive models if needed."""
-    return comfy.model_management.ensure_pin_budget(frame_pixels * SEEDVR2_CACHE_BYTES_PER_FRAME_PIXEL, evict_active=False)
+def _decode_working_bytes(area, dtype):
+    return (area * SEEDVR2_DECODE_BYTES_PER_FRAME_PIXEL + SEEDVR2_DECODE_FIXED_BYTES) * _eager_factor(dtype, SEEDVR2_EAGER_DECODE_FACTOR)
+
+
+def _encode_working_bytes(area, dtype):
+    return (area * SEEDVR2_ENCODE_BYTES_PER_PIXEL + SEEDVR2_ENCODE_FIXED_BYTES) * _eager_factor(dtype, SEEDVR2_EAGER_ENCODE_FACTOR)
+
+
+def _caches_fit_on_device(cache_bytes, working_bytes, device):
+    """Whether free VRAM holds a pass's caches beside its own working set. --lowvram and --novram keep
+    the caches on the host, as those modes trade speed for VRAM."""
+    mm = comfy.model_management
+    if mm.vram_state in (mm.VRAMState.LOW_VRAM, mm.VRAMState.NO_VRAM):
+        return False
+    device = mm.get_torch_device() if device is None else device
+    if getattr(device, "type", None) != "cuda":
+        return False
+    free = mm.get_free_memory(device) - mm.extra_reserved_memory()
+    return free >= working_bytes + cache_bytes * SEEDVR2_RESIDENT_CACHE_HEADROOM
+
+
+def _offload_caches_for(frame_pixels, working_bytes=0, device=None):
+    """Whether a pass over this frame area keeps its packed caches in host memory. They stay on the
+    GPU while free VRAM holds them beside the pass's ``working_bytes`` (call before the pass allocates);
+    otherwise they go to the host when there is room, reclaiming RAM from inactive models if needed."""
+    cache_bytes = frame_pixels * SEEDVR2_CACHE_BYTES_PER_FRAME_PIXEL
+    if _caches_fit_on_device(cache_bytes, working_bytes, device):
+        return False
+    return comfy.model_management.ensure_pin_budget(cache_bytes, evict_active=False)
 
 
 class MemoryState(Enum):
@@ -1286,7 +1312,8 @@ class VideoAutoencoderKLWrapper(nn.Module):
             return torch.cat([self.slicing_encode(x[i:i + 1]) for i in range(x.size(0))])
         if (x.shape[2] - 1) <= self.slicing_sample_min_size:
             return self._encode(x.to(self.device))
-        memory_cache = CausalMemoryCache(offload=_offload_caches_for(x.shape[-2] * x.shape[-1]))
+        area = x.shape[-2] * x.shape[-1]
+        memory_cache = CausalMemoryCache(offload=_offload_caches_for(area, _encode_working_bytes(area, x.dtype), self.device))
         split_size = max(self.slicing_sample_min_size, self.temporal_downsample_factor)
         x_slices = list(x[:, :, 1:].split(split_size=split_size, dim=2))   # _encode moves each to the device
         if len(x_slices) > 1 and x_slices[-1].shape[2] < self.temporal_downsample_factor:
@@ -1310,7 +1337,8 @@ class VideoAutoencoderKLWrapper(nn.Module):
         if (z.shape[2] - 1) <= self.slicing_latent_min_size:
             decoded = self._decode(z)
             return decoded if output_buffer is None else output_buffer.copy_(decoded)
-        memory_cache = CausalMemoryCache(offload=_offload_caches_for(z.shape[-2] * z.shape[-1] * self.spatial_downsample_factor ** 2))
+        area = z.shape[-2] * z.shape[-1] * self.spatial_downsample_factor ** 2
+        memory_cache = CausalMemoryCache(offload=_offload_caches_for(area, _decode_working_bytes(area, z.dtype), self.device))
         z_slices = z[:, :, 1:].split(split_size=self.slicing_latent_min_size, dim=2)
         decoded_slices = []
         write_pos = 0
@@ -1379,7 +1407,7 @@ class VideoAutoencoderKLWrapper(nn.Module):
         if budget <= 0:
             return SEEDVR2_MIN_TILE_LATENT
         area = budget / (SEEDVR2_DECODE_BYTES_PER_FRAME_PIXEL * factor)
-        if not _offload_caches_for(area):
+        if not _offload_caches_for(area, _decode_working_bytes(area, dtype)):
             area = budget / ((SEEDVR2_DECODE_BYTES_PER_FRAME_PIXEL + SEEDVR2_CACHE_BYTES_PER_FRAME_PIXEL) * factor)
         side = int(math.sqrt(max(area, 1.0))) // self.spatial_downsample_factor
         side = (side // 8) * 8  # keep tiles a whole number of latent blocks
@@ -1424,7 +1452,9 @@ class VideoAutoencoderKLWrapper(nn.Module):
         _, _, _, latent_h, latent_w = self._latent_dims(shape)
         area = latent_h * self.spatial_downsample_factor * latent_w * self.spatial_downsample_factor
         decode_peak = area * SEEDVR2_DECODE_BYTES_PER_FRAME_PIXEL + SEEDVR2_DECODE_FIXED_BYTES
-        if not _offload_caches_for(area):
+        # chosen when free VRAM holds the caches beside the working set, so including them never
+        # tips this estimate past free memory into tiling
+        if not _offload_caches_for(area, _decode_working_bytes(area, dtype)):
             decode_peak += area * SEEDVR2_CACHE_BYTES_PER_FRAME_PIXEL   # the temporal caches stay resident
         # The node's colour correction runs after the decode, one frame (LAB) or a free-memory
         # sized chunk (wavelet, adain) at a time with its own OOM back-off, so it never coincides
