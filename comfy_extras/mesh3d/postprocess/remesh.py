@@ -1041,6 +1041,9 @@ def remesh_narrow_band_dc(
     assert faces.ndim == 2 and faces.shape[1] == 3
     device = vertices.device
 
+    # drop faces on NaN/inf vertices (e.g. from a bad decode), the KD-tree and distance queries need finite input
+    faces = faces[torch.isfinite(vertices).all(dim=1)[faces.long()].all(dim=1)]
+
     if center is None:
         center = 0.5 * (vertices.max(dim=0)[0] + vertices.min(dim=0)[0])
     else:
