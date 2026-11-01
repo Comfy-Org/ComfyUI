@@ -33,8 +33,11 @@ import comfy.memory_management
 import comfy.system_memory
 import comfy.utils
 import comfy.quant_ops
-import comfy_aimdo.host_buffer
-import comfy_aimdo.vram_buffer
+try:
+    import comfy_aimdo.host_buffer
+    import comfy_aimdo.vram_buffer
+except ImportError:
+    comfy_aimdo = None
 from comfy.internal_logging import detail
 
 from typing import TYPE_CHECKING
