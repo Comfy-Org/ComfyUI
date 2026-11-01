@@ -477,7 +477,8 @@ class CLIP:
     def get_key_patches(self):
         return self.patcher.get_key_patches()
 
-    def generate(self, tokens, do_sample=True, max_length=256, temperature=1.0, top_k=50, top_p=0.95, min_p=0.0, repetition_penalty=1.0, seed=None, presence_penalty=0.0, mtp=True):
+    def generate(self, tokens, do_sample=True, max_length=256, temperature=1.0, top_k=50, top_p=0.95, min_p=0.0, repetition_penalty=1.0, seed=None, presence_penalty=0.0, mtp=True, state=None):
+        """Generate tokens into a model state, continuing the generation it holds. The state stays loaded until flushed, or released after the node."""
         self.cond_stage_model.reset_clip_options()
 
         self.load_model(tokens)
@@ -485,7 +486,8 @@ class CLIP:
         self.cond_stage_model.set_clip_options({"layer": None})
         self.cond_stage_model.set_clip_options({"execution_device": device})
 
-        state = comfy.model_state.ModelState()
+        if state is None:
+            state = comfy.model_state.ModelState()
         model_management.register_ephemeral_model(state)
         with model_management.cuda_device_context(device), comfy.ops.use_quantized_matmul(self.cond_stage_model, device):
             self.cond_stage_model.set_clip_options({"model_state": state})
