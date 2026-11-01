@@ -84,7 +84,7 @@ def test_create_video_optional_eager_encoding(monkeypatch):
     codec_input = next(input for input in CreateVideo.define_schema().inputs if input.id == "codec")
     assert isinstance(video, VideoFromList)
     assert encoded_codecs == [VideoCodec.AV1]
-    assert codec_input.options == ["none", "auto", "h264", "av1"]
+    assert codec_input.options == ["none", "auto", "h264", "av1", "prores"]
     assert codec_input.default == "none"
     assert codec_input.advanced and codec_input.optional
 
