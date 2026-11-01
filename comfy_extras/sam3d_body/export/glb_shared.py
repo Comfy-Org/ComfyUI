@@ -1186,12 +1186,12 @@ FACE_LANDMARK_TARGETS: Tuple[Tuple[str, Tuple[float, float, float]], ...] = (
     ("l_brow_outer", (+0.058, 1.690, 0.090)),
     # Right eye — outer/top/inner/bottom
     ("r_eye_outer", (-0.058, 1.660, 0.085)),
-    ("r_eye_top",   (-0.040, 1.673, 0.090)),
+    ("r_eye_top",   (-0.047, 1.675, 0.123)),
     ("r_eye_inner", (-0.022, 1.665, 0.092)),
     ("r_eye_bot",   (-0.040, 1.652, 0.090)),
     # Left eye
     ("l_eye_outer", (+0.058, 1.660, 0.085)),
-    ("l_eye_top",   (+0.040, 1.673, 0.090)),
+    ("l_eye_top",   (+0.047, 1.675, 0.123)),
     ("l_eye_inner", (+0.022, 1.665, 0.092)),
     ("l_eye_bot",   (+0.040, 1.652, 0.090)),
     # Nose
@@ -1202,7 +1202,7 @@ FACE_LANDMARK_TARGETS: Tuple[Tuple[str, Tuple[float, float, float]], ...] = (
     ("nostril_l",   (+0.014, 1.580, 0.115)),
     # Mouth — 4 outer-lip points
     ("mouth_r_corner", (-0.030, 1.540, 0.105)),
-    ("upper_lip_mid",  (+0.000, 1.555, 0.115)),
+    ("upper_lip_mid",  (+0.000, 1.560, 0.142)),
     ("mouth_l_corner", (+0.030, 1.540, 0.105)),
     ("lower_lip_mid",  (+0.000, 1.530, 0.110)),
     # Chin + jaw line — Y raised so NN search lands on chin tip / jaw underside
