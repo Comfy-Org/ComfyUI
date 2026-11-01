@@ -416,7 +416,7 @@ def linear_multistep_coeff(order, t, i, j):
     return integrate.quad(fn, t[i], t[i + 1], epsrel=1e-4)[0]
 
 
-def _sample_cfgpp_history(model, x, sigmas, extra_args=None, callback=None, disable=None, history_weight=0.5, zero_weight=None, zero_order=1, uncond_history_weight=0.0):
+def _sample_cfgpp_history(model, x, sigmas, extra_args=None, callback=None, disable=None, history_weight=0.5, zero_weight=None, zero_order=1, uncond_history_weight=0.0, disable_cfg1_optimization=True):
     """CFG++ Euler with variable-step AB2 history and optional sigma-zero extrapolation."""
     extra_args = {} if extra_args is None else extra_args
     model_sampling = model.inner_model.model_patcher.get_model_object("model_sampling")
@@ -434,7 +434,7 @@ def _sample_cfgpp_history(model, x, sigmas, extra_args=None, callback=None, disa
         return args["denoised"]
 
     model_options = extra_args.get("model_options", {}).copy()
-    extra_args["model_options"] = comfy.model_patcher.set_model_options_post_cfg_function(model_options, post_cfg_function)
+    extra_args["model_options"] = comfy.model_patcher.set_model_options_post_cfg_function(model_options, post_cfg_function, disable_cfg1_optimization=disable_cfg1_optimization)
 
     for i in trange(len(sigmas) - 1, disable=disable):
         denoised = model(x, sigmas[i] * s_in, **extra_args)
@@ -480,8 +480,8 @@ def _sample_cfgpp_history(model, x, sigmas, extra_args=None, callback=None, disa
     return x
 
 
-def sample_cfgpp_ud10_ab(model, x, sigmas, extra_args=None, callback=None, disable=None):
-    return _sample_cfgpp_history(model, x, sigmas, extra_args=extra_args, callback=callback, disable=disable, history_weight=0.25, zero_weight=1.0, uncond_history_weight=0.1)
+def sample_cfgpp_ud10_ab(model, x, sigmas, extra_args=None, callback=None, disable=None, history_weight=0.25, uncond_history_weight=0.1, disable_cfg1_optimization=True):
+    return _sample_cfgpp_history(model, x, sigmas, extra_args=extra_args, callback=callback, disable=disable, history_weight=history_weight, zero_weight=1.0, uncond_history_weight=uncond_history_weight, disable_cfg1_optimization=disable_cfg1_optimization)
 
 
 @torch.no_grad()
