@@ -26,6 +26,13 @@ def get_history(prompt_id):
     with urllib.request.urlopen("http://{}/history/{}".format(server_address, prompt_id)) as response:
         return json.loads(response.read())
 
+def describe_failure(message_type, data):
+    node = "{} ({})".format(data.get('node_id'), data.get('node_type'))
+    if message_type == 'execution_interrupted':
+        return "execution interrupted at node {}".format(node)
+    return "execution failed at node {}: {}: {}".format(
+        node, data.get('exception_type'), data.get('exception_message'))
+
 def get_images(ws, prompt):
     prompt_id = str(uuid.uuid4())
     queue_prompt(prompt, prompt_id)
@@ -34,6 +41,10 @@ def get_images(ws, prompt):
         out = ws.recv()
         if isinstance(out, str):
             message = json.loads(out)
+            if message['type'] in ('execution_error', 'execution_interrupted'):
+                data = message['data']
+                if data.get('prompt_id') == prompt_id:
+                    raise RuntimeError(describe_failure(message['type'], data))
             if message['type'] == 'executing':
                 data = message['data']
                 if data['node'] is None and data['prompt_id'] == prompt_id:
