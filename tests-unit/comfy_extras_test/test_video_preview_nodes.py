@@ -1,4 +1,4 @@
-"""Tests for video preview generation in comfy_extras/nodes_video.py."""
+"""Tests for comfy_extras/nodes_video.py."""
 import os
 
 import av
@@ -50,3 +50,19 @@ def test_save_video_preview_reuses_cached_result(tmp_path, monkeypatch):
     second = nodes_video.save_video_preview(cropped).as_dict()["images"][0]
 
     assert second == first
+
+
+def test_get_video_components_includes_frame_count(tmp_path):
+    video = VideoFromFile(_make_video(tmp_path / "src.mp4", frames=3))
+
+    result = nodes_video.GetVideoComponents.execute(video)
+
+    assert result.args[5] == 3
+
+
+def test_get_video_components_frame_count_from_created_video():
+    created = nodes_video.CreateVideo.execute(torch.zeros((7, 48, 64, 3)), 30.0)
+
+    result = nodes_video.GetVideoComponents.execute(created.args[0])
+
+    assert result.args[5] == 7
