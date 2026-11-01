@@ -659,6 +659,48 @@ async def test_scenario_26_view_forms(tmp_path):
     assert after == before
 
 
+@pytest.mark.asyncio
+async def test_scenario_26_list_by_hash(tmp_path):
+    """Ruling 26: ?hash= selects the record by content hash, not the newest one."""
+    payloads = {"first.png": b"first-bytes", "second.png": b"second-bytes"}
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as setup:
+        for name, payload in payloads.items():
+            path = tmp_path / name
+            path.write_bytes(payload)
+            content = create_content(setup, str(path), hash=to_stored_hash(blake3(payload).hexdigest()))
+            create_record(setup, content.id, name, mime_type="image/png")
+        setup.commit()
+
+    async def names(query: str) -> tuple[list[str], int]:
+        url = "/api/assets"
+        if query:
+            url = f"{url}?{query}"
+        response = await routes.list_assets_route(make_mocked_request("GET", url))
+        body = json.loads(response.body)
+        return [asset["name"] for asset in body["assets"]], body["total"]
+
+    wanted = blake3(payloads["second.png"]).hexdigest()
+    with (
+        patch.object(routes, "create_session", lambda: Session(engine)),
+        patch.object(routes, "_ASSETS_ENABLED", True),
+        _sandbox_asset_roots(tmp_path),
+    ):
+        both, total = await names("limit=10")
+        exact, exact_total = await names(f"hash=blake3:{wanted}")
+        rejected = await routes.list_assets_route(
+            make_mocked_request("GET", f"/api/assets?hash={wanted}.png")
+        )
+        missing, missing_total = await names("hash=blake3:" + "0" * 64)
+    engine.dispose()
+
+    assert both == ["second.png", "first.png"] and total == 2
+    assert exact == ["second.png"] and exact_total == 1
+    assert rejected.status == 400, "a filename is not a hash, and it should not match silently"
+    assert missing == [] and missing_total == 0
+
+
 def test_scenario_27_fail_closed_previews_fromhash(session, tmp_path):
     """Ruling 27: missing content is never a serving candidate."""
     path = tmp_path / "servable.png"
