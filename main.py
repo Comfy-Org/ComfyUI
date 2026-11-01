@@ -340,9 +340,9 @@ def prompt_worker(q, server_instance, asset_manager):
     cache_ram_inactive = 0
     if not args.cache_classic and not args.cache_none and args.cache_lru <= 0:
         cache_ram = min(10.0, max(2.0, comfy.model_management.total_ram * 0.10 / 1024.0))
-        cache_ram_inactive = min(128.0, max(cache_ram, comfy.model_management.total_ram * 0.25 / 1024.0))
         if len(args.cache_ram) > 0:
             cache_ram = args.cache_ram[0]
+        cache_ram_inactive = max(cache_ram, min(128.0, comfy.model_management.total_ram * 0.25 / 1024.0))
         if len(args.cache_ram) > 1:
             cache_ram_inactive = args.cache_ram[1]
 
