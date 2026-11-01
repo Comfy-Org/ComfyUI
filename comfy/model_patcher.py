@@ -23,6 +23,7 @@ import contextlib
 import inspect
 import logging
 import math
+import sys
 import time
 import uuid
 import weakref
@@ -1779,7 +1780,14 @@ class ModelPatcher:
         unet_state_dict = self.model_state_dict_for_saving(self.model.diffusion_model, "diffusion_model.")
         return self.model.state_dict_for_saving(unet_state_dict, clip_state_dict=clip_state_dict, vae_state_dict=vae_state_dict, clip_vision_state_dict=clip_vision_state_dict)
 
-    def __del__(self):
+    def __del__(self, _is_finalizing=sys.is_finalizing):
+        # At interpreter exit the module globals are cleared before the last
+        # objects are collected, so `detach` reaches `CallbacksMP` after it is
+        # already None. `sys` is cleared the same way, so the check is bound as
+        # a default argument to capture it while the module is still alive.
+        # Nothing here matters once the process is going away.
+        if _is_finalizing():
+            return
         self.unpin_all_weights()
         self.detach(unpatch_all=False)
 
