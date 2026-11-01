@@ -1854,6 +1854,18 @@ def llama_detect(clip_data):
     return {}
 
 def load_text_encoder_state_dicts(state_dicts=[], embedding_directory=None, clip_type=CLIPType.STABLE_DIFFUSION, model_options={}, disable_dynamic=False):
+    """Load and initialize text encoder model(s) and tokenizer(s) from state dicts.
+
+    Args:
+        state_dicts: List of text encoder state dicts.
+        embedding_directory: Directory containing custom text embeddings.
+        clip_type: CLIPType enum specifying expected model architecture and tokenizer mapping.
+        model_options: Optional configuration dictionary for model instantiation.
+        disable_dynamic: Whether to disable dynamic memory management.
+
+    Returns:
+        CLIP: Configured CLIP wrapper instance holding the text encoder and tokenizer.
+    """
     clip_data = state_dicts
 
     class EmptyClass:
@@ -2016,6 +2028,18 @@ def load_text_encoder_state_dicts(state_dicts=[], embedding_directory=None, clip
             if clip_type == CLIPType.FLUX or clip_type == CLIPType.FLUX2:
                 clip_target.clip = comfy.text_encoders.flux.klein_te(**llama_detect(clip_data), model_type="qwen3_4b")
                 clip_target.tokenizer = comfy.text_encoders.flux.KleinTokenizer
+            elif clip_type == CLIPType.KREA2:
+                clip_data[0] = comfy.utils.state_dict_prefix_replace(clip_data[0], {"model.language_model.": "model.", "model.visual.": "visual.", "lm_head.": "model.lm_head."})
+                clip_target.clip = comfy.text_encoders.krea2.te(**llama_detect(clip_data))
+                clip_target.tokenizer = comfy.text_encoders.krea2.Krea2Tokenizer
+            elif clip_type == CLIPType.FLUX3:
+                clip_data[0] = comfy.utils.state_dict_prefix_replace(clip_data[0], {"model.language_model.": "model.", "model.visual.": "visual.", "lm_head.": "model.lm_head."})
+                clip_target.clip = comfy.text_encoders.flux.flux3_te(**llama_detect(clip_data))
+                clip_target.tokenizer = comfy.text_encoders.flux.Flux3Tokenizer
+            elif clip_type == CLIPType.MAGE:
+                clip_data[0] = comfy.utils.state_dict_prefix_replace(clip_data[0], {"model.language_model.": "model.", "model.visual.": "visual.", "lm_head.": "model.lm_head."})
+                clip_target.clip = comfy.text_encoders.mage_flow.te(**llama_detect(clip_data))
+                clip_target.tokenizer = comfy.text_encoders.mage_flow.MageFlowTokenizer
             else:
                 clip_target.clip = comfy.text_encoders.z_image.te(**llama_detect(clip_data))
                 clip_target.tokenizer = comfy.text_encoders.z_image.ZImageTokenizer
@@ -2026,6 +2050,18 @@ def load_text_encoder_state_dicts(state_dicts=[], embedding_directory=None, clip
             if clip_type == CLIPType.IDEOGRAM4:
                 clip_target.clip = comfy.text_encoders.ideogram4.te(**llama_detect(clip_data))
                 clip_target.tokenizer = comfy.text_encoders.ideogram4.Ideogram4Tokenizer
+            elif clip_type == CLIPType.BOOGU:
+                clip_data[0] = comfy.utils.state_dict_prefix_replace(clip_data[0], {"model.language_model.": "model.", "model.visual.": "visual.", "lm_head.": "model.lm_head."})
+                clip_target.clip = comfy.text_encoders.boogu.te(**llama_detect(clip_data))
+                clip_target.tokenizer = comfy.text_encoders.boogu.BooguTokenizer
+            elif clip_type == CLIPType.JOYIMAGE:
+                clip_data[0] = comfy.utils.state_dict_prefix_replace(clip_data[0], {"model.language_model.": "model.", "model.visual.": "visual.", "lm_head.": "model.lm_head."})
+                clip_target.clip = comfy.text_encoders.joyimage.te(**llama_detect(clip_data))
+                clip_target.tokenizer = comfy.text_encoders.joyimage.JoyImageTokenizer
+            elif clip_type == CLIPType.QWEN_IMAGE:
+                clip_data[0] = comfy.utils.state_dict_prefix_replace(clip_data[0], {"model.language_model.": "model.", "model.visual.": "visual.", "lm_head.": "model.lm_head."})
+                clip_target.clip = comfy.text_encoders.qwen_image21.te(**llama_detect(clip_data))
+                clip_target.tokenizer = comfy.text_encoders.qwen_image21.QwenImage21Tokenizer
             else:
                 clip_target.clip = comfy.text_encoders.flux.klein_te(**llama_detect(clip_data), model_type="qwen3_8b")
                 clip_target.tokenizer = comfy.text_encoders.flux.KleinTokenizer8B
