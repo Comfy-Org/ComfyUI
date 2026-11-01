@@ -303,8 +303,11 @@ def test_start_runs_the_host_off_the_event_loop(monkeypatch):
 def test_the_install_hint_upgrades_from_agent_requirements(monkeypatch, caplog, eps):
     # agent_requirements.txt names the package without a version, so a plain
     # `pip install -r` leaves an old or placeholder comfy-agent in place.
+    # Quoted: Windows profile paths often contain spaces.
+    root = os.path.join(os.path.abspath(os.sep), "Users", "First Last", "ComfyUI")
+    monkeypatch.setattr(folder_paths, "__file__", os.path.join(root, "folder_paths.py"))
     _entry_points(monkeypatch, eps)
     with caplog.at_level(logging.WARNING):
         agent_host.load()
-    req = os.path.join(_comfy_path(), "agent_requirements.txt")
-    assert any(f"pip install -U -r {req}" in r.getMessage() for r in caplog.records)
+    req = os.path.join(root, "agent_requirements.txt")
+    assert any(f'pip install -U -r "{req}"' in r.getMessage() for r in caplog.records)
