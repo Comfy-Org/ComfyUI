@@ -1,6 +1,7 @@
 from comfy_api.latest import ComfyExtension, io
 import comfy.context_windows
 import nodes
+from comfy_extras.nodes_minimax_h3 import video_latent_t
 
 
 class ContextWindowsManualNode(io.ComfyNode):
@@ -135,12 +136,41 @@ class LTXVContextWindowsNode(ContextWindowsManualNode):
                                cond_retain_index_list=retain_index_list, latent_retain_index_list=retain_index_list, split_conds_to_windows=split_conds_to_windows)
 
 
+class MiniMaxH3ContextWindowsNode(ContextWindowsManualNode):
+    @classmethod
+    def define_schema(cls) -> io.Schema:
+        schema = super().define_schema()
+        schema.node_id = "MiniMaxH3ContextWindows"
+        schema.display_name = "MiniMax H3 Context Windows"
+        schema.description = "Set context windows for MiniMax H3. Windows start on the model's 17-frame chunks to keep video and audio in sync."
+        schema.category = "model/patch/minimax"
+        schema.inputs = [
+            io.Model.Input("model", tooltip="The model to apply context windows to during sampling."),
+            io.Int.Input("context_length", min=22, max=nodes.MAX_RESOLUTION, step=17, default=124, tooltip="The length of the context window in real frames. Must be 17*n + 5."),
+            io.Int.Input("context_overlap", min=5, step=17, default=39, tooltip="The overlap of the context window in real frames. Must be 17*n + 5."),
+            io.Combo.Input("fuse_method", options=comfy.context_windows.ContextFuseMethods.LIST_STATIC, default=comfy.context_windows.ContextFuseMethods.PYRAMID, tooltip="The method to use to fuse the context windows."),
+            io.Boolean.Input("freenoise", default=True, tooltip="Whether to apply FreeNoise noise shuffling, improves window blending.", advanced=True),
+            io.Boolean.Input("split_conds_to_windows", default=False, tooltip="Whether to split multiple conditionings (created by ConditionCombine) to each window based on region index.", advanced=True),
+        ]
+        return schema
+
+    @classmethod
+    def execute(cls, model: io.Model.Type, context_length: int, context_overlap: int, fuse_method: str, freenoise: bool,
+                split_conds_to_windows: bool=False) -> io.Model:
+        # length and overlap of 5n + 2 latents start every static window on a chunk boundary
+        context_length = video_latent_t(context_length)
+        context_overlap = min(video_latent_t(context_overlap), context_length - 5)
+        return super().execute(model, context_length, context_overlap, comfy.context_windows.ContextSchedules.STATIC_STANDARD, 1, False, fuse_method, dim=2, freenoise=freenoise,
+                               split_conds_to_windows=split_conds_to_windows, causal_window_fix=False)
+
+
 class ContextWindowsExtension(ComfyExtension):
     async def get_node_list(self) -> list[type[io.ComfyNode]]:
         return [
             ContextWindowsManualNode,
             WanContextWindowsManualNode,
             LTXVContextWindowsNode,
+            MiniMaxH3ContextWindowsNode,
         ]
 
 def comfy_entrypoint():

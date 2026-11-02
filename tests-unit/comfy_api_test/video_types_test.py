@@ -1585,7 +1585,8 @@ def test_as_cropped_components_releases_uncropped_storage():
 
 @pytest.mark.parametrize("color_space", ["sRGB", "HDR", "HDR PQ"])
 @pytest.mark.parametrize("bit_depth", [8, 10])
-def test_as_cropped_components_preserves_color_space(color_space, bit_depth):
+@pytest.mark.parametrize("chroma_subsampling", [None, "420", "422", "444"])
+def test_as_cropped_components_preserves_color_space(color_space, bit_depth, chroma_subsampling):
     images = torch.rand(2, 8, 8, 3)
     alpha = torch.rand(2, 8, 8)
     components = VideoComponents(
@@ -1594,13 +1595,17 @@ def test_as_cropped_components_preserves_color_space(color_space, bit_depth):
         metadata={"test": "crop"},
         alpha=alpha,
     )
-    video = VideoFromComponents(components, bit_depth=bit_depth, color_space=color_space)
+    video = VideoFromComponents(
+        components, bit_depth=bit_depth, color_space=color_space,
+        chroma_subsampling=chroma_subsampling,
+    )
 
     cropped = video.as_cropped(2, 2, 4, 4)
     result = cropped.get_components()
 
     assert cropped.get_color_space() == color_space
     assert cropped.get_bit_depth() == bit_depth
+    assert cropped.get_chroma_subsampling() == chroma_subsampling
     assert torch.equal(result.images, images[:, 2:6, 2:6, :])
     assert torch.equal(result.alpha, alpha[:, 2:6, 2:6])
     assert result.frame_rate == components.frame_rate

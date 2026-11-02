@@ -3,15 +3,12 @@ from typing_extensions import override
 from comfy_api.latest import IO, ComfyExtension, Input
 from comfy_api_nodes.apis.wavespeed import (
     FlashVSRRequest,
-    TaskCreatedResponse,
     TaskResultResponse,
     SeedVR2ImageRequest,
 )
 from comfy_api_nodes.util import (
-    ApiEndpoint,
     download_url_to_video_output,
-    poll_op,
-    sync_op,
+    router_op,
     upload_video_to_comfyapi,
     validate_container_format_is_mp4,
     validate_video_duration,
@@ -66,30 +63,17 @@ class WavespeedFlashVSRNode(IO.ComfyNode):
     ) -> IO.NodeOutput:
         validate_container_format_is_mp4(video)
         validate_video_duration(video, min_duration=5, max_duration=60 * 10)
-        initial_res = await sync_op(
+        response = await router_op(
             cls,
-            ApiEndpoint(path="/proxy/wavespeed/api/v3/wavespeed-ai/flashvsr", method="POST"),
-            response_model=TaskCreatedResponse,
+            "wavespeed/flashvsr",
+            response_model=TaskResultResponse,
             data=FlashVSRRequest(
                 target_resolution=target_resolution.lower(),
                 video=await upload_video_to_comfyapi(cls, video),
                 duration=video.get_duration(),
             ),
         )
-        if initial_res.code != 200:
-            raise ValueError(f"Task creation fails with code={initial_res.code} and message={initial_res.message}")
-        final_response = await poll_op(
-            cls,
-            ApiEndpoint(path=f"/proxy/wavespeed/api/v3/predictions/{initial_res.data.id}/result"),
-            response_model=TaskResultResponse,
-            status_extractor=lambda x: "failed" if x.data is None else x.data.status,
-            poll_interval=10.0,
-        )
-        if final_response.code != 200:
-            raise ValueError(
-                f"Task processing failed with code={final_response.code} and message={final_response.message}"
-            )
-        return IO.NodeOutput(await download_url_to_video_output(final_response.data.outputs[0]))
+        return IO.NodeOutput(await download_url_to_video_output(response.data.outputs[0]))
 
 
 class WavespeedImageUpscaleNode(IO.ComfyNode):
@@ -134,33 +118,17 @@ class WavespeedImageUpscaleNode(IO.ComfyNode):
     ) -> IO.NodeOutput:
         if get_number_of_images(image) != 1:
             raise ValueError("Exactly one input image is required.")
-        if model == "SeedVR2":
-            model_path = "seedvr2/image"
-        else:
-            model_path = "ultimate-image-upscaler"
-        initial_res = await sync_op(
+        model_id = "wavespeed/seedvr2" if model == "SeedVR2" else "wavespeed/ultimate-image-upscaler"
+        response = await router_op(
             cls,
-            ApiEndpoint(path=f"/proxy/wavespeed/api/v3/wavespeed-ai/{model_path}", method="POST"),
-            response_model=TaskCreatedResponse,
+            model_id,
+            response_model=TaskResultResponse,
             data=SeedVR2ImageRequest(
                 target_resolution=target_resolution.lower(),
                 image=(await upload_images_to_comfyapi(cls, image, max_images=1))[0],
             ),
         )
-        if initial_res.code != 200:
-            raise ValueError(f"Task creation fails with code={initial_res.code} and message={initial_res.message}")
-        final_response = await poll_op(
-            cls,
-            ApiEndpoint(path=f"/proxy/wavespeed/api/v3/predictions/{initial_res.data.id}/result"),
-            response_model=TaskResultResponse,
-            status_extractor=lambda x: "failed" if x.data is None else x.data.status,
-            poll_interval=10.0,
-        )
-        if final_response.code != 200:
-            raise ValueError(
-                f"Task processing failed with code={final_response.code} and message={final_response.message}"
-            )
-        return IO.NodeOutput(await download_url_to_image_tensor(final_response.data.outputs[0]))
+        return IO.NodeOutput(await download_url_to_image_tensor(response.data.outputs[0]))
 
 
 class WavespeedExtension(ComfyExtension):
