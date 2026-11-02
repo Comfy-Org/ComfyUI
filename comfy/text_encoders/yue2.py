@@ -105,7 +105,8 @@ class YuE2TEModel(torch.nn.Module):
         operations = model_options.get("custom_operations", comfy.ops.manual_cast)
         quant = model_options.get("quantization_metadata")
         if quant is not None and "custom_operations" not in model_options:
-            operations = comfy.ops.mixed_precision_ops(quant, dtype)
+            load_device = model_options.get("load_device", comfy.model_management.text_encoder_device())
+            operations = comfy.ops.mixed_precision_ops(quant, dtype, disabled=comfy.ops.get_disabled_quant_formats(load_device))
         self.model = Llama2_(self.config, device=device, dtype=dtype, ops=operations)
         self.model.prefetch_dynamic_vbars = True
         self.model.graph_dynamic_vbar_blocks = True
