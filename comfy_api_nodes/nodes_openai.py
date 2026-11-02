@@ -43,6 +43,8 @@ STARTING_POINT_ID_PATTERN = r"<starting_point_id:(.*)>"
 
 class SupportedOpenAIModel(str, Enum):
     gpt_6_astra = "gpt-6-astra"
+    gpt_6_1_sol = "gpt-6.1-sol"
+    gpt_6_1_terra = "gpt-6.1-terra"
     gpt_6_sol = "gpt-6-sol"
     gpt_6_luna = "gpt-6-luna"
     gpt_5_6_sol = "gpt-5.6-sol"
@@ -68,6 +70,8 @@ _GPT_5_EFFORTS = ("minimal", "low", "medium", "high")
 _GPT_5_6_EFFORTS = ("none", "low", "medium", "high", "xhigh", "max")
 SUPPORTED_REASONING_EFFORTS: dict[str, tuple[str, ...]] = {
     SupportedOpenAIModel.gpt_6_astra: ("low", "medium", "high", "xhigh", "max"),
+    SupportedOpenAIModel.gpt_6_1_sol: ("low", "medium", "high", "xhigh", "max"),
+    SupportedOpenAIModel.gpt_6_1_terra: _GPT_5_6_EFFORTS,
     SupportedOpenAIModel.gpt_6_sol: _GPT_5_6_EFFORTS,
     SupportedOpenAIModel.gpt_6_luna: _GPT_5_6_EFFORTS,
     SupportedOpenAIModel.gpt_5_6_sol: _GPT_5_6_EFFORTS,
@@ -839,6 +843,16 @@ class OpenAIChatNode(IO.ComfyNode):
                     "usd": [0.0143, 0.0715],
                     "format": { "approximate": true, "separator": "-", "suffix": " per 1K tokens" }
                   }
+                  : $contains($m, "gpt-6.1-sol") ? {
+                    "type": "list_usd",
+                    "usd": [0.00286, 0.0143],
+                    "format": { "approximate": true, "separator": "-", "suffix": " per 1K tokens" }
+                  }
+                  : $contains($m, "gpt-6.1-terra") ? {
+                    "type": "list_usd",
+                    "usd": [0.00143, 0.00715],
+                    "format": { "approximate": true, "separator": "-", "suffix": " per 1K tokens" }
+                  }
                   : $contains($m, "gpt-6-sol") ? {
                     "type": "list_usd",
                     "usd": [0.00286, 0.0143],
@@ -1138,10 +1152,8 @@ class OpenAIChatConfig(IO.ComfyNode):
                     options=REASONING_EFFORT_OPTIONS,
                     default="default",
                     optional=True,
-                    tooltip="How much the model reasons before answering. 'default' leaves the choice to the model. "
-                    "Supported levels differ per model: GPT-6 Astra low-max, GPT-6 Sol/Luna and GPT-5.6 none-max (no minimal), "
-                    "GPT-5.5 none-xhigh, GPT-5.5 Pro medium-xhigh, GPT-5 minimal-high, o-series low-high; "
-                    "GPT-4.1 has no reasoning. Unsupported levels are rejected before the request is sent.",
+                    tooltip="Supported levels vary by model. An unsupported level stops the run and lists the valid ones. "
+                    "'default' lets the model choose.",
                 ),
             ],
             outputs=[
