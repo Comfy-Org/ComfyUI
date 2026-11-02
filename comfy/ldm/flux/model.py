@@ -410,6 +410,8 @@ class Flux(nn.Module):
             index = 0
             ref_latents_method = kwargs.get("ref_latents_method", self.params.default_ref_method)
             timestep_zero = ref_latents_method == "index_timestep_zero"
+            reference_views = kwargs.get("reference_views", None)
+            view_index = None
             for i, ref in enumerate(ref_latents):
                 if ref_latents_method in ("index", "index_timestep_zero"):
                     index += self.params.ref_index_scale
@@ -432,7 +434,15 @@ class Flux(nn.Module):
                     h = max(h, ref.shape[-2] + h_offset)
                     w = max(w, ref.shape[-1] + w_offset)
 
-                kontext, kontext_ids = self.process_img(ref, index=index, h_offset=h_offset, w_offset=w_offset, transformer_options=transformer_options)
+                ref_index = index
+                view = reference_views[i] if reference_views is not None else None
+                if view is not None:
+                    # View references (UltraTex) share the first one's index, each placed over its view's tile.
+                    if view_index is None:
+                        view_index = index
+                    ref_index = view_index
+                    h_offset, w_offset = view_grid[view][0] * h_view, view_grid[view][1] * w_view
+                kontext, kontext_ids = self.process_img(ref, index=ref_index, h_offset=h_offset, w_offset=w_offset, transformer_options=transformer_options)
                 if token_masks is not None and token_masks["refs"][i] is not None:
                     ref_keep = foreground_tokens(token_masks["refs"][i].to(x.device), (ref.shape[-2] + patch_size // 2) // patch_size, (ref.shape[-1] + patch_size // 2) // patch_size)
                     ref_keep = ref_keep.flatten().nonzero().flatten()
