@@ -586,7 +586,7 @@ def _decode_estimate(frames, height, width, dtype=torch.float16, batch=1, offloa
     floors are with them offloaded, so the test decides it instead of the machine."""
     wrapper = vae_mod.VideoAutoencoderKLWrapper.__new__(vae_mod.VideoAutoencoderKLWrapper)
     latent_t = (frames - 1) // 4 + 1
-    with patch.object(vae_mod, "_offload_caches_for", lambda frame_pixels: offload):
+    with patch.object(vae_mod, "_offload_caches_for", lambda frame_pixels, *_: offload):
         return wrapper.comfy_memory_used_decode((batch, 16, latent_t, height // 8, width // 8), dtype)
 
 
@@ -594,6 +594,25 @@ def test_seedvr2_decode_estimate_charges_resident_caches_without_offload():
     """Without room to pin the caches in host memory they stay on the GPU, and the estimate says so."""
     resident = _decode_estimate(21, 1080, 1920, offload=False) - _decode_estimate(21, 1080, 1920)
     assert resident == 1080 * 1920 * vae_mod.SEEDVR2_CACHE_BYTES_PER_FRAME_PIXEL
+
+
+@pytest.mark.parametrize("free_gib, vram_state, device_type, resident", [
+    (32, "NORMAL_VRAM", "cuda", True),
+    (2, "NORMAL_VRAM", "cuda", False),
+    (32, "LOW_VRAM", "cuda", False),
+    (32, "NORMAL_VRAM", "cpu", False),
+])
+def test_seedvr2_caches_stay_on_the_gpu_only_when_they_fit(free_gib, vram_state, device_type, resident):
+    """A 720p decode keeps its caches on the GPU when free VRAM holds them beside its working set;
+    otherwise, and always under --lowvram or off CUDA, they go to host memory as before."""
+    mm = vae_mod.comfy.model_management
+    area = 1248 * 720
+    with patch.object(mm, "vram_state", mm.VRAMState[vram_state]), \
+            patch.object(mm, "get_free_memory", lambda dev=None: free_gib * 1024 ** 3), \
+            patch.object(mm, "extra_reserved_memory", lambda: 0), \
+            patch.object(mm, "ensure_pin_budget", lambda size, evict_active=False: True):
+        offload = vae_mod._offload_caches_for(area, vae_mod._decode_working_bytes(area, torch.float16), torch.device(device_type))
+    assert offload is not resident
 
 
 def _encode_estimate(frames, height, width, dtype=torch.float16, batch=1):
@@ -659,6 +678,7 @@ def test_seedvr2_batch_runs_a_video_at_a_time():
     slices land back in their video's place (in the preallocated output too)."""
     vae = vae_mod.VideoAutoencoderKLWrapper.__new__(vae_mod.VideoAutoencoderKLWrapper)
     vae.slicing_sample_min_size = vae.slicing_latent_min_size = 2
+    vae.device = torch.device("cpu")   # encode() and decode() set it before slicing
     seen = []
 
     def run(x, memory_state=vae_mod.MemoryState.DISABLED, memory_cache=None):
@@ -701,7 +721,7 @@ def test_seedvr2_decode_output_shape_matches_decode():
 def _tile_side(free_gib, dtype=torch.float16, offload=True):
     wrapper = vae_mod.VideoAutoencoderKLWrapper.__new__(vae_mod.VideoAutoencoderKLWrapper)
     wrapper.spatial_downsample_factor = 8
-    with patch.object(vae_mod, "_offload_caches_for", lambda frame_pixels: offload):
+    with patch.object(vae_mod, "_offload_caches_for", lambda frame_pixels, *_: offload):
         return wrapper.preferred_decode_tile(free_gib * 1024 ** 3, dtype)
 
 
