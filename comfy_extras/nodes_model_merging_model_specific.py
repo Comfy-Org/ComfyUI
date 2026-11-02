@@ -367,6 +367,34 @@ class ModelMergeKrea2(comfy_extras.nodes_model_merging.ModelMergeBlocks):
 
         return {"required": arg_dict}
 
+class ModelMergeMOSSImage(comfy_extras.nodes_model_merging.ModelMergeBlocks):
+    CATEGORY = "model/merging/model specific"
+
+    @classmethod
+    def INPUT_TYPES(s):
+        arg_dict = { "model1": ("MODEL",),
+                              "model2": ("MODEL",)}
+
+        argument = ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01})
+
+        arg_dict["video_embedder."] = argument
+        arg_dict["text_embedder.proj."] = argument
+
+        for i in range(2):
+            arg_dict["text_embedder.blocks.{}.".format(i)] = argument
+
+        arg_dict["time_embedding."] = argument
+        arg_dict["shared_block_modulation."] = argument
+
+        for i in range(42):
+            arg_dict["layers.{}.".format(i)] = argument
+
+        arg_dict["final_norm_video."] = argument
+        arg_dict["final_linear_video."] = argument
+        arg_dict["video_head_modulation."] = argument
+
+        return {"required": arg_dict}
+
 NODE_CLASS_MAPPINGS = {
     "ModelMergeSD1": ModelMergeSD1,
     "ModelMergeSD2": ModelMergeSD1, #SD1 and SD2 have the same blocks
@@ -384,4 +412,5 @@ NODE_CLASS_MAPPINGS = {
     "ModelMergeCosmosPredict2_14B": ModelMergeCosmosPredict2_14B,
     "ModelMergeQwenImage": ModelMergeQwenImage,
     "ModelMergeKrea2": ModelMergeKrea2,
+    "ModelMergeMOSSImage": ModelMergeMOSSImage,
 }

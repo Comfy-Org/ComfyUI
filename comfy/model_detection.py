@@ -404,8 +404,12 @@ def detect_unet_config(state_dict, key_prefix, metadata=None):
         dit_config["num_layers"] = count_blocks(state_dict_keys, '{}blocks.'.format(key_prefix) + '{}.')
         dit_config["token_refiner_num_layers"] = count_blocks(state_dict_keys, '{}token_refiner.blocks.'.format(key_prefix) + '{}.')
         dit_config["hidden_size"] = state_dict['{}video_patch_proj.weight'.format(key_prefix)].shape[0]
-        dit_config["latents_dim"] = state_dict['{}final_layer.video_out.weight'.format(key_prefix)].shape[0] // 4  # patch 1x2x2
-        dit_config["audio_latents_dim"] = state_dict['{}final_layer.audio_out.weight'.format(key_prefix)].shape[0]
+        # a PDD checkpoint stacks pdd_steps output heads per stream (declared in its config metadata)
+        pdd_steps = 1
+        if metadata is not None and "config" in metadata:
+            pdd_steps = json.loads(metadata["config"]).get("transformer", {}).get("pdd_steps", 1)
+        dit_config["latents_dim"] = state_dict['{}final_layer.video_out.weight'.format(key_prefix)].shape[0] // (4 * pdd_steps)  # patch 1x2x2
+        dit_config["audio_latents_dim"] = state_dict['{}final_layer.audio_out.weight'.format(key_prefix)].shape[0] // pdd_steps
         dit_config["attention_head_dim"] = state_dict['{}blocks.0.attn.q_norm.weight'.format(key_prefix)].shape[0]
         qkv = state_dict['{}blocks.0.attn.qkv_proj.weight'.format(key_prefix)]
         dit_config["num_attention_heads"] = qkv.shape[0] // (3 * dit_config["attention_head_dim"])
@@ -1016,6 +1020,25 @@ def detect_unet_config(state_dict, key_prefix, metadata=None):
         dit_config["image_model"] = "ideogram4"
         dit_config["in_channels"] = state_dict['{}input_proj.weight'.format(key_prefix)].shape[1]
         dit_config["num_layers"] = count_blocks(state_dict_keys, '{}layers.'.format(key_prefix) + '{}.')
+        return dit_config
+
+    if ('{}perceiver.latent_queries'.format(key_prefix) in state_dict_keys and '{}layers.0.attention.qkv.weight'.format(key_prefix) in state_dict_keys and '{}final_layer.linear.weight'.format(key_prefix) in state_dict_keys
+            and ('{}layers.0.feed_forward.w13.weight'.format(key_prefix) in state_dict_keys or '{}layers.0.feed_forward.w1.weight'.format(key_prefix) in state_dict_keys)):  # Fibo 2.0 (repacked)
+        dit_config = {}
+        dit_config["image_model"] = "fibo2"
+        dit_config["max_gist_tokens"], dit_config["dim"] = state_dict['{}perceiver.latent_queries'.format(key_prefix)].shape
+        dit_config["n_heads"] = dit_config["dim"] // 128
+        dit_config["in_channels"] = state_dict['{}final_layer.linear.weight'.format(key_prefix)].shape[0]
+        dit_config["n_layers"] = count_blocks(state_dict_keys, '{}layers.'.format(key_prefix) + '{}.')
+        dit_config["n_refiner_layers"] = count_blocks(state_dict_keys, '{}noise_refiner.'.format(key_prefix) + '{}.')
+        dit_config["perceiver_layers"] = count_blocks(state_dict_keys, '{}perceiver.layers.'.format(key_prefix) + '{}.')
+        dit_config["injection_layers"] = [i for i in range(dit_config["n_layers"]) if '{}layers.{}.cross_attn_gate'.format(key_prefix, i) in state_dict_keys]
+        w13 = '{}layers.0.feed_forward.w13.weight'.format(key_prefix)
+        if w13 in state_dict_keys:  # w1 and w3 fused, hidden width padded for the fused int8 swiglu
+            dit_config["ffn_dim"] = state_dict[w13].shape[0] // 2
+        else:
+            dit_config["ffn_dim"] = state_dict['{}layers.0.feed_forward.w1.weight'.format(key_prefix)].shape[0]
+            dit_config["fused_ffn"] = False
         return dit_config
 
     if '{}shared_block_modulation.weight'.format(key_prefix) in state_dict_keys and '{}layers.0.proj.ffn_up_gate.weight'.format(key_prefix) in state_dict_keys:  # MOSS-Image

@@ -7,6 +7,7 @@ import logging
 
 from comfy import model_management
 import comfy.ops
+import comfy.quant_ops
 ops = comfy.ops.disable_weight_init
 
 if model_management.xformers_enabled_vae():
@@ -52,6 +53,83 @@ def nonlinearity(x):
 
 def Normalize(in_channels, num_groups=32):
     return ops.GroupNorm(num_groups=num_groups, num_channels=in_channels, eps=1e-6, affine=True)
+
+
+def fused_norm_served(device, dtype):
+    # MIOpen runs a channels_last conv through NCHW and loses the gain; the kitchen fp16 conv on RDNA3+ does not
+    ck = getattr(comfy.quant_ops, "ck", None)
+    if ck is None or device.type != "cuda":
+        return False
+    if torch.version.hip:
+        return dtype == torch.float16 and ck.registry.get_constraints("hip", "fp16_conv3d") is not None
+    return dtype in (torch.float16, torch.bfloat16)
+
+
+
+STRIP_ELEMS = 2 ** 24
+
+
+def strip_rows(fn, x, out_elems, scale=1, out=None, accumulate=False):
+    # fn(rows, top, bottom) runs a 3x3 conv on a strip with a one-row halo, padding only at the image edge
+    size = x.shape[2]
+    step = -(-size // -(-max(x.numel(), out_elems) // STRIP_ELEMS))
+    for a in range(0, size, step):
+        b = min(size, a + step)
+        lo, hi = max(0, a - 1), min(size, b + 1)
+        top = int(lo == 0)
+        rows = fn(x.narrow(2, lo, hi - lo), top, int(hi == size))
+        rows = rows.narrow(2, scale * (a - lo) + top - 1, scale * (b - a))
+        if out is None:
+            out = torch.empty((rows.shape[0], rows.shape[1], size * scale, rows.shape[3]), dtype=rows.dtype, device=rows.device, memory_format=torch.channels_last)
+        dst = out.narrow(2, scale * a, scale * (b - a))
+        if accumulate:
+            dst.add_(rows)
+        else:
+            dst.copy_(rows)
+    return out
+
+
+def interleaved_view(x, channels, part):
+    # x's storage as two half-width tensors whose rows alternate inside each row slot
+    b, c, h, w = x.shape
+    flat = x.permute(0, 2, 3, 1).reshape(-1)
+    return flat.as_strided((1, channels, h, w), (h * w * c, 1, w * c, channels), flat.storage_offset() + part * w * channels)
+
+
+def region(buf, end, channels, h, w):
+    # the channels_last tensor of that shape ending at element `end` of the flat buffer
+    n = channels * h * w
+    return buf.narrow(0, end - n, n).view(1, h, w, channels).permute(0, 3, 1, 2)
+
+
+def padded_conv(padded, weight, bias):
+    # a 5-D weight means the fp16-accumulate opt-in: the kitchen conv takes the padded strip as a depth-1 conv3d
+    if weight.ndim == 5:
+        return comfy.quant_ops.ck.fp16_conv3d(padded, weight, bias, None, 1).squeeze(2)
+    return torch.nn.functional.conv2d(padded.squeeze(2), weight, bias)
+
+
+def conv_weight(weight, x):
+    # the ROCm kitchen conv accumulates in fp32, so it needs no fp16-accumulation opt-in
+    if comfy.ops._fp16_linear_wanted(x) or (torch.version.hip and x.dtype == torch.float16):
+        return weight.unsqueeze(2).contiguous(memory_format=torch.channels_last_3d)
+    return weight
+
+
+def strip_conv(conv, x, norm=None, scale=1, out=None, accumulate=False):
+    # conv(silu(norm(x))) in row strips, after a nearest upsample when scale > 1
+    ck = comfy.quant_ops.ck
+    groups, eps = (1, 0.0) if norm is None else (norm.num_groups, norm.eps)
+    stats = None if norm is None else ck.group_norm_stats3d(x.unsqueeze(2), groups, eps)
+    with comfy.ops.CastBiasWeightContext(norm, x, offloadable=True) as (norm_weight, norm_bias), comfy.ops.CastBiasWeightContext(conv, x, offloadable=True) as (weight, bias):
+        weight = conv_weight(weight, x)
+
+        def fn(rows, top, bottom):
+            if scale > 1:
+                rows = interpolate_up(rows, scale)
+            rows = ck.group_norm_silu_pad3d(rows.unsqueeze(2), norm_weight, norm_bias, groups, eps, [1, 1, top, bottom, 0], norm is not None, zero_pad=True, stats=stats)
+            return padded_conv(rows, weight, bias)
+        return strip_rows(fn, x, x.shape[0] * conv.out_channels * x.shape[2] * x.shape[3] * scale * scale, scale, out, accumulate)
 
 
 class CarriedConv3d(nn.Module):
@@ -107,10 +185,11 @@ def interpolate_up(x, scale_factor):
     return torch.nn.functional.interpolate(x, scale_factor=scale_factor, mode="nearest")
 
 class Upsample(nn.Module):
-    def __init__(self, in_channels, with_conv, conv_op=ops.Conv2d, scale_factor=2.0):
+    def __init__(self, in_channels, with_conv, conv_op=ops.Conv2d, scale_factor=2.0, fused_norm=False):
         super().__init__()
         self.with_conv = with_conv
         self.scale_factor = scale_factor
+        self.fused_norm = fused_norm and with_conv
 
         if self.with_conv:
             self.conv = conv_op(in_channels,
@@ -119,10 +198,13 @@ class Upsample(nn.Module):
                                         stride=1,
                                         padding=1)
 
-    def forward(self, x, conv_carry_in=None, conv_carry_out=None):
+    def forward(self, x, conv_carry_in=None, conv_carry_out=None, out=None):
         scale_factor = self.scale_factor
         if isinstance(scale_factor, (int, float)):
             scale_factor = (scale_factor,) * (x.ndim - 2)
+
+        if self.fused_norm and fused_norm_served(x.device, x.dtype):
+            return strip_conv(self.conv, x, scale=2, out=out)
 
         if x.ndim == 5 and scale_factor[0] > 1.0:
             results = []
@@ -140,10 +222,29 @@ class Upsample(nn.Module):
         return x
 
 
+def strip_down(conv, x):
+    # the stride-2 conv with its (0, 1, 0, 1) pad in strips: output rows [a, b) read input rows [2a, 2b + 1)
+    ck = comfy.quant_ops.ck
+    rows = x.shape[2] // 2
+    step = -(-rows // -(-x.numel() // STRIP_ELEMS))
+    out = None
+    with comfy.ops.CastBiasWeightContext(conv, x, offloadable=True) as (weight, bias):
+        for a in range(0, rows, step):
+            b = min(rows, a + step)
+            hi = min(x.shape[2], 2 * b + 1)
+            padded = ck.group_norm_silu_pad3d(x.narrow(2, 2 * a, hi - 2 * a).unsqueeze(2), None, None, 1, 0.0, [0, 1, 0, int(hi == x.shape[2]), 0], False, zero_pad=True).squeeze(2)
+            y = torch.nn.functional.conv2d(padded, weight, bias, stride=2)
+            if out is None:
+                out = torch.empty((x.shape[0], y.shape[1], rows, y.shape[3]), dtype=y.dtype, device=y.device, memory_format=torch.channels_last)
+            out.narrow(2, a, b - a).copy_(y)
+    return out
+
+
 class Downsample(nn.Module):
-    def __init__(self, in_channels, with_conv, stride=2, conv_op=ops.Conv2d):
+    def __init__(self, in_channels, with_conv, stride=2, conv_op=ops.Conv2d, fused_norm=False):
         super().__init__()
         self.with_conv = with_conv
+        self.fused_norm = fused_norm and with_conv
         if self.with_conv:
             # no asymmetric padding in torch conv, must do it ourselves
             self.conv = conv_op(in_channels,
@@ -153,6 +254,8 @@ class Downsample(nn.Module):
                                         padding=0)
 
     def forward(self, x, conv_carry_in=None, conv_carry_out=None):
+        if self.fused_norm and fused_norm_served(x.device, x.dtype):
+            return strip_down(self.conv, x)
         if self.with_conv:
             if isinstance(self.conv, CarriedConv3d):
                 x = conv_carry_causal_3d([x], self.conv, conv_carry_in, conv_carry_out)
@@ -173,12 +276,13 @@ class Downsample(nn.Module):
 
 class ResnetBlock(nn.Module):
     def __init__(self, *, in_channels, out_channels=None, conv_shortcut=False,
-                 dropout=0.0, temb_channels=512, conv_op=ops.Conv2d, norm_op=Normalize):
+                 dropout=0.0, temb_channels=512, conv_op=ops.Conv2d, norm_op=Normalize, fused_norm=False):
         super().__init__()
         self.in_channels = in_channels
         out_channels = in_channels if out_channels is None else out_channels
         self.out_channels = out_channels
         self.use_conv_shortcut = conv_shortcut
+        self.fused_norm = fused_norm
 
         self.swish = torch.nn.SiLU(inplace=True)
         self.norm1 = norm_op(in_channels)
@@ -211,7 +315,49 @@ class ResnetBlock(nn.Module):
                                                     stride=1,
                                                     padding=0)
 
-    def forward(self, x, temb=None, conv_carry_in=None, conv_carry_out=None):
+    def halves_in_place(self, x):
+        return x.shape[0] == 1 and self.in_channels == 2 * self.out_channels and x.is_contiguous(memory_format=torch.channels_last)
+
+    def halve_in_place(self, x):
+        # C -> C/2: hidden and output interleave inside x; a strip's last row waits until the next strip has read its halo
+        ck = comfy.quant_ops.ck
+        h = interleaved_view(x, self.out_channels, 0)
+        out = interleaved_view(x, self.out_channels, 1)
+        stats = ck.group_norm_stats3d(x.unsqueeze(2), self.norm1.num_groups, self.norm1.eps)
+        rows = x.shape[2]
+        step = -(-rows // -(-x.numel() // STRIP_ELEMS))
+        held = None
+        with comfy.ops.CastBiasWeightContext(self.norm1, x, offloadable=True) as (norm_weight, norm_bias), comfy.ops.CastBiasWeightContext(self.conv1, x, offloadable=True) as (weight, bias), comfy.ops.CastBiasWeightContext(self.nin_shortcut, x, offloadable=True) as (sc_weight, sc_bias):
+            weight = conv_weight(weight, x)
+            for a in range(0, rows, step):
+                b = min(rows, a + step)
+                lo, hi = max(0, a - 1), min(rows, b + 1)
+                padded = ck.group_norm_silu_pad3d(x.narrow(2, lo, hi - lo).unsqueeze(2), norm_weight, norm_bias, self.norm1.num_groups, self.norm1.eps, [1, 1, int(lo == 0), int(hi == rows), 0], True, zero_pad=True, stats=stats)
+                h_rows = padded_conv(padded, weight, bias)
+                out_rows = torch.nn.functional.conv2d(x.narrow(2, a, b - a), sc_weight, sc_bias)
+                if held is not None:
+                    h.narrow(2, a - 1, 1).copy_(held[0])
+                    out.narrow(2, a - 1, 1).copy_(held[1])
+                h.narrow(2, a, b - a - 1).copy_(h_rows.narrow(2, 0, b - a - 1))
+                out.narrow(2, a, b - a - 1).copy_(out_rows.narrow(2, 0, b - a - 1))
+                held = (h_rows.narrow(2, b - a - 1, 1).clone(), out_rows.narrow(2, b - a - 1, 1).clone())
+            h.narrow(2, rows - 1, 1).copy_(held[0])
+            out.narrow(2, rows - 1, 1).copy_(held[1])
+        return strip_conv(self.conv2, h, self.norm2, out=out, accumulate=True)
+
+    def forward(self, x, temb=None, conv_carry_in=None, conv_carry_out=None, hidden=None):
+        if self.fused_norm and fused_norm_served(x.device, x.dtype):
+            # the block consumes x: the residual stream is updated in place
+            if x.stride(1) != 1:  # NCHW, after the mid-block attention
+                x = x.contiguous(memory_format=torch.channels_last)
+            if self.in_channels == self.out_channels:
+                h = strip_conv(self.conv1, x, self.norm1, out=hidden)
+                return strip_conv(self.conv2, h, self.norm2, out=x, accumulate=True)
+            if self.halves_in_place(x):
+                return self.halve_in_place(x)
+            h = strip_conv(self.conv1, x, self.norm1)
+            return strip_conv(self.conv2, h, self.norm2, out=self.nin_shortcut(x), accumulate=True)
+
         h = x
         h = self.norm1(h)
         h = [ self.swish(h) ]
@@ -541,13 +687,14 @@ class Encoder(nn.Module):
     def __init__(self, *, ch, out_ch, ch_mult=(1,2,4,8), num_res_blocks,
                  attn_resolutions, dropout=0.0, resamp_with_conv=True, in_channels,
                  resolution, z_channels, double_z=True, use_linear_attn=False, attn_type="vanilla",
-                 conv3d=False, time_compress=None,
+                 conv3d=False, time_compress=None, fused_norm=False,
                  **ignore_kwargs):
         super().__init__()
         if use_linear_attn:
             attn_type = "linear"
         self.ch = ch
         self.temb_ch = 0
+        self.fused_norm = fused_norm = fused_norm and not conv3d
         self.num_resolutions = len(ch_mult)
         self.num_res_blocks = num_res_blocks
         self.resolution = resolution
@@ -587,7 +734,8 @@ class Encoder(nn.Module):
                                          out_channels=block_out,
                                          temb_channels=self.temb_ch,
                                          dropout=dropout,
-                                         conv_op=conv_op))
+                                         conv_op=conv_op,
+                                         fused_norm=fused_norm))
                 block_in = block_out
                 if curr_res in attn_resolutions:
                     attn.append(make_attn(block_in, attn_type=attn_type, conv_op=conv_op))
@@ -601,7 +749,7 @@ class Encoder(nn.Module):
                         stride = (1, 2, 2)
                 else:
                     self.time_compress *= 2
-                down.downsample = Downsample(block_in, resamp_with_conv, stride=stride, conv_op=conv_op)
+                down.downsample = Downsample(block_in, resamp_with_conv, stride=stride, conv_op=conv_op, fused_norm=fused_norm)
                 curr_res = curr_res // 2
             self.down.append(down)
 
@@ -614,13 +762,15 @@ class Encoder(nn.Module):
                                        out_channels=block_in,
                                        temb_channels=self.temb_ch,
                                        dropout=dropout,
-                                       conv_op=conv_op)
+                                       conv_op=conv_op,
+                                       fused_norm=fused_norm)
         self.mid.attn_1 = make_attn(block_in, attn_type=attn_type, conv_op=mid_attn_conv_op)
         self.mid.block_2 = ResnetBlock(in_channels=block_in,
                                        out_channels=block_in,
                                        temb_channels=self.temb_ch,
                                        dropout=dropout,
-                                       conv_op=conv_op)
+                                       conv_op=conv_op,
+                                       fused_norm=fused_norm)
 
         # end
         self.norm_out = Normalize(block_in)
@@ -652,6 +802,8 @@ class Encoder(nn.Module):
                 conv_carry_out = None
 
             # downsampling
+            if self.fused_norm and fused_norm_served(x1.device, x1.dtype):
+                x1 = x1.contiguous(memory_format=torch.channels_last)
             x1 = [ x1 ]
             h1 = conv_carry_causal_3d(x1, self.conv_in, conv_carry_in, conv_carry_out)
 
@@ -676,8 +828,9 @@ class Encoder(nn.Module):
         h = self.mid.block_2(h, temb)
 
         # end
-        h = self.norm_out(h)
-        h = [ nonlinearity(h) ]
+        if self.fused_norm and fused_norm_served(h.device, h.dtype):
+            return strip_conv(self.conv_out, h, self.norm_out)
+        h = [ nonlinearity(self.norm_out(h)) ]
         h = conv_carry_causal_3d(h, self.conv_out)
         return h
 
@@ -691,6 +844,7 @@ class Decoder(nn.Module):
                  attn_op=AttnBlock,
                  conv3d=False,
                  time_compress=None,
+                 fused_norm=False,
                 **ignorekwargs):
         super().__init__()
         self.ch = ch
@@ -701,6 +855,7 @@ class Decoder(nn.Module):
         self.in_channels = in_channels
         self.tanh_out = tanh_out
         self.carried = False
+        self.fused_norm = fused_norm = fused_norm and not conv3d
 
         if conv3d:
             if not attn_resolutions and resnet_op == ResnetBlock:
@@ -736,13 +891,15 @@ class Decoder(nn.Module):
                                        out_channels=block_in,
                                        temb_channels=self.temb_ch,
                                        dropout=dropout,
-                                       conv_op=conv_op)
+                                       conv_op=conv_op,
+                                       fused_norm=fused_norm)
         self.mid.attn_1 = attn_op(block_in, conv_op=mid_attn_conv_op)
         self.mid.block_2 = resnet_op(in_channels=block_in,
                                        out_channels=block_in,
                                        temb_channels=self.temb_ch,
                                        dropout=dropout,
-                                       conv_op=conv_op)
+                                       conv_op=conv_op,
+                                       fused_norm=fused_norm)
 
         # upsampling
         self.up = nn.ModuleList()
@@ -755,7 +912,8 @@ class Decoder(nn.Module):
                                          out_channels=block_out,
                                          temb_channels=self.temb_ch,
                                          dropout=dropout,
-                                         conv_op=conv_op))
+                                         conv_op=conv_op,
+                                         fused_norm=fused_norm))
                 block_in = block_out
                 if curr_res in attn_resolutions:
                     attn.append(attn_op(block_in, conv_op=conv_op))
@@ -768,7 +926,7 @@ class Decoder(nn.Module):
                     if i_level > math.log2(time_compress):
                         scale_factor = (1.0, 2.0, 2.0)
 
-                up.upsample = Upsample(block_in, resamp_with_conv, conv_op=conv_op, scale_factor=scale_factor)
+                up.upsample = Upsample(block_in, resamp_with_conv, conv_op=conv_op, scale_factor=scale_factor, fused_norm=fused_norm)
                 curr_res = curr_res * 2
             self.up.insert(0, up) # prepend to get consistent order
 
@@ -780,7 +938,39 @@ class Decoder(nn.Module):
                                         stride=1,
                                         padding=1)
 
+    def forward_fused(self, z):
+        # one buffer the size of the largest upsample output holds every level: each upsample writes it from
+        # the front while reading its input at the back, and the blocks take their hidden tensors from the rest
+        h = self.conv_in(z.contiguous(memory_format=torch.channels_last))
+        h = self.mid.block_1(h, None)
+        h = self.mid.attn_1(h)
+        h = self.mid.block_2(h, None)
+        n = self.num_resolutions
+        buf = torch.empty(max(self.up[i].block[-1].out_channels * (h.shape[2] << (n - i)) * (h.shape[3] << (n - i)) for i in range(1, n)), dtype=h.dtype, device=h.device)
+        for i_level in reversed(range(n)):
+            level = self.up[i_level]
+            hidden = None
+            for i_block, block in enumerate(level.block):
+                if hidden is None:
+                    if block.halves_in_place(h):
+                        hidden = interleaved_view(h, block.out_channels, 0)
+                    else:
+                        hidden = region(buf, buf.numel() - (h.numel() if i_level < n - 1 else 0), block.out_channels, h.shape[2], h.shape[3])
+                h = block(h, None, hidden=hidden)
+                if len(level.attn) > 0:
+                    h = level.attn[i_block](h)
+            if i_level != 0:
+                h = level.upsample(h, out=region(buf, buf.numel(), h.shape[1], 2 * h.shape[2], 2 * h.shape[3]))
+        h = strip_conv(self.conv_out, h, self.norm_out)
+        if self.tanh_out:
+            h = torch.tanh(h)
+        return h
+
     def forward(self, z, **kwargs):
+        if self.fused_norm and fused_norm_served(z.device, z.dtype):
+            out = [self.forward_fused(z[i:i + 1]) for i in range(z.shape[0])]
+            return out[0] if len(out) == 1 else torch.cat(out)
+
         # timestep embedding
         temb = None
 

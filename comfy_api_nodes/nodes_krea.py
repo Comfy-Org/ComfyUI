@@ -341,7 +341,7 @@ class Krea3ImageNode(IO.ComfyNode):
                                     "aspect_ratio",
                                     options=_KREA3_ASPECT_RATIOS,
                                     default="auto",
-                                    tooltip="auto follows the first image, or the prompt when no image is connected.",
+                                    tooltip="auto lets Krea pick the shape from the connected images and the prompt.",
                                 ),
                                 IO.Combo.Input(
                                     "resolution",
@@ -350,10 +350,12 @@ class Krea3ImageNode(IO.ComfyNode):
                                 ),
                                 IO.Combo.Input(
                                     "thinking_mode",
-                                    options=["fast", "high"],
+                                    options=["fast", "high", "ultra"],
                                     default="fast",
                                     tooltip="fast is recommended. "
-                                    "high plans complex edits in more detail and takes longer.",
+                                    "high plans complex edits in more detail and takes longer. "
+                                    "ultra generates several candidates and returns the best one; "
+                                    "it needs at least one image, always outputs 2K and does not support precise_edit.",
                                 ),
                                 IO.Boolean.Input(
                                     "precise_edit",
@@ -389,12 +391,13 @@ class Krea3ImageNode(IO.ComfyNode):
                 ),
                 expr="""
                 (
-                  $res := $lookup(widgets, "model.resolution");
-                  $high := $lookup(widgets, "model.thinking_mode") = "high";
+                  $mode := $lookup(widgets, "model.thinking_mode");
+                  $is1k := $lookup(widgets, "model.resolution") = "1k" and $mode != "ultra";
                   $refs := $lookup(inputGroups, "model.images");
-                  $base := $res = "1k" ? ($high ? 0.0715 : 0.0429) : ($high ? 0.1144 : 0.0858);
+                  $base := $mode = "ultra" ? 0.3718
+                    : $is1k ? ($mode = "high" ? 0.0715 : 0.0429) : ($mode = "high" ? 0.1144 : 0.0858);
                   $min := $base + 0.0286 * $refs;
-                  ($res = "1k" or $refs = 0)
+                  ($is1k or $refs = 0)
                     ? {"type":"usd","usd": $min}
                     : {"type":"range_usd","min_usd": $min,"max_usd": $base + 0.1001 * $refs}
                 )
@@ -405,8 +408,14 @@ class Krea3ImageNode(IO.ComfyNode):
     @classmethod
     async def execute(cls, model: dict) -> IO.NodeOutput:
         validate_string(model["prompt"], min_length=1)
+        ultra = model["thinking_mode"] == "ultra"
+        if ultra and not model["images"]:
+            raise ValueError("thinking_mode ultra needs at least one image.")
+        if ultra and model["precise_edit"]:
+            raise ValueError("precise_edit is not supported with thinking_mode ultra.")
         prompt = _resolve_image_refs(model["prompt"], len(model["images"]))
-        reference_pixels = 1024 * 1024 if model["resolution"] == "1K" else 2048 * 2048
+        resolution = "2K" if ultra else model["resolution"]
+        reference_pixels = 1024 * 1024 if resolution == "1K" else 2048 * 2048
         image_urls = [
             await _upload_image_to_krea_assets(cls, image, reference_pixels) for image in model["images"].values()
         ]
@@ -417,11 +426,11 @@ class Krea3ImageNode(IO.ComfyNode):
             data=Krea3GenerateImageRequest(
                 prompt=prompt,
                 thinking_mode=model["thinking_mode"],
-                resolution=model["resolution"].lower(),
+                resolution=resolution.lower(),
                 aspect_ratio=None if model["aspect_ratio"] == "auto" else model["aspect_ratio"],
                 seed=model["seed"],
                 image_urls=image_urls or None,
-                regional_edit=model["precise_edit"],
+                regional_edit=None if ultra else model["precise_edit"],
             ),
         )
         job = await poll_op(
@@ -430,7 +439,7 @@ class Krea3ImageNode(IO.ComfyNode):
             response_model=KreaJob,
             status_extractor=lambda r: r.status,
             queued_statuses=_KREA_QUEUED_STATUSES,
-            poll_interval=1.0,
+            poll_interval=5.0 if ultra else 1.0,
         )
         return IO.NodeOutput(await download_url_to_image_tensor(job.result.urls[0]))
 

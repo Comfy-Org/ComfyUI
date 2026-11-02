@@ -1,3 +1,4 @@
+import asyncio
 import re
 
 import torch
@@ -10,6 +11,7 @@ from comfy_api_nodes.apis.heygen import (
     HEYGEN_TRANSLATE_LANGUAGES,
     HEYGEN_VOICE_GENERAL_MAP,
     HEYGEN_VOICE_GENERAL_OPTIONS,
+    HEYGEN_VOICE_LANGUAGES,
     HEYGEN_VOICE_TTS_MAP,
     HEYGEN_VOICE_TTS_OPTIONS,
 )
@@ -38,8 +40,12 @@ _TRANSLATIONS_PATH = "/proxy/heygen/v3/video-translations"
 _SPEECH_PATH = "/proxy/heygen/v3/voices/speech"
 _AVATARS_PATH = "/proxy/heygen/v3/avatars"
 _LOOKS_PATH = "/proxy/heygen/v3/avatars/looks"
+_MODEL_VOICES_PATH = "/proxy/heygen/v3/models/audio/voices"
+_MODEL_TTS_PATH = "/proxy/heygen/v3/models/audio/tts"
 
 _DEFAULT_VOICE_OPTION = "(avatar's default voice)"
+_VOICE_LANGUAGE_OPTIONS = ["auto", *HEYGEN_VOICE_LANGUAGES]
+_NEW_VOICE_RETRIES = 5
 
 _AVATARS_BY_ENGINE = {
     e: [label for label, (_aid, _atype, engines) in HEYGEN_AVATAR_MAP.items() if e in engines]
@@ -91,11 +97,18 @@ async def _apply_speech_source(cls: type[IO.ComfyNode], payload: dict, speech: d
 
 async def _create_and_poll_video(cls: type[IO.ComfyNode], create_path: str, payload: dict) -> dict:
     """POST a video payload, poll /v3/videos until terminal, and return the final video data."""
-    created = await sync_op_raw(
-        cls,
-        ApiEndpoint(path=create_path, method="POST"),
-        data=payload,
-    )
+    for attempt in range(_NEW_VOICE_RETRIES + 1):
+        try:
+            created = await sync_op_raw(
+                cls,
+                ApiEndpoint(path=create_path, method="POST"),
+                data=payload,
+            )
+            break
+        except Exception as e:
+            if attempt == _NEW_VOICE_RETRIES or "Invalid voice_id" not in str(e):
+                raise
+            await asyncio.sleep(3)
     video_id = (created.get("data") or {}).get("video_id")
     if not video_id:
         raise ValueError(f"HeyGen did not return a video_id: {created}")
@@ -1080,6 +1093,205 @@ class HeyGenImageToVideoNode(IO.ComfyNode):
         return IO.NodeOutput(await download_url_to_video_output(video["video_url"]))
 
 
+class HeyGenVoiceCloneNode(IO.ComfyNode):
+
+    @classmethod
+    def define_schema(cls) -> IO.Schema:
+        return IO.Schema(
+            node_id="HeyGenVoiceCloneNode",
+            display_name="HeyGen Voice 1.0 Instant Clone",
+            category="partner/audio/HeyGen",
+            description="Clone a voice from a recording of one speaker with HeyGen Voice 1.0. Connect the voice_id "
+            "to HeyGen Voice 1.0 Text to Speech, or to custom_voice_id in HeyGen Avatar Video and HeyGen Talking Photo.",
+            inputs=[
+                IO.Audio.Input(
+                    "audio",
+                    tooltip="Recording of one speaker. Use at least 10 seconds of clear speech; "
+                    "only the first 3 minutes are used.",
+                ),
+                IO.Combo.Input(
+                    "language",
+                    options=_VOICE_LANGUAGE_OPTIONS,
+                    tooltip="Language spoken in the recording.",
+                ),
+                IO.Combo.Input(
+                    "similarity",
+                    options=["medium", "high", "extra_high", "max"],
+                    default="max",
+                    tooltip="How closely the voice follows the recording.",
+                ),
+                IO.Boolean.Input("remove_background_noise", default=True),
+                IO.Int.Input(
+                    "seed",
+                    default=42,
+                    min=0,
+                    max=2147483647,
+                    control_after_generate=IO.ControlAfterGenerate.fixed,
+                    tooltip="Change the seed to clone the recording again; each clone is a slightly different voice.",
+                ),
+            ],
+            outputs=[IO.String.Output(display_name="voice_id")],
+            hidden=[
+                IO.Hidden.auth_token_comfy_org,
+                IO.Hidden.api_key_comfy_org,
+                IO.Hidden.unique_id,
+            ],
+            is_api_node=True,
+            price_badge=IO.PriceBadge(expr="""{"type":"usd","usd":0}"""),
+        )
+
+    @classmethod
+    async def execute(
+        cls,
+        audio: Input.Audio,
+        language: str,
+        similarity: str,
+        remove_background_noise: bool,
+        seed: int,
+    ) -> IO.NodeOutput:
+        sample_rate = audio["sample_rate"]
+        audio_url = await upload_audio_to_comfyapi(
+            cls,
+            {"waveform": audio["waveform"][..., : 180 * sample_rate], "sample_rate": sample_rate},
+            container_format="mp3",
+            codec_name="libmp3lame",
+            mime_type="audio/mpeg",
+        )
+        payload = {
+            "mode": "instant",
+            "name": "ComfyUI Voice",
+            "audio": [{"type": "url", "url": audio_url}],
+            "similarity": similarity,
+            "remove_background_noise": remove_background_noise,
+        }
+        if language != "auto":
+            payload["language"] = HEYGEN_VOICE_LANGUAGES[language]
+        created = await sync_op_raw(
+            cls,
+            ApiEndpoint(path=_MODEL_VOICES_PATH, method="POST"),
+            data=payload,
+        )
+        voice_id = (created.get("data") or {}).get("voice_id")
+        if not voice_id:
+            raise ValueError(f"HeyGen did not return a voice_id: {created}")
+        final = await poll_op_raw(
+            cls,
+            ApiEndpoint(path=f"{_MODEL_VOICES_PATH}/{voice_id}"),
+            status_extractor=lambda r: (r.get("data") or {}).get("status"),
+            completed_statuses=["active", "failed"],
+            poll_interval=2.0,
+        )
+        if final["data"]["status"].strip().lower() == "failed":
+            raise ValueError(
+                f"HeyGen could not create a voice from this recording ({final['data'].get('failure_reason')})."
+            )
+        PromptServer.instance.send_progress_text(
+            f"Please save the voice_id for reuse.\n\nvoice_id: {voice_id}",
+            cls.hidden.unique_id,
+        )
+        return IO.NodeOutput(voice_id)
+
+
+def _voice_tts_inputs() -> list:
+    return [
+        IO.String.Input(
+            "voice_id",
+            default="",
+            tooltip="Voice from HeyGen Voice 1.0 Instant Clone.",
+        ),
+        IO.String.Input(
+            "text",
+            multiline=True,
+            default="",
+            tooltip="Up to 5000 characters. Speech longer than about 12 minutes fails, "
+            "so split very long Chinese or Japanese text.",
+        ),
+        IO.Combo.Input(
+            "language",
+            options=_VOICE_LANGUAGE_OPTIONS,
+            tooltip="Language of the text. Set it for closely related languages such as Serbian or Malay, "
+            "which auto-detection can confuse.",
+        ),
+        IO.Float.Input(
+            "expressiveness_boost",
+            default=0.5,
+            min=0.0,
+            max=1.0,
+            step=0.05,
+            tooltip="Higher values are more expressive; lower values stay closer to the original voice.",
+        ),
+    ]
+
+
+class HeyGenVoiceTextToSpeechNode(IO.ComfyNode):
+
+    @classmethod
+    def define_schema(cls) -> IO.Schema:
+        return IO.Schema(
+            node_id="HeyGenVoiceTextToSpeechNode",
+            display_name="HeyGen Voice 1.0 Text to Speech",
+            category="partner/audio/HeyGen",
+            description="Speak text in a voice cloned with HeyGen Voice 1.0 Instant Clone.",
+            inputs=[
+                IO.DynamicCombo.Input(
+                    "model",
+                    options=[
+                        IO.DynamicCombo.Option("heygen-voice-1", _voice_tts_inputs()),
+                        IO.DynamicCombo.Option("heygen-voice-1-turbo", _voice_tts_inputs()),
+                    ],
+                ),
+            ],
+            outputs=[IO.Audio.Output()],
+            hidden=[
+                IO.Hidden.auth_token_comfy_org,
+                IO.Hidden.api_key_comfy_org,
+                IO.Hidden.unique_id,
+            ],
+            is_api_node=True,
+            price_badge=IO.PriceBadge(
+                depends_on=IO.PriceBadgeDepends(widgets=["model", "model.text"]),
+                expr="""
+                (
+                  $t := $lookup(widgets, "model.text");
+                  $promo := $now() < "2026-11-01T00:00:00.000Z";
+                  $rate := widgets.model = "heygen-voice-1-turbo"
+                    ? ($promo ? 0.00572 : 0.010725)
+                    : ($promo ? 0.02145 : 0.0429);
+                  $type($t) = "string" and $length($t) > 0
+                    ? {"type":"usd","usd": $length($t) * $rate / 1000}
+                    : {"type":"usd","usd": $rate, "format":{"approximate":true,"suffix":"/1K chars"}}
+                )
+                """,
+            ),
+        )
+
+    @classmethod
+    async def execute(cls, model: dict) -> IO.NodeOutput:
+        voice_id = model["voice_id"].strip()
+        if not voice_id:
+            raise ValueError("Connect a voice_id from HeyGen Voice 1.0 Instant Clone.")
+        text = model["text"].strip()
+        validate_string(text, field_name="text", min_length=1, max_length=5000)
+        payload = {
+            "model": model["model"],
+            "voice_id": voice_id,
+            "text": text,
+            "expressiveness_boost": model["expressiveness_boost"],
+        }
+        if model["language"] != "auto":
+            payload["language"] = HEYGEN_VOICE_LANGUAGES[model["language"]]
+        response = await sync_op_raw(
+            cls,
+            ApiEndpoint(path=_MODEL_TTS_PATH, method="POST"),
+            data=payload,
+        )
+        audio_url = (response.get("data") or {}).get("audio_url")
+        if not audio_url:
+            raise ValueError(f"HeyGen did not return an audio_url: {response}")
+        audio_bytes = await download_url_as_bytesio(audio_url)
+        return IO.NodeOutput(audio_bytes_to_audio_input(audio_bytes.getvalue()))
+
+
 class HeyGenExtension(ComfyExtension):
     @override
     async def get_node_list(self) -> list[type[IO.ComfyNode]]:
@@ -1091,6 +1303,8 @@ class HeyGenExtension(ComfyExtension):
             HeyGenTextToSpeechNode,
             HeyGenReferenceToVideoNode,
             HeyGenImageToVideoNode,
+            HeyGenVoiceCloneNode,
+            HeyGenVoiceTextToSpeechNode,
         ]
 
 

@@ -19,6 +19,7 @@ from comfy_api_nodes.util._helpers import (
     get_comfy_api_headers,
     get_node_id,
     is_processing_interrupted,
+    refresh_partner_token,
 )
 from comfy_api_nodes.util.common_exceptions import ProcessingInterrupted
 from server import PromptServer
@@ -165,6 +166,7 @@ async def _stream_sonilo_music(
     """POST ``form`` to Sonilo, read the NDJSON stream, and return the first stream's audio bytes."""
     url = urljoin(default_base_url().rstrip("/") + "/", endpoint.path.lstrip("/"))
 
+    await refresh_partner_token(cls)
     headers = get_comfy_api_headers(cls)
     headers.update(endpoint.headers)
 
@@ -175,7 +177,7 @@ async def _stream_sonilo_music(
     title: str | None = None
 
     timeout = aiohttp.ClientTimeout(total=1200.0, sock_read=300.0)
-    async with aiohttp.ClientSession(timeout=timeout) as session:
+    async with aiohttp.ClientSession(timeout=timeout, trust_env=True) as session:
         PromptServer.instance.send_progress_text("Status: Queued", node_id)
         async with session.post(url, data=form, headers=headers) as resp:
             if resp.status >= 400:
