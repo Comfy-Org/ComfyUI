@@ -1,0 +1,860 @@
+{
+  "id": "mini-h3-image-to-video",
+  "revision": 0,
+  "last_node_id": 16,
+  "last_link_id": 16,
+  "nodes": [
+    {
+      "id": 1,
+      "type": "UnetLoaderGGUF",
+      "pos": [
+        100,
+        100
+      ],
+      "size": [
+        300,
+        120
+      ],
+      "flags": {},
+      "order": 0,
+      "mode": 0,
+      "outputs": [
+        {
+          "name": "MODEL",
+          "type": "MODEL",
+          "links": [
+            1
+          ],
+          "slot_index": 0
+        }
+      ],
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.7.0",
+        "Node name for S&R": "UnetLoaderGGUF",
+        "models": [
+          {
+            "name": "mini_h3_denoiser.gguf",
+            "url": "https://huggingface.co/unsloth/MiniMax-H3-GGUF/resolve/main/minimax_h3_fl2va_pruned-Q4_K.gguf",
+            "directory": "unet"
+          }
+        ]
+      },
+      "widgets_values": [
+        "mini_h3_denoiser.gguf",
+        "default"
+      ],
+      "title": "\ud83e\udde0 Denoiser GGUF (Mini H3)"
+    },
+    {
+      "id": 2,
+      "type": "CLIPLoaderGGUF",
+      "pos": [
+        100,
+        280
+      ],
+      "size": [
+        300,
+        120
+      ],
+      "flags": {},
+      "order": 1,
+      "mode": 0,
+      "outputs": [
+        {
+          "name": "CLIP",
+          "type": "CLIP",
+          "links": [
+            2
+          ],
+          "slot_index": 0
+        }
+      ],
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.7.0",
+        "Node name for S&R": "CLIPLoaderGGUF",
+        "models": [
+          {
+            "name": "mini_h3_text_encoder.gguf",
+            "url": "https://huggingface.co/unsloth/MiniMax-H3-GGUF/resolve/main/qwen3vl_32b_minimax_h3-Q4_K_M.gguf",
+            "directory": "text_encoders"
+          }
+        ]
+      },
+      "widgets_values": [
+        "mini_h3_text_encoder.gguf",
+        "minimax"
+      ],
+      "title": "\ud83d\udcdd Text Encoder GGUF"
+    },
+    {
+      "id": 3,
+      "type": "VAELoader",
+      "pos": [
+        100,
+        460
+      ],
+      "size": [
+        300,
+        120
+      ],
+      "flags": {},
+      "order": 2,
+      "mode": 0,
+      "outputs": [
+        {
+          "name": "VAE",
+          "type": "VAE",
+          "links": [
+            3,
+            9
+          ],
+          "slot_index": 0
+        }
+      ],
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.3.56",
+        "Node name for S&R": "VAELoader",
+        "models": [
+          {
+            "name": "mini_h3_video_vae.safetensors",
+            "url": "https://huggingface.co/Comfy-Org/MiniMax-H3/resolve/main/vae/minimax_h3_video_vae_fp16.safetensors",
+            "directory": "vae"
+          }
+        ]
+      },
+      "widgets_values": [
+        "mini_h3_video_vae.safetensors"
+      ],
+      "title": "\ud83c\udfac Video VAE"
+    },
+    {
+      "id": 14,
+      "type": "VAELoader",
+      "pos": [
+        100,
+        640
+      ],
+      "size": [
+        300,
+        120
+      ],
+      "flags": {},
+      "order": 3,
+      "mode": 0,
+      "outputs": [
+        {
+          "name": "VAE",
+          "type": "VAE",
+          "links": [
+            15
+          ],
+          "slot_index": 0
+        }
+      ],
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.3.56",
+        "Node name for S&R": "VAELoader",
+        "models": [
+          {
+            "name": "mini_h3_audio_vae.safetensors",
+            "url": "https://huggingface.co/Comfy-Org/MiniMax-H3/resolve/main/vae/minimax_h3_audio_vae_fp32.safetensors",
+            "directory": "vae"
+          }
+        ]
+      },
+      "widgets_values": [
+        "mini_h3_audio_vae.safetensors"
+      ],
+      "title": "\ud83d\udd0a Audio VAE"
+    },
+    {
+      "id": 4,
+      "type": "MiniMaxH3SigmaShift",
+      "pos": [
+        500,
+        100
+      ],
+      "size": [
+        300,
+        120
+      ],
+      "flags": {},
+      "order": 4,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "model",
+          "type": "MODEL",
+          "link": 1
+        }
+      ],
+      "outputs": [
+        {
+          "name": "MODEL",
+          "type": "MODEL",
+          "links": [
+            4,
+            6,
+            8
+          ],
+          "slot_index": 0
+        }
+      ],
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.7.0",
+        "Node name for S&R": "MiniMaxH3SigmaShift"
+      },
+      "widgets_values": [
+        12.0,
+        3.0
+      ],
+      "title": "\u2699\ufe0f Sigma Shift"
+    },
+    {
+      "id": 5,
+      "type": "LoadImage",
+      "pos": [
+        500,
+        280
+      ],
+      "size": [
+        300,
+        300
+      ],
+      "flags": {},
+      "order": 5,
+      "mode": 0,
+      "outputs": [
+        {
+          "name": "IMAGE",
+          "type": "IMAGE",
+          "links": [
+            5
+          ],
+          "slot_index": 0
+        },
+        {
+          "name": "MASK",
+          "type": "MASK",
+          "links": null
+        }
+      ],
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.3.56",
+        "Node name for S&R": "LoadImage"
+      },
+      "widgets_values": [
+        "example.png",
+        "image"
+      ],
+      "title": "\ud83d\udcf7 Reference Image (First Frame)"
+    },
+    {
+      "id": 6,
+      "type": "MiniMaxH3ImageToVideo",
+      "pos": [
+        900,
+        100
+      ],
+      "size": [
+        350,
+        350
+      ],
+      "flags": {},
+      "order": 6,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "clip",
+          "type": "CLIP",
+          "link": 2
+        },
+        {
+          "name": "vae",
+          "type": "VAE",
+          "link": 3
+        },
+        {
+          "name": "first_frame",
+          "type": "IMAGE",
+          "link": 5
+        }
+      ],
+      "outputs": [
+        {
+          "name": "positive",
+          "type": "CONDITIONING",
+          "links": [
+            7
+          ],
+          "slot_index": 0
+        },
+        {
+          "name": "latent",
+          "type": "LATENT",
+          "links": [
+            11
+          ],
+          "slot_index": 1
+        }
+      ],
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.7.0",
+        "Node name for S&R": "MiniMaxH3ImageToVideo"
+      },
+      "widgets_values": [
+        "A beautiful landscape with birds singing and wind blowing through trees, ambient nature sounds",
+        512,
+        320,
+        39
+      ],
+      "title": "\ud83c\udfa5 Image to Video (Mini H3)"
+    },
+    {
+      "id": 15,
+      "type": "MiniMaxH3AddGuide",
+      "pos": [
+        900,
+        500
+      ],
+      "size": [
+        350,
+        250
+      ],
+      "flags": {},
+      "order": 7,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "positive",
+          "type": "CONDITIONING",
+          "link": 7
+        },
+        {
+          "name": "vae",
+          "type": "VAE",
+          "link": 9
+        },
+        {
+          "name": "audio_vae",
+          "type": "VAE",
+          "link": 15
+        },
+        {
+          "name": "latent",
+          "type": "LATENT",
+          "link": 11
+        }
+      ],
+      "outputs": [
+        {
+          "name": "positive",
+          "type": "CONDITIONING",
+          "links": [
+            16
+          ],
+          "slot_index": 0
+        }
+      ],
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.7.0",
+        "Node name for S&R": "MiniMaxH3AddGuide"
+      },
+      "widgets_values": [
+        0
+      ],
+      "title": "\ud83d\udd0a Add Guide (Audio Anchor Frame 0)"
+    },
+    {
+      "id": 7,
+      "type": "RandomNoise",
+      "pos": [
+        1350,
+        100
+      ],
+      "size": [
+        250,
+        80
+      ],
+      "flags": {},
+      "order": 8,
+      "mode": 0,
+      "outputs": [
+        {
+          "name": "NOISE",
+          "type": "NOISE",
+          "links": [
+            12
+          ],
+          "slot_index": 0
+        }
+      ],
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.3.56",
+        "Node name for S&R": "RandomNoise"
+      },
+      "widgets_values": [
+        42,
+        "randomize"
+      ],
+      "title": "\ud83c\udfb2 Random Noise"
+    },
+    {
+      "id": 8,
+      "type": "BasicGuider",
+      "pos": [
+        1350,
+        220
+      ],
+      "size": [
+        250,
+        100
+      ],
+      "flags": {},
+      "order": 9,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "model",
+          "type": "MODEL",
+          "link": 4
+        },
+        {
+          "name": "conditioning",
+          "type": "CONDITIONING",
+          "link": 16
+        }
+      ],
+      "outputs": [
+        {
+          "name": "GUIDER",
+          "type": "GUIDER",
+          "links": [
+            13
+          ],
+          "slot_index": 0
+        }
+      ],
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.3.56",
+        "Node name for S&R": "BasicGuider"
+      },
+      "widgets_values": [],
+      "title": "\ud83c\udfaf Basic Guider"
+    },
+    {
+      "id": 9,
+      "type": "KSamplerSelect",
+      "pos": [
+        1350,
+        360
+      ],
+      "size": [
+        250,
+        80
+      ],
+      "flags": {},
+      "order": 10,
+      "mode": 0,
+      "outputs": [
+        {
+          "name": "SAMPLER",
+          "type": "SAMPLER",
+          "links": [
+            14
+          ],
+          "slot_index": 0
+        }
+      ],
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.3.56",
+        "Node name for S&R": "KSamplerSelect"
+      },
+      "widgets_values": [
+        "euler"
+      ],
+      "title": "\ud83d\udd27 Sampler Select"
+    },
+    {
+      "id": 10,
+      "type": "BasicScheduler",
+      "pos": [
+        1350,
+        480
+      ],
+      "size": [
+        250,
+        120
+      ],
+      "flags": {},
+      "order": 11,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "model",
+          "type": "MODEL",
+          "link": 6
+        }
+      ],
+      "outputs": [
+        {
+          "name": "SIGMAS",
+          "type": "SIGMAS",
+          "links": [
+            15
+          ],
+          "slot_index": 0
+        }
+      ],
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.3.56",
+        "Node name for S&R": "BasicScheduler"
+      },
+      "widgets_values": [
+        "normal",
+        4,
+        1.0
+      ],
+      "title": "\ud83d\udcc5 Basic Scheduler"
+    },
+    {
+      "id": 11,
+      "type": "SamplerCustomAdvanced",
+      "pos": [
+        1700,
+        100
+      ],
+      "size": [
+        300,
+        200
+      ],
+      "flags": {},
+      "order": 12,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "noise",
+          "type": "NOISE",
+          "link": 12
+        },
+        {
+          "name": "guider",
+          "type": "GUIDER",
+          "link": 13
+        },
+        {
+          "name": "sampler",
+          "type": "SAMPLER",
+          "link": 14
+        },
+        {
+          "name": "sigmas",
+          "type": "SIGMAS",
+          "link": 15
+        },
+        {
+          "name": "latent_image",
+          "type": "LATENT",
+          "link": 11
+        }
+      ],
+      "outputs": [
+        {
+          "name": "output",
+          "type": "LATENT",
+          "links": [
+            12
+          ],
+          "slot_index": 0
+        }
+      ],
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.3.56",
+        "Node name for S&R": "SamplerCustomAdvanced"
+      },
+      "widgets_values": [],
+      "title": "\ud83d\ude80 Sampler Custom Advanced"
+    },
+    {
+      "id": 12,
+      "type": "VAEDecode",
+      "pos": [
+        2100,
+        100
+      ],
+      "size": [
+        250,
+        100
+      ],
+      "flags": {},
+      "order": 13,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "samples",
+          "type": "LATENT",
+          "link": 12
+        },
+        {
+          "name": "vae",
+          "type": "VAE",
+          "link": 3
+        }
+      ],
+      "outputs": [
+        {
+          "name": "IMAGE",
+          "type": "IMAGE",
+          "links": [
+            13
+          ],
+          "slot_index": 0
+        }
+      ],
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.3.56",
+        "Node name for S&R": "VAEDecode"
+      },
+      "widgets_values": [],
+      "title": "\ud83d\uddbc\ufe0f VAE Decode"
+    },
+    {
+      "id": 13,
+      "type": "SaveImage",
+      "pos": [
+        2450,
+        100
+      ],
+      "size": [
+        300,
+        250
+      ],
+      "flags": {},
+      "order": 14,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "link": 13
+        }
+      ],
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.3.56",
+        "Node name for S&R": "SaveImage"
+      },
+      "widgets_values": [
+        "mini_h3_output"
+      ],
+      "title": "\ud83d\udcbe Save Image"
+    }
+  ],
+  "links": [
+    [
+      1,
+      1,
+      0,
+      4,
+      0,
+      "MODEL"
+    ],
+    [
+      2,
+      2,
+      0,
+      6,
+      0,
+      "CLIP"
+    ],
+    [
+      3,
+      3,
+      0,
+      6,
+      1,
+      "VAE"
+    ],
+    [
+      4,
+      4,
+      0,
+      8,
+      0,
+      "MODEL"
+    ],
+    [
+      5,
+      5,
+      0,
+      6,
+      2,
+      "IMAGE"
+    ],
+    [
+      6,
+      4,
+      0,
+      10,
+      0,
+      "MODEL"
+    ],
+    [
+      7,
+      6,
+      0,
+      15,
+      0,
+      "CONDITIONING"
+    ],
+    [
+      9,
+      3,
+      0,
+      15,
+      1,
+      "VAE"
+    ],
+    [
+      11,
+      6,
+      1,
+      15,
+      3,
+      "LATENT"
+    ],
+    [
+      12,
+      7,
+      0,
+      11,
+      0,
+      "NOISE"
+    ],
+    [
+      13,
+      8,
+      0,
+      11,
+      1,
+      "GUIDER"
+    ],
+    [
+      14,
+      9,
+      0,
+      11,
+      2,
+      "SAMPLER"
+    ],
+    [
+      15,
+      10,
+      0,
+      11,
+      3,
+      "SIGMAS"
+    ],
+    [
+      13,
+      12,
+      0,
+      13,
+      0,
+      "IMAGE"
+    ],
+    [
+      15,
+      14,
+      0,
+      15,
+      2,
+      "VAE"
+    ],
+    [
+      16,
+      15,
+      0,
+      8,
+      1,
+      "CONDITIONING"
+    ]
+  ],
+  "groups": [
+    {
+      "title": "\ud83e\udde0 Model Loading",
+      "bounding": [
+        80,
+        40,
+        750,
+        720
+      ],
+      "color": "#3F51B5",
+      "font_size": 20
+    },
+    {
+      "title": "\ud83c\udfa5 Conditioning & Latent",
+      "bounding": [
+        880,
+        40,
+        750,
+        500
+      ],
+      "color": "#E91E63",
+      "font_size": 20
+    },
+    {
+      "title": "\ud83d\ude80 Sampling Pipeline",
+      "bounding": [
+        1330,
+        40,
+        700,
+        600
+      ],
+      "color": "#4CAF50",
+      "font_size": 20
+    },
+    {
+      "title": "\ud83d\uddbc\ufe0f Output",
+      "bounding": [
+        2080,
+        40,
+        700,
+        350
+      ],
+      "color": "#FF9800",
+      "font_size": 20
+    }
+  ],
+  "config": {},
+  "extra": {
+    "BlueprintDescription": "Generate ultra-realistic videos with native audio (32kHz stereo) from an image reference and text prompt. Uses a packed DiT architecture with joint video+audio denoising. Supports image-to-video, text-to-video, reference-based generation, and multi-frame guide anchoring. Works on CPU via GGUF quantization (~29GB RAM) or GPU for full quality.",
+    "BlueprintSearchAliases": [
+      "mini h3",
+      "image to video",
+      "video with audio",
+      "audio video generation",
+      "i2v",
+      "t2va",
+      "cpu video generation",
+      "gguf video",
+      "native audio video"
+    ],
+    "banner_image": "mini_h3_banner.png"
+  },
+  "version": 0.4
+}
