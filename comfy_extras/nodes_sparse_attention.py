@@ -56,6 +56,7 @@ class SparseAttnPatch:
 
     def reset(self):
         self.pooled = {}          # (block, rows) -> (kmean, vscale) from the previous step
+        self.sigma = None         # (sigmas, float(sigmas[0]))
         self.vsa_plans = {}       # small LRU of tiling plans
         self.vsa_rope = None
         self._logged = set()
@@ -69,7 +70,9 @@ class SparseAttnPatch:
         """Why this call stays dense regardless of its tensors, or None."""
         sigmas = transformer_options.get("sigmas")
         if sigmas is not None:
-            sigma = float(sigmas[0])
+            if self.sigma is None or self.sigma[0] is not sigmas:
+                self.sigma = (sigmas, float(sigmas[0]))
+            sigma = self.sigma[1]
             if sigma > self.sigma_start or sigma < self.sigma_end:
                 return f"sigma {sigma:.3g} outside the start/end window"
         if tokens < self.min_tokens:
