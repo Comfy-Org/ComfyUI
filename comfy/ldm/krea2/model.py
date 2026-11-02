@@ -10,10 +10,12 @@ from typing import Optional
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from einops import rearrange
 
 import comfy.model_management
+import comfy.model_prefetch
+import comfy.ops
 import comfy.patcher_extension
+import comfy.quant_ops
 import comfy.ldm.common_dit
 import comfy.utils
 from comfy.ldm.flux.layers import EmbedND, timestep_embedding
@@ -29,10 +31,45 @@ class RMSNorm(nn.Module):
         self.eps = eps
         self.scale = nn.Parameter(torch.empty(features, device=device, dtype=dtype))
 
+    def fp32_weight(self, x):
+        return comfy.model_management.cast_to(self.scale, dtype=torch.float32, device=x.device) + 1.0
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        dtype = x.dtype
-        weight = comfy.model_management.cast_to(self.scale, dtype=torch.float32, device=x.device) + 1.0
-        return F.rms_norm(x.float(), (x.shape[-1],), weight=weight, eps=self.eps).to(dtype)
+        return F.rms_norm(x, (x.shape[-1],), weight=self.fp32_weight(x).to(x.dtype), eps=self.eps)
+
+
+def modulated_norm(x, norm, scale, shift):
+    if comfy.model_management.in_training:
+        return (1 + scale) * norm(x) + shift
+    # the norm weight is folded in fp32 into the scale of the fused rmsnorm(x) * (1 + scale) + shift
+    scale = (norm.fp32_weight(x) * (1 + scale.float()) - 1).to(x.dtype)
+    return comfy.quant_ops.ck.rms_adaln(x, scale, shift, norm.eps)
+
+
+def modulate(x, norm, mod, i, ref):
+    # mod[i] is the scale and mod[i + 1] the shift; tokens from ref[0] on take the t=0 modulation ref[1]
+    if ref is None:
+        return modulated_norm(x, norm, mod[i], mod[i + 1])
+    s, ref_mod = ref
+    return torch.cat((modulated_norm(x[:, :s], norm, mod[i], mod[i + 1]), modulated_norm(x[:, s:], norm, ref_mod[i], ref_mod[i + 1])), dim=1)
+
+
+def gated_residual(x, y, gate):
+    # in place inside the memory compiler region; out of place keeps x for backward when training
+    if comfy.model_management.in_training:
+        return torch.addcmul(x, y, gate)
+    return x.addcmul_(y, gate)
+
+
+def residual(x, y, mod, i, ref):
+    if ref is None:
+        return gated_residual(x, y, mod[i])
+    s, ref_mod = ref
+    if comfy.model_management.in_training:
+        return torch.cat((gated_residual(x[:, :s], y[:, :s], mod[i]), gated_residual(x[:, s:], y[:, s:], ref_mod[i])), dim=1)
+    gated_residual(x[:, :s], y[:, :s], mod[i])
+    gated_residual(x[:, s:], y[:, s:], ref_mod[i])
+    return x
 
 
 class QKNorm(nn.Module):
@@ -75,31 +112,41 @@ class Attention(nn.Module):
         self.wo = operations.Linear(dim, dim, bias=bias, device=device, dtype=dtype)
 
     def forward(self, x, freqs=None, mask=None, transformer_options={}):
+        # (B, L, H, D) throughout, the rope table is laid out (B, L, 1, ...) to match
+        B, L, _ = x.shape
+        q = self.wq(x).view(B, L, self.heads, self.headdim)
+        k = self.wk(x).view(B, L, self.kvheads, self.headdim)
+        v = self.wv(x).view(B, L, self.kvheads, self.headdim)
+        gate = self.gate(x)
         transformer_patches = transformer_options.get("patches", {})
-        extra_options = transformer_options.copy()
-        q, k, v, gate = self.wq(x), self.wk(x), self.wv(x), self.gate(x)
-        q = rearrange(q, "B L (H D) -> B H L D", H=self.heads)
-        k = rearrange(k, "B L (H D) -> B H L D", H=self.kvheads)
-        v = rearrange(v, "B L (H D) -> B H L D", H=self.kvheads)
-        q, k = self.qknorm(q, k)
+        patches = transformer_patches.get("attn1_patch", []) if "block_index" in transformer_options else []
 
-        if "block_index" in transformer_options and "attn1_patch" in transformer_patches:
-            for p in transformer_patches["attn1_patch"]:
-                out = p(q, k, v, pe=freqs, attn_mask=mask, extra_options=extra_options)
-                q, k, v = out.get("q", q), out.get("k", k), out.get("v", v)
-                freqs, mask = out.get("pe", freqs), out.get("attn_mask", mask)
+        if freqs is not None and not patches and not comfy.model_management.in_training:
+            qnorm, knorm = self.qknorm.qnorm, self.qknorm.knorm
+            q, k = comfy.quant_ops.ck.rms_rope_(q, k, freqs, qnorm.fp32_weight(q), knorm.fp32_weight(k), qnorm.eps)
+        else:
+            q, k = self.qknorm(q, k)
+            if patches:
+                # patches see (B, H, L, D) before rope and the (B, 1, L, ...) rope table
+                extra_options = transformer_options.copy()
+                q, k, v = q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2)
+                freqs = None if freqs is None else freqs.transpose(1, 2)
+                for p in patches:
+                    out = p(q, k, v, pe=freqs, attn_mask=mask, extra_options=extra_options)
+                    q, k, v = out.get("q", q), out.get("k", k), out.get("v", v)
+                    freqs, mask = out.get("pe", freqs), out.get("attn_mask", mask)
+                q, k, v = q.transpose(1, 2).contiguous(), k.transpose(1, 2).contiguous(), v.transpose(1, 2).contiguous()
+                freqs = None if freqs is None else freqs.transpose(1, 2)
+            if freqs is not None:
+                q, k = apply_rope(q, k, freqs)
 
-        if freqs is not None:
-            q, k = apply_rope(q, k, freqs)
-        if self.kvheads != self.heads:
-            rep = self.heads // self.kvheads
-            k = k.repeat_interleave(rep, dim=1)
-            v = v.repeat_interleave(rep, dim=1)
-        q, k, v = AttentionTensorContainer(q), AttentionTensorContainer(k), AttentionTensorContainer(v)
-        out = optimized_attention_masked(q, k, v, self.heads, mask=mask, skip_reshape=True,
-                                         preferred_attention=self.comfy_attention, transformer_options=transformer_options)
+        # expanded here: block-sparse, sol and custom attention overrides reshape k/v by the query heads
+        k, v = comfy.ops.repeat_kv_for_gqa(k, v, self.heads, 2)
+        q, k, v = AttentionTensorContainer(q.flatten(2)), AttentionTensorContainer(k.flatten(2)), AttentionTensorContainer(v.flatten(2))
+        out = optimized_attention_masked(q, k, v, self.heads, mask=mask, preferred_attention=self.comfy_attention, transformer_options=transformer_options)
 
         if "block_index" in transformer_options and "attn1_output_patch" in transformer_patches:
+            extra_options = transformer_options.copy()
             for p in transformer_patches["attn1_output_patch"]:
                 out = p(out, extra_options)
 
@@ -157,12 +204,15 @@ class TextFusionTransformer(nn.Module):
     def forward(self, x, mask=None, transformer_options={}):
         b, l, n, d = x.shape
         x = x.reshape(b * l, n, d)
+        prefetch_queue = comfy.model_prefetch.make_prefetch_queue(list(self.layerwise_blocks) + list(self.refiner_blocks), x.device, transformer_options)
         for block in self.layerwise_blocks:
+            comfy.model_prefetch.prefetch_queue_pop(prefetch_queue, x.device, block, x.dtype)
             x = block(x.contiguous(), mask=None, transformer_options=transformer_options)
-        x = rearrange(x, "(b l) n d -> b l d n", b=b, l=l)
-        x = self.projector(x).squeeze(-1)
+        x = self.projector(x.unflatten(0, (b, l)).transpose(2, 3)).squeeze(-1)
         for block in self.refiner_blocks:
+            comfy.model_prefetch.prefetch_queue_pop(prefetch_queue, x.device, block, x.dtype)
             x = block(x, mask=mask, transformer_options=transformer_options)
+        comfy.model_prefetch.prefetch_queue_pop(prefetch_queue, x.device, None)
         return x
 
 
@@ -176,46 +226,16 @@ class SingleStreamBlock(nn.Module):
         self.mlp = SwiGLU(features, multiplier, bias, device=device, dtype=dtype, operations=operations)
 
     def forward(self, x, vec, freqs, mask=None, timestep_zero_index=None, transformer_options={}):
-        prescale, preshift, pregate, postscale, postshift, postgate = self.mod(vec)
+        # prescale, preshift, pregate, postscale, postshift, postgate
+        mod = self.mod(vec)
+        ref = None
         if timestep_zero_index is not None:
+            # the reference tokens take the t=0 modulation stacked after the batch in vec
             bs = x.shape[0]
-            ref_prescale = prescale[bs:]
-            ref_preshift = preshift[bs:]
-            ref_pregate = pregate[bs:]
-            ref_postscale = postscale[bs:]
-            ref_postshift = postshift[bs:]
-            ref_postgate = postgate[bs:]
-            prescale = prescale[:bs]
-            preshift = preshift[:bs]
-            pregate = pregate[:bs]
-            postscale = postscale[:bs]
-            postshift = postshift[:bs]
-            postgate = postgate[:bs]
-
-            pre = self.prenorm(x)
-            pre[:, :timestep_zero_index].mul_(1 + prescale).add_(preshift)
-            pre[:, timestep_zero_index:].mul_(1 + ref_prescale).add_(ref_preshift)
-            attn = self.attn(pre, freqs, mask, transformer_options=transformer_options)
-            del pre
-            attn[:, :timestep_zero_index].mul_(pregate)
-            attn[:, timestep_zero_index:].mul_(ref_pregate)
-            x = x + attn
-            del attn
-
-            post = self.postnorm(x)
-            post[:, :timestep_zero_index].mul_(1 + postscale).add_(postshift)
-            post[:, timestep_zero_index:].mul_(1 + ref_postscale).add_(ref_postshift)
-            mlp = self.mlp(post)
-            del post
-            mlp[:, :timestep_zero_index].mul_(postgate)
-            mlp[:, timestep_zero_index:].mul_(ref_postgate)
-            x = x + mlp
-            del mlp
-            return x
-
-        x = x + pregate * self.attn((1 + prescale) * self.prenorm(x) + preshift, freqs, mask, transformer_options=transformer_options)
-        x = x + postgate * self.mlp((1 + postscale) * self.postnorm(x) + postshift)
-        return x
+            ref = (timestep_zero_index, [m[bs:] for m in mod])
+            mod = [m[:bs] for m in mod]
+        x = residual(x, self.attn(modulate(x, self.prenorm, mod, 0, ref), freqs, mask, transformer_options=transformer_options), mod, 2, ref)
+        return residual(x, self.mlp(modulate(x, self.postnorm, mod, 3, ref)), mod, 5, ref)
 
 
 class LastLayer(nn.Module):
@@ -227,8 +247,7 @@ class LastLayer(nn.Module):
 
     def forward(self, x, tvec):
         scale, shift = self.modulation(tvec)
-        x = (1 + scale) * self.norm(x) + shift
-        return self.linear(x)
+        return self.linear(modulated_norm(x, self.norm, scale, shift))
 
 
 class SingleStreamDiT(nn.Module):
@@ -285,8 +304,9 @@ class SingleStreamDiT(nn.Module):
     def process_img(self, x, index=0):
         patch = self.patch
         x = comfy.ldm.common_dit.pad_to_patch_size(x, (patch, patch))
+        b, c = x.shape[:2]
         h, w = x.shape[-2] // patch, x.shape[-1] // patch
-        img = rearrange(x, "b c (h ph) (w pw) -> b (h w) (c ph pw)", ph=patch, pw=patch)
+        img = x.reshape(b, c, h, patch, w, patch).permute(0, 2, 4, 1, 3, 5).reshape(b, h * w, c * patch * patch)
 
         img_ids = torch.zeros(h, w, 3, device=x.device, dtype=torch.float32)
         img_ids[..., 0] = index
@@ -294,7 +314,12 @@ class SingleStreamDiT(nn.Module):
         img_ids[..., 2] = torch.arange(w, device=x.device, dtype=torch.float32)[None, :]
         return img, img_ids.reshape(1, h * w, 3).repeat(x.shape[0], 1, 1), h, w
 
-    def _forward(self, x, timesteps, context, attention_mask=None, ref_latents=None, transformer_options={}, **kwargs):
+    def preprocess_text(self, context, transformer_options={}):
+        # the txtfusion adapter and txtmlp depend on the conditioning alone, extra_conds runs them once per sampling
+        context = self.txtfusion(self._unpack_context(context), mask=None, transformer_options=transformer_options)
+        return self.txtmlp(context)
+
+    def _forward(self, x, timesteps, context, attention_mask=None, ref_latents=None, transformer_options={}, txt_states=None, **kwargs):
         transformer_options = transformer_options.copy()
         temporal = x.ndim == 5
         if temporal:
@@ -302,9 +327,6 @@ class SingleStreamDiT(nn.Module):
             x = x.reshape(b5 * t5, c5, h5, w5)
         bs, _, h_orig, w_orig = x.shape
         patch = self.patch
-
-        # context arrives as (B, seq, txtlayers*txtdim); reshape to (B, txtlayers, seq, txtdim).
-        context = self._unpack_context(context)
 
         img, imgpos, h_, w_ = self.process_img(x)
         img_tokens = img.shape[1]
@@ -338,8 +360,8 @@ class SingleStreamDiT(nn.Module):
             t0 = self.tmlp(timestep_embedding(torch.zeros_like(timesteps), self.tdim).unsqueeze(1).to(img.dtype))
             tvec = torch.cat((tvec, self.tproj(t0)), dim=0)
 
-        context = self.txtfusion(context, mask=None, transformer_options=transformer_options)
-        context = self.txtmlp(context)
+        # every step when extra_conds could not precompute it (training, hooks)
+        context = self.preprocess_text(context, transformer_options) if txt_states is None else txt_states
 
         txtlen = context.shape[1]
         device = context.device
@@ -352,6 +374,7 @@ class SingleStreamDiT(nn.Module):
                 img, context = out["img"], out["txt"]
                 imgpos, txtpos = out["img_ids"], out["txt_ids"]
 
+        # allocated outside the memory compiler region, the blocks update it in place
         combined = torch.cat((context, img), dim=1)
         del context, img
         if timestep_zero_index is not None:
@@ -361,21 +384,24 @@ class SingleStreamDiT(nn.Module):
         pos = torch.cat((txtpos, imgpos), dim=1)
         del txtpos, imgpos
 
-        freqs = self.pe_embedder(pos)
+        freqs = self.pe_embedder(pos).transpose(1, 2)
         del pos
 
         transformer_options["total_blocks"] = len(self.blocks)
         transformer_options["block_type"] = "single"
         transformer_options["img_slice"] = [txtlen, combined.shape[1]]
+        prefetch_queue = comfy.model_prefetch.make_prefetch_queue(list(self.blocks), device, transformer_options)
+        comfy.model_prefetch.malloc_graph_begin(device)
         for i, block in enumerate(self.blocks):
+            comfy.model_prefetch.prefetch_queue_pop(prefetch_queue, device, block, combined.dtype, malloc_scope="block")
             transformer_options["block_index"] = i
             combined = block(combined, tvec, freqs, None, timestep_zero_index=timestep_zero_index, transformer_options=transformer_options)
+        comfy.model_prefetch.prefetch_queue_pop(prefetch_queue, device, None, malloc_scope="block")
+        comfy.model_prefetch.malloc_graph_end()
 
-        final = self.last(combined, t)
+        out = self.last(combined[:, txtlen:txtlen + img_tokens], t)
         del combined
-        out = final[:, txtlen:txtlen + img_tokens, :]
-        out = rearrange(out, "b (h w) (c ph pw) -> b c (h ph) (w pw)",
-                        h=h_, w=w_, ph=patch, pw=patch, c=self.channels)
+        out = out.reshape(bs, h_, w_, self.channels, patch, patch).permute(0, 3, 1, 4, 2, 5).reshape(bs, self.channels, h_ * patch, w_ * patch)
         out = out[:, :, :h_orig, :w_orig]  # crop padding back off
         if temporal:
             out = out.reshape(b5, t5, self.channels, h_orig, w_orig).movedim(1, 2)
