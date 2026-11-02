@@ -82,13 +82,15 @@ def _write(path: Path, payload: bytes = b"model-bytes") -> Path:
 
 
 def _startup_scan(caplog: pytest.LogCaptureFixture) -> dict:
-    """One startup scan (prune first, then a fast scan); returns its scan_completed fields."""
+    """One startup scan once the node list is served (prune first, then a fast scan);
+    returns its scan_completed fields."""
     seeder = seeder_module._AssetSeeder()
     seeder._state = seeder_module.State.RUNNING
     seeder._scan_state = seeder_module._ScanState()
     seeder._roots = ALL_ROOTS
     seeder._phase = seeder_module.ScanPhase.FAST
     seeder._prune_first = True
+    seeder._prune_pending = seeder._scan_prunes = True
     seeder._run_gate.set()
     caplog.clear()
     with caplog.at_level(logging.INFO):
