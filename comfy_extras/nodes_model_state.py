@@ -29,7 +29,7 @@ class OpenModelState(io.ComfyNode):
                 io.String.Input("filename", default="model_states/ComfyUI.safetensors"),
                 io.Combo.Input("create", options=["if_missing", "never", "always"], default="if_missing", tooltip="What to do when the file is missing: start from an empty state, or fail. always ignores the file and starts empty on every run."),
             ],
-            outputs=[io.ModelState.Output()],
+            outputs=[io.ModelState.Output(display_name="state")],
         )
 
     @classmethod
@@ -50,14 +50,14 @@ class SaveModelState(io.ComfyNode):
         return io.Schema(
             node_id="SaveModelState",
             display_name="Save Model State",
-            category="model_state",
-            description="Writes a model state's values to a file in the output folder.",
+            category="model/merging",
+            description="Writes a model state's values to a file in the folder output/model_states.",
             is_output_node=True,
             inputs=[
                 io.ModelState.Input("state"),
                 io.String.Input("filename", default="model_states/ComfyUI.safetensors"),
             ],
-            outputs=[io.ModelState.Output(tooltip="The saved state, for chaining or ending a loop.")],
+            outputs=[io.ModelState.Output(display_name="state", tooltip="The saved state, for chaining or ending a loop.")],
         )
 
     @classmethod
