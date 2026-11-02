@@ -384,6 +384,22 @@ def test_video_from_components_auto_color_space_matches_srgb(tmp_path, format, s
             assert stream.color_range == ColorRange.MPEG
 
 
+@pytest.mark.parametrize(
+    "format,suffix,codec",
+    [
+        (VideoContainer.MP4, "mp4", VideoCodec.H264),
+        (VideoContainer.MKV, "mkv", VideoCodec.H264),
+        (VideoContainer.WEBM, "webm", VideoCodec.AV1),
+    ],
+)
+def test_video_from_file_frame_count(tmp_path, format, suffix, codec):
+    components = VideoComponents(images=torch.rand(7, 64, 64, 3), frame_rate=Fraction(24))
+    path = str(tmp_path / f"video.{suffix}")
+    VideoFromComponents(components).save_to(path, format=format, codec=codec)
+
+    assert VideoFromFile(path).get_frame_count() == 7
+
+
 def create_hdr_av1_video(path, transfer, color_range):
     images = np.random.default_rng(17).integers(0, 65536, (3, 64, 64, 3), dtype=np.uint16)
     with av.open(path, mode="w") as container:
