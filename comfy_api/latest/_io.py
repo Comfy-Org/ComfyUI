@@ -1888,6 +1888,8 @@ class Schema:
     """Optional client-evaluated pricing badge declaration for this node."""
     not_idempotent: bool=False
     """Flags a node as not idempotent; when True, the node will run and not reuse the cached outputs when identical inputs are provided on a different node in the graph."""
+    skip_unlinked_outputs: bool=False
+    """Flags a node as allowed to skip computing outputs that are not linked; the set of linked outputs becomes part of its cache key. Read it with ``hidden.dynprompt.get_linked_outputs(hidden.unique_id)``."""
     enable_expand: bool=False
     """Flags a node as expandable, allowing NodeOutput to include 'expand' property."""
     accept_all_inputs: bool=False
@@ -2384,6 +2386,14 @@ class _ComfyNodeBaseInternal(_ComfyNodeInternal):
             cls.GET_SCHEMA()
         return cls._NOT_IDEMPOTENT
 
+    _SKIP_UNLINKED_OUTPUTS = None
+    @final
+    @classproperty
+    def SKIP_UNLINKED_OUTPUTS(cls):  # noqa
+        if cls._SKIP_UNLINKED_OUTPUTS is None:
+            cls.GET_SCHEMA()
+        return cls._SKIP_UNLINKED_OUTPUTS
+
     _ACCEPT_ALL_INPUTS = None
     @final
     @classproperty
@@ -2434,6 +2444,8 @@ class _ComfyNodeBaseInternal(_ComfyNodeInternal):
             cls._INPUT_IS_LIST = schema.is_input_list
         if cls._NOT_IDEMPOTENT is None:
             cls._NOT_IDEMPOTENT = schema.not_idempotent
+        if cls._SKIP_UNLINKED_OUTPUTS is None:
+            cls._SKIP_UNLINKED_OUTPUTS = schema.skip_unlinked_outputs
         if cls._ACCEPT_ALL_INPUTS is None:
             cls._ACCEPT_ALL_INPUTS = schema.accept_all_inputs
 

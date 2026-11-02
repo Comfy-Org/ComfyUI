@@ -1,6 +1,6 @@
 {
   "revision": 0,
-  "last_node_id": "35",
+  "last_node_id": "36",
   "last_link_id": 0,
   "nodes": [
     {
@@ -134,8 +134,8 @@
         "version": 1,
         "state": {
           "lastGroupId": 6,
-          "lastNodeId": 35,
-          "lastLinkId": 72,
+          "lastNodeId": 36,
+          "lastLinkId": 73,
           "lastRerouteId": 0
         },
         "revision": 0,
@@ -556,16 +556,15 @@
                 "name": "positive",
                 "type": "CONDITIONING",
                 "links": [
-                  3
+                  3,
+                  73
                 ]
               },
               {
                 "localized_name": "negative",
                 "name": "negative",
                 "type": "CONDITIONING",
-                "links": [
-                  4
-                ]
+                "links": []
               },
               {
                 "localized_name": "latent",
@@ -595,6 +594,43 @@
             }
           },
           {
+            "id": 36,
+            "type": "ConditioningZeroOut",
+            "pos": [
+              -1020,
+              340
+            ],
+            "size": [
+              210,
+              30
+            ],
+            "flags": {},
+            "order": 4,
+            "mode": 0,
+            "inputs": [
+              {
+                "localized_name": "conditioning",
+                "name": "conditioning",
+                "type": "CONDITIONING",
+                "link": 73
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "CONDITIONING",
+                "name": "CONDITIONING",
+                "type": "CONDITIONING",
+                "links": [
+                  4
+                ]
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "ConditioningZeroOut"
+            },
+            "widgets_values": []
+          },
+          {
             "id": 33,
             "type": "KSampler",
             "pos": [
@@ -606,7 +642,7 @@
               610
             ],
             "flags": {},
-            "order": 4,
+            "order": 5,
             "mode": 0,
             "inputs": [
               {
@@ -732,7 +768,7 @@
               80
             ],
             "flags": {},
-            "order": 5,
+            "order": 6,
             "mode": 0,
             "inputs": [
               {
@@ -836,8 +872,8 @@
           },
           {
             "id": 4,
-            "origin_id": 32,
-            "origin_slot": 1,
+            "origin_id": 36,
+            "origin_slot": 0,
             "target_id": 33,
             "target_slot": 2,
             "type": "CONDITIONING"
@@ -937,6 +973,14 @@
             "target_id": 32,
             "target_slot": 4,
             "type": "STRING"
+          },
+          {
+            "id": 73,
+            "origin_id": 32,
+            "origin_slot": 0,
+            "target_id": 36,
+            "target_slot": 0,
+            "type": "CONDITIONING"
           }
         ],
         "extra": {},

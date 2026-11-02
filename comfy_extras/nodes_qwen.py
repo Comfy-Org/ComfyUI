@@ -134,10 +134,12 @@ class TextEncodeQwenImage21(io.ComfyNode):
             ],
             outputs=[
                 io.Conditioning.Output(display_name="positive"),
-                io.Conditioning.Output(display_name="negative"),
+                io.Conditioning.Output(display_name="negative", tooltip="Only encoded when linked. At cfg 1 leave it unlinked and give the sampler a ConditioningZeroOut of the positive."),
                 io.Latent.Output(display_name="latent",
                                  tooltip="Empty latent on the first reference image's size, to match with sampling as any other size shifts the edit."),
             ],
+            hidden=[io.Hidden.dynprompt, io.Hidden.unique_id],
+            skip_unlinked_outputs=True,
         )
 
     @classmethod
@@ -174,10 +176,13 @@ class TextEncodeQwenImage21(io.ComfyNode):
 
         keep_vision = len(ref_latents) == 0
         positive = clip.encode_from_tokens_scheduled(clip.tokenize(prompt, images=images_vl, keep_vision=keep_vision, prevent_empty_text=True))
-        negative = clip.encode_from_tokens_scheduled(clip.tokenize(negative_prompt, images=images_vl, keep_vision=keep_vision, prevent_empty_text=True))
         if len(ref_latents) > 0:
             positive = node_helpers.conditioning_set_values(positive, {"reference_latents": ref_latents}, append=True)
-            negative = node_helpers.conditioning_set_values(negative, {"reference_latents": ref_latents}, append=True)
+        negative = None
+        if cls.hidden.dynprompt is None or 1 in cls.hidden.dynprompt.get_linked_outputs(cls.hidden.unique_id):
+            negative = clip.encode_from_tokens_scheduled(clip.tokenize(negative_prompt, images=images_vl, keep_vision=keep_vision, prevent_empty_text=True))
+            if len(ref_latents) > 0:
+                negative = node_helpers.conditioning_set_values(negative, {"reference_latents": ref_latents}, append=True)
         latent = torch.zeros([1, 64, latent_h // 16, latent_w // 16], device=comfy.model_management.intermediate_device())
         return io.NodeOutput(positive, negative, {"samples": latent})
 

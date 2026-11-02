@@ -69,6 +69,14 @@ class DynamicPrompt:
     def all_node_ids(self):
         return set(self.original_prompt.keys()).union(set(self.ephemeral_prompt.keys()))
 
+    def get_linked_outputs(self, node_id):
+        linked = set()
+        for consumer_id in self.all_node_ids():
+            for value in self.get_node(consumer_id).get("inputs", {}).values():
+                if is_link(value) and value[0] == node_id:
+                    linked.add(value[1])
+        return linked
+
     def get_original_prompt(self):
         return self.original_prompt
 
