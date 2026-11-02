@@ -395,7 +395,7 @@ def slice_attention(q, k, v):
 
     while True:
         try:
-            slice_size = q.shape[1] // steps if (q.shape[1] % steps) == 0 else q.shape[1]
+            slice_size = math.ceil(q.shape[1] / steps)
             for i in range(0, q.shape[1], slice_size):
                 end = i + slice_size
                 s1 = torch.bmm(q[:, i:end], k) * scale
