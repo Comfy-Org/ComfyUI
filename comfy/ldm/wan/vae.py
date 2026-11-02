@@ -23,11 +23,7 @@ class CausalConv3d(ops.Conv3d):
         self._padding = 2 * self.padding[0]
         self.padding = (0, self.padding[1], self.padding[2])
 
-    def forward(self, x, cache_x=None, cache_list=None, cache_idx=None):
-        if cache_list is not None:
-            cache_x = cache_list[cache_idx]
-            cache_list[cache_idx] = None
-
+    def forward(self, x, cache_x=None):
         if cache_x is None and x.shape[2] == 1:
             #Fast path - the op will pad for use by truncating the weight
             #and save math on a pile of zeros.
@@ -62,6 +58,89 @@ class RMS_norm(nn.Module):
     def forward(self, x):
         return F.normalize(
             x, dim=(1 if self.channel_first else -1)) * self.scale * self.gamma.to(x) + (self.bias.to(x) if self.bias is not None else 0)
+
+
+STRIP_ELEMS = 2 ** 24
+
+
+def strip_apply(fn, x, scale=1, halo=1, out=None, accumulate=False):
+    # fn(strip, first row) on row strips with `halo` context rows; out may be x itself, so each strip's last rows wait for the next to read them
+    n = -(-x.numel() * scale * scale // STRIP_ELEMS)
+    if n <= 1 and out is None:
+        return fn(x, 0)
+    size = x.shape[-2]
+    step = -(-size // n)
+    put = torch.Tensor.add_ if accumulate else torch.Tensor.copy_
+    held = None
+    for a in range(0, size, step):
+        b = min(size, a + step)
+        lo = max(0, a - halo)
+        y = fn(x.narrow(-2, lo, min(size, b + halo) - lo), lo).narrow(-2, (a - lo) * scale, (b - a) * scale)
+        if out is None:
+            out = y.new_empty(*y.shape[:-2], size * scale, y.shape[-1])
+        if held is not None:
+            put(out.narrow(-2, a * scale - held.shape[-2], held.shape[-2]), held)
+        keep = min(halo, b - a)
+        put(out.narrow(-2, a * scale, (b - a - keep) * scale), y.narrow(-2, 0, (b - a - keep) * scale))
+        held = y.narrow(-2, (b - a - keep) * scale, keep * scale).clone() if keep else None
+    if held is not None:
+        put(out.narrow(-2, size * scale - held.shape[-2], held.shape[-2]), held)
+    return out
+
+
+def cached_chain(layers, x, feat_cache=None, feat_idx=[0]):
+    # norm, act and conv layers as one strip function; each conv sees its cached frames' matching rows, and the
+    # strips rebuild the caches from the chunk's last frames
+    convs = [layer for layer in layers if isinstance(layer, CausalConv3d)]
+    old = new = [None] * len(convs)
+    if feat_cache is not None:
+        i = feat_idx[0]
+        feat_idx[0] += len(convs)
+        old = feat_cache[i:i + len(convs)]
+        new = [x.new_empty(x.shape[0], conv.in_channels, min(CACHE_T, x.shape[2]), *x.shape[-2:]) for conv in convs]
+        feat_cache[i:i + len(convs)] = new
+
+    def fn(s, lo):
+        k = 0
+        for layer in layers:
+            if isinstance(layer, CausalConv3d):
+                if new[k] is not None:
+                    # the k convs before this one spoiled k rows at the strip's top edge; the bottom ones get rewritten by the next strip
+                    off = min(lo, k)
+                    new[k].narrow(-2, lo + off, s.shape[-2] - off).copy_(s[:, :, -CACHE_T:, off:])
+                s = layer(s, None if old[k] is None else old[k].narrow(-2, lo, s.shape[-2]))
+                k += 1
+            else:
+                s = layer(s)
+        return s
+    return fn
+
+
+def strip_residual(block, x, feat_cache=None, feat_idx=[0]):
+    # strips accumulate into x, or land in its leading channels when the block narrows
+    fn = cached_chain(block.residual, x, feat_cache, feat_idx)
+    if block.in_dim == block.out_dim:
+        return strip_apply(fn, x, halo=2, out=x, accumulate=True)
+    out = x.narrow(1, 0, block.out_dim) if block.in_dim > block.out_dim else None
+    return strip_apply(lambda s, lo: fn(s, lo).add_(block.shortcut(s)), x, halo=2, out=out)
+
+
+def strip_down(resample, x):
+    # the stride-2 conv with its (0, 1, 0, 1) pad in strips: output rows [a, b) read input rows [2a, 2b + 1)
+    rows = x.shape[-2] // 2
+    n = -(-x.numel() // STRIP_ELEMS)
+    if n <= 1:
+        return resample(x)
+    step = -(-rows // n)
+    out = None
+    for a in range(0, rows, step):
+        b = min(rows, a + step)
+        hi = min(x.shape[-2], 2 * b + 1)
+        y = resample[1](F.pad(x.narrow(-2, 2 * a, hi - 2 * a), (0, 1, 0, int(hi == x.shape[-2]))))
+        if out is None:
+            out = y.new_empty(*y.shape[:-2], rows, y.shape[-1])
+        out.narrow(-2, a, b - a).copy_(y)
+    return out
 
 
 class Resample(nn.Module):
@@ -122,15 +201,19 @@ class Resample(nn.Module):
                                     3)
                     x = x.reshape(b, c, t * 2, h, w)
         t = x.shape[2]
-        x = rearrange(x, 'b c t h w -> (b t) c h w')
-        x = self.resample(x)
-        x = rearrange(x, '(b t) c h w -> b c t h w', t=t)
+        if self.mode != 'none':
+            x = rearrange(x, 'b c t h w -> (b t) c h w')
+            if self.mode in ('upsample2d', 'upsample3d'):
+                x = strip_apply(lambda s, lo: self.resample(s), x, scale=2)
+            else:
+                x = strip_down(self.resample, x)
+            x = rearrange(x, '(b t) c h w -> b c t h w', t=t)
 
         if self.mode == 'downsample3d':
             if feat_cache is not None:
                 idx = feat_idx[0]
                 if feat_cache[idx] is None:
-                    feat_cache[idx] = x
+                    feat_cache[idx] = x[:, :, -1:, :, :].clone()  # the next block accumulates into x
                 else:
 
                     cache_x = x[:, :, -1:, :, :]
@@ -168,17 +251,7 @@ class ResidualBlock(nn.Module):
             if in_dim != out_dim else nn.Identity()
 
     def forward(self, x, feat_cache=None, feat_idx=[0], final=False):
-        old_x = x
-        for layer in self.residual:
-            if isinstance(layer, CausalConv3d) and feat_cache is not None:
-                idx = feat_idx[0]
-                cache_x = x[:, :, -CACHE_T:, :, :]
-                x = layer(x, cache_list=feat_cache, cache_idx=idx)
-                feat_cache[idx] = cache_x
-                feat_idx[0] += 1
-            else:
-                x = layer(x)
-        return x + self.shortcut(old_x)
+        return strip_residual(self, x, feat_cache, feat_idx)
 
 
 class AttentionBlock(nn.Module):
@@ -293,16 +366,7 @@ class Encoder3d(nn.Module):
                 x = layer(x)
 
         ## head
-        for layer in self.head:
-            if isinstance(layer, CausalConv3d) and feat_cache is not None:
-                idx = feat_idx[0]
-                cache_x = x[:, :, -CACHE_T:, :, :]
-                x = layer(x, feat_cache[idx])
-                feat_cache[idx] = cache_x
-                feat_idx[0] += 1
-            else:
-                x = layer(x)
-        return x
+        return strip_apply(cached_chain(self.head, x, feat_cache, feat_idx), x)
 
 
 class Decoder3d(nn.Module):
@@ -364,15 +428,7 @@ class Decoder3d(nn.Module):
         x = x_ref[0]
         x_ref[0] = None
         if layer_idx >= len(self.upsamples):
-            for layer in self.head:
-                if isinstance(layer, CausalConv3d) and feat_cache is not None:
-                    cache_x = x[:, :, -CACHE_T:, :, :]
-                    x = layer(x, feat_cache[feat_idx[0]])
-                    feat_cache[feat_idx[0]] = cache_x
-                    feat_idx[0] += 1
-                else:
-                    x = layer(x)
-            out_chunks.append(x)
+            out_chunks.append(strip_apply(cached_chain(self.head, x, feat_cache, feat_idx), x))
             return
 
         layer = self.upsamples[layer_idx]

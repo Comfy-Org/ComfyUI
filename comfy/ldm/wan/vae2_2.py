@@ -6,12 +6,10 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange
-from .vae import AttentionBlock, CausalConv3d, RMS_norm
+from .vae import CACHE_T, STRIP_ELEMS, AttentionBlock, CausalConv3d, RMS_norm, cached_chain, strip_apply, strip_down, strip_residual
 
 import comfy.ops
 ops = comfy.ops.disable_weight_init
-
-CACHE_T = 2
 
 
 class Resample(nn.Module):
@@ -55,7 +53,7 @@ class Resample(nn.Module):
         else:
             self.resample = nn.Identity()
 
-    def forward(self, x, feat_cache=None, feat_idx=[0]):
+    def forward(self, x, feat_cache=None, feat_idx=[0], out=None):
         b, c, t, h, w = x.size()
         if self.mode == "upsample3d":
             if feat_cache is not None:
@@ -96,12 +94,12 @@ class Resample(nn.Module):
                                     3)
                     x = x.reshape(b, c, t * 2, h, w)
         t = x.shape[2]
-        x = rearrange(x, "b c t h w -> (b t) c h w")
-        if feat_cache is None and self.mode in ("upsample2d", "upsample3d"):
-            x = strip_apply(self.resample, x, scale=2)
-        else:
-            x = self.resample(x)
-        x = rearrange(x, "(b t) c h w -> b c t h w", t=t)
+        if self.mode in ("upsample2d", "upsample3d"):
+            # strips of the 5-D tensor, so the shortcut buffer is accumulated into whatever its frame count
+            fn = lambda s, lo: rearrange(self.resample(rearrange(s, "b c t h w -> (b t) c h w")), "(b t) c h w -> b c t h w", t=t)
+            x = strip_apply(fn, x, scale=2, out=out, accumulate=out is not None)
+        elif self.mode != "none":
+            x = rearrange(strip_down(self.resample, rearrange(x, "b c t h w -> (b t) c h w")), "(b t) c h w -> b c t h w", t=t)
 
         if self.mode == "downsample3d":
             if feat_cache is not None:
@@ -116,31 +114,6 @@ class Resample(nn.Module):
                     feat_cache[idx] = cache_x
                     feat_idx[0] += 1
         return x
-
-
-STRIP_ELEMS = 2 ** 24
-
-
-def strip_apply(fn, x, scale=1, halo=1, out=None):
-    # strips of rows bound cudnn's conv workspace, a halo row per 3x3 conv keeps them exact
-    n = -(-x.numel() * scale * scale // STRIP_ELEMS)
-    if n <= 1 and out is None:
-        return fn(x)
-    add = out is not None
-    size = x.shape[-2]
-    step = -(-size // n)
-    for a in range(0, size, step):
-        b = min(size, a + step)
-        lo = max(0, a - halo)
-        y = fn(x.narrow(-2, lo, min(size, b + halo) - lo)).narrow(-2, (a - lo) * scale, (b - a) * scale)
-        if out is None:
-            out = y.new_empty(*y.shape[:-2], size * scale, y.shape[-1])
-        dst = out.narrow(-2, a * scale, (b - a) * scale)
-        if add:
-            dst.add_(y)
-        else:
-            dst.copy_(y)
-    return out
 
 
 def conv3x3(in_dim, out_dim, temporal_kernel=3):
@@ -169,30 +142,17 @@ class ResidualBlock(nn.Module):
             if in_dim != out_dim else nn.Identity())
 
     def forward(self, x, feat_cache=None, feat_idx=[0]):
-        if feat_cache is None:
-            # single image: the whole block runs in strips so its intermediates never exist at full size
-            return strip_apply(lambda s: self.residual(s).add_(self.shortcut(s)), x, halo=2)
-        old_x = x
-        for layer in self.residual:
-            if isinstance(layer, CausalConv3d) and feat_cache is not None:
-                idx = feat_idx[0]
-                cache_x = x[:, :, -CACHE_T:, :, :].clone()
-                if cache_x.shape[2] < 2 and feat_cache[idx] is not None:
-                    # cache last frame of last two chunk
-                    cache_x = torch.cat(
-                        [
-                            feat_cache[idx][:, :, -1, :, :].unsqueeze(2).to(
-                                cache_x.device),
-                            cache_x,
-                        ],
-                        dim=2,
-                    )
-                x = layer(x, cache_list=feat_cache, cache_idx=idx)
-                feat_cache[idx] = cache_x
-                feat_idx[0] += 1
-            else:
-                x = layer(x)
-        return x + self.shortcut(old_x)
+        i, old = feat_idx[0], feat_cache[feat_idx[0]:feat_idx[0] + 2] if feat_cache is not None else []
+        x = strip_residual(self, x, feat_cache, feat_idx)
+        keep_two_frames(feat_cache, i, old)
+        return x
+
+
+def keep_two_frames(feat_cache, i, old):
+    # a one-frame chunk keeps the previous chunk's last frame in front of its own
+    for j, o in enumerate(old):
+        if o is not None and feat_cache[i + j].shape[2] < CACHE_T:
+            feat_cache[i + j] = torch.cat([o[:, :, -1:], feat_cache[i + j]], 2)
 
 
 def patchify(x, patch_size):
@@ -364,11 +324,12 @@ class Down_ResidualBlock(nn.Module):
         self.downsamples = nn.Sequential(*downsamples)
 
     def forward(self, x, feat_cache=None, feat_idx=[0]):
-        x_copy = x
+        # the shortcut first, in strips of even rows, so the blocks may run in place on x
+        step = 2 * -(-x.shape[-2] // (2 * max(1, x.numel() // STRIP_ELEMS)))
+        x_shortcut = torch.cat([self.avg_shortcut(s) for s in x.split(step, dim=-2)], dim=-2)
         for module in self.downsamples:
             x = module(x, feat_cache, feat_idx)
-
-        return x + self.avg_shortcut(x_copy)
+        return x.add_(x_shortcut)
 
 
 class Up_ResidualBlock(nn.Module):
@@ -407,16 +368,15 @@ class Up_ResidualBlock(nn.Module):
         self.upsamples = nn.Sequential(*upsamples)
 
     def forward(self, x, feat_cache=None, feat_idx=[0], first_chunk=False):
-        x_main = x
-        for module in self.upsamples:
-            x_main = module(x_main, feat_cache, feat_idx)
-        if self.avg_shortcut is not None:
-            if feat_cache is None:
-                return strip_apply(lambda s: self.avg_shortcut(s, first_chunk), x, scale=self.avg_shortcut.factor_s, halo=0, out=x_main)
-            x_shortcut = self.avg_shortcut(x, first_chunk)
-            return x_main + x_shortcut
-        else:
-            return x_main
+        if self.avg_shortcut is None:
+            for module in self.upsamples:
+                x = module(x, feat_cache, feat_idx)
+            return x
+        # the shortcut first, as the output the upsample accumulates into, so the blocks may run in place on x
+        out = strip_apply(lambda s, lo: self.avg_shortcut(s, first_chunk), x, scale=self.avg_shortcut.factor_s, halo=0)
+        for module in self.upsamples[:-1]:
+            x = module(x, feat_cache, feat_idx)
+        return self.upsamples[-1](x, feat_cache, feat_idx, out=out)
 
 
 class Encoder3d(nn.Module):
@@ -516,25 +476,9 @@ class Encoder3d(nn.Module):
                 x = layer(x)
 
         ## head
-        for layer in self.head:
-            if isinstance(layer, CausalConv3d) and feat_cache is not None:
-                idx = feat_idx[0]
-                cache_x = x[:, :, -CACHE_T:, :, :].clone()
-                if cache_x.shape[2] < 2 and feat_cache[idx] is not None:
-                    cache_x = torch.cat(
-                        [
-                            feat_cache[idx][:, :, -1, :, :].unsqueeze(2).to(
-                                cache_x.device),
-                            cache_x,
-                        ],
-                        dim=2,
-                    )
-                x = layer(x, feat_cache[idx])
-                feat_cache[idx] = cache_x
-                feat_idx[0] += 1
-            else:
-                x = layer(x)
-
+        i, old = feat_idx[0], feat_cache[feat_idx[0]:feat_idx[0] + 1] if feat_cache is not None else []
+        x = strip_apply(cached_chain(self.head, x, feat_cache, feat_idx), x)
+        keep_two_frames(feat_cache, i, old)
         return x
 
 
@@ -629,24 +573,9 @@ class Decoder3d(nn.Module):
                 x = layer(x, first_chunk=first_chunk)
 
         ## head
-        for layer in self.head:
-            if isinstance(layer, CausalConv3d) and feat_cache is not None:
-                idx = feat_idx[0]
-                cache_x = x[:, :, -CACHE_T:, :, :].clone()
-                if cache_x.shape[2] < 2 and feat_cache[idx] is not None:
-                    cache_x = torch.cat(
-                        [
-                            feat_cache[idx][:, :, -1, :, :].unsqueeze(2).to(
-                                cache_x.device),
-                            cache_x,
-                        ],
-                        dim=2,
-                    )
-                x = layer(x, feat_cache[idx])
-                feat_cache[idx] = cache_x
-                feat_idx[0] += 1
-            else:
-                x = layer(x)
+        i, old = feat_idx[0], feat_cache[feat_idx[0]:feat_idx[0] + 1] if feat_cache is not None else []
+        x = strip_apply(cached_chain(self.head, x, feat_cache, feat_idx), x)
+        keep_two_frames(feat_cache, i, old)
         return x
 
 
@@ -712,12 +641,13 @@ class WanVAE(nn.Module):
 
     def encode(self, x):
         if x.ndim == 4:
-            # single image: no temporal cache, which would keep every conv input alive for the whole pass
-            x = patchify(x.unsqueeze(2), patch_size=self.patch_size)
-            return self.conv1(self.encoder(x)).chunk(2, dim=1)[0].squeeze(2)
+            return self.encode(x.unsqueeze(2)).squeeze(2)
+        x = patchify(x, patch_size=self.patch_size)
+        if x.shape[2] == 1:
+            # single frame: no temporal cache, which would keep every conv input alive for the whole pass
+            return self.conv1(self.encoder(x)).chunk(2, dim=1)[0]
         conv_idx = [0]
         feat_map = [None] * count_conv3d(self.encoder)
-        x = patchify(x, patch_size=self.patch_size)
         t = x.shape[2]
         iter_ = 1 + (t - 1) // 4
         for i in range(iter_):
@@ -740,12 +670,13 @@ class WanVAE(nn.Module):
 
     def decode(self, z):
         if z.ndim == 4:
-            out = self.decoder(self.conv2(z.unsqueeze(2)), first_chunk=True)
-            return unpatchify(out, patch_size=self.patch_size).squeeze(2)
+            return self.decode(z.unsqueeze(2)).squeeze(2)
+        x = self.conv2(z)
+        if x.shape[2] == 1:
+            return unpatchify(self.decoder(x, first_chunk=True), patch_size=self.patch_size)
         conv_idx = [0]
         feat_map = [None] * count_conv3d(self.decoder)
         iter_ = z.shape[2]
-        x = self.conv2(z)
         for i in range(iter_):
             conv_idx = [0]
             if i == 0:
