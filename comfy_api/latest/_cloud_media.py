@@ -112,6 +112,11 @@ class _PublicHttpsRedirect(urllib.request.HTTPRedirectHandler):
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
 def _safe_provider_error(error: BaseException) -> RuntimeError:
     if isinstance(error, urllib.error.HTTPError):
         return RuntimeError(f"provider request failed with HTTP {error.code}")
@@ -156,9 +161,10 @@ def _request_json(
     if not 1 <= request_maximum <= 49 * 1024 * 1024:
         raise ValueError("provider request limit is invalid")
     raw = b""
+    opener = urllib.request.build_opener(_NoRedirect())
     for attempt in range(attempts):
         try:
-            with urllib.request.urlopen(request, timeout=timeout) as response:
+            with opener.open(request, timeout=timeout) as response:
                 length = response.headers.get("Content-Length")
                 if length is not None and int(length) > maximum:
                     raise ValueError("provider response exceeds its byte limit")

@@ -19,6 +19,11 @@ from collections import OrderedDict
 from typing import Any
 
 
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
 class InProcessCivitai:
     _ORIGIN = "https://civitai.com"
     _API_PREFIX = "/api/v1/"
@@ -59,7 +64,8 @@ class InProcessCivitai:
             },
             method="GET",
         )
-        with urllib.request.urlopen(request, timeout=15.0) as response:
+        opener = urllib.request.build_opener(_NoRedirect())
+        with opener.open(request, timeout=15.0) as response:
             final = urllib.parse.urlsplit(response.geturl())
             if (final.scheme != "https" or final.hostname != "civitai.com"
                     or final.port not in (None, 443)
