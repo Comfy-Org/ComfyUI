@@ -4,6 +4,7 @@ import os
 import shutil
 import sqlite3
 import time
+import urllib.parse
 from contextlib import closing
 from app.logger import log_startup_warning
 from filelock import FileLock, Timeout
@@ -164,6 +165,34 @@ def _backup_database(source_path, destination_path):
         with closing(sqlite3.connect(destination_path)) as destination:
             source.backup(destination, progress=give_up_when_locked_too_long)
     shutil.copymode(source_path, destination_path)
+
+
+def _unknown_revisions(db_path):
+    """Read-only, so a database a newer ComfyUI upgraded, and the WAL it left, stay as they are."""
+    path = os.path.abspath(db_path).replace(os.sep, "/")
+    uri = "file://" + ("" if path.startswith("/") else "/") + urllib.parse.quote(path, safe="/:") + "?mode=ro"
+    try:
+        with closing(sqlite3.connect(uri, uri=True, timeout=0)) as conn:
+            stored = [row[0] for row in conn.execute("SELECT version_num FROM alembic_version")]
+        known = {revision.revision for revision in ScriptDirectory.from_config(get_alembic_config()).walk_revisions()}
+    except Exception:
+        return None  # no database or version table yet, or one it can't read: init_db reports it
+    return ", ".join(ascii(revision) for revision in stored if revision not in known) or None
+
+
+def newer_database():
+    """(path, revisions) if the database init_db would open, or the legacy one it would move
+    into place, was upgraded by a newer ComfyUI; else None."""
+    try:
+        db_path = get_db_path()
+    except ValueError:
+        return None  # sqlite:// (in memory), or an unsupported URL that init_db reports
+    legacy_db_path = get_legacy_default_db_path()
+    if args.database_url is None and legacy_db_path is not None and not os.path.exists(db_path) \
+            and not os.path.exists(legacy_db_path + ".bak"):
+        db_path = legacy_db_path  # copy_legacy_default_db moves it into place
+    revisions = _unknown_revisions(db_path)
+    return (db_path, revisions) if revisions else None
 
 
 _db_lock = None
