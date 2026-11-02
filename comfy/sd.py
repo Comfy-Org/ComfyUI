@@ -86,6 +86,7 @@ import comfy.text_encoders.minimax_music
 import comfy.text_encoders.yue2
 import comfy.ldm.minimax.vae
 import comfy.ldm.minimax.audio_vae
+import comfy.ldm.ming_tts.model
 import comfy.text_encoders.boogu
 import comfy.text_encoders.ernie
 import comfy.text_encoders.gemma4
@@ -532,7 +533,22 @@ class VAE:
         self.audio_sample_rate = 44100
 
         if config is None:
-            if "dec_in_proj.weight" in sd and "decoder.model.0.weight_g" in sd:  # MiniMax Music3 DAV
+            if metadata is not None and "ming_config" in metadata and "decoder.head.out.weight" in sd:
+                ming_config = json.loads(metadata["ming_config"])
+                audio_config = ming_config["audio_config" if ming_config["model_type"] == "lingv3_tts" else "audio_tokenizer_config"]
+                ming_dtype = dtype if dtype is not None else model_management.vae_dtype(device or model_management.vae_device(), self.working_dtypes)
+                operations = comfy.ops.mixed_precision_ops({}, ming_dtype)
+                self.first_stage_model = comfy.ldm.ming_tts.model.MingAudioVAE(audio_config, "cpu", ming_dtype, operations)
+                self.latent_channels = 64
+                self.output_channels = 1
+                self.upscale_ratio = self.downscale_ratio = audio_config["enc_kwargs"]["hop_size"] * audio_config["patch_size"]
+                self.latent_dim = 1
+                self.audio_sample_rate = audio_config["sample_rate"]
+                self.process_input = self.process_output = lambda audio: audio
+                self.crop_input = False
+                self.memory_used_encode = lambda shape, dtype: (shape[-1] * 1600 + 128_000_000) * model_management.dtype_size(dtype)
+                self.memory_used_decode = lambda shape, dtype: (shape[-1] * 3528 * 1600 + 128_000_000) * model_management.dtype_size(dtype)
+            elif "dec_in_proj.weight" in sd and "decoder.model.0.weight_g" in sd:  # MiniMax Music3 DAV
                 self.first_stage_model = comfy.ldm.minimax_music.dav.MiniMaxMusic3DAV(operations=comfy.ops.disable_weight_init)
                 self.latent_channels = 128
                 self.output_channels = 2

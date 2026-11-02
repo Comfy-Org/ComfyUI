@@ -17,6 +17,7 @@ import comfy.text_encoders.lt
 import comfy.text_encoders.hunyuan_video
 import comfy.text_encoders.minimax
 import comfy.text_encoders.minimax_music
+import comfy.text_encoders.ming_tts
 import comfy.text_encoders.cosmos
 import comfy.text_encoders.lumina2
 import comfy.text_encoders.wan
@@ -2419,6 +2420,22 @@ class YuE2(supported_models_base.BASE):
         return supported_models_base.ClipTarget(comfy.text_encoders.yue2.YuE2Tokenizer, comfy.text_encoders.yue2.te(**detect))
 
 
+class MingTTS(supported_models_base.BASE):
+    unet_config = {"audio_model": "ming_tts"}
+    unet_extra_config = {}
+    latent_format = comfy.latent_formats.MingTTS
+    supported_inference_dtypes = [torch.bfloat16, torch.float32]
+    sampling_settings = {"multiplier": 1.0}
+
+    def get_model(self, state_dict, prefix="", device=None):
+        return model_base.MingTTS(self, device=device)
+
+    def clip_target(self, state_dict={}):
+        target = supported_models_base.ClipTarget(comfy.text_encoders.ming_tts.MingTokenizer, comfy.text_encoders.ming_tts.MingTEModel)
+        target.params["config"] = self.unet_config["ming_config"]
+        return target
+
+
 class MiniMaxMusic3(supported_models_base.BASE):
     unet_config = {
         "audio_model": "minimax_music3",
@@ -2737,6 +2754,7 @@ models = [
     ChromaRadiance,
     ACEStep,
     ACEStep15,
+    MingTTS,
     MiniMaxMusic3,
     YuE2,
     Omnigen2,

@@ -85,6 +85,7 @@ from comfy.ldm.sensenova.sampling import SenseNovaModelSampling, time_snr_shift
 import comfy.ldm.depth_anything_3.model
 import comfy.ldm.moss_image.model
 import comfy.ldm.fibo2.model
+import comfy.ldm.ming_tts.model
 
 import comfy.model_management
 import comfy.patcher_extension
@@ -2689,6 +2690,14 @@ class YuE2(BaseModel):
     def memory_required(self, input_shape, cond_shapes={}):
         context_size = sum(math.prod(shape) for shape in cond_shapes.get("c_crossattn", []))
         return super().memory_required(input_shape, cond_shapes) + context_size * comfy.model_management.dtype_size(self.get_dtype_inference())
+
+
+class MingTTS(BaseModel):
+    def __init__(self, model_config, model_type=ModelType.FLOW, device=None):
+        super().__init__(model_config, model_type, device=device, unet_model=comfy.ldm.ming_tts.model.MingFlowModel)
+
+    def get_dynamic_vram__units(self):
+        return self.diffusion_model.get_dynamic_vram__units()
 
 
 class MiniMaxMusic3(BaseModel):
