@@ -14,6 +14,7 @@ import pytest
 
 import folder_paths
 from app import agent_host
+from comfy.cli_args import DEFAULT_VERSION_STRING
 from comfy_api import feature_flags
 
 
@@ -365,4 +366,20 @@ def test_no_frontend_warning_when_the_agent_failed_to_load(monkeypatch, caplog):
     with caplog.at_level(logging.INFO):
         agent_host.check_frontend("1.57.6", None)
     assert agent_host.feature_flag() == {"state": "failed", "reason": "package_missing"}
+    assert "too old" not in caplog.text and not _agent_records(caplog)
+
+
+def test_default_version_argument_counts_as_no_pin(monkeypatch, caplog):
+    _ready_host(monkeypatch)
+    with caplog.at_level(logging.WARNING):
+        agent_host.check_frontend("1.57.6", DEFAULT_VERSION_STRING, None)
+    assert "update comfyui-frontend-package" in caplog.text
+    assert DEFAULT_VERSION_STRING not in caplog.text
+
+
+def test_custom_frontend_root_is_not_checked(monkeypatch, caplog):
+    _ready_host(monkeypatch)
+    with caplog.at_level(logging.INFO):
+        agent_host.check_frontend("1.57.6", "Comfy-Org/ComfyUI_frontend@1.59.0", "/srv/my-frontend")
+    assert agent_host.feature_flag() == {"state": "ready"}
     assert "too old" not in caplog.text and not _agent_records(caplog)

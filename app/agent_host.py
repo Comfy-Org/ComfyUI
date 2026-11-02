@@ -25,6 +25,7 @@ import os
 from packaging.version import InvalidVersion, Version
 
 import folder_paths
+from comfy.cli_args import DEFAULT_VERSION_STRING
 from comfy_api import feature_flags
 
 ENTRY_POINT_GROUP = "comfyui.agent"
@@ -80,14 +81,17 @@ def load() -> bool:
     return _failure is None
 
 
-def check_frontend(served: str | None, pinned: str | None) -> None:
+def check_frontend(served: str | None, pinned: str | None, front_end_root: str | None = None) -> None:
     """Report a frontend too old to show the agent panel, so a page with no Agent
     button isn't the only sign of it. `served` is None when the version is unknown;
-    `pinned` is what --front-end-version asked for, if it asked. The host's state
+    `pinned` is the --front-end-version argument and `front_end_root` the
+    --front-end-root one. A custom root has no version to compare. The host's state
     is left alone: it describes the host, and a newer frontend can still use it."""
     global _frontend_outdated
-    if _failure is not None or _host is None or served is None:
+    if _failure is not None or _host is None or served is None or front_end_root is not None:
         return
+    if pinned == DEFAULT_VERSION_STRING:
+        pinned = None
     try:
         if Version(served) >= Version(MIN_FRONTEND_VERSION):
             return
