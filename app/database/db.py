@@ -1,8 +1,10 @@
+import hashlib
 import importlib
 import logging
 import os
 import shutil
 import sqlite3
+import tempfile
 import time
 from contextlib import closing
 from app.logger import log_startup_warning
@@ -299,6 +301,22 @@ def _upgrade_discards_the_catalog(script, target_rev, current_rev):
 
 def _migrate_and_bind(db_url, db_path, db_exists):
     config = get_alembic_config()
+    # macOS writes AppleDouble ._* files beside every file on exFAT, FAT and SMB volumes, and
+    # Alembic would load them as revisions, so migrate from a copy of versions/ without them.
+    # The copy has a fixed name per install, so each launch replaces the last one's.
+    versions = os.path.join(config.get_main_option("script_location"), "versions")
+    if any(name.startswith("._") for name in os.listdir(versions)):
+        key = hashlib.sha256(os.path.abspath(versions).encode()).hexdigest()[:12]
+        filtered = os.path.join(tempfile.gettempdir(), f"comfyui-alembic-versions-{key}")
+        shutil.rmtree(filtered, ignore_errors=True)
+        try:
+            os.makedirs(filtered, mode=0o700)
+        except FileExistsError:  # another user's, or a symlink: use a private one-off copy
+            filtered = tempfile.mkdtemp()
+        for name in os.listdir(versions):
+            if name.endswith(".py") and not name.startswith("._"):
+                shutil.copyfile(os.path.join(versions, name), os.path.join(filtered, name))
+        config.set_main_option("version_locations", filtered.replace("%", "%%"))  # ConfigParser syntax
 
     # Check if we need to upgrade
     engine = create_engine(db_url)
