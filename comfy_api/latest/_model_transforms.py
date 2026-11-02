@@ -1232,6 +1232,7 @@ def _wan_video_nag(
                 self_module, x, context, transformer_options=None,
                 _context=nag_context, _scale=nag_scale, _alpha=nag_alpha,
                 _tau=nag_tau, _input_type=input_type, _inplace=inplace,
+                *, context_img_len=None,
             ):
                 return _wan_nag_forward(
                     self_module, x, context, _context, _scale, _alpha, _tau,
