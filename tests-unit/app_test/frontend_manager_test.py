@@ -468,3 +468,28 @@ def test_template_asset_map_skips_missing_assets():
         asset_map = FrontendManager.template_asset_map()
 
     assert asset_map == {"example.json": "/templates/example.json"}
+
+
+def test_served_version_of_a_downloaded_frontend():
+    root = FrontendManager.CUSTOM_FRONTENDS_ROOT
+    assert FrontendManager.served_version(f"{root}/Comfy-Org_ComfyUI_frontend/1.59.0") == "1.59.0"
+    assert FrontendManager.served_version(f"{root}/comfy-org_comfyui_frontend/1.57.0") == "1.57.0"
+
+
+def test_served_version_ignores_other_downloaded_frontends():
+    root = FrontendManager.CUSTOM_FRONTENDS_ROOT
+    assert FrontendManager.served_version(f"{root}/someone_ComfyUI_frontend/1.2.3") is None
+
+
+def test_served_version_of_the_default_frontend():
+    with patch("importlib.util.find_spec", return_value=Mock()):
+        with patch.object(FrontendManager, "default_frontend_path", return_value="/site/static"):
+            with patch("app.frontend_management.version", return_value="1.57.6") as installed:
+                assert FrontendManager.served_version("/site/static") == "1.57.6"
+    installed.assert_called_once_with("comfyui-frontend-package")
+
+
+def test_served_version_does_not_exit_without_the_frontend_package():
+    with patch("importlib.util.find_spec", return_value=None):
+        with patch.object(FrontendManager, "default_frontend_path", side_effect=SystemExit(-1)):
+            assert FrontendManager.served_version("/some/other/frontend") is None
