@@ -309,6 +309,7 @@ def _migrate_and_bind(db_url, db_path, db_exists):
     def set_sqlite_pragma(dbapi_connection, connection_record):
         cursor = dbapi_connection.cursor()
         cursor.execute("PRAGMA foreign_keys=ON")
+        cursor.execute("PRAGMA temp_store=MEMORY")
         cursor.close()
 
     # Writes go through a separate engine whose transactions take the write lock up front.
@@ -320,6 +321,7 @@ def _migrate_and_bind(db_url, db_path, db_exists):
     def configure_write_connection(dbapi_connection, connection_record):
         dbapi_connection.isolation_level = None
         dbapi_connection.execute("PRAGMA foreign_keys=ON")
+        dbapi_connection.execute("PRAGMA temp_store=MEMORY")
 
     @event.listens_for(write_engine, "begin")
     def begin_immediate(connection):
