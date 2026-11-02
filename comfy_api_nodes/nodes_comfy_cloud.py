@@ -583,7 +583,11 @@ def _video_schema(node_id: str, display_name: str, summary: str, inputs: list[IO
     )
 
 
-_MINIMAX_H3_MAX_REFERENCES = 4
+# The limits the graph behind the workflow actually declares: see
+# comfy_extras/nodes_minimax_h3.py, where MiniMaxH3ReferenceToVideo grows
+# ref_images to 9 and ref_videos / ref_audios to 3 each.
+_MINIMAX_H3_MAX_REFERENCES = 9
+_MINIMAX_H3_MAX_VIDEO_REFERENCES = 3
 _MINIMAX_H3_MAX_AUDIO_REFERENCES = 3
 
 
@@ -758,15 +762,24 @@ class ComfyCloudMiniMaxH3ReferenceToVideoNode(IO.ComfyNode):
                     template=IO.Autogrow.TemplatePrefix(
                         input=IO.Image.Input("reference_image"),
                         prefix="reference_image_",
-                        min=0,
+                        min=1,
                         max=_MINIMAX_H3_MAX_REFERENCES,
                     ),
                     tooltip=(
-                        "Up to four references, addressed in the prompt as <Picture 1> upwards "
-                        "in connection order."
+                        "Up to nine references, addressed in the prompt as <Picture 1> upwards "
+                        "in connection order. At least one is required."
                     ),
                 ),
-                IO.Video.Input("ref_video", optional=True),
+                IO.Autogrow.Input(
+                    "ref_videos",
+                    template=IO.Autogrow.TemplatePrefix(
+                        input=IO.Video.Input("ref_video"),
+                        prefix="ref_video_",
+                        min=0,
+                        max=_MINIMAX_H3_MAX_VIDEO_REFERENCES,
+                    ),
+                    tooltip="Addressed in the prompt as <Video 1> upwards in connection order.",
+                ),
                 IO.Autogrow.Input(
                     "ref_audio",
                     template=IO.Autogrow.TemplatePrefix(
@@ -800,7 +813,7 @@ class ComfyCloudMiniMaxH3ReferenceToVideoNode(IO.ComfyNode):
         cls,
         prompt: str,
         reference_images: dict[str, Input.Image] | None = None,
-        ref_video: Input.Video | None = None,
+        ref_videos: dict[str, Input.Video] | None = None,
         ref_audio: dict[str, Input.Audio] | None = None,
         seed: int = 42,
         aspect_ratio: str = "16:9",
@@ -812,6 +825,9 @@ class ComfyCloudMiniMaxH3ReferenceToVideoNode(IO.ComfyNode):
         images = [image for image in (reference_images or {}).values() if image is not None]
         if len(images) > _MINIMAX_H3_MAX_REFERENCES:
             raise ValueError(f"At most {_MINIMAX_H3_MAX_REFERENCES} reference images are supported.")
+        videos = [video for video in (ref_videos or {}).values() if video is not None]
+        if len(videos) > _MINIMAX_H3_MAX_VIDEO_REFERENCES:
+            raise ValueError(f"At most {_MINIMAX_H3_MAX_VIDEO_REFERENCES} reference videos are supported.")
         audios = [audio for audio in (ref_audio or {}).values() if audio is not None]
         if len(audios) > _MINIMAX_H3_MAX_AUDIO_REFERENCES:
             raise ValueError(f"At most {_MINIMAX_H3_MAX_AUDIO_REFERENCES} reference audio inputs are supported.")
@@ -821,8 +837,10 @@ class ComfyCloudMiniMaxH3ReferenceToVideoNode(IO.ComfyNode):
             f"reference_image_{index}": await _minimax_h3_asset(cls, image)
             for index, image in enumerate(images, 1)
         }
-        if ref_video is not None:
-            assets["ref_video"] = await _minimax_h3_video_asset(cls, ref_video)
+        assets.update({
+            f"ref_video_{index}": await _minimax_h3_video_asset(cls, video)
+            for index, video in enumerate(videos, 1)
+        })
         assets.update({
             f"ref_audio_{index}": await _minimax_h3_audio_asset(cls, audio)
             for index, audio in enumerate(audios, 1)
@@ -844,7 +862,7 @@ class ComfyCloudExtension(ComfyExtension):
         return [
             ComfyCloudMiniMaxH3TextToVideoNode,
             ComfyCloudMiniMaxH3FirstLastFrameToVideoNode,
-            # ComfyCloudMiniMaxH3ReferenceToVideoNode,  # Disabled until the server-side issue is fixed.
+            ComfyCloudMiniMaxH3ReferenceToVideoNode,
             ComfyCloudMiniMaxH3ImageToVideoNode,
             ComfyCloudMiniMaxMusic3TextToAudioNode,
             ComfyCloudFlux2TextToImageNode,
