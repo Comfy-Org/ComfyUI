@@ -115,6 +115,7 @@ def _parse_cli_feature_flags() -> dict[str, Any]:
 # Default server capabilities
 _CORE_FEATURE_FLAGS: dict[str, Any] = {
     "supports_preview_metadata": True,
+    "supports_progress_text_metadata": True,
     "supports_model_type_tags": True,
     "max_upload_size": args.max_upload_size * 1024 * 1024, # Convert MB to bytes
     "extension": {"manager": {"supports_v4": True}},

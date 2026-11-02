@@ -8,6 +8,7 @@ import time
 import nodes
 import folder_paths
 import execution
+from comfy_execution.utils import current_prompt_id
 from comfy_execution.jobs import (
     JobStatus,
     get_job,
@@ -1601,5 +1602,12 @@ class PromptServer():
 
         # Pack the node_id length as a 4-byte unsigned integer, followed by the node_id bytes
         message = struct.pack(">I", len(node_id_bytes)) + node_id_bytes + text
+        # Clients that opt in get the prompt id prepended, so they can tell concurrent prompts apart.
+        prompt_id_bytes = (current_prompt_id.get() or "").encode("utf-8")
+        message_with_prompt = struct.pack(">I", len(prompt_id_bytes)) + prompt_id_bytes + message
 
-        self.send_sync(BinaryEventTypes.TEXT, message, sid)
+        for target in ([sid] if sid is not None else list(self.sockets.keys())):
+            supported = feature_flags.supports_feature(
+                self.sockets_metadata, target, "supports_progress_text_metadata"
+            )
+            self.send_sync(BinaryEventTypes.TEXT, message_with_prompt if supported else message, target)
