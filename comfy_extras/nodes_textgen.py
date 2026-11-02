@@ -1,6 +1,8 @@
 from comfy_api.latest import ComfyExtension, io
 from typing_extensions import override
 
+VIDEO_TOOLTIP = "Video frames as image batch. Assumed to be 24 FPS; subsampled to 1 FPS internally."
+
 class TextGenerateV2(io.ComfyNode):
     @classmethod
     def define_schema(cls):
@@ -14,8 +16,8 @@ class TextGenerateV2(io.ComfyNode):
                     io.Float.Input("top_p", default=0.95, min=0.0, max=1.0, step=0.01),
                     io.Float.Input("min_p", default=0.05, min=0.0, max=1.0, step=0.01),
                     io.Float.Input("repetition_penalty", default=1.05, min=0.0, max=5.0, step=0.01),
+                    io.Float.Input("presence_penalty", default=0.0, min=0.0, max=5.0, step=0.01),
                     io.Int.Input("seed", default=0, min=0, max=0xffffffffffffffff),
-                    io.Float.Input("presence_penalty", optional=True, default=0.0, min=0.0, max=5.0, step=0.01),
                 ]
             ),
             io.DynamicCombo.Option(
@@ -32,9 +34,9 @@ class TextGenerateV2(io.ComfyNode):
             inputs=[
                 io.Clip.Input("clip"),
                 io.String.Input("prompt", multiline=True, dynamic_prompts=True, default=""),
-                io.Autogrow.Input("images", optional=True, template=io.Autogrow.TemplatePrefix(io.Image.Input("image"), prefix="image", min=0, max=50)),
-                io.Image.Input("video", optional=True, tooltip="Video frames as image batch. Assumed to be 24 FPS; subsampled to 1 FPS internally."),
-                io.Audio.Input("audio", optional=True),
+                io.Autogrow.Input("images", optional=True, template=io.Autogrow.TemplateNames(io.Image.Input("image"), names=[f"image{i}" for i in range(1, 51)], min=0)),
+                io.Autogrow.Input("videos", optional=True, template=io.Autogrow.TemplateNames(io.Image.Input("video", tooltip=VIDEO_TOOLTIP), names=[f"video{i}" for i in range(1, 101)], min=0)),
+                io.Autogrow.Input("audios", optional=True, template=io.Autogrow.TemplateNames(io.Audio.Input("audio"), names=[f"audio{i}" for i in range(1, 101)], min=0)),
                 io.Int.Input("max_length", default=512, min=1, max=32768),
                 io.DynamicCombo.Input("sampling_mode", options=sampling_options, display_name="Sampling Mode"),
                 io.Boolean.Input("thinking", optional=True, default=False, tooltip="Operate in thinking mode if the model supports it."),
@@ -49,14 +51,15 @@ class TextGenerateV2(io.ComfyNode):
         )
 
     @classmethod
-    def execute(cls, clip, prompt, max_length, sampling_mode, image=None, thinking=False, use_default_template=True, video=None, audio=None, mtp="auto", system_prompt="", images: io.Autogrow.Type = None) -> io.NodeOutput:
+    def execute(cls, clip, prompt, max_length, sampling_mode, image=None, thinking=False, use_default_template=True, video=None, audio=None, mtp="auto", system_prompt="", images: io.Autogrow.Type = None, videos: io.Autogrow.Type = None, audios: io.Autogrow.Type = None) -> io.NodeOutput:
 
         mtp = {"off": False, "auto": True}.get(mtp, mtp)
 
-        images = images or {}
-        images = [batch[i:i + 1] for batch in images.values() for i in range(batch.shape[0])]
+        images = [batch[i:i + 1] for batch in (images or {}).values() if batch is not None for i in range(batch.shape[0])]
+        videos = [v for v in (videos or {}).values() if v is not None]
+        audios = [a for a in (audios or {}).values() if a is not None]
 
-        tokens = clip.tokenize(prompt, image=image, images=images, skip_template=not use_default_template, min_length=1, thinking=thinking, video=video, audio=audio, system_prompt=system_prompt if use_default_template else "")
+        tokens = clip.tokenize(prompt, image=image, images=images, skip_template=not use_default_template, min_length=1, thinking=thinking, video=video, videos=videos, audio=audio, audios=audios, system_prompt=system_prompt if use_default_template else "")
 
         # Get sampling parameters from dynamic combo
         do_sample = sampling_mode.get("sampling_mode") == "on"
@@ -100,12 +103,20 @@ class TextGenerate(TextGenerateV2):
     @classmethod
     def define_schema(cls):
         parent_schema = super().define_schema()
+        old_inputs = {
+            "images": io.Image.Input("image", optional=True),
+            "videos": io.Image.Input("video", optional=True, tooltip=VIDEO_TOOLTIP),
+            "audios": io.Audio.Input("audio", optional=True),
+        }
+        # optional widgets follow required ones, which keeps seed before presence_penalty in saved workflows
+        sampling_on = next(i for i in parent_schema.inputs if i.id == "sampling_mode").options[0]
+        next(i for i in sampling_on.inputs if i.id == "presence_penalty").optional = True
         return io.Schema(
             node_id="TextGenerate",
             display_name="Generate Text (DEPRECATED)",
             category=parent_schema.category,
             is_deprecated=True,
-            inputs=[io.Image.Input("image", optional=True) if i.id == "images" else i for i in parent_schema.inputs],
+            inputs=[old_inputs.get(i.id, i) for i in parent_schema.inputs],
             outputs=parent_schema.outputs,
         )
 

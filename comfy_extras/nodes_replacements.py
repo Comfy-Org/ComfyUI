@@ -102,8 +102,10 @@ async def register_replacements_textgenerate():
             old_node_id="TextGenerate",
             old_widget_ids=widgets,
             input_mapping=[
-                {"new_id": "images.image0", "old_id": "image"},
-                *[{"new_id": name, "old_id": name} for name in ["clip", "video", "audio", "system_prompt", *widgets]],
+                {"new_id": "images.image1", "old_id": "image"},
+                {"new_id": "videos.video1", "old_id": "video"},
+                {"new_id": "audios.audio1", "old_id": "audio"},
+                *[{"new_id": name, "old_id": name} for name in ["clip", "system_prompt", *widgets]],
             ],
         ))
 
