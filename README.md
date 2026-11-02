@@ -432,7 +432,7 @@ To use the most up-to-date frontend version:
 
    Once that version is downloaded, ComfyUI starts from the local copy without asking GitHub. `@latest` asks GitHub on every start.
 
-3. `@prerelease` picks the newest pre-release that ships a built frontend (`dist.zip`) among the 30 newest releases. If there is none, ComfyUI logs why and uses the default frontend.
+3. `@prerelease` picks the newest published pre-release that ships a built frontend (`dist.zip`) among the 30 newest releases. If there is none, ComfyUI logs why and uses the default frontend.
 
 This approach allows you to easily switch between the stable fortnightly release and the cutting-edge daily updates, or even specific versions for testing purposes.
 
