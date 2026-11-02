@@ -32,6 +32,7 @@ from comfy_execution.caching import (
     LRUCache,
     RAMPressureCache,
     RAM_CACHE_LARGE_INTERMEDIATE,
+    cache_ram_from_prompt,
 )
 from comfy_execution.graph import (
     DynamicPrompt,
@@ -748,8 +749,18 @@ class PromptExecutor:
         self.add_message("execution_start", { "prompt_id": prompt_id}, broadcast=False)
 
         self._notify_prompt_lifecycle("start", prompt_id)
-        ram_headroom = int(self.cache_args["ram"] * (1024 ** 3))
-        ram_inactive_headroom = int(self.cache_args["ram_inactive"] * (1024 ** 3))
+        ram = self.cache_args["ram"]
+        ram_inactive = self.cache_args["ram_inactive"]
+        if self.cache_type == CacheType.RAM_PRESSURE:
+            settings = cache_ram_from_prompt(prompt, comfy.model_management.total_ram / 1024.0)
+            if settings is not None:
+                if len(args.cache_ram) > 0:
+                    logging.info("Cache RAM Settings node ignored: --cache-ram is set.")
+                else:
+                    ram, ram_inactive = settings
+                    logging.info("Cache RAM Settings: keeping %.1fGB free (active), %.1fGB (inactive) for this run.", ram, ram_inactive)
+        ram_headroom = int(ram * (1024 ** 3))
+        ram_inactive_headroom = int(ram_inactive * (1024 ** 3))
         ram_release_callback = self.caches.outputs.ram_release if self.cache_type == CacheType.RAM_PRESSURE else None
         comfy.memory_management.set_ram_cache_release_state(ram_release_callback, ram_headroom)
 
