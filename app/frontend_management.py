@@ -6,7 +6,6 @@ import sys
 import tempfile
 import zipfile
 import importlib
-import importlib.util
 from dataclasses import dataclass
 from functools import cached_property
 from pathlib import Path
@@ -242,12 +241,18 @@ class FrontendManager:
         return get_comfy_package_versions()
 
     @classmethod
-    def default_frontend_path(cls) -> str:
+    def _package_frontend_path(cls) -> Optional[str]:
+        """The frontend bundled in comfyui-frontend-package, or None if the package can't be imported."""
         try:
             import comfyui_frontend_package
-
-            return str(importlib.resources.files(comfyui_frontend_package) / "static")
         except ImportError:
+            return None
+        return str(importlib.resources.files(comfyui_frontend_package) / "static")
+
+    @classmethod
+    def default_frontend_path(cls) -> str:
+        path = cls._package_frontend_path()
+        if path is None:
             logging.error(
                 f"""
 ********** ERROR ***********
@@ -260,6 +265,7 @@ comfyui-frontend-package is not installed.
 """.strip()
             )
             sys.exit(-1)
+        return path
 
     @classmethod
     def served_version(cls, web_root: str) -> Optional[str]:
@@ -267,9 +273,7 @@ comfyui-frontend-package is not installed.
         path = Path(web_root)
         if path.parent.parent == Path(cls.CUSTOM_FRONTENDS_ROOT):
             return path.name if path.parent.name.lower() == "comfy-org_comfyui_frontend" else None
-        if importlib.util.find_spec("comfyui_frontend_package") is None:  # default_frontend_path() would exit
-            return None
-        if web_root != cls.default_frontend_path():
+        if web_root != cls._package_frontend_path():  # not default_frontend_path(), which exits without the package
             return None
         try:
             return version("comfyui-frontend-package")

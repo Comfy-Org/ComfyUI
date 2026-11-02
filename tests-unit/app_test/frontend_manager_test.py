@@ -482,14 +482,25 @@ def test_served_version_ignores_other_downloaded_frontends():
 
 
 def test_served_version_of_the_default_frontend():
-    with patch("importlib.util.find_spec", return_value=Mock()):
-        with patch.object(FrontendManager, "default_frontend_path", return_value="/site/static"):
-            with patch("app.frontend_management.version", return_value="1.57.6") as installed:
-                assert FrontendManager.served_version("/site/static") == "1.57.6"
+    with patch.object(FrontendManager, "_package_frontend_path", return_value="/site/static"):
+        with patch("app.frontend_management.version", return_value="1.57.6") as installed:
+            assert FrontendManager.served_version("/site/static") == "1.57.6"
     installed.assert_called_once_with("comfyui-frontend-package")
 
 
 def test_served_version_does_not_exit_without_the_frontend_package():
-    with patch("importlib.util.find_spec", return_value=None):
+    with patch.object(FrontendManager, "_package_frontend_path", return_value=None):
         with patch.object(FrontendManager, "default_frontend_path", side_effect=SystemExit(-1)):
             assert FrontendManager.served_version("/some/other/frontend") is None
+
+
+def test_served_version_does_not_exit_when_the_frontend_package_fails_to_import():
+    real_import = __import__
+
+    def broken_import(name, *args, **kwargs):
+        if name == "comfyui_frontend_package":
+            raise ImportError("broken install")
+        return real_import(name, *args, **kwargs)
+
+    with patch("builtins.__import__", side_effect=broken_import):
+        assert FrontendManager.served_version("/some/other/frontend") is None
