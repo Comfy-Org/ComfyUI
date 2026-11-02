@@ -164,7 +164,7 @@ def _run_faulting_fast_phase(
     monkeypatch.setattr(scanner_module, "create_record", create_record_or_raise)
     monkeypatch.setattr(scanner_module.mode, "hashing_enabled", lambda: False)
     _configure_fast_phase(monkeypatch, paths, specs)
-    return engine, scan_seeder._run_fast_phase(("models",))
+    return engine, scan_seeder._run_fast_phase(("models",), False)
 
 
 def test_idle_status_returns_a_progress_snapshot() -> None:
@@ -208,7 +208,9 @@ def test_multi_root_scan_emits_one_started_and_completed_without_root(
     monkeypatch.setattr(seeder_module.time, "perf_counter", lambda: next(clock))
     cpu_clock = iter((2.0, 2.25))
     monkeypatch.setattr(seeder_module.time, "thread_time", lambda: next(cpu_clock))
-    monkeypatch.setattr(scan_seeder, "_run_fast_phase", lambda roots: (3, 2, 5))
+    # Models and input get a fast pass each; the completed event sums them.
+    passes = {("models",): (2, 1, 3), ("input",): (1, 1, 2)}
+    monkeypatch.setattr(scan_seeder, "_run_fast_phase", lambda roots, by_listing=None: passes[roots])
     monkeypatch.setattr(scan_seeder, "_run_enrich_phase", lambda roots: (False, 4))
 
     with caplog.at_level(logging.INFO):
@@ -249,7 +251,7 @@ def test_scan_completed_reports_per_scan_failure_counts(
     )
     clock = iter((10.0, 10.5))
     monkeypatch.setattr(seeder_module.time, "perf_counter", lambda: next(clock))
-    monkeypatch.setattr(scan_seeder, "_run_fast_phase", lambda roots: (0, 0, 0))
+    monkeypatch.setattr(scan_seeder, "_run_fast_phase", lambda roots, by_listing=None: (0, 0, 0))
     monkeypatch.setattr(scan_seeder, "_run_enrich_phase", lambda roots: (False, 0))
 
     with caplog.at_level(logging.INFO):
@@ -329,11 +331,15 @@ def test_single_root_scan_emits_root_and_phase(
 ) -> None:
     scan_seeder._roots = ("output",)
     scan_seeder._phase = ScanPhase.FAST
-    monkeypatch.setattr(scan_seeder, "_run_fast_phase", lambda roots: (0, 0, 0))
+    listing: list[bool] = []
+    monkeypatch.setattr(
+        scan_seeder, "_run_fast_phase", lambda roots, by_listing: listing.append(by_listing) or (0, 0, 0)
+    )
 
     with caplog.at_level(logging.INFO):
         scan_seeder._run_scan()
 
+    assert listing == [True]  # the output-only rescan diffs listings
     assert events_named(caplog, "seeder.scan_started") == [
         {"phase": "fast", "root": "output"}
     ]
@@ -413,7 +419,7 @@ def test_scan_cancellation_emits_the_checkpoint_stage(
         return (False, 0)
 
     monkeypatch.setattr(scan_seeder, "_check_pause_and_cancel", cancel_at_stage)
-    monkeypatch.setattr(scan_seeder, "_run_fast_phase", lambda roots: (0, 0, 0))
+    monkeypatch.setattr(scan_seeder, "_run_fast_phase", lambda roots, by_listing=None: (0, 0, 0))
     monkeypatch.setattr(scan_seeder, "_run_enrich_phase", run_enrich)
 
     with caplog.at_level(logging.INFO):
@@ -515,7 +521,7 @@ def test_prune_before_scan_emits_marked_missing_with_pruning_stage(
     monkeypatch.setattr(
         seeder_module, "sync_temp_references_safely", lambda _progress, _should_stop=None: None
     )
-    monkeypatch.setattr(scan_seeder, "_run_fast_phase", lambda roots: (0, 0, 0))
+    monkeypatch.setattr(scan_seeder, "_run_fast_phase", lambda roots, by_listing=None: (0, 0, 0))
 
     with caplog.at_level(logging.INFO):
         scan_seeder._run_scan()
@@ -584,7 +590,7 @@ def test_scan_prune_failure_is_reported_and_the_scan_still_runs(
         seeder_module, "sync_temp_references_safely", lambda _progress, _should_stop=None: None
     )
 
-    def run_fast_phase(roots: tuple[str, ...]) -> tuple[int, int, int]:
+    def run_fast_phase(roots: tuple[str, ...], by_listing: bool | None = None) -> tuple[int, int, int]:
         fast_phase_roots.append(roots)
         return 0, 0, 0
 
@@ -596,7 +602,7 @@ def test_scan_prune_failure_is_reported_and_the_scan_still_runs(
     assert scan_seeder._errors == [
         "Marking missing assets failed; scan continued with the prune incomplete"
     ]
-    assert fast_phase_roots == [("models", "input")]
+    assert fast_phase_roots == [("models",), ("input",)]
     assert events_named(caplog, "seeder.marked_missing") == []
 
 
@@ -632,7 +638,7 @@ def test_batch_insert_failure_emits_only_the_exception_type(
     monkeypatch.setattr(seeder_module, "tick_watch_list", lambda _progress=None: None)
 
     with caplog.at_level(logging.INFO):
-        scan_seeder._run_fast_phase(("models",))
+        scan_seeder._run_fast_phase(("models",), False)
 
     assert events_named(caplog, "seeder.batch_insert_failed") == [
         {"error_kind": "other", "error_type": "PermissionError"}
@@ -732,7 +738,7 @@ def test_scan_completed_reports_the_scan_state_counters(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     scan_seeder._scan_state = _ScanState(dirs_listed=7, files_statted=31, paused_s=1.2344)
-    monkeypatch.setattr(scan_seeder, "_run_fast_phase", lambda roots: (0, 0, 0))
+    monkeypatch.setattr(scan_seeder, "_run_fast_phase", lambda roots, by_listing=None: (0, 0, 0))
     monkeypatch.setattr(scan_seeder, "_run_enrich_phase", lambda roots: (False, 0))
 
     with caplog.at_level(logging.INFO):
@@ -751,7 +757,7 @@ def test_paused_ms_accumulates_across_pauses(
 ) -> None:
     pause_s = 0.05
 
-    def fast_phase_paused_twice(roots):
+    def fast_phase_paused_twice(roots, by_listing=None):
         for _ in range(2):
             assert scan_seeder.pause()
             threading.Timer(pause_s, scan_seeder.resume).start()
@@ -782,7 +788,7 @@ def test_cpu_ms_counts_the_scan_threads_cpu_not_its_sleep(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    def fast_phase_that_spins_then_sleeps(roots):
+    def fast_phase_that_spins_then_sleeps(roots, by_listing=None):
         spin_until = time.thread_time() + 0.03
         while time.thread_time() < spin_until:
             pass
@@ -898,7 +904,7 @@ def test_scan_failure_classifies_a_real_sqlite_expression_tree_error(
     engine = create_engine("sqlite:///:memory:")
     secret_path = "/private/models/secret.safetensors"
 
-    def fail_scan(_roots):
+    def fail_scan(_roots, _by_listing=None):
         # One bound path per term; SQLite rejects the expression past depth 1000.
         clause = " OR ".join(["? = 1"] * 1100)
         with engine.connect() as connection:
