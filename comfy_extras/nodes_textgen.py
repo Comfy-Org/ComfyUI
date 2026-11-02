@@ -1,7 +1,7 @@
 from comfy_api.latest import ComfyExtension, io
 from typing_extensions import override
 
-class TextGenerate(io.ComfyNode):
+class TextGenerateV2(io.ComfyNode):
     @classmethod
     def define_schema(cls):
         # Define dynamic combo options for sampling mode
@@ -25,14 +25,14 @@ class TextGenerate(io.ComfyNode):
         ]
 
         return io.Schema(
-            node_id="TextGenerate",
+            node_id="TextGenerateV2",
             display_name="Generate Text",
             category="text",
             search_aliases=["LLM", "gemma"],
             inputs=[
                 io.Clip.Input("clip"),
                 io.String.Input("prompt", multiline=True, dynamic_prompts=True, default=""),
-                io.Image.Input("image", optional=True),
+                io.Autogrow.Input("images", optional=True, template=io.Autogrow.TemplatePrefix(io.Image.Input("image"), prefix="image", min=0, max=50)),
                 io.Image.Input("video", optional=True, tooltip="Video frames as image batch. Assumed to be 24 FPS; subsampled to 1 FPS internally."),
                 io.Audio.Input("audio", optional=True),
                 io.Int.Input("max_length", default=512, min=1, max=32768),
@@ -49,11 +49,14 @@ class TextGenerate(io.ComfyNode):
         )
 
     @classmethod
-    def execute(cls, clip, prompt, max_length, sampling_mode, image=None, thinking=False, use_default_template=True, video=None, audio=None, mtp="auto", system_prompt="") -> io.NodeOutput:
+    def execute(cls, clip, prompt, max_length, sampling_mode, image=None, thinking=False, use_default_template=True, video=None, audio=None, mtp="auto", system_prompt="", images: io.Autogrow.Type = None) -> io.NodeOutput:
 
         mtp = {"off": False, "auto": True}.get(mtp, mtp)
 
-        tokens = clip.tokenize(prompt, image=image, skip_template=not use_default_template, min_length=1, thinking=thinking, video=video, audio=audio, system_prompt=system_prompt if use_default_template else "")
+        images = images or {}
+        images = [batch[i:i + 1] for batch in images.values() for i in range(batch.shape[0])]
+
+        tokens = clip.tokenize(prompt, image=image, images=images, skip_template=not use_default_template, min_length=1, thinking=thinking, video=video, audio=audio, system_prompt=system_prompt if use_default_template else "")
 
         # Get sampling parameters from dynamic combo
         do_sample = sampling_mode.get("sampling_mode") == "on"
@@ -91,6 +94,20 @@ class TextGenerate(io.ComfyNode):
                 reasoning, text = "", generated_text
 
         return io.NodeOutput(text.strip(), reasoning.replace("<think>", "", 1).strip())
+
+
+class TextGenerate(TextGenerateV2):
+    @classmethod
+    def define_schema(cls):
+        parent_schema = super().define_schema()
+        return io.Schema(
+            node_id="TextGenerate",
+            display_name="Generate Text (DEPRECATED)",
+            category=parent_schema.category,
+            is_deprecated=True,
+            inputs=[io.Image.Input("image", optional=True) if i.id == "images" else i for i in parent_schema.inputs],
+            outputs=parent_schema.outputs,
+        )
 
 
 LTX2_T2V_SYSTEM_PROMPT = """You are a Creative Assistant. Given a user's raw input prompt describing a scene or concept, expand it into a detailed video generation prompt with specific visuals and integrated audio to guide a text-to-video model.
@@ -278,6 +295,7 @@ class TextgenExtension(ComfyExtension):
     @override
     async def get_node_list(self) -> list[type[io.ComfyNode]]:
         return [
+            TextGenerateV2,
             TextGenerate,
             TextGenerateLTX2Prompt,
         ]

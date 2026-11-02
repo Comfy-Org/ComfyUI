@@ -1470,7 +1470,7 @@ class Gemma4_Tokenizer():
         up_slopes = slopes[:, 2:] / filter_diff[1:]
         return np.maximum(np.zeros(1), np.minimum(down_slopes, up_slopes))
 
-    def tokenize_with_weights(self, text, return_word_ids=False, image=None, audio=None, video=None, llama_template=None, skip_template=True, thinking=False, system_prompt="", **kwargs):
+    def tokenize_with_weights(self, text, return_word_ids=False, image=None, audio=None, video=None, llama_template=None, skip_template=True, thinking=False, system_prompt="", images=[], **kwargs):
 
         # Process audio
         audio_features = []
@@ -1482,9 +1482,11 @@ class Gemma4_Tokenizer():
 
         # Process image/video frames
         is_video = video is not None
-        source = video if is_video else image
+        if image is not None and len(images) == 0:
+            images = [image]
+        sources = [video] if is_video else images
         images = []
-        if source is not None:
+        for source in sources:
             samples = source.movedim(-1, 1)  # [B, C, H, W]
             num_frames = samples.shape[0]
 
