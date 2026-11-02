@@ -400,6 +400,9 @@ class Combo(ComfyTypeIO):
             super().__init__(id, display_name, tooltip, is_output_list)
             self.options = options if options is not None else []
 
+        def get_io_type(self):
+            return self.options if self.options else super().get_io_type()
+
 @comfytype(io_type="COMBO")
 class MultiCombo(ComfyTypeI):
     '''Multiselect Combo input (dropdown for selecting potentially more than one value).'''
@@ -1756,7 +1759,7 @@ class NodeInfoV1:
     input: dict=None
     input_order: dict[str, list[str]]=None
     is_input_list: bool=None
-    output: list[str]=None
+    output: list[str | list[str]]=None
     output_is_list: list[bool]=None
     output_name: list[str]=None
     output_tooltips: list[str]=None
@@ -1985,7 +1988,7 @@ class Schema:
         any_matchtypes = False
         if self.outputs:
             for o in self.outputs:
-                output.append(o.io_type)
+                output.append(o.get_io_type())
                 output_is_list.append(o.is_output_list)
                 output_name.append(o.display_name if o.display_name else o.io_type)
                 output_tooltips.append(o.tooltip if o.tooltip else None)
@@ -2451,7 +2454,7 @@ class _ComfyNodeBaseInternal(_ComfyNodeInternal):
             output_tooltips = []
             if schema.outputs:
                 for o in schema.outputs:
-                    output.append(o.io_type)
+                    output.append(o.get_io_type())
                     output_name.append(o.display_name if o.display_name else o.io_type)
                     output_is_list.append(o.is_output_list)
                     output_tooltips.append(o.tooltip if o.tooltip else None)
