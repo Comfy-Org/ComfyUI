@@ -1032,7 +1032,6 @@ if CUBLAS_IS_AVAILABLE:
 # ==============================================================================
 from . import quant_ops
 from .quant_ops import (
-    QuantizedLayout,
     QuantizedTensor,
     QUANT_ALGOS,
     TensorCoreFP8Layout,
@@ -1128,12 +1127,8 @@ class CombinedLinear:
         weights = []
         for s in self.linears:
             # FIXME: add bias support if ever needed
-            # The combined path runs the quantized kernel on the raw weight, so members whose
-            # split path transforms the weight per call or whose layout has no kernel stay split.
             if (not isinstance(s, MixedPrecisionOp) or not isinstance(s._v_weight, QuantizedTensor)
-                    or s._full_precision_mm or s.comfy_force_forward or s.bias is not None
-                    or s.weight_function or s.bias_function or getattr(s, "comfy_force_cast_weights", False)
-                    or s._v_weight.layout_cls.linear_input_act.__func__ is QuantizedLayout.linear_input_act.__func__):
+                    or s._full_precision_mm or s.comfy_force_forward or s.bias is not None):
                 return
             weights.append(s._v_weight)
         # Members are loaded back to back, so their VBAR allocations are consecutive in member order.
