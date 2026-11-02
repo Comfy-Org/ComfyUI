@@ -16,10 +16,18 @@ from scipy.sparse.csgraph import connected_components
 import comfy.model_management
 import comfy.utils
 from comfy_api.latest import ComfyExtension, IO, Types
+from comfy_extras.mesh3d.postprocess.qem_decimate import _compute_vertex_normals
+from comfy_extras.mesh3d.postprocess.remesh import remesh_narrow_band_dc
+from comfy_extras.nodes_mesh_postprocess import _build_triangle_bvh, _closest_points_on_mesh_bvh, _prepare_gpu_mesh_processing
 from comfy_extras.nodes_save_3d import pack_variable_mesh_batch
 from server import PromptServer
 
 _C0 = 0.28209479177387814  # SH band-0 constant: DC coefficient -> base RGB
+_SURFEL_SOLID_RES = 384    # resolution of the solid that signs the surfels, never output
+_SURFEL_REACH = 0.0135     # gaussians further than this (of the object size) from that solid are not on the surface
+_SURFEL_FRONT = 2.0        # sigmas in front of the gaussian centres that a render's visible surface sits
+_SURFEL_PREFILTER = 0.5    # voxels of low-pass on the density: gaussians at the decoder's sigma floor are under a voxel wide
+_SURFEL_INSET = 0.35       # voxels that low-pass pushes the contour out
 
 
 def _srgb_to_linear(c):
@@ -1181,16 +1189,20 @@ def _inverse_covariance(scale, quat):
 
 
 def _splat_density(xyz, opacity, scale, quat, rgb, res, kernel, device, color_sharpen=1.0, chunk=4096, progress=None,
-                   col_dtype=torch.float16):
+                   col_dtype=torch.float16, frame=None):
     # Splat each gaussian as its oriented-covariance disk (3-sigma, opacity-weighted) into a density grid,
     # plus a colour volume. Each gaussian uses a voxel window sized to its OWN 3-sigma (capped at `kernel`).
     # Colour is weighted by w^color_sharpen: >1 biases each voxel toward its dominant gaussian (crisper
-    # texture). Returns (density, colour numerator, colour normaliser, origin, voxel).
-    pad = 4.0 * scale.median()
-    lo = xyz.amin(0) - pad
-    hi = xyz.amax(0) + pad
-    voxel = ((hi - lo).max() / res).clamp_min(1e-8)
-    dx, dy, dz = (torch.ceil((hi - lo) / voxel).long() + 1).tolist()
+    # texture). Returns (density, colour numerator, colour normaliser, origin, voxel). `frame` (origin, voxel, grid shape)
+    # rasterizes onto an existing grid.
+    if frame is None:
+        pad = 4.0 * scale.median()
+        lo = xyz.amin(0) - pad
+        hi = xyz.amax(0) + pad
+        voxel = ((hi - lo).max() / res).clamp_min(1e-8)
+        dx, dy, dz = (torch.ceil((hi - lo) / voxel).long() + 1).tolist()
+    else:
+        lo, voxel, (dx, dy, dz) = torch.as_tensor(frame[0], device=device, dtype=torch.float32), torch.tensor(frame[1], device=device), frame[2]
 
     sinv = _inverse_covariance(scale, quat)
     kreq = torch.ceil(3.0 * scale.amax(-1) / voxel).long().clamp(1, int(kernel))  # per-gaussian half-width
@@ -1449,9 +1461,147 @@ def _sample_vertex_colours_gpu(colvol, colnorm, verts, origin, voxel, device):
     return (num / den.clamp_min(1e-8)).T.cpu().numpy()                        # (V,3)
 
 
-def _gaussian_to_mesh(g: Types.SPLAT, i, res, kernel, taubin, level_bias, min_component, min_opacity, color_sharpen, device, progress=None):
-    # Mesh one splat: density + colour grids -> Surface Nets -> floater removal -> Taubin smoothing ->
-    # volume-sampled colours. Returns (verts, faces int64, colors in [0,1]), or None if no surface.
+def _surfel_normals(xyz, scale, quat, verts, faces, device):
+    # Orient the gaussians against a closed surface: the thin axis signed by the closest face, or the face normal where
+    # the thin axis disagrees with it. Gaussians off that surface are floaters and interior junk.
+    # Returns (outward normals (M,3), keep mask (N,)).
+    tri = torch.as_tensor(verts, device=device, dtype=torch.float32)[torch.as_tensor(faces, device=device)]
+    n = torch.linalg.cross(tri[:, 1] - tri[:, 0], tri[:, 2] - tri[:, 0])
+    n = n / n.norm(dim=-1, keepdim=True).clamp_min(1e-12)
+    closest, fid = _closest_points_on_mesh_bvh(xyz, tri, _build_triangle_bvh(tri), return_face=True)
+    n = n[fid]
+    thin = _quat_to_mat(quat)[torch.arange(xyz.shape[0], device=device), :, scale.argmin(-1)]
+    dot = (thin * n).sum(-1)
+    keep = (xyz - closest).norm(dim=-1) < _SURFEL_REACH * (tri.amax((0, 1)) - tri.amin((0, 1))).amax()
+    return torch.where((dot.abs() > 0.5)[:, None], thin * torch.sign(dot)[:, None], n)[keep], keep
+
+
+def _poisson_indicator(field, device, smooth=1.0, pad=8):
+    # Spectral Poisson solve (Kazhdan's FFT reconstruction) on the Sum(w * outward normal) grid (dx,dy,dz,3): the
+    # indicator, high inside, with a gaussian low-pass of `smooth` voxels. One channel at a time to bound the peak.
+    dx, dy, dz = (s + 2 * pad for s in field.shape[:3])
+    kx = 2.0 * math.pi * torch.fft.fftfreq(dx, device=device)[:, None, None]
+    ky = 2.0 * math.pi * torch.fft.fftfreq(dy, device=device)[None, :, None]
+    kz = 2.0 * math.pi * torch.fft.rfftfreq(dz, device=device)[None, None, :]
+    spec = None
+    for c, k in enumerate((kx, ky, kz)):
+        f = torch.nn.functional.pad(-field[..., c].to(device)[None, None], (pad,) * 6)[0, 0]
+        s = torch.fft.rfftn(f).mul_(-1j * k)
+        del f
+        spec = s if spec is None else spec.add_(s)
+        del s
+    k2 = kx * kx + ky * ky + kz * kz
+    k2[0, 0, 0] = 1.0
+    spec.mul_(torch.exp(-0.5 * smooth * smooth * k2)).div_(k2)
+    spec[0, 0, 0] = 0.0
+    return torch.fft.irfftn(spec, s=(dx, dy, dz))[pad:-pad, pad:-pad, pad:-pad]
+
+
+def _sample_grid(vol, pts, origin, voxel):
+    # Trilinear sample of (C,dx,dy,dz) at world points (V,3) -> (V,C).
+    size = torch.tensor(vol.shape[1:], device=pts.device, dtype=torch.float32)
+    g = 2.0 * (pts - torch.as_tensor(origin, device=pts.device, dtype=torch.float32)) / voxel / (size - 1) - 1.0
+    o = torch.nn.functional.grid_sample(vol[None], g[:, [2, 1, 0]][None, None, None], mode="bilinear", padding_mode="border", align_corners=True)
+    return o[0, :, 0, 0, :].T
+
+
+def _refine_to_normals(verts, faces, field, origin, voxel, device, iters=20, step=0.7, hold=0.05):
+    # Face-normal vertex update (Sun et al. 2007) toward the rasterized surfel normals, which keep detail the solve
+    # low-passes. Where they cancel out (thin parts) or turn away, the face keeps its own normal.
+    v = torch.as_tensor(verts, device=device, dtype=torch.float32)
+    f = torch.as_tensor(faces, device=device)
+    v0 = v
+    grid = field.permute(3, 0, 1, 2).to(device)
+    deg = torch.bincount(f.reshape(-1), minlength=v.shape[0]).clamp_min(1)[:, None]
+    typical = None
+    for _ in range(iters):
+        tri = v[f]
+        c = tri.mean(1)
+        cur = torch.linalg.cross(tri[:, 1] - tri[:, 0], tri[:, 2] - tri[:, 0])
+        cur = cur / cur.norm(dim=-1, keepdim=True).clamp_min(1e-12)
+        s = _sample_grid(grid, c, origin, voxel)
+        mag = s.norm(dim=-1, keepdim=True)
+        if typical is None:
+            typical = mag.median()
+        a = (mag / typical.clamp_min(1e-8)).clamp(0, 1)
+        tgt = a * s / mag.clamp_min(1e-8) + (1 - a) * cur
+        tgt = tgt / tgt.norm(dim=-1, keepdim=True).clamp_min(1e-12)
+        tgt = torch.where((tgt * cur).sum(-1, keepdim=True) > 0.2, tgt, cur)
+        dv = torch.zeros_like(v)
+        for k in range(3):
+            dv.index_add_(0, f[:, k], tgt * (tgt * (c - v[f[:, k]])).sum(-1, keepdim=True))
+        v = v + step * dv / deg + hold * (v0 - v)
+    return (v - _SURFEL_INSET * voxel * _compute_vertex_normals(v, f)).cpu().numpy().astype(np.float32)
+
+
+def _gaussian_lowpass(x, sigma):
+    pad = math.ceil(3.0 * sigma)
+    dx, dy, dz = (d + 2 * pad for d in x.shape)
+    kx = 2.0 * math.pi * torch.fft.fftfreq(dx, device=x.device)[:, None, None]
+    ky = 2.0 * math.pi * torch.fft.fftfreq(dy, device=x.device)[None, :, None]
+    kz = 2.0 * math.pi * torch.fft.rfftfreq(dz, device=x.device)[None, None, :]
+    spec = torch.fft.rfftn(torch.nn.functional.pad(x[None, None], (pad,) * 6)[0, 0])
+    spec.mul_(torch.exp(-0.5 * sigma * sigma * (kx * kx + ky * ky + kz * kz)))
+    return torch.fft.irfftn(spec, s=(dx, dy, dz))[pad:-pad, pad:-pad, pad:-pad]
+
+
+def _surfel_interior(xyz, scale, quat, opacity, verts, faces, res, voxel, origin, shape, fill, device):
+    # What lies inside the gaussians' surface, on the density grid. A density contour can't say: its shell has an inner
+    # wall, joined to the outer one by any leak. That contour only picks inside/outside through a graph-cut solid; the
+    # normals of the gaussians on it then go through a Poisson solve. Returns (fill (dx,dy,dz) in [0,1], 0.5 at the surface,
+    # on the solve's device, normal field (dx,dy,dz,3) on the CPU), or None when no gaussian is on the solid.
+    vt = torch.as_tensor(verts, device=device, dtype=torch.float32)
+    ft = torch.as_tensor(faces, device=device, dtype=torch.int64)
+    solid_v, solid_f, _ = remesh_narrow_band_dc(vt, ft, resolution=_SURFEL_SOLID_RES, qef=False, sign_mode="solid", fill=fill, drop_small_components=0.0,
+                                                drop_inverted_components=False, drop_enclosed_components=False)
+    del vt, ft
+    normals, keep = _surfel_normals(xyz, scale, quat, solid_v, solid_f, device)
+    del solid_v, solid_f
+    xyz, scale, quat, opacity = xyz[keep], scale[keep], quat[keep], opacity[keep]
+    if xyz.shape[0] == 0:
+        return None
+
+    # Stamp the normals at half size: opposite sides of thin parts cancel at full size. Capping the density evens out
+    # the solve's jump between overlapping gaussians and sparse areas.
+    stamp = (0.5 * scale).clamp_min(0.75 * voxel)
+    density, field, *_ = _splat_density(xyz, opacity, stamp, quat, normals, res, min(math.ceil(3.0 * float(stamp.amax()) / voxel) + 1, 8), device,
+                                        col_dtype=torch.float32, frame=(origin, voxel, shape))
+    cap = 0.5 * _sample_grid(density[None], xyz, origin, voxel).median().clamp_min(1e-8)
+    field = field.mul_((cap / density.clamp_min(cap))[..., None]).cpu()
+    del density
+    comfy.model_management.soft_empty_cache()                            # cuFFT's work area is outside torch's allocator
+
+    # the solve peaks at ~20 bytes per voxel; DirectML and older MPS can't run torch.fft, so anything but CUDA stays on the CPU
+    numel = shape[0] * shape[1] * shape[2]
+    fft_dev = device if device.type == "cuda" and comfy.model_management.get_free_memory(device) > 6 * numel * 4 else torch.device("cpu")
+    chi = _poisson_indicator(field, fft_dev)
+
+    # The indicator's jump varies over the surface, so no single level finds all of it: thin and sparse parts would
+    # drop out. Level it locally at the fronts of the nearby gaussians, which is what a render shows, and from further
+    # away deep inside, far from any gaussian.
+    front = (xyz + normals * (_SURFEL_FRONT * scale.amin(-1))[:, None]).to(fft_dev)
+    weight = opacity.to(fft_dev)
+    value = _sample_grid(chi[None], front, origin, voxel)[:, 0] * weight
+    idx = ((front - torch.as_tensor(origin, device=fft_dev, dtype=torch.float32)) / voxel).round().long()
+    flat = idx[:, 0].clamp(0, shape[0] - 1) * (shape[1] * shape[2]) + idx[:, 1].clamp(0, shape[1] - 1) * shape[2] + idx[:, 2].clamp(0, shape[2] - 1)
+
+    def local_level(sigma, far):
+        num = _gaussian_lowpass(torch.zeros(numel, device=fft_dev).index_add_(0, flat, value).reshape(shape), sigma)
+        den = _gaussian_lowpass(torch.zeros(numel, device=fft_dev).index_add_(0, flat, weight).reshape(shape), sigma)
+        eps = den.amax() * 1e-3
+        return (num + eps * far) / (den + eps)
+
+    surface = local_level(res / 128.0, local_level(res / 32.0, value.sum() / weight.sum()))
+
+    # Continuous over a couple of voxels around that surface, the solve's slope being the normal field: Surface Nets
+    # gets a sub-voxel crossing, and the fill closes the pits the density has where gaussians are missing.
+    slope = _sample_grid(field.permute(3, 0, 1, 2), xyz.cpu(), origin, voxel).norm(dim=-1).median().to(fft_dev)
+    return ((chi - surface) / (2.0 * slope) + 0.5).clamp(0, 1), field
+
+
+def _gaussian_to_mesh(g: Types.SPLAT, i, res, kernel, taubin, level_bias, min_component, min_opacity, color_sharpen, solid, fill, device, progress=None):
+    # Mesh one splat: density + colour grids -> Surface Nets -> optional interior fill and normal refinement -> floater
+    # removal -> Taubin smoothing -> volume-sampled colours. Returns (verts, faces int64, colors in [0,1]), or None if no surface.
     rep = progress if progress is not None else (lambda *_: None)
 
     end = _real_len(g, i)
@@ -1466,7 +1616,12 @@ def _gaussian_to_mesh(g: Types.SPLAT, i, res, kernel, taubin, level_bias, min_co
     if xyz.shape[0] == 0:
         return None
 
-    vol, colvol, colnorm, origin, voxel = _splat_density(xyz, opacity, scale, quat, rgb, res, kernel, device,
+    density_scale, density_opacity = scale, opacity
+    if solid:  # mass-preserving low-pass: an undersampled gaussian adds pits and grid ribbing to the contour
+        voxel = float(((xyz.amax(0) - xyz.amin(0)).amax() + 8.0 * scale.median()) / res)
+        density_scale = (scale.square() + (_SURFEL_PREFILTER * voxel) ** 2).sqrt()
+        density_opacity = opacity * (scale / density_scale).prod(-1)
+    vol, colvol, colnorm, origin, voxel = _splat_density(xyz, density_opacity, density_scale, quat, rgb, res, kernel, device,
                                                          color_sharpen=color_sharpen,
                                                          progress=lambda f: rep(0.25 * f))   # density build: 0 -> 25%
     # Colour: sample on the GPU (grid_sample) when there's headroom
@@ -1496,6 +1651,15 @@ def _gaussian_to_mesh(g: Types.SPLAT, i, res, kernel, taubin, level_bias, min_co
         sn_dev = torch.device("cpu")
         vol = vol.cpu()
     verts, faces = _surface_nets(vol, level, voxel, origin, sn_dev)
+    filled = _surfel_interior(xyz, scale, quat, opacity, verts, faces, res, voxel, origin, tuple(vol.shape), fill, device) if solid and len(faces) > 0 else None
+    if filled is not None:
+        interior, field = filled
+        vol = torch.maximum(vol, 2.0 * level * interior.to(sn_dev))
+        del interior
+        verts, faces = _surface_nets(vol, level, voxel, origin, sn_dev)
+        if len(faces) > 0:
+            verts = _refine_to_normals(verts, faces, field, origin, voxel, sn_dev)
+        del field
     del vol
     rep(0.55)
     if min_component > 0 and len(faces) > 0:
@@ -1541,14 +1705,14 @@ class SplatToMesh(IO.ComfyNode):
             description="Extract a coloured mesh from a gaussian splat.",
             inputs=[
                 IO.Splat.Input("splat"),
-                IO.Int.Input("resolution", default=384, min=64, max=768, step=16,
+                IO.Int.Input("resolution", default=512, min=64, max=768, step=16,
                              tooltip="Density-grid resolution along the longest axis. Higher = finer surface, "
                                      "more VRAM/time (grows with resolution^3)."),
                 IO.Int.Input("kernel", default=5, min=1, max=8,
                              tooltip="Max splat half-width in voxels. Each gaussian is rasterized over a window "
                                      "sized to its own 3-sigma, capped here - small surfels stay cheap, large ones "
                                      "aren't truncated. Raise if sparse splats leave gaps."),
-                IO.Int.Input("smooth", default=0, min=0, max=60, advanced = True,
+                IO.Int.Input("smooth", default=3, min=0, max=60, advanced = True,
                              tooltip="Taubin mesh-smoothing iterations. Smooths the surface without shrinking it "
                                      "(volume-preserving), unlike blurring the density. 0 = raw surface."),
                 IO.Float.Input("level", default=0.4, min=0.0, max=2.0, step=0.01,
@@ -1563,13 +1727,21 @@ class SplatToMesh(IO.ComfyNode):
                                tooltip="Crisp up the vertex texture: 1.0 = physically-correct blend; higher biases "
                                        "each voxel's colour toward its dominant gaussian instead of averaging "
                                        "neighbours (de-smears the texture). Colour only - geometry is unchanged."),
+                IO.Boolean.Input("solid", default=True, optional=True,
+                                 tooltip="Fill the inside from the gaussians' orientation, for a single closed surface. "
+                                         "Off: the raw density contour, which keeps a hidden inner wall behind the surface."),
+                IO.Float.Input("fill", default=20.0, min=0.0, max=1000.0, step=1.0, optional=True, advanced=True,
+                               tooltip="Solid only. Cost of closing an opening relative to following the surface. Lower closes "
+                                       "larger openings: around 3 seals hollow objects, but also puts lids on cups and collars."),
             ],
             outputs=[IO.Mesh.Output(display_name="mesh")],
         )
 
     @classmethod
-    def execute(cls, splat, resolution, kernel, smooth, level, min_component, min_opacity, color_sharpen) -> IO.NodeOutput:
+    def execute(cls, splat, resolution, kernel, smooth, level, min_component, min_opacity, color_sharpen, solid=True, fill=20.0) -> IO.NodeOutput:
         device = comfy.model_management.get_torch_device()
+        if solid:
+            _prepare_gpu_mesh_processing(device, resolution ** 3 * 45)
         b = splat.positions.shape[0]
         prec = 1000  # each splat owns a 0..prec block of the bar; its callback advances within that block
         pbar = comfy.utils.ProgressBar(b * prec)
@@ -1577,7 +1749,7 @@ class SplatToMesh(IO.ComfyNode):
         verts_l, faces_l, colors_l = [], [], []
         for i in range(b):
             cb = lambda f, base=i * prec: pbar.update_absolute(base + int(min(max(f, 0.0), 1.0) * prec))
-            res = _gaussian_to_mesh(splat, i, resolution, kernel, smooth, level, min_component, min_opacity, color_sharpen, device, cb)
+            res = _gaussian_to_mesh(splat, i, resolution, kernel, smooth, level, min_component, min_opacity, color_sharpen, solid, fill, device, cb)
             if res is None:
                 logging.warning("SplatToMesh: splat %d produced no surface; emitting an empty mesh.", i)
                 v, f, c = torch.zeros((0, 3)), torch.zeros((0, 3), dtype=torch.int64), torch.zeros((0, 3))
