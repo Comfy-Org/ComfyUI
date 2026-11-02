@@ -1223,7 +1223,7 @@
           }
         ],
         "extra": {},
-        "category": "Audio/Music generation",
+        "category": "Audio",
         "description": "Creates a new version of a song from reference audio using YuE2, preserving melody while changing style, vocals, lyrics, and arrangement."
       }
     ]

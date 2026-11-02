@@ -1,14 +1,14 @@
 {
   "revision": 0,
-  "last_node_id": "105",
+  "last_node_id": "106",
   "last_link_id": 0,
   "nodes": [
     {
-      "id": 105,
-      "type": "9387c6d1-43e7-47a7-a4a9-53546efa05ea",
+      "id": 106,
+      "type": "40b418b3-87a7-4be3-89da-9e2f92401d28",
       "pos": [
-        -1830,
-        4130
+        3900,
+        5910
       ],
       "size": [
         380,
@@ -79,6 +79,15 @@
             "name": "conditioning_name"
           },
           "link": null
+        },
+        {
+          "name": "sampling",
+          "shape": 7,
+          "type": "COMBO",
+          "widget": {
+            "name": "sampling"
+          },
+          "link": null
         }
       ],
       "outputs": [
@@ -89,7 +98,6 @@
           "links": []
         }
       ],
-      "title": "Image Albedo Estimation (Marigold V2)",
       "properties": {
         "previewExposures": []
       },
@@ -100,7 +108,8 @@
         "qwen_image_edit_2509_int8_convrot.safetensors",
         "marigold_v2_albedo.safetensors",
         "marigold_v2_albedo_vae.safetensors",
-        "marigold_v2_albedo_conditioning.safetensors"
+        "marigold_v2_albedo_conditioning.safetensors",
+        "img_to_img_velocity"
       ],
       "widgets_values_named": {
         "sampler_name": "euler",
@@ -109,8 +118,10 @@
         "unet_name": "qwen_image_edit_2509_int8_convrot.safetensors",
         "lora_name": "marigold_v2_albedo.safetensors",
         "vae_name": "marigold_v2_albedo_vae.safetensors",
-        "conditioning_name": "marigold_v2_albedo_conditioning.safetensors"
-      }
+        "conditioning_name": "marigold_v2_albedo_conditioning.safetensors",
+        "sampling": "img_to_img_velocity"
+      },
+      "title": "Image Albedo Estimation (Marigold V2)"
     }
   ],
   "links": [],
@@ -118,24 +129,25 @@
   "definitions": {
     "subgraphs": [
       {
-        "id": "9387c6d1-43e7-47a7-a4a9-53546efa05ea",
+        "id": "40b418b3-87a7-4be3-89da-9e2f92401d28",
         "version": 1,
         "state": {
-          "lastGroupId": 4,
-          "lastNodeId": 105,
-          "lastLinkId": 110,
+          "lastGroupId": 8,
+          "lastNodeId": 106,
+          "lastLinkId": 134,
           "lastRerouteId": 0
         },
         "revision": 0,
         "config": {},
         "name": "Image Albedo Estimation (Marigold V2)",
+        "description": "Estimates albedo from an input image using Marigold V2, separating surface color from lighting and shading for relighting and 3D asset work.",
         "inputNode": {
           "id": -10,
           "bounding": [
             -2110,
             4550,
             155.080078125,
-            208
+            228
           ]
         },
         "outputNode": {
@@ -153,7 +165,7 @@
             "name": "pixels",
             "type": "IMAGE",
             "linkIds": [
-              17
+              125
             ],
             "localized_name": "pixels",
             "pos": [
@@ -166,7 +178,7 @@
             "name": "sampler_name",
             "type": "COMBO",
             "linkIds": [
-              35
+              127
             ],
             "pos": [
               -1978.919921875,
@@ -178,7 +190,7 @@
             "name": "sigmas",
             "type": "STRING",
             "linkIds": [
-              36
+              128
             ],
             "pos": [
               -1978.919921875,
@@ -190,7 +202,7 @@
             "name": "prediction",
             "type": "COMBO",
             "linkIds": [
-              37
+              129
             ],
             "pos": [
               -1978.919921875,
@@ -202,7 +214,7 @@
             "name": "unet_name",
             "type": "COMBO",
             "linkIds": [
-              38
+              130
             ],
             "pos": [
               -1978.919921875,
@@ -214,7 +226,7 @@
             "name": "lora_name",
             "type": "COMBO",
             "linkIds": [
-              39
+              131
             ],
             "pos": [
               -1978.919921875,
@@ -226,7 +238,7 @@
             "name": "vae_name",
             "type": "COMBO",
             "linkIds": [
-              40
+              132
             ],
             "pos": [
               -1978.919921875,
@@ -238,11 +250,23 @@
             "name": "conditioning_name",
             "type": "COMBO",
             "linkIds": [
-              41
+              133
             ],
             "pos": [
               -1978.919921875,
               4714
+            ]
+          },
+          {
+            "id": "3fe5155a-6212-4b32-a5fb-7aab5d5891b6",
+            "name": "sampling",
+            "type": "COMBO",
+            "linkIds": [
+              134
+            ],
+            "pos": [
+              -1978.919921875,
+              4734
             ]
           }
         ],
@@ -252,7 +276,7 @@
             "name": "IMAGE",
             "type": "IMAGE",
             "linkIds": [
-              30
+              126
             ],
             "localized_name": "IMAGE",
             "pos": [
@@ -264,7 +288,7 @@
         "widgets": [],
         "nodes": [
           {
-            "id": 92,
+            "id": 93,
             "type": "UNETLoader",
             "pos": [
               -1730,
@@ -285,7 +309,7 @@
                 "widget": {
                   "name": "unet_name"
                 },
-                "link": 38
+                "link": 130
               },
               {
                 "localized_name": "weight_dtype",
@@ -303,7 +327,7 @@
                 "name": "MODEL",
                 "type": "MODEL",
                 "links": [
-                  5
+                  112
                 ]
               }
             ],
@@ -329,7 +353,7 @@
             "bgcolor": "#335"
           },
           {
-            "id": 93,
+            "id": 94,
             "type": "LoraLoaderModelOnly",
             "pos": [
               -1730,
@@ -347,7 +371,7 @@
                 "localized_name": "model",
                 "name": "model",
                 "type": "MODEL",
-                "link": 5
+                "link": 112
               },
               {
                 "localized_name": "lora_name",
@@ -356,7 +380,7 @@
                 "widget": {
                   "name": "lora_name"
                 },
-                "link": 39
+                "link": 131
               },
               {
                 "localized_name": "strength_model",
@@ -374,7 +398,7 @@
                 "name": "MODEL",
                 "type": "MODEL",
                 "links": [
-                  8
+                  113
                 ]
               }
             ],
@@ -400,7 +424,7 @@
             "bgcolor": "#335"
           },
           {
-            "id": 94,
+            "id": 95,
             "type": "ModelSamplingAuraFlow",
             "pos": [
               -1040,
@@ -413,12 +437,13 @@
             "flags": {},
             "order": 3,
             "mode": 0,
+            "showAdvanced": true,
             "inputs": [
               {
                 "localized_name": "model",
                 "name": "model",
                 "type": "MODEL",
-                "link": 8
+                "link": 113
               },
               {
                 "localized_name": "shift",
@@ -437,7 +462,7 @@
                 "widget": {
                   "name": "sampling"
                 },
-                "link": null
+                "link": 134
               }
             ],
             "outputs": [
@@ -446,7 +471,7 @@
                 "name": "MODEL",
                 "type": "MODEL",
                 "links": [
-                  12
+                  114
                 ]
               }
             ],
@@ -465,7 +490,7 @@
             "bgcolor": "#335"
           },
           {
-            "id": 95,
+            "id": 96,
             "type": "ConditioningLoader",
             "pos": [
               -1730,
@@ -486,7 +511,7 @@
                 "widget": {
                   "name": "conditioning_name"
                 },
-                "link": 41
+                "link": 133
               }
             ],
             "outputs": [
@@ -495,7 +520,7 @@
                 "name": "CONDITIONING",
                 "type": "CONDITIONING",
                 "links": [
-                  13
+                  115
                 ]
               }
             ],
@@ -519,7 +544,7 @@
             "bgcolor": "#653"
           },
           {
-            "id": 96,
+            "id": 97,
             "type": "VAELoader",
             "pos": [
               -1730,
@@ -540,7 +565,7 @@
                 "widget": {
                   "name": "vae_name"
                 },
-                "link": 40
+                "link": 132
               }
             ],
             "outputs": [
@@ -549,8 +574,8 @@
                 "name": "VAE",
                 "type": "VAE",
                 "links": [
-                  18,
-                  21
+                  121,
+                  124
                 ]
               }
             ],
@@ -574,7 +599,7 @@
             "bgcolor": "#535"
           },
           {
-            "id": 97,
+            "id": 98,
             "type": "DisableNoise",
             "pos": [
               -740,
@@ -594,7 +619,7 @@
                 "name": "NOISE",
                 "type": "NOISE",
                 "links": [
-                  26
+                  116
                 ]
               }
             ],
@@ -603,7 +628,7 @@
             }
           },
           {
-            "id": 98,
+            "id": 99,
             "type": "KSamplerSelect",
             "pos": [
               -740,
@@ -624,7 +649,7 @@
                 "widget": {
                   "name": "sampler_name"
                 },
-                "link": 35
+                "link": 127
               }
             ],
             "outputs": [
@@ -633,7 +658,7 @@
                 "name": "SAMPLER",
                 "type": "SAMPLER",
                 "links": [
-                  25
+                  118
                 ]
               }
             ],
@@ -648,7 +673,7 @@
             }
           },
           {
-            "id": 99,
+            "id": 100,
             "type": "BasicGuider",
             "pos": [
               -740,
@@ -666,13 +691,13 @@
                 "localized_name": "model",
                 "name": "model",
                 "type": "MODEL",
-                "link": 12
+                "link": 114
               },
               {
                 "localized_name": "conditioning",
                 "name": "conditioning",
                 "type": "CONDITIONING",
-                "link": 13
+                "link": 115
               }
             ],
             "outputs": [
@@ -681,7 +706,7 @@
                 "name": "GUIDER",
                 "type": "GUIDER",
                 "links": [
-                  14
+                  117
                 ]
               }
             ],
@@ -690,7 +715,7 @@
             }
           },
           {
-            "id": 100,
+            "id": 101,
             "type": "ManualSigmas",
             "pos": [
               -740,
@@ -711,7 +736,7 @@
                 "widget": {
                   "name": "sigmas"
                 },
-                "link": 36
+                "link": 128
               }
             ],
             "outputs": [
@@ -720,7 +745,7 @@
                 "name": "SIGMAS",
                 "type": "SIGMAS",
                 "links": [
-                  27
+                  119
                 ]
               }
             ],
@@ -735,7 +760,7 @@
             }
           },
           {
-            "id": 101,
+            "id": 102,
             "type": "SamplerCustomAdvanced",
             "pos": [
               -370,
@@ -753,31 +778,31 @@
                 "localized_name": "noise",
                 "name": "noise",
                 "type": "NOISE",
-                "link": 26
+                "link": 116
               },
               {
                 "localized_name": "guider",
                 "name": "guider",
                 "type": "GUIDER",
-                "link": 14
+                "link": 117
               },
               {
                 "localized_name": "sampler",
                 "name": "sampler",
                 "type": "SAMPLER",
-                "link": 25
+                "link": 118
               },
               {
                 "localized_name": "sigmas",
                 "name": "sigmas",
                 "type": "SIGMAS",
-                "link": 27
+                "link": 119
               },
               {
                 "localized_name": "latent_image",
                 "name": "latent_image",
                 "type": "LATENT",
-                "link": 19
+                "link": 120
               }
             ],
             "outputs": [
@@ -786,7 +811,7 @@
                 "name": "output",
                 "type": "LATENT",
                 "links": [
-                  20
+                  123
                 ]
               },
               {
@@ -801,7 +826,7 @@
             }
           },
           {
-            "id": 102,
+            "id": 103,
             "type": "VAEEncode",
             "pos": [
               -1550,
@@ -819,13 +844,13 @@
                 "localized_name": "pixels",
                 "name": "pixels",
                 "type": "IMAGE",
-                "link": 17
+                "link": 125
               },
               {
                 "localized_name": "vae",
                 "name": "vae",
                 "type": "VAE",
-                "link": 18
+                "link": 121
               }
             ],
             "outputs": [
@@ -834,7 +859,7 @@
                 "name": "LATENT",
                 "type": "LATENT",
                 "links": [
-                  19
+                  120
                 ]
               }
             ],
@@ -845,7 +870,7 @@
             "bgcolor": "#533"
           },
           {
-            "id": 103,
+            "id": 104,
             "type": "MarigoldV2PostProcess",
             "pos": [
               50,
@@ -863,7 +888,7 @@
                 "localized_name": "image",
                 "name": "image",
                 "type": "IMAGE",
-                "link": 23
+                "link": 122
               },
               {
                 "localized_name": "prediction",
@@ -872,7 +897,7 @@
                 "widget": {
                   "name": "prediction"
                 },
-                "link": 37
+                "link": 129
               }
             ],
             "outputs": [
@@ -881,7 +906,7 @@
                 "name": "IMAGE",
                 "type": "IMAGE",
                 "links": [
-                  30
+                  126
                 ]
               }
             ],
@@ -896,7 +921,7 @@
             }
           },
           {
-            "id": 104,
+            "id": 105,
             "type": "VAEDecode",
             "pos": [
               60,
@@ -914,13 +939,13 @@
                 "localized_name": "samples",
                 "name": "samples",
                 "type": "LATENT",
-                "link": 20
+                "link": 123
               },
               {
                 "localized_name": "vae",
                 "name": "vae",
                 "type": "VAE",
-                "link": 21
+                "link": 124
               }
             ],
             "outputs": [
@@ -929,7 +954,7 @@
                 "name": "IMAGE",
                 "type": "IMAGE",
                 "links": [
-                  23
+                  122
                 ]
               }
             ],
@@ -942,7 +967,7 @@
         ],
         "groups": [
           {
-            "id": 1,
+            "id": 5,
             "title": "Models",
             "bounding": [
               -1740,
@@ -954,7 +979,7 @@
             "flags": {}
           },
           {
-            "id": 2,
+            "id": 6,
             "title": "Image Encoding",
             "bounding": [
               -1740,
@@ -966,7 +991,7 @@
             "flags": {}
           },
           {
-            "id": 3,
+            "id": 7,
             "title": "Sampling",
             "bounding": [
               -1080,
@@ -978,7 +1003,7 @@
             "flags": {}
           },
           {
-            "id": 4,
+            "id": 8,
             "title": "Decoding",
             "bounding": [
               -20,
@@ -992,15 +1017,7 @@
         ],
         "links": [
           {
-            "id": 5,
-            "origin_id": 92,
-            "origin_slot": 0,
-            "target_id": 93,
-            "target_slot": 0,
-            "type": "MODEL"
-          },
-          {
-            "id": 8,
+            "id": 112,
             "origin_id": 93,
             "origin_slot": 0,
             "target_id": 94,
@@ -1008,169 +1025,184 @@
             "type": "MODEL"
           },
           {
-            "id": 12,
+            "id": 113,
             "origin_id": 94,
             "origin_slot": 0,
-            "target_id": 99,
+            "target_id": 95,
             "target_slot": 0,
             "type": "MODEL"
           },
           {
-            "id": 13,
+            "id": 114,
             "origin_id": 95,
             "origin_slot": 0,
-            "target_id": 99,
+            "target_id": 100,
+            "target_slot": 0,
+            "type": "MODEL"
+          },
+          {
+            "id": 115,
+            "origin_id": 96,
+            "origin_slot": 0,
+            "target_id": 100,
             "target_slot": 1,
             "type": "CONDITIONING"
           },
           {
-            "id": 26,
-            "origin_id": 97,
+            "id": 116,
+            "origin_id": 98,
             "origin_slot": 0,
-            "target_id": 101,
+            "target_id": 102,
             "target_slot": 0,
             "type": "NOISE"
           },
           {
-            "id": 14,
-            "origin_id": 99,
+            "id": 117,
+            "origin_id": 100,
             "origin_slot": 0,
-            "target_id": 101,
+            "target_id": 102,
             "target_slot": 1,
             "type": "GUIDER"
           },
           {
-            "id": 25,
-            "origin_id": 98,
+            "id": 118,
+            "origin_id": 99,
             "origin_slot": 0,
-            "target_id": 101,
+            "target_id": 102,
             "target_slot": 2,
             "type": "SAMPLER"
           },
           {
-            "id": 27,
-            "origin_id": 100,
+            "id": 119,
+            "origin_id": 101,
             "origin_slot": 0,
-            "target_id": 101,
+            "target_id": 102,
             "target_slot": 3,
             "type": "SIGMAS"
           },
           {
-            "id": 19,
-            "origin_id": 102,
+            "id": 120,
+            "origin_id": 103,
             "origin_slot": 0,
-            "target_id": 101,
+            "target_id": 102,
             "target_slot": 4,
             "type": "LATENT"
           },
           {
-            "id": 18,
-            "origin_id": 96,
+            "id": 121,
+            "origin_id": 97,
             "origin_slot": 0,
-            "target_id": 102,
+            "target_id": 103,
             "target_slot": 1,
             "type": "VAE"
           },
           {
-            "id": 23,
-            "origin_id": 104,
+            "id": 122,
+            "origin_id": 105,
+            "origin_slot": 0,
+            "target_id": 104,
+            "target_slot": 0,
+            "type": "IMAGE"
+          },
+          {
+            "id": 123,
+            "origin_id": 102,
+            "origin_slot": 0,
+            "target_id": 105,
+            "target_slot": 0,
+            "type": "LATENT"
+          },
+          {
+            "id": 124,
+            "origin_id": 97,
+            "origin_slot": 0,
+            "target_id": 105,
+            "target_slot": 1,
+            "type": "VAE"
+          },
+          {
+            "id": 125,
+            "origin_id": -10,
             "origin_slot": 0,
             "target_id": 103,
             "target_slot": 0,
             "type": "IMAGE"
           },
           {
-            "id": 20,
-            "origin_id": 101,
-            "origin_slot": 0,
-            "target_id": 104,
-            "target_slot": 0,
-            "type": "LATENT"
-          },
-          {
-            "id": 21,
-            "origin_id": 96,
-            "origin_slot": 0,
-            "target_id": 104,
-            "target_slot": 1,
-            "type": "VAE"
-          },
-          {
-            "id": 17,
-            "origin_id": -10,
-            "origin_slot": 0,
-            "target_id": 102,
-            "target_slot": 0,
-            "type": "IMAGE"
-          },
-          {
-            "id": 30,
-            "origin_id": 103,
+            "id": 126,
+            "origin_id": 104,
             "origin_slot": 0,
             "target_id": -20,
             "target_slot": 0,
             "type": "IMAGE"
           },
           {
-            "id": 35,
+            "id": 127,
             "origin_id": -10,
             "origin_slot": 1,
-            "target_id": 98,
+            "target_id": 99,
             "target_slot": 0,
             "type": "COMBO"
           },
           {
-            "id": 36,
+            "id": 128,
             "origin_id": -10,
             "origin_slot": 2,
-            "target_id": 100,
+            "target_id": 101,
             "target_slot": 0,
             "type": "STRING"
           },
           {
-            "id": 37,
+            "id": 129,
             "origin_id": -10,
             "origin_slot": 3,
-            "target_id": 103,
+            "target_id": 104,
             "target_slot": 1,
             "type": "COMBO"
           },
           {
-            "id": 38,
+            "id": 130,
             "origin_id": -10,
             "origin_slot": 4,
-            "target_id": 92,
+            "target_id": 93,
             "target_slot": 0,
             "type": "COMBO"
           },
           {
-            "id": 39,
+            "id": 131,
             "origin_id": -10,
             "origin_slot": 5,
-            "target_id": 93,
+            "target_id": 94,
             "target_slot": 1,
             "type": "COMBO"
           },
           {
-            "id": 40,
+            "id": 132,
             "origin_id": -10,
             "origin_slot": 6,
+            "target_id": 97,
+            "target_slot": 0,
+            "type": "COMBO"
+          },
+          {
+            "id": 133,
+            "origin_id": -10,
+            "origin_slot": 7,
             "target_id": 96,
             "target_slot": 0,
             "type": "COMBO"
           },
           {
-            "id": 41,
+            "id": 134,
             "origin_id": -10,
-            "origin_slot": 7,
+            "origin_slot": 8,
             "target_id": 95,
-            "target_slot": 0,
+            "target_slot": 2,
             "type": "COMBO"
           }
         ],
         "extra": {},
-        "category": "Preprocessors/Albedo",
-        "description": "Estimates albedo from an input image using Marigold V2, separating surface color from lighting and shading for relighting and 3D asset work."
+        "category": "Preprocessors/Albedo"
       }
     ]
   },
