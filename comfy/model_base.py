@@ -1076,6 +1076,9 @@ class Flux(BaseModel):
         token_masks = kwargs.get("token_masks", None)
         if token_masks is not None:
             out['token_masks'] = comfy.conds.CONDConstant(token_masks)
+        reference_views = kwargs.get("reference_views", None)
+        if reference_views is not None:
+            out['reference_views'] = comfy.conds.CONDConstant(reference_views)
         background_latent = kwargs.get("background_latent", None)
         if background_latent is not None:
             out['background_latent'] = comfy.conds.CONDConstant(self.process_latent_in(background_latent))

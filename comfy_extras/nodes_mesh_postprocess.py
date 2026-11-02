@@ -11,7 +11,6 @@ from server import PromptServer
 from comfy_extras.mesh3d.postprocess.qem_decimate import QEMConfig, qem_simplify, qem_cluster_decimate, _compute_vertex_normals, _connected_labels, _kitchen_op
 from comfy_extras.mesh3d.postprocess.remesh import remesh_narrow_band_dc, _point_tri_closest
 from comfy_extras.nodes_save_3d import get_mesh_batch_item, pack_variable_mesh_batch
-from comfy_extras.nodes_gaussian_splat import _orbit_camera_info_yaw
 from comfy_extras.mesh3d.uv_unwrap import mesh as _uv_mesh
 from comfy_extras.mesh3d.uv_unwrap import segment as _uv_seg
 from comfy_extras.mesh3d.uv_unwrap import parameterize as _uv_param
@@ -1834,37 +1833,21 @@ class BakeAmbientOcclusion(IO.ComfyNode):
         return IO.NodeOutput(ao_img)
 
 
-MeshCameras = IO.Custom("MESH_CAMERAS")
-
-
 def _xyz_dict(v):
     return {"x": float(v[0]), "y": float(v[1]), "z": float(v[2])}
 
 
-def _mesh_view_cameras(camera_info, center, radius, views, top_bottom, dev):
-    """Cameras RenderMesh renders, in order: the given camera (target defaulting to the mesh centre) or an
-    auto-framed front view, turned in `views` turntable steps about world +Y, then with `top_bottom` straight
-    down and up onto the target with the first camera's back at the image top (TexVerse's canonical views)."""
+def _mesh_view_cameras(camera_info, lv):
+    """Cameras RenderMesh renders and BakeTextureFromViews projects from: every camera of camera_info (one, or a
+    list from Create Camera Orbit) with the target defaulting to the mesh centre, else an auto-framed front view."""
+    center = (lv.amax(0) + lv.amin(0)) * 0.5
     if camera_info is None:
+        radius = float((lv - center).norm(dim=-1).amax().clamp_min(1e-6))
         dist = radius / math.tan(math.radians(20.0)) * 1.04
-        base = {"position": _xyz_dict(center + center.new_tensor([0.0, 0.0, dist])), "target": _xyz_dict(center),
-                "fov": 40.0, "zoom": 1.0, "cameraType": "perspective"}
-    else:
-        base = dict(camera_info)
-        if not base.get("target"):
-            base["target"] = _xyz_dict(center)
-    cams = [base] + [_orbit_camera_info_yaw(base, 360.0 * k / views, dev) for k in range(1, views)]
-    if top_bottom:
-        tgt = [float(base["target"].get(k, 0.0)) for k in "xyz"]
-        dist = math.dist([float(base.get("position", {}).get(k, 0.0)) for k in "xyz"], tgt)
-        r = _mesh_view_camera(base, dev)[2]
-        back = torch.cross(r.new_tensor([0.0, 1.0, 0.0]), r, dim=-1)
-        for sign in (1.0, -1.0):
-            cam = {k: v for k, v in base.items() if k not in ("quaternion", "useCustomUp")}
-            cam["position"] = _xyz_dict([tgt[0], tgt[1] + sign * dist, tgt[2]])
-            cam["up"] = _xyz_dict(back)
-            cams.append(cam)
-    return cams
+        return [{"position": _xyz_dict(center + center.new_tensor([0.0, 0.0, dist])), "target": _xyz_dict(center),
+                 "fov": 40.0, "zoom": 1.0, "cameraType": "perspective"}]
+    cams = camera_info if isinstance(camera_info, list) else [camera_info]
+    return [{**cam, "target": cam.get("target") or _xyz_dict(center)} for cam in cams]
 
 
 def _mesh_view_camera(camera_info, dev):
@@ -1894,9 +1877,8 @@ class RenderMesh(IO.ComfyNode):
             search_aliases=["mesh to image", "render mesh", "preview textured mesh", "multiview render"],
             category="3d/mesh",
             description=(
-                "Ray-casts views of a mesh. The camera and optional model transform can come "
-                "from a Load3D / Preview3D viewer. The cameras output lets Bake Texture From Views "
-                "project edited renders back onto the mesh."
+                "Ray-casts views of a mesh, one per camera. The camera and optional model transform can come "
+                "from a Load3D / Preview3D viewer; Create Camera Orbit gives several views at once."
             ),
             inputs=[
                 IO.Mesh.Input("mesh"),
@@ -1907,30 +1889,19 @@ class RenderMesh(IO.ComfyNode):
                 IO.Int.Input("width", default=1024, min=64, max=4096, step=8),
                 IO.Int.Input("height", default=1024, min=64, max=4096, step=8),
                 IO.Color.Input("background", default="#000000"),
-                IO.Int.Input("views", default=1, min=1, max=64,
-                             tooltip="1 = single view; >1 = that many views evenly spaced in a turntable orbit "
-                                     "around the camera target, starting at the camera."),
-                IO.Boolean.Input("top_bottom", default=False,
-                                 tooltip="Also render straight down and straight up onto the camera target "
-                                         "(after the orbit views), so a re-bake covers the top and bottom."),
                 IO.Load3DModelInfo.Input("model_3d_info", optional=True,
                                          tooltip="Model transform from the same Load3D / Preview3D viewer. "
                                                  "Connect it with camera_info to match the viewer framing."),
                 IO.Load3DCamera.Input("camera_info", optional=True,
-                                      tooltip="Camera from a Load3D / Preview3D viewer or a Create Camera Info "
-                                              "node. If none is connected, a default front view is auto-framed."),
+                                      tooltip="Camera from a Load3D / Preview3D viewer or a Create Camera Info node, or the "
+                                              "cameras of a Create Camera Orbit. If none is connected, a default front view is "
+                                              "auto-framed."),
             ],
-            outputs=[
-                IO.Image.Output(display_name="image"),
-                IO.Mask.Output(display_name="mask"),
-                MeshCameras.Output(display_name="cameras",
-                                   tooltip="The rendered cameras (and model transform), for Bake Texture From Views."),
-            ],
+            outputs=[IO.Image.Output(display_name="image"), IO.Mask.Output(display_name="mask")],
         )
 
     @classmethod
-    def execute(cls, mesh, mode, width, height, background, views=1, top_bottom=False,
-                model_3d_info=None, camera_info=None):
+    def execute(cls, mesh, mode, width, height, background, model_3d_info=None, camera_info=None):
         if int(mesh.vertices.shape[0]) > 1:
             logging.warning("RenderMesh: one item per batch only; using the first of %d.", int(mesh.vertices.shape[0]))
         dev = comfy.model_management.get_torch_device()
@@ -1970,10 +1941,8 @@ class RenderMesh(IO.ComfyNode):
 
         tri = lv[lf]
         bvh = _build_triangle_bvh(tri)
-        center = (lv.amax(0) + lv.amin(0)) * 0.5
-        radius = float((lv - center).norm(dim=-1).amax().clamp_min(1e-6))
         # Camera from a Load3D / Preview3D viewer (three.js Y-up, same frame as the mesh), else auto-framed front view.
-        cameras = _mesh_view_cameras(camera_info, center, radius, int(views), top_bottom, dev)
+        cameras = _mesh_view_cameras(camera_info, lv)
         if resolved == "world normal":
             r = _mesh_view_camera(cameras[0], dev)[2]
             y = r.new_tensor([0.0, 1.0, 0.0])
@@ -2004,13 +1973,12 @@ class RenderMesh(IO.ComfyNode):
             imgs.append(torch.where(hit[..., None], img.clamp(0.0, 1.0), bg_rgb).to(idev, idtype))
             masks.append(hit.to(idev, idtype))
             pbar.update(1)
-        return IO.NodeOutput(torch.stack(imgs), torch.stack(masks),
-                             {"cameras": cameras, "model_transform": model_transform})
+        return IO.NodeOutput(torch.stack(imgs), torch.stack(masks))
 
 
-def _views_depth(tri, bvh, views, H, W, ray_chunk=1 << 22):
+def _views_depth(tri, bvh, views, H, W, tick, ray_chunk=1 << 22):
     """[V,H,W] hit distance along each pixel ray of `views` (eye, f, r, u, fov, ortho_half), inf on background.
-    Small views are cast together: the torch BVH walk is launch-bound."""
+    Small views are cast together: the torch BVH walk is launch-bound. Calls tick(n) after each n views."""
     per = max(1, ray_chunk // (H * W))
     out = []
     for g in range(0, len(views), per):
@@ -2022,6 +1990,7 @@ def _views_depth(tri, bvh, views, H, W, ray_chunk=1 << 22):
             t_hit, _, hit = _closest_hit_rays_bvh(o[s:e], d[s:e], tri, bvh, tmin=1e-5, tmax=1e30)
             depth[s:e] = torch.where(hit, t_hit, depth[s:e])
         out.append(depth.view(-1, H, W))
+        tick(len(rays))
     return torch.cat(out)
 
 
@@ -2149,15 +2118,25 @@ def _fill_vertex_colors(lv, lf, col, known):
 
 
 def _bake_texture_from_views(lv, lf, uv, normals, base_texture, base_vcol, images, masks, cameras, resolution,
-                             blend_exponent, pbar=None, chunk=1 << 22, depth_res=2048):
+                             blend_exponent, chunk=1 << 22, depth_res=2048):
     """Back-project views into the UV atlas. Each texel's surface point samples every view that shows it (not
     from background-coloured gaps an edit left along edges), weighted by coverage * edge fade * cos(view angle)^blend_exponent * mask, and the blend is composited over
     the base colour (texture, else vertex colours) by the best view's coverage. Without a base, texels no view
     sees get colour grown over the surface from the seen vertices. Returns the [H,W,3] texture and the [H,W]
     confidence (best view's coverage * edge fade * cos) as numpy."""
     dev = lv.device
+    steps = 2 * len(cameras) + 2      # rasterize, visibility per view, projection per view, fill
+    tq = tqdm(total=steps, desc="Bake texture from views", leave=False)
+    pbar = comfy.utils.ProgressBar(steps)
+
+    def tick(stage, n=1):
+        tq.set_postfix_str(stage)
+        tq.update(n)
+        pbar.update(n)
+
     uv_np = _normalize_uvs_to_unit(uv.cpu().numpy(), log_prefix="[BakeTextureFromViews]  ")
     face_idx, bary, cov = _rasterize_uv_barycentric(lf.cpu().numpy(), uv_np, resolution)
+    tick("rasterize")
     fv = lf[face_idx[cov]]                        # [K,3] vertex ids of each covered texel's face
     b = bary[cov][:, :, None]
     del face_idx, bary
@@ -2186,7 +2165,7 @@ def _bake_texture_from_views(lv, lf, uv, normals, base_texture, base_vcol, image
     # Visibility is cast at most depth_res px: upscaled views add colour detail, not geometry.
     ds = min(1.0, depth_res / max(H, W))
     Hd, Wd = max(1, round(H * ds)), max(1, round(W * ds))
-    depth = _views_depth(tri, bvh, views, Hd, Wd)
+    depth = _views_depth(tri, bvh, views, Hd, Wd, lambda n: tick("visibility", n))
     # Views lose weight near their own silhouettes and occlusion edges (never to zero: a texel only one
     # view sees keeps it), so overlapping views take over where an edit's edges may not line up.
     px = torch.stack([d * (2.0 * math.tan(0.5 * fov) / Hd) if oh is None else torch.full_like(d, 2.0 * oh / Hd)
@@ -2234,8 +2213,7 @@ def _bake_texture_from_views(lv, lf, uv, normals, base_texture, base_vcol, image
             ramp = ((cs - 0.1) / 0.4).clamp(0.0, 1.0)     # grazing views fade back to the base
             alpha[idx] = torch.maximum(alpha[idx], gate * ramp * ramp * (3.0 - 2.0 * ramp))
             conf[idx] = torch.maximum(conf[idx], faded * cs)
-        if pbar is not None:
-            pbar.update(1)
+        tick("project")
 
     seen = den > 0
     proj = num / torch.where(seen, den, 1.0)[:, None]     # cos^k weights get tiny at grazing views; no clamp
@@ -2253,6 +2231,8 @@ def _bake_texture_from_views(lv, lf, uv, normals, base_texture, base_vcol, image
     tex = torch.zeros((resolution, resolution, 4), device=dev)
     tex[cov] = torch.cat([out.clamp(0.0, 1.0), conf[:Kt, None]], dim=-1)
     tex = _seam_fill(tex.cpu().numpy(), fill.cpu().numpy())
+    tick("fill")
+    tq.close()
     return tex[..., :3], tex[..., 3]
 
 
@@ -2266,25 +2246,32 @@ class BakeTextureFromViews(IO.ComfyNode):
             category="3d/texturing",
             description=(
                 "Projects (edited) renders back onto the mesh's UV layout. Render the mesh with Render Mesh, "
-                "edit the images, then connect them here with the same mesh and Render Mesh's cameras. Areas "
+                "edit the images, then connect them here with the same mesh and Render Mesh's camera_info. Areas "
                 "no view covers, or outside the mask, keep the mesh's texture (else vertex colours). Outputs a "
-                "base_color IMAGE for Apply Texture to Mesh and a confidence MASK of how well the views saw each texel."
+                "base_color IMAGE for Apply Texture to Mesh and a confidence MASK of how well the views saw each texel. "
+                "Renders made with a viewer model transform (Render Mesh's model_3d_info) do not line up."
             ),
             inputs=[
                 IO.Mesh.Input("mesh", tooltip="The UV-unwrapped mesh that was rendered."),
-                IO.Image.Input("images", tooltip="One image per camera, in Render Mesh's order, camera sets one after "
+                IO.Image.Input("images", tooltip="One image per camera, in camera order, camera inputs one after "
                                                  "another (Batch Images). Any resolution with the render's aspect "
                                                  "ratio; higher gives a sharper bake."),
-                IO.Autogrow.Input("cameras", template=IO.Autogrow.TemplatePrefix(
-                    MeshCameras.Input("cameras", tooltip="The cameras output of a Render Mesh whose views are in images. "
-                                                         "Several sets (e.g. a second orbit turned 45 degrees) bake together."),
-                    prefix="cameras", min=1, max=50)),
+                IO.Autogrow.Input("cameras", optional=True, template=IO.Autogrow.TemplatePrefix(
+                    IO.Load3DCamera.Input("camera_info", tooltip="The camera_info a Render Mesh rendered images with. Several "
+                                                                 "(e.g. a second rig turned 45 degrees) bake together. None "
+                                                                 "is Render Mesh's auto-framed front view."),
+                    prefix="camera_info", min=0, max=50)),
                 IO.Int.Input("resolution", default=0, min=0, max=8192, step=64,
                              tooltip="Square texture resolution. 0 = the mesh's current texture size (2048 if it "
                                      "has none); otherwise the current texture is resampled to it."),
                 IO.Float.Input("blend_exponent", default=4.0, min=0.0, max=32.0, step=0.5, advanced=True,
                                tooltip="Views are weighted by cos(view angle)^exponent. Higher favours the most "
                                        "head-on view (sharper, harder seams); lower averages more views (softer)."),
+                IO.Boolean.Input("fill_unseen", default=False,
+                                 tooltip="Ignore the mesh's own texture and vertex colours: areas no view sees get "
+                                         "colour grown from the seen surface. For views that replace the whole "
+                                         "texture (multi-view texturing), where the old texture would show "
+                                         "through in occluded areas."),
                 IO.Mask.Input("mask", optional=True,
                               tooltip="Edited areas per view; only masked pixels are projected. A single mask "
                                       "applies to every view."),
@@ -2299,21 +2286,7 @@ class BakeTextureFromViews(IO.ComfyNode):
         )
 
     @classmethod
-    def execute(cls, mesh, images, cameras, resolution, blend_exponent, mask=None):
-        sets = list(cameras.values())
-        views = [cam for c in sets for cam in c["cameras"]]
-        transform = sets[0]["model_transform"]
-        if any(c["model_transform"] != transform for c in sets[1:]):
-            raise ValueError("BakeTextureFromViews: the camera sets were rendered with different model transforms.")
-        if int(images.shape[0]) != len(views):
-            raise ValueError(f"BakeTextureFromViews: {int(images.shape[0])} images for {len(views)} cameras; "
-                             "connect one image per rendered view, in Render Mesh's order.")
-        if mask is not None:
-            mask = mask if mask.ndim == 3 else mask[None]
-            if int(mask.shape[0]) == 1:
-                mask = mask.expand(len(views), -1, -1)
-            elif int(mask.shape[0]) != len(views):
-                raise ValueError(f"BakeTextureFromViews: {int(mask.shape[0])} masks for {len(views)} cameras.")
+    def execute(cls, mesh, images, resolution, blend_exponent, fill_unseen=False, cameras=None, mask=None):
         if mesh.uvs is None:
             raise ValueError("BakeTextureFromViews: mesh has no UVs. Connect the UV-unwrapped mesh that was rendered.")
         if int(mesh.vertices.shape[0]) > 1:
@@ -2325,17 +2298,24 @@ class BakeTextureFromViews(IO.ComfyNode):
         dev = comfy.model_management.get_torch_device()
         _prepare_gpu_mesh_processing(dev, max(resolution * resolution * 512, int(f_i.shape[0]) * 512))
         lv, lf = v_i.to(dev).float(), f_i.to(dev).long()
+        camera_info = [cam for c in cameras.values() for cam in (c if isinstance(c, list) else [c])] if cameras else None
+        views = _mesh_view_cameras(camera_info, lv)
+        if int(images.shape[0]) != len(views):
+            raise ValueError(f"BakeTextureFromViews: {int(images.shape[0])} images for {len(views)} cameras; "
+                             "connect one image per rendered view, in camera order.")
+        if mask is not None:
+            mask = mask if mask.ndim == 3 else mask[None]
+            if int(mask.shape[0]) == 1:
+                mask = mask.expand(len(views), -1, -1)
+            elif int(mask.shape[0]) != len(views):
+                raise ValueError(f"BakeTextureFromViews: {int(mask.shape[0])} masks for {len(views)} cameras.")
         normals = normals_i.to(dev).float() if normals_i is not None else _compute_vertex_normals(lv, lf)
-        if transform is not None:
-            lv = _apply_model_transform(lv, transform)
-            normals = _apply_model_transform(normals, transform, is_normal=True)
-        base_texture = mesh.texture[0].to(dev).float() if mesh.texture is not None else None
+        base_texture = mesh.texture[0].to(dev).float() if mesh.texture is not None and not fill_unseen else None
         # glTF COLOR_0 is linear (PaintMesh stores pow(srgb, 2.2)); back to sRGB like RenderMesh shows it.
-        base_vcol = colors_i[:, :3].to(dev).float().clamp(0.0, 1.0).pow(1.0 / 2.2) if colors_i is not None else None
+        base_vcol = colors_i[:, :3].to(dev).float().clamp(0.0, 1.0).pow(1.0 / 2.2) if colors_i is not None and not fill_unseen else None
 
         tex, conf = _bake_texture_from_views(lv, lf, uvs_i.to(dev).float(), normals, base_texture, base_vcol, images, mask,
-                                             views, int(resolution), float(blend_exponent),
-                                             pbar=comfy.utils.ProgressBar(len(views)))
+                                             views, int(resolution), float(blend_exponent))
         return IO.NodeOutput(torch.from_numpy(np.ascontiguousarray(tex)).float()[None],
                              torch.from_numpy(np.ascontiguousarray(conf)).float()[None])
 
