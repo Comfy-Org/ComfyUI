@@ -261,11 +261,12 @@ class CreateVideo(io.ComfyNode):
     ) -> io.NodeOutput:
         if bit_depth == "auto":
             bit_depth = 10 if color_space in ("HDR", "HDR PQ") else 8
+        chroma_subsampling = chroma_subsampling if chroma_subsampling in ("444", "422", "420") else None
         video = InputImpl.VideoFromComponents(
             Types.VideoComponents(images=images, audio=audio, frame_rate=Fraction(fps)),
             bit_depth=bit_depth,
             color_space=color_space,
-            chroma_subsampling=None if chroma_subsampling == "auto" else chroma_subsampling,
+            chroma_subsampling=chroma_subsampling,
         )
         if codec != "none":
             video = InputImpl.VideoFromList([video], codec=Types.VideoCodec(codec))
