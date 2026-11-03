@@ -224,7 +224,7 @@ class OpenAIGPTImage1(IO.ComfyNode):
                 ),
                 IO.Combo.Input(
                     "model",
-                    options=["gpt-image-1", "gpt-image-1.5", "gpt-image-2"],
+                    options=["gpt-image-1.5", "gpt-image-2"],
                     default="gpt-image-2",
                     optional=True,
                 ),
@@ -261,11 +261,6 @@ class OpenAIGPTImage1(IO.ComfyNode):
                 expr="""
                 (
                   $ranges := {
-                    "gpt-image-1": {
-                      "low":    [0.011, 0.02],
-                      "medium": [0.042, 0.07],
-                      "high":   [0.167, 0.25]
-                    },
                     "gpt-image-1.5": {
                       "low":    [0.009, 0.02],
                       "medium": [0.034, 0.062],
@@ -306,7 +301,7 @@ class OpenAIGPTImage1(IO.ComfyNode):
         size: str = "1024x1024",
         custom_width: int = 1024,
         custom_height: int = 1024,
-        model: str = "gpt-image-1",
+        model: str = "gpt-image-2",
     ) -> IO.NodeOutput:
         validate_string(prompt, strip_whitespace=False)
 
@@ -331,11 +326,11 @@ class OpenAIGPTImage1(IO.ComfyNode):
                     f"Custom resolution total pixels must be between 655,360 and 8,294,400, got {total_pixels}"
                 )
             size = f"{custom_width}x{custom_height}"
-        elif model in ("gpt-image-1", "gpt-image-1.5"):
+        elif model == "gpt-image-1.5":
             if size not in ("auto", "1024x1024", "1024x1536", "1536x1024"):
                 raise ValueError(f"Resolution {size} is only supported by GPT Image 2 model")
 
-        if model not in ("gpt-image-1", "gpt-image-1.5", "gpt-image-2"):
+        if model not in ("gpt-image-1.5", "gpt-image-2"):
             raise ValueError(f"Unknown model: {model}")
 
         if image is not None:
@@ -414,7 +409,7 @@ class OpenAIGPTImage1(IO.ComfyNode):
 
 GPT_IMAGE_QUALITIES = ("low", "medium", "high")
 GPT_IMAGE_25_QUALITIES = ("low", "medium", "high", "xhigh", "max")
-GPT_IMAGE_MODELS = ("gpt-image-2.5-flare", "gpt-image-2.5-sunburst", "gpt-image-2", "gpt-image-1.5", "gpt-image-1")
+GPT_IMAGE_MODELS = ("gpt-image-2.5-flare", "gpt-image-2.5-sunburst", "gpt-image-2", "gpt-image-1.5")
 
 
 def _gpt_image_shared_inputs(qualities: tuple[str, ...] = GPT_IMAGE_QUALITIES):
@@ -445,7 +440,7 @@ def _gpt_image_shared_inputs(qualities: tuple[str, ...] = GPT_IMAGE_QUALITIES):
 
 
 def _gpt_image_legacy_model_inputs():
-    """Per-model widget set for legacy gpt-image-1 / gpt-image-1.5 (4 base sizes, transparent bg allowed)."""
+    """Per-model widget set for legacy gpt-image-1.5 (4 base sizes, transparent bg allowed)."""
     return [
         IO.Combo.Input(
             "size",
@@ -540,7 +535,6 @@ class OpenAIGPTImageNodeV2(IO.ComfyNode):
                             _gpt_image_2_model_inputs(("auto", "opaque"), GPT_IMAGE_QUALITIES),
                         ),
                         IO.DynamicCombo.Option("gpt-image-1.5", _gpt_image_legacy_model_inputs()),
-                        IO.DynamicCombo.Option("gpt-image-1", _gpt_image_legacy_model_inputs()),
                     ],
                 ),
                 IO.Int.Input(
@@ -575,11 +569,6 @@ class OpenAIGPTImageNodeV2(IO.ComfyNode):
                 expr="""
                 (
                   $ranges := {
-                    "gpt-image-1": {
-                      "low":    [0.011, 0.02],
-                      "medium": [0.042, 0.07],
-                      "high":   [0.167, 0.25]
-                    },
                     "gpt-image-1.5": {
                       "low":    [0.009, 0.02],
                       "medium": [0.034, 0.062],
@@ -620,7 +609,6 @@ class OpenAIGPTImageNodeV2(IO.ComfyNode):
                     }
                   };
                   $perImage := {
-                    "gpt-image-1": [0.0019, 0.0019],
                     "gpt-image-1.5": [0.0016, 0.0016],
                     "gpt-image-2": [0.0098, 0.0147],
                     "gpt-image-2.5-flare": [0.0117, 0.0176],
