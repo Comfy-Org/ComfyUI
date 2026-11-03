@@ -1737,6 +1737,57 @@ def unpin_memory(tensor):
 
     return False
 
+class HostWriter:
+    """Copies device tensors of one shape into slices of a CPU tensor without the device waiting on each copy:
+    every write goes through one of two pinned staging buffers on the offload stream and lands in its slice one
+    write later. Writes go straight through when the target is on the device, there is no offload stream or the
+    buffers can't be pinned."""
+
+    def __init__(self, device, target, shape):
+        self.device = device
+        self.staging = []
+        self.pending = [None, None]
+        self.slot = 0
+        self.stream = get_offload_stream(device) if is_device_cpu(target.device) else None
+        if self.stream is not None:
+            for _ in range(2):
+                buffer = torch.empty(shape, dtype=target.dtype)
+                if pin_memory(buffer):
+                    self.staging.append(buffer)
+            if len(self.staging) < 2:
+                self.stream = None
+
+    def __enter__(self):
+        return self
+
+    def write(self, dest, src):
+        if self.stream is None:
+            dest.copy_(src)
+            return
+        if self.pending[self.slot] is not None:
+            self._collect(self.slot)
+        self.stream.wait_stream(current_stream(self.device))
+        cast_to(src, None, torch.device("cpu"), non_blocking=True, stream=self.stream, r=self.staging[self.slot])
+        # src stays referenced until its copy is done
+        self.pending[self.slot] = (self.stream.record_event(), dest, src)
+        self.slot ^= 1
+
+    def _collect(self, slot):
+        event, dest, _ = self.pending[slot]
+        event.synchronize()
+        dest.copy_(self.staging[slot])
+        self.pending[slot] = None
+
+    def __exit__(self, exc_type, exc, tb):
+        if self.stream is not None:
+            if exc_type is None:
+                for slot in (self.slot, self.slot ^ 1):
+                    if self.pending[slot] is not None:
+                        self._collect(slot)
+            self.stream.synchronize()
+        for buffer in self.staging:
+            unpin_memory(buffer)
+
 def sage_attention_enabled():
     return args.use_sage_attention
 
