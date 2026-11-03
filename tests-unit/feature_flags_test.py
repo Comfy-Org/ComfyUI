@@ -11,7 +11,7 @@ from comfy_api.feature_flags import (
     _coerce_flag_value,
     _parse_cli_feature_flags,
 )
-from comfy.comfy_api_env import (
+from app.comfy_api_env import (
     environment_overrides_for_base,
     get_environment_overrides,
     normalize_comfy_api_base,
@@ -237,7 +237,7 @@ class TestComfyApiEnv:
     def test_environment_overrides_only_for_staging_tier(self, monkeypatch):
         def set_base(url):
             monkeypatch.setattr(
-                "comfy.comfy_api_env.args",
+                "app.comfy_api_env.args",
                 type("Args", (), {"comfy_api_base": url})(),
             )
 
@@ -253,7 +253,7 @@ class TestComfyApiEnv:
     def test_server_features_never_carry_env_overrides(self, monkeypatch):
         """The WebSocket capability handshake must stay free of routing keys."""
         monkeypatch.setattr(
-            "comfy.comfy_api_env.args",
+            "app.comfy_api_env.args",
             type("Args", (), {"comfy_api_base": "https://pr-7.testenvs.comfy.org"})(),
         )
         features = get_server_features()

@@ -8,6 +8,7 @@ from io import BytesIO
 import av
 import numpy as np
 import torch
+from av.codec import CodecContext
 from PIL import Image
 
 from comfy.utils import common_upscale
@@ -588,6 +589,26 @@ def _apply_video_scale(video: Input.Video, scale_dims: tuple[int, int]) -> Input
         if output_container is not None:
             output_container.close()
         raise RuntimeError(f"Failed to resize video: {str(e)}") from e
+
+
+def video_to_images_and_mask(video: Input.Video) -> tuple[Input.Image, Input.Mask]:
+    frames: list[torch.Tensor | None] = []
+    with av.open(video.get_stream_source(), mode="r") as container:
+        stream = container.streams.video[0]
+        decoder = CodecContext.create("libvpx-vp9", "r") if stream.codec_context.name == "vp9" else None
+        for packet in container.demux(stream):
+            for frame in decoder.decode(packet) if decoder is not None else packet.decode():
+                frames.append(torch.from_numpy(frame.to_ndarray(format="rgba")))
+    if not frames:
+        raise ValueError("The video contains no frames.")
+    height, width = frames[0].shape[:2]
+    images = torch.empty((len(frames), height, width, 3))
+    mask = torch.empty((len(frames), height, width))
+    for i, rgba in enumerate(frames):
+        images[i] = rgba[..., :3] / 255.0
+        mask[i] = 1.0 - rgba[..., 3] / 255.0
+        frames[i] = None
+    return images, mask
 
 
 def _f32_pcm(wav: torch.Tensor) -> torch.Tensor:

@@ -29,6 +29,12 @@
 
 ## Architecture Boundaries
 
+- Keep `comfy/` limited to model implementations and their supporting inference
+  infrastructure, consistent with its current scope: model detection, loading,
+  and conversion; encoders, tokenizers, and latent formats; conditioning,
+  sampling, and model patching; tensor operations, quantization, and device,
+  memory, and offload management. Put UI, API/server, workflow/queue, application
+  persistence, and other product-level logic outside `comfy/`.
 - Keep each layer focused on the concepts it owns. Do not leak UI, API,
   workflow, queue, persistence, telemetry, model-loading, node, or execution
   concerns into unrelated layers just because it is convenient to pass data
@@ -152,6 +158,17 @@
 - Keep comments sparse and useful. Strip useless comments that restate the code
   or describe obvious behavior. Short TODOs are fine when they name the concrete
   missing follow-up.
+
+## Model Integration
+
+- Reuse native ComfyUI loaders and nodes wherever possible. Extend existing
+  loading paths before introducing model-specific loaders.
+- Use standard `MODEL`, `CLIP`, and `VAE` interfaces where they fit, preferring
+  the regular checkpoint loader for bundled components.
+- Package weights as single `.safetensors` files in the normal model folders;
+  never require model directories. Provide a conversion script when repackaging.
+- Use native execution and optimization mechanisms. Benchmark performance and
+  verify short and long generations against the reference implementation.
 
 ## Model, Device, and Memory Behavior
 
@@ -332,8 +349,7 @@
 
 ## Nodes and User-Facing Behavior
 
-- Follow existing node conventions: `INPUT_TYPES`, `RETURN_TYPES`, `FUNCTION`,
-  `CATEGORY`, and registration through the local mapping used by that file.
+- Use V3 schemas for new nodes and reuse existing native nodes wherever possible.
 - Treat legacy combo inputs, `io.Combo`, and `io.DynamicCombo` values as
   untrusted when they affect filesystem access. Any value used as a file or
   folder name, path component, format, or extension must be validated again at
@@ -351,9 +367,6 @@
 - Mark inputs optional when execution has a valid path that does not read them.
   If one optional input is needed only to process another optional input, do not
   force users on the path that supplies neither to connect it.
-- Conditioning nodes should normally output conditioning only. Do not expose
-  input or intermediate images as convenience outputs for downstream sizing or
-  routing; use the existing image path or a dedicated image operation instead.
 - Nodes should output only values they own. Do not add pass-through outputs for
   workflow convenience unless the node is explicitly an output node. Existing
   models, latents, conditioning, or other inputs should flow directly to the

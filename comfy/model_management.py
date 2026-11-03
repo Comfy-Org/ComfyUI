@@ -1539,6 +1539,14 @@ def get_offload_stream(device):
         return s
     return None
 
+def sync_all_offload_streams():
+    if NUM_STREAMS == 0:
+        synchronize()
+        return
+    for streams in STREAMS.values():
+        for stream in streams:
+            stream.synchronize()
+
 def sync_stream(device, stream):
     if stream is None or current_stream(device) is None:
         return
@@ -1769,7 +1777,9 @@ def pytorch_attention_enabled():
 
 def pytorch_attention_enabled_vae():
     if is_amd():
-        return False  # enabling pytorch attention on AMD currently causes crash when doing high res
+        arch = torch.cuda.get_device_properties(get_torch_device()).gcnArchName
+        if arch.startswith("gfx11"):  # aotriton ships no head dim > 256 kernels for gfx11 (ROCm/aotriton#168), the VAE's single head needs 384 or 512
+            return False
     return pytorch_attention_enabled()
 
 def pytorch_attention_flash_attention():
