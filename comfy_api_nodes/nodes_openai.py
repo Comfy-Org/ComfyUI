@@ -57,11 +57,7 @@ class SupportedOpenAIModel(str, Enum):
     gpt_5_nano = "gpt-5-nano"
     gpt_4_1 = "gpt-4.1"
     gpt_4_1_mini = "gpt-4.1-mini"
-    gpt_4_1_nano = "gpt-4.1-nano"
-    o4_mini = "o4-mini"
     o3 = "o3"
-    o1_pro = "o1-pro"
-    o1 = "o1"
 
 
 REASONING_EFFORT_OPTIONS = ["default", "none", "minimal", "low", "medium", "high", "xhigh", "max"]
@@ -84,11 +80,7 @@ SUPPORTED_REASONING_EFFORTS: dict[str, tuple[str, ...]] = {
     SupportedOpenAIModel.gpt_5_nano: _GPT_5_EFFORTS,
     SupportedOpenAIModel.gpt_4_1: (),
     SupportedOpenAIModel.gpt_4_1_mini: (),
-    SupportedOpenAIModel.gpt_4_1_nano: (),
-    SupportedOpenAIModel.o4_mini: _O_SERIES_EFFORTS,
     SupportedOpenAIModel.o3: _O_SERIES_EFFORTS,
-    SupportedOpenAIModel.o1_pro: _O_SERIES_EFFORTS,
-    SupportedOpenAIModel.o1: _O_SERIES_EFFORTS,
 }
 
 
@@ -851,34 +843,9 @@ class OpenAIChatNode(IO.ComfyNode):
                     "usd": [0.000143, 0.000715],
                     "format": { "approximate": true, "separator": "-", "suffix": " per 1K tokens" }
                   }
-                  : $contains($m, "o4-mini") ? {
-                    "type": "list_usd",
-                    "usd": [0.0011, 0.0044],
-                    "format": { "approximate": true, "separator": "-", "suffix": " per 1K tokens" }
-                  }
-                  : $contains($m, "o1-pro") ? {
-                    "type": "list_usd",
-                    "usd": [0.15, 0.6],
-                    "format": { "approximate": true, "separator": "-", "suffix": " per 1K tokens" }
-                  }
-                  : $contains($m, "o1") ? {
-                    "type": "list_usd",
-                    "usd": [0.015, 0.06],
-                    "format": { "approximate": true, "separator": "-", "suffix": " per 1K tokens" }
-                  }
-                  : $contains($m, "o3-mini") ? {
-                    "type": "list_usd",
-                    "usd": [0.0011, 0.0044],
-                    "format": { "approximate": true, "separator": "-", "suffix": " per 1K tokens" }
-                  }
                   : $contains($m, "o3") ? {
                     "type": "list_usd",
                     "usd": [0.01, 0.04],
-                    "format": { "approximate": true, "separator": "-", "suffix": " per 1K tokens" }
-                  }
-                  : $contains($m, "gpt-4.1-nano") ? {
-                    "type": "list_usd",
-                    "usd": [0.0001, 0.0004],
                     "format": { "approximate": true, "separator": "-", "suffix": " per 1K tokens" }
                   }
                   : $contains($m, "gpt-4.1-mini") ? {
@@ -1162,7 +1129,7 @@ class OpenAIChatConfig(IO.ComfyNode):
 
         Note:
             While `top_p` and `temperature` are listed as properties in the
-            spec, they are not supported for all models (e.g., o4-mini).
+            spec, they are not supported for all models (e.g., gpt-6.1-sol).
             They are not exposed as inputs at all to avoid having to manually
             remove depending on model choice.
         """
