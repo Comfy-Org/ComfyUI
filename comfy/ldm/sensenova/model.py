@@ -12,7 +12,7 @@ from comfy.ldm.modules.attention import AttentionTensorContainer, ComfyAttention
 from comfy.ldm.modules.diffusionmodules.mmdit import TimestepEmbedder
 from comfy.text_encoders.llama import FixedKV
 
-from .conditioning import IMAGE_CONTEXT_ID, IM_END_ID, THINK_END_ID
+from .conditioning import IM_END_ID, THINK_END_ID, image_token_mask
 from .sampling import resolution_noise_scale
 
 
@@ -540,25 +540,26 @@ class SenseNovaU15(nn.Module):
         ).execute(x, timesteps, context, transformer_options, **kwargs)
 
     def _prepare_prefix(
-        self, text_input_ids, reference_images, prefix_indexes, prefix_mask
+        self, text_input_ids, reference_images, prefix_indexes, prefix_mask, text_suffix=None
     ):
+        prefix_length = text_input_ids.shape[1]
+        all_ids = torch.cat((text_input_ids, text_suffix), dim=1) if text_suffix is not None else text_input_ids
         embed = self.language_model.model.embed_tokens
         if _use_host_rows(embed):
-            prefix = embed.host_rows(text_input_ids)
+            prefix = embed.host_rows(all_ids)
         else:
-            prefix = embed(text_input_ids)
+            prefix = embed(all_ids)
         if reference_images:
             reference_embeds = [
                 self.vision_model(_pad_to_merged_patch_size(reference))
                 for reference in reference_images
             ]
-            selected = text_input_ids == IMAGE_CONTEXT_ID
+            selected = image_token_mask(text_input_ids)
             prefix = prefix.clone()
-            prefix[selected] = torch.cat(reference_embeds, dim=1).reshape(
+            prefix[:, :prefix_length][selected] = torch.cat(reference_embeds, dim=1).reshape(
                 -1, HIDDEN_SIZE
             )
 
-        prefix_length = text_input_ids.shape[1]
         if prefix_indexes is None:
             prefix_positions = torch.arange(
                 prefix_length, dtype=torch.long, device=prefix.device
@@ -581,6 +582,24 @@ class SenseNovaU15(nn.Module):
             prefix_indexes = prefix_indexes.transpose(0, 1)
             prefix_time = prefix_indexes[0].amax(dim=-1) + 1
 
+        if text_suffix is not None:
+            # Upstream appends thinking tokens as text, even when their IDs are image markers.
+            suffix_length = text_suffix.shape[1]
+            positions = prefix_time[:, None] + torch.arange(suffix_length, device=prefix.device)
+            zeros = torch.zeros_like(positions)
+            suffix_indexes = torch.stack((positions, zeros, zeros))
+            if prefix_indexes.ndim == 2:
+                suffix_indexes = suffix_indexes[:, 0]
+            prefix_indexes = torch.cat((prefix_indexes, suffix_indexes), dim=-1)
+            length = prefix_length + suffix_length
+            mask = torch.full(
+                (*prefix_mask.shape[:-2], length, length), float("-inf"),
+                dtype=prefix_mask.dtype, device=prefix.device,
+            ).triu(1)
+            mask[..., :prefix_length, :prefix_length] = prefix_mask
+            prefix_mask = mask
+            prefix_time = prefix_time + suffix_length
+
         return prefix, prefix_indexes, prefix_mask, prefix_time
 
     def _preprocess_prefix_state(
@@ -590,9 +609,10 @@ class SenseNovaU15(nn.Module):
         prefix_indexes=None,
         prefix_mask=None,
         transformer_options=None,
+        text_suffix=None,
     ):
         prefix, prefix_indexes, prefix_mask, prefix_time = self._prepare_prefix(
-            text_input_ids, reference_images, prefix_indexes, prefix_mask
+            text_input_ids, reference_images, prefix_indexes, prefix_mask, text_suffix
         )
         prefix_keys = []
         prefix_values = []
@@ -628,6 +648,7 @@ class SenseNovaU15(nn.Module):
         prefix_indexes=None,
         prefix_mask=None,
         transformer_options=None,
+        text_suffix=None,
     ):
         """Precompute the text and reference-image prefix KV state."""
 
@@ -639,6 +660,7 @@ class SenseNovaU15(nn.Module):
                 prefix_indexes,
                 prefix_mask,
                 transformer_options,
+                text_suffix,
             )
         )
         return prefix_keys, prefix_values, prefix_time
@@ -809,6 +831,7 @@ class SenseNovaU15(nn.Module):
         prefix_keys=None,
         prefix_values=None,
         prefix_time=None,
+        text_suffix=None,
         **kwargs,
     ):
         if text_input_ids is None and prefix_keys is None:
@@ -824,6 +847,8 @@ class SenseNovaU15(nn.Module):
                 batch, text_input_ids, prefix_indexes, prefix_mask
             )
             prefix_batch = text_input_ids.shape[0]
+            if text_suffix is not None:
+                text_suffix = comfy.utils.resize_to_batch_size(text_suffix, prefix_batch)
             if reference_images:
                 reference_images = [
                     comfy.utils.resize_to_batch_size(reference, prefix_batch)
@@ -860,7 +885,7 @@ class SenseNovaU15(nn.Module):
 
         if prefix_keys is None:
             prefix, prefix_indexes, prefix_mask, prefix_time = self._prepare_prefix(
-                text_input_ids, reference_images, prefix_indexes, prefix_mask
+                text_input_ids, reference_images, prefix_indexes, prefix_mask, text_suffix
             )
             prefix_rope = _prepare_mrope(
                 prefix_indexes, prefix.device, prefix.dtype

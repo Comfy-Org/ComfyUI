@@ -225,6 +225,7 @@ class SenseNovaGenerate(io.ComfyNode):
         updated_metadata = {
             **metadata,
             "text_input_ids": torch.cat((input_ids, suffix), dim=1),
+            "sensenova_thinking_start": input_ids.shape[1],
             "sensenova_thinking": False,
         }
         updated_conditioning = [[conditioning[0][0], updated_metadata]]

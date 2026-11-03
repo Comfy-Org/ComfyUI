@@ -2507,12 +2507,20 @@ class SenseNovaU15(BaseModel):
         if text_input_ids is not None:
             device = kwargs["device"]
             dtype = self.get_dtype_inference()
+            text_suffix = None
+            thinking_start = kwargs.get("sensenova_thinking_start")
+            if thinking_start is not None:
+                text_suffix = text_input_ids[:, thinking_start:]
+                text_input_ids = text_input_ids[:, :thinking_start]
             text_input_ids, reference_images, indexes, prefix_mask = comfy.ldm.sensenova.conditioning.prepare_prefix_inputs(
                 text_input_ids, kwargs.get("reference_latents"),
                 comfy.ldm.sensenova.model.MERGED_PATCH_SIZE, dtype,
                 image_only=kwargs.get("prompt_type") == "negative",
                 expand_images=not kwargs.get("sensenova_interleave_expanded", False),
+                generated_start=kwargs.get("sensenova_interleave_start"),
             )
+            if reference_images and kwargs.get("prompt_type") == "negative":
+                text_suffix = None
 
             hooks = kwargs.get("hooks")
             if hooks is None:
@@ -2535,6 +2543,7 @@ class SenseNovaU15(BaseModel):
                         transformer_options={
                             "prefetch_dynamic_vbars": self.current_patcher is not None and self.current_patcher.is_dynamic(),
                         },
+                        text_suffix=text_suffix.to(device=device) if text_suffix is not None else None,
                     )
                 )
                 out["prefix_keys"] = SenseNovaSharedList(prefix_keys)
@@ -2546,6 +2555,8 @@ class SenseNovaU15(BaseModel):
                     out["prefix_mask"] = SenseNovaSharedRegular(prefix_mask)
                     out["reference_images"] = SenseNovaSharedList(reference_images)
                 out["text_input_ids"] = SenseNovaSharedRegular(text_input_ids)
+                if text_suffix is not None:
+                    out["text_suffix"] = SenseNovaSharedRegular(text_suffix)
         return out
 
     def extra_conds_shapes(self, **kwargs):
@@ -2553,9 +2564,8 @@ class SenseNovaU15(BaseModel):
         images = comfy.ldm.sensenova.conditioning.split_reference_batches(images) if images is not None else []
         patch_size = comfy.ldm.sensenova.model.MERGED_PATCH_SIZE
         reference_grids = [
-            (
-                max(1, math.ceil(image.shape[-3] / patch_size)),
-                max(1, math.ceil(image.shape[-2] / patch_size)),
+            comfy.ldm.sensenova.conditioning.reference_grid(
+                image.shape[-3], image.shape[-2], patch_size
             )
             for image in images
         ]

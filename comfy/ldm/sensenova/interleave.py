@@ -5,6 +5,7 @@ from .conditioning import (
     IMAGE_END_ID,
     condition_input_ids,
     prepare_prefix_inputs,
+    reference_grid,
     split_reference_batches,
 )
 from .model import MERGED_PATCH_SIZE
@@ -17,6 +18,7 @@ def prefix_arguments(metadata, device, dtype):
         metadata["text_input_ids"], metadata.get("reference_latents"),
         MERGED_PATCH_SIZE, dtype,
         expand_images=not metadata.get("sensenova_interleave_expanded"),
+        generated_start=metadata.get("sensenova_interleave_start"),
     )
     if references:
         references = [
@@ -33,10 +35,7 @@ def expand_interleave_inputs(input_ids, reference_images, image_only):
     references = split_reference_batches(reference_images or [])
     if references:
         reference_grids = [
-            (
-                max(1, (image.shape[-3] + MERGED_PATCH_SIZE - 1) // MERGED_PATCH_SIZE),
-                max(1, (image.shape[-2] + MERGED_PATCH_SIZE - 1) // MERGED_PATCH_SIZE),
-            )
+            reference_grid(image.shape[-3], image.shape[-2], MERGED_PATCH_SIZE)
             for image in references
         ]
         input_ids = condition_input_ids(
@@ -56,11 +55,8 @@ def append_image_to_prefix(input_ids, latent_samples):
         raise ValueError("SenseNova interleave requires one BCHW latent image per stage.")
 
     image = (latent_samples * 0.5 + 0.5).movedim(1, -1)
-    token_height = max(
-        1, (latent_samples.shape[-2] + MERGED_PATCH_SIZE - 1) // MERGED_PATCH_SIZE
-    )
-    token_width = max(
-        1, (latent_samples.shape[-1] + MERGED_PATCH_SIZE - 1) // MERGED_PATCH_SIZE
+    token_height, token_width = reference_grid(
+        latent_samples.shape[-2], latent_samples.shape[-1], MERGED_PATCH_SIZE
     )
     suffix = input_ids.new_tensor(
         [IMAGE_CONTEXT_ID] * (token_height * token_width)

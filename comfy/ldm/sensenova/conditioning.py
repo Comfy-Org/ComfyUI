@@ -50,35 +50,74 @@ def preprocess_references(images):
     return [preprocess_reference(image) for image in split_reference_batches(images)]
 
 
+def reference_grid(height, width, patch_size):
+    return (
+        max(1, (height + patch_size - 1) // patch_size),
+        max(1, (width + patch_size - 1) // patch_size),
+    )
+
+
+def image_token_mask(input_ids):
+    # Image-control IDs generated outside an image block remain text embeddings.
+    positions = torch.arange(input_ids.shape[-1], device=input_ids.device)
+    starts = torch.where(input_ids == IMAGE_START_ID, positions, -1).cummax(dim=-1).values
+    ends = torch.where(input_ids == IMAGE_END_ID, positions, -1).cummax(dim=-1).values
+    return (input_ids == IMAGE_CONTEXT_ID) & (starts > ends)
+
+
 def prepare_prefix_inputs(
     input_ids, reference_images, patch_size, dtype, *,
-    image_only=False, expand_images=True, append_image_start=True,
+    image_only=False, expand_images=True, append_image_start=True, generated_start=None,
 ):
     """Prepare reference tokens, normalized images, positions and attention mask."""
 
     reference_images = preprocess_references(reference_images) if reference_images else []
-    if not reference_images:
-        return input_ids, None, None, None
     reference_grids = [
-        (
-            max(1, (image.shape[-2] + patch_size - 1) // patch_size),
-            max(1, (image.shape[-1] + patch_size - 1) // patch_size),
-        )
+        reference_grid(image.shape[-2], image.shape[-1], patch_size)
         for image in reference_images
     ]
-    if expand_images:
+    if reference_images and expand_images:
         input_ids = condition_input_ids(
             input_ids, reference_grids,
             image_only=image_only, append_image_start=append_image_start,
         )
-    else:
-        expected_slots = sum(height * width for height, width in reference_grids)
-        actual_slots = int((input_ids == IMAGE_CONTEXT_ID).sum())
-        if actual_slots != expected_slots:
+    values = input_ids[0].tolist()
+    image_slots = []
+    in_image = False
+    for token in values:
+        if token == IMAGE_START_ID:
+            in_image = True
+        elif token == IMAGE_END_ID:
+            in_image = False
+        image_slots.append(token == IMAGE_CONTEXT_ID and in_image)
+    text_start = len(values) if generated_start is None else generated_start
+    expected_slots = sum(height * width for height, width in reference_grids)
+    actual_slots = sum(
+        token == IMAGE_CONTEXT_ID and (index < text_start or image_slots[index])
+        for index, token in enumerate(values)
+    )
+    if actual_slots != expected_slots:
+        raise ValueError(
+            f"SenseNova prefix has {actual_slots} image context tokens, "
+            f"but reference images require {expected_slots}."
+        )
+    starts = [index for index, token in enumerate(values) if token == IMAGE_START_ID]
+    ends = [
+        index for index, token in enumerate(values)
+        if token == IMAGE_END_ID and (index < text_start or (index > 0 and image_slots[index - 1]))
+    ]
+    if starts and starts[-1] == len(values) - 1:
+        starts.pop()
+    if len(starts) != len(reference_grids) or len(ends) != len(reference_grids):
+        raise ValueError("SenseNova prefix image blocks do not match its reference images.")
+    for index, (start, end, (height, width)) in enumerate(zip(starts, ends, reference_grids), 1):
+        if values[start + 1:end] != [IMAGE_CONTEXT_ID] * (height * width):
             raise ValueError(
-                f"SenseNova interleave history has {actual_slots} image context tokens, "
-                f"but reference images require {expected_slots}."
+                f"SenseNova prefix image block {index}: reference images "
+                f"require {height * width} contiguous image context tokens."
             )
+    if not reference_images:
+        return input_ids, None, None, None
     indexes = thw_indexes(input_ids, reference_grids)
     return input_ids, reference_images, indexes, block_causal_mask(indexes, dtype=dtype)
 
@@ -154,11 +193,11 @@ def thw_indexes(input_ids, reference_grids):
             (values == IMAGE_START_ID).long(),
         )
     )[:-1]
-    not_image = (values != IMAGE_CONTEXT_ID).long()
+    selected = image_token_mask(input_ids)[0]
+    not_image = (~selected).long()
     time_indexes = (image_start_shift + not_image).cumsum(0) - 1
     height_indexes = torch.zeros_like(time_indexes)
     width_indexes = torch.zeros_like(time_indexes)
-    selected = values == IMAGE_CONTEXT_ID
     height_positions = []
     width_positions = []
     for token_height, token_width in reference_grids:
