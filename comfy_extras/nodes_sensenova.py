@@ -336,6 +336,7 @@ def generate_text_event(
     transformer_options=None,
     progress=None,
     interrupt=None,
+    compute_dtype=None,
 ):
     """Decode one interleave text stage without carrying KV state across nodes."""
 
@@ -346,6 +347,7 @@ def generate_text_event(
         transformer_options=transformer_options,
         progress=progress,
         interrupt=interrupt,
+        compute_dtype=compute_dtype,
     )
     stop_reason = {
         IM_END_ID: "eos",
@@ -409,18 +411,22 @@ def append_interleave_image(metadata, latent_samples):
 @contextmanager
 def _generation_context(model, metadata, max_tokens):
     prefix_length = model.model.extra_conds_shapes(**metadata)["prefix_mask"][-1]
-    dtype_size = comfy.model_management.dtype_size(model.model.get_dtype_inference())
+    dtype_size = comfy.model_management.dtype_size(
+        model.get_model_object("manual_cast_dtype") or model.model.get_dtype()
+    )
     kv_bytes = 2 * NUM_LAYERS * NUM_KV_HEADS * HEAD_DIM * (prefix_length + max_tokens) * dtype_size
     comfy.model_management.load_models_gpu([model], memory_required=kv_bytes)
     with comfy.model_management.cuda_device_context(model.load_device):
         try:
             model.pre_run()
+            compute_dtype = model.model.get_dtype_inference()
             prefix_args = prefix_arguments(
-                metadata, model.load_device, model.model.get_dtype_inference()
+                metadata, model.load_device, compute_dtype
             )
             transformer_options = model.model_options.get("transformer_options", {}).copy()
             transformer_options["prefetch_dynamic_vbars"] = model.is_dynamic()
             options = {
+                "compute_dtype": compute_dtype,
                 "transformer_options": transformer_options,
                 "progress": comfy.utils.ProgressBar(max_tokens).update_absolute,
                 "interrupt": comfy.model_management.throw_exception_if_processing_interrupted,

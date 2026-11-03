@@ -540,15 +540,15 @@ class SenseNovaU15(nn.Module):
         ).execute(x, timesteps, context, transformer_options, **kwargs)
 
     def _prepare_prefix(
-        self, text_input_ids, reference_images, prefix_indexes, prefix_mask, text_suffix=None
+        self, text_input_ids, reference_images, prefix_indexes, prefix_mask, text_suffix=None, compute_dtype=None
     ):
         prefix_length = text_input_ids.shape[1]
         all_ids = torch.cat((text_input_ids, text_suffix), dim=1) if text_suffix is not None else text_input_ids
         embed = self.language_model.model.embed_tokens
         if _use_host_rows(embed):
-            prefix = embed.host_rows(all_ids)
+            prefix = embed.host_rows(all_ids, out_dtype=compute_dtype)
         else:
-            prefix = embed(all_ids)
+            prefix = embed(all_ids).to(dtype=compute_dtype)
         if reference_images:
             reference_embeds = [
                 self.vision_model(_pad_to_merged_patch_size(reference))
@@ -610,9 +610,10 @@ class SenseNovaU15(nn.Module):
         prefix_mask=None,
         transformer_options=None,
         text_suffix=None,
+        compute_dtype=None,
     ):
         prefix, prefix_indexes, prefix_mask, prefix_time = self._prepare_prefix(
-            text_input_ids, reference_images, prefix_indexes, prefix_mask, text_suffix
+            text_input_ids, reference_images, prefix_indexes, prefix_mask, text_suffix, compute_dtype
         )
         prefix_keys = []
         prefix_values = []
@@ -649,6 +650,7 @@ class SenseNovaU15(nn.Module):
         prefix_mask=None,
         transformer_options=None,
         text_suffix=None,
+        compute_dtype=None,
     ):
         """Precompute the text and reference-image prefix KV state."""
 
@@ -661,6 +663,7 @@ class SenseNovaU15(nn.Module):
                 prefix_mask,
                 transformer_options,
                 text_suffix,
+                compute_dtype,
             )
         )
         return prefix_keys, prefix_values, prefix_time
@@ -715,6 +718,7 @@ class SenseNovaU15(nn.Module):
         transformer_options=None,
         progress=None,
         interrupt=None,
+        compute_dtype=None,
     ):
         """Return thinking token IDs, closing unfinished thinking at the limit."""
 
@@ -728,6 +732,7 @@ class SenseNovaU15(nn.Module):
             transformer_options=transformer_options,
             progress=progress,
             interrupt=interrupt,
+            compute_dtype=compute_dtype,
         )
         if stop_token_id != THINK_END_ID:
             token_ids.append(THINK_END_ID)
@@ -745,6 +750,7 @@ class SenseNovaU15(nn.Module):
         transformer_options=None,
         progress=None,
         interrupt=None,
+        compute_dtype=None,
     ):
         """Return generated IDs and the stop token (None at the token limit).
 
@@ -767,6 +773,7 @@ class SenseNovaU15(nn.Module):
                 prefix_indexes,
                 prefix_mask,
                 transformer_options,
+                compute_dtype=compute_dtype,
             )
         )
         comfy.model_prefetch.cleanup_malloc_graph()
@@ -885,7 +892,7 @@ class SenseNovaU15(nn.Module):
 
         if prefix_keys is None:
             prefix, prefix_indexes, prefix_mask, prefix_time = self._prepare_prefix(
-                text_input_ids, reference_images, prefix_indexes, prefix_mask, text_suffix
+                text_input_ids, reference_images, prefix_indexes, prefix_mask, text_suffix, x.dtype
             )
             prefix_rope = _prepare_mrope(
                 prefix_indexes, prefix.device, prefix.dtype

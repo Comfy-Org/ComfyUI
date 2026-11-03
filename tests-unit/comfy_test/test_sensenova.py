@@ -468,7 +468,7 @@ def test_sensenova_prefix_preprocessing_runs_each_prefix_layer_once(monkeypatch)
 def test_sensenova_model_base_preprocesses_prefix_conditioning():
     calls = []
 
-    def preprocess_prefix(input_ids, references, indexes, prefix_mask, transformer_options=None, text_suffix=None):
+    def preprocess_prefix(input_ids, references, indexes, prefix_mask, transformer_options=None, text_suffix=None, compute_dtype=None):
         calls.append((input_ids, references, indexes, prefix_mask))
         return (
             [torch.zeros(1, 1, 3, 1, dtype=torch.bfloat16)],
@@ -728,7 +728,7 @@ def test_sensenova_sampler_preserves_multiple_interleave_image_blocks(negative, 
 def test_sensenova_model_base_does_not_reinsert_expanded_interleave_images():
     calls = []
 
-    def preprocess_prefix(input_ids, references, indexes, prefix_mask, transformer_options=None, text_suffix=None):
+    def preprocess_prefix(input_ids, references, indexes, prefix_mask, transformer_options=None, text_suffix=None, compute_dtype=None):
         calls.append((input_ids, references, indexes, prefix_mask))
         return (
             [torch.zeros(1, 1, input_ids.shape[1], 1, dtype=torch.bfloat16)],
@@ -772,7 +772,7 @@ def test_sensenova_thinking_returns_stop_without_decoding_suffix():
     tokens = iter((42, 151668))
     decoded = []
 
-    model._preprocess_prefix_state = lambda *args: (
+    model._preprocess_prefix_state = lambda *args, **kwargs: (
         torch.zeros(1, 1, 1),
         [torch.zeros(1, 1, 1, 1)],
         [torch.zeros(1, 1, 1, 1)],
@@ -816,7 +816,7 @@ def test_sensenova_thinking_closes_truncated_reasoning(
     token_iterator = iter(tokens)
     decoded = []
 
-    model._preprocess_prefix_state = lambda *args: (
+    model._preprocess_prefix_state = lambda *args, **kwargs: (
         torch.zeros(1, 1, 1),
         [torch.zeros(1, 1, 1, 1)],
         [torch.zeros(1, 1, 1, 1)],
@@ -839,7 +839,7 @@ def test_sensenova_thinking_closes_truncated_reasoning(
 def test_sensenova_uses_prompt_type_for_negative_reference_conditioning():
     calls = []
 
-    def preprocess_prefix(input_ids, references, indexes, prefix_mask, transformer_options=None, text_suffix=None):
+    def preprocess_prefix(input_ids, references, indexes, prefix_mask, transformer_options=None, text_suffix=None, compute_dtype=None):
         calls.append((input_ids, references, indexes, prefix_mask))
         return (
             [torch.zeros(1, 1, 1, 1, dtype=torch.bfloat16)],
@@ -1310,6 +1310,9 @@ def test_sensenova_generate_returns_prefix_conditioning_and_text(
         model.diffusion_model = DiffusionModel()
         model.manual_cast_dtype = compute_dtype
 
+        def get_model_object(self, name):
+            return getattr(self.model, name)
+
         def is_dynamic(self):
             return False
 
@@ -1375,7 +1378,7 @@ def test_sensenova_generate_returns_prefix_conditioning_and_text(
 
     sampler_prefixes = []
 
-    def sampler_prefill(input_ids, references, indexes, prefix_mask, transformer_options=None, text_suffix=None):
+    def sampler_prefill(input_ids, references, indexes, prefix_mask, transformer_options=None, text_suffix=None, compute_dtype=None):
         sampler_prefixes.append((torch.cat((input_ids, text_suffix), dim=1), references))
         return [torch.full((1, 1, 1, 1), 17.0)], [], torch.tensor([input_ids.shape[1]])
 
@@ -1575,6 +1578,155 @@ def _text_model_patcher(token_ids):
     return comfy.model_patcher.ModelPatcher(
         model, load_device=torch.device("cpu"), offload_device=torch.device("cpu")
     )
+
+
+def _prefix_dtype_model(monkeypatch, storage_dtype, compute_dtype, offloaded):
+    model = _text_model_patcher([42, 43, 151668])
+    _add_identity_decoder_layers(monkeypatch, model)
+    model.model.to(dtype=compute_dtype)
+    diffusion = model.model.diffusion_model
+    backbone = diffusion.language_model.model
+    for layer in backbone.layers:
+        for module in (layer.input_layernorm, layer.self_attn.k_proj, layer.self_attn.v_proj,
+                       layer.self_attn.k_norm, layer.self_attn.k_norm_hw):
+            module.weight.detach().fill_(1)
+    weight = backbone.embed_tokens.weight.detach().to(storage_dtype)
+    weight[198].copy_(weight[1])
+    embed = comfy.ops.manual_cast.Embedding(*weight.shape, dtype=storage_dtype, device="cpu")
+    embed.weight = torch.nn.Parameter(weight, requires_grad=False)
+    if offloaded:
+        # Simulate a table beyond the allocator watermark, using the real host-row op.
+        embed._v = (SimpleNamespace(base_addr=0, get_watermark=lambda: 0), 0, 1)
+        embed.weight_lowvram_function = None
+    backbone.embed_tokens = embed
+    diffusion.vision_model = PatchEmbedding(3, weight.shape[1], kernel_size=32, stride=32).to(compute_dtype)
+    diffusion.vision_model.weight.detach().zero_()
+    diffusion.vision_model.bias.detach().zero_()
+    diffusion.dtype = storage_dtype
+    model.model.manual_cast_dtype = compute_dtype
+    model.model.concat_keys = ()
+    return model
+
+
+@pytest.mark.parametrize("offloaded", [False, True])
+@pytest.mark.parametrize("compute_dtype", [torch.float32, torch.bfloat16])
+@pytest.mark.parametrize("storage_dtype", [torch.float8_e4m3fn, torch.bfloat16])
+@pytest.mark.parametrize("with_reference", [False, True])
+def test_sensenova_sampler_prefix_uses_inference_dtype(
+    monkeypatch, storage_dtype, compute_dtype, offloaded, with_reference,
+):
+    model = _prefix_dtype_model(monkeypatch, storage_dtype, compute_dtype, offloaded)
+    metadata = {
+        "text_input_ids": _generation_input_ids(),
+        "reference_latents": [torch.ones(1, 32, 32, 3)] if with_reference else [],
+    }
+    conds = model.model.extra_conds(**metadata, device=model.load_device)
+
+    assert model.model.diffusion_model.language_model.model.embed_tokens.weight.dtype == storage_dtype
+    for kind in ("prefix_keys", "prefix_values"):
+        assert len(conds[kind].cond) == 2
+        for tensor in conds[kind].cond:
+            assert tensor.dtype == compute_dtype
+            assert torch.isfinite(tensor).all()
+            assert torch.count_nonzero(tensor) > 0
+
+
+@pytest.mark.parametrize("offloaded", [False, True])
+@pytest.mark.parametrize("compute_dtype", [torch.float32, torch.bfloat16])
+@pytest.mark.parametrize("with_reference", [False, True])
+@pytest.mark.parametrize("interleave", [False, True])
+def test_sensenova_generate_uses_inference_dtype(
+    monkeypatch, compute_dtype, offloaded, with_reference, interleave,
+):
+    monkeypatch.setattr(comfy.model_management, "load_models_gpu", lambda models, **kwargs: None)
+    model = _prefix_dtype_model(monkeypatch, torch.float8_e4m3fn, compute_dtype, offloaded)
+    if interleave:
+        head = model.model.diffusion_model.language_model.lm_head.weight.detach()
+        head[151670].copy_(head[151668])
+        head[151668].zero_()
+    positive = [[torch.empty(1), {
+        "text_input_ids": torch.tensor([[1]]),
+        "reference_latents": [torch.ones(1, 32, 32, 3)] if with_reference else [],
+        "sensenova_thinking": True,
+        "sensenova_interleave": interleave,
+    }]]
+    result = SenseNovaGenerate.execute(
+        model=model, clip=SenseNovaQwenTokenizer(), conditioning=positive,
+        negative=[[torch.empty(1), {"text_input_ids": torch.tensor([[9]])}]], max_think_tokens=8,
+    )
+
+    assert result.args[1] == "KL"
+    assert result.args[3] is True
+    expected = [42, 43, 151670] if interleave else [42, 43, 151668, 271, 151670]
+    assert result.args[0][0][1]["text_input_ids"][0, -len(expected):].tolist() == expected
+    conds = model.model.extra_conds(**result.args[0][0][1], device=model.load_device)
+    for kind in ("prefix_keys", "prefix_values"):
+        assert all(value.dtype == compute_dtype and torch.isfinite(value).all() for value in conds[kind].cond)
+
+
+@pytest.mark.parametrize("patch_dtype,expected_bytes", [
+    (torch.float32, 4_472_832), (torch.bfloat16, 2_236_416), (None, 2_236_416),
+])
+def test_sensenova_generate_uses_pending_compute_dtype_patch(monkeypatch, patch_dtype, expected_bytes):
+    compute_dtype = patch_dtype or torch.bfloat16
+    model = _prefix_dtype_model(monkeypatch, torch.bfloat16, compute_dtype, False)
+    model.model.manual_cast_dtype = torch.bfloat16 if compute_dtype == torch.float32 else torch.float32
+    model.set_model_compute_dtype(patch_dtype)
+    memory_budgets = []
+
+    def load_model(models, memory_required=0):
+        memory_budgets.append(memory_required)
+        for patcher in models:
+            patcher.patch_model(load_weights=False)
+
+    monkeypatch.setattr(comfy.model_management, "load_models_gpu", load_model)
+    positive = [[torch.empty(1), {
+        "text_input_ids": torch.tensor([[1]]), "sensenova_thinking": True,
+        "reference_latents": [torch.ones(1, 32, 32, 3)],
+    }]]
+    result = SenseNovaGenerate.execute(
+        model=model, clip=SenseNovaQwenTokenizer(), conditioning=positive, max_think_tokens=8,
+    )
+
+    assert result.args[1] == "KL"
+    assert memory_budgets == [expected_bytes]
+    assert model.model.get_dtype_inference() == compute_dtype
+    conds = model.model.extra_conds(**result.args[0][0][1], device=model.load_device)
+    for kind in ("prefix_keys", "prefix_values"):
+        assert all(value.dtype == compute_dtype and torch.isfinite(value).all() for value in conds[kind].cond)
+
+
+@pytest.mark.parametrize("offloaded", [False, True])
+@pytest.mark.parametrize("compute_dtype", [torch.float32, torch.bfloat16])
+@pytest.mark.parametrize("with_reference", [False, True])
+def test_sensenova_hooked_sampling_uses_inference_dtype(monkeypatch, compute_dtype, offloaded, with_reference):
+    model = _prefix_dtype_model(monkeypatch, torch.float8_e4m3fn, compute_dtype, offloaded).model
+    diffusion = model.diffusion_model
+    width = diffusion.language_model.model.embed_tokens.embedding_dim
+    diffusion.language_model.model.norm_mot_gen = torch.nn.Identity()
+    diffusion.fm_modules = torch.nn.ModuleDict({
+        "vision_model_mot_gen": PatchEmbedding(3, width, kernel_size=32, stride=32),
+        "timestep_embedder": sensenova_model.TimestepEmbedder(width, operations=comfy.ops.manual_cast),
+        "noise_scale_embedder": sensenova_model.TimestepEmbedder(width, operations=comfy.ops.manual_cast),
+        "fm_head": torch.nn.ConvTranspose2d(width, 3, kernel_size=32, stride=32),
+    }).to(compute_dtype)
+    for parameter in diffusion.fm_modules.parameters():
+        parameter.detach().fill_(0.1)
+    model.model_sampling = SenseNovaModelSampling()
+    metadata = {
+        "text_input_ids": _generation_input_ids(),
+        "reference_latents": [torch.ones(1, 32, 32, 3)] if with_reference else [],
+        "device": torch.device("cpu"),
+    }
+    image = torch.ones(1, 3, 32, 32)
+    sigma = torch.tensor([0.5])
+    prepared = model.extra_conds(**metadata)
+    expected = model.apply_model(image, sigma, **{key: value.cond for key, value in prepared.items()})
+    hooked = model.extra_conds(**metadata, hooks=object())
+    actual = model.apply_model(image, sigma, **{key: value.cond for key, value in hooked.items()})
+
+    assert torch.isfinite(actual).all()
+    torch.testing.assert_close(actual, expected)
 
 
 @pytest.mark.parametrize("context_slots,reference_shapes,error", [
@@ -2246,7 +2398,7 @@ def test_sensenova_interleave_text_event_stops_before_image_sampling():
         def __init__(self):
             self.tokens = iter((101, 151670))
 
-        def _preprocess_prefix_state(self, *args):
+        def _preprocess_prefix_state(self, *args, **kwargs):
             return torch.zeros(1, 1, 1), [torch.zeros(1, 1, 1, 1)], [torch.zeros(1, 1, 1, 1)], torch.tensor([3])
 
         def _next_text_token(self, hidden):
@@ -2279,7 +2431,7 @@ def test_sensenova_interleave_generate_can_resume_after_ksampler(monkeypatch, st
             self.stages = [iter((101, 151670)), iter((102, 151645))]
             self.tokens = None
 
-        def _preprocess_prefix_state(self, *args):
+        def _preprocess_prefix_state(self, *args, **kwargs):
             if args[1]:
                 assert args[1][0].dtype == torch.float32
                 assert args[3].dtype == torch.float32
@@ -2305,6 +2457,9 @@ def test_sensenova_interleave_generate_can_resume_after_ksampler(monkeypatch, st
         torch.nn.Module.__init__(model)
         model.diffusion_model = diffusion_model
         model.manual_cast_dtype = torch.float32
+
+        def get_model_object(self, name):
+            return getattr(self.model, name)
 
         def is_dynamic(self):
             return False

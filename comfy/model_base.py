@@ -2544,6 +2544,7 @@ class SenseNovaU15(BaseModel):
                             "prefetch_dynamic_vbars": self.current_patcher is not None and self.current_patcher.is_dynamic(),
                         },
                         text_suffix=text_suffix.to(device=device) if text_suffix is not None else None,
+                        compute_dtype=dtype,
                     )
                 )
                 out["prefix_keys"] = SenseNovaSharedList(prefix_keys)
