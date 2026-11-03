@@ -17,6 +17,9 @@ import comfy.clip_model
 
 from . import qwen_vl
 
+# widest speculative verify (draft chain or tree rows) the decode caches serve in one step
+SPEC_ROWS = 8
+
 
 @dataclass
 class FixedKV:
@@ -42,18 +45,29 @@ class FixedKVState(FixedKV):
     tracker: dict = None
 
     def prepare(self, num_tokens):
-        if self.tracker["step"] == (self.index, num_tokens):
+        tree = self.tracker["tree"]
+        if self.tracker["step"] == (self.index, num_tokens, tree):
             return
-        self.tracker["step"] = (self.index, num_tokens)
+        self.tracker["step"] = (self.index, num_tokens, tree)
         torch.arange(self.index, self.index + self.position.shape[0], out=self.position)
-        self.seqlen.fill_(self.index + num_tokens)
+        # A tree verify attends the committed prefix, then folds in its own rows.
+        self.seqlen.fill_(self.index if tree is not None else self.index + num_tokens)
+
+    def commit_path(self, base, path):
+        # the accepted tree rows path[1:] become tokens base + 1, ...; a row never sits above its
+        # depth, so ascending copies never clobber a later source. Modulo for a circular window.
+        for k, r in enumerate(path[1:], 1):
+            if r != k:
+                dst, src = (base + k) % self.key.shape[2], (base + r) % self.key.shape[2]
+                self.key[:, :, dst] = self.key[:, :, src]
+                self.value[:, :, dst] = self.value[:, :, src]
 
     @staticmethod
     def shared(batch, device):
         # all layers advance in lockstep, so the caches share one position/seqlen/tracker
-        position = torch.empty((6,), device=device, dtype=torch.int64)
+        position = torch.empty((SPEC_ROWS,), device=device, dtype=torch.int64)
         seqlen = torch.empty((batch,), device=device, dtype=torch.int32)
-        return position, seqlen, {"step": -1}
+        return position, seqlen, {"step": -1, "tree": None}
 
 
 class FixedKVCache(FixedKVState):
@@ -77,13 +91,22 @@ class FixedKVCache(FixedKVState):
         self.value.index_copy_(2, position, xv)
 
     def attend(self, xq, xk, xv):
+        tree = self.tracker["tree"]
+        if tree is not None:
+            # every row attends the committed prefix, then its ancestors and itself through the log-sum-exp
+            out, lse = comfy_kitchen.flash_attention_decode_gqa(xq, self.key, self.value, self.seqlen, return_lse=True, causal=False)
+            return comfy_kitchen.flash_attention_decode_tree_merge(out, lse, xq, xk, xv, tree.mask, torch.empty_like(out))
         return comfy_kitchen.flash_attention_decode_gqa(xq, self.key, self.value, self.seqlen)
 
     def mask(self, seq):
         # additive [B, 1, seq, capacity] mask with attend()'s visibility, for a generic attention over the
-        # whole cache: a chain row sees slots up to its own
+        # whole cache: a chain row sees slots up to its own, a tree row the prefix plus its ancestors and itself
         rel = torch.arange(self.key.shape[2], device=self.key.device) - self.seqlen.view(-1, 1, 1, 1)
-        visible = rel < torch.arange(1 - seq, 1, device=self.key.device).view(seq, 1)
+        tree = self.tracker["tree"]
+        if tree is not None:
+            visible = (rel < 0) | ((rel < seq) & ((tree.mask.view(seq, 1) >> rel.clamp(0, seq - 1)) & 1).bool())
+        else:
+            visible = rel < torch.arange(1 - seq, 1, device=self.key.device).view(seq, 1)
         return torch.zeros(visible.shape, device=self.key.device, dtype=self.key.dtype).masked_fill_(~visible, float("-inf"))
 
 
@@ -97,6 +120,7 @@ class Int8FixedKVCache(FixedKVState):
         key = torch.zeros((batch, kv_heads, window, head_dim), device=device, dtype=dtype)
         cache = cls(key, torch.zeros_like(key), 0, *shared)
         cache.packed = packed
+        cache.chain_mask = torch.tensor([(1 << (r + 1)) - 1 for r in range(SPEC_ROWS)], dtype=torch.int32, device=device)
         return cache
 
     def append(self, xk, xv):
@@ -116,10 +140,13 @@ class Int8FixedKVCache(FixedKVState):
         self.value.index_copy_(2, position, xv)
 
     def attend(self, xq, xk, xv):
+        seq = xq.shape[2]
         length = self.position[:1]
         self.packed.update(self.key, self.value, length)
         out, lse = self.packed.attend(xq, length)
-        return comfy_kitchen.flash_attention_decode_step_merge(out, lse, xq, xk, xv, torch.empty_like(out))
+        tree = self.tracker["tree"]
+        mask = tree.mask if tree is not None else self.chain_mask[:seq]
+        return comfy_kitchen.flash_attention_decode_tree_merge(out, lse, xq, xk, xv, mask, torch.empty_like(out))
 
 @dataclass
 class Llama2Config:
@@ -987,7 +1014,7 @@ class Llama2_(nn.Module):
             mask = 1.0 - attention_mask.to(x.dtype).reshape((attention_mask.shape[0], 1, -1, attention_mask.shape[-1])).expand(attention_mask.shape[0], 1, seq_len, attention_mask.shape[-1])
             mask = mask.masked_fill(mask.to(torch.bool), torch.finfo(x.dtype).min / 4)
 
-        spec_decode = fixed_kv and any(isinstance(kv, FixedKVState) for kv in past_key_values) and 2 <= seq_len <= 6 and past_len > 0 and attention_mask is None
+        spec_decode = fixed_kv and any(isinstance(kv, FixedKVState) for kv in past_key_values) and 2 <= seq_len <= SPEC_ROWS and past_len > 0 and attention_mask is None
         if seq_len > 1 and not spec_decode:  # spec verify: the staircase decode bias is causal
             causal_mask = torch.empty(past_len + seq_len, past_len + seq_len, dtype=x.dtype, device=x.device).fill_(torch.finfo(x.dtype).min / 4).triu_(1)
             if mask is not None:

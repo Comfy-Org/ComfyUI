@@ -371,6 +371,33 @@ class ModelComputeDtype:
         return (m, )
 
 
+class VAEComputeDtype(io.ComfyNode):
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="VAEComputeDtype",
+            display_name="VAE Compute Dtype",
+            search_aliases=["vae precision", "vae fp32", "vae fp16", "vae bf16"],
+            category="advanced/debug",
+            description="Sets the compute dtype for VAE encoding and decoding without affecting other branches.",
+            inputs=[
+                io.Vae.Input("vae"),
+                io.Combo.Input("dtype", options=["default", "fp32", "fp16", "bf16"], default="default", advanced=True,
+                               tooltip="Default keeps the input VAE's compute dtype."),
+            ],
+            outputs=[io.Vae.Output()],
+        )
+
+    @classmethod
+    def execute(cls, vae, dtype):
+        vae = vae.clone()
+        compute_dtype = node_helpers.string_to_torch_dtype(dtype)
+        if compute_dtype is not None:
+            vae.vae_dtype = compute_dtype
+            vae.patcher.set_model_compute_dtype(compute_dtype)
+        return io.NodeOutput(vae)
+
+
 class ModelAttentionBackend(io.ComfyNode):
     @classmethod
     def define_schema(cls):
@@ -424,5 +451,6 @@ NODE_CLASS_MAPPINGS = {
     "ModelNoiseScale": ModelNoiseScale,
     "RescaleCFG": RescaleCFG,
     "ModelComputeDtype": ModelComputeDtype,
+    "VAEComputeDtype": VAEComputeDtype,
     "ModelAttentionBackend": ModelAttentionBackend,
 }

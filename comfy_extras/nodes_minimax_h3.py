@@ -10,6 +10,7 @@ audio stream's shifted schedule internally).
 """
 
 import math
+import re
 
 import torch
 import torch.nn.functional as F
@@ -33,6 +34,12 @@ MAX_PIXELS = 768 * 1344
 REF_IMAGE_SHORT_EDGE = 2048
 FPS = 24
 AUDIO_LATENT_FPS = 40
+
+PH3_IMAGE_SIZE = 2912
+PH3_IMAGE_VISION_PIXELS = 1000000
+PH3_IMAGE_EDIT = "Edit <Picture 1>. {}"
+# an edit brief from the upsampler, or an instruction that already names the picture to edit, is encoded as it is
+PH3_IMAGE_EDIT_VERBATIM = re.compile(r"\s*(Edit <Picture \d+>|subject_definitions:)")
 
 
 def align_frame_count(n):
@@ -82,13 +89,17 @@ def _encode_ref_audio(audio_vae, audio):
     return z, z.shape[-1]
 
 
-def _empty_av_latent(width, height, length, batch_size=1):
-    frame_count, latent_t, audio_t = temporal_shape(length)
+def _av_latent(width, height, latent_t, audio_t, batch_size=1):
     video = torch.zeros([batch_size, 24, latent_t, height // 16, width // 16],
                         device=comfy.model_management.intermediate_device())
     audio = torch.zeros([batch_size, 32, 2, audio_t],
                         device=comfy.model_management.intermediate_device())
-    return {"samples": comfy.nested_tensor.NestedTensor((video, audio))}, frame_count
+    return {"samples": comfy.nested_tensor.NestedTensor((video, audio))}
+
+
+def _empty_av_latent(width, height, length, batch_size=1):
+    frame_count, latent_t, audio_t = temporal_shape(length)
+    return _av_latent(width, height, latent_t, audio_t, batch_size), frame_count
 
 
 class EmptyMiniMaxH3LatentAV(io.ComfyNode):
@@ -621,6 +632,105 @@ class MiniMaxH3FunControlNetApply(io.ComfyNode):
         return io.NodeOutput(model_patched)
 
 
+class MiniMaxH3LatentUpscaleWithModel(io.ComfyNode):
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="MiniMaxH3LatentUpscaleWithModel",
+            display_name="MiniMax H3 Latent Upscale With Model",
+            category="model/latent/minimax",
+            description="Resizes the video of a MiniMax H3 latent with a latent upscale model; audio passes through unchanged.",
+            inputs=[
+                io.LatentUpscaleModel.Input("model"),
+                io.Latent.Input("samples"),
+                io.Int.Input("width", default=2560, min=32, max=nodes.MAX_RESOLUTION, step=32),
+                io.Int.Input("height", default=1440, min=32, max=nodes.MAX_RESOLUTION, step=32),
+            ],
+            outputs=[io.Latent.Output()],
+        )
+
+    @classmethod
+    def execute(cls, model, samples, width, height) -> io.NodeOutput:
+        latents = samples["samples"]
+        video = latents.tensors[0] if latents.is_nested else latents
+        size = (video.shape[2], height // 16, width // 16)
+        if size == tuple(video.shape[2:]):
+            return io.NodeOutput(samples)
+        comfy.model_management.load_models_gpu([model], memory_required=model.model.memory_required(video.shape, size))
+        upscaled = model.model(video.to(device=model.load_device, dtype=model.model_dtype()), size)
+        upscaled = upscaled.to(device=comfy.model_management.intermediate_device(), dtype=video.dtype)
+        out = samples.copy()
+        out["samples"] = comfy.nested_tensor.NestedTensor((upscaled, latents.tensors[1])) if latents.is_nested else upscaled
+        out.pop("noise_mask", None)
+        return io.NodeOutput(out)
+
+
+def _size_within_area(width, height, pixels):
+    """Aspect-preserving scale (down only) to `pixels`, rounded to the canvas grid."""
+    scale = min(1.0, math.sqrt(pixels / (width * height)))
+    return tuple(max(CANVAS_MULTIPLE, round(side * scale / CANVAS_MULTIPLE) * CANVAS_MULTIPLE) for side in (width, height))
+
+
+def _resize_to(image, size):
+    # lanczos round-trips through 8 bit: an image already at its size stays untouched
+    if (image.shape[2], image.shape[1]) == size:
+        return image[..., :3]
+    return _resize(image, size[0], size[1], "disabled")
+
+
+class PH3ImageConditioning(io.ComfyNode):
+    """p-h3-image text-to-image and editing: prompt + images -> conditioning + image latent."""
+
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="PH3ImageConditioning",
+            display_name="p-h3-image Conditioning",
+            category="model/conditioning/minimax",
+            description="Text-to-image, or with images an edit of image_1 with the others as references. The prompt refers to them as <Picture 1>, <Picture 2>, ... The model needs ModelSamplingMiniMaxH3 at 1.0/1.0.",
+            inputs=[
+                io.Clip.Input("clip"),
+                io.Vae.Input("vae", optional=True, tooltip="The p-h3-image VAE, needed when images are connected."),
+                io.String.Input("prompt", multiline=True, dynamic_prompts=True,
+                                tooltip="With images a short instruction gets \"Edit <Picture 1>. \" in front; an instruction that starts with \"Edit <Picture\" and an edit brief from the prompt upsampler are used as they are."),
+                io.Int.Input("width", default=0, min=0, max=nodes.MAX_RESOLUTION, step=CANVAS_MULTIPLE,
+                             tooltip="0 uses the width of image_1 after scaling, or 2912 without images."),
+                io.Int.Input("height", default=0, min=0, max=nodes.MAX_RESOLUTION, step=CANVAS_MULTIPLE,
+                             tooltip="0 uses the height of image_1 after scaling, or 2912 without images."),
+                io.Autogrow.Input("images", optional=True, template=io.Autogrow.TemplateNames(
+                    io.Image.Input("image"), names=["image_{}".format(i) for i in range(1, 10)], min=0)),
+            ],
+            outputs=[io.Conditioning.Output(display_name="positive"), io.Latent.Output()],
+        )
+
+    @classmethod
+    def execute(cls, clip, prompt, width, height, vae=None, images=None) -> io.NodeOutput:
+        # image_1 is the image to edit, so the slots keep their order
+        names = sorted(images or {}, key=lambda name: int(name.rsplit("_", 1)[-1]))
+        images = [images[name][:1] for name in names if images[name] is not None]
+        if images and vae is None:
+            raise ValueError("p-h3-image images need the vae input")
+
+        area = (width * height) or PH3_IMAGE_SIZE ** 2
+        vision_images = []
+        refs = []
+        for image in images:
+            size = (image.shape[2], image.shape[1])
+            vision_images.append(_resize_to(image, _size_within_area(*size, PH3_IMAGE_VISION_PIXELS)))
+            z = vae.encode(_resize_to(image, _size_within_area(*size, area)))
+            refs.append({"kind": "image", "latent_h": z.shape[-2], "latent_w": z.shape[-1], "latent": z})
+
+        if refs:
+            prompt = prompt.strip() if PH3_IMAGE_EDIT_VERBATIM.match(prompt) else PH3_IMAGE_EDIT.format(prompt)
+        cond = clip.encode_from_tokens_scheduled(clip.tokenize(prompt, images=vision_images))
+        if refs:
+            cond = node_helpers.conditioning_set_values(cond, {"minimax_refs": refs})
+        latent_width = width or (refs[0]["latent_w"] * 16 if refs else PH3_IMAGE_SIZE)
+        latent_height = height or (refs[0]["latent_h"] * 16 if refs else PH3_IMAGE_SIZE)
+        # a still image, with the two audio latents it spans
+        return io.NodeOutput(cond, _av_latent(latent_width, latent_height, 1, 2))
+
+
 class MiniMaxH3Extension(ComfyExtension):
     async def get_node_list(self):
         return [
@@ -630,6 +740,8 @@ class MiniMaxH3Extension(ComfyExtension):
             MiniMaxH3ReferenceToVideo,
             MiniMaxH3SigmaShift,
             MiniMaxH3FunControlNetApply,
+            MiniMaxH3LatentUpscaleWithModel,
+            PH3ImageConditioning,
             ]
 
 

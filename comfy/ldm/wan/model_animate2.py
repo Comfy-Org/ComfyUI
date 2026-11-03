@@ -111,6 +111,18 @@ class WanAnimate2Block(WanAttentionBlock):
         return self._cross_attn_ffn(x, e, context, context_img_len, transformer_options)
 
 
+def quantize_cache(t, dtype):
+    if dtype not in ("int8", "int4"):
+        return t, None
+    g = 256
+    while g > 4 and t.shape[-1] % g:
+        g //= 4
+    t = t.reshape(-1, t.shape[-1])
+    if dtype == "int4":
+        return comfy.quant_ops.TensorCoreConvRotW4A4Layout.quantize(t, convrot_groupsize=g)
+    return comfy.quant_ops.TensorWiseINT8Layout.quantize(t, is_weight=True, per_channel=True, convrot=True, convrot_groupsize=g)
+
+
 class PoseBranchCache:
     """Pose-branch block inputs, reused across the sampling steps of one execution.
 
@@ -120,8 +132,6 @@ class PoseBranchCache:
     the store device runs low on memory. Created and freed by WanAnimate2Cache; Qwen-Image 2.1
     also stores its prefix K/V in it.
     """
-
-    CONVROT_GROUPSIZE = 256
 
     def __init__(self, store_device=None, dtype="default"):
         self.store_device = torch.device(store_device) if store_device is not None else torch.device("cpu")
@@ -173,17 +183,10 @@ class PoseBranchCache:
         return self.slot is not None and len(self.slot["blocks"]) == num_blocks
 
     def put(self, i, t):
-        params = None
         if self.dtype in ("int8", "int4"):
             # convrot is what lets low-bit survive the ~125x per-channel outliers here, and over a [tokens, dim] view per-row scale means per-token. The kernels want 2D and a power-of-4 group that divides dim.
             self.slot["shape"] = t.shape
-            g = self.CONVROT_GROUPSIZE
-            while g > 4 and t.shape[-1] % g:
-                g //= 4
-            if self.dtype == "int4":
-                t, params = comfy.quant_ops.TensorCoreConvRotW4A4Layout.quantize(t.reshape(-1, t.shape[-1]), convrot_groupsize=g)
-            else:
-                t, params = comfy.quant_ops.TensorWiseINT8Layout.quantize(t.reshape(-1, t.shape[-1]), is_weight=True, per_channel=True, convrot=True, convrot_groupsize=g)
+        t, params = quantize_cache(t, self.dtype)
 
         t = t.to(self.store_device, copy=True)
         if comfy.model_management.pin_memory(t, evict_active=False):

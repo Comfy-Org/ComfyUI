@@ -1,7 +1,9 @@
 from comfy_api.latest import ComfyExtension, io
 from typing_extensions import override
 
-class TextGenerate(io.ComfyNode):
+VIDEO_TOOLTIP = "Video frames as image batch. Assumed to be 24 FPS; subsampled to 1 FPS internally."
+
+class TextGenerateV2(io.ComfyNode):
     @classmethod
     def define_schema(cls):
         # Define dynamic combo options for sampling mode
@@ -14,8 +16,8 @@ class TextGenerate(io.ComfyNode):
                     io.Float.Input("top_p", default=0.95, min=0.0, max=1.0, step=0.01),
                     io.Float.Input("min_p", default=0.05, min=0.0, max=1.0, step=0.01),
                     io.Float.Input("repetition_penalty", default=1.05, min=0.0, max=5.0, step=0.01),
+                    io.Float.Input("presence_penalty", default=0.0, min=0.0, max=5.0, step=0.01),
                     io.Int.Input("seed", default=0, min=0, max=0xffffffffffffffff),
-                    io.Float.Input("presence_penalty", optional=True, default=0.0, min=0.0, max=5.0, step=0.01),
                 ]
             ),
             io.DynamicCombo.Option(
@@ -25,21 +27,21 @@ class TextGenerate(io.ComfyNode):
         ]
 
         return io.Schema(
-            node_id="TextGenerate",
+            node_id="TextGenerateV2",
             display_name="Generate Text",
             category="text",
             search_aliases=["LLM", "gemma"],
             inputs=[
                 io.Clip.Input("clip"),
                 io.String.Input("prompt", multiline=True, dynamic_prompts=True, default=""),
-                io.Image.Input("image", optional=True),
-                io.Image.Input("video", optional=True, tooltip="Video frames as image batch. Assumed to be 24 FPS; subsampled to 1 FPS internally."),
-                io.Audio.Input("audio", optional=True),
+                io.Autogrow.Input("images", optional=True, template=io.Autogrow.TemplateNames(io.Image.Input("image"), names=[f"image{i}" for i in range(1, 51)], min=0)),
+                io.Autogrow.Input("videos", optional=True, template=io.Autogrow.TemplateNames(io.Image.Input("video", tooltip=VIDEO_TOOLTIP), names=[f"video{i}" for i in range(1, 101)], min=0)),
+                io.Autogrow.Input("audios", optional=True, template=io.Autogrow.TemplateNames(io.Audio.Input("audio"), names=[f"audio{i}" for i in range(1, 101)], min=0)),
                 io.Int.Input("max_length", default=512, min=1, max=32768),
                 io.DynamicCombo.Input("sampling_mode", options=sampling_options, display_name="Sampling Mode"),
                 io.Boolean.Input("thinking", optional=True, default=False, tooltip="Operate in thinking mode if the model supports it."),
                 io.Boolean.Input("use_default_template", optional=True, default=True, tooltip="Use the built in system prompt/template if the model has one.", advanced=True),
-                io.Combo.Input("mtp", options=["auto", "off", "2", "3", "4", "5"], default="auto", optional=True, tooltip="Speculative decoding with the checkpoint's multi-token-prediction head. No effect without MTP weights. auto adapts the draft depth; 2-5 pins it. Sampled output stays correctly distributed but differs from non-MTP output for the same seed."),
+                io.Combo.Input("mtp", options=["auto", "off", "2", "3", "4", "5", "tree2s1", "tree2s2", "tree3s1", "tree4s1m8"], default="auto", optional=True, tooltip="Speculative decoding with the checkpoint's multi-token-prediction head. No effect without MTP weights. auto adapts the draft depth and breadth to observed token matches and execution cost; 2-5 pins a constant draft depth; tree modes pin both breadth and depth. Sampled output stays correctly distributed but differs from non-MTP output for the same seed."),
                 io.String.Input("system_prompt", force_input=True, optional=True, tooltip="Replaces the system prompt in the model's chat template. Ignored when the default template is not used."),
             ],
             outputs=[
@@ -49,11 +51,15 @@ class TextGenerate(io.ComfyNode):
         )
 
     @classmethod
-    def execute(cls, clip, prompt, max_length, sampling_mode, image=None, thinking=False, use_default_template=True, video=None, audio=None, mtp="auto", system_prompt="") -> io.NodeOutput:
+    def execute(cls, clip, prompt, max_length, sampling_mode, image=None, thinking=False, use_default_template=True, video=None, audio=None, mtp="auto", system_prompt="", images: io.Autogrow.Type = None, videos: io.Autogrow.Type = None, audios: io.Autogrow.Type = None) -> io.NodeOutput:
 
-        mtp = False if mtp == "off" else (True if mtp == "auto" else int(mtp))
+        mtp = {"off": False, "auto": True}.get(mtp, mtp)
 
-        tokens = clip.tokenize(prompt, image=image, skip_template=not use_default_template, min_length=1, thinking=thinking, video=video, audio=audio, system_prompt=system_prompt if use_default_template else "")
+        images = [batch[i:i + 1] for batch in (images or {}).values() if batch is not None for i in range(batch.shape[0])]
+        videos = [v for v in (videos or {}).values() if v is not None]
+        audios = [a for a in (audios or {}).values() if a is not None]
+
+        tokens = clip.tokenize(prompt, image=image, images=images, skip_template=not use_default_template, min_length=1, thinking=thinking, video=video, videos=videos, audio=audio, audios=audios, system_prompt=system_prompt if use_default_template else "")
 
         # Get sampling parameters from dynamic combo
         do_sample = sampling_mode.get("sampling_mode") == "on"
@@ -91,6 +97,28 @@ class TextGenerate(io.ComfyNode):
                 reasoning, text = "", generated_text
 
         return io.NodeOutput(text.strip(), reasoning.replace("<think>", "", 1).strip())
+
+
+class TextGenerate(TextGenerateV2):
+    @classmethod
+    def define_schema(cls):
+        parent_schema = super().define_schema()
+        old_inputs = {
+            "images": io.Image.Input("image", optional=True),
+            "videos": io.Image.Input("video", optional=True, tooltip=VIDEO_TOOLTIP),
+            "audios": io.Audio.Input("audio", optional=True),
+        }
+        # optional widgets follow required ones, which keeps seed before presence_penalty in saved workflows
+        sampling_on = next(i for i in parent_schema.inputs if i.id == "sampling_mode").options[0]
+        next(i for i in sampling_on.inputs if i.id == "presence_penalty").optional = True
+        return io.Schema(
+            node_id="TextGenerate",
+            display_name="Generate Text (DEPRECATED)",
+            category=parent_schema.category,
+            is_deprecated=True,
+            inputs=[old_inputs.get(i.id, i) for i in parent_schema.inputs],
+            outputs=parent_schema.outputs,
+        )
 
 
 LTX2_T2V_SYSTEM_PROMPT = """You are a Creative Assistant. Given a user's raw input prompt describing a scene or concept, expand it into a detailed video generation prompt with specific visuals and integrated audio to guide a text-to-video model.
@@ -278,6 +306,7 @@ class TextgenExtension(ComfyExtension):
     @override
     async def get_node_list(self) -> list[type[io.ComfyNode]]:
         return [
+            TextGenerateV2,
             TextGenerate,
             TextGenerateLTX2Prompt,
         ]

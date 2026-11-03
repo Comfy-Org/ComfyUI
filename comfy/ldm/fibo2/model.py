@@ -4,12 +4,12 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
+import comfy.ldm.flux.math
 import comfy.model_management
 import comfy.model_prefetch
 import comfy.ops
 import comfy.patcher_extension
 import comfy.utils
-from comfy.ldm.flux.layers import EmbedND
 from comfy.ldm.lumina.model import FinalLayer, JointAttention, apply_gate, clamp_fp16, modulate, pos_ids_x
 from comfy.ldm.modules.attention import AttentionTensorContainer, ComfyAttention, optimized_attention
 from comfy.ldm.modules.diffusionmodules.mmdit import TimestepEmbedder
@@ -149,7 +149,7 @@ class Fibo2(nn.Module):
         self.perceiver = Perceiver(dim, n_heads, ffn_dim, fused_ffn, cap_feat_dim, max_gist_tokens, perceiver_layers, norm_eps, operation_settings=operation_settings)
         self.layers = nn.ModuleList([Block(dim, n_heads, ffn_dim, fused_ffn, norm_eps, cap_feat_dim if i in injection_layers else None, operation_settings=operation_settings) for i in range(n_layers)])
         self.final_layer = FinalLayer(dim, 1, in_channels, z_image_modulation=True, operation_settings=operation_settings)
-        self.rope_embedder = EmbedND(dim=dim // n_heads, theta=256.0, axes_dim=[32, 48, 48])
+        self.rope_axes_dim = [32, 48, 48]
 
     def forward(self, x, timestep, context, transformer_options={}, **kwargs):
         return comfy.patcher_extension.WrapperExecutor.new_class_executor(
@@ -170,14 +170,19 @@ class Fibo2(nn.Module):
         # gist tokens on rope planes 1..num_gist, the image on plane max_gist_tokens + 1 whatever the gist count, reference k on the k-th plane after it
         num_gist = gist_count(context.shape[1], self.max_gist_tokens)
         plane = self.max_gist_tokens + 1
+        # NTK-aware axis scales: the positions keep their spacing, zero collapses the axis
+        rope_options = transformer_options.get("rope_options", {})
+        scales = (1.0, rope_options.get("scale_y", 1.0), rope_options.get("scale_x", 1.0))
+        pos_options = {"rope_options": {**rope_options, "scale_y": float(scales[1] != 0), "scale_x": float(scales[2] != 0)}}
         tokens = [x.flatten(2).transpose(1, 2)]
-        ids = [torch.zeros(1, num_gist, 3, dtype=torch.float32, device=device), pos_ids_x(plane, H, W, 1, device, transformer_options=transformer_options)]
+        ids = [torch.zeros(1, num_gist, 3, dtype=torch.float32, device=device), pos_ids_x(plane, H, W, 1, device, transformer_options=pos_options)]
         ids[0][0, :, 0] = torch.arange(1, num_gist + 1, dtype=torch.float32, device=device)
         for k, ref in enumerate(ref_latents):
             tokens.append(comfy.utils.repeat_to_batch_size(ref, B).flatten(2).transpose(1, 2))
-            ids.append(pos_ids_x(plane + 1 + k, ref.shape[-2], ref.shape[-1], 1, device, transformer_options=transformer_options))
+            ids.append(pos_ids_x(plane + 1 + k, ref.shape[-2], ref.shape[-1], 1, device, transformer_options=pos_options))
         img = self.x_embedder(torch.cat(tokens, dim=1))
-        freqs_cis = self.rope_embedder(torch.cat(ids, dim=1)).movedim(1, 2)
+        ids = torch.cat(ids, dim=1)
+        freqs_cis = torch.cat([comfy.ldm.flux.math.rope(ids[..., i], d, 256.0 * (s or 1.0) ** (-d / (d - 2))) for i, (d, s) in enumerate(zip(self.rope_axes_dim, scales))], dim=-3).unsqueeze(2)
         del tokens
 
         n_img = H * W
