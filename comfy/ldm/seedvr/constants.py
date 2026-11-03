@@ -21,6 +21,16 @@ SEEDVR2_LATENT_CHANNELS = 16
 SEEDVR2_VAE_CACHE_QUANT_BYTES = 64 * 1024 ** 2         # tails at or above this size are packed.
 SEEDVR2_CACHE_BYTES_PER_FRAME_PIXEL = 6200             # host-held caches and parked frames, per output-frame pixel.
 
+# Free memory above the floor goes to the caches on the device first, then to longer slices.
+SEEDVR2_MAX_SLICE_LATENTS = 4
+SEEDVR2_SLICE_MEM_HEADROOM = 0.8
+SEEDVR2_DECODE_SLICE_BYTES_PER_FRAME_PIXEL = 5300      # per latent frame of a slice, per output-frame pixel.
+SEEDVR2_ENCODE_SLICE_BYTES_PER_PIXEL = 3150            # per input-frame pixel.
+SEEDVR2_DECODE_TAIL_BYTES_PER_FRAME_PIXEL = 5550       # caches on the device; the fixed part covers tiles too small to pack.
+SEEDVR2_DECODE_TAIL_FIXED_BYTES = 768 * 1024 ** 2
+SEEDVR2_ENCODE_TAIL_BYTES_PER_PIXEL = 2700
+SEEDVR2_ENCODE_TAIL_FIXED_BYTES = 512 * 1024 ** 2
+
 # VAE decode estimate: the free VRAM an untiled decode needs under cudaMallocAsync (ComfyUI's default),
 # fitted 2-7% above the measured floor from 480p to 4K. Flat in clip length: the decoded frames go
 # to sd.py's output buffer off the GPU slice by slice (1088p: 5.33 GiB allocated at 61 and 121 frames).
