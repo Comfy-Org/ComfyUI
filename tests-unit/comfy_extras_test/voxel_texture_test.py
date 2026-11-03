@@ -52,6 +52,7 @@ def test_bfloat16_voxel_texture_with_empty_mask():
 
 @pytest.mark.parametrize("channels", [3, 6])
 def test_bake_bfloat16_voxel_texture(channels):
+    """Bake bfloat16 RGB/PBR attributes through rasterization and seam filling."""
     vertices = torch.tensor([[-0.25, -0.25, 0.0], [0.25, -0.25, 0.0], [-0.25, 0.25, 0.0]])
     faces = torch.tensor([[0, 1, 2]])
     uvs = torch.tensor([[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]])
