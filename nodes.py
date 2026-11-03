@@ -834,14 +834,15 @@ class VAELoader:
 
     @classmethod
     def INPUT_TYPES(s):
-        return {"required": { "vae_name": (s.vae_list(s), )}}
+        return {"required": { "vae_name": (s.vae_list(s), )},
+                "optional": { "dtype": (["default", "fp32", "fp16", "bf16"], {"default": "default", "advanced": True, "tooltip": "Compute dtype for VAE encoding and decoding. Default picks it automatically."})}}
     RETURN_TYPES = ("VAE",)
     FUNCTION = "load_vae"
 
     CATEGORY = "model/loaders"
 
     #TODO: scale factor?
-    def load_vae(self, vae_name):
+    def load_vae(self, vae_name, dtype="default"):
         metadata = None
         vae_path = None
         if vae_name == "pixel_space":
@@ -870,6 +871,10 @@ class VAELoader:
         # load_taesd) are not addressable by a single vae_path.
         if vae_path is not None:
             vae.patcher.cached_patcher_init = (comfy.sd.load_vae_patcher, (vae_path, metadata, None))
+        compute_dtype = node_helpers.string_to_torch_dtype(dtype)
+        if compute_dtype is not None:
+            vae.vae_dtype = compute_dtype
+            vae.patcher.set_model_compute_dtype(compute_dtype)
         return (vae,)
 
 class ControlNetLoader:
