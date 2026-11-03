@@ -28,7 +28,9 @@ from comfy_api_nodes.util import (
     ApiEndpoint,
     download_url_to_image_tensor,
     download_url_to_video_output,
+    downscale_image_tensor,
     get_fs_object_size,
+    get_image_dimensions,
     get_number_of_images,
     poll_op,
     sync_op,
@@ -45,6 +47,10 @@ UPSCALER_MODELS_MAP = {
 
 AST2_MAX_FRAMES = 9000
 AST2_MAX_FRAMES_WITH_PROMPT = 450
+
+IMAGE_MAX_UPSCALE_FACTOR = {"Bloom 2": 12, "Wonder 3.5": 6, "Wonder 4": 6}
+IMAGE_MAX_OUTPUT_PIXELS = 178_956_970
+IMAGE_MAX_OUTPUT_SIDE = 32000
 
 
 class TopazImageEnhance(IO.ComfyNode):
@@ -237,7 +243,7 @@ class TopazImageEnhanceV2(IO.ComfyNode):
             node_id="TopazImageEnhanceV2",
             display_name="Topaz Image Enhance",
             category="partner/image/Topaz",
-            description="Industry-standard upscaling and image enhancement.",
+            description="Industry-standard upscaling and image enhancement. Maximum output: 179 megapixels.",
             inputs=[
                 IO.Image.Input("image"),
                 IO.DynamicCombo.Input(
@@ -443,6 +449,7 @@ class TopazImageEnhanceV2(IO.ComfyNode):
                                 ),
                             ],
                         ),
+                        IO.DynamicCombo.Option("Wonder 4", []),
                     ],
                 ),
                 IO.Int.Input(
@@ -455,9 +462,10 @@ class TopazImageEnhanceV2(IO.ComfyNode):
                     optional=True,
                     tooltip="Zero value means to calculate automatically (usually it will be original size "
                     "or scaled proportionally to output_height if specified). "
-                    "Wonder 3.5 supports upscale factors from 1x to 6x only. "
-                    "Bloom 2 and Wonder 3.5 preserve the input aspect ratio and treat the "
-                    "requested size as a target.",
+                    "Wonder 3.5 and Wonder 4 support upscale factors from 1x to 6x, Bloom 2 from 1x to 12x. "
+                    "Bloom 2, Wonder 3.5 and Wonder 4 always keep the input aspect ratio: if both sizes are set "
+                    "and their ratio differs, the larger scale wins and the output (and price) is bigger than "
+                    "the requested size.",
                     advanced=True,
                 ),
                 IO.Int.Input(
@@ -470,9 +478,10 @@ class TopazImageEnhanceV2(IO.ComfyNode):
                     optional=True,
                     tooltip="Zero value means to output in the same height as original or scaled "
                     "proportionally to output_width if specified. "
-                    "Wonder 3.5 supports upscale factors from 1x to 6x only. "
-                    "Bloom 2 and Wonder 3.5 preserve the input aspect ratio and treat the "
-                    "requested size as a target.",
+                    "Wonder 3.5 and Wonder 4 support upscale factors from 1x to 6x, Bloom 2 from 1x to 12x. "
+                    "Bloom 2, Wonder 3.5 and Wonder 4 always keep the input aspect ratio: if both sizes are set "
+                    "and their ratio differs, the larger scale wins and the output (and price) is bigger than "
+                    "the requested size.",
                     advanced=True,
                 ),
             ],
@@ -490,7 +499,7 @@ class TopazImageEnhanceV2(IO.ComfyNode):
                 expr="""
                 (
                   $usdPer8Mp := $lookup(
-                    {"reimagine": 0.32, "bloom 2": 0.4576, "wonder 3.5": 0.1144},
+                    {"reimagine": 0.32, "bloom 2": 0.4576, "wonder 3.5": 0.1144, "wonder 4": 0.1144},
                     $lookup(widgets, "model")
                   );
                   {"type":"usd","usd": $usdPer8Mp, "format": {"suffix": "/8MP", "approximate": true}}
@@ -510,6 +519,24 @@ class TopazImageEnhanceV2(IO.ComfyNode):
         if get_number_of_images(image) != 1:
             raise ValueError("Only one input image is supported.")
         model_choice = model["model"]
+        image = downscale_image_tensor(image, total_pixels=4096 * 4096)
+        height, width = get_image_dimensions(image)
+        factor = max(output_width / width, output_height / height) or 1
+        max_factor = IMAGE_MAX_UPSCALE_FACTOR.get(model_choice)
+        if max_factor and not 1 <= factor <= max_factor:
+            raise ValueError(
+                f"{model_choice} supports upscale factors from 1x to {max_factor}x, "
+                f"but the requested size is {factor:g}x of the {width}x{height} uploaded image."
+            )
+        if model_choice == "Reimagine" and output_width and output_height:
+            out_width, out_height = output_width, output_height
+        else:
+            out_width, out_height = round(width * factor), round(height * factor)
+        if out_width * out_height > IMAGE_MAX_OUTPUT_PIXELS or max(out_width, out_height) > IMAGE_MAX_OUTPUT_SIDE:
+            raise ValueError(
+                f"The output would be {out_width}x{out_height} pixels, but at most 179 megapixels and "
+                f"{IMAGE_MAX_OUTPUT_SIDE} pixels per side are supported. Use a smaller output size."
+            )
         download_url = await upload_images_to_comfyapi(
             cls, image, max_images=1, mime_type="image/png", total_pixels=4096 * 4096
         )
@@ -545,7 +572,7 @@ class TopazImageEnhanceV2(IO.ComfyNode):
                 request.grain_strength = model["grain_strength"]
                 request.grain_size = model["grain_size"]
                 request.grain_density = model["grain_density"]
-        else:
+        elif model_choice == "Wonder 3.5":
             request.enhancement_strength = model["enhancement_strength"]
             if model["grain"]:
                 request.grain = "true"
