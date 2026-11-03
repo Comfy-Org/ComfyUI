@@ -1026,3 +1026,8 @@ class PH3ImageVAE(MiniMaxH3VideoVAE):
         noise = torch.randn(mean.shape, generator=torch.Generator().manual_seed(PH3_IMAGE_ENCODE_SEED)).to(mean.device)
         latents = torch.addcmul(mean, torch.exp(0.5 * logvar.clamp(-30.0, 20.0)), noise)
         return (latents - self.latents_mean.view(1, -1, 1, 1, 1).to(latents)) / self.latents_std.view(1, -1, 1, 1, 1).to(latents)
+
+    def decode(self, z, output_buffer=None):
+        if z.shape[2] != 1:
+            raise ValueError(f"The p-h3-image VAE decodes single-frame image latents only, got {z.shape[2]} latent frames")
+        return super().decode(z, output_buffer)
