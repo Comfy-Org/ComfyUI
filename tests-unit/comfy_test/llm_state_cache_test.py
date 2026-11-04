@@ -1,0 +1,76 @@
+import os
+import time
+
+import pytest
+import torch
+
+from comfy.text_encoders import llm_state_cache as cache
+
+MB = 2**20
+
+
+@pytest.fixture
+def cache_dir(tmp_path, monkeypatch):
+    monkeypatch.setattr(cache, "CACHE_DIR", str(tmp_path))
+    monkeypatch.setattr(cache, "_entries", [])
+    return tmp_path
+
+
+def write(name, mb, age=0):
+    path = os.path.join(cache.CACHE_DIR, name)
+    cache._write(path, {"t": torch.zeros(mb * MB, dtype=torch.uint8)}, {"key": "k", "ids": [1, 2]})
+    if age:
+        t = time.time() - age
+        os.utime(path, (t, t))
+    return path
+
+
+def files(d):
+    return sorted(p.name for p in d.iterdir())
+
+
+def test_disk_budget_evicts_least_recently_used(cache_dir, monkeypatch):
+    monkeypatch.setattr(cache, "DISK_BUDGET", 1000 * 2**40)
+    old = write("spill-old.safetensors", 4, age=300)
+    used = write("prefix-used.safetensors", 4, age=200)
+    write("spill-mid.safetensors", 4, age=100)
+    assert cache._read(used) is not None  # a read counts as a use
+    monkeypatch.setattr(cache, "DISK_BUDGET", 9 * MB)
+    write("spill-new.safetensors", 4)
+    assert files(cache_dir) == ["prefix-used.safetensors", "spill-new.safetensors"]
+    assert not os.path.exists(old)
+
+
+def test_disk_budget_drops_spilled_entries_and_old_runs_files(cache_dir, monkeypatch):
+    monkeypatch.setattr(cache, "DISK_BUDGET", 1000 * 2**40)
+    orphan = write("spill-2-140729398259792.safetensors", 4, age=3 * 3600)  # an earlier run's, unknown to this one
+    partial = os.path.join(cache.CACHE_DIR, "spill-x.safetensors.tmp2")
+    with open(partial, "wb") as f:
+        f.write(b"\0" * MB)
+    os.utime(partial, (time.time() - 2 * 3600,) * 2)
+    entry = cache._Entry("k", None, 0)
+    entry.file = write("spill-mine.safetensors", 4, age=60)
+    cache._entries.append(entry)
+    unrelated = cache_dir / "notes.txt"
+    unrelated.write_text("x")
+    monkeypatch.setattr(cache, "DISK_BUDGET", 5 * MB)
+    write("prefix-new.safetensors", 4)
+    assert files(cache_dir) == ["notes.txt", "prefix-new.safetensors"]
+    assert not os.path.exists(orphan)
+    assert cache._entries == []
+
+
+def test_recent_partial_write_is_left_alone(cache_dir, monkeypatch):
+    partial = os.path.join(cache.CACHE_DIR, "spill-x.safetensors.tmp7")
+    with open(partial, "wb") as f:
+        f.write(b"\0" * 4 * MB)
+    monkeypatch.setattr(cache, "DISK_BUDGET", 1 * MB)
+    write("prefix-new.safetensors", 4)
+    assert files(cache_dir) == ["prefix-new.safetensors", "spill-x.safetensors.tmp7"]
+
+
+def test_missing_or_broken_file_is_a_miss(cache_dir):
+    assert cache._read(os.path.join(cache.CACHE_DIR, "spill-gone.safetensors")) is None
+    broken = cache_dir / "prefix-broken.safetensors"
+    broken.write_bytes(b"not a safetensors file")
+    assert cache._read(str(broken)) is None

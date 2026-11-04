@@ -12,7 +12,8 @@ Memory: states stay loaded between calls (nothing is written per call). Past COM
 COMFY_LLM_STATE_CACHE_ENTRIES of them, the least recently used is saved to a file in COMFY_LLM_STATE_CACHE_DIR and
 dropped; its next match loads the file. The shared start (the prompt up to the end of the system message) is saved
 once to a file named by the hash of its tokens, if no such file exists, and a new conversation with no resident match
-starts from it.
+starts from it. Past COMFY_LLM_STATE_CACHE_DISK_GB (default: the memory budget) of files in the folder, the least
+recently used are deleted, files left by earlier runs included.
 
 COMFY_LLM_PREFIX_CACHE: off (default) | on.
 Attention uses the bf16 FixedKVCache while the cache is on: Int8FixedKVCache can't continue a prefill from a prefix.
@@ -23,6 +24,7 @@ import json
 import logging
 import os
 import time
+import uuid
 
 import safetensors
 import safetensors.torch
@@ -31,6 +33,7 @@ import torch
 MODE = os.environ.get("COMFY_LLM_PREFIX_CACHE", "off")
 CACHE_DIR = os.environ.get("COMFY_LLM_STATE_CACHE_DIR", "/tmp/llm_state_cache")
 BUDGET = int(float(os.environ.get("COMFY_LLM_STATE_CACHE_GB", "16")) * 2**30)
+DISK_BUDGET = int(float(os.environ.get("COMFY_LLM_STATE_CACHE_DISK_GB", BUDGET / 2**30)) * 2**30)
 MAX_ENTRIES = int(os.environ.get("COMFY_LLM_STATE_CACHE_ENTRIES", "4"))
 HEADROOM = int(os.environ.get("COMFY_LLM_PREFIX_CACHE_HEADROOM", "8192"))  # capacity beyond this call, for later turns
 CKPT_RECENT = int(os.environ.get("COMFY_LLM_PREFIX_CACHE_CKPTS", "6"))  # message-boundary checkpoints kept
@@ -231,18 +234,49 @@ def _write(path, tensors, meta):
     tmp = path + f".tmp{os.getpid()}"
     safetensors.torch.save_file(tensors, tmp, {"llm_state_cache": json.dumps(meta)})
     os.replace(tmp, path)
+    _trim_disk(path)
+
+
+def _trim_disk(keep):
+    """Delete the least recently used cache files past DISK_BUDGET, never keep; a spilled entry whose file goes is
+    dropped. Partial writes count once they are an hour old."""
+    files = []
+    for name in os.listdir(CACHE_DIR):
+        path = os.path.join(CACHE_DIR, name)
+        if not name.startswith(("prefix-", "spill-")) or path == keep:
+            continue
+        try:
+            st = os.stat(path)
+        except OSError:
+            continue
+        if not name.endswith(".safetensors") and time.time() - st.st_mtime < 3600:
+            continue
+        files.append((st.st_mtime, st.st_size, path))
+    total = sum(size for _, size, _ in files) + os.path.getsize(keep)
+    for _, size, path in sorted(files):
+        if total <= DISK_BUDGET:
+            break
+        _remove(path)
+        total -= size
+        _entries[:] = [e for e in _entries if e.file != path]
 
 
 def _read(path):
-    with safetensors.safe_open(path, "pt") as f:
-        meta = json.loads(f.metadata()["llm_state_cache"])
-        tensors, cps = {}, {}
-        for name in f.keys():
-            if name.startswith("ckpt."):
-                _, pos, i, kind = name.split(".")
-                cps.setdefault(int(pos), {}).setdefault(int(i), [None, None])[0 if kind == "conv" else 1] = f.get_tensor(name)
-            else:
-                tensors[name] = f.get_tensor(name)
+    """(tensors, checkpoints, metadata) from a cache file, or None if it is gone or unreadable."""
+    try:
+        with safetensors.safe_open(path, "pt") as f:
+            meta = json.loads(f.metadata()["llm_state_cache"])
+            tensors, cps = {}, {}
+            for name in f.keys():
+                if name.startswith("ckpt."):
+                    _, pos, i, kind = name.split(".")
+                    cps.setdefault(int(pos), {}).setdefault(int(i), [None, None])[0 if kind == "conv" else 1] = f.get_tensor(name)
+                else:
+                    tensors[name] = f.get_tensor(name)
+        os.utime(path)
+    except (OSError, safetensors.SafetensorError, KeyError, ValueError) as e:
+        logging.warning("llm state cache: could not read %s: %s", path, e)
+        return None
     return tensors, {p: {i: tuple(v) for i, v in st.items()} for p, st in cps.items()}, meta
 
 
@@ -262,7 +296,7 @@ def _spill(entry):
     attention = _attention_names(state.patcher.model)
     state.flush()
     n = len(entry.ids)
-    path = os.path.join(CACHE_DIR, f"spill-{os.getpid()}-{id(entry)}.safetensors")
+    path = os.path.join(CACHE_DIR, f"spill-{uuid.uuid4().hex}.safetensors")
     _write(path, _file_tensors(_trimmed_tensors(state.tensors, n, attention), entry.checkpoints),
            {"key": entry.key, "ids": _ids_json(entry.ids)})
     entry.state = None
@@ -275,11 +309,15 @@ def _drop(entry):
     if entry.state is not None:
         entry.state.release()
     if entry.file is not None:
-        try:
-            os.remove(entry.file)
-        except OSError:
-            pass
+        _remove(entry.file)
     _entries.remove(entry)
+
+
+def _remove(path):
+    try:
+        os.remove(path)
+    except OSError:
+        pass
 
 
 def _enforce_budget(keep):
@@ -311,9 +349,14 @@ def _take(model, key, ids, need, device, dtype):
     if entry is not None:
         _entries.remove(entry)
         if entry.state is None:
-            tensors, cps, _ = _read(entry.file)
-            os.remove(entry.file)
+            loaded = _read(entry.file)
+            _remove(entry.file)
             entry.file = None
+            if loaded is None:  # deleted past the disk budget, by this or another server
+                entry, n = None, 0
+    if entry is not None:
+        if entry.state is None:
+            tensors, cps, _ = loaded
             cap = max(_capacity(need), entry.capacity)
             entry.state, kvm = _load(model, cap, device, dtype, tensors)
             entry.capacity = cap
@@ -336,8 +379,9 @@ def _take(model, key, ids, need, device, dtype):
         entry.ids = list(ids[:n])
         return entry, kvm, n
     cap = _capacity(need)
-    if path is not None and os.path.exists(path):
-        tensors, cps, _ = _read(path)
+    loaded = _read(path) if path is not None and os.path.exists(path) else None
+    if loaded is not None:
+        tensors, cps, _ = loaded
         state, kvm = _load(model, cap, device, dtype, tensors)
         entry = _Entry(key, state, cap)
         entry.checkpoints = {start: cps[start]}
