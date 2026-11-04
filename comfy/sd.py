@@ -1159,6 +1159,7 @@ class VAE:
         if self.disable_offload:
             mp = comfy.model_patcher.ModelPatcher
         self.patcher = mp(self.first_stage_model, load_device=self.device, offload_device=offload_device, fast_disk=fast_disk)
+        self.first_stage_model.current_patcher = self.patcher
 
         m, u = self.first_stage_model.load_state_dict(sd, strict=False, assign=self.patcher.is_dynamic())
         if not self.patcher.is_dynamic():
@@ -1177,6 +1178,7 @@ class VAE:
         n = VAE(no_init=True)
         n.patcher = self.patcher.clone()
         n.first_stage_model = self.first_stage_model
+        n.first_stage_model.current_patcher = n.patcher
         n.memory_used_encode = self.memory_used_encode
         n.memory_used_decode = self.memory_used_decode
         n.downscale_ratio = self.downscale_ratio
