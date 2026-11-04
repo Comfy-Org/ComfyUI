@@ -187,9 +187,9 @@ def sparse_pool3d_mean(
     unique_flat, index = torch.unique(flat, return_inverse=True)
 
     pooled = torch.zeros((unique_flat.shape[0], feats.shape[-1]), device=feats.device, dtype=feats.dtype)
-    pooled.index_add_(0, index, feats)
+    pooled.index_put_((index,), feats, accumulate=True)
     counts = torch.zeros((unique_flat.shape[0],), device=feats.device, dtype=feats.dtype)
-    counts.index_add_(0, index, torch.ones_like(index, dtype=feats.dtype))
+    counts.index_put_((index,), torch.ones_like(index, dtype=feats.dtype), accumulate=True)
     pooled /= counts.unsqueeze(-1)
 
     z = unique_flat % out_z
