@@ -2396,8 +2396,8 @@ class RemeshMesh(IO.ComfyNode):
                 "Re-extracts a uniformly tessellated mesh via a narrow-band distance field + Dual "
                 "Contouring, on the active compute device. Normalizes messy / non-manifold / "
                 "self-intersecting topology; run before Decimate Mesh to hit an exact face count. "
-                "Output stays welded. Meshes outside the [-0.5,0.5] cube or under half its size are "
-                "fitted to it first and mapped back."
+                "Output stays welded. Meshes reaching past 0.51 or spanning under 0.5 are fitted to the "
+                "[-0.5,0.5] cube first and mapped back."
             ),
             inputs=[
                 IO.Mesh.Input("mesh"),
@@ -2482,8 +2482,8 @@ class RemeshMesh(IO.ComfyNode):
                 mesh_center = 0.5 * (lo + hi)
                 cell = rs_scale / resolution
                 margin = math.ceil(band) + 1  # cells past the extremes: the band shell and a corner beyond it
-                fit_scale = (resolution - 2 * margin) * cell / extent
-                vv = (vv - mesh_center) * fit_scale
+                span = (resolution - 2 * margin) * cell
+                vv = (vv - mesh_center) / extent * span
                 # the centre and the extremes land a quarter cell past a corner plane: a flat mesh or box face on a plane has no
                 # crossings in udf and sdf, and mid-cell its symmetric shell leaves the solid cut empty
                 rs_center = rs_center + ((resolution / 2 - 0.25) % 1) * cell
@@ -2501,7 +2501,7 @@ class RemeshMesh(IO.ComfyNode):
                 scale=rs_scale, center=rs_center, colors=cc)
 
             if fit:
-                rv = rv / fit_scale + mesh_center
+                rv = rv / span * extent + mesh_center
             v = rv.to(src_device)
             f = rf.to(device=src_device, dtype=torch.int32)
             c = rc.to(src_device) if rc is not None else None
