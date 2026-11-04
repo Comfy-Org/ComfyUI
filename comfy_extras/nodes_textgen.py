@@ -2,6 +2,8 @@ from comfy_api.latest import ComfyExtension, io
 from typing_extensions import override
 
 import comfy.model_state
+from comfy.text_encoders import llm_state_cache
+
 
 class TextGenerate(io.ComfyNode):
     @classmethod
@@ -43,6 +45,7 @@ class TextGenerate(io.ComfyNode):
                 io.Boolean.Input("use_default_template", optional=True, default=True, tooltip="Use the built in system prompt/template if the model has one.", advanced=True),
                 io.Combo.Input("mtp", options=["auto", "off", "2", "3", "4", "5", "tree2s1", "tree2s2", "tree3s1", "tree4s1m8"], default="auto", optional=True, tooltip="Speculative decoding with the checkpoint's multi-token-prediction head. No effect without MTP weights. auto adapts the draft depth and breadth to observed token matches and execution cost; 2-5 pins a constant draft depth; tree modes pin both breadth and depth. Sampled output stays correctly distributed but differs from non-MTP output for the same seed."),
                 io.String.Input("system_prompt", force_input=True, optional=True, tooltip="Replaces the system prompt in the model's chat template. Ignored when the default template is not used."),
+                io.Combo.Input("prefix_cache", options=["env", "off", "on"], default="env", optional=True, advanced=True, tooltip="Reuse the prompt state of an earlier call that shares this prompt's start (one kept per conversation). env follows COMFY_LLM_PREFIX_CACHE."),
                 io.ModelState.Input("state", optional=True, tooltip="Continues the conversation held by this model state and extends it with this turn. The prompt should be a single text turn."),
             ],
             outputs=[
@@ -54,8 +57,13 @@ class TextGenerate(io.ComfyNode):
         )
 
     @classmethod
-    def execute(cls, clip, prompt, max_length, sampling_mode, image=None, thinking=False, use_default_template=True, video=None, audio=None, mtp="auto", system_prompt="", state=None) -> io.NodeOutput:
+    def execute(cls, clip, prompt, max_length, sampling_mode, image=None, thinking=False, use_default_template=True, video=None, audio=None, mtp="auto", system_prompt="", state=None, prefix_cache="env") -> io.NodeOutput:
+        # the mode applies to this call only; env follows COMFY_LLM_PREFIX_CACHE
+        with llm_state_cache.call_mode(None if prefix_cache == "env" else prefix_cache):
+            return cls._generate(clip, prompt, max_length, sampling_mode, image, thinking, use_default_template, video, audio, mtp, system_prompt, state)
 
+    @classmethod
+    def _generate(cls, clip, prompt, max_length, sampling_mode, image, thinking, use_default_template, video, audio, mtp, system_prompt, state) -> io.NodeOutput:
         mtp = {"off": False, "auto": True}.get(mtp, mtp)
 
         # the system prompt opens a conversation; later turns continue it
@@ -247,7 +255,7 @@ class TextGenerateLTX2Prompt(TextGenerate):
             node_id="TextGenerateLTX2Prompt",
             display_name="Generate LTX2 Prompt",
             category=parent_schema.category,
-            inputs=[i for i in parent_schema.inputs if i.id != "state"],
+            inputs=[i for i in parent_schema.inputs if i.id not in ("state", "prefix_cache")],
             outputs=parent_schema.outputs[:2],
             hidden=parent_schema.hidden,
             search_aliases=["prompt enhance", "LLM", "gemma"],

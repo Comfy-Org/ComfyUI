@@ -1075,7 +1075,8 @@ class Llama2_(nn.Module):
 
         spec_decode = fixed_kv and any(isinstance(kv, FixedKVState) for kv in past_key_values) and 2 <= seq_len <= SPEC_ROWS and past_len > 0 and attention_mask is None
         if seq_len > 1 and not spec_decode:  # spec verify: the staircase decode bias is causal
-            causal_mask = torch.empty(past_len + seq_len, past_len + seq_len, dtype=x.dtype, device=x.device).fill_(torch.finfo(x.dtype).min / 4).triu_(1)
+            # rows are this call's tokens, columns the cached prefix plus them (a prefill continuing a prefix)
+            causal_mask = torch.empty(seq_len, past_len + seq_len, dtype=x.dtype, device=x.device).fill_(torch.finfo(x.dtype).min / 4).triu_(past_len + 1)
             if mask is not None:
                 mask += causal_mask
             else:
