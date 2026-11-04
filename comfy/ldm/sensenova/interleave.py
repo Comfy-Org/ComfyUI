@@ -53,6 +53,8 @@ def append_image_to_prefix(input_ids, latent_samples):
 
     if latent_samples.ndim != 4 or latent_samples.shape[0] != 1:
         raise ValueError("SenseNova interleave requires one BCHW latent image per stage.")
+    if latent_samples.shape[1] != 3:
+        raise ValueError("SenseNova interleave requires a three-channel RGB pixel latent from KSampler.")
 
     image = (latent_samples * 0.5 + 0.5).movedim(1, -1)
     token_height, token_width = reference_grid(
