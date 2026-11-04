@@ -2457,11 +2457,14 @@ class RemeshMesh(IO.ComfyNode):
                     vv, ff, target_verts=int(precluster_max_verts), colors=cc)
 
             # Preserve the standard unit-cube domain, but fit larger inputs instead of clipping them.
-            rs_scale = (resolution + 3.0 * band) / resolution
+            domain_padding = (resolution + 3.0 * band) / resolution
+            rs_scale = domain_padding
             rs_center = torch.zeros(3, dtype=vv.dtype, device=compute_device)
             if bool((vv.abs().amax() > 0.5 * rs_scale).item()):
-                rs_scale = None
-                rs_center = None
+                bbox_min = vv.amin(dim=0)
+                bbox_max = vv.amax(dim=0)
+                rs_scale = float((bbox_max - bbox_min).amax().item()) * domain_padding
+                rs_center = 0.5 * (bbox_min + bbox_max)
 
             rv, rf, rc = remesh_narrow_band_dc(
                 vv, ff,
