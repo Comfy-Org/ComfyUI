@@ -449,8 +449,7 @@ def _generation_context(model, metadata, max_tokens):
 
 def _decode_generated_text(clip, token_ids):
     text_tokens = [token for token in token_ids if token != IMAGE_START_ID]
-    text = clip.decode(text_tokens, skip_special_tokens=True) if text_tokens else ""
-    return text.strip()
+    return clip.decode(text_tokens, skip_special_tokens=True) if text_tokens else ""
 
 
 def _interleave_thinking_span(clip, token_ids):
@@ -484,7 +483,7 @@ def _decode_interleave_text(clip, token_ids):
             elif token_id not in (IMAGE_CONTEXT_ID, IMAGE_END_ID):
                 text_tokens.append(token_id)
         parts.append(clip.decode(text_tokens, skip_special_tokens=True))
-        outputs.append("\n\n".join(part.strip() for part in parts if part.strip()) if has_thinking else "".join(parts))
+        outputs.append("\n\n".join(part.strip() for part in parts if part.strip()) if is_thinking else "".join(parts))
     return outputs[0], outputs[1]
 
 
@@ -531,7 +530,12 @@ class SenseNovaDecode(io.ComfyNode):
                 "SenseNova Decode requires interleave conditioning from SenseNova Generate."
             )
         metadata = conditioning[0][1]
-        if metadata["sensenova_interleave_pending_image"] and samples is not None:
+        if metadata["sensenova_interleave_pending_image"]:
+            if samples is None:
+                raise ValueError(
+                    "SenseNova Decode is waiting for samples from the last KSampler. "
+                    "Connect its LATENT output to samples."
+                )
             metadata = append_interleave_image(metadata, samples["samples"])
         token_ids = metadata["text_input_ids"][0, metadata["sensenova_interleave_start"]:].tolist()
         text, thinking = _decode_interleave_text(clip, token_ids)
