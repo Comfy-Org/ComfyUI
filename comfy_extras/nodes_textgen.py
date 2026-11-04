@@ -64,9 +64,12 @@ class TextGenerate(io.ComfyNode):
 
     @classmethod
     def execute(cls, clip, prompt, max_length, sampling_mode, image=None, thinking=False, use_default_template=True, video=None, audio=None, mtp="auto", system_prompt="", state=None, prefix_cache="env") -> io.NodeOutput:
-        if prefix_cache != "env":
-            llm_state_cache.MODE = LEGACY_CACHE_MODES.get(prefix_cache, prefix_cache)
+        # the mode applies to this call only; env follows COMFY_LLM_PREFIX_CACHE
+        with llm_state_cache.call_mode(None if prefix_cache == "env" else LEGACY_CACHE_MODES.get(prefix_cache, prefix_cache)):
+            return cls._generate(clip, prompt, max_length, sampling_mode, image, thinking, use_default_template, video, audio, mtp, system_prompt, state)
 
+    @classmethod
+    def _generate(cls, clip, prompt, max_length, sampling_mode, image, thinking, use_default_template, video, audio, mtp, system_prompt, state) -> io.NodeOutput:
         mtp = {"off": False, "auto": True}.get(mtp, mtp)
 
         # the system prompt opens a conversation; later turns continue it

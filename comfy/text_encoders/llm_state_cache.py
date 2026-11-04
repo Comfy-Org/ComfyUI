@@ -43,8 +43,20 @@ _entries = []  # resident and spilled states, most recently used last
 _tick = [0]
 
 
+_call = [None]  # a per-call mode set by the TextGenerate node, else MODE
+
+
 def enabled():
-    return MODE == "on"
+    return (_call[0] or MODE) == "on"
+
+
+@contextlib.contextmanager
+def call_mode(mode):
+    _call[0] = mode
+    try:
+        yield
+    finally:
+        _call[0] = None
 
 
 class _Entry:
