@@ -51,10 +51,7 @@ _GROK_IMAGE_EDIT_MAX_IMAGES = {
     "grok-imagine-image": 3,
 }
 
-_GROK_IMAGE_EDIT_ASPECT_RATIO_NEEDS_MULTIPLE = {
-    "grok-imagine-image-quality",
-    "grok-imagine-image",
-}
+_GROK_IMAGE_EDIT_ASPECT_RATIO_NEEDS_MULTIPLE = {"grok-imagine-image"}
 
 _GROK_VOICE_OPTIONS = [
     "none",
@@ -140,8 +137,6 @@ class GrokImageNode(IO.ComfyNode):
                     "model",
                     options=[
                         "grok-imagine-image-2.0",
-                        "grok-imagine-image-quality",
-                        "grok-imagine-image-pro",
                         "grok-imagine-image",
                     ],
                 ),
@@ -212,9 +207,7 @@ class GrokImageNode(IO.ComfyNode):
                   $is1k := widgets.resolution = "1k";
                   $rate := widgets.model = "grok-imagine-image-2.0"
                     ? (widgets.quality = "low" ? ($is1k ? 0.04 : 0.06) : ($is1k ? 0.06 : 0.08))
-                    : (widgets.model = "grok-imagine-image-quality"
-                        ? ($is1k ? 0.05 : 0.07)
-                        : ($contains(widgets.model, "pro") ? 0.07 : 0.02));
+                    : 0.02;
                   {"type":"usd","usd": $rate * widgets.number_of_images}
                 )
                 """,
@@ -399,12 +392,10 @@ class GrokImageEditNode(IO.ComfyNode):
                 depends_on=IO.PriceBadgeDepends(widgets=["model", "number_of_images", "resolution"]),
                 expr="""
                 (
-                  $isQualityModel := widgets.model = "grok-imagine-image-quality";
+                  $is10 := widgets.model = "grok-imagine-image";
                   $isPro := $contains(widgets.model, "pro");
-                  $rate := $isQualityModel
-                    ? (widgets.resolution = "1k" ? 0.05 : 0.07)
-                    : ($isPro ? 0.07 : 0.02);
-                  $base := $isQualityModel ? 0.01 : 0.002;
+                  $rate := $is10 ? 0.02 : (widgets.resolution = "1k" ? 0.04 : 0.06);
+                  $base := $is10 ? 0.002 : 0.01;
                   $output := $rate * widgets.number_of_images;
                   $isPro
                     ? {"type":"usd","usd": $base + $output}
@@ -489,7 +480,11 @@ class GrokImageEditNodeV2(IO.ComfyNode):
                         ),
                         IO.DynamicCombo.Option(
                             "grok-imagine-image-quality",
-                            _grok_image_edit_model_inputs(max_ref_images=3, with_aspect_ratio=True),
+                            _grok_image_edit_model_inputs(
+                                max_ref_images=3,
+                                with_aspect_ratio=True,
+                                aspect_ratio_needs_multiple=False,
+                            ),
                         ),
                         IO.DynamicCombo.Option(
                             "grok-imagine-image-pro",
@@ -528,6 +523,7 @@ class GrokImageEditNodeV2(IO.ComfyNode):
                 ),
                 expr="""
                 (
+                  $is10 := widgets.model = "grok-imagine-image";
                   $is20 := widgets.model = "grok-imagine-image-2.0";
                   $isPro := $contains(widgets.model, "pro");
                   $res := $lookup(widgets, "model.resolution");
@@ -537,10 +533,8 @@ class GrokImageEditNodeV2(IO.ComfyNode):
                     ? ($lookup(widgets, "model.quality") = "low"
                         ? ($is1k ? 0.04 : 0.06)
                         : ($is1k ? 0.06 : 0.08))
-                    : (widgets.model = "grok-imagine-image-quality"
-                        ? ($is1k ? 0.05 : 0.07)
-                        : ($isPro ? 0.07 : 0.02));
-                  $base := ($is20 or widgets.model = "grok-imagine-image-quality") ? 0.01 : 0.002;
+                    : ($is10 ? 0.02 : ($is1k ? 0.04 : 0.06));
+                  $base := $is10 ? 0.002 : 0.01;
                   $output := $rate * $n;
                   $isPro
                     ? {"type":"usd","usd": $base + $output}
