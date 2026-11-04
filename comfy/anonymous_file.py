@@ -15,6 +15,9 @@ if os.name == "nt":
     _kernel32.DeviceIoControl.restype = wintypes.BOOL
     _kernel32.SetFileInformationByHandle.argtypes = [wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD]
     _kernel32.SetFileInformationByHandle.restype = wintypes.BOOL
+    _kernel32.GetVolumeInformationByHandleW.argtypes = [wintypes.HANDLE, wintypes.LPWSTR, wintypes.DWORD, ctypes.POINTER(wintypes.DWORD),
+                                                        ctypes.POINTER(wintypes.DWORD), ctypes.POINTER(wintypes.DWORD), wintypes.LPWSTR, wintypes.DWORD]
+    _kernel32.GetVolumeInformationByHandleW.restype = wintypes.BOOL
 elif sys.platform == "linux":
     # os.memfd_create is missing from Pythons built against glibc < 2.27.
     _libc = ctypes.CDLL(None, use_errno=True)
@@ -27,9 +30,9 @@ def create_anonymous_file(size=0):
 
     Uses Linux memfd or a Windows temporary-cache/delete-on-close file.
     Windows may still write to disk; Linux memfd may be swapped.
-    Initial sizing is sparse with zero-filled holes; Windows requires a filesystem
-    supporting sparse files. Keep the file open through all I/O and close
-    mappings before closing it. No persistent pathname is provided.
+    Initial sizing is sparse with zero-filled holes where the filesystem supports
+    sparse files; otherwise it is fully allocated. Keep the file open through all
+    I/O and close mappings before closing it. No persistent pathname is provided.
     """
     size = operator.index(size)
     if size < 0 or size > 0x7fffffffffffffff:
@@ -53,9 +56,13 @@ def create_anonymous_file(size=0):
         if os.name == "nt":
             handle = msvcrt.get_osfhandle(file.fileno())
             transferred = wintypes.DWORD()
+            fs_flags = wintypes.DWORD()
+            if not _kernel32.GetVolumeInformationByHandleW(handle, None, 0, None, None, ctypes.byref(fs_flags), None, 0):
+                raise ctypes.WinError(ctypes.get_last_error())
             # FSCTL_SET_SPARSE: unwritten ranges stay unallocated and read as zeros.
-            if not _kernel32.DeviceIoControl(handle, 0x900c4, None, 0, None, 0,
-                                             ctypes.byref(transferred), None):
+            # FAT32 and exFAT lack FILE_SUPPORTS_SPARSE_FILES (0x40); the file is then fully allocated.
+            if fs_flags.value & 0x40 and not _kernel32.DeviceIoControl(handle, 0x900c4, None, 0, None, 0,
+                                                                      ctypes.byref(transferred), None):
                 raise ctypes.WinError(ctypes.get_last_error())
             # FileEndOfFileInfo avoids the CRT truncate implementation's zero-fill loop.
             end = ctypes.c_longlong(size)
