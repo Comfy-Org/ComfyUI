@@ -1,8 +1,14 @@
 from comfy_api.latest import ComfyExtension, io
 from typing_extensions import override
 
+import json
+import time
+
 import comfy.model_state
 from comfy.text_encoders import llm_state_cache
+
+# older clients send these mode names and read LLMPrefixCacheStats
+LEGACY_CACHE_MODES = {"vram": "on", "gpu": "on", "cpu": "on", "disk": "on", "stats": "off"}
 
 
 class TextGenerate(io.ComfyNode):
@@ -45,7 +51,7 @@ class TextGenerate(io.ComfyNode):
                 io.Boolean.Input("use_default_template", optional=True, default=True, tooltip="Use the built in system prompt/template if the model has one.", advanced=True),
                 io.Combo.Input("mtp", options=["auto", "off", "2", "3", "4", "5", "tree2s1", "tree2s2", "tree3s1", "tree4s1m8"], default="auto", optional=True, tooltip="Speculative decoding with the checkpoint's multi-token-prediction head. No effect without MTP weights. auto adapts the draft depth and breadth to observed token matches and execution cost; 2-5 pins a constant draft depth; tree modes pin both breadth and depth. Sampled output stays correctly distributed but differs from non-MTP output for the same seed."),
                 io.String.Input("system_prompt", force_input=True, optional=True, tooltip="Replaces the system prompt in the model's chat template. Ignored when the default template is not used."),
-                io.Combo.Input("prefix_cache", options=["env", "off", "on"], default="env", optional=True, advanced=True, tooltip="Reuse the prompt state of an earlier call that shares this prompt's start (one kept per conversation). env follows COMFY_LLM_PREFIX_CACHE."),
+                io.Combo.Input("prefix_cache", options=["env", "off", "on"] + list(LEGACY_CACHE_MODES), default="env", optional=True, advanced=True, tooltip="Reuse the prompt state of an earlier call that shares this prompt's start (one kept per conversation). env follows COMFY_LLM_PREFIX_CACHE. vram, gpu, disk and stats are older clients' names."),
                 io.ModelState.Input("state", optional=True, tooltip="Continues the conversation held by this model state and extends it with this turn. The prompt should be a single text turn."),
             ],
             outputs=[
@@ -59,7 +65,7 @@ class TextGenerate(io.ComfyNode):
     @classmethod
     def execute(cls, clip, prompt, max_length, sampling_mode, image=None, thinking=False, use_default_template=True, video=None, audio=None, mtp="auto", system_prompt="", state=None, prefix_cache="env") -> io.NodeOutput:
         # the mode applies to this call only; env follows COMFY_LLM_PREFIX_CACHE
-        with llm_state_cache.call_mode(None if prefix_cache == "env" else prefix_cache):
+        with llm_state_cache.call_mode(None if prefix_cache == "env" else LEGACY_CACHE_MODES.get(prefix_cache, prefix_cache)):
             return cls._generate(clip, prompt, max_length, sampling_mode, image, thinking, use_default_template, video, audio, mtp, system_prompt, state)
 
     @classmethod
@@ -297,12 +303,32 @@ class TextGenerateLTX2Prompt(TextGenerate):
         return io.NodeOutput(out.args[0] or prompt, out.args[1])
 
 
+class LLMPrefixCacheStats(io.ComfyNode):
+    """The last generate's prompt state cache line, as JSON (for older clients); wire the generated text in so it runs after."""
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(node_id="LLMPrefixCacheStats", category="text",
+                         inputs=[io.String.Input("text", force_input=True)],
+                         outputs=[io.String.Output(display_name="stats")])
+
+    @classmethod
+    def fingerprint_inputs(cls, **kwargs):
+        return time.time()
+
+    @classmethod
+    def execute(cls, text) -> io.NodeOutput:
+        st = dict(llm_state_cache.stats)
+        st.setdefault("hit", st.get("prefix_len", 0) > 0)
+        return io.NodeOutput(json.dumps(st))
+
+
 class TextgenExtension(ComfyExtension):
     @override
     async def get_node_list(self) -> list[type[io.ComfyNode]]:
         return [
             TextGenerate,
             TextGenerateLTX2Prompt,
+            LLMPrefixCacheStats,
         ]
 
 async def comfy_entrypoint() -> TextgenExtension:
