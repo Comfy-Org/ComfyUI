@@ -62,6 +62,9 @@ class _MallocGraphScope:
 def malloc_graph_scope(device):
     return _MallocGraphScope(device)
 
+def malloc_graph_recording():
+    return threading.get_ident() in MALLOC_GRAPHS
+
 def malloc_graph_begin(device):
     global MALLOC_GRAPH_USED
     if not malloc_graph_enabled(device):
