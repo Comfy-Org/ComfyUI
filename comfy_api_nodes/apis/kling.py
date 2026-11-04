@@ -174,9 +174,10 @@ class Kling3TurboImage2VideoRequest(BaseModel):
 
 
 class Kling4Settings(BaseModel):
-    resolution: str = Field(..., description="'720p' or '1080p'")
+    resolution: str = Field(..., description="'720p' or '1080p'; Flash is 720p only")
     aspect_ratio: str | None = Field(None, description="'16:9', '9:16', '1:1', '21:9'; omni also 'adaptive'")
-    duration: int | None = Field(None, description="3-30 seconds; omitted for edits to keep the input length")
+    duration: int | None = Field(None, description="3-30 seconds, 3-20 on Flash; omitted for edits to keep the input length")
+    audio: str | None = Field(None, description="'original' keeps the input video's audio; omitted generates new audio")
 
 
 class Kling4Content(BaseModel):
