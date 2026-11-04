@@ -302,6 +302,11 @@ def _enforce_budget(keep):
 def _take(model, key, ids, need, device, dtype):
     """(entry, cache model, prefix length) for this prompt, allocating or loading as needed."""
     entry, n = (None, 0) if MODE == "stats" else _best(key, ids)
+    start = _shared_start(ids)
+    path = _prefix_path(key, ids[:start]) if start else None
+    if entry is not None and n <= start < len(entry.ids) and path is not None and os.path.exists(path):
+        entry, n = None, 0  # another conversation: fork from the shared-start file, keep its state whole
+        stats["fork"] = True
     if entry is not None:
         _entries.remove(entry)
         if entry.state is None:
@@ -330,8 +335,6 @@ def _take(model, key, ids, need, device, dtype):
         entry.ids = list(ids[:n])
         return entry, kvm, n
     cap = _capacity(need)
-    start = _shared_start(ids)
-    path = _prefix_path(key, ids[:start]) if start else None
     if MODE != "stats" and path is not None and os.path.exists(path):
         tensors, cps, meta = _read(path)
         state, kvm = _load(model, cap, device, dtype, tensors)
