@@ -1,4 +1,4 @@
-"""Tests for NodeReplaceManager registration behavior."""
+"""Tests for NodeReplaceManager registration and graph replacement."""
 import importlib
 import sys
 import types
@@ -11,7 +11,7 @@ def NodeReplaceManager(monkeypatch):
     """Provide NodeReplaceManager with `nodes` stubbed.
 
     `app.node_replace_manager` does `import nodes` at module level, which pulls in
-    torch + the full ComfyUI graph. register() doesn't actually need it, so we
+    torch + the full ComfyUI graph. These methods only need its registry, so we
     stub `nodes` per-test (via monkeypatch so it's torn down) and reload the
     module so it picks up the stub instead of any cached real import.
     """
@@ -88,3 +88,49 @@ def test_register_dedupe_does_not_affect_other_old_nodes(NodeReplaceManager):
     manager.register(FakeNodeReplace(new_node_id="NewB", old_node_id="OldB"))
     assert len(manager.get_replacement("OldA")) == 1
     assert len(manager.get_replacement("OldB")) == 1
+
+
+@pytest.mark.parametrize("producer_id", ["1", "2"])
+@pytest.mark.parametrize("new_input", ["input", "renamed_input"])
+def test_connected_replacements_preserve_output_mapping(NodeReplaceManager, producer_id, new_input):
+    sys.modules["nodes"].NODE_CLASS_MAPPINGS.update({"NewProducer": object(), "NewConsumer": object()})
+    consumer_id = "2" if producer_id == "1" else "1"
+    manager = NodeReplaceManager()
+    manager.register(FakeNodeReplace(
+        new_node_id="NewProducer", old_node_id="OldProducer",
+        input_mapping=[],
+        output_mapping=[{"old_idx": 0, "new_idx": 1}],
+    ))
+    manager.register(FakeNodeReplace(
+        new_node_id="NewConsumer", old_node_id="OldConsumer",
+        input_mapping=[{"old_id": "input", "new_id": new_input}],
+    ))
+    prompt = {"1": {}, "2": {}}
+    prompt[producer_id] = {"class_type": "OldProducer", "inputs": {}}
+    prompt[consumer_id] = {"class_type": "OldConsumer", "inputs": {"input": [producer_id, 0]}}
+
+    manager.apply_replacements(prompt)
+
+    assert prompt[producer_id]["class_type"] == "NewProducer"
+    assert prompt[consumer_id]["class_type"] == "NewConsumer"
+    assert prompt[consumer_id]["inputs"] == {new_input: [producer_id, 1]}
+
+
+@pytest.mark.parametrize("producer_id", ["1", "2"])
+def test_output_mapping_to_an_existing_node(NodeReplaceManager, producer_id):
+    sys.modules["nodes"].NODE_CLASS_MAPPINGS.update({"NewProducer": object(), "NewConsumer": object()})
+    consumer_id = "2" if producer_id == "1" else "1"
+    manager = NodeReplaceManager()
+    manager.register(FakeNodeReplace(
+        new_node_id="NewProducer", old_node_id="OldProducer",
+        input_mapping=[],
+        output_mapping=[{"old_idx": 0, "new_idx": 1}],
+    ))
+    prompt = {
+        producer_id: {"class_type": "OldProducer", "inputs": {}},
+        consumer_id: {"class_type": "NewConsumer", "inputs": {"input": [producer_id, 0]}},
+    }
+
+    manager.apply_replacements(prompt)
+
+    assert prompt[consumer_id]["inputs"] == {"input": [producer_id, 1]}

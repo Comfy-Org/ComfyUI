@@ -59,7 +59,7 @@ class NodeReplaceManager:
         return old_node_id in self._replacements
 
     def apply_replacements(self, prompt: dict[str, NodeStruct]):
-        connections: dict[str, list[tuple[str, str, int]]] = {}
+        connections: dict[str, list[tuple[list, int]]] = {}
         need_replacement: set[str] = set()
         for node_number, node_struct in prompt.items():
             if "class_type" not in node_struct or "inputs" not in node_struct:
@@ -69,10 +69,10 @@ class NodeReplaceManager:
             if class_type not in nodes.NODE_CLASS_MAPPINGS.keys() and self.has_replacement(class_type):
                 need_replacement.add(node_number)
             # keep track of connections
-            for input_id, input_value in node_struct["inputs"].items():
+            for input_value in node_struct["inputs"].values():
                 if is_link(input_value):
                     conn_number = input_value[0]
-                    connections.setdefault(conn_number, []).append((node_number, input_id, input_value[1]))
+                    connections.setdefault(conn_number, []).append((input_value, input_value[1]))
         for node_number in need_replacement:
             node_struct = prompt[node_number]
             class_type = node_struct["class_type"]
@@ -102,12 +102,10 @@ class NodeReplaceManager:
             if replacement.output_mapping is not None:
                 # re-mapping outputs requires changing the input values of nodes that receive connections from this one
                 if node_number in connections:
-                    for conns in connections[node_number]:
-                        conn_node_number, conn_input_id, old_output_idx = conns
+                    for previous_input, old_output_idx in connections[node_number]:
                         for output_map in replacement.output_mapping:
                             if output_map["old_idx"] == old_output_idx:
                                 new_output_idx = output_map["new_idx"]
-                                previous_input = prompt[conn_node_number]["inputs"][conn_input_id]
                                 previous_input[1] = new_output_idx
 
     def as_dict(self):
