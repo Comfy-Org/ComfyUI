@@ -122,6 +122,13 @@ if args.directml is not None:
     # torch_directml.disable_tiled_resources(True)
     lowvram_available = False #TODO: need to find a way to get free memory in directml before this can be enabled by default.
 
+vulkan_enabled = False
+if args.vulkan is not None:
+    import torchvulkan
+    vulkan_enabled = True
+    device = torch.device(f"vulkan:{args.vulkan}")
+    logging.info("Using vulkan with device: {}".format(args.vulkan))
+    lowvram_available = False # not quite ready yet.
 
 try:
     _ = torch.xpu.device_count()
@@ -194,10 +201,14 @@ def is_wsl():
 
 def get_torch_device():
     global directml_enabled
+    global vulkan_enabled
     global cpu_state
     if directml_enabled:
         global directml_device
         return directml_device
+    elif vulkan_enabled:	
+        global vulkan_device
+        return vulkan_device
     if cpu_state == CPUState.MPS:
         return torch.device("mps")
     if cpu_state == CPUState.CPU:
@@ -219,7 +230,11 @@ def get_all_torch_devices(exclude_current=False):
         # NVIDIA + AMD/ROCm both expose their GPUs through torch.cuda.*;
         # without the AMD arm, single-GPU ROCm users get an empty list
         # which silently turns unload_all_models() into a no-op.
-        if is_nvidia() or is_amd():
+        global vulkan_enabled
+        if vulkan_enabled:
+            for i in range(torchvulkan.device_count()):
+                devices.append(torch.device("vulkan", i))
+        elif is_nvidia() or is_amd():
             for i in range(torch.cuda.device_count()):
                 devices.append(torch.device("cuda", i))
         elif is_intel_xpu():
