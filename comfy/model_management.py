@@ -27,6 +27,7 @@ import sys
 import platform
 import weakref
 import gc
+import functools
 import os
 from contextlib import contextmanager, nullcontext
 import comfy.memory_management
@@ -313,6 +314,33 @@ def cuda_device_context(device):
         if prev is not None:
             torch.cuda.set_device(prev)
 
+# A dynamic VRAM page-out can run Python inside a torch CUDA allocation, with the allocator's lock held, and that
+# Python can let another thread take the GIL. torch.cuda.memory_stats waits on the allocator's lock without releasing
+# the GIL, so a device query from another thread then deadlocks the process. The thread running models holds this
+# lock; other threads get the last values instead while it is held.
+model_execution_lock = threading.RLock()
+
+def _last_values_while_models_run(query):
+    last = {}
+
+    @functools.wraps(query)
+    def wrapper(dev=None, torch_too=False, **kwargs):
+        if dev is None:
+            dev = get_torch_device()
+        torch_too = torch_too or any(kwargs.values())
+        if getattr(dev, "type", None) in ("cpu", "mps"):
+            return query(dev, torch_too)
+        key = (str(dev), torch_too)
+        if not model_execution_lock.acquire(blocking=False):
+            return last.get(key, (0, 0) if torch_too else 0)
+        try:
+            last[key] = query(dev, torch_too)
+        finally:
+            model_execution_lock.release()
+        return last[key]
+    return wrapper
+
+@_last_values_while_models_run
 def get_total_memory(dev=None, torch_total_too=False):
     global directml_enabled
     if dev is None:
@@ -1828,6 +1856,7 @@ def force_upcast_attention_dtype():
 #that makes you meansure VRAM from model code). Instead call get_free_memory() on the ModelPatcher
 #for your BaseModel object (.current_patcher) instead to count this VRAM as free and then Dynamic
 #VRAM will evict that extra VRAM for you when you use it.
+@_last_values_while_models_run
 def get_free_memory(dev=None, torch_free_too=False):
     global directml_enabled
     if dev is None:
