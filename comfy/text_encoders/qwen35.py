@@ -1023,8 +1023,6 @@ class Qwen35(BaseLlama, BaseGenerate, torch.nn.Module):
             comfy.model_management.reset_cast_buffers()
             vbar.set_watermark(vbar.max_size)
         ids = [nt_buf[0].item()]
-        if cache_ids is not None:
-            llm_state_cache.note_token(1)
         if penalized:
             pen_mask.index_fill_(0, nt_buf.reshape(-1), True)
         pos = pkv[0].index
@@ -1240,8 +1238,6 @@ class Qwen35(BaseLlama, BaseGenerate, torch.nn.Module):
                     mtp_kv.rollback(max(0, kept - len(commit)))
                 ids.extend(commit)
                 update_progress(len(commit))
-                if cache_ids is not None:
-                    llm_state_cache.note_token(2)
         finally:
             console.close()
             comfy.model_prefetch.cleanup_prefetch_queues()

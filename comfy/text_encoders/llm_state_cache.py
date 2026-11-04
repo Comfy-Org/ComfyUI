@@ -14,7 +14,7 @@ dropped; its next match loads the file. The shared start (the prompt up to the e
 once to a file named by the hash of its tokens, if no such file exists, and a new conversation with no resident match
 starts from it.
 
-COMFY_LLM_PREFIX_CACHE: off (default) | on (also gpu, vram, cpu, disk: the old modes) | stats (timing only, no reuse).
+COMFY_LLM_PREFIX_CACHE: off (default) | on.
 Attention uses the bf16 FixedKVCache while the cache is on: Int8FixedKVCache can't continue a prefill from a prefix.
 """
 import contextlib
@@ -29,9 +29,8 @@ import safetensors.torch
 import torch
 
 MODE = os.environ.get("COMFY_LLM_PREFIX_CACHE", "off")
-ON_MODES = ("on", "gpu", "vram", "cpu", "disk")
-CACHE_DIR = os.environ.get("COMFY_LLM_STATE_CACHE_DIR", os.environ.get("COMFY_LLM_PREFIX_CACHE_DIR", "/tmp/llm_state_cache"))
-BUDGET = int(float(os.environ.get("COMFY_LLM_STATE_CACHE_GB", os.environ.get("COMFY_LLM_PREFIX_CACHE_HOST_GB", "16"))) * 2**30)
+CACHE_DIR = os.environ.get("COMFY_LLM_STATE_CACHE_DIR", "/tmp/llm_state_cache")
+BUDGET = int(float(os.environ.get("COMFY_LLM_STATE_CACHE_GB", "16")) * 2**30)
 MAX_ENTRIES = int(os.environ.get("COMFY_LLM_STATE_CACHE_ENTRIES", "4"))
 HEADROOM = int(os.environ.get("COMFY_LLM_PREFIX_CACHE_HEADROOM", "8192"))  # capacity beyond this call, for later turns
 CKPT_RECENT = int(os.environ.get("COMFY_LLM_PREFIX_CACHE_CKPTS", "6"))  # message-boundary checkpoints kept
@@ -45,12 +44,7 @@ _tick = [0]
 
 
 def enabled():
-    return MODE in ON_MODES or MODE == "stats"
-
-
-def _sync(device):
-    if device.type == "cuda":
-        torch.cuda.synchronize(device)
+    return MODE == "on"
 
 
 class _Entry:
@@ -65,10 +59,6 @@ class _Entry:
         self.checkpoints = {}
         self.file = None
         self.used = 0
-
-    def touch(self):
-        _tick[0] += 1
-        self.used = _tick[0]
 
     def nbytes(self):
         n = sum(c.nbytes + r.nbytes for st in self.checkpoints.values() for c, r in st.values())
@@ -101,7 +91,6 @@ def _best(key, ids):
         usable = [p for p in e.checkpoints if p <= min(lcp, limit_all)]
         if usable and max(usable) > best_pos:
             best, best_pos = e, max(usable)
-        stats["common_prefix"] = max(stats.get("common_prefix", 0), lcp)
     return best, best_pos
 
 
@@ -301,7 +290,7 @@ def _enforce_budget(keep):
 
 def _take(model, key, ids, need, device, dtype):
     """(entry, cache model, prefix length) for this prompt, allocating or loading as needed."""
-    entry, n = (None, 0) if MODE == "stats" else _best(key, ids)
+    entry, n = _best(key, ids)
     start = _shared_start(ids)
     path = _prefix_path(key, ids[:start]) if start else None
     if entry is not None and n <= start < len(entry.ids) and path is not None and os.path.exists(path):
@@ -335,8 +324,8 @@ def _take(model, key, ids, need, device, dtype):
         entry.ids = list(ids[:n])
         return entry, kvm, n
     cap = _capacity(need)
-    if MODE != "stats" and path is not None and os.path.exists(path):
-        tensors, cps, meta = _read(path)
+    if path is not None and os.path.exists(path):
+        tensors, cps, _ = _read(path)
         state, kvm = _load(model, cap, device, dtype, tensors)
         entry = _Entry(key, state, cap)
         entry.checkpoints = {start: cps[start]}
@@ -346,8 +335,6 @@ def _take(model, key, ids, need, device, dtype):
         stats["restore"] = "shared-start-file"
         return entry, kvm, start
     state, kvm = _load(model, cap, device, dtype)
-    if _entries:
-        stats["miss_reason"] = "prefix"
     return _Entry(key, state, cap), kvm, 0
 
 
@@ -415,31 +402,20 @@ def prefill(model, embeds, ids, need, forward, position_ids=None):
     stats.clear()
     device, dtype = embeds.device, embeds.dtype
     key = _model_key(model, dtype)
-    _sync(device)
-    t0 = time.perf_counter()
-    stats["t0"] = t0
     entry, kvm, n = _take(model, key, ids, need, device, dtype)
-    _sync(device)
-    t1 = time.perf_counter()
-    stats.update(prompt_len=len(ids), prefix_len=n, hit=n > 0, restore_s=round(t1 - t0, 3))
-    if position_ids is not None:
-        stats["image_positions"] = sum(1 for t in ids if not isinstance(t, int))
+    stats.update(prompt_len=len(ids), prefix_len=n)
     start, x = n, None
     shared = _shared_start(ids)
-    for pos in ([] if MODE == "stats" else _checkpoint_positions(ids, n)) + [len(ids)]:
+    for pos in _checkpoint_positions(ids, n) + [len(ids)]:
         x = forward(embeds[:, start:pos], kvm.caches, None if position_ids is None else position_ids[..., start:pos])
-        if MODE != "stats":
-            entry.checkpoints[pos] = _snapshot(model, kvm, device)
-        if MODE != "stats" and pos == shared and n < shared:
+        entry.checkpoints[pos] = _snapshot(model, kvm, device)
+        if pos == shared and n < shared:
             _save_shared_start(model, kvm, key, ids, shared, entry.checkpoints[pos], device)
         start = pos
-    _sync(device)
-    stats["prefill_s"] = round(time.perf_counter() - t1, 3)
     if len(entry.checkpoints) > CKPT_RECENT + 3:
         keep = sorted(entry.checkpoints)
         keep = keep[:1] + keep[-(CKPT_RECENT + 2):]
         entry.checkpoints = {p: entry.checkpoints[p] for p in keep}
-    stats["checkpoints"] = sorted(entry.checkpoints)
     entry.ids = list(ids)
     _current.update(entry=entry, kvm=kvm, device=device, model=model)
     return kvm, x
@@ -450,7 +426,6 @@ def _save_shared_start(model, kvm, key, ids, pos, linear_states, device):
     path = _prefix_path(key, ids[:pos])
     if os.path.exists(path):
         return
-    t = time.perf_counter()
     linear = _linear(kvm)
     attn = {i: kv for i, kv in enumerate(kvm.caches) if i not in linear}
     tensors = {}
@@ -459,12 +434,7 @@ def _save_shared_start(model, kvm, key, ids, pos, linear_states, device):
             tensors[f"layers.{i}.key.weight"] = kv.key[:, :, :pos].to("cpu", copy=True)
             tensors[f"layers.{i}.value.weight"] = kv.value[:, :, :pos].to("cpu", copy=True)
     _write(path, _file_tensors(tensors, {pos: linear_states}), {"key": key, "ids": _ids_json(ids[:pos])})
-    stats["shared_start_saved_s"] = round(time.perf_counter() - t, 3)
-
-
-def note_token(i):
-    if "t0" in stats and f"t_tok{i}" not in stats:
-        stats[f"t_tok{i}"] = round(time.perf_counter() - stats["t0"], 3)
+    stats["shared_start_saved"] = True
 
 
 def finish(ids, generated):
@@ -474,29 +444,24 @@ def finish(ids, generated):
     _current.clear()
     if entry is None:
         return
-    stats["t_end"] = round(time.perf_counter() - stats["t0"], 3)
     stats["gen_tokens"] = len(generated)
     full = list(ids) + list(generated)
     lin = next(iter(_linear(kvm).values()))
     # deferred commit: a decode step leaves the DeltaNet state untouched until the next step, so the state lags the
     # index by the last step's still-uncommitted tokens
     idx = lin.index - lin.uncommitted
-    stats["uncommitted"] = lin.uncommitted
-    if MODE == "stats":
-        entry.state.release()
-    else:
-        if len(ids) < idx <= len(full):
-            entry.checkpoints[idx] = _snapshot(model, kvm, device)
-            entry.ids = full[:idx]
-        entry.state.patcher.set_in_use_by_current_prompt(False)
-        entry.touch()
-        _entries.append(entry)
-        _enforce_budget(entry)
-    stats["mode"] = MODE
+    if len(ids) < idx <= len(full):
+        entry.checkpoints[idx] = _snapshot(model, kvm, device)
+        entry.ids = full[:idx]
+    entry.state.patcher.set_in_use_by_current_prompt(False)
+    _tick[0] += 1
+    entry.used = _tick[0]
+    _entries.append(entry)
+    _enforce_budget(entry)
     stats["entries"] = len(_entries)
     stats["resident"] = sum(1 for e in _entries if e.state is not None)
     stats["cache_gb"] = round(sum(e.nbytes() for e in _entries if e.state is not None) / 1e9, 3)
-    logging.info("LLM_PREFIX_CACHE %s", json.dumps({k: v for k, v in stats.items() if k != "t0"}))
+    logging.info("LLM_PREFIX_CACHE %s", json.dumps(stats))
 
 
 def abort():
@@ -505,8 +470,3 @@ def abort():
     _current.clear()
     if entry is not None and entry.state is not None:
         entry.state.release()
-
-
-def drop():
-    while _entries:
-        _drop(_entries[0])
