@@ -1750,10 +1750,12 @@ class HostWriter:
         self.slot = 0
         self.stream = get_data_stream(device) if is_device_cpu(target.device) else None
         if self.stream is not None:
-            for _ in range(2):
-                buffer = torch.empty(shape, dtype=target.dtype)
-                if pin_memory(buffer):
-                    self.staging.append(buffer)
+            # inactive model pins make room for the staging buffers, active ones stay
+            if ensure_pin_budget(2 * torch.Size(shape).numel() * target.element_size(), evict_active=False):
+                for _ in range(2):
+                    buffer = torch.empty(shape, dtype=target.dtype)
+                    if pin_memory(buffer, evict_active=False):
+                        self.staging.append(buffer)
             if len(self.staging) < 2:
                 self.stream = None
 
