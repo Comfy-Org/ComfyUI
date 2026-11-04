@@ -2456,9 +2456,12 @@ class RemeshMesh(IO.ComfyNode):
                 vv, ff, cc = qem_cluster_decimate(
                     vv, ff, target_verts=int(precluster_max_verts), colors=cc)
 
-            # Fixed [-0.5,0.5] cube domain (matches cumesh/TRELLIS2); scale ≈ 1.0 any resolution.
+            # Preserve the standard unit-cube domain, but fit larger inputs instead of clipping them.
             rs_scale = (resolution + 3.0 * band) / resolution
             rs_center = torch.zeros(3, dtype=vv.dtype, device=compute_device)
+            if bool((vv.abs().amax() > 0.5 * rs_scale).item()):
+                rs_scale = None
+                rs_center = None
 
             rv, rf, rc = remesh_narrow_band_dc(
                 vv, ff,
