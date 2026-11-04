@@ -1490,6 +1490,21 @@ def reset_cast_buffers():
     STREAM_AIMDO_CAST_BUFFERS.clear()
     soft_empty_cache()
 
+def new_stream(device):
+    if is_device_cuda(device):
+        s = torch.cuda.Stream(device=device, priority=0)
+        s.as_context = torch.cuda.stream
+    elif is_device_xpu(device):
+        s = torch.xpu.Stream(device=device, priority=0)
+        s.as_context = torch.xpu.stream
+    elif is_device_npu(device):
+        # torch.npu.stream provides the context manager for torch-npu streams.
+        s = torch.npu.Stream(device=device, priority=0)
+        s.as_context = torch.npu.stream
+    else:
+        return None
+    return s
+
 def get_offload_stream(device):
     stream_counter = stream_counters.get(device, 0)
     if NUM_STREAMS == 0:
@@ -1505,39 +1520,24 @@ def get_offload_stream(device):
         stream_counter = (stream_counter + 1) % len(ss)
         stream_counters[device] = stream_counter
         return ss[stream_counter]
-    elif is_device_cuda(device):
-        ss = []
-        for k in range(NUM_STREAMS):
-            s1 = torch.cuda.Stream(device=device, priority=0)
-            s1.as_context = torch.cuda.stream
-            ss.append(s1)
-        STREAMS[device] = ss
-        s = ss[stream_counter]
-        stream_counters[device] = stream_counter
-        return s
-    elif is_device_xpu(device):
-        ss = []
-        for k in range(NUM_STREAMS):
-            s1 = torch.xpu.Stream(device=device, priority=0)
-            s1.as_context = torch.xpu.stream
-            ss.append(s1)
-        STREAMS[device] = ss
-        s = ss[stream_counter]
-        stream_counters[device] = stream_counter
-        return s
-    elif is_device_npu(device):
-        ss = []
-        # Match the CUDA/XPU stream interface used by the shared offload path.
-        # torch.npu.stream provides the context manager for torch-npu streams.
-        for k in range(NUM_STREAMS):
-            s1 = torch.npu.Stream(device=device, priority=0)
-            s1.as_context = torch.npu.stream
-            ss.append(s1)
-        STREAMS[device] = ss
-        s = ss[stream_counter]
-        stream_counters[device] = stream_counter
-        return s
-    return None
+    s = new_stream(device)
+    if s is None:
+        return None
+    ss = [s] + [new_stream(device) for _ in range(NUM_STREAMS - 1)]
+    STREAMS[device] = ss
+    stream_counters[device] = stream_counter
+    return ss[stream_counter]
+
+DATA_STREAMS = {}
+
+def get_data_stream(device):
+    """One stream per device for data copies such as cache staging and decoder output, kept off the
+    offload streams so they don't disturb the weight prefetch. Callers order on it themselves."""
+    if torch.compiler.is_compiling():
+        return None
+    if device not in DATA_STREAMS:
+        DATA_STREAMS[device] = new_stream(device)
+    return DATA_STREAMS[device]
 
 def sync_all_offload_streams():
     if NUM_STREAMS == 0:
@@ -1739,8 +1739,8 @@ def unpin_memory(tensor):
 
 class HostWriter:
     """Copies device tensors of one shape into slices of a CPU tensor without the device waiting on each copy:
-    every write goes through one of two pinned staging buffers on the offload stream and lands in its slice one
-    write later. Writes go straight through when the target is on the device, there is no offload stream or the
+    every write goes through one of two pinned staging buffers on the data stream and lands in its slice one
+    write later. Writes go straight through when the target is on the device, the device has no streams or the
     buffers can't be pinned."""
 
     def __init__(self, device, target, shape):
@@ -1748,7 +1748,7 @@ class HostWriter:
         self.staging = []
         self.pending = [None, None]
         self.slot = 0
-        self.stream = get_offload_stream(device) if is_device_cpu(target.device) else None
+        self.stream = get_data_stream(device) if is_device_cpu(target.device) else None
         if self.stream is not None:
             for _ in range(2):
                 buffer = torch.empty(shape, dtype=target.dtype)
