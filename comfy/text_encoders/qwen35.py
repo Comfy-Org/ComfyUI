@@ -497,8 +497,6 @@ class GatedAttention(nn.Module):
         self.comfy_attention = ComfyAttention()
 
     def kv_cache_type(self, device, dtype):
-        if llm_state_cache.enabled():
-            return FixedKVCache  # the prompt state cache continues prefills from a cached prefix; int8 can't
         method = self.comfy_attention.method
         if method == "comfy_kitchen_int8" or method is None and comfy.model_management.comfy_kitchen_attention_enabled():
             if dtype == torch.bfloat16 and self.head_dim == 256 and int8_decode_is_available(device):
@@ -997,10 +995,9 @@ class Qwen35(BaseLlama, BaseGenerate, torch.nn.Module):
         generator = torch.Generator(device=device).manual_seed(sampling["seed"]) if sampling is not None else None
         if cache_ids is not None:
             # the prompt state cache: a resident state with the longest matching prefix, prefilled to the end of the prompt
-            cache, x = llm_state_cache.prefill(self, embeds, cache_ids, cap,
-                                               lambda e, kv, p: self.model.forward(None, embeds=e, attention_mask=None, past_key_values=kv, position_ids=p)[0],
-                                               position_ids=position_ids)
-            cap = cache.caches[self.model.config.layer_types.index("full_attention")].key.shape[2]
+            cache, x, cap = llm_state_cache.prefill(self, embeds, cache_ids, cap,
+                                                    lambda e, kv, p: self.model.forward(None, embeds=e, attention_mask=None, past_key_values=kv, position_ids=p)[0],
+                                                    position_ids=position_ids)
         else:
             cache = model_state.load(self.init_kv_cache(embeds.shape[0], cap, device, dt, mtp=True), device)
             self.restore_generation_state(state, cache, generator)

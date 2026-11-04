@@ -500,22 +500,22 @@ def test_long_continuation_prefills_in_one_batch(monkeypatch, tmp_path, mtp):
 
 
 class _ExactPacked:
-    # Int8DecodeCache stand-in that pages exact rows, 4 per page, so a continued int8 prefill can be checked
+    # Int8DecodeCache stand-in that pages exact rows, `page` per page, so a continued int8 prefill can be checked
     # against bf16. A refresh reads only what the kernel may: the last two pages, from the circular window.
-    dim = 64
+    dim, page = 64, 4
 
     def __init__(self, batch, heads, capacity, device):
-        shape = (batch, (capacity + 3) // 4, heads, 4, self.dim)
+        shape = (batch, -(-capacity // self.page), heads, self.page, self.dim)
         self.key, self.value = torch.zeros(shape, device=device), torch.zeros(shape, device=device)
-        self.key_scale, self.value_scale = torch.zeros(1, device=device), torch.zeros(1, device=device)
+        self.key_scale, self.value_scale = (torch.zeros(shape[:3] + (1,), device=device) for _ in range(2))  # per page, as the kernel's
 
     def update(self, key, value, length, initialize=False):
-        n = int(length.item())
-        first = 0 if initialize else max(0, (n - 1) // 4 * 4 - 4)
+        n, page = int(length.item()), self.page
+        first = 0 if initialize else max(0, (n - 1) // page * page - page)
         for i in range(first, n):
             src = i if initialize else i % key.shape[2]
-            self.key[:, i // 4, :, i % 4] = key[:, :, src]
-            self.value[:, i // 4, :, i % 4] = value[:, :, src]
+            self.key[:, i // page, :, i % page] = key[:, :, src]
+            self.value[:, i // page, :, i % page] = value[:, :, src]
 
     def attend(self, query, length):
         n = int(length.item())

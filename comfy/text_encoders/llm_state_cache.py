@@ -15,7 +15,7 @@ once to a file named by the hash of its tokens, if no such file exists, and a ne
 starts from it.
 
 COMFY_LLM_PREFIX_CACHE: off (default) | on.
-Attention uses the bf16 FixedKVCache while the cache is on: Int8FixedKVCache can't continue a prefill from a prefix.
+With the int8 KV cache, a state resumes only where its bf16 window still holds the two pages before the resume point.
 """
 import contextlib
 import hashlib
@@ -71,6 +71,8 @@ class _Entry:
         self.checkpoints = {}
         self.file = None
         self.used = 0
+        self.window = _int8_window(state.patcher.model) if state is not None else None  # (rows, page) for an int8 cache
+        self.written = 0  # rows written past the committed ones (draft rows included) bound what the window still holds
 
     def nbytes(self):
         n = sum(c.nbytes + r.nbytes for st in self.checkpoints.values() for c, r in st.values())
@@ -79,8 +81,24 @@ class _Entry:
         return n
 
 
-def _model_key(model, dtype):
-    return f"{getattr(model, 'model_type', type(model).__name__)}|{dtype}"
+def _model_key(model, dtype, device):
+    from .qwen35 import GatedAttention
+    attn = next(m for m in model.modules() if isinstance(m, GatedAttention))
+    return f"{getattr(model, 'model_type', type(model).__name__)}|{dtype}|{attn.kv_cache_type(device, dtype).__name__}"
+
+
+def _int8_window(kvm):
+    from .llama import Int8FixedKVCache
+    kv = next((kv for kv in kvm.caches if isinstance(kv, Int8FixedKVCache)), None)
+    return None if kv is None else (kv.key.shape[2], kv.packed.key.shape[3])
+
+
+def _resumable(entry, pos):
+    """An int8 cache refreshes its pages from the bf16 window: the two pages before pos must still be in it."""
+    if entry.window is None:
+        return True
+    rows, page = entry.window
+    return entry.written - rows <= max(0, (pos - 1) // page * page - page)
 
 
 def _lcp(a, b):
@@ -100,7 +118,7 @@ def _best(key, ids):
         if e.key != key:
             continue
         lcp = _lcp(ids, e.ids)
-        usable = [p for p in e.checkpoints if p <= min(lcp, limit_all)]
+        usable = [p for p in e.checkpoints if p <= min(lcp, limit_all) and _resumable(e, p)]
         if usable and max(usable) > best_pos:
             best, best_pos = e, max(usable)
     return best, best_pos
@@ -166,8 +184,8 @@ def _capacity(need):
 
 
 def _padded(tensors, model_sd):
-    """CPU tensors shaped like model_sd: equal shapes pass through, attention caches (capacity on dim 2) are copied into
-    zeros of the new capacity, cut to it if longer."""
+    """CPU tensors shaped like model_sd: equal shapes pass through, attention caches (capacity on dim 2, int8 pages on
+    dim 1) are copied into zeros of the new capacity, cut to it if longer."""
     out = {}
     for name, like in model_sd.items():
         t = tensors.get(name)
@@ -177,10 +195,16 @@ def _padded(tensors, model_sd):
             out[name] = t
         else:
             z = torch.zeros(like.shape, dtype=like.dtype)
-            n = min(t.shape[2], like.shape[2])
-            z[:, :, :n] = t[:, :, :n]
+            common = tuple(slice(0, min(a, b)) for a, b in zip(t.shape, like.shape))
+            z[common] = t[common]
             out[name] = z
     return out
+
+
+def _in_use(patcher, flag):
+    # only a dynamic-VRAM patcher pins for the current prompt (none on a CPU device)
+    if patcher.is_dynamic():
+        patcher.set_in_use_by_current_prompt(flag)
 
 
 def _load(model, capacity, device, dtype, tensors=None):
@@ -191,30 +215,38 @@ def _load(model, capacity, device, dtype, tensors=None):
     if tensors:
         state.tensors = _padded(tensors, kvm.state_dict())
     state.load(kvm, device)
-    state.patcher.set_in_use_by_current_prompt(True)
+    _in_use(state.patcher, True)
     return state, kvm
 
 
 def _activate(entry, device):
     import comfy.model_management
     comfy.model_management.load_models_gpu([entry.state.patcher])
-    entry.state.patcher.set_in_use_by_current_prompt(True)
+    _in_use(entry.state.patcher, True)
     return entry.state.patcher.model
 
 
-def _attention_names(kvm):
-    """State-dict names of the attention caches (capacity on dim 2), the MTP layer's included."""
+def _attention_layout(kvm):
+    """{state-dict name: (dim, rows per slot)} of the attention caches, the MTP layer's included: capacity on dim 2 (an
+    int8 cache's bf16 window too: row r sits in slot r % window), an int8 cache's pages on dim 1."""
     from .qwen35 import LinearKV
-    out = set()
+    out = {}
     for i, kv in enumerate(kvm.caches + kvm.extra_caches):
-        if not isinstance(kv, LinearKV):
-            out.update((f"layers.{i}.key.weight", f"layers.{i}.value.weight"))
+        if isinstance(kv, LinearKV):
+            continue
+        for key in kv.state_tensors():
+            out[f"layers.{i}.{key}.weight"] = (1, kv.packed.key.shape[3]) if key.startswith("packed_") else (2, 1)
     return out
+
+
+def _trimmed(t, n, layout):
+    dim, unit = layout
+    return t.narrow(dim, 0, min(t.shape[dim], -(-n // unit))).contiguous()
 
 
 def _trimmed_tensors(state_tensors, n, attention):
     """A state's CPU tensors with the attention caches cut to the n tokens used (the rest is masked anyway)."""
-    return {name: t[:, :, :n].contiguous() if name in attention else t for name, t in state_tensors.items()}
+    return {name: _trimmed(t, n, attention[name]) if name in attention else t for name, t in state_tensors.items()}
 
 
 def _file_tensors(entry_tensors, checkpoints):
@@ -259,7 +291,7 @@ def _spill(entry):
     """Save a resident entry to a file and free its state; its next match loads the file."""
     t = time.perf_counter()
     state = entry.state
-    attention = _attention_names(state.patcher.model)
+    attention = _attention_layout(state.patcher.model)
     state.flush()
     n = len(entry.ids)
     path = os.path.join(CACHE_DIR, f"spill-{os.getpid()}-{id(entry)}.safetensors")
@@ -320,7 +352,7 @@ def _take(model, key, ids, need, device, dtype):
             entry.checkpoints = {p: cps[p] for p in cps if p in entry.checkpoints}
             stats["restore"] = "from-disk"
         elif entry.capacity < need:
-            attention = _attention_names(entry.state.patcher.model)
+            attention = _attention_layout(entry.state.patcher.model)
             entry.state.flush()
             cap = _capacity(need)
             tensors = _trimmed_tensors(entry.state.tensors, n, attention)
@@ -340,6 +372,7 @@ def _take(model, key, ids, need, device, dtype):
         tensors, cps, _ = _read(path)
         state, kvm = _load(model, cap, device, dtype, tensors)
         entry = _Entry(key, state, cap)
+        entry.written = start
         entry.checkpoints = {start: cps[start]}
         _restore_linear(model, kvm, cps[start], device)
         _set_index(kvm, start)
@@ -407,13 +440,13 @@ _current = {}
 
 
 def prefill(model, embeds, ids, need, forward, position_ids=None):
-    """Prefill the whole prompt `embeds`, reusing a cached prefix of `ids`. Returns (cache model, x of the last position).
+    """Prefill the whole prompt `embeds`, reusing a cached prefix of `ids`. Returns (cache model, x of the last position, capacity).
     `forward(embeds, caches, position_ids)` runs one segment."""
     if _current:
         abort()  # the previous generate failed after its prefill
     stats.clear()
     device, dtype = embeds.device, embeds.dtype
-    key = _model_key(model, dtype)
+    key = _model_key(model, dtype, device)
     entry, kvm, n = _take(model, key, ids, need, device, dtype)
     stats.update(prompt_len=len(ids), prefix_len=n)
     start, x = n, None
@@ -429,8 +462,9 @@ def prefill(model, embeds, ids, need, forward, position_ids=None):
         keep = keep[:1] + keep[-(CKPT_RECENT + 2):]
         entry.checkpoints = {p: entry.checkpoints[p] for p in keep}
     entry.ids = list(ids)
+    entry.written = len(ids)
     _current.update(entry=entry, kvm=kvm, device=device, model=model)
-    return kvm, x
+    return kvm, x, entry.capacity
 
 
 def _save_shared_start(model, kvm, key, ids, pos, linear_states, device):
@@ -440,11 +474,13 @@ def _save_shared_start(model, kvm, key, ids, pos, linear_states, device):
         return
     linear = _linear(kvm)
     attn = {i: kv for i, kv in enumerate(kvm.caches) if i not in linear}
+    layout = _attention_layout(kvm)
     tensors = {}
     with _cast(model, attn.values(), device):
         for i, kv in attn.items():
-            tensors[f"layers.{i}.key.weight"] = kv.key[:, :, :pos].to("cpu", copy=True)
-            tensors[f"layers.{i}.value.weight"] = kv.value[:, :, :pos].to("cpu", copy=True)
+            for key, (owner, field) in kv.state_tensors().items():
+                name = f"layers.{i}.{key}.weight"
+                tensors[name] = _trimmed(getattr(owner, field), pos, layout[name]).to("cpu", copy=True)
     _write(path, _file_tensors(tensors, {pos: linear_states}), {"key": key, "ids": _ids_json(ids[:pos])})
     stats["shared_start_saved"] = True
 
@@ -452,6 +488,7 @@ def _save_shared_start(model, kvm, key, ids, pos, linear_states, device):
 def finish(ids, generated):
     """Checkpoint the prompt plus the generated tokens the DeltaNet state has committed, keep the state resident, and
     spill others past the budget."""
+    from . import llama
     entry, kvm, device, model = (_current.get(k) for k in ("entry", "kvm", "device", "model"))
     _current.clear()
     if entry is None:
@@ -465,7 +502,8 @@ def finish(ids, generated):
     if len(ids) < idx <= len(full):
         entry.checkpoints[idx] = _snapshot(model, kvm, device)
         entry.ids = full[:idx]
-    entry.state.patcher.set_in_use_by_current_prompt(False)
+    entry.written = max(kv.index for kv in kvm.caches) + llama.SPEC_ROWS  # a verify step writes up to SPEC_ROWS rows ahead
+    _in_use(entry.state.patcher, False)
     _tick[0] += 1
     entry.used = _tick[0]
     _entries.append(entry)
