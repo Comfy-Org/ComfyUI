@@ -16,6 +16,7 @@ from comfy.quant_ops import QuantizedTensor
 from comfy.ldm.modules.attention import AttentionTensorContainer, ComfyAttention, optimized_attention_for_device
 from comfy import sd1_clip
 import comfy.text_encoders.qwen_vl
+from . import llm_state_cache
 
 from .llama import SPEC_ROWS, BaseLlama, BaseGenerate, FixedKV, FixedKVCache, Int8FixedKVCache, KVCacheModel, Llama2_, MLP, RMSNorm, apply_penalty, apply_rope, penalty_active, precompute_freqs_cis, rope_matrix
 
@@ -496,6 +497,8 @@ class GatedAttention(nn.Module):
         self.comfy_attention = ComfyAttention()
 
     def kv_cache_type(self, device, dtype):
+        if llm_state_cache.enabled():
+            return FixedKVCache  # the prompt state cache continues prefills from a cached prefix; int8 can't
         method = self.comfy_attention.method
         if method == "comfy_kitchen_int8" or method is None and comfy.model_management.comfy_kitchen_attention_enabled():
             if dtype == torch.bfloat16 and self.head_dim == 256 and int8_decode_is_available(device):
@@ -977,9 +980,9 @@ class Qwen35(BaseLlama, BaseGenerate, torch.nn.Module):
                         "presence_penalty": kwargs.get("presence_penalty", 0.0) or 0.0,
                         "seed": seed if seed is not None else 42}
         return self._generate_mtp(embeds, max_length, stop_tokens, mtp, sampling=sampling, position_ids=kwargs.get("position_ids"),
-                                  model_state=kwargs.get("model_state"))
+                                  model_state=kwargs.get("model_state"), cache_ids=kwargs.get("cache_ids"))
 
-    def _generate_mtp(self, embeds, max_length, stop_tokens, mtp, sampling=None, position_ids=None, model_state=None):
+    def _generate_mtp(self, embeds, max_length, stop_tokens, mtp, sampling=None, position_ids=None, model_state=None, cache_ids=None):
         device = embeds.device
         cfg = self.model.config
         if stop_tokens is None:
@@ -992,8 +995,15 @@ class Qwen35(BaseLlama, BaseGenerate, torch.nn.Module):
         past_length = state.get("length", 0)
         cap = self.cache_capacity(past_length + embeds.shape[1] + max_length + 7, state)
         generator = torch.Generator(device=device).manual_seed(sampling["seed"]) if sampling is not None else None
-        cache = model_state.load(self.init_kv_cache(embeds.shape[0], cap, device, dt, mtp=True), device)
-        self.restore_generation_state(state, cache, generator)
+        if cache_ids is not None:
+            # the prompt state cache: a resident state with the longest matching prefix, prefilled to the end of the prompt
+            cache, x = llm_state_cache.prefill(self, embeds, cache_ids, cap,
+                                               lambda e, kv, p: self.model.forward(None, embeds=e, attention_mask=None, past_key_values=kv, position_ids=p)[0],
+                                               position_ids=position_ids)
+            cap = cache.caches[self.model.config.layer_types.index("full_attention")].key.shape[2]
+        else:
+            cache = model_state.load(self.init_kv_cache(embeds.shape[0], cap, device, dt, mtp=True), device)
+            self.restore_generation_state(state, cache, generator)
         pkv = cache.caches
         # repair window: drafting ahead plus a near-full rollback
         mtp_kv = cache.extra_caches[0]
@@ -1019,7 +1029,8 @@ class Qwen35(BaseLlama, BaseGenerate, torch.nn.Module):
         # cross-step state lives in static carriers: nothing allocated inside a step may outlive it
         nt_buf = torch.empty((embeds.shape[0], 1), device=device, dtype=torch.long)
         h_buf = torch.empty((embeds.shape[0], 1, cfg.hidden_size), device=device, dtype=dt)
-        x, _, _ = self.prefill(embeds, pkv, position_ids)
+        if cache_ids is None:
+            x, _, _ = self.prefill(embeds, pkv, position_ids)
         lg0 = self.logits(x)[:, -1]
         pen_mask = torch.zeros((lg0.shape[-1],), device=device, dtype=torch.bool) if penalized else None
         if penalized and "penalty_tokens" in state:
@@ -1257,6 +1268,9 @@ class Qwen35(BaseLlama, BaseGenerate, torch.nn.Module):
             # A resumed cache decodes as a chain until its next verify installs a tree.
             for kv in pkv:
                 (kv.ctl_tracker if isinstance(kv, LinearKV) else kv.tracker)["tree"] = None
+        if cache_ids is not None:
+            llm_state_cache.finish(cache_ids, ids)
+            return ids
         self.save_generation_state(state, cache, ids, generator, cap, pkv[0].index + rope_offset)
         return ids
 
@@ -1370,9 +1384,15 @@ class Qwen35ClipModel(sd1_clip.SDClipModel):
         position_ids = comfy.text_encoders.qwen_vl.qwen2vl_mrope_position_ids(embeds_info, embeds.shape[1], embeds.device)
         if resume:
             position_ids = torch.arange(state["position"], state["position"] + embeds.shape[1], device=embeds.device).unsqueeze(0)
+        extra = {}
+        if llm_state_cache.enabled() and not state and mtp and len(tokens_only) == 1:
+            # no explicit state: the prompt state cache finds a matching prefix itself (image positions are hashed)
+            cache_ids = llm_state_cache.prompt_ids(tokens_only[0], embeds_info, embeds.shape[1])
+            if cache_ids is not None:
+                extra["cache_ids"] = cache_ids
         return self.transformer.generate(embeds, do_sample, max_length, temperature, top_k, top_p, min_p, repetition_penalty, seed,
                                          presence_penalty=presence_penalty, position_ids=position_ids, mtp=mtp,
-                                         model_state=self.model_state)
+                                         model_state=self.model_state, **extra)
 
 
 class Qwen35TEModel(sd1_clip.SD1ClipModel):
