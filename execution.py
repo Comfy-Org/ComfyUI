@@ -650,6 +650,8 @@ async def execute(server: "ExecutionServer", dynprompt, caches, current_item, ex
             comfy.model_management.unload_all_models()
         elif isinstance(ex, RuntimeError) and ("mat1 and mat2 shapes" in str(ex)) and "Sampler" in class_type:
             tips = "\n\nTIPS: If you have any \"Load CLIP\" or \"*CLIP Loader\" nodes in your workflow connected to this sampler node make sure the correct file(s) and type is selected."
+        elif isinstance(ex, TypeError) and "Cannot handle this data type: (1, 1," in str(ex) and "|u1" in str(ex):
+            tips = "\n\nTIPS: This can happen when 'pixel_space' is selected in the Load VAE node. Select the VAE that matches your model instead."
 
         error_details = {
             "node_id": real_node_id,
