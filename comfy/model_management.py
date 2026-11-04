@@ -1834,7 +1834,10 @@ def get_free_memory(dev=None, torch_free_too=False):
             stats = torch.xpu.memory_stats(dev)
             mem_active = stats['active_bytes.all.current']
             mem_reserved = stats['reserved_bytes.all.current']
-            mem_free_xpu = torch.xpu.get_device_properties(dev).total_memory - mem_reserved
+            if hasattr(torch.xpu, "mem_get_info"):
+                mem_free_xpu, _ = torch.xpu.mem_get_info(dev)
+            else:
+                mem_free_xpu = torch.xpu.get_device_properties(dev).total_memory - mem_reserved
             mem_free_torch = mem_reserved - mem_active
             mem_free_total = mem_free_xpu + mem_free_torch
         elif is_ascend_npu():
