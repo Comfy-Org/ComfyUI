@@ -1297,14 +1297,15 @@ def test_sensenova_text_encode_leaves_image_thinking_to_generate():
 
 @pytest.mark.parametrize("with_reference", [False, True])
 @pytest.mark.parametrize("storage_dtype", [torch.float32, torch.float8_e4m3fn])
-@pytest.mark.parametrize("max_tokens,compute_dtype,text_bytes,reference_bytes", [
-    (32, torch.float32, 16_171_008, 19_267_584),
-    (8192, torch.float32, 2_823_733_248, 2_826_829_824),
-    (32, torch.bfloat16, 8_085_504, 9_633_792),
-    (8192, torch.bfloat16, 1_411_866_624, 1_413_414_912),
+@pytest.mark.parametrize("max_tokens,compute_dtype,text_padding,text_bytes,reference_bytes", [
+    (32, torch.float32, 0, 16_171_908, 19_269_888),
+    (8192, torch.float32, 0, 2_823_734_148, 2_826_832_128),
+    (32, torch.bfloat16, 0, 8_085_954, 9_634_944),
+    (8192, torch.bfloat16, 0, 1_411_867_074, 1_413_416_064),
+    (32, torch.bfloat16, 4096, 746_529_218, 748_225_664),
 ])
 def test_sensenova_generate_returns_prefix_conditioning_and_text(
-    monkeypatch, with_reference, storage_dtype, max_tokens, compute_dtype, text_bytes, reference_bytes,
+    monkeypatch, with_reference, storage_dtype, max_tokens, compute_dtype, text_padding, text_bytes, reference_bytes,
 ):
     calls = []
     memory_budgets = []
@@ -1357,10 +1358,12 @@ def test_sensenova_generate_returns_prefix_conditioning_and_text(
         "load_models_gpu",
         load_model,
     )
+    input_ids = _generation_input_ids()[:, :-1]
+    input_ids = torch.cat((input_ids[:, :3], input_ids.new_full((1, text_padding), 2), input_ids[:, 3:]), dim=1)
     conditioning = [[
         torch.empty(1),
         {
-            "text_input_ids": _generation_input_ids()[:, :-1],
+            "text_input_ids": input_ids,
             "sensenova_thinking": True,
             "reference_latents": [torch.ones(1, 33, 65, 3)] if with_reference else [],
         },
@@ -1373,7 +1376,7 @@ def test_sensenova_generate_returns_prefix_conditioning_and_text(
     )
 
     updated, thinking, negative, image_requested = output.args
-    # 15 text positions, plus 9 for the 2x3 reference grid, followed by decode capacity.
+    # Prefix mask plus KV: 15 text positions + padding, plus 9 for the 2x3 reference grid.
     assert memory_budgets == [reference_bytes if with_reference else text_bytes]
     assert thinking == "  plan the composition"
     assert negative == []
@@ -1384,7 +1387,7 @@ def test_sensenova_generate_returns_prefix_conditioning_and_text(
     assert not {"prefix_keys", "prefix_values", "prefix_time"} & metadata.keys()
     assert metadata["reference_latents"] is conditioning[0][1]["reference_latents"]
     assert metadata["sensenova_thinking"] is False
-    assert conditioning[0][1]["text_input_ids"].shape[1] == 15
+    assert conditioning[0][1]["text_input_ids"].shape[1] == 15 + text_padding
     assert conditioning[0][1]["sensenova_thinking"] is True
     prefix_call = next(item for item in calls if isinstance(item, tuple))
     if with_reference:
@@ -1737,7 +1740,7 @@ def test_sensenova_generate_uses_inference_dtype(
 
 
 @pytest.mark.parametrize("patch_dtype,expected_bytes", [
-    (torch.float32, 4_472_832), (torch.bfloat16, 2_236_416), (None, 2_236_416),
+    (torch.float32, 4_472_932), (torch.bfloat16, 2_236_466), (None, 2_236_466),
 ])
 def test_sensenova_generate_uses_pending_compute_dtype_patch(monkeypatch, patch_dtype, expected_bytes):
     compute_dtype = patch_dtype or torch.bfloat16
@@ -2599,7 +2602,7 @@ def test_sensenova_interleave_generate_can_resume_after_ksampler(monkeypatch, st
     assert second_positive[0][1]["reference_latents"][0][0, 0, :2, 0].tolist() == [-0.5, 1.5]
     assert second_positive[0][1]["sensenova_interleave_pending_image"] is False
     # The second prefix already contains the sampled image's two patch tokens.
-    assert memory_budgets == [3_440_640, 5_160_960]
+    assert memory_budgets == [3_440_656, 5_161_156]
     assert calls == ["load", "pre_run", "cleanup", "load", "pre_run", "cleanup"]
 
     for _ in range(3):

@@ -418,12 +418,14 @@ def append_interleave_image(metadata, latent_samples):
 
 @contextmanager
 def _generation_context(model, metadata, max_tokens):
-    prefix_length = model.model.extra_conds_shapes(**metadata)["prefix_mask"][-1]
+    prefix_shape = model.model.extra_conds_shapes(**metadata)["prefix_mask"]
+    prefix_length = prefix_shape[-1]
     dtype_size = comfy.model_management.dtype_size(
         model.get_model_object("manual_cast_dtype") or model.model.get_dtype()
     )
     kv_bytes = 2 * NUM_LAYERS * NUM_KV_HEADS * HEAD_DIM * (prefix_length + max_tokens) * dtype_size
-    comfy.model_management.load_models_gpu([model], memory_required=kv_bytes)
+    mask_bytes = math.prod(prefix_shape) * dtype_size
+    comfy.model_management.load_models_gpu([model], memory_required=kv_bytes + mask_bytes)
     with comfy.model_management.cuda_device_context(model.load_device):
         try:
             model.pre_run()
