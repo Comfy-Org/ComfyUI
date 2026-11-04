@@ -409,11 +409,19 @@ class GatedDeltaNet(nn.Module):
         a = self.in_proj_a(x)
 
         # Conv1d
-        if past_key_value is not None:
-            conv_state = past_key_value.conv_state
-            conv_state_init = F.pad(mixed_qkv, (self.conv_kernel_size - mixed_qkv.shape[-1], 0))
-            conv_state.copy_(conv_state_init[:, :, -conv_state.shape[-1]:])
-        mixed_qkv = F.silu(self.conv1d(mixed_qkv)[:, :, :seq_len])
+        continuing = past_key_value is not None and past_key_value.index > 0
+        if continuing:
+            # a prefill continuing a resumed state: the conv window starts from the cached one
+            window = torch.cat([past_key_value.conv_state, mixed_qkv], dim=-1)
+            past_key_value.conv_state.copy_(window[:, :, -past_key_value.conv_state.shape[-1]:])
+            with comfy.ops.CastBiasWeightContext(self.conv1d, window, offloadable=True) as (conv_weight, conv_bias):
+                mixed_qkv = F.silu(F.conv1d(window, conv_weight, conv_bias, groups=self.conv1d.groups))
+        else:
+            if past_key_value is not None:
+                conv_state = past_key_value.conv_state
+                conv_state_init = F.pad(mixed_qkv, (self.conv_kernel_size - mixed_qkv.shape[-1], 0))
+                conv_state.copy_(conv_state_init[:, :, -conv_state.shape[-1]:])
+            mixed_qkv = F.silu(self.conv1d(mixed_qkv)[:, :, :seq_len])
 
         # Split QKV and compute beta/g
         mixed_qkv = mixed_qkv.transpose(1, 2)  # [B, seq_len, conv_dim]
@@ -434,7 +442,7 @@ class GatedDeltaNet(nn.Module):
         # Delta rule
         core_attn_out, last_recurrent_state = torch_chunk_gated_delta_rule(
             query, key, value, g=g, beta=beta,
-            initial_state=None,
+            initial_state=past_key_value.recurrent_state if continuing else None,
             output_final_state=past_key_value is not None,
         )
 
@@ -529,6 +537,8 @@ class GatedAttention(nn.Module):
         if decode and (isinstance(past_key_value, Int8FixedKVCache) or
                        self.comfy_attention.method is None and not comfy.model_management.comfy_kitchen_attention_enabled()):
             output = past_key_value.attend(xq, xk, xv)
+        elif not decode and isinstance(past_key_value, Int8FixedKVCache) and past_key_value.index > 0:
+            output = past_key_value.extend(xq, xk, xv)  # a prefill continuing a resumed state
         else:
             if decode:
                 xk, xv = past_key_value.key, past_key_value.value
@@ -900,10 +910,10 @@ class Qwen35(BaseLlama, BaseGenerate, torch.nn.Module):
         return super().forward(x, attention_mask=attention_mask, embeds=embeds, num_tokens=num_tokens, intermediate_output=intermediate_output, final_layer_norm_intermediate=final_layer_norm_intermediate, dtype=dtype, position_ids=position_ids, past_key_values=past_key_values)
 
     def prefill(self, embeds, past_key_values, position_ids=None, **kwargs):
-        if past_key_values[0].index == 0:
+        if past_key_values[0].index == 0 or self.batched_continue(embeds.shape[1], past_key_values):
             return super().prefill(embeds, past_key_values, position_ids, **kwargs)
-        # Resumed DeltaNet must preserve its recurrent and convolution state, so the new
-        # tokens go through the deferred decode kernels in rows of 1, 4 or 8. A multi-row
+        # Otherwise the new tokens go through the deferred decode kernels in rows of 1, 4 or 8,
+        # which also commit any rows the saved state left uncommitted. A multi-row
         # chunk is a verify tree that is one chain: each row attends and commits after the
         # row before it.
         kwargs.pop("decode_buffers", None)
@@ -923,6 +933,29 @@ class Qwen35(BaseLlama, BaseGenerate, torch.nn.Module):
         for tracker in trackers:
             tracker["tree"] = None
         return result
+
+    @staticmethod
+    def batched_continue(num_tokens, past_key_values):
+        # A resumed state continues as one batched prefill when no DeltaNet rows wait for a commit;
+        # up to SPEC_ROWS tokens would take the decode path inside the layers.
+        return num_tokens > SPEC_ROWS and all(kv.uncommitted == 0 for kv in past_key_values if isinstance(kv, LinearKV))
+
+    def save_generation_state(self, state, cache, ids, generator, capacity, position):
+        # The last step's accepted tokens sit in the attention caches but not yet in the DeltaNet state
+        # (deferred commit). Save the state before them and re-feed them with the pending token, so the
+        # next turn can continue as one batched prefill.
+        pkv = cache.caches
+        replay = next((kv.uncommitted for kv in pkv if isinstance(kv, LinearKV)), 0)
+        if 0 < replay < len(ids):
+            for kv in pkv:
+                kv.index -= replay
+                if isinstance(kv, LinearKV):
+                    kv.uncommitted = 0
+                    kv.ctl_tracker["path"] = None
+            super().save_generation_state(state, cache, ids, generator, capacity, position - replay)
+            state["pending"] = ids[-1 - replay:]
+            return
+        super().save_generation_state(state, cache, ids, generator, capacity, position)
 
     def cache_capacity(self, needed, state):
         # a saved state fixes its capacity when first created, rounded up so later turns fit

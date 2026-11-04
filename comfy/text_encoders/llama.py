@@ -183,6 +183,48 @@ class Int8FixedKVCache(FixedKVState):
         mask = tree.mask if tree is not None else self.chain_mask[:seq]
         return comfy_kitchen.flash_attention_decode_tree_merge(out, lse, xq, xk, xv, mask, torch.empty_like(out))
 
+    def extend(self, xq, xk, xv):
+        # A prefill continuing a resumed prefix: the new rows attend the quantized prefix through the
+        # decode kernel and each other causally, then the quantized pages grow one page per update.
+        start, seq = self.index, xk.shape[2]
+        length = torch.full_like(self.position[:1], start)
+        self.packed.update(self.key, self.value, length)
+        step = max(1, 64 // (xq.shape[1] // xk.shape[1]))  # query rows per call, no more than a verify step uses
+        parts = [self.packed.attend(xq[:, :, r:r + step].contiguous(), length) for r in range(0, seq, step)]
+        out = causal_merge(torch.cat([o for o, _ in parts], dim=1), torch.cat([lse for _, lse in parts], dim=2), xq, xk, xv)
+        window, page = self.key.shape[2], self.packed.key.shape[3]
+        pos = start
+        while pos < start + seq:
+            end = min(start + seq, (pos // page + 1) * page)
+            slots = torch.arange(pos, end, device=xk.device).remainder(window)
+            self.key.index_copy_(2, slots, xk[:, :, pos - start:end - start])
+            self.value.index_copy_(2, slots, xv[:, :, pos - start:end - start])
+            self.packed.update(self.key, self.value, torch.full_like(length, end))
+            pos = end
+        return out
+
+
+def causal_merge(out, lse, q, k, v, chunk=512):
+    """Fold rows' causal attention over each other into their attention over a prefix.
+
+    out [B, S, H*D] and lse [B, H, S] are every row's attention over the prefix; q [B, H, S, D] and
+    k/v [B, Hk, S, D] the rows themselves. Row i also attends rows <= i. Returns [B, S, H*D]."""
+    batch, heads, rows, dim = q.shape
+    kf = k.float().repeat_interleave(heads // k.shape[1], dim=1)
+    vf = v.float().repeat_interleave(heads // k.shape[1], dim=1)
+    merged = torch.empty_like(out)
+    for r in range(0, rows, chunk):
+        n = min(chunk, rows - r)
+        scores = torch.matmul(q[:, :, r:r + n].float(), kf[:, :, :r + n].transpose(-1, -2)) * dim ** -0.5
+        scores.masked_fill_(torch.ones(n, r + n, dtype=torch.bool, device=q.device).triu_(r + 1), float("-inf"))
+        m = torch.maximum(lse[:, :, r:r + n], scores.amax(-1))
+        w_prefix = torch.exp(lse[:, :, r:r + n] - m)
+        w = torch.exp(scores - m.unsqueeze(-1))
+        acc = out[:, r:r + n].view(batch, n, heads, dim).transpose(1, 2).float() * w_prefix.unsqueeze(-1) + torch.matmul(w, vf[:, :, :r + n])
+        merged[:, r:r + n] = (acc / (w_prefix + w.sum(-1)).unsqueeze(-1)).transpose(1, 2).reshape(batch, n, heads * dim).to(out.dtype)
+    return merged
+
+
 class KVCacheModel(nn.Module):
     comfy_writable = True
 
@@ -1075,7 +1117,8 @@ class Llama2_(nn.Module):
 
         spec_decode = fixed_kv and any(isinstance(kv, FixedKVState) for kv in past_key_values) and 2 <= seq_len <= SPEC_ROWS and past_len > 0 and attention_mask is None
         if seq_len > 1 and not spec_decode:  # spec verify: the staircase decode bias is causal
-            causal_mask = torch.empty(past_len + seq_len, past_len + seq_len, dtype=x.dtype, device=x.device).fill_(torch.finfo(x.dtype).min / 4).triu_(1)
+            # rows are this call's tokens, columns the cached prefix plus them (a prefill continuing a prefix)
+            causal_mask = torch.empty(seq_len, past_len + seq_len, dtype=x.dtype, device=x.device).fill_(torch.finfo(x.dtype).min / 4).triu_(past_len + 1)
             if mask is not None:
                 mask += causal_mask
             else:
