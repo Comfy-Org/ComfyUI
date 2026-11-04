@@ -4,6 +4,7 @@ import nodes
 import asyncio
 import inspect
 from comfy_execution.graph_utils import is_link, ExecutionBlocker
+from comfy_execution.failure_kind import FAILURE_KIND_DEPENDENCY_CYCLE, failure_metadata
 from comfy.comfy_types.node_typing import ComfyNodeABC, InputTypeDict, InputTypeOptions
 from comfy_api.internal import _ComfyNodeInternal
 from comfy_api.latest import _io
@@ -311,7 +312,8 @@ class ExecutionList(TopologicalSort):
                 "exception_message": str(ex),
                 "exception_type": "graph.DependencyCycleError",
                 "traceback": [],
-                "current_inputs": []
+                "current_inputs": [],
+                **failure_metadata(FAILURE_KIND_DEPENDENCY_CYCLE),
             }
             return None, error_details, ex
 

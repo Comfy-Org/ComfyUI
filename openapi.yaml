@@ -310,12 +310,42 @@ components:
                 exception_type:
                     description: Python exception type (e.g., "RuntimeError")
                     type: string
+                failure_kind:
+                    description: >-
+                        Machine-readable failure classification, so clients do not have to regex the
+                        human-readable message. One of out_of_memory, shape_mismatch, interrupted,
+                        execution_blocked, dependency_cycle, internal. Absent on servers that predate
+                        this field, so clients must treat it as optional and keep their text fallback.
+                    enum:
+                        - out_of_memory
+                        - shape_mismatch
+                        - interrupted
+                        - execution_blocked
+                        - dependency_cycle
+                        - internal
+                    type: string
+                hints:
+                    description: >-
+                        Human-readable diagnostic lines describing the failure class. These are
+                        facts about what went wrong, not retry advice: the server does not know the
+                        client's resolution, batch size or free VRAM. Replacement for the advice
+                        that used to be appended to exception_message.
+                    items:
+                        type: string
+                    type: array
                 node_id:
                     description: ID of the node that failed
                     type: string
                 node_type:
                     description: Type name of the node (e.g., "KSampler")
                     type: string
+                retryable:
+                    description: >-
+                        True when this class of failure has some chance of succeeding under different
+                        resource conditions. It does NOT mean retrying the same request will work:
+                        an out-of-memory failure while sampling is retryable in this sense yet will
+                        fail again if the batch size is unchanged.
+                    type: boolean
                 traceback:
                     description: Array of traceback lines (empty array if not available)
                     items:
