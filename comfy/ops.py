@@ -1130,7 +1130,7 @@ def linear_input_act_(x, weight, bias, input_act=None, act_weight=None, act_eps=
 
 # Grouped-scale integer weights that run through the shared INT8 GEMM (comfy_kitchen
 # AsymW4A8Int8Layout): format -> code width, which also fixes the packed weight width K*bits/8.
-_GROUPED_INT8_FORMATS = {"asym_w4a8_int8": 4, "w6a8_int8": 6}
+_GROUPED_INT8_FORMATS = {"w3a8_int8": 3, "asym_w4a8_int8": 4, "w5a8_int8": 5, "w6a8_int8": 6}
 
 
 class QuantLinearFunc(torch.autograd.Function):
