@@ -2182,7 +2182,8 @@ def test_sensenova_generate_initialization_failure_cleans_up_and_can_run_again(m
 
 @pytest.mark.parametrize("interleave", [False, True])
 @pytest.mark.parametrize("dynamic", [False, True])
-def test_sensenova_generate_cancel_cleans_up_and_can_run_again(monkeypatch, interleave, dynamic):
+@pytest.mark.parametrize("cancel_during_prefill", [False, True])
+def test_sensenova_generate_cancel_cleans_up_and_can_run_again(monkeypatch, interleave, dynamic, cancel_during_prefill):
     monkeypatch.setattr(comfy.model_management, "load_models_gpu", lambda models, **kwargs: None)
     monkeypatch.setattr(comfy.model_management, "NUM_STREAMS", 1)
     monkeypatch.setattr(comfy.model_management, "is_device_cpu", lambda device: False)
@@ -2210,12 +2211,25 @@ def test_sensenova_generate_cancel_cleans_up_and_can_run_again(monkeypatch, inte
         assert bool(comfy.model_prefetch.PREFETCH_QUEUES) == dynamic
         comfy.model_management.interrupt_current_processing()
 
-    monkeypatch.setattr(comfy.utils, "PROGRESS_BAR_HOOK", cancel_on_progress)
+    layers = model.model.diffusion_model.language_model.model.layers
+    completed_prefill_layers = []
+
+    def cancel_after_layer(module, inputs, output):
+        completed_prefill_layers.append(module)
+        cancel_on_progress(0, 0, None)
+
+    handles = [layer.mlp.register_forward_hook(cancel_after_layer) for layer in layers] if cancel_during_prefill else []
+    if not cancel_during_prefill:
+        monkeypatch.setattr(comfy.utils, "PROGRESS_BAR_HOOK", cancel_on_progress)
     try:
         with pytest.raises(comfy.model_management.InterruptProcessingException):
             SenseNovaGenerate.execute(**kwargs)
     finally:
+        for handle in handles:
+            handle.remove()
         comfy.model_management.interrupt_current_processing(False)
+    if cancel_during_prefill:
+        assert completed_prefill_layers == [layers[0].mlp]
     assert comfy.model_prefetch.PREFETCH_QUEUES == []
     assert model.model.current_patcher is None
     assert positive[0][1]["text_input_ids"].tolist() == [[1]]

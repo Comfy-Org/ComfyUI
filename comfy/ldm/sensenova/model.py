@@ -611,6 +611,7 @@ class SenseNovaU15(nn.Module):
         transformer_options=None,
         text_suffix=None,
         compute_dtype=None,
+        interrupt=None,
     ):
         prefix, prefix_indexes, prefix_mask, prefix_time = self._prepare_prefix(
             text_input_ids, reference_images, prefix_indexes, prefix_mask, text_suffix, compute_dtype
@@ -626,6 +627,8 @@ class SenseNovaU15(nn.Module):
         )
         with comfy.model_prefetch.malloc_graph_scope(prefix.device):
             for layer_index, layer in enumerate(self.language_model.model.layers):
+                if interrupt is not None:
+                    interrupt()
                 comfy.model_prefetch.prefetch_queue_pop(prefetch, prefix.device, layer, prefix.dtype, malloc_scope="prefix")
                 transformer_options["block_index"] = layer_index
                 output, prefix_key, prefix_value = layer.forward_prefix(
@@ -774,6 +777,7 @@ class SenseNovaU15(nn.Module):
                 prefix_mask,
                 transformer_options,
                 compute_dtype=compute_dtype,
+                interrupt=interrupt,
             )
         )
         comfy.model_prefetch.cleanup_malloc_graph()
