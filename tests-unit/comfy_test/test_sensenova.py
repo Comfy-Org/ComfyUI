@@ -301,12 +301,12 @@ def test_hidream_o1_ignores_shared_negative_marker(monkeypatch):
 
 def test_sensenova_reference_preprocessing_preserves_size_and_splits_batches():
     references = preprocess_references(
-        [torch.rand(2, 9, 13, 1), torch.empty(1, 0, 0, 0)]
+        [torch.rand(2, 9, 13, 1), torch.empty(1, 9, 13, 0)]
     )
 
     assert len(references) == 3
     assert all(reference.shape == (1, 3, 9, 13) for reference in references[:2])
-    assert references[2].shape == (1, 3, 0, 0)
+    assert references[2].shape == (1, 3, 9, 13)
     assert _pad_to_merged_patch_size(references[0]).shape == (1, 3, 32, 32)
     assert _pad_to_merged_patch_size(references[2]).shape == (1, 3, 32, 32)
 
@@ -543,6 +543,22 @@ def test_sensenova_model_base_preprocesses_regular_prefix_only():
     assert len(regular_calls) == 2
     assert positive["prefix_time"].cond.tolist() == [3]
     assert hooked["text_input_ids"].cond.tolist() == input_ids.tolist()
+
+
+@pytest.mark.parametrize("height,width", [(0, 32), (32, 0), (0, 0)])
+@pytest.mark.parametrize("batched", [False, True])
+def test_sensenova_sampler_rejects_zero_sized_references(height, width, batched):
+    model = _text_model_patcher([42, 151668]).model
+    model.concat_keys = ()
+    reference = torch.empty(height, width, 3)
+    if batched:
+        reference = reference.unsqueeze(0)
+
+    with pytest.raises(ValueError, match="reference images must have nonzero height and width"):
+        model.extra_conds(
+            text_input_ids=_generation_input_ids(), reference_latents=[reference],
+            device=torch.device("cpu"), hooks=object(),
+        )
 
 
 @pytest.mark.parametrize("negative", [False, True])

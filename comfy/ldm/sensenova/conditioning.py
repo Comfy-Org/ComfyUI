@@ -24,6 +24,8 @@ def preprocess_reference(image):
     if image.ndim == 3:
         image = image.unsqueeze(0)
     image = image[:, :, :, :3].movedim(-1, 1).float()
+    if image.shape[-2] == 0 or image.shape[-1] == 0:
+        raise ValueError("SenseNova reference images must have nonzero height and width.")
     if image.shape[1] == 0:
         image = image.new_zeros((image.shape[0], 3, *image.shape[-2:]))
     elif image.shape[1] < 3:
