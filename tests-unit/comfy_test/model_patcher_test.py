@@ -1,3 +1,5 @@
+from unittest import mock
+
 import torch
 
 import comfy.model_patcher as model_patcher
@@ -141,9 +143,13 @@ def test_incremental_partially_load_does_not_double_apply_lora_or_inflate_counte
     assert torch.allclose(model.l2(x_l2), torch.full((1, 25), 60.0))
 
     model2 = ThreeLayerModel()
+    model2.l2.pre_quant_scale = torch.nn.Parameter(torch.full((30,), 2.0))
     patcher2 = model_patcher.ModelPatcher(model2, load_device=cpu, offload_device=cpu)
     patcher2.add_patches(
-        {"l2.weight": (torch.ones_like(model2.l2.weight),)},
+        {
+            "l2.weight": (torch.ones_like(model2.l2.weight),),
+            "l2.pre_quant_scale": (torch.ones_like(model2.l2.pre_quant_scale),),
+        },
         strength_patch=1.0,
         strength_model=1.0,
     )
@@ -151,14 +157,19 @@ def test_incremental_partially_load_does_not_double_apply_lora_or_inflate_counte
     patcher2.partially_load(cpu, extra_memory=14000)
     assert model2.l2.comfy_patched_weights is True
     assert patcher2.lowvram_patch_counter() == 0
+    assert torch.allclose(model2.l2.pre_quant_scale, torch.full((30,), 3.0))
     assert torch.allclose(model2.l2(x_l2), torch.full((1, 25), 60.0))
 
-    patcher2.partially_load(cpu, extra_memory=18000)
+    with mock.patch.object(model2.l2, "to", wraps=model2.l2.to) as l2_to:
+        patcher2.partially_load(cpu, extra_memory=18000)
+    l2_to.assert_called_once_with(cpu)
     assert model2.l2.comfy_patched_weights is False
     assert patcher2.lowvram_patch_counter() == 1
+    assert torch.allclose(model2.l2.pre_quant_scale, torch.full((30,), 3.0))
     assert torch.allclose(model2.l2(x_l2), torch.full((1, 25), 60.0))
 
     patcher2.partially_load(cpu, extra_memory=20000)
     assert model2.model_lowvram is False
     assert patcher2.lowvram_patch_counter() == 0
+    assert torch.allclose(model2.l2.pre_quant_scale, torch.full((30,), 3.0))
     assert torch.allclose(model2.l2(x_l2), torch.full((1, 25), 60.0))
