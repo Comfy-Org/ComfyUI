@@ -433,19 +433,189 @@ def test_continuation_from_model_state_matches_uninterrupted_generation(monkeypa
         path = str(tmp_path / f"{cutoff}.safetensors")
         state = comfy.model_state.ModelState.open(path)
         first = model.generate(embeds.clone(), do_sample=False, max_length=cutoff, mtp=mtp, model_state=state)
-        assert state.metadata["length"] == embeds.shape[1] + cutoff - 1
-        assert state.metadata["pending"] == first[-1:]
+        # pending is the last sampled token, after the last step's tokens the DeltaNet state hadn't committed
+        pending_ids = state.metadata["pending"]
+        assert pending_ids == first[-len(pending_ids):]
+        assert state.metadata["length"] == embeds.shape[1] + cutoff - len(pending_ids)
         state.flush()
         state.save(path)
 
         # The next turn reopens the saved file, as a later prompt would.
         saved = comfy.model_state.ModelState.open(path, create="never")
         pending = model.model.embed_tokens(torch.tensor([saved.metadata["pending"]]))
+        position = saved.metadata["position"]
         rest = model.generate(pending, do_sample=False, max_length=20 - cutoff, mtp=mtp, model_state=saved,
-                              position_ids=torch.tensor([[saved.metadata["position"]]]))
+                              position_ids=torch.arange(position, position + len(pending_ids)).unsqueeze(0))
         saved.release()
         assert first + rest == expected
 
+
+def test_batched_continue_matches_one_prefill(monkeypatch):
+    # a prefill continuing a cached prefix (DeltaNet conv window and recurrent state, attention prefix)
+    # gives the same hidden states as prefilling the whole sequence at once
+    model = _tiny_model(monkeypatch)
+    embeds = torch.randn(1, 30, 64)
+
+    def prefill(*parts):
+        state = comfy.model_state.ModelState()
+        comfy.model_management.register_ephemeral_model(state)
+        cpu = torch.device("cpu")
+        cache = state.load(model.init_kv_cache(1, 32, cpu, torch.float32, mtp=True), cpu)
+        out = [model.prefill(embeds[:, part].clone(), cache.caches)[0] for part in parts]  # the forward reuses its input buffer
+        state.release()
+        return out
+
+    whole, = prefill(slice(0, 30))
+    _, rest = prefill(slice(0, 11), slice(11, 30))
+    assert torch.allclose(rest, whole[:, 11:], atol=1e-4)
+
+@pytest.mark.parametrize("kv", ["bf16", "int8"])
+def test_long_prompt_prefills_in_pieces(monkeypatch, kv):
+    # a prompt over PREFILL_ROWS goes in equal pieces that continue each other, and its last hidden state
+    # and the cache it leaves match one pass over the whole prompt
+    import comfy.text_encoders.llama as llama
+    import comfy.text_encoders.qwen35 as qwen35
+    model = _tiny_model(monkeypatch)
+    if kv == "int8":
+        monkeypatch.setattr(llama, "Int8DecodeCache", _ExactPacked, raising=False)
+        monkeypatch.setattr(qwen35.GatedAttention, "kv_cache_type", lambda self, device, dtype: qwen35.Int8FixedKVCache)
+    embeds, more = torch.randn(1, 30, 64), torch.randn(1, 12, 64)
+    passes = []
+    forward = model.model.forward
+    monkeypatch.setattr(model.model, "forward", lambda *a, **kw: passes.append(kw["embeds"].shape[1]) or forward(*a, **kw))
+
+    def prefill(rows):
+        monkeypatch.setattr(qwen35, "PREFILL_ROWS", rows)
+        state = comfy.model_state.ModelState()
+        comfy.model_management.register_ephemeral_model(state)
+        cpu = torch.device("cpu")
+        cache = state.load(model.init_kv_cache(1, 48, cpu, torch.float32, mtp=True), cpu)
+        last = model.prefill(embeds.clone(), cache.caches)[0][:, -1]  # the forward reuses its input buffer
+        monkeypatch.setattr(qwen35, "PREFILL_ROWS", 4096)
+        after = model.prefill(more.clone(), cache.caches)[0]
+        state.release()
+        return last, after
+
+    whole = prefill(4096)
+    passes.clear()
+    pieces = prefill(11)
+    assert passes == [10, 10, 10, 12]
+    assert torch.allclose(pieces[0], whole[0], atol=1e-4)
+    assert torch.allclose(pieces[1], whole[1], atol=1e-4)
+
+@pytest.mark.parametrize("mtp", [False, "3", "tree2s2"])
+def test_long_continuation_prefills_in_one_batch(monkeypatch, tmp_path, mtp):
+    # a continued turn with more than SPEC_ROWS new tokens prefills as one batch, from the saved
+    # DeltaNet conv/recurrent state and the attention prefix, and matches reading the whole prompt at once
+    import comfy.text_encoders.qwen35 as qwen35
+    model = _tiny_model(monkeypatch)
+    batched = []
+    check = qwen35.Qwen35.batched_continue
+    monkeypatch.setattr(qwen35.Qwen35, "batched_continue", staticmethod(lambda n, kvs: batched.append(check(n, kvs)) or batched[-1]))
+    turn1, turn2 = torch.randn(1, 5, 64), torch.randn(1, 13, 64)
+    path = str(tmp_path / "state.safetensors")
+    state = comfy.model_state.ModelState.open(path)
+    first = model.generate(turn1.clone(), do_sample=False, max_length=6, mtp=mtp, model_state=state)
+    state.flush()
+    state.save(path)
+
+    saved = comfy.model_state.ModelState.open(path, create="never")
+    pending_ids, position = saved.metadata["pending"], saved.metadata["position"]
+    embeds = torch.cat([model.model.embed_tokens(torch.tensor([pending_ids])), turn2], dim=1)
+    batched.clear()
+    rest = model.generate(embeds, do_sample=False, max_length=12, mtp=mtp, model_state=saved,
+                          position_ids=torch.arange(position, position + embeds.shape[1]).unsqueeze(0))
+    saved.release()
+    assert batched[0] is True
+
+    whole = torch.cat([turn1, model.model.embed_tokens(torch.tensor([first])), turn2], dim=1)
+    assert rest == model.generate(whole, do_sample=False, max_length=12, mtp=False)
+
+
+
+class _ExactPacked:
+    # Int8DecodeCache stand-in that pages exact rows, 4 per page, so a continued int8 prefill can be checked
+    # against bf16. A refresh reads only what the kernel may: the last two pages, from the circular window.
+    dim = 64
+
+    def __init__(self, batch, heads, capacity, device):
+        shape = (batch, (capacity + 3) // 4, heads, 4, self.dim)
+        self.key, self.value = torch.zeros(shape, device=device), torch.zeros(shape, device=device)
+        self.key_scale, self.value_scale = torch.zeros(1, device=device), torch.zeros(1, device=device)
+
+    def update(self, key, value, length, initialize=False):
+        n = int(length.item())
+        first = 0 if initialize else max(0, (n - 1) // 4 * 4 - 4)
+        for i in range(first, n):
+            src = i if initialize else i % key.shape[2]
+            self.key[:, i // 4, :, i % 4] = key[:, :, src]
+            self.value[:, i // 4, :, i % 4] = value[:, :, src]
+
+    def attend(self, query, length):
+        n = int(length.item())
+        batch, heads, seq, dim = query.shape
+        k, v = (t.permute(0, 2, 1, 3, 4).reshape(batch, t.shape[2], -1, dim)[:, :, :n] for t in (self.key, self.value))
+        k, v = (t.repeat_interleave(heads // t.shape[1], dim=1) for t in (k, v))
+        scores = torch.matmul(query.float(), k.float().transpose(-1, -2)) * dim ** -0.5
+        out = torch.matmul(scores.softmax(-1), v.float())
+        return out.transpose(1, 2).reshape(batch, seq, heads * dim).to(query.dtype), scores.logsumexp(-1)
+
+
+@pytest.mark.parametrize("merge_elements", [1 << 26, 4 * 19 * 5])
+def test_int8_extend_matches_full_attention(monkeypatch, merge_elements):
+    # a continued prefill over an int8 prefix: each new row sees the prefix and the new rows up to itself,
+    # and the pages afterwards hold every row, across page and window boundaries; the small merge budget
+    # takes the new rows in chunks of 5
+    import comfy.text_encoders.llama as llama
+    monkeypatch.setattr(llama, "Int8DecodeCache", _ExactPacked, raising=False)
+    monkeypatch.setattr(llama, "CAUSAL_MERGE_ELEMENTS", merge_elements)
+    kv = llama.Int8FixedKVCache.zeros(1, 2, 64, 64, "cpu", torch.float32, llama.FixedKVCache.shared(1, "cpu"))
+    q, k, v = torch.randn(1, 4, 30, 64), torch.randn(1, 2, 30, 64), torch.randn(1, 2, 30, 64)
+
+    def full(rows, length):
+        scores = torch.matmul(q[:, :, rows], k.repeat_interleave(2, dim=1)[:, :, :length].transpose(-1, -2)) * 64 ** -0.5
+        scores.masked_fill_(torch.arange(length) > torch.arange(length)[rows].view(-1, 1), float("-inf"))
+        return torch.matmul(scores.softmax(-1), v.repeat_interleave(2, dim=1)[:, :, :length]).transpose(1, 2).reshape(1, -1, 256)
+
+    kv.prepare(11)
+    kv.append(k[:, :, :11], v[:, :, :11])
+    kv.advance(11)
+    kv.prepare(19)
+    assert torch.allclose(kv.extend(q[:, :, 11:], k[:, :, 11:], v[:, :, 11:]), full(slice(11, 30), 30), atol=1e-5)
+    out, _ = kv.packed.attend(q[:, :, 29:], torch.tensor([30]))
+    assert torch.allclose(out, full(slice(29, 30), 30), atol=1e-5)
+
+@pytest.mark.parametrize("mtp", [False, "3", "tree2s2"])
+def test_int8_long_continuation_matches_bf16(monkeypatch, tmp_path, mtp):
+    # the int8 cache continues a long turn through extend(): new rows attend the paged prefix and each
+    # other, then the pages grow through the window; with exact pages it must match the bf16 cache
+    import comfy.text_encoders.llama as llama
+    import comfy.text_encoders.qwen35 as qwen35
+    model = _tiny_model(monkeypatch)
+    turn1, turn2 = torch.randn(1, 5, 64), torch.randn(1, 13, 64)
+
+    def two_turns(name):
+        path = str(tmp_path / f"{name}.safetensors")
+        state = comfy.model_state.ModelState.open(path)
+        first = model.generate(turn1.clone(), do_sample=False, max_length=6, mtp=mtp, model_state=state)
+        state.flush()
+        state.save(path)
+        saved = comfy.model_state.ModelState.open(path, create="never")
+        pending_ids, position = saved.metadata["pending"], saved.metadata["position"]
+        embeds = torch.cat([model.model.embed_tokens(torch.tensor([pending_ids])), turn2], dim=1)
+        rest = model.generate(embeds, do_sample=False, max_length=12, mtp=mtp, model_state=saved,
+                              position_ids=torch.arange(position, position + embeds.shape[1]).unsqueeze(0))
+        saved.release()
+        return first, rest
+
+    expected = two_turns("bf16")
+    monkeypatch.setattr(llama, "Int8DecodeCache", _ExactPacked, raising=False)
+    monkeypatch.setattr(qwen35.GatedAttention, "kv_cache_type", lambda self, device, dtype: qwen35.Int8FixedKVCache)
+    extended = []
+    extend = llama.Int8FixedKVCache.extend
+    monkeypatch.setattr(llama.Int8FixedKVCache, "extend", lambda self, q, k, v: extended.append(k.shape[2]) or extend(self, q, k, v))
+    assert two_turns("int8") == expected
+    assert extended and min(extended) > 8
 
 class _FakePacked:
     # Int8DecodeCache boundary with 4-row pages: records the BF16 refreshes it is asked for
