@@ -6,11 +6,12 @@ from comfy_api.latest import ComfyExtension, IO, Types
 import copy
 import comfy.utils
 import comfy.model_management
-import comfy.quant_ops
 from server import PromptServer
 from comfy_extras.mesh3d.postprocess.qem_decimate import QEMConfig, qem_simplify, qem_cluster_decimate, _compute_vertex_normals, _connected_labels, _kitchen_op
 from comfy_extras.mesh3d.postprocess.remesh import remesh_narrow_band_dc, _point_tri_closest
 from comfy_extras.nodes_save_3d import get_mesh_batch_item, pack_variable_mesh_batch
+from comfy_extras.nodes_camera import camera_list
+from comfy_extras.nodes_gaussian_splat import _xyz
 from comfy_extras.mesh3d.uv_unwrap import mesh as _uv_mesh
 from comfy_extras.mesh3d.uv_unwrap import segment as _uv_seg
 from comfy_extras.mesh3d.uv_unwrap import parameterize as _uv_param
@@ -476,11 +477,11 @@ def _morton_expand21(v):
 
 
 def _build_triangle_bvh(tri):
-    """BVH over `tri` [F,3,3] for the *_bvh queries: comfy-kitchen's ("ck") when available. A query kitchen
-    can't run builds the pure-torch BVH on first use."""
-    mesh_bvh = _kitchen_op("mesh_bvh", tri)
-    if mesh_bvh is not None:
-        return {"ck": mesh_bvh(tri.contiguous())}
+    """BVH over `tri` [F,3,3] for the *_bvh queries: comfy-kitchen's ("ck", with its query ops) when its CUDA
+    backend runs on `tri`, else pure torch."""
+    ops = [_kitchen_op(name, tri) for name in ("mesh_bvh", "closest_point_on_mesh", "closest_hit_on_mesh")]
+    if None not in ops:
+        return {"ck": ops[0](tri.contiguous()), "closest_point": ops[1], "closest_hit": ops[2]}
     return _torch_triangle_bvh(tri)
 
 
@@ -593,7 +594,7 @@ def _closest_points_on_mesh_bvh(Q, tri, bvh, max_stack=64, return_face=False):
     when return_face=True (face_idx indexes `tri`). `max_stack` bounds the torch stack
     (= tree height); overflow is counted+warned, not silently wrong."""
     if "ck" in bvh:
-        _, bestp, bestf = comfy.quant_ops.ck.closest_point_on_mesh(bvh["ck"], Q.contiguous())
+        _, bestp, bestf = bvh["closest_point"](bvh["ck"], Q.contiguous())
         return (bestp, bestf) if return_face else bestp
     dev = Q.device
     N = Q.shape[0]
@@ -724,11 +725,8 @@ def _ray_tri_hit(o, d, tri, tmin, tmax):
 def _any_hit_rays_bvh(orig, dirs, tri, bvh, tmin=0.0, tmax=1e30, max_stack=64):
     """Any-hit ray test over the BVH: comfy-kitchen's closest hit, else pure torch (slab cull + Möller-Trumbore,
     rays stop at their first hit). Returns bool [N]: True if the ray hits any triangle in (tmin, tmax)."""
-    closest_hit = _kitchen_op("closest_hit_on_mesh", orig) if "ck" in bvh else None
-    if closest_hit is not None:
-        return closest_hit(bvh["ck"], orig.contiguous(), dirs.contiguous(), tmin=float(tmin), tmax=float(tmax))[1] >= 0
-    if "LEAF" not in bvh:
-        bvh.update(_torch_triangle_bvh(tri))
+    if "ck" in bvh:
+        return bvh["closest_hit"](bvh["ck"], orig.contiguous(), dirs.contiguous(), tmin=float(tmin), tmax=float(tmax))[1] >= 0
     dev = orig.device
     N = orig.shape[0]
     LEAF = bvh['LEAF']
@@ -798,13 +796,10 @@ def _ray_tri_intersect(o, d, tri, tmin, tmax, cull_backface=False):
 def _closest_hit_rays_bvh(orig, dirs, tri, bvh, tmin=0.0, tmax=1e30, max_stack=64, cull_backface=False):
     """Nearest-hit ray cast over the BVH: comfy-kitchen's, else pure torch. Returns (t [N], face [N]
     long, -1 on miss; hit [N] bool) — the closest intersection in (tmin, tmax), pruning nodes past best_t."""
-    closest_hit = _kitchen_op("closest_hit_on_mesh", orig) if "ck" in bvh else None
-    if closest_hit is not None:
-        t, face = closest_hit(bvh["ck"], orig.contiguous(), dirs.contiguous(), tmin=float(tmin), tmax=float(tmax),
-                              cull_backface=cull_backface)
+    if "ck" in bvh:
+        t, face = bvh["closest_hit"](bvh["ck"], orig.contiguous(), dirs.contiguous(), tmin=float(tmin), tmax=float(tmax),
+                                     cull_backface=cull_backface)
         return t, face, face >= 0
-    if "LEAF" not in bvh:
-        bvh.update(_torch_triangle_bvh(tri))
     dev = orig.device
     N = orig.shape[0]
     LEAF = bvh['LEAF']
@@ -1258,11 +1253,16 @@ def _bake_normal_map(high_v, high_f, high_n, low_v_np, low_f_np, low_uv_np, low_
 def _jfa_fill_gpu(img01, mask):
     """Fill uncovered texels with nearest covered value via GPU Jump Flooding
     (O(log n) passes; replaces cv2.inpaint). img01 [H,W,C] float, mask [H,W] bool."""
-    if not mask.any():
-        return img01
     dev = comfy.model_management.get_torch_device()
-    it = torch.from_numpy(np.ascontiguousarray(img01)).to(dev).float()
-    mm = torch.from_numpy(np.ascontiguousarray(mask)).to(dev)
+    return _jfa_fill(torch.from_numpy(np.ascontiguousarray(img01)).to(dev).float(),
+                     torch.from_numpy(np.ascontiguousarray(mask)).to(dev)).cpu().numpy()
+
+
+def _jfa_fill(it, mm):
+    """`_jfa_fill_gpu` on device tensors, returning one."""
+    if not bool(mm.any()):
+        return it
+    dev = it.device
     H, W = mm.shape
     yy, xx = torch.meshgrid(
         torch.arange(H, dtype=torch.int32, device=dev),
@@ -1289,8 +1289,7 @@ def _jfa_fill_gpu(img01, mask):
                 bx = torch.where(take, cbx, bx)
         step //= 2
     flat_idx = by.clamp_min_(0).long().mul_(W).add_(bx.clamp_min_(0))
-    filled = it.reshape(-1, it.shape[-1])[flat_idx.reshape(-1)].reshape(H, W, -1)
-    return filled.cpu().numpy()
+    return it.reshape(-1, it.shape[-1])[flat_idx.reshape(-1)].reshape(H, W, -1)
 
 
 def _seam_fill(img01, mask):
@@ -1846,17 +1845,14 @@ def _mesh_view_cameras(camera_info, lv):
         dist = radius / math.tan(math.radians(20.0)) * 1.04
         return [{"position": _xyz_dict(center + center.new_tensor([0.0, 0.0, dist])), "target": _xyz_dict(center),
                  "fov": 40.0, "zoom": 1.0, "cameraType": "perspective"}]
-    cams = camera_info if isinstance(camera_info, list) else [camera_info]
-    return [{**cam, "target": cam.get("target") or _xyz_dict(center)} for cam in cams]
+    return [{**cam, "target": cam.get("target") or _xyz_dict(center)} for cam in camera_list(camera_info)]
 
 
 def _mesh_view_camera(camera_info, dev):
     """(eye, f, r, u, fov_rad, ortho_half) of a camera_info with a target: look-at towards its three.js "up"
     (default +Y), fov narrowed by zoom; ortho_half is half the visible height of orthographic cameras."""
-    def _vec(d):
-        return torch.tensor([float(d.get("x", 0.0)), float(d.get("y", 0.0)), float(d.get("z", 0.0))], device=dev)
-    eye, target = _vec(camera_info.get("position", {})), _vec(camera_info["target"])
-    f, r, u = _camera_basis(eye, target, _vec(camera_info.get("up", {"y": 1.0})))
+    eye, target = torch.tensor(_xyz(camera_info.get("position", {})), device=dev), torch.tensor(_xyz(camera_info["target"]), device=dev)
+    f, r, u = _camera_basis(eye, target, torch.tensor(_xyz(camera_info.get("up", {"y": 1.0})), device=dev))
     zoom = max(float(camera_info.get("zoom", 1.0) or 1.0), 1e-3)  # three.js digital zoom scales focal length
     half_tan = math.tan(math.radians(float(camera_info.get("fov", 0) or 0) or 40.0) * 0.5) / zoom
     ortho_half = None
@@ -1976,25 +1972,21 @@ class RenderMesh(IO.ComfyNode):
         return IO.NodeOutput(torch.stack(imgs), torch.stack(masks))
 
 
-def _views_depth(tri, bvh, views, H, W, tick, ray_chunk=1 << 22):
+def _views_depth(tri, bvh, views, H, W, tick):
     """[V,H,W] hit distance along each pixel ray of `views` (eye, f, r, u, fov, ortho_half), inf on background.
-    Small views are cast together: the torch BVH walk is launch-bound. Calls tick(n) after each n views."""
-    per = max(1, ray_chunk // (H * W))
+    Small views are cast together, up to 1 << 22 rays: the torch BVH walk is launch-bound. Calls tick(n) after
+    each n views."""
+    per = max(1, (1 << 22) // (H * W))
     out = []
     for g in range(0, len(views), per):
         rays = [_view_rays(eye, f, r, u, fov, H, W, oh) for eye, f, r, u, fov, oh in views[g:g + per]]
-        o, d = torch.cat([ray[0] for ray in rays]), torch.cat([ray[1] for ray in rays])
-        depth = torch.full((o.shape[0],), float("inf"), device=tri.device)
-        for s in range(0, o.shape[0], ray_chunk):
-            e = min(s + ray_chunk, o.shape[0])
-            t_hit, _, hit = _closest_hit_rays_bvh(o[s:e], d[s:e], tri, bvh, tmin=1e-5, tmax=1e30)
-            depth[s:e] = torch.where(hit, t_hit, depth[s:e])
-        out.append(depth.view(-1, H, W))
+        t_hit, _, hit = _closest_hit_rays_bvh(torch.cat([ray[0] for ray in rays]), torch.cat([ray[1] for ray in rays]), tri, bvh, tmin=1e-5, tmax=1e30)
+        out.append(torch.where(hit, t_hit, float("inf")).view(-1, H, W))
         tick(len(rays))
     return torch.cat(out)
 
 
-def _surface_sample(view, view_depth, fx, fy, dist, tol, keep=None):
+def _surface_sample(view, view_depth, fx, fy, dist, tol, keep):
     """Sample view [H,W,C] at pixel coords (fx, fy), pixel centres on integers, from only the taps whose
     `view_depth` [Hd,Wd] is within `tol` of `dist` (they show this surface), so occluders and background never
     bleed in: bicubic where the whole 4x4 footprint does, else bilinear renormalised over those taps. `keep`
@@ -2020,20 +2012,22 @@ def _surface_sample(view, view_depth, fx, fy, dist, tol, keep=None):
     lin = torch.zeros_like(bic)
     cov = torch.zeros_like(fx)
     clean = torch.ones_like(fx, dtype=torch.bool)
+    cols = []
+    for ox in (-1, 0, 1, 2):
+        ix = (x0 + ox).clamp(0, W - 1)
+        cols.append((ix, ((ix + 0.5) * (Wd / W)).long().clamp_(max=Wd - 1)))
     for j, oy in enumerate((-1, 0, 1, 2)):
         iy = (y0 + oy).clamp(0, H - 1)
-        dy = ((iy + 0.5) * (Hd / H)).long().clamp_(max=Hd - 1)
-        for k, ox in enumerate((-1, 0, 1, 2)):
-            ix = (x0 + ox).clamp(0, W - 1)
-            dx = ((ix + 0.5) * (Wd / W)).long().clamp_(max=Wd - 1)
-            same = (dflat[dy * Wd + dx] - dist).abs() <= tol
+        row, drow = iy * W, ((iy + 0.5) * (Hd / H)).long().clamp_(max=Hd - 1) * Wd
+        for k, (ix, dx) in enumerate(cols):
+            same = (dflat[drow + dx] - dist).abs() <= tol
             if kflat is not None:
-                same &= kflat[iy * W + ix]
-            v = flat[iy * W + ix]
+                same &= kflat[row + ix]
+            v = flat[row + ix]
             bic.addcmul_((cy[j] * cx[k])[:, None], v)
             clean &= same
-            if oy in (0, 1) and ox in (0, 1):
-                wl = (ty if oy else 1 - ty) * (tx if ox else 1 - tx) * same
+            if j in (1, 2) and k in (1, 2):
+                wl = (ty if oy else 1 - ty) * (tx if k == 2 else 1 - tx) * same
                 lin.addcmul_(wl[:, None], v)
                 cov += wl
     return torch.where(clean[:, None], bic, lin / cov.clamp_min(1e-6)[:, None]), cov
@@ -2062,8 +2056,9 @@ def _background_rim_keep(view, outside, edge, rim=0.012):
         return None
     k = 2 * max(1, round(rim * outside.shape[0])) + 1
 
-    def near(m):
-        m = torch.nn.functional.max_pool2d(m[None, None].float(), k, stride=1, padding=k // 2)
+    def near(m):                                  # k x k dilation, separable
+        m = torch.nn.functional.max_pool2d(m[None, None].float(), (k, 1), stride=1, padding=(k // 2, 0))
+        m = torch.nn.functional.max_pool2d(m, (1, k), stride=1, padding=(0, k // 2))
         return torch.nn.functional.interpolate(m, size=(H, W), mode="nearest")[0, 0] > 0
 
     out = torch.nn.functional.interpolate(outside[None, None].float(), size=(H, W), mode="nearest")[0, 0] > 0
@@ -2094,26 +2089,24 @@ def _fill_vertex_colors(lv, lf, col, known):
     q = ((lv - lo) / (float((lv.amax(0) - lo).max().clamp_min(1e-9)) * 1e-5)).round().long()
     _, g = torch.unique(q, dim=0, return_inverse=True)
     G = int(g.max()) + 1
-    gcnt = torch.zeros(G, device=lv.device).index_add_(0, g[known], torch.ones_like(col[known, 0]))
+    gcnt = torch.bincount(g[known], minlength=G).float()
     gcol = torch.zeros((G, 3), device=lv.device).index_add_(0, g[known], col[known]) / gcnt.clamp_min(1.0)[:, None]
     gk = gcnt > 0
     e = g[lf]
     src = torch.cat([e[:, 0], e[:, 1], e[:, 2], e[:, 1], e[:, 2], e[:, 0]])
     dst = torch.cat([e[:, 1], e[:, 2], e[:, 0], e[:, 0], e[:, 1], e[:, 2]])
-    keep = ~gk[dst]
-    src, dst = src[keep], dst[keep]
     while True:
-        m = gk[src] & ~gk[dst]
+        keep = ~gk[dst]
+        src, dst = src[keep], dst[keep]
+        m = gk[src]
         if not bool(m.any()):
             break
         s, d = src[m], dst[m]
-        cnt = torch.zeros(G, device=lv.device).index_add_(0, d, torch.ones_like(d, dtype=torch.float32))
+        cnt = torch.bincount(d, minlength=G).float()
         acc = torch.zeros((G, 3), device=lv.device).index_add_(0, d, gcol[s])
         new = cnt > 0
-        gcol[new] = acc[new] / cnt[new, None]
+        gcol = torch.where(new[:, None], acc / cnt.clamp_min(1.0)[:, None], gcol)
         gk |= new
-        keep = ~gk[dst]
-        src, dst = src[keep], dst[keep]
     return gcol[g], gk[g]
 
 
@@ -2217,7 +2210,7 @@ def _bake_texture_from_views(lv, lf, uv, normals, base_texture, base_vcol, image
 
     seen = den > 0
     proj = num / torch.where(seen, den, 1.0)[:, None]     # cos^k weights get tiny at grazing views; no clamp
-    fill = cov.clone()
+    fill = cov
     if base is not None:
         out = torch.where(seen[:, None], torch.lerp(base, proj, alpha[:, None]), base)
     else:
@@ -2227,13 +2220,14 @@ def _bake_texture_from_views(lv, lf, uv, normals, base_texture, base_vcol, image
         w = b[un, :, 0] * vknown[fv[un]]
         out[un] = (w[:, :, None] * vcol[fv[un]]).sum(1) / w.sum(1, keepdim=True).clamp_min(1e-12)
         filled[un] = w.sum(1) > 0
+        fill = cov.clone()
         fill[cov] = filled                            # the rest (unseen components) and the gutter: nearest texel
     tex = torch.zeros((resolution, resolution, 4), device=dev)
     tex[cov] = torch.cat([out.clamp(0.0, 1.0), conf[:Kt, None]], dim=-1)
-    tex = _seam_fill(tex.cpu().numpy(), fill.cpu().numpy())
+    tex = _jfa_fill(tex, fill)                        # UV gutter: nearest texel, so seams don't pull in black
     tick("fill")
     tq.close()
-    return tex[..., :3], tex[..., 3]
+    return tex[..., :3].contiguous(), tex[..., 3].contiguous()
 
 
 class BakeTextureFromViews(IO.ComfyNode):
@@ -2296,9 +2290,9 @@ class BakeTextureFromViews(IO.ComfyNode):
             resolution = max(int(mesh.texture.shape[1]), int(mesh.texture.shape[2])) if mesh.texture is not None else 2048
         v_i, f_i, colors_i, uvs_i, normals_i = get_mesh_batch_item(mesh, 0)
         dev = comfy.model_management.get_torch_device()
-        _prepare_gpu_mesh_processing(dev, max(resolution * resolution * 512, int(f_i.shape[0]) * 512))
+        _prepare_gpu_mesh_processing(dev, max(resolution * resolution * 256, int(f_i.shape[0]) * 512))  # measured 140-200 B/texel
         lv, lf = v_i.to(dev).float(), f_i.to(dev).long()
-        camera_info = [cam for c in cameras.values() for cam in (c if isinstance(c, list) else [c])] if cameras else None
+        camera_info = [cam for c in cameras.values() for cam in camera_list(c)] if cameras else None
         views = _mesh_view_cameras(camera_info, lv)
         if int(images.shape[0]) != len(views):
             raise ValueError(f"BakeTextureFromViews: {int(images.shape[0])} images for {len(views)} cameras; "
@@ -2316,8 +2310,8 @@ class BakeTextureFromViews(IO.ComfyNode):
 
         tex, conf = _bake_texture_from_views(lv, lf, uvs_i.to(dev).float(), normals, base_texture, base_vcol, images, mask,
                                              views, int(resolution), float(blend_exponent))
-        return IO.NodeOutput(torch.from_numpy(np.ascontiguousarray(tex)).float()[None],
-                             torch.from_numpy(np.ascontiguousarray(conf)).float()[None])
+        idev = comfy.model_management.intermediate_device()
+        return IO.NodeOutput(tex[None].to(idev), conf[None].to(idev))
 
 
 def _fill_holes_v2_gpu(verts, faces, max_perimeter, colors=None, fill_chains=False, max_verts=16):

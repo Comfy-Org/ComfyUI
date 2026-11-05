@@ -1075,13 +1075,15 @@ class Flux(BaseModel):
             out['view_grid'] = comfy.conds.CONDConstant(view_grid)
         token_masks = kwargs.get("token_masks", None)
         if token_masks is not None:
-            out['token_masks'] = comfy.conds.CONDConstant(token_masks)
+            # the kept token indices depend on the conditioning alone: compute them once, not every step
+            device = kwargs["device"]
+            masks = {"target": token_masks["target"].to(device), "refs": [None if m is None else m.to(device) for m in token_masks["refs"]]}
+            background = self.process_latent_in(kwargs["background_latent"]).to(device=device, dtype=self.get_dtype_inference())
+            out['token_keep'] = comfy.conds.CONDConstant(self.diffusion_model.preprocess_token_masks(
+                masks, view_grid, kwargs["noise"].shape, [lat.shape for lat in ref_latents], background))
         reference_views = kwargs.get("reference_views", None)
         if reference_views is not None:
             out['reference_views'] = comfy.conds.CONDConstant(reference_views)
-        background_latent = kwargs.get("background_latent", None)
-        if background_latent is not None:
-            out['background_latent'] = comfy.conds.CONDConstant(self.process_latent_in(background_latent))
         return out
 
     def extra_conds_shapes(self, **kwargs):

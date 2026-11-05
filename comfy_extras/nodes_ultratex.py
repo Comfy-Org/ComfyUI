@@ -1,6 +1,7 @@
 import torch
 from typing_extensions import override
 
+import comfy.utils
 import node_helpers
 from comfy.ldm.flux.model import views_to_grid
 from comfy_api.latest import ComfyExtension, io
@@ -11,12 +12,6 @@ VIEW_NAMES = ["front", "right", "back", "left", "top", "bottom"]
 
 def _on_white(image, mask):
     return image[..., :3] * mask[..., None] + (1.0 - mask[..., None])
-
-
-def _resize_mask(mask, h, w):
-    if mask.shape[-2:] == (h, w):
-        return mask
-    return torch.nn.functional.interpolate(mask[:, None], size=(h, w), mode="bilinear")[:, 0]
 
 
 class UltraTexConditioning(io.ComfyNode):
@@ -56,7 +51,7 @@ class UltraTexConditioning(io.ComfyNode):
         # without poles their tiles stay empty and are dropped like background
         grid = VIEW_GRID[:normals.shape[0]]
         h, w = normals.shape[1:3]
-        masks = _resize_mask(masks.to(normals), h, w)
+        masks = comfy.utils.common_upscale(masks.to(normals)[:, None], w, h, "bilinear", "disabled")[:, 0]
         # UltraTex was trained on world normals with the up axis negated.
         normals = normals[..., :3].clone()
         normals[..., 1] = 1.0 - normals[..., 1]
@@ -65,16 +60,17 @@ class UltraTexConditioning(io.ComfyNode):
         reference = reference[:1]
         if reference_mask is None:
             reference_mask = torch.ones(reference.shape[:3])
-        reference_mask = _resize_mask(reference_mask[:1].to(reference), reference.shape[1], reference.shape[2])
+        else:
+            reference_mask = comfy.utils.common_upscale(reference_mask[:1].to(reference)[:, None], reference.shape[2], reference.shape[1], "bilinear", "disabled")[:, 0]
         ref_latents = [normal_atlas, vae.encode(_on_white(reference, reference_mask))]
         ref_masks = [views_to_grid(masks[:, None], grid)[:, 0], reference_mask]
         # the reference is the front view's: it shares positions with the front tile
         ref_views = [None, 0]
-        for view_index, name in enumerate(VIEW_NAMES[:len(grid)]):
+        for view_index, name in enumerate(VIEW_NAMES[1:len(grid)], 1):
             image = extra_views.get(name)
             if image is not None:
                 image = image[:1]
-                view_mask = _resize_mask(masks[view_index:view_index + 1].to(image), image.shape[1], image.shape[2])
+                view_mask = comfy.utils.common_upscale(masks[view_index:view_index + 1].to(image)[:, None], image.shape[2], image.shape[1], "bilinear", "disabled")[:, 0]
                 ref_latents.append(vae.encode(_on_white(image, view_mask)))
                 ref_masks.append(view_mask)
                 ref_views.append(view_index)
