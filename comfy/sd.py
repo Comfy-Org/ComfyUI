@@ -997,6 +997,7 @@ class VAE:
                 if "upscale_factor" not in config:
                     raise ValueError("RelayVSR Flash decoder without its upscale_factor metadata, use the released relayvsr_flash_x2/x4 file.")
                 self.first_stage_model = comfy.ldm.wan.model_vsr.RelayFlash(config["upscale_factor"])
+                self.working_dtypes = [torch.float16, torch.bfloat16, torch.float32]
                 self.process_input = self.process_output = lambda image: image
                 self.memory_used_decode = lambda shape, dtype: (40000 * shape[-2] * shape[-1] * model_management.dtype_size(dtype))
             elif "vocoder.resblocks.0.convs1.0.weight" in sd or "vocoder.vocoder.resblocks.0.convs1.0.weight" in sd: # LTX Audio
