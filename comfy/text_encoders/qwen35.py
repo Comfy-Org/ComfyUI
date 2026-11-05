@@ -866,6 +866,11 @@ class MTPHead(nn.Module):
 
 
 # Model Wrapper
+# Rows per prefill pass: one pass over a long prompt needs enough working memory to page the
+# weights out of VRAM, and the decode after it would read them back from system memory.
+PREFILL_ROWS = 4096
+
+
 class Qwen35(BaseLlama, BaseGenerate, torch.nn.Module):
     model_type = "qwen35_2b"
 
@@ -911,7 +916,16 @@ class Qwen35(BaseLlama, BaseGenerate, torch.nn.Module):
         return super().forward(x, attention_mask=attention_mask, embeds=embeds, num_tokens=num_tokens, intermediate_output=intermediate_output, final_layer_norm_intermediate=final_layer_norm_intermediate, dtype=dtype, position_ids=position_ids, past_key_values=past_key_values)
 
     def prefill(self, embeds, past_key_values, position_ids=None, **kwargs):
-        if past_key_values[0].index == 0 or self.batched_continue(embeds.shape[1], past_key_values):
+        rows = embeds.shape[1]
+        batched = past_key_values[0].index == 0 or self.batched_continue(rows, past_key_values)
+        if batched and rows > PREFILL_ROWS and not kwargs:
+            # a long prompt goes in equal pieces, each continuing the one before
+            size = -(-rows // -(-rows // PREFILL_ROWS))
+            for start in range(0, rows, size):
+                positions = position_ids[..., start:start + size] if position_ids is not None else None
+                result = super().prefill(embeds[:, start:start + size], past_key_values, positions)
+            return result
+        if batched:
             return super().prefill(embeds, past_key_values, position_ids, **kwargs)
         # Otherwise the new tokens go through the deferred decode kernels in rows of 1, 4 or 8,
         # which also commit any rows the saved state left uncommitted. A multi-row
