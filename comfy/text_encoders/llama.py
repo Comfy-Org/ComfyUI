@@ -190,8 +190,15 @@ class Int8FixedKVCache(FixedKVState):
         length = torch.full_like(self.position[:1], start)
         self.packed.update(self.key, self.value, length)
         step = max(1, 64 // (xq.shape[1] // xk.shape[1]))  # query rows per call, no more than a verify step uses
-        parts = [self.packed.attend(xq[:, :, r:r + step].contiguous(), length) for r in range(0, seq, step)]
-        out = causal_merge(torch.cat([o for o, _ in parts], dim=1), torch.cat([lse for _, lse in parts], dim=2), xq, xk, xv)
+        out, lse = None, None
+        for r in range(0, seq, step):
+            o, s = self.packed.attend(xq[:, :, r:r + step].contiguous(), length)
+            if out is None:
+                out = o.new_empty((o.shape[0], seq, o.shape[2]))
+                lse = s.new_empty((s.shape[0], s.shape[1], seq))
+            out[:, r:r + step] = o
+            lse[:, :, r:r + step] = s
+        out = causal_merge(out, lse, xq, xk, xv)
         window, page = self.key.shape[2], self.packed.key.shape[3]
         pos = start
         while pos < start + seq:
@@ -204,23 +211,32 @@ class Int8FixedKVCache(FixedKVState):
         return out
 
 
-def causal_merge(out, lse, q, k, v, chunk=512):
+CAUSAL_MERGE_ELEMENTS = 1 << 26  # float32 scores per chunk (256 MB)
+
+
+def causal_merge(out, lse, q, k, v):
     """Fold rows' causal attention over each other into their attention over a prefix.
 
     out [B, S, H*D] and lse [B, H, S] are every row's attention over the prefix; q [B, H, S, D] and
-    k/v [B, Hk, S, D] the rows themselves. Row i also attends rows <= i. Returns [B, S, H*D]."""
+    k/v [B, Hk, S, D] the rows themselves. Row i also attends rows <= i. Returns [B, S, H*D].
+    The query heads sharing a key/value head go through one matmul, so k and v are never repeated."""
     batch, heads, rows, dim = q.shape
-    kf = k.float().repeat_interleave(heads // k.shape[1], dim=1)
-    vf = v.float().repeat_interleave(heads // k.shape[1], dim=1)
+    kv_heads = k.shape[1]
+    groups = heads // kv_heads
+    kf, vf = k.float(), v.float()
     merged = torch.empty_like(out)
+    chunk = max(1, min(rows, CAUSAL_MERGE_ELEMENTS // (heads * rows)))
     for r in range(0, rows, chunk):
         n = min(chunk, rows - r)
-        scores = torch.matmul(q[:, :, r:r + n].float(), kf[:, :, :r + n].transpose(-1, -2)) * dim ** -0.5
+        qc = q[:, :, r:r + n].float().reshape(batch, kv_heads, groups * n, dim)
+        scores = torch.matmul(qc, kf[:, :, :r + n].transpose(-1, -2)).mul_(dim ** -0.5).view(batch, heads, n, r + n)
         scores.masked_fill_(torch.ones(n, r + n, dtype=torch.bool, device=q.device).triu_(r + 1), float("-inf"))
-        m = torch.maximum(lse[:, :, r:r + n], scores.amax(-1))
-        w_prefix = torch.exp(lse[:, :, r:r + n] - m)
-        w = torch.exp(scores - m.unsqueeze(-1))
-        acc = out[:, r:r + n].view(batch, n, heads, dim).transpose(1, 2).float() * w_prefix.unsqueeze(-1) + torch.matmul(w, vf[:, :, :r + n])
+        prefix_lse = lse[:, :, r:r + n]
+        m = torch.maximum(prefix_lse, scores.amax(-1))
+        w_prefix = torch.exp(prefix_lse - m)
+        w = scores.sub_(m.unsqueeze(-1)).exp_()
+        acc = torch.matmul(w.view(batch, kv_heads, groups * n, r + n), vf[:, :, :r + n]).view(batch, heads, n, dim)
+        acc.add_(out[:, r:r + n].view(batch, n, heads, dim).transpose(1, 2).float() * w_prefix.unsqueeze(-1))
         merged[:, r:r + n] = (acc / (w_prefix + w.sum(-1)).unsqueeze(-1)).transpose(1, 2).reshape(batch, n, heads * dim).to(out.dtype)
     return merged
 
