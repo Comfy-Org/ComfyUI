@@ -11,6 +11,7 @@ from typing_extensions import override
 import folder_paths
 from comfy.utils import common_upscale
 from comfy_api.latest import IO, ComfyExtension, Input
+from comfy_extras.nodes_images import SVG
 from comfy_api_nodes.apis.openai import (
     InputFileContent,
     InputImageContent,
@@ -21,6 +22,7 @@ from comfy_api_nodes.apis.openai import (
     OpenAIImageEditRequest,
     OpenAIImageGenerationRequest,
     OpenAIImageGenerationResponse,
+    OpenAIImageSVGOptions,
     OpenAIResponse,
     OutputContent,
     Reasoning,
@@ -1244,6 +1246,106 @@ class OpenAIGPTImageGIFNode(IO.ComfyNode):
         return IO.NodeOutput(frames, fps)
 
 
+def _gpt_image_svg_inputs():
+    return [
+        IO.String.Input("prompt", default="", multiline=True),
+        IO.Combo.Input("size", default="1024x1024", options=["1024x1024", "1024x1536", "1536x1024"]),
+        IO.Combo.Input("background", default="auto", options=["auto", "opaque", "transparent"]),
+        IO.Combo.Input(
+            "quality",
+            default="low",
+            options=list(GPT_IMAGE_25_QUALITIES),
+            tooltip="Quality of the reference image the SVG is drawn from.",
+        ),
+        IO.Combo.Input(
+            "complexity",
+            default="high",
+            options=["low", "medium", "high"],
+            tooltip="How much the model plans the reference image before rendering.",
+        ),
+        IO.Int.Input(
+            "seed",
+            default=42,
+            min=0,
+            max=2147483647,
+            display_mode=IO.NumberDisplay.number,
+            control_after_generate=True,
+            tooltip="Seed controls whether the node should re-run; results are non-deterministic regardless of seed.",
+        ),
+    ]
+
+
+class OpenAIGPTImageSVGNode(IO.ComfyNode):
+
+    @classmethod
+    def define_schema(cls):
+        return IO.Schema(
+            node_id="OpenAIGPTImageSVGNode",
+            display_name="OpenAI GPT Image 2.6 SVG",
+            category="partner/image/OpenAI",
+            description="Generates an SVG via OpenAI's GPT Image endpoint.",
+            inputs=[
+                IO.DynamicCombo.Input(
+                    "model",
+                    options=[IO.DynamicCombo.Option(model_id, _gpt_image_svg_inputs()) for model_id in GPT_IMAGE_26_MODELS],
+                ),
+            ],
+            outputs=[IO.SVG.Output()],
+            hidden=[
+                IO.Hidden.auth_token_comfy_org,
+                IO.Hidden.api_key_comfy_org,
+                IO.Hidden.unique_id,
+            ],
+            is_api_node=True,
+            price_badge=IO.PriceBadge(
+                depends_on=IO.PriceBadgeDepends(widgets=["model.quality", "model.size"]),
+                expr="""
+                (
+                  $prices := {
+                    "low": {"1024x1024": 0.0353, "1024x1536": 0.0285, "1536x1024": 0.0285},
+                    "medium": {"1024x1024": 0.0622, "1024x1536": 0.0486, "1536x1024": 0.0486},
+                    "high": {"1024x1024": 0.0753, "1024x1536": 0.0589, "1536x1024": 0.0589},
+                    "xhigh": {"1024x1024": 0.1339, "1024x1536": 0.1055, "1536x1024": 0.1055},
+                    "max": {"1024x1024": 0.3013, "1024x1536": 0.2354, "1536x1024": 0.2354}
+                  };
+                  $qualityRaw := $lookup(widgets, "model.quality");
+                  $quality := ($qualityRaw != null) ? $qualityRaw : "low";
+                  $sizeRaw := $lookup(widgets, "model.size");
+                  $size := ($sizeRaw != null) ? $sizeRaw : "1024x1024";
+                  $image := $lookup($lookup($prices, $quality), $size);
+                  {
+                    "type": "range_usd",
+                    "min_usd": $image + 0.0011,
+                    "max_usd": $image + 0.0084,
+                    "format": {"approximate": true}
+                  }
+                )
+                """,
+            ),
+        )
+
+    @classmethod
+    async def execute(cls, model: dict) -> IO.NodeOutput:
+        validate_string(model["prompt"], strip_whitespace=False)
+        response = await sync_op(
+            cls,
+            ApiEndpoint(path="/proxy/openai/images/generations", method="POST"),
+            response_model=OpenAIImageGenerationResponse,
+            data=OpenAIImageGenerationRequest(
+                model=model["model"],
+                prompt=model["prompt"],
+                quality=model["quality"],
+                background=model["background"],
+                size=model["size"],
+                moderation="low",
+                output_format="svg",
+                complexity=model["complexity"],
+                svg=OpenAIImageSVGOptions(model="gpt-6-luna"),
+            ),
+        )
+        return IO.NodeOutput(SVG([await _single_image_payload(response, cls)]))
+
+
 class OpenAIChatNode(IO.ComfyNode):
     """
     Node to generate text responses from an OpenAI model.
@@ -1638,6 +1740,7 @@ class OpenAIExtension(ComfyExtension):
             OpenAIGPTImageNodeV2,
             OpenAIGPTImageNodeV3,
             OpenAIGPTImageGIFNode,
+            OpenAIGPTImageSVGNode,
             OpenAIChatNode,
             OpenAIInputFiles,
             OpenAIChatConfig,

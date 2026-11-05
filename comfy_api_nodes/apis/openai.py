@@ -37,6 +37,10 @@ class OpenAIImageEditRequest(BaseModel):
     size: str | None = Field(None, description="Size of the output image")
 
 
+class OpenAIImageSVGOptions(BaseModel):
+    model: str = Field(...)
+
+
 class OpenAIImageGenerationRequest(BaseModel):
     background: str | None = Field(None, description="Background transparency")
     complexity: str | None = Field(None)
@@ -53,6 +57,7 @@ class OpenAIImageGenerationRequest(BaseModel):
     prompt: str = Field(...)
     quality: str | None = Field(None, description="The quality of the generated image")
     size: str | None = Field(None, description="Size of the image (e.g., 1024x1024, 1536x1024, auto)")
+    svg: OpenAIImageSVGOptions | None = Field(None)
 
 
 class Reasoning(BaseModel):
