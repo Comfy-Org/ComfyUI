@@ -82,6 +82,26 @@ def test_remesh_mesh_pads_fitted_domain_for_udf_band(mesh_module, monkeypatch):
     torch.testing.assert_close(captured["center"], torch.zeros(3))
 
 
+def test_remesh_mesh_fits_referenced_longest_axis(mesh_module, monkeypatch):
+    captured = {}
+
+    def fake_remesh(vertices, faces, **kwargs):
+        captured.update(kwargs)
+        return vertices, faces, kwargs["colors"]
+
+    mesh = _cube_mesh(1.0)
+    mesh.vertices[..., 1] *= 2.0
+    mesh = Types.MESH(
+        vertices=torch.cat([mesh.vertices, torch.tensor([[[100.0, 100.0, 100.0]]])], dim=1),
+        faces=mesh.faces,
+    )
+    monkeypatch.setattr(mesh_module, "remesh_narrow_band_dc", fake_remesh)
+    _remesh(mesh_module, mesh)
+
+    assert captured["scale"] == pytest.approx(4.0 * 35.0 / 32.0)
+    torch.testing.assert_close(captured["center"], torch.zeros(3))
+
+
 def test_remesh_mesh_preserves_unit_cube_domain(mesh_module, monkeypatch):
     captured = {}
 

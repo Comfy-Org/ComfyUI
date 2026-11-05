@@ -2460,9 +2460,10 @@ class RemeshMesh(IO.ComfyNode):
             domain_padding = (resolution + 3.0 * band) / resolution
             rs_scale = domain_padding
             rs_center = torch.zeros(3, dtype=vv.dtype, device=compute_device)
-            if bool((vv.abs().amax() > 0.5 * rs_scale).item()):
-                bbox_min = vv.amin(dim=0)
-                bbox_max = vv.amax(dim=0)
+            used_vertices = vv[ff.unique()]
+            if bool((used_vertices.abs().amax() > 0.5 * rs_scale).item()):
+                bbox_min = used_vertices.amin(dim=0)
+                bbox_max = used_vertices.amax(dim=0)
                 rs_scale = float((bbox_max - bbox_min).amax().item()) * domain_padding
                 rs_center = 0.5 * (bbox_min + bbox_max)
 
