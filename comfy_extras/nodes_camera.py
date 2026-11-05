@@ -4,36 +4,12 @@ from typing_extensions import override
 
 import comfy.model_management
 from comfy_api.latest import ComfyExtension, IO
-from comfy_extras.nodes_gaussian_splat import _lookat_camera_info, _quat_camera_info
+from comfy_extras.nodes_gaussian_splat import _lookat_camera_info, _quat_camera_info, _rotate_camera_info, _xyz
 
 
-def _xyz(d):
-    return [float(d.get(k, 0.0)) for k in "xyz"]
-
-
-def _rotate_camera_info(camera_info, axis, angle_deg):
-    # Rigidly rotate a camera_info about the unit world `axis` through its target: position, up and quaternion
-    # turn together, so a sweep over the top keeps the camera's orientation continuous.
-    a = math.radians(angle_deg)
-    c, s = math.cos(a), math.sin(a)
-    kx, ky, kz = axis
-
-    def rot(v):
-        d = (kx * v[0] + ky * v[1] + kz * v[2]) * (1.0 - c)
-        return [v[0] * c + (ky * v[2] - kz * v[1]) * s + kx * d,
-                v[1] * c + (kz * v[0] - kx * v[2]) * s + ky * d,
-                v[2] * c + (kx * v[1] - ky * v[0]) * s + kz * d]
-    tgt = _xyz(camera_info.get("target", {}))
-    rel = rot([p - t for p, t in zip(_xyz(camera_info.get("position", {})), tgt)])
-    up = rot(_xyz(camera_info.get("up", {"y": 1.0})))
-    out = {**camera_info, "position": dict(zip("xyz", (r + t for r, t in zip(rel, tgt)))), "up": dict(zip("xyz", up))}
-    q = camera_info.get("quaternion")
-    if q:                                         # world-frame rotation (cos a/2, axis sin a/2) applied first
-        aw, ax, ay, az = math.cos(a / 2), kx * math.sin(a / 2), ky * math.sin(a / 2), kz * math.sin(a / 2)
-        bw, bx, by, bz = (float(q.get(k, 1.0 if k == "w" else 0.0)) for k in "wxyz")
-        out["quaternion"] = {"x": aw * bx + ax * bw + ay * bz - az * by, "y": aw * by - ax * bz + ay * bw + az * bx,
-                             "z": aw * bz + ax * by - ay * bx + az * bw, "w": aw * bw - ax * bx - ay * by - az * bz}
-    return out
+def camera_list(camera_info):
+    """A camera_info is one camera or, from Create Camera Orbit / Batch Cameras, a list of them."""
+    return camera_info if isinstance(camera_info, list) else [camera_info]
 
 
 class CreateCameraInfo(IO.ComfyNode):
@@ -143,12 +119,13 @@ class CreateCameraOrbit(IO.ComfyNode):
         step = lambda angle: angle / count if angle % 360.0 == 0.0 else angle / max(count - 1, 1)
         yaw_step, pitch_step = step(yaw), step(pitch)
         rig = []
-        for base in camera_info if isinstance(camera_info, list) else [camera_info]:
+        for base in camera_list(camera_info):
             pos, tgt = _xyz(base.get("position", {})), _xyz(base.get("target", {}))
             fx, fy, fz = (t - p for p, t in zip(pos, tgt))
             ux, uy, uz = _xyz(base.get("up", {"y": 1.0}))
             if abs(fx * ux + fy * uy + fz * uz) >= 0.99 * math.hypot(fx, fy, fz) * math.hypot(ux, uy, uz):
-                ux, uy, uz = 0.0, 0.0, 1.0                # looking along up: Render Mesh's +Z up fallback
+                # looking along up: Render Mesh's +Z up fallback, +Y when the view is along Z too
+                ux, uy, uz = (0.0, 0.0, 1.0) if abs(fz) < 0.99 * math.hypot(fx, fy, fz) else (0.0, 1.0, 0.0)
             ax, ay, az = uy * fz - uz * fy, uz * fx - ux * fz, ux * fy - uy * fx   # up x forward: tilting about it rises
             n = math.hypot(ax, ay, az)
             for i in range(count):
@@ -186,7 +163,7 @@ class BatchCameras(IO.ComfyNode):
 
     @classmethod
     def execute(cls, cameras: IO.Autogrow.Type) -> IO.NodeOutput:
-        return IO.NodeOutput([cam for c in cameras.values() for cam in (c if isinstance(c, list) else [c])])
+        return IO.NodeOutput([cam for c in cameras.values() for cam in camera_list(c)])
 
 
 class CameraExtension(ComfyExtension):

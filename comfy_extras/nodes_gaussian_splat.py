@@ -647,22 +647,33 @@ def _orbit_camera_info(yaw, pitch, distance, fov, pivot_splat, dev):
     return _lookat_camera_info(m(pivot_splat - distance * fwd_splat), m(pivot_splat), fov, dev)
 
 
-def _orbit_camera_info_yaw(camera_info, angle_deg, dev):
-    # Turntable: rigidly rotate a camera_info about world +Y around its target by angle_deg. Returns a new dict.
+def _xyz(d):
+    return [float(d.get(k, 0.0)) for k in "xyz"]
+
+
+def _rotate_camera_info(camera_info, axis, angle_deg):
+    # Rigidly rotate a camera_info about the unit world `axis` through its target: position, up and quaternion
+    # turn together, so a turntable or a sweep over the top keeps the camera's orientation continuous.
     a = math.radians(angle_deg)
-    ca, sa = math.cos(a), math.sin(a)
-    v = lambda d: torch.tensor([float(d.get("x", 0.0)), float(d.get("y", 0.0)), float(d.get("z", 0.0))], device=dev)
-    pos, tgt = v(camera_info.get("position", {})), v(camera_info.get("target", {}))
-    Ry = torch.tensor([[ca, 0.0, sa], [0.0, 1.0, 0.0], [-sa, 0.0, ca]], device=dev)
-    new_pos = tgt + Ry @ (pos - tgt)
-    q = camera_info.get("quaternion") or {}
-    qcur = torch.tensor([float(q.get("w", 1.0)), float(q.get("x", 0.0)),
-                         float(q.get("y", 0.0)), float(q.get("z", 0.0))], device=dev)
-    qy = torch.tensor([math.cos(a / 2), 0.0, math.sin(a / 2), 0.0], device=dev)   # world +Y rotation
-    qn = _quat_mul(qy[None], qcur[None])[0]
-    xyz = lambda t: {"x": float(t[0]), "y": float(t[1]), "z": float(t[2])}
-    return {**camera_info, "position": xyz(new_pos),
-            "quaternion": {"x": float(qn[1]), "y": float(qn[2]), "z": float(qn[3]), "w": float(qn[0])}}
+    c, s = math.cos(a), math.sin(a)
+    kx, ky, kz = axis
+
+    def rot(v):
+        d = (kx * v[0] + ky * v[1] + kz * v[2]) * (1.0 - c)
+        return [v[0] * c + (ky * v[2] - kz * v[1]) * s + kx * d,
+                v[1] * c + (kz * v[0] - kx * v[2]) * s + ky * d,
+                v[2] * c + (kx * v[1] - ky * v[0]) * s + kz * d]
+    tgt = _xyz(camera_info.get("target", {}))
+    rel = rot([p - t for p, t in zip(_xyz(camera_info.get("position", {})), tgt)])
+    up = rot(_xyz(camera_info.get("up", {"y": 1.0})))
+    out = {**camera_info, "position": dict(zip("xyz", (r + t for r, t in zip(rel, tgt)))), "up": dict(zip("xyz", up))}
+    q = camera_info.get("quaternion")
+    if q:                                         # world-frame rotation (cos a/2, axis sin a/2) applied first
+        aw, ax, ay, az = math.cos(a / 2), kx * math.sin(a / 2), ky * math.sin(a / 2), kz * math.sin(a / 2)
+        bw, bx, by, bz = (float(q.get(k, 1.0 if k == "w" else 0.0)) for k in "wxyz")
+        out["quaternion"] = {"x": aw * bx + ax * bw + ay * bz - az * by, "y": aw * by - ax * bz + ay * bw + az * bx,
+                             "z": aw * bz + ax * by - ay * bx + az * bw, "w": aw * bw - ax * bx - ay * by - az * bz}
+    return out
 
 
 def _gauss_blur(x, sigma, dev):
@@ -1011,7 +1022,7 @@ class RenderSplat(IO.ComfyNode):
                 base_cam = _orbit_camera_info(35.0, 30.0, dist, 35.0, center, device)
             for fr in range(n_frames):
                 cam_fr = (base_cam if n_frames == 1
-                          else _orbit_camera_info_yaw(base_cam, orbit_dir * 360.0 * fr / n_frames, device))
+                          else _rotate_camera_info(base_cam, (0.0, 1.0, 0.0), orbit_dir * 360.0 * fr / n_frames))
                 bg_k = bg_imgs[k % bg_imgs.shape[0]] if bg_imgs is not None else bg   # per-frame plate, or solid colour
                 img, mask = _render_gaussian(xyz, rgb, opacity, scale, rot, width, height, splat_scale, bg_k, cam_fr,
                                              sharpen=sharpen, headlight_shading=headlight_shading,
