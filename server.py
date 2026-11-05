@@ -1326,6 +1326,7 @@ class PromptServer():
         # router freezes in start_multi_address().
         if args.enable_agent:
             agent_host.register(self.app)
+            agent_host.check_frontend(FrontendManager.served_version(self.web_root), args.front_end_version, args.front_end_root)
         self.user_manager.add_routes(self.routes)
         self.model_file_manager.add_routes(self.routes)
         self.custom_node_manager.add_routes(self.routes, self.app, nodes.LOADED_MODULE_DIRS.items())
