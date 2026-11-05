@@ -313,9 +313,6 @@ def cuda_device_context(device):
         if prev is not None:
             torch.cuda.set_device(prev)
 
-# Held by the prompt worker while it executes. A dynamic VRAM page-out can run Python inside a torch CUDA allocation,
-# with the allocator's lock held, and that Python can let another thread take the GIL. torch.cuda.memory_stats waits on
-# the allocator's lock without releasing the GIL, so a status query from another thread then deadlocks the process.
 model_execution_lock = threading.Lock()
 
 def get_total_memory(dev=None, torch_total_too=False):

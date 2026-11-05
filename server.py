@@ -273,7 +273,7 @@ class PromptServer():
         self.prompt_queue = execution.PromptQueue(self)
         self.loop = loop
         self.messages = asyncio.Queue()
-        self.device_memory = {}  # /system_stats' last device memory values, by device
+        self.device_memory = {}
         self.read_device_memory([comfy.model_management.get_torch_device()] + list(comfy.model_management.get_all_torch_devices()))
         self.client_session:Optional[aiohttp.ClientSession] = None
         self.number = 0
@@ -792,8 +792,6 @@ class PromptServer():
             else:
                 torch_devices = [primary_device] + list(torch_devices)
 
-            # While a prompt runs, report the last values read: querying the device then can deadlock (see
-            # model_execution_lock).
             if comfy.model_management.model_execution_lock.acquire(blocking=False):
                 try:
                     self.read_device_memory(torch_devices)
@@ -1329,7 +1327,6 @@ class PromptServer():
         self.client_session = aiohttp.ClientSession(timeout=timeout)
 
     def read_device_memory(self, devices):
-        """Read the devices' memory for /system_stats; only while no prompt runs (see model_execution_lock)."""
         for d in devices:
             self.device_memory[str(d)] = (comfy.model_management.get_total_memory(d, torch_total_too=True)
                                           + comfy.model_management.get_free_memory(d, torch_free_too=True))

@@ -1,5 +1,3 @@
-"""/system_stats while a prompt runs: it must not query the device, since a dynamic VRAM page-out on the prompt worker
-can hold torch's allocator lock while another thread has the GIL."""
 
 from unittest.mock import MagicMock
 
@@ -34,11 +32,10 @@ async def test_system_stats_reports_last_values_while_a_prompt_runs(monkeypatch)
         return d["vram_total"], d["torch_vram_total"], d["vram_free"], d["torch_vram_free"]
 
     async with TestClient(TestServer(prompt_server.app)) as client:
-        # the first request comes mid-prompt: the values read at startup
         with comfy.model_management.model_execution_lock:
             queried.clear()
             assert device(await (await client.get("/system_stats")).json()) == (100, 6, 14, 4)
-            assert queried == ["total", "free"]  # the cpu's RAM only, for "system"
+            assert queried == ["total", "free"]
 
         memory.update(total=(200, 7), free=(30, 5))
         assert device(await (await client.get("/system_stats")).json()) == (200, 7, 30, 5)
