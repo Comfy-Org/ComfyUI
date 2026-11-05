@@ -5,7 +5,7 @@ from io import BytesIO
 
 import numpy as np
 import torch
-from PIL import Image
+from PIL import Image, ImageSequence
 from typing_extensions import override
 
 import folder_paths
@@ -92,6 +92,12 @@ async def _image_payload_bytes(img_data, timeout: int | None, cls: type[IO.Comfy
         await download_url_to_bytesio(img_data.url, img_io, timeout=timeout, cls=cls)
         return img_io
     raise ValueError("Invalid image payload – neither URL nor base64 data present.")
+
+
+async def _single_image_payload(response, cls: type[IO.ComfyNode]) -> BytesIO:
+    if not response.data:
+        raise ValueError("No images returned from API endpoint")
+    return await _image_payload_bytes(response.data[0], None, cls)
 
 
 async def validate_and_cast_response(
@@ -1031,6 +1037,213 @@ class OpenAIGPTImageNodeV3(IO.ComfyNode):
         return IO.NodeOutput(await validate_and_cast_response(response, cls=cls))
 
 
+def _gpt_image_gif_inputs():
+    return [
+        IO.String.Input("prompt", default="", multiline=True),
+        IO.Combo.Input(
+            "size",
+            default="512x512",
+            options=[
+                "384x384",
+                "512x512",
+                "640x640",
+                "720x720",
+                "768x768",
+                "960x960",
+                "512x288",
+                "288x512",
+                "1024x576",
+                "576x1024",
+                "1280x720",
+                "720x1280",
+            ],
+            tooltip="Size of each frame. Larger sizes only fit lower frame counts.",
+        ),
+        IO.Int.Input(
+            "frame_count",
+            default=9,
+            min=2,
+            max=16,
+            tooltip="Frames are billed in steps: 2-8, 9, 10-12, 13-16.",
+        ),
+        IO.Int.Input("frame_duration_ms", default=200, min=20, max=2000, step=10),
+        IO.Combo.Input(
+            "background",
+            default="opaque",
+            options=["opaque", "transparent"],
+            tooltip="Transparency is kept by Save WEBM with vp9, Save Animated WEBP and Save Animated PNG.",
+        ),
+        IO.Combo.Input("quality", default="low", options=list(GPT_IMAGE_25_QUALITIES)),
+        IO.Combo.Input(
+            "complexity",
+            default="high",
+            options=["low", "medium", "high"],
+            tooltip="How much the model plans the animation before rendering.",
+        ),
+        IO.Int.Input(
+            "seed",
+            default=42,
+            min=0,
+            max=2147483647,
+            display_mode=IO.NumberDisplay.number,
+            control_after_generate=True,
+            tooltip="Seed controls whether the node should re-run; results are non-deterministic regardless of seed.",
+        ),
+    ]
+
+
+def _gif_to_frames(gif: BytesIO, mode: str) -> tuple[torch.Tensor, float]:
+    img = Image.open(gif)
+    fps = 1000.0 / img.info["duration"]
+    frames = [np.asarray(frame.convert(mode)).astype(np.float32) / 255.0 for frame in ImageSequence.Iterator(img)]
+    return torch.from_numpy(np.stack(frames)), fps
+
+
+class OpenAIGPTImageGIFNode(IO.ComfyNode):
+
+    @classmethod
+    def define_schema(cls):
+        return IO.Schema(
+            node_id="OpenAIGPTImageGIFNode",
+            display_name="OpenAI GPT Image 2.6 GIF",
+            category="partner/image/OpenAI",
+            description="Generates an animated GIF via OpenAI's GPT Image endpoint and outputs its frames and frame rate.",
+            inputs=[
+                IO.DynamicCombo.Input(
+                    "model",
+                    options=[IO.DynamicCombo.Option(model_id, _gpt_image_gif_inputs()) for model_id in GPT_IMAGE_26_MODELS],
+                ),
+            ],
+            outputs=[
+                IO.Image.Output(display_name="frames"),
+                IO.Float.Output(display_name="fps"),
+            ],
+            hidden=[
+                IO.Hidden.auth_token_comfy_org,
+                IO.Hidden.api_key_comfy_org,
+                IO.Hidden.unique_id,
+            ],
+            is_api_node=True,
+            price_badge=IO.PriceBadge(
+                depends_on=IO.PriceBadgeDepends(widgets=["model.quality", "model.size", "model.frame_count"]),
+                expr="""
+                (
+                  $prices := {
+                    "low": {
+                      "384x384": [0.0184, 0.0384, 0.0326, 0.0503],
+                      "512x512": [0.0238, 0.0503, 0.0445, 0.0716],
+                      "640x640": [0.0305, 0.0656, 0.0598, 0.0988],
+                      "720x720": [0.0355, 0.0770, 0.0712, 0.1187],
+                      "768x768": [0.0387, 0.0843, 0.0786, null],
+                      "960x960": [0.0541, 0.1187, null, null],
+                      "512x288": [0.0323, 0.0216, 0.0326, 0.0283],
+                      "288x512": [0.0323, 0.0216, 0.0326, 0.0283],
+                      "1024x576": [0.0680, 0.0476, 0.0786, null],
+                      "576x1024": [0.0680, 0.0476, 0.0786, null],
+                      "1280x720": [0.0946, 0.0669, null, null],
+                      "720x1280": [0.0946, 0.0669, null, null]
+                    },
+                    "medium": {
+                      "384x384": [0.0324, 0.0680, 0.0578, 0.0889],
+                      "512x512": [0.0418, 0.0889, 0.0787, 0.1263],
+                      "640x640": [0.0538, 0.1160, 0.1058, 0.1744],
+                      "720x720": [0.0627, 0.1359, 0.1257, 0.2100],
+                      "768x768": [0.0686, 0.1491, 0.1389, null],
+                      "960x960": [0.0956, 0.2100, null, null],
+                      "512x288": [0.0568, 0.0396, 0.0578, 0.0520],
+                      "288x512": [0.0568, 0.0396, 0.0578, 0.0520],
+                      "1024x576": [0.1199, 0.0870, 0.1389, null],
+                      "576x1024": [0.1199, 0.0870, 0.1389, null],
+                      "1280x720": [0.1672, 0.1225, null, null],
+                      "720x1280": [0.1672, 0.1225, null, null]
+                    },
+                    "high": {
+                      "384x384": [0.0393, 0.0822, 0.0699, 0.1077],
+                      "512x512": [0.0506, 0.1077, 0.0954, 0.1531],
+                      "640x640": [0.0652, 0.1405, 0.1282, 0.2114],
+                      "720x720": [0.0760, 0.1647, 0.1524, 0.2544],
+                      "768x768": [0.0830, 0.1806, 0.1683, null],
+                      "960x960": [0.1158, 0.2544, null, null],
+                      "512x288": [0.0704, 0.0462, 0.0699, 0.0606],
+                      "288x512": [0.0704, 0.0462, 0.0699, 0.0606],
+                      "1024x576": [0.1487, 0.1016, 0.1683, null],
+                      "576x1024": [0.1487, 0.1016, 0.1683, null],
+                      "1280x720": [0.2075, 0.1431, null, null],
+                      "720x1280": [0.2075, 0.1431, null, null]
+                    },
+                    "xhigh": {
+                      "384x384": [0.0698, 0.1462, 0.1242, 0.1915],
+                      "512x512": [0.0900, 0.1915, 0.1695, 0.2721],
+                      "640x640": [0.1159, 0.2498, 0.2278, 0.3758],
+                      "720x720": [0.1350, 0.2928, 0.2709, 0.4523],
+                      "768x768": [0.1476, 0.3211, 0.2991, null],
+                      "960x960": [0.2059, 0.4523, null, null],
+                      "512x288": [0.1244, 0.0822, 0.1242, 0.1077],
+                      "288x512": [0.1244, 0.0822, 0.1242, 0.1077],
+                      "1024x576": [0.2629, 0.1806, 0.2991, null],
+                      "576x1024": [0.2629, 0.1806, 0.2991, null],
+                      "1280x720": [0.3667, 0.2544, null, null],
+                      "720x1280": [0.3667, 0.2544, null, null]
+                    },
+                    "max": {
+                      "384x384": [0.1571, 0.3289, 0.2795, 0.4309],
+                      "512x512": [0.2025, 0.4309, 0.3815, 0.6123],
+                      "640x640": [0.2608, 0.5621, 0.5127, 0.8455],
+                      "720x720": [0.3038, 0.6589, 0.6094, 1.0175],
+                      "768x768": [0.3320, 0.7224, 0.6730, null],
+                      "960x960": [0.4632, 1.0175, null, null],
+                      "512x288": [0.2783, 0.1850, 0.2795, 0.2424],
+                      "288x512": [0.2783, 0.1850, 0.2795, 0.2424],
+                      "1024x576": [0.5880, 0.4063, 0.6730, null],
+                      "576x1024": [0.5880, 0.4063, 0.6730, null],
+                      "1280x720": [0.8203, 0.5724, null, null],
+                      "720x1280": [0.8203, 0.5724, null, null]
+                    }
+                  };
+                  $qualityRaw := $lookup(widgets, "model.quality");
+                  $quality := ($qualityRaw != null) ? $qualityRaw : "low";
+                  $sizeRaw := $lookup(widgets, "model.size");
+                  $size := ($sizeRaw != null) ? $sizeRaw : "512x512";
+                  $framesRaw := $lookup(widgets, "model.frame_count");
+                  $frames := ($framesRaw != null) ? $framesRaw : 9;
+                  $tier := ($frames <= 8) ? 0 : ($frames = 9) ? 1 : ($frames <= 12) ? 2 : 3;
+                  $usd := $lookup($lookup($prices, $quality), $size)[$tier];
+                  ($usd != null)
+                    ? {"type": "usd", "usd": $usd, "format": {"approximate": true}}
+                    : {"type": "text", "text": "Size too large for this frame count"}
+                )
+                """,
+            ),
+        )
+
+    @classmethod
+    async def execute(cls, model: dict) -> IO.NodeOutput:
+        validate_string(model["prompt"], strip_whitespace=False)
+        response = await sync_op(
+            cls,
+            ApiEndpoint(path="/proxy/openai/images/generations", method="POST"),
+            response_model=OpenAIImageGenerationResponse,
+            asset_urls=True,
+            data=OpenAIImageGenerationRequest(
+                model=model["model"],
+                prompt=model["prompt"],
+                quality=model["quality"],
+                background=model["background"],
+                size=model["size"],
+                moderation="low",
+                output_format="gif",
+                complexity=model["complexity"],
+                frame_count=model["frame_count"],
+                frame_duration_ms=model["frame_duration_ms"],
+            ),
+        )
+        frames, fps = _gif_to_frames(
+            await _single_image_payload(response, cls),
+            "RGBA" if model["background"] == "transparent" else "RGB",
+        )
+        return IO.NodeOutput(frames, fps)
+
+
 class OpenAIChatNode(IO.ComfyNode):
     """
     Node to generate text responses from an OpenAI model.
@@ -1424,6 +1637,7 @@ class OpenAIExtension(ComfyExtension):
             OpenAIGPTImage1,
             OpenAIGPTImageNodeV2,
             OpenAIGPTImageNodeV3,
+            OpenAIGPTImageGIFNode,
             OpenAIChatNode,
             OpenAIInputFiles,
             OpenAIChatConfig,
