@@ -166,7 +166,7 @@ class LockCheckingExecutor(Executor):
 
 def test_prompt_worker_holds_model_execution_lock_only_while_executing(monkeypatch) -> None:
     monkeypatch.setattr(main.execution, "PromptExecutor", LockCheckingExecutor)
-    monkeypatch.setattr(main.time, "perf_counter", lambda: 1.0)  # no GC pass
+    monkeypatch.setattr(main.time, "perf_counter", lambda: 1.0)
     LockCheckingExecutor.held_during_execute = None
     lock = main.comfy.model_management.model_execution_lock
     held_while_waiting: list[bool] = []
