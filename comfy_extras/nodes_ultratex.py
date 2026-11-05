@@ -5,8 +5,6 @@ import node_helpers
 from comfy.ldm.flux.model import views_to_grid
 from comfy_api.latest import ComfyExtension, io
 
-# Tile (row, col) in UltraTex's 2x3 atlas of each canonical view (Create Camera Orbit count 4, top and bottom: front, right,
-# back, left, top, bottom). Row 0 holds front, left, right; row 1 back, top, bottom.
 VIEW_GRID = [(0, 0), (0, 2), (1, 0), (0, 1), (1, 1), (1, 2)]
 VIEW_NAMES = ["front", "right", "back", "left", "top", "bottom"]
 
@@ -29,26 +27,20 @@ class UltraTexConditioning(io.ComfyNode):
             display_name="UltraTex Conditioning",
             category="3d/texturing",
             description=(
-                "Conditioning for texturing a mesh with FLUX.2 Klein base 9B and the UltraTex LoRA, from Render Mesh's six "
-                "canonical views (world normal mode, cameras from Create Camera Orbit with count 4 and top and bottom poles) and a reference image of the textured object. "
-                "An orbit camera at yaw 0, pitch 0, fov 35 and distance 1.6 matches the training framing of a unit-sized "
-                "mesh. Sample six latents at the view size, then bake the decoded views with Bake Texture From Views. "
-                "The four side views alone (no poles) also work, e.g. for a second orbit at yaw 45, whose poles would repeat the first's. "
+                "Conditioning for texturing a mesh with FLUX.2 Klein base 9B and the UltraTex LoRA, from Render Mesh's six views and a reference image of the textured object. "
                 "Extra views add images of the object from the other canonical views as further references."),
             inputs=[
                 io.Conditioning.Input("conditioning", tooltip="Text conditioning; UltraTex was trained with an empty prompt."),
                 io.Vae.Input("vae"),
-                io.Image.Input("normals", tooltip="Render Mesh world normal images of the six canonical views, or the four side views, in its order."),
+                io.Image.Input("normals", tooltip="Render Mesh world normal images"),
                 io.Mask.Input("masks", tooltip="Render Mesh object masks of the same views."),
-                io.Image.Input("reference", tooltip="Image of the object with the look to texture it with, e.g. an edited render."),
+                io.Image.Input("reference", tooltip="Image of the object with the look to texture it with"),
                 io.Mask.Input("reference_mask", optional=True,
-                              tooltip="Object mask of the reference (1 = object; Load Image's mask is the inverse, "
-                                      "so pass it through Invert Mask). Without it every reference token is attended."),
+                              tooltip="Object mask of the reference (white = object)"),
                 io.DynamicCombo.Input("extra_views", options=[
                     io.DynamicCombo.Option("off", []),
                     io.DynamicCombo.Option("on", [
-                        io.Image.Input(name, optional=True, tooltip=f"The object seen from the {name} view, e.g. an edited Render Mesh "
-                                                                    "render, framed like that view's render.")
+                        io.Image.Input(name, optional=True, tooltip=f"The object seen from the {name} view")
                         for name in VIEW_NAMES[1:]
                     ]),
                 ], tooltip="Further references, each masked by its view's silhouette and placed over its tile, like the reference over the front."),
