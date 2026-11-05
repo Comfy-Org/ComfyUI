@@ -469,6 +469,40 @@ def test_batched_continue_matches_one_prefill(monkeypatch):
     _, rest = prefill(slice(0, 11), slice(11, 30))
     assert torch.allclose(rest, whole[:, 11:], atol=1e-4)
 
+@pytest.mark.parametrize("kv", ["bf16", "int8"])
+def test_long_prompt_prefills_in_pieces(monkeypatch, kv):
+    # a prompt over PREFILL_ROWS goes in equal pieces that continue each other, and its last hidden state
+    # and the cache it leaves match one pass over the whole prompt
+    import comfy.text_encoders.llama as llama
+    import comfy.text_encoders.qwen35 as qwen35
+    model = _tiny_model(monkeypatch)
+    if kv == "int8":
+        monkeypatch.setattr(llama, "Int8DecodeCache", _ExactPacked, raising=False)
+        monkeypatch.setattr(qwen35.GatedAttention, "kv_cache_type", lambda self, device, dtype: qwen35.Int8FixedKVCache)
+    embeds, more = torch.randn(1, 30, 64), torch.randn(1, 12, 64)
+    passes = []
+    forward = model.model.forward
+    monkeypatch.setattr(model.model, "forward", lambda *a, **kw: passes.append(kw["embeds"].shape[1]) or forward(*a, **kw))
+
+    def prefill(rows):
+        monkeypatch.setattr(qwen35, "PREFILL_ROWS", rows)
+        state = comfy.model_state.ModelState()
+        comfy.model_management.register_ephemeral_model(state)
+        cpu = torch.device("cpu")
+        cache = state.load(model.init_kv_cache(1, 48, cpu, torch.float32, mtp=True), cpu)
+        last = model.prefill(embeds.clone(), cache.caches)[0][:, -1]  # the forward reuses its input buffer
+        monkeypatch.setattr(qwen35, "PREFILL_ROWS", 4096)
+        after = model.prefill(more.clone(), cache.caches)[0]
+        state.release()
+        return last, after
+
+    whole = prefill(4096)
+    passes.clear()
+    pieces = prefill(11)
+    assert passes == [10, 10, 10, 12]
+    assert torch.allclose(pieces[0], whole[0], atol=1e-4)
+    assert torch.allclose(pieces[1], whole[1], atol=1e-4)
+
 @pytest.mark.parametrize("mtp", [False, "3", "tree2s2"])
 def test_long_continuation_prefills_in_one_batch(monkeypatch, tmp_path, mtp):
     # a continued turn with more than SPEC_ROWS new tokens prefills as one batch, from the saved
