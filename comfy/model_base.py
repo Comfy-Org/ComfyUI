@@ -2200,7 +2200,7 @@ class MiniMaxH3(BaseModel):
         """Scale the sampler carries the audio stream at, 1.0 when not sampling the packed latent."""
         if self.latent_shapes is None or len(self.latent_shapes) < 2:
             return 1.0
-        return self.model_sampling.audio_scale
+        return getattr(self.model_sampling, "audio_scale", 1.0)
 
     def _scale_audio_slice(self, latent, scale):
         # the sampler carries the audio stream scaled onto the video schedule
