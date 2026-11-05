@@ -1010,7 +1010,7 @@ class Qwen35(BaseLlama, BaseGenerate, torch.nn.Module):
         if cache_ids is not None:
             # the prompt state cache: a resident state with the longest matching prefix, prefilled to the end of the prompt
             cache, x, cap = llm_state_cache.prefill(self, embeds, cache_ids, cap,
-                                                    lambda e, kv, p: self.model.forward(None, embeds=e, attention_mask=None, past_key_values=kv, position_ids=p)[0],
+                                                    lambda e, kv, p: self.prefill(e, kv, p)[0],
                                                     position_ids=position_ids)
         else:
             cache = model_state.load(self.init_kv_cache(embeds.shape[0], cap, device, dt, mtp=True), device)
