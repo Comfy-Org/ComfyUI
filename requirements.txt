@@ -22,7 +22,7 @@ SQLAlchemy>=2.0.0
 filelock
 av>=17.0.0
 comfy-aimdo==0.6.0
-comfy-kitchen==0.2.40
+comfy-kitchen==0.2.41
 requests
 simpleeval>=1.0.0
 blake3
