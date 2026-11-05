@@ -9,7 +9,7 @@ class TorchTweakModel(io.ComfyNode):
         return io.Schema(
             node_id="TorchTweakModel",
             category="experimental",
-            description="Measures OpenVINO, graphs and eager on the first step of each image size and keeps the fastest. Later runs with the same model reuse the choice. Needs the torch-tweak package.",
+            description="Measures OpenVINO, Torch Inductor, graphs and eager on the first step of each image size and keeps the fastest. Later runs with the same model reuse the choice. Needs the torch-tweak package.",
             inputs=[
                 io.Model.Input("model"),
             ],

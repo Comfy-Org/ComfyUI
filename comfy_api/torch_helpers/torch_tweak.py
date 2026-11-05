@@ -58,14 +58,22 @@ class _TunedDiffusionModel(torch.nn.Module):
 
 
 def _xpu_strategy():
-    '''
-    Torch Inductor is left out: it never beat OpenVINO on UNets and its compile is most of the tuning time.
-    '''
     from torch_tweak.torch import HighestThroughputStrategy
-    from torch_tweak.torch.backend import OpenVINOBackend, OpenVINOBackendConfig, TorchEagerBackend, XPUGraphBackend
+    from torch_tweak.torch.backend import (
+        OpenVINOBackend,
+        OpenVINOBackendConfig,
+        TorchEagerBackend,
+        TorchInductorBackend,
+        XPUGraphBackend,
+    )
 
     strategy = HighestThroughputStrategy(
-        backends=[XPUGraphBackend(), OpenVINOBackend(OpenVINOBackendConfig(offload_module=False, reuse_ir=True)), TorchEagerBackend()]
+        backends=[
+            XPUGraphBackend(),
+            TorchInductorBackend(),
+            OpenVINOBackend(OpenVINOBackendConfig(offload_module=False, reuse_ir=True)),
+            TorchEagerBackend(),
+        ]
     )
     strategy.enable_find_max_batch_size(False)
     return strategy
@@ -75,7 +83,7 @@ def set_torch_tweak_wrapper(model: ModelPatcher):
     '''
     Serve the diffusion model of a ModelPatcher through Torch Tweak at sample time.
 
-    Torch Tweak tunes each new input shape on its first step: it measures XPU graphs, OpenVINO and eager,
+    Torch Tweak tunes each new input shape on its first step: it measures XPU graphs, Torch Inductor, OpenVINO and eager,
     and keeps the fastest. Later steps with that shape use it.
     Tuned shapes are dropped whenever the weights are loaded again, since LoRA patches and offloading change them.
     The selection of every shape is saved under the Torch Tweak cache directory, keyed by the weights.
