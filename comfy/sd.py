@@ -1051,7 +1051,12 @@ class VAE:
                     still_frame = int(metadata.get("h3_t1_output_slice", 3))
                 # LightVAE Lite encoders prune resnet blocks down to their shortcut
                 minimax_kept = {(int(k.split(".")[2]), int(k.split(".")[4])) for k in sd if k.startswith("encoder.down.") and k.endswith(".conv1.weight")}
-                self.first_stage_model = comfy.ldm.minimax.vae.MiniMaxH3VideoVAE(operations=minimax_ops, num_layers=minimax_layers, still_frame=still_frame, encoder_kept_blocks=minimax_kept, encoder="encoder.conv_in.weight" in sd, decoder=minimax_layers > 0, noncausal_decoder=noncausal)
+                if "decoder.proj_out.weight" in sd and sd["decoder.proj_out.weight"].shape[0] == 768:  # p-h3-image: single-frame decoder
+                    still_frame = 0
+                    self.not_video = True
+                    self.first_stage_model = comfy.ldm.minimax.vae.PH3ImageVAE(operations=minimax_ops, num_layers=minimax_layers)
+                else:
+                    self.first_stage_model = comfy.ldm.minimax.vae.MiniMaxH3VideoVAE(operations=minimax_ops, num_layers=minimax_layers, still_frame=still_frame, encoder_kept_blocks=minimax_kept, encoder="encoder.conv_in.weight" in sd, decoder=minimax_layers > 0, noncausal_decoder=noncausal)
                 self.latent_channels = 24
                 self.latent_dim = 3
                 # frames 17k+5 <-> latents 5k+2, 16x spatial
@@ -1154,6 +1159,7 @@ class VAE:
         if self.disable_offload:
             mp = comfy.model_patcher.ModelPatcher
         self.patcher = mp(self.first_stage_model, load_device=self.device, offload_device=offload_device, fast_disk=fast_disk)
+        self.first_stage_model.current_patcher = self.patcher
 
         m, u = self.first_stage_model.load_state_dict(sd, strict=False, assign=self.patcher.is_dynamic())
         if not self.patcher.is_dynamic():
@@ -1172,6 +1178,7 @@ class VAE:
         n = VAE(no_init=True)
         n.patcher = self.patcher.clone()
         n.first_stage_model = self.first_stage_model
+        n.first_stage_model.current_patcher = n.patcher
         n.memory_used_encode = self.memory_used_encode
         n.memory_used_decode = self.memory_used_decode
         n.downscale_ratio = self.downscale_ratio
@@ -2062,6 +2069,10 @@ def load_text_encoder_state_dicts(state_dicts=[], embedding_directory=None, clip
                 clip_data[0] = comfy.utils.state_dict_prefix_replace(clip_data[0], {"model.language_model.": "model.", "model.visual.": "visual.", "lm_head.": "model.lm_head."})
                 clip_target.clip = comfy.text_encoders.fibo2.te(**llama_detect(clip_data))
                 clip_target.tokenizer = comfy.text_encoders.fibo2.Fibo2Tokenizer
+            elif clip_type == CLIPType.MINIMAX and "text_connector.proj.weight" in clip_data[0]:  # p-h3-image: Qwen3-VL-4B, 5-layer tap -> text connector -> 5120.
+                clip_data[0] = comfy.utils.state_dict_prefix_replace(clip_data[0], {"model.language_model.": "model.", "model.visual.": "visual.", "lm_head.": "model.lm_head."})
+                clip_target.clip = comfy.text_encoders.minimax.te(**llama_detect(clip_data), te_model=comfy.text_encoders.minimax.PH3ImageTEModel)
+                clip_target.tokenizer = comfy.text_encoders.minimax.PH3ImageTokenizer
             elif clip_type == CLIPType.MAGE and te_model == TEModel.QWEN3VL_4B:  # Mage-Flow: full Qwen3-VL-4B, last hidden state, Qwen-Image-style templates.
                 clip_data[0] = comfy.utils.state_dict_prefix_replace(clip_data[0], {"model.language_model.": "model.", "model.visual.": "visual.", "lm_head.": "model.lm_head."})
                 clip_target.clip = comfy.text_encoders.mage_flow.te(**llama_detect(clip_data))
