@@ -313,6 +313,9 @@ def cuda_device_context(device):
         if prev is not None:
             torch.cuda.set_device(prev)
 
+# Held while a prompt executes: a dynamic VRAM page-out can hold torch's allocator lock and hand the GIL to another thread, where torch.cuda.memory_stats then deadlocks.
+model_execution_lock = threading.Lock()
+
 def get_total_memory(dev=None, torch_total_too=False):
     global directml_enabled
     if dev is None:

@@ -155,3 +155,34 @@ def test_prompt_worker_resumes_scan_once_the_queue_is_empty(monkeypatch) -> None
 
 def test_prompt_worker_keeps_scan_paused_while_prompts_are_queued(monkeypatch) -> None:
     assert _paused_when_the_worker_asks_for_the_next_prompt(monkeypatch, queued_after_first=1) == [True]
+
+
+class LockCheckingExecutor(Executor):
+    held_during_execute = None
+
+    def execute(self, *args, **kwargs) -> None:
+        LockCheckingExecutor.held_during_execute = main.comfy.model_management.model_execution_lock.locked()
+
+
+def test_prompt_worker_holds_model_execution_lock_only_while_executing(monkeypatch) -> None:
+    monkeypatch.setattr(main.execution, "PromptExecutor", LockCheckingExecutor)
+    monkeypatch.setattr(main.time, "perf_counter", lambda: 1.0)
+    LockCheckingExecutor.held_during_execute = None
+    lock = main.comfy.model_management.model_execution_lock
+    held_while_waiting: list[bool] = []
+    queue = Queue(on_second_get=lambda: held_while_waiting.append(lock.locked()))
+
+    with pytest.raises(LoopEscape, match="^prompt worker requested a second item$"):
+        main.prompt_worker(queue, Server(), AssetManager())
+
+    assert LockCheckingExecutor.held_during_execute is True
+    assert held_while_waiting == [False]
+
+
+def test_prompt_worker_releases_model_execution_lock_when_execute_raises(monkeypatch) -> None:
+    monkeypatch.setattr(main.execution, "PromptExecutor", ExecuteFailureExecutor)
+
+    with pytest.raises(RuntimeError, match="^forced execute failure$"):
+        main.prompt_worker(Queue(), Server(), AssetManager())
+
+    assert not main.comfy.model_management.model_execution_lock.locked()
