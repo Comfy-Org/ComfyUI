@@ -1,4 +1,3 @@
-
 from unittest.mock import MagicMock
 
 import pytest
@@ -34,8 +33,9 @@ async def test_system_stats_reports_last_values_while_a_prompt_runs(monkeypatch)
     async with TestClient(TestServer(prompt_server.app)) as client:
         with comfy.model_management.model_execution_lock:
             queried.clear()
-            assert device(await (await client.get("/system_stats")).json()) == (100, 6, 14, 4)
-            assert queried == ["total", "free"]
+            assert device(await (await client.get("/system_stats")).json()) == (100, 6, 14, 4), \
+                "a first request during a prompt gets the values read at startup"
+            assert queried == ["total", "free"], "only the cpu's RAM is read while a prompt runs"
 
         memory.update(total=(200, 7), free=(30, 5))
         assert device(await (await client.get("/system_stats")).json()) == (200, 7, 30, 5)
