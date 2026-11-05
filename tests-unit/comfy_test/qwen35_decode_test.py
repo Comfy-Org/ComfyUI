@@ -527,11 +527,14 @@ class _ExactPacked:
         return out.transpose(1, 2).reshape(batch, seq, heads * dim).to(query.dtype), scores.logsumexp(-1)
 
 
-def test_int8_extend_matches_full_attention(monkeypatch):
+@pytest.mark.parametrize("merge_elements", [1 << 26, 4 * 19 * 5])
+def test_int8_extend_matches_full_attention(monkeypatch, merge_elements):
     # a continued prefill over an int8 prefix: each new row sees the prefix and the new rows up to itself,
-    # and the pages afterwards hold every row, across page and window boundaries
+    # and the pages afterwards hold every row, across page and window boundaries; the small merge budget
+    # takes the new rows in chunks of 5
     import comfy.text_encoders.llama as llama
     monkeypatch.setattr(llama, "Int8DecodeCache", _ExactPacked, raising=False)
+    monkeypatch.setattr(llama, "CAUSAL_MERGE_ELEMENTS", merge_elements)
     kv = llama.Int8FixedKVCache.zeros(1, 2, 64, 64, "cpu", torch.float32, llama.FixedKVCache.shared(1, "cpu"))
     q, k, v = torch.randn(1, 4, 30, 64), torch.randn(1, 2, 30, 64), torch.randn(1, 2, 30, 64)
 
