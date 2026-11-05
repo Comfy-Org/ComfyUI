@@ -15,9 +15,6 @@ if os.name == "nt":
     _kernel32.DeviceIoControl.restype = wintypes.BOOL
     _kernel32.SetFileInformationByHandle.argtypes = [wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD]
     _kernel32.SetFileInformationByHandle.restype = wintypes.BOOL
-    _kernel32.GetVolumeInformationByHandleW.argtypes = [wintypes.HANDLE, wintypes.LPWSTR, wintypes.DWORD, ctypes.POINTER(wintypes.DWORD),
-                                                        ctypes.POINTER(wintypes.DWORD), ctypes.POINTER(wintypes.DWORD), wintypes.LPWSTR, wintypes.DWORD]
-    _kernel32.GetVolumeInformationByHandleW.restype = wintypes.BOOL
 elif sys.platform == "linux":
     # os.memfd_create is missing from Pythons built against glibc < 2.27.
     _libc = ctypes.CDLL(None, use_errno=True)
@@ -56,14 +53,9 @@ def create_anonymous_file(size=0):
         if os.name == "nt":
             handle = msvcrt.get_osfhandle(file.fileno())
             transferred = wintypes.DWORD()
-            fs_flags = wintypes.DWORD()
-            # SMB shares can't report volume flags; treat them like volumes without sparse support.
-            has_flags = _kernel32.GetVolumeInformationByHandleW(handle, None, 0, None, None, ctypes.byref(fs_flags), None, 0)
             # FSCTL_SET_SPARSE: unwritten ranges stay unallocated and read as zeros.
-            # FAT32 and exFAT lack FILE_SUPPORTS_SPARSE_FILES (0x40); the file is then fully allocated.
-            if has_flags and fs_flags.value & 0x40 and not _kernel32.DeviceIoControl(handle, 0x900c4, None, 0, None, 0,
-                                                                                     ctypes.byref(transferred), None):
-                raise ctypes.WinError(ctypes.get_last_error())
+            # Not all volumes support it (FAT32, exFAT); the file is then fully allocated.
+            _kernel32.DeviceIoControl(handle, 0x900c4, None, 0, None, 0, ctypes.byref(transferred), None)
             # FileEndOfFileInfo avoids the CRT truncate implementation's zero-fill loop.
             end = ctypes.c_longlong(size)
             if not _kernel32.SetFileInformationByHandle(handle, 6,
