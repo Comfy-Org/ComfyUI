@@ -1892,12 +1892,14 @@ class RenderMesh(IO.ComfyNode):
                                       tooltip="Camera from a Load3D / Preview3D viewer or a Create Camera Info node, or the "
                                               "cameras of a Create Camera Orbit. If none is connected, a default front view is "
                                               "auto-framed."),
+                IO.Image.Input("texture", optional=True,
+                               tooltip="Rendered in place of the mesh's own texture"),
             ],
             outputs=[IO.Image.Output(display_name="image"), IO.Mask.Output(display_name="mask")],
         )
 
     @classmethod
-    def execute(cls, mesh, mode, width, height, background, model_3d_info=None, camera_info=None):
+    def execute(cls, mesh, mode, width, height, background, model_3d_info=None, camera_info=None, texture=None):
         if int(mesh.vertices.shape[0]) > 1:
             logging.warning("RenderMesh: one item per batch only; using the first of %d.", int(mesh.vertices.shape[0]))
         dev = comfy.model_management.get_torch_device()
@@ -1916,6 +1918,8 @@ class RenderMesh(IO.ComfyNode):
             return (a[0] if (isinstance(a, list) or a.ndim == 3) else a)[:n].to(dev).float()
 
         tex, uvs = mesh.texture, mesh.uvs
+        if texture is not None:
+            tex = texture.clamp(0.0, 1.0)
         have_tex = tex is not None and uvs is not None
         have_vc = getattr(mesh, "vertex_colors", None) is not None
         resolved = mode
@@ -1925,7 +1929,10 @@ class RenderMesh(IO.ComfyNode):
         uv = texture_hwc = vcols = vnorms = None
         render_normal = None
         if resolved == "texture" and have_tex:
-            uv = (uvs[0, :n] if uvs.ndim == 3 else uvs[:n]).to(dev).float()
+            uv = uvs[0, :n] if uvs.ndim == 3 else uvs[:n]
+            if texture is not None:   # the UVs the bake sampled with, as Apply Texture to Mesh stores them
+                uv = torch.from_numpy(_normalize_uvs_to_unit(uv.cpu().numpy()))
+            uv = uv.to(dev).float()
             texture_hwc = tex[0].to(dev).float()
         elif resolved == "vertex colors" and have_vc:
             # glTF COLOR_0 is linear (PaintMesh stores pow(srgb, 2.2)); to sRGB so it isn't dark.
