@@ -13,6 +13,7 @@ async def register_replacements():
     await register_replacements_preview3d()
     await register_replacements_svdimg2vid()
     await register_replacements_conditioningavg()
+    await register_replacements_textgenerate()
 
 async def register_replacements_longeredge():
     # No dynamic inputs here
@@ -90,6 +91,23 @@ async def register_replacements_conditioningavg():
     await api.node_replacement.register(io.NodeReplace(
             new_node_id="ConditioningAverage",
             old_node_id="ConditioningAverage ",
+        ))
+
+async def register_replacements_textgenerate():
+    # TextGenerateV2 uses Autogrow, widget order is the sampling_mode "on" layout
+    sampling = [f"sampling_mode.{name}" for name in ["temperature", "top_k", "top_p", "min_p", "repetition_penalty", "seed", "presence_penalty"]]
+    widgets = ["prompt", "max_length", "sampling_mode", *sampling, "thinking", "use_default_template", "mtp"]
+    await api.node_replacement.register(io.NodeReplace(
+            new_node_id="TextGenerateV2",
+            old_node_id="TextGenerate",
+            old_widget_ids=widgets,
+            input_mapping=[
+                {"new_id": "images.image1", "old_id": "image"},
+                {"new_id": "videos.video1", "old_id": "video"},
+                {"new_id": "audios.audio1", "old_id": "audio"},
+                {"new_id": "sampling_mode.presence_penalty", "set_value": 0.0},
+                *[{"new_id": name, "old_id": name} for name in ["clip", "system_prompt", *widgets]],
+            ],
         ))
 
 class NodeReplacementsExtension(ComfyExtension):
