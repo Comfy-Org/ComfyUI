@@ -168,10 +168,31 @@ class CreateCameraOrbit(IO.ComfyNode):
         return IO.NodeOutput(rig)
 
 
+class BatchCameras(IO.ComfyNode):
+    @classmethod
+    def define_schema(cls):
+        return IO.Schema(
+            node_id="BatchCameras",
+            display_name="Batch Cameras",
+            search_aliases=["combine cameras", "merge cameras", "join camera rigs", "camera list"],
+            category="3d",
+            description="Join cameras and camera rigs into one camera_info, in input order",
+            inputs=[
+                IO.Autogrow.Input("cameras", template=IO.Autogrow.TemplatePrefix(
+                    IO.Load3DCamera.Input("camera_info"), prefix="camera_info", min=1, max=50)),
+            ],
+            outputs=[IO.Load3DCamera.Output(display_name="camera_info")],
+        )
+
+    @classmethod
+    def execute(cls, cameras: IO.Autogrow.Type) -> IO.NodeOutput:
+        return IO.NodeOutput([cam for c in cameras.values() for cam in (c if isinstance(c, list) else [c])])
+
+
 class CameraExtension(ComfyExtension):
     @override
     async def get_node_list(self) -> list[type[IO.ComfyNode]]:
-        return [CreateCameraInfo, CreateCameraOrbit]
+        return [CreateCameraInfo, CreateCameraOrbit, BatchCameras]
 
 
 async def comfy_entrypoint() -> CameraExtension:
