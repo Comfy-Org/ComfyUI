@@ -1192,13 +1192,15 @@ class Autogrow(ComfyTypeI):
             max = value[1]["template"]["max"]
             names = [f"{prefix}{i}" for i in range(max)]
         finalized_prefix = finalize_prefix(curr_prefix)
-        if isinstance(live_inputs.get(finalized_prefix), list):
+        root_value = live_inputs.get(finalized_prefix)
+        if isinstance(root_value, list) and root_value:
             # A list of link pairs under the autogrow key itself is silently
             # dropped otherwise, so reject it here with a clear error.
+            example_key = f"{finalized_prefix}.{names[0]}" if names else finalized_prefix
             raise DynamicInputError(
                 finalized_prefix,
                 f"Invalid Autogrow input '{finalized_prefix}': received a list; "
-                f"provide entries with flat keys like '{finalized_prefix}.{names[0]}'")
+                f"provide entries with flat keys like '{example_key}'")
         # need to create a new input based on the contents of input
         template_input = None
         template_required = True

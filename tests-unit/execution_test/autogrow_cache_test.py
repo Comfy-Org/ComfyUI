@@ -99,3 +99,23 @@ async def test_autogrow_flat_entries_rerun_when_upstream_reruns(monkeypatch):
     consumer_runs = [e[1] for e in executions if isinstance(e, tuple)]
     assert source_runs == 2, "source should rerun every time (is_changed)"
     assert consumer_runs == [{"image_1": 1.0}, {"image_1": 2.0}]
+
+
+async def test_autogrow_empty_root_list_coexists_with_flat_entries(monkeypatch):
+    # An empty list under the autogrow key itself is allowed; only a
+    # non-empty list of link pairs is rejected.
+    executions = _register_probe_nodes(monkeypatch)
+    prompt = {
+        "source": {"class_type": "Source", "inputs": {}},
+        "consumer": {"class_type": "Consumer", "inputs": {"images": [], "images.image_1": ["source", 0]}},
+    }
+    valid, _, outputs, errors = await execution.validate_prompt("probe", copy.deepcopy(prompt), None)
+    assert valid, errors
+    server = SimpleNamespace(client_id=None, send_sync=Mock())
+    executor = execution.PromptExecutor(server, cache_args={"ram": 0, "ram_inactive": 0})
+
+    await executor.execute_async(copy.deepcopy(prompt), "probe1", execute_outputs=outputs)
+    assert executor.success, executor.status_messages
+
+    consumer_runs = [e[1] for e in executions if isinstance(e, tuple)]
+    assert consumer_runs == [{"image_1": 1.0}]
