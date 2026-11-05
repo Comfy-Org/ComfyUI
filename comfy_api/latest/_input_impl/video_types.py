@@ -131,6 +131,53 @@ def filter_hevc_packet(hevc_filter, packet):
     return hevc_filter.filter(packet)
 
 
+class FrameBuffer:
+    """Decoded frames written straight into one tensor, sized up front from the expected frame count and grown if
+    the count was short. Collecting a list of frames and stacking it holds every frame twice at the end."""
+
+    def __init__(self, expected: int):
+        self.expected = max(1, expected)
+        self.data: torch.Tensor | None = None
+        self.count = 0
+
+    def append(self, frame: torch.Tensor) -> None:
+        if self.data is None:
+            self.data = torch.empty((self.expected, *frame.shape), dtype=frame.dtype)
+        elif self.count == self.data.shape[0]:
+            grown = torch.empty((self.count + self.count // 2 + 1, *frame.shape), dtype=frame.dtype)
+            grown[: self.count] = self.data
+            self.data = grown
+        self.data[self.count] = frame
+        self.count += 1
+
+    def __len__(self) -> int:
+        return self.count
+
+    def tensor(self) -> torch.Tensor:
+        """The frames as one [N, ...] tensor; copied only if the guess was well over the count."""
+        assert self.data is not None
+        if self.count * 10 < self.data.shape[0] * 9:
+            return self.data[: self.count].clone()
+        return self.data[: self.count]
+
+
+def expected_frame_count(container: InputContainer, stream, start_time: float, duration: float) -> int:
+    """How many frames decoding the trim window should give, from the stream's metadata (a guess: 1 if unknown)."""
+    rate = float(stream.average_rate or 0)
+    total = int(stream.frames or 0)
+    if not total and rate:
+        if stream.duration and stream.time_base:
+            seconds = float(stream.duration * stream.time_base)
+        else:
+            seconds = float(container.duration or 0) / av.time_base
+        total = math.ceil(seconds * rate)
+    if rate and start_time > 0:
+        total -= int(start_time * rate)
+    if rate and duration > 0:
+        total = min(total, math.ceil(duration * rate) + 1)
+    return max(total, 1)
+
+
 def last_decodable_audio_stream(container: InputContainer):
     """Streams FFmpeg has no decoder for have no codec context, and decoding their
     packets crashes the process (e.g. APAC spatial-audio track in iPhone)."""
@@ -523,7 +570,7 @@ class VideoFromFile(VideoInput):
         start_time, duration = self.get_active_trim_window()
 
         # Get video frames
-        frames = []
+        frames = FrameBuffer(expected_frame_count(container, video_stream, start_time, duration))
         audio_frames = []
         alphas = None
         start_pts = int(start_time / video_stream.time_base)
@@ -572,11 +619,11 @@ class VideoFromFile(VideoInput):
                             alpha_channel = False
                             for comp in frame.format.components:
                                 if comp.is_alpha or frame.format.name == "pal8":
-                                    alphas = []
+                                    alphas = FrameBuffer(frames.expected)
                                     alpha_channel = True
                                     break
                             if frame.format.name in ("yuvj420p", "yuvj422p", "yuvj444p", "rgb24", "rgba", "pal8"):
-                                process_image_format = lambda a: a.float() / 255.0
+                                process_image_format = lambda a: a.float().div_(255.0)
                                 if alpha_channel:
                                     image_format = 'rgba'
                                 else:
@@ -666,9 +713,10 @@ class VideoFromFile(VideoInput):
                     else:
                         audio_frames.append(frame.to_ndarray())
 
-        images = process_image_format(torch.stack(frames)) if len(frames) > 0 else torch.zeros(0, 0, 0, 3)
+        images = process_image_format(frames.tensor()) if len(frames) > 0 else torch.zeros(0, 0, 0, 3)
+        del frames
         if alphas is not None:
-            alphas = process_image_format(torch.stack(alphas)) if len(alphas) > 0 else torch.zeros(0, 0, 0, 1)
+            alphas = process_image_format(alphas.tensor()) if len(alphas) > 0 else torch.zeros(0, 0, 0, 1)
 
         # Get frame rate
         frame_rate = Fraction(video_stream.average_rate) if video_stream.average_rate else Fraction(1)
