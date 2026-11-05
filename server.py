@@ -274,7 +274,7 @@ class PromptServer():
         self.loop = loop
         self.messages = asyncio.Queue()
         self.device_memory = {}
-        self.read_device_memory([comfy.model_management.get_torch_device()] + list(comfy.model_management.get_all_torch_devices()))
+        self.read_device_memory_unless_a_prompt_runs([comfy.model_management.get_torch_device()] + list(comfy.model_management.get_all_torch_devices()))
         self.client_session:Optional[aiohttp.ClientSession] = None
         self.number = 0
 
@@ -792,11 +792,7 @@ class PromptServer():
             else:
                 torch_devices = [primary_device] + list(torch_devices)
 
-            if comfy.model_management.model_execution_lock.acquire(blocking=False):
-                try:
-                    self.read_device_memory(torch_devices)
-                finally:
-                    comfy.model_management.model_execution_lock.release()
+            self.read_device_memory_unless_a_prompt_runs(torch_devices)
 
             device_entries = []
             for d in torch_devices:
@@ -1326,10 +1322,15 @@ class PromptServer():
         timeout = aiohttp.ClientTimeout(total=None) # no timeout
         self.client_session = aiohttp.ClientSession(timeout=timeout)
 
-    def read_device_memory(self, devices):
-        for d in devices:
-            self.device_memory[str(d)] = (comfy.model_management.get_total_memory(d, torch_total_too=True)
-                                          + comfy.model_management.get_free_memory(d, torch_free_too=True))
+    def read_device_memory_unless_a_prompt_runs(self, devices):
+        if not comfy.model_management.model_execution_lock.acquire(blocking=False):
+            return
+        try:
+            for d in devices:
+                self.device_memory[str(d)] = (comfy.model_management.get_total_memory(d, torch_total_too=True)
+                                              + comfy.model_management.get_free_memory(d, torch_free_too=True))
+        finally:
+            comfy.model_management.model_execution_lock.release()
 
     def add_routes(self):
         # The comfy-agent host mounts its own /api/agent and /api/workflows
