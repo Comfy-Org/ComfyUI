@@ -57,12 +57,12 @@ def create_anonymous_file(size=0):
             handle = msvcrt.get_osfhandle(file.fileno())
             transferred = wintypes.DWORD()
             fs_flags = wintypes.DWORD()
-            if not _kernel32.GetVolumeInformationByHandleW(handle, None, 0, None, None, ctypes.byref(fs_flags), None, 0):
-                raise ctypes.WinError(ctypes.get_last_error())
+            # SMB shares can't report volume flags; treat them like volumes without sparse support.
+            has_flags = _kernel32.GetVolumeInformationByHandleW(handle, None, 0, None, None, ctypes.byref(fs_flags), None, 0)
             # FSCTL_SET_SPARSE: unwritten ranges stay unallocated and read as zeros.
             # FAT32 and exFAT lack FILE_SUPPORTS_SPARSE_FILES (0x40); the file is then fully allocated.
-            if fs_flags.value & 0x40 and not _kernel32.DeviceIoControl(handle, 0x900c4, None, 0, None, 0,
-                                                                      ctypes.byref(transferred), None):
+            if has_flags and fs_flags.value & 0x40 and not _kernel32.DeviceIoControl(handle, 0x900c4, None, 0, None, 0,
+                                                                                     ctypes.byref(transferred), None):
                 raise ctypes.WinError(ctypes.get_last_error())
             # FileEndOfFileInfo avoids the CRT truncate implementation's zero-fill loop.
             end = ctypes.c_longlong(size)
