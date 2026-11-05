@@ -102,6 +102,24 @@ def test_remesh_mesh_fits_referenced_longest_axis(mesh_module, monkeypatch):
     torch.testing.assert_close(captured["center"], torch.zeros(3))
 
 
+def test_remesh_mesh_recenters_fitted_input(mesh_module, monkeypatch):
+    captured = {}
+
+    def fake_remesh(vertices, faces, **kwargs):
+        captured["vertices"] = vertices
+        captured.update(kwargs)
+        return vertices, faces, kwargs["colors"]
+
+    mesh = _cube_mesh(1.0, center=(1000.0, 0.0, 0.0))
+    monkeypatch.setattr(mesh_module, "remesh_narrow_band_dc", fake_remesh)
+    result = _remesh(mesh_module, mesh)
+
+    torch.testing.assert_close(captured["vertices"].amin(dim=0), torch.full((3,), -1.0))
+    torch.testing.assert_close(captured["vertices"].amax(dim=0), torch.full((3,), 1.0))
+    torch.testing.assert_close(captured["center"], torch.zeros(3))
+    torch.testing.assert_close(result.vertices, mesh.vertices)
+
+
 def test_remesh_mesh_preserves_unit_cube_domain(mesh_module, monkeypatch):
     captured = {}
 

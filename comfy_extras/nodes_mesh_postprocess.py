@@ -2468,7 +2468,7 @@ class RemeshMesh(IO.ComfyNode):
                 rs_center = 0.5 * (bbox_min + bbox_max)
 
             rv, rf, rc = remesh_narrow_band_dc(
-                vv, ff,
+                vv - rs_center, ff,
                 resolution=int(resolution),
                 band=float(band), project_back=float(project_back),
                 qef=qef, sign_mode=mode,
@@ -2477,9 +2477,9 @@ class RemeshMesh(IO.ComfyNode):
                 drop_small_components=float(drop_small_components),
                 drop_inverted_components=drop_inverted_components,
                 drop_enclosed_components=drop_enclosed_components,
-                scale=rs_scale, center=rs_center, colors=cc)
+                scale=rs_scale, center=torch.zeros_like(rs_center), colors=cc)
 
-            v = rv.to(src_device)
+            v = (rv + rs_center).to(src_device)
             f = rf.to(device=src_device, dtype=torch.int32)
             c = rc.to(src_device) if rc is not None else None
             counts["out"] += int(f.shape[0])
