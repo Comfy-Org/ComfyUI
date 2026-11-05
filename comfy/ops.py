@@ -963,10 +963,15 @@ def fp8_linear(self, input):
 
     if input.ndim != 2:
         return None
+    if input.device.type == "cuda" and comfy.model_management.is_nvidia():
+        # The CUDA FP8 quantizer needs full 16-element vectors and 16-byte aligned input.
+        if input.numel() % 16 != 0 or (input.is_contiguous() and input.data_ptr() % 16 != 0):
+            return None
     lora_compute_dtype=comfy.model_management.lora_compute_dtype(input.device)
     scale_weight = torch.ones((), device=input.device, dtype=torch.float32)
 
     scale_input = (input.abs().amax().float() / torch.finfo(dtype).max).clamp_min(1)
+    scale_input = torch.where(torch.isfinite(scale_input), scale_input, torch.ones_like(scale_input))
     input_fp8, layout_params_input = TensorCoreFP8Layout.quantize(input, scale=scale_input,)
     quantized_input = QuantizedTensor(input_fp8, "TensorCoreFP8Layout", layout_params_input)
 

@@ -26,7 +26,7 @@ def make_linear(device, weight_dtype=torch.float8_e4m3fn, bias=True):
     return layer
 
 
-@pytest.mark.parametrize("layout", ["2d", "3d", "strided_2d", "strided_3d", "slice"])
+@pytest.mark.parametrize("layout", ["2d", "3d", "strided_2d", "strided_3d", "slice", "offset_strided"])
 def test_fp8_linear_preserves_input_and_shared_storage(device, layout):
     backing = torch.linspace(-2096, 2096, 32 * 128, device=device).to(torch.bfloat16).reshape(32, 128)
     if layout == "2d":
@@ -37,8 +37,10 @@ def test_fp8_linear_preserves_input_and_shared_storage(device, layout):
         x = backing[:, ::2]
     elif layout == "strided_3d":
         x = backing.reshape(2, 16, 128)[:, :, ::2]
-    else:
+    elif layout == "slice":
         x = backing.reshape(64, 64)[8:24]
+    else:
+        x = backing.reshape(-1)[1:2049].reshape(16, 128)[:, ::2]
     before = backing.clone()
     layer = make_linear(device)
 
@@ -70,6 +72,23 @@ def test_fp8_linear_preserves_representable_values_and_bias(device, dtype, bias,
     assert output is not None
     assert output.dtype == dtype
     torch.testing.assert_close(output, expected, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("nonfinite", [float("nan"), float("inf"), -float("inf")], ids=["nan", "inf", "negative_inf"])
+def test_fp8_linear_nonfinite_input_preserves_finite_rows(device, nonfinite):
+    x = torch.ones(16, 64, device=device, dtype=torch.bfloat16)
+    x[0, 0] = nonfinite
+    before = x.clone()
+    layer = make_linear(device)
+    expected = F.linear(x[1:], layer.weight.to(x.dtype), layer.bias)
+
+    output = ops.fp8_linear(layer, x)
+
+    assert output is not None
+    assert output.shape == (16, 32)
+    assert output.dtype == x.dtype
+    torch.testing.assert_close(output[1:], expected, rtol=0, atol=0)
+    torch.testing.assert_close(x, before, rtol=0, atol=0, equal_nan=True)
 
 
 def test_fp8_linear_reduces_error_for_large_activations(device):
@@ -123,6 +142,53 @@ def test_fp8_linear_unsupported_dtype_falls_back(weight_dtype):
     assert ops.fp8_linear(layer, x) is None
     torch.testing.assert_close(layer(x), expected, rtol=0, atol=0)
     assert torch.equal(x, torch.full_like(x, 2096.0))
+
+
+@pytest.mark.skipif(not torch.cuda.is_available() or not model_management.is_nvidia(), reason="Requires NVIDIA CUDA")
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32])
+@pytest.mark.parametrize("layout", ["misaligned_2d", "misaligned_3d", "partial_vector", "strided_partial_vector"])
+def test_fp8_linear_unsafe_cuda_input_falls_back_before_quantization(dtype, layout, monkeypatch):
+    if layout.startswith("misaligned"):
+        backing = torch.linspace(-2096, 2096, 16 * 64 + 1, device="cuda").to(dtype)
+        x = backing[1:].reshape(16, 64)
+        if layout == "misaligned_3d":
+            x = x.reshape(2, 8, 64)
+        assert x.is_contiguous()
+        assert x.data_ptr() % 16 != 0
+    else:
+        columns = 126 if layout == "strided_partial_vector" else 63
+        backing = torch.linspace(-2096, 2096, 17 * columns, device="cuda").to(dtype)
+        x = backing.reshape(17, columns)
+        if layout == "strided_partial_vector":
+            x = x[:, ::2]
+        assert x.numel() % 16 != 0
+    before = backing.clone()
+    layer = ops.fp8_ops.Linear(x.shape[-1], 32, bias=False, device=x.device, dtype=torch.float8_e4m3fn)
+    layer.weight = torch.nn.Parameter(torch.eye(32, x.shape[-1], device=x.device).to(torch.float8_e4m3fn), requires_grad=False)
+    expected = F.linear(x, layer.weight.to(dtype))
+
+    def reject_quantization(*args, **kwargs):
+        pytest.fail("Unsafe CUDA input reached the FP8 quantizer")
+
+    monkeypatch.setattr(ops.TensorCoreFP8Layout, "quantize", reject_quantization)
+
+    assert ops.fp8_linear(layer, x) is None
+    output = layer(x)
+
+    assert output.dtype == dtype
+    torch.testing.assert_close(output, expected, rtol=0, atol=0)
+    assert torch.equal(backing, before)
+
+
+def test_fp8_linear_cpu_partial_vector_still_uses_fp8():
+    x = torch.ones(3, 5, dtype=torch.bfloat16)
+    layer = ops.fp8_ops.Linear(5, 4, bias=False, device="cpu", dtype=torch.float8_e4m3fn)
+    layer.weight = torch.nn.Parameter(torch.eye(4, 5).to(torch.float8_e4m3fn), requires_grad=False)
+
+    output = ops.fp8_linear(layer, x)
+
+    assert output is not None
+    torch.testing.assert_close(output, F.linear(x, layer.weight.to(x.dtype)), rtol=0, atol=0)
 
 
 def test_fp8_failure_falls_back_with_original_input(device, monkeypatch):
