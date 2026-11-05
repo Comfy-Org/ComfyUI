@@ -2049,6 +2049,7 @@ class WAN21_SCAIL(WAN21):
 class WAN22_RelayVSR(WAN21):
     def __init__(self, model_config, model_type=ModelType.FLOW, device=None):
         super(WAN21, self).__init__(model_config, model_type, device=device, unet_model=comfy.ldm.wan.model_vsr.RelayVSRWanModel)
+        self.image_to_video = False
 
     def extra_conds(self, **kwargs):
         out = super().extra_conds(**kwargs)

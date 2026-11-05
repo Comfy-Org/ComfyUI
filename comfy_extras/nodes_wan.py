@@ -1481,9 +1481,9 @@ class RelayVSRConditioning(io.ComfyNode):
     def execute(cls, model, images) -> io.NodeOutput:
         diffusion_model = model.model.diffusion_model
         keyframes = comfy.ldm.wan.model_vsr.relay_keyframes(images.shape[0])
-        positive = [[diffusion_model.positive_conditioning.unsqueeze(0), {"lq_images": images[keyframes]}]]
+        positive = [[diffusion_model.positive_conditioning.unsqueeze(0).clone(), {"lq_images": images[keyframes]}]]
         latent_size = comfy.ldm.wan.model_vsr.relay_latent_size(images.shape[1], images.shape[2], diffusion_model.latent_stride)
-        latent = torch.zeros([1, 48, len(keyframes), *latent_size], device=comfy.model_management.intermediate_device())
+        latent = torch.zeros([1, model.model.latent_format.latent_channels, len(keyframes), *latent_size], device=comfy.model_management.intermediate_device())
         return io.NodeOutput(positive, {"samples": latent})
 
 
@@ -1509,7 +1509,7 @@ class VSRDecode(io.ComfyNode):
     @classmethod
     def execute(cls, vae, samples, images, detail=1.0) -> io.NodeOutput:
         decoded = vae.decode(samples["samples"], vae_options={"lq_images": images, "detail": detail})
-        return io.NodeOutput(decoded.reshape(-1, *decoded.shape[-3:]).clamp_(0.0, 1.0))
+        return io.NodeOutput(decoded.reshape(-1, *decoded.shape[-3:]))
 
 
 from comfy.ldm.wan.model_multitalk import InfiniteTalkOuterSampleWrapper, MultiTalkCrossAttnPatch, MultiTalkGetAttnMapPatch, project_audio_features

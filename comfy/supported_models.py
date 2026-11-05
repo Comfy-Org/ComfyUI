@@ -1585,11 +1585,6 @@ class WAN22_RelayVSR(WAN21_T2V):
     }
 
     latent_format = latent_formats.RelayVSR
-    supported_inference_dtypes = [torch.bfloat16, torch.float16, torch.float32]
-
-    def __init__(self, unet_config):
-        super().__init__(unet_config)
-        self.memory_usage_factor = 1.2
 
     def get_model(self, state_dict, prefix="", device=None):
         out = model_base.WAN22_RelayVSR(self, device=device)

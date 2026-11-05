@@ -1533,7 +1533,7 @@ DATA_STREAMS = {}
 def get_data_stream(device):
     """One stream per device for data copies such as cache staging and decoder output, kept off the
     offload streams so they don't disturb the weight prefetch. Callers order on it themselves."""
-    if torch.compiler.is_compiling():
+    if NUM_STREAMS == 0 or torch.compiler.is_compiling():
         return None
     if device not in DATA_STREAMS:
         DATA_STREAMS[device] = new_stream(device)
