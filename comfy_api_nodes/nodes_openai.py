@@ -520,7 +520,7 @@ class OpenAIGPTImageNodeV2(IO.ComfyNode):
     def define_schema(cls):
         return IO.Schema(
             node_id="OpenAIGPTImageNodeV2",
-            display_name="OpenAI GPT Image 2.6",
+            display_name="OpenAI GPT Image",
             category="partner/image/OpenAI",
             description="Generates images via OpenAI's GPT Image endpoint.",
             inputs=[
