@@ -40,6 +40,8 @@ class OpenAIImageEditRequest(BaseModel):
 class OpenAIImageGenerationRequest(BaseModel):
     background: str | None = Field(None, description="Background transparency")
     complexity: str | None = Field(None)
+    frame_count: int | None = Field(None)
+    frame_duration_ms: int | None = Field(None)
     model: str | None = Field(None)
     moderation: str | None = Field(None)
     n: int | None = Field(
