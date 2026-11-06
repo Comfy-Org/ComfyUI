@@ -1,5 +1,3 @@
-import os
-
 import folder_paths
 import comfy.utils
 import comfy.model_management
@@ -8,67 +6,17 @@ import torch
 from comfy_api.latest import ComfyExtension, io
 from comfy_extras.nodes_audio import VAEEncodeAudio
 
-VAE_SUFFIX = " (vae)"
 
+def _ltxv_audio_vae_path(ckpt_name: str, vae_name: str | None) -> str:
+    """Resolve the selected model file, raising when it is gone.
 
-def _vae_option(name: str) -> str:
-    """Return the selector value that marks `name` as the `vae/` copy.
-
-    The marker goes before the extension ("a (vae).safetensors") so the value
-    still ends in a model file extension, which is what the frontend
-    missing-model scan matches on, while staying distinct from the checkpoint
-    entry of the same name.
+    A standalone VAE from `models/vae` wins when one is selected; otherwise the
+    checkpoint is used, so existing workflows keep loading exactly what they
+    loaded before this node offered VAEs.
     """
-    stem, ext = os.path.splitext(name)
-    return f"{stem}{VAE_SUFFIX}{ext}"
-
-
-def _ltxv_audio_vae_options() -> dict[str, tuple[str, str]]:
-    """Map every selector value to the folder and filename it stands for.
-
-    `vae/` files are offered first, then `checkpoints/`. Both the option list
-    and the loader read this one mapping, so a value always resolves to the file
-    it was offered for. A `vae/` value carries the marker and no part of it
-    depends on what else is installed, so a workflow saved on one machine stays
-    a valid value on another; the marker is repeated only when the marked value
-    is already taken by another `vae/` entry or by a checkpoint name. A
-    checkpoint keeps its exact name, because that is what its saved values meant
-    before this change.
-    """
-    checkpoint_names = folder_paths.get_filename_list("checkpoints")
-    options: dict[str, tuple[str, str]] = {}
-
-    taken = set(checkpoint_names)
-    for name in folder_paths.get_filename_list("vae"):
-        option = _vae_option(name)
-        while option in taken:
-            option = _vae_option(option)
-        taken.add(option)
-        options[option] = ("vae", name)
-    for name in checkpoint_names:
-        options[name] = ("checkpoints", name)
-    return options
-
-
-def _ltxv_audio_vae_names() -> list[str]:
-    """List selector values, `vae/` models before `checkpoints/`."""
-    return list(_ltxv_audio_vae_options())
-
-
-def _ltxv_audio_vae_path(name: str) -> str:
-    """Resolve a selector value to its model file, raising when it is gone."""
-    options = _ltxv_audio_vae_options()
-    if name in options:
-        folder, filename = options[name]
-        return folder_paths.get_full_path_or_raise(folder, filename)
-
-    # Not offered right now: an API caller passing a bare filename, or a value
-    # whose file has been moved away. Keep the historical lookup order.
-    for folder in ("checkpoints", "vae"):
-        path = folder_paths.get_full_path(folder, name)
-        if path is not None:
-            return path
-    return folder_paths.get_full_path_or_raise("checkpoints", name)
+    if vae_name:
+        return folder_paths.get_full_path_or_raise("vae", vae_name)
+    return folder_paths.get_full_path_or_raise("checkpoints", ckpt_name)
 
 
 class LTXVAudioVAELoader(io.ComfyNode):
@@ -81,16 +29,22 @@ class LTXVAudioVAELoader(io.ComfyNode):
             inputs=[
                 io.Combo.Input(
                     "ckpt_name",
-                    options=_ltxv_audio_vae_names(),
+                    options=folder_paths.get_filename_list("checkpoints"),
                     tooltip="Audio VAE checkpoint to load.",
-                )
+                ),
+                io.Combo.Input(
+                    "vae_name",
+                    options=folder_paths.get_filename_list("vae"),
+                    optional=True,
+                    tooltip="Standalone VAE from models/vae. When set, it is used instead of the checkpoint.",
+                ),
             ],
             outputs=[io.Vae.Output(display_name="Audio VAE")],
         )
 
     @classmethod
-    def execute(cls, ckpt_name: str) -> io.NodeOutput:
-        ckpt_path = _ltxv_audio_vae_path(ckpt_name)
+    def execute(cls, ckpt_name: str, vae_name: str | None = None) -> io.NodeOutput:
+        ckpt_path = _ltxv_audio_vae_path(ckpt_name, vae_name)
         sd, metadata = comfy.utils.load_torch_file(ckpt_path, return_metadata=True)
         sd = comfy.utils.state_dict_prefix_replace(sd, {"audio_vae.": "autoencoder.", "vocoder.": "vocoder."}, filter_keys=True)
         vae = comfy.sd.VAE(sd=sd, metadata=metadata)
