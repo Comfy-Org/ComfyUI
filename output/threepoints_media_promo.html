@@ -1,0 +1,324 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>ThreePoints Media — Brand Film</title>
+<style>
+  :root { color-scheme: dark; font-family: "Avenir Next", "Helvetica Neue", Arial, sans-serif; }
+  * { box-sizing: border-box; }
+  body { margin: 0; min-height: 100vh; display: grid; place-items: center; background: #090909; color: #f4f2ef; }
+  main { width: min(100vw, 1200px); padding: 24px; }
+  canvas { display: block; width: 100%; aspect-ratio: 16 / 9; background: #090909; box-shadow: 0 24px 100px #000; }
+  footer { display: flex; justify-content: space-between; align-items: center; padding-top: 14px; gap: 16px; color: #a8a5a2; font-size: 12px; letter-spacing: .12em; text-transform: uppercase; }
+  button { border: 1px solid #f04438; background: #ed342d; color: white; border-radius: 2px; padding: 12px 18px; font: inherit; font-size: 11px; letter-spacing: .14em; text-transform: uppercase; cursor: pointer; }
+  button:hover { background: #ff5146; }
+  button:disabled { opacity: .55; cursor: wait; }
+  @media (max-width: 600px) { main { padding: 10px; } footer { align-items: flex-start; flex-direction: column; } }
+</style>
+</head>
+<body>
+<main>
+  <canvas id="film" width="1280" height="720" aria-label="ThreePoints Media brand film preview"></canvas>
+  <footer><span>ThreePoints Media · Brand film · 00:36</span><button id="record" onclick="startRecording()">Export video</button></footer>
+</main>
+<script>
+(() => {
+  const canvas = document.getElementById("film");
+  const ctx = canvas.getContext("2d");
+  const W = canvas.width, H = canvas.height, sceneLength = 9, duration = sceneLength * 4;
+  const red = "#f04438", white = "#f5f2ed", muted = "#aaa49f", ink = "#0a0a0b";
+  const ease = x => { x = Math.max(0, Math.min(1, x)); return x * x * (3 - 2 * x); };
+  const line = (x1, y1, x2, y2, color, width = 1) => {
+    ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.strokeStyle = color; ctx.lineWidth = width; ctx.stroke();
+  };
+  const text = (value, x, y, size, color, weight = 500, spacing = 0) => {
+    ctx.save(); ctx.fillStyle = color; ctx.font = `${weight} ${size}px "Avenir Next", "Helvetica Neue", Arial, sans-serif`;
+    ctx.textBaseline = "alphabetic"; ctx.letterSpacing = `${spacing}px`; ctx.fillText(value, x, y); ctx.restore();
+  };
+  const rounded = (x, y, w, h, r, fill, stroke) => {
+    ctx.beginPath(); ctx.roundRect(x, y, w, h, r);
+    if (fill) { ctx.fillStyle = fill; ctx.fill(); }
+    if (stroke) { ctx.strokeStyle = stroke; ctx.lineWidth = 1; ctx.stroke(); }
+  };
+  const wash = (x, y, radius, color) => {
+    const g = ctx.createRadialGradient(x, y, 0, x, y, radius);
+    g.addColorStop(0, color); g.addColorStop(1, "rgba(0,0,0,0)");
+    ctx.fillStyle = g; ctx.fillRect(x-radius, y-radius, radius*2, radius*2);
+  };
+  function background(top = "#141213", bottom = ink) {
+    const g = ctx.createLinearGradient(0, 0, 0, H);
+    g.addColorStop(0, top); g.addColorStop(1, bottom); ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+  }
+  function frame(label, t, index) {
+    const intro = ease(t / .9);
+    ctx.save(); ctx.globalAlpha = intro;
+    ctx.fillStyle = red; ctx.fillRect(64, 54, 25, 2); ctx.fillRect(64, 54, 2, 25);
+    text("THREEPOINTS", 103, 68, 15, white, 650, 2.1);
+    text("MEDIA", 104, 87, 9, muted, 500, 4.3);
+    text(label, 1110, 70, 10, white, 500, 2);
+    line(64, 630, 1216, 630, "rgba(255,255,255,.16)");
+    text("MOROCCO  ·  CREATIVE THAT MOVES BUSINESS", 64, 657, 10, muted, 500, 1.7);
+    text(`0${index+1} / 04`, 1156, 657, 10, white, 500, 1.5);
+    ctx.restore();
+  }
+  function city(t) {
+    const p = t / sceneLength, drift = p * 38;
+    const sky = ctx.createLinearGradient(0, 0, 0, H);
+    sky.addColorStop(0, "#19191e"); sky.addColorStop(.55, "#482b2b"); sky.addColorStop(1, "#d16a40");
+    ctx.fillStyle = sky; ctx.fillRect(0, 0, W, H);
+    wash(970 - drift * .35, 330, 300, "rgba(255,111,62,.34)");
+    ctx.beginPath(); ctx.arc(968 - drift * .35, 336, 74, 0, Math.PI*2); ctx.fillStyle = "#ffb16d"; ctx.fill();
+    for (let i=0; i<26; i++) {
+      const x = ((i*173 - drift*.7) % (W+170) + W+170) % (W+170) - 70;
+      const h = 92 + ((i*83)%190), y = 500-h;
+      ctx.fillStyle = i%3===0 ? "#1d1a1d" : "#211d20"; ctx.fillRect(x, y, 72+(i%4)*11, h+110);
+      if (i%5===0) {
+        ctx.fillStyle = "#171518"; ctx.fillRect(x+25, y-33, 24, 34);
+        ctx.fillStyle = "#292125"; ctx.fillRect(x+33, y-76, 8, 44);
+        ctx.beginPath(); ctx.arc(x+37, y-78, 11, Math.PI, 0); ctx.fill();
+      }
+      for (let wx=x+11; wx<x+76; wx+=19) for (let wy=y+20; wy<590; wy+=25) {
+        ctx.fillStyle = ((Math.floor(wx+wy+i)%5)===0) ? "rgba(255,181,113,.75)" : "rgba(255,224,182,.22)";
+        ctx.fillRect(wx, wy, 4, 7);
+      }
+    }
+    ctx.fillStyle = "#111012"; ctx.fillRect(0, 588, W, 132);
+    for (let i=0;i<8;i++) {
+      const shift = ((i*217 - drift*2)%(W+240)+W+240)%(W+240)-120;
+      line(shift, 720, shift+210, 590, "rgba(246,91,62,.46)", 2);
+    }
+    frame("01  /  THE CITY", t, 0);
+    ctx.save(); ctx.globalAlpha = ease((t-1.3)/.8);
+    text("A NEW PERSPECTIVE", 66, 287, 13, "#ffb19a", 600, 4);
+    text("Morocco moves.", 64, 367, 62, white, 600, -1.8);
+    text("We move it forward.", 66, 418, 29, white, 400, -.4);
+    text("STRATEGY  /  STORY  /  DIGITAL", 67, 466, 11, "rgba(255,255,255,.72)", 500, 2.4);
+    ctx.restore();
+  }
+  function monitor(x,y,w,h,kind,t) {
+    ctx.save(); ctx.shadowColor = "rgba(240,68,56,.2)"; ctx.shadowBlur = 26;
+    rounded(x,y,w,h,7,"#101113","#454044"); ctx.restore();
+    ctx.fillStyle = "#0c0d0f"; ctx.fillRect(x+8,y+8,w-16,h-16);
+    ctx.fillStyle = "#252529"; ctx.fillRect(x+8,y+8,w-16,22);
+    ctx.fillStyle = red; ctx.beginPath(); ctx.arc(x+20,y+19,3,0,7); ctx.fill();
+    ctx.fillStyle="#737277"; ctx.fillRect(x+31,y+17,w*.38,3);
+    if(kind===0) {
+      ctx.fillStyle="#252428"; ctx.fillRect(x+17,y+40,w*.47,h-59);
+      ctx.fillStyle="#b94a3f"; ctx.fillRect(x+17,y+40,w*.47,h*.48);
+      ctx.fillStyle="#f2ddd0"; ctx.fillRect(x+28,y+57,w*.26,5);
+      ctx.fillStyle="#121316"; ctx.fillRect(x+w*.54,y+43,w*.34,5);
+      ctx.fillStyle="#77747a"; ctx.fillRect(x+w*.54,y+57,w*.29,3);
+      ctx.fillStyle="#77747a"; ctx.fillRect(x+w*.54,y+68,w*.24,3);
+      for(let i=0;i<3;i++){ctx.fillStyle=["#d9aa73","#718389","#a44038"][i];ctx.fillRect(x+18+i*(w*.15),y+h-40,w*.13,19);}
+    } else if(kind===1) {
+      for(let i=0;i<6;i++){ctx.fillStyle=i===Math.floor(t*2)%6?red:"#48464e";ctx.fillRect(x+19,y+43+i*13,w*.27,4);}
+      for(let i=0;i<5;i++) line(x+w*.47,y+48+i*11,x+w*.84,y+48+i*11, i===2 ? "#8fa8a7":"#545158",2);
+      ctx.fillStyle="#d94238"; ctx.fillRect(x+w*.55,y+h-48,w*.25,12);
+    } else {
+      ctx.fillStyle="#27272b"; ctx.fillRect(x+18,y+42,w*.35,h-59);
+      ctx.fillStyle="#d66b4d"; ctx.fillRect(x+18,y+42,w*.35,h*.48);
+      ctx.fillStyle="#dfd5c7"; ctx.fillRect(x+w*.49,y+45,w*.37,3);
+      ctx.fillStyle="#76737a"; ctx.fillRect(x+w*.49,y+56,w*.32,3);
+      ctx.fillStyle="#f04438"; ctx.fillRect(x+w*.49,y+72,w*.14,10);
+    }
+    ctx.fillStyle="#28272a"; ctx.fillRect(x+w*.47-5,y+h,w*.06,27); ctx.fillRect(x+w*.34,y+h+25,w*.32,6);
+  }
+  function studio(t) {
+    background("#131316","#09090b");
+    wash(710,380,350,"rgba(124,39,42,.25)");
+    ctx.fillStyle="#111114"; ctx.fillRect(0,492,W,228);
+    line(0,493,W,493,"rgba(255,255,255,.12)");
+    monitor(625,162,323,203,0,t);
+    monitor(976,205,225,156,2,t);
+    monitor(790,389,325,167,1,t);
+    ctx.fillStyle="#181719"; ctx.fillRect(0,470,590,18);
+    ctx.fillStyle="#252327"; ctx.fillRect(0,488,590,8);
+    for(let i=0;i<5;i++) {
+      const x=100+i*91, y=330+(i%2)*11;
+      ctx.fillStyle="#0a0a0c"; ctx.beginPath(); ctx.ellipse(x,y+122,33,46,0,0,7); ctx.fill();
+      ctx.fillStyle=["#a76d56","#d2a27b","#7d8790"][i%3];
+      ctx.beginPath(); ctx.arc(x,y+58,16,0,7); ctx.fill();
+      ctx.fillStyle="#252429"; ctx.beginPath(); ctx.moveTo(x-18,y+82);ctx.lineTo(x+19,y+82);ctx.lineTo(x+31,y+150);ctx.lineTo(x-31,y+150);ctx.fill();
+      line(x,y+148,x-8,y+193,"#302d30",8); line(x+14,y+146,x+26,y+190,"#302d30",8);
+    }
+    for(let i=0;i<9;i++){ctx.fillStyle=i%2? "#d14336":"#dad0c2";ctx.fillRect(64+i*52,500,22,3);}
+    frame("02  /  THE STUDIO",t,1);
+    ctx.save(); ctx.globalAlpha=ease((t-1.1)/.7);
+    text("ONE TEAM. EVERY TOUCHPOINT.",65,217,12,"#ff9e8e",600,3.2);
+    text("Ideas, made",64,287,55,white,600,-1.4);
+    text("visible.",64,345,55,white,600,-1.4);
+    text("Identity  ·  Design  ·  Campaigns",66,392,14,"rgba(255,255,255,.75)",400,.2);
+    ctx.restore();
+  }
+  function villa(x,y,s,t) {
+    ctx.save(); ctx.translate(x,y); ctx.scale(s,s);
+    ctx.fillStyle="#16201f"; ctx.fillRect(-18,215,470,17);
+    const pool=ctx.createLinearGradient(0,230,0,300);pool.addColorStop(0,"#53777a");pool.addColorStop(1,"#172c31");
+    ctx.fillStyle=pool;ctx.fillRect(54,236,354,48);
+    for(let i=0;i<7;i++) line(72+i*46,244,96+i*46,244,"rgba(221,237,224,.35)",1);
+    ctx.fillStyle="#bda58c";ctx.fillRect(15,97,398,127);
+    ctx.fillStyle="#dbc6a9";ctx.fillRect(41,67,178,157);
+    ctx.fillStyle="#a88469";ctx.beginPath();ctx.moveTo(21,68);ctx.lineTo(130,15);ctx.lineTo(239,68);ctx.fill();
+    ctx.fillStyle="#82705f";ctx.beginPath();ctx.moveTo(241,99);ctx.lineTo(314,53);ctx.lineTo(419,99);ctx.fill();
+    ctx.fillStyle="#26323a";ctx.fillRect(66,107,43,117);ctx.fillRect(127,107,62,61);ctx.fillRect(246,125,56,99);ctx.fillRect(325,125,57,99);
+    ctx.fillStyle="#e4ad78";ctx.fillRect(68,109,39,4);ctx.fillRect(249,128,48,3);
+    ctx.fillStyle="#cfb18b";ctx.fillRect(0,221,440,17);
+    for(let i=0;i<5;i++) {
+      const tx=-30+i*104, h=85+(i%3)*23;
+      ctx.fillStyle="#213a35";ctx.beginPath();ctx.arc(tx,220-h*.45,25,0,7);ctx.fill();
+      ctx.fillRect(tx-4,220-h*.45,8,h*.55);
+    }
+    ctx.restore();
+  }
+  function property(t) {
+    background("#101215","#08090a");
+    wash(830,366,410,"rgba(62,110,112,.2)");
+    const float=Math.sin(t*1.1)*7;
+    ctx.save(); ctx.translate(155,119+float); ctx.transform(1,0,-.12,1,0,0);
+    rounded(0,0,722,440,12,"#111316","#4c4a4a");
+    ctx.fillStyle="#202124";ctx.fillRect(0,0,722,43);
+    for(let i=0;i<3;i++){ctx.beginPath();ctx.arc(22+i*16,21,4,0,7);ctx.fillStyle=i===0?red:"#55545a";ctx.fill();}
+    text("dar-living.ma",82,26,10,"#aaa8a8",500,.8);
+    const g=ctx.createLinearGradient(0,45,0,430);g.addColorStop(0,"#6e7773");g.addColorStop(.5,"#b98363");g.addColorStop(1,"#344547");
+    ctx.fillStyle=g;ctx.fillRect(12,48,698,378);
+    ctx.fillStyle="rgba(13,16,17,.26)";ctx.fillRect(12,48,698,378);
+    villa(127,154,1.12,t);
+    ctx.fillStyle="rgba(5,7,8,.48)";ctx.fillRect(31,303,340,112);
+    text("CASA AZUR",53,339,12,white,600,2);
+    text("A quieter kind of luxury.",53,369,17,white,400,.1);
+    rounded(53,384,107,24,2,red,null);text("EXPLORE  →",66,401,9,white,600,1.1);
+    rounded(568,181,37,37,19,"rgba(15,18,19,.75)","rgba(255,255,255,.36)");
+    text("⌖",579,207,19,white,500);
+    ctx.restore();
+    rounded(890,195,290,315,5,"rgba(14,15,17,.96)","rgba(255,255,255,.13)");
+    text("A PROPERTY, REIMAGINED",915,231,10,"#ff9f91",600,2);
+    text("Step inside.",914,278,31,white,550,-.5);
+    line(914,300,1147,300,"rgba(255,255,255,.14)");
+    text("01",915,333,10,red,600,1);text("VILLA  /  MARRAKECH",946,333,10,white,500,1);
+    text("02",915,370,10,red,600,1);text("APARTMENT  /  CASABLANCA",946,370,9,white,500,.4);
+    text("03",915,407,10,red,600,1);text("RETAIL  /  RABAT",946,407,10,white,500,1);
+    line(915,430,1147,430,"rgba(255,255,255,.14)");
+    rounded(915,451,232,38,2,null,"rgba(240,68,56,.8)");
+    text("START THE VIRTUAL TOUR   ↗",932,475,9,white,600,1);
+    frame("03  /  THE EXPERIENCE",t,2);
+    text("Not just online.",66,267,45,white,550,-1);
+    text("All the way inside.",66,319,35,white,400,-.6);
+    text("Websites that open new worlds.",68,358,14,"rgba(255,255,255,.7)",400,.1);
+  }
+  function camera(x,y,t) {
+    ctx.save(); ctx.translate(x,y);
+    const body=ctx.createLinearGradient(-115,-55,125,90);body.addColorStop(0,"#3a3436");body.addColorStop(.5,"#171719");body.addColorStop(1,"#09090a");
+    rounded(-145,-88,290,175,20,body,"#5b5554");
+    rounded(-91,-118,91,38,7,"#262426","#544e4e");
+    for(let i=0;i<4;i++){
+      ctx.beginPath();ctx.arc(22,0,79-i*14,0,7);ctx.fillStyle=i%2?"#171a1e":"#252327";ctx.fill();ctx.strokeStyle="#605d5c";ctx.lineWidth=2;ctx.stroke();
+    }
+    const lens=ctx.createRadialGradient(13,-13,6,22,0,58);lens.addColorStop(0,"#568088");lens.addColorStop(.35,"#162d3b");lens.addColorStop(.8,"#080b0f");lens.addColorStop(1,"#151416");
+    ctx.beginPath();ctx.arc(22,0,49,0,7);ctx.fillStyle=lens;ctx.fill();ctx.strokeStyle="#8c7771";ctx.lineWidth=2;ctx.stroke();
+    ctx.beginPath();ctx.arc(5,-16,8,0,7);ctx.fillStyle="rgba(216,240,239,.72)";ctx.fill();
+    rounded(-128,-59,35,22,4,"#1d1c1e","#60595b");
+    ctx.restore();
+  }
+  function production(t) {
+    background("#141216","#080809");
+    wash(470,365,340,"rgba(172,72,42,.22)");
+    ctx.fillStyle="#111013";ctx.fillRect(0,519,W,201);
+    ctx.fillStyle="#242125";ctx.fillRect(0,520,W,7);
+    const sweep=.5+Math.sin(t*.8)*.5;
+    ctx.save();ctx.translate(445,265);ctx.rotate(-.35+sweep*.5);
+    const beam=ctx.createLinearGradient(0,0,0,450);beam.addColorStop(0,"rgba(255,238,210,.22)");beam.addColorStop(1,"rgba(255,238,210,0)");
+    ctx.fillStyle=beam;ctx.beginPath();ctx.moveTo(-60,0);ctx.lineTo(74,0);ctx.lineTo(270,470);ctx.lineTo(-250,470);ctx.fill();ctx.restore();
+    camera(388,375,t);
+    ctx.fillStyle="#141315";ctx.fillRect(750,479,368,15);
+    ctx.fillStyle="#292528";ctx.fillRect(779,494,311,9);
+    // Product set: sculptural bottle, hard light, and a warm studio backdrop.
+    ctx.fillStyle="#d3ad83";ctx.beginPath();ctx.moveTo(885,292);ctx.lineTo(1030,292);ctx.lineTo(1080,479);ctx.lineTo(839,479);ctx.fill();
+    ctx.fillStyle="#eee0c7";ctx.fillRect(918,324,82,139);
+    ctx.fillStyle="#c69e72";ctx.fillRect(934,309,50,20);ctx.fillRect(946,293,26,17);
+    ctx.fillStyle="#7f2828";ctx.fillRect(930,378,58,40);
+    text("Nº 03",940,397,10,"#f2e8dd",600,1.4);
+    ctx.fillStyle="#191719";ctx.beginPath();ctx.moveTo(777,480);ctx.lineTo(800,390);ctx.lineTo(817,480);ctx.fill();
+    ctx.fillStyle="#454044";ctx.fillRect(788,477,7,42);
+    ctx.fillStyle="#09090a";ctx.fillRect(1164,195,11,220);
+    ctx.save();ctx.translate(1158,191);ctx.rotate(.16);ctx.fillStyle="#272327";ctx.fillRect(-34,-14,69,26);ctx.fillStyle="#d5c8b2";ctx.fillRect(-36,-14,7,26);ctx.restore();
+    frame("04  /  THE PRODUCTION",t,3);
+    ctx.save();ctx.globalAlpha=ease((t-1.05)/.7);
+    text("MADE TO BE FELT.",66,236,12,"#ff9c8c",600,3.2);
+    text("Every frame.",64,302,49,white,550,-1.4);
+    text("A feeling.",64,356,49,white,550,-1.4);
+    text("Photography  ·  Film  ·  Campaigns",67,398,14,"rgba(255,255,255,.74)",400,.2);
+    ctx.restore();
+    const cta=ease((t-5.7)/1);
+    if(cta>0) {
+      ctx.save();ctx.globalAlpha=cta;
+      ctx.fillStyle="rgba(8,8,9,.88)";ctx.fillRect(0,0,W,H);
+      ctx.fillStyle=red;ctx.fillRect(64,211,45,3);
+      text("THREEPOINTS",65,271,14,muted,600,4);
+      text("MEDIA",65,297,10,muted,500,6);
+      text("Let's create",64,383,65,white,550,-2);
+      text("what's next.",64,452,65,white,550,-2);
+      text("MOROCCO  ·  STRATEGY  ·  DESIGN  ·  DIGITAL",68,501,12,"#bbb4b0",500,2.2);
+      rounded(68,541,211,47,2,red,null);
+      text("START A CONVERSATION  ↗",83,571,10,white,650,1);
+      for(let i=0;i<3;i++){ctx.fillStyle=red;ctx.beginPath();ctx.arc(1130+i*24,559,4,0,7);ctx.fill();}
+      ctx.restore();
+    }
+  }
+  const scenes=[city,studio,property,production];
+  let livePreview=true, animationFrame;
+  function draw(now=0) {
+    const t=(now/1000)%duration;
+    const index=Math.floor(t/sceneLength), local=t%sceneLength;
+    ctx.clearRect(0,0,W,H);
+    const blend=Math.min(1,Math.max(0,(local-(sceneLength-.75))/.75));
+    if(blend>0) {
+      scenes[index](local);
+      ctx.save();ctx.globalAlpha=ease(blend);scenes[(index+1)%scenes.length]((local-(sceneLength-.75)));ctx.restore();
+    } else scenes[index](local);
+    if(livePreview) animationFrame=requestAnimationFrame(draw);
+  }
+  window.renderFrame=now=>{livePreview=false;cancelAnimationFrame(animationFrame);draw(now);};
+  animationFrame=requestAnimationFrame(draw);
+  window.startRecording = async () => {
+    const button=document.getElementById("record");
+    if(!canvas.captureStream || !window.MediaRecorder) { button.textContent="Recording unavailable"; return; }
+    button.disabled=true; button.textContent="Recording · 00:00";
+    const audio=new AudioContext();
+    const destination=audio.createMediaStreamDestination();
+    const master=audio.createGain();master.gain.value=.08;master.connect(destination);
+    for(const [hz,level] of [[110,.28],[164.81,.19],[220,.11]]) {
+      const oscillator=audio.createOscillator(), gain=audio.createGain();
+      oscillator.type="sine"; oscillator.frequency.value=hz; gain.gain.value=level;
+      oscillator.connect(gain);gain.connect(master);oscillator.start();
+    }
+    await audio.resume();
+    const stream=canvas.captureStream(30);
+    destination.stream.getAudioTracks().forEach(track=>stream.addTrack(track));
+    const mimeType=["video/webm;codecs=vp9,opus","video/webm;codecs=vp8,opus","video/webm"].find(type=>MediaRecorder.isTypeSupported(type));
+    const recorder=new MediaRecorder(stream,{mimeType,videoBitsPerSecond:6000000,audioBitsPerSecond:128000});
+    const chunks=[];
+    recorder.ondataavailable=event=>{if(event.data.size)chunks.push(event.data);};
+    recorder.onstop=()=>{
+      const blob=new Blob(chunks,{type:mimeType});
+      const url=URL.createObjectURL(blob), link=document.createElement("a");
+      link.href=url;link.download="ThreePoints_Media_Brand_Film.webm";link.click();
+      setTimeout(()=>URL.revokeObjectURL(url),60000);
+      stream.getTracks().forEach(track=>track.stop());audio.close();
+      button.disabled=false;button.textContent="Export again";
+      window.recordingDone=true;
+    };
+    recorder.start(1000);
+    const started=performance.now();
+    const update=()=> {
+      const elapsed=Math.floor((performance.now()-started)/1000);
+      button.textContent=`Recording · 00:${String(Math.min(elapsed,36)).padStart(2,"0")}`;
+      if(elapsed>=duration){recorder.stop();return;}
+      requestAnimationFrame(update);
+    };
+    requestAnimationFrame(update);
+  };
+})();
+</script>
+</body>
+</html>
