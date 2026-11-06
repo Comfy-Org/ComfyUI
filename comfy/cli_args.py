@@ -295,6 +295,8 @@ if args.cache_ram is not None and len(args.cache_ram) > 2:
 if args.high_ram:
     args.cache_classic = True
 
+args.assets_implicitly_enabled = args.windows_standalone_build and not args.enable_assets
+
 if args.windows_standalone_build:
     args.auto_launch = True
     args.enable_assets = True
