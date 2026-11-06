@@ -73,7 +73,7 @@ class APG(io.ComfyNode):
             guidance = cond - uncond
 
             if momentum != 0:
-                if not torch.is_tensor(running_avg):
+                if not torch.is_tensor(running_avg) or (running_avg.shape != guidance.shape):
                     running_avg = guidance
                 else:
                     running_avg = momentum * running_avg + guidance
