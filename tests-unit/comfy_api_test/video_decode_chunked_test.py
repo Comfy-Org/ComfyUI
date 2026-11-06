@@ -209,6 +209,8 @@ def test_decode_chunked_holds_one_chunk(fixture_files, name):
     first = next(chunks)
     held, _ = tracemalloc.get_traced_memory()
     tracemalloc.stop()
+    # numpy allocations are traced, so the chunk the consumer holds counts; anything past it is the generator's
+    held -= first.images.numel() * first.images.element_size()
     assert held < 3 * frame_bytes, "the generator holds decoded frames across its yield"
     del first, chunks
 
@@ -429,7 +431,7 @@ def test_get_components_sizes_its_buffer_from_the_metadata(fixture_files, monkey
     from comfy_api.latest._input_impl import video_types
     sizes = []
     real = video_types.FrameBuffer.__init__
-    monkeypatch.setattr(video_types.FrameBuffer, "__init__", lambda self, expected: sizes.append(expected) or real(self, expected))
+    monkeypatch.setattr(video_types.FrameBuffer, "__init__", lambda self, expected, **kw: sizes.append(expected) or real(self, expected, **kw))
     assert VideoFromFile(fixture_files["h264"]).get_components().images.shape[0] == 20
     assert sizes[0] == 20
 

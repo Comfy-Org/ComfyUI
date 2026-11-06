@@ -146,8 +146,9 @@ class FrameBuffer:
     header still claims its full length, say), or the allocation fails, it collects a list and stacks it, as
     before this buffer existed."""
 
-    def __init__(self, expected: int):
+    def __init__(self, expected: int, recount=None):
         self.expected = max(1, expected)
+        self.recount = recount  # counts the frames from the file when the header's claim looks too big to trust
         self.data: torch.Tensor | None = None
         self.overflow: list[torch.Tensor] = []
         self.listed: list[torch.Tensor] | None = None  # the list-and-stack fallback
@@ -155,6 +156,9 @@ class FrameBuffer:
 
     def _start(self, frame: torch.Tensor) -> None:
         frame_bytes = max(1, frame.numel() * frame.element_size())
+        if self.recount is not None and self.expected * frame_bytes > _available_memory() // 4:
+            # A big claim may come from a header that outlives a cut-short file: count the packets that are there.
+            self.expected = max(1, min(self.expected, self.recount() + 1))
         if self.expected * frame_bytes > _available_memory():
             self.listed = []
             return
@@ -197,7 +201,10 @@ class FrameBuffer:
             self.overflow = []
             return result
         if self.count * 10 < self.data.shape[0] * 9:
-            return self.data[: self.count].clone()
+            try:
+                return self.data[: self.count].clone()
+            except RuntimeError:  # no room for the trimmed copy (the guess was far over): keep the view
+                pass
         return self.data[: self.count]
 
 
@@ -632,6 +639,23 @@ class VideoFromFile(VideoInput):
         with av.open(self.__file, mode='r') as container:
             return container.format.name
 
+    def _count_packets(self, start_time: float, duration: float) -> int:
+        """The video packets in the trim window, read without decoding them: a file cut short has packets only for
+        the frames it really holds, whatever its header claims."""
+        source = io.BytesIO(self.__file.getvalue()) if isinstance(self.__file, io.BytesIO) else self.__file
+        with av.open(source, mode='r') as container:
+            stream = self._get_first_video_stream(container)
+            base = stream.start_time or 0
+            count = 0
+            for packet in container.demux(stream):
+                if packet.pts is None or packet.size == 0:
+                    continue
+                t = float((packet.pts - base) * stream.time_base) if stream.time_base else 0.0
+                if t + 1e-6 < start_time or (duration > 0 and t >= start_time + duration):
+                    continue
+                count += 1
+            return count
+
     def _seek_trim_window(self, container: InputContainer, video_stream) -> tuple[int, int]:
         """Move the container to the active trim window; return its (start, end) in the stream's time base."""
         start_time, duration = self.get_active_trim_window()
@@ -811,7 +835,8 @@ class VideoFromFile(VideoInput):
     def get_components_internal(self, container: InputContainer) -> VideoComponents:
         video_stream = self._get_first_video_stream(container)
         start_time, duration = self.get_active_trim_window()
-        frames = FrameBuffer(expected_frame_count(container, video_stream, start_time, duration))
+        frames = FrameBuffer(expected_frame_count(container, video_stream, start_time, duration),
+                             recount=lambda: self._count_packets(start_time, duration))
         alphas = None
         audio = {}
         for img in self._decode_trim_window(container, audio=audio):
