@@ -1705,6 +1705,7 @@ class ByteDanceTextToVideoNode(IO.ComfyNode):
             ],
             is_api_node=True,
             price_badge=PRICE_BADGE_VIDEO,
+            is_deprecated=True,
         )
 
     @classmethod
@@ -1836,6 +1837,7 @@ class ByteDanceImageToVideoNode(IO.ComfyNode):
             ],
             is_api_node=True,
             price_badge=PRICE_BADGE_VIDEO,
+            is_deprecated=True,
         )
 
     @classmethod
@@ -1972,6 +1974,7 @@ class ByteDanceFirstLastFrameNode(IO.ComfyNode):
             ],
             is_api_node=True,
             price_badge=PRICE_BADGE_VIDEO,
+            is_deprecated=True,
         )
 
     @classmethod

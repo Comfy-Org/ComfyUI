@@ -787,6 +787,10 @@ def detect_unet_config(state_dict, key_prefix, metadata=None):
             dit_config["model_type"] = "scail"
         elif '{}patch_embedding_global.weight'.format(key_prefix) in state_dict_keys:
             dit_config["model_type"] = "wandancer"
+        elif '{}lq_proj_in.conv1.weight'.format(key_prefix) in state_dict_keys:
+            dit_config["model_type"] = "relayvsr"
+            # the LQ frames go in pixel-unshuffled by 4 * upscale_factor
+            dit_config["upscale_factor"] = math.isqrt(state_dict['{}lq_proj_in.conv1.weight'.format(key_prefix)].shape[1] // 3) // 4
         else:
             if '{}img_emb.proj.0.bias'.format(key_prefix) in state_dict_keys:
                 dit_config["model_type"] = "i2v"

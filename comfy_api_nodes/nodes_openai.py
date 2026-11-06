@@ -43,6 +43,8 @@ STARTING_POINT_ID_PATTERN = r"<starting_point_id:(.*)>"
 
 class SupportedOpenAIModel(str, Enum):
     gpt_6_astra = "gpt-6-astra"
+    gpt_6_1_sol = "gpt-6.1-sol"
+    gpt_6_1_terra = "gpt-6.1-terra"
     gpt_6_sol = "gpt-6-sol"
     gpt_6_luna = "gpt-6-luna"
     gpt_5_6_sol = "gpt-5.6-sol"
@@ -55,11 +57,7 @@ class SupportedOpenAIModel(str, Enum):
     gpt_5_nano = "gpt-5-nano"
     gpt_4_1 = "gpt-4.1"
     gpt_4_1_mini = "gpt-4.1-mini"
-    gpt_4_1_nano = "gpt-4.1-nano"
-    o4_mini = "o4-mini"
     o3 = "o3"
-    o1_pro = "o1-pro"
-    o1 = "o1"
 
 
 REASONING_EFFORT_OPTIONS = ["default", "none", "minimal", "low", "medium", "high", "xhigh", "max"]
@@ -68,6 +66,8 @@ _GPT_5_EFFORTS = ("minimal", "low", "medium", "high")
 _GPT_5_6_EFFORTS = ("none", "low", "medium", "high", "xhigh", "max")
 SUPPORTED_REASONING_EFFORTS: dict[str, tuple[str, ...]] = {
     SupportedOpenAIModel.gpt_6_astra: ("low", "medium", "high", "xhigh", "max"),
+    SupportedOpenAIModel.gpt_6_1_sol: ("low", "medium", "high", "xhigh", "max"),
+    SupportedOpenAIModel.gpt_6_1_terra: _GPT_5_6_EFFORTS,
     SupportedOpenAIModel.gpt_6_sol: _GPT_5_6_EFFORTS,
     SupportedOpenAIModel.gpt_6_luna: _GPT_5_6_EFFORTS,
     SupportedOpenAIModel.gpt_5_6_sol: _GPT_5_6_EFFORTS,
@@ -80,11 +80,7 @@ SUPPORTED_REASONING_EFFORTS: dict[str, tuple[str, ...]] = {
     SupportedOpenAIModel.gpt_5_nano: _GPT_5_EFFORTS,
     SupportedOpenAIModel.gpt_4_1: (),
     SupportedOpenAIModel.gpt_4_1_mini: (),
-    SupportedOpenAIModel.gpt_4_1_nano: (),
-    SupportedOpenAIModel.o4_mini: _O_SERIES_EFFORTS,
     SupportedOpenAIModel.o3: _O_SERIES_EFFORTS,
-    SupportedOpenAIModel.o1_pro: _O_SERIES_EFFORTS,
-    SupportedOpenAIModel.o1: _O_SERIES_EFFORTS,
 }
 
 
@@ -220,7 +216,7 @@ class OpenAIGPTImage1(IO.ComfyNode):
                 ),
                 IO.Combo.Input(
                     "model",
-                    options=["gpt-image-1", "gpt-image-1.5", "gpt-image-2"],
+                    options=["gpt-image-1.5", "gpt-image-2"],
                     default="gpt-image-2",
                     optional=True,
                 ),
@@ -257,11 +253,6 @@ class OpenAIGPTImage1(IO.ComfyNode):
                 expr="""
                 (
                   $ranges := {
-                    "gpt-image-1": {
-                      "low":    [0.011, 0.02],
-                      "medium": [0.042, 0.07],
-                      "high":   [0.167, 0.25]
-                    },
                     "gpt-image-1.5": {
                       "low":    [0.009, 0.02],
                       "medium": [0.034, 0.062],
@@ -302,7 +293,7 @@ class OpenAIGPTImage1(IO.ComfyNode):
         size: str = "1024x1024",
         custom_width: int = 1024,
         custom_height: int = 1024,
-        model: str = "gpt-image-1",
+        model: str = "gpt-image-2",
     ) -> IO.NodeOutput:
         validate_string(prompt, strip_whitespace=False)
 
@@ -327,11 +318,11 @@ class OpenAIGPTImage1(IO.ComfyNode):
                     f"Custom resolution total pixels must be between 655,360 and 8,294,400, got {total_pixels}"
                 )
             size = f"{custom_width}x{custom_height}"
-        elif model in ("gpt-image-1", "gpt-image-1.5"):
+        elif model == "gpt-image-1.5":
             if size not in ("auto", "1024x1024", "1024x1536", "1536x1024"):
                 raise ValueError(f"Resolution {size} is only supported by GPT Image 2 model")
 
-        if model not in ("gpt-image-1", "gpt-image-1.5", "gpt-image-2"):
+        if model not in ("gpt-image-1.5", "gpt-image-2"):
             raise ValueError(f"Unknown model: {model}")
 
         if image is not None:
@@ -410,7 +401,14 @@ class OpenAIGPTImage1(IO.ComfyNode):
 
 GPT_IMAGE_QUALITIES = ("low", "medium", "high")
 GPT_IMAGE_25_QUALITIES = ("low", "medium", "high", "xhigh", "max")
-GPT_IMAGE_MODELS = ("gpt-image-2.5-flare", "gpt-image-2.5-sunburst", "gpt-image-2", "gpt-image-1.5", "gpt-image-1")
+GPT_IMAGE_MODELS = (
+    "gpt-image-2.6-flare",
+    "gpt-image-2.6-sunburst",
+    "gpt-image-2.5-flare",
+    "gpt-image-2.5-sunburst",
+    "gpt-image-2",
+    "gpt-image-1.5",
+)
 
 
 def _gpt_image_shared_inputs(qualities: tuple[str, ...] = GPT_IMAGE_QUALITIES):
@@ -441,7 +439,7 @@ def _gpt_image_shared_inputs(qualities: tuple[str, ...] = GPT_IMAGE_QUALITIES):
 
 
 def _gpt_image_legacy_model_inputs():
-    """Per-model widget set for legacy gpt-image-1 / gpt-image-1.5 (4 base sizes, transparent bg allowed)."""
+    """Per-model widget set for legacy gpt-image-1.5 (4 base sizes, transparent bg allowed)."""
     return [
         IO.Combo.Input(
             "size",
@@ -504,13 +502,25 @@ def _gpt_image_2_model_inputs(backgrounds: tuple[str, ...], qualities: tuple[str
     ]
 
 
+def _gpt_image_26_model_inputs():
+    return [
+        *_gpt_image_2_model_inputs(("auto", "opaque", "transparent"), GPT_IMAGE_25_QUALITIES),
+        IO.Combo.Input(
+            "complexity",
+            default="high",
+            options=["low", "medium", "high"],
+            tooltip="How much the model plans the image before rendering.",
+        ),
+    ]
+
+
 class OpenAIGPTImageNodeV2(IO.ComfyNode):
 
     @classmethod
     def define_schema(cls):
         return IO.Schema(
             node_id="OpenAIGPTImageNodeV2",
-            display_name="OpenAI GPT Image 2.5",
+            display_name="OpenAI GPT Image 2.6",
             category="partner/image/OpenAI",
             description="Generates images via OpenAI's GPT Image endpoint.",
             inputs=[
@@ -523,6 +533,8 @@ class OpenAIGPTImageNodeV2(IO.ComfyNode):
                 IO.DynamicCombo.Input(
                     "model",
                     options=[
+                        IO.DynamicCombo.Option("gpt-image-2.6-flare", _gpt_image_26_model_inputs()),
+                        IO.DynamicCombo.Option("gpt-image-2.6-sunburst", _gpt_image_26_model_inputs()),
                         IO.DynamicCombo.Option(
                             "gpt-image-2.5-flare",
                             _gpt_image_2_model_inputs(("auto", "opaque", "transparent"), GPT_IMAGE_25_QUALITIES),
@@ -536,7 +548,6 @@ class OpenAIGPTImageNodeV2(IO.ComfyNode):
                             _gpt_image_2_model_inputs(("auto", "opaque"), GPT_IMAGE_QUALITIES),
                         ),
                         IO.DynamicCombo.Option("gpt-image-1.5", _gpt_image_legacy_model_inputs()),
-                        IO.DynamicCombo.Option("gpt-image-1", _gpt_image_legacy_model_inputs()),
                     ],
                 ),
                 IO.Int.Input(
@@ -571,11 +582,6 @@ class OpenAIGPTImageNodeV2(IO.ComfyNode):
                 expr="""
                 (
                   $ranges := {
-                    "gpt-image-1": {
-                      "low":    [0.011, 0.02],
-                      "medium": [0.042, 0.07],
-                      "high":   [0.167, 0.25]
-                    },
                     "gpt-image-1.5": {
                       "low":    [0.009, 0.02],
                       "medium": [0.034, 0.062],
@@ -599,6 +605,20 @@ class OpenAIGPTImageNodeV2(IO.ComfyNode):
                       "high":   [0.0222, 0.2544],
                       "xhigh":  [0.0388, 0.4523],
                       "max":    [0.0887, 1.0175]
+                    },
+                    "gpt-image-2.6-flare": {
+                      "low":    [0.0097, 0.1188],
+                      "medium": [0.0181, 0.2100],
+                      "high":   [0.0222, 0.2544],
+                      "xhigh":  [0.0388, 0.4523],
+                      "max":    [0.0887, 1.0175]
+                    },
+                    "gpt-image-2.6-sunburst": {
+                      "low":    [0.0097, 0.1188],
+                      "medium": [0.0181, 0.2100],
+                      "high":   [0.0222, 0.2544],
+                      "xhigh":  [0.0388, 0.4523],
+                      "max":    [0.0887, 1.0175]
                     }
                   };
                   $presets := {
@@ -613,17 +633,27 @@ class OpenAIGPTImageNodeV2(IO.ComfyNode):
                       "high": {"1024x1024": 0.0753, "1024x1536": 0.0589, "1536x1024": 0.0589, "2048x2048": 0.1531, "2048x1152": 0.0606, "1152x2048": 0.0606, "3840x2160": 0.1431, "2160x3840": 0.1431},
                       "xhigh": {"1024x1024": 0.1339, "1024x1536": 0.1055, "1536x1024": 0.1055, "2048x2048": 0.2721, "2048x1152": 0.1077, "1152x2048": 0.1077, "3840x2160": 0.2544, "2160x3840": 0.2544},
                       "max": {"1024x1024": 0.3013, "1024x1536": 0.2354, "1536x1024": 0.2354, "2048x2048": 0.6123, "2048x1152": 0.2424, "1152x2048": 0.2424, "3840x2160": 0.5724, "2160x3840": 0.5724}
+                    },
+                    "gpt-image-2.6": {
+                      "low": {"1024x1024": 0.0353, "1024x1536": 0.0285, "1536x1024": 0.0285, "2048x2048": 0.0716, "2048x1152": 0.0283, "1152x2048": 0.0283, "3840x2160": 0.0669, "2160x3840": 0.0669},
+                      "medium": {"1024x1024": 0.0622, "1024x1536": 0.0486, "1536x1024": 0.0486, "2048x2048": 0.1263, "2048x1152": 0.0520, "1152x2048": 0.0520, "3840x2160": 0.1225, "2160x3840": 0.1225},
+                      "high": {"1024x1024": 0.0753, "1024x1536": 0.0589, "1536x1024": 0.0589, "2048x2048": 0.1531, "2048x1152": 0.0606, "1152x2048": 0.0606, "3840x2160": 0.1431, "2160x3840": 0.1431},
+                      "xhigh": {"1024x1024": 0.1339, "1024x1536": 0.1055, "1536x1024": 0.1055, "2048x2048": 0.2721, "2048x1152": 0.1077, "1152x2048": 0.1077, "3840x2160": 0.2544, "2160x3840": 0.2544},
+                      "max": {"1024x1024": 0.3013, "1024x1536": 0.2354, "1536x1024": 0.2354, "2048x2048": 0.6123, "2048x1152": 0.2424, "1152x2048": 0.2424, "3840x2160": 0.5724, "2160x3840": 0.5724}
                     }
                   };
                   $perImage := {
-                    "gpt-image-1": [0.0019, 0.0019],
                     "gpt-image-1.5": [0.0016, 0.0016],
                     "gpt-image-2": [0.0098, 0.0147],
                     "gpt-image-2.5-flare": [0.0117, 0.0176],
-                    "gpt-image-2.5-sunburst": [0.0117, 0.0176]
+                    "gpt-image-2.5-sunburst": [0.0117, 0.0176],
+                    "gpt-image-2.6-flare": [0.0117, 0.0176],
+                    "gpt-image-2.6-sunburst": [0.0117, 0.0176]
                   };
                   $model := widgets.model;
-                  $family := ($model = "gpt-image-2.5-flare" or $model = "gpt-image-2.5-sunburst") ? "gpt-image-2.5" : $model;
+                  $family := ($model = "gpt-image-2.6-flare" or $model = "gpt-image-2.6-sunburst") ? "gpt-image-2.6"
+                    : ($model = "gpt-image-2.5-flare" or $model = "gpt-image-2.5-sunburst") ? "gpt-image-2.5"
+                    : $model;
                   $qualityRaw := $lookup(widgets, "model.quality");
                   $quality := ($qualityRaw != null) ? $qualityRaw : "";
                   $sizeRaw := $lookup(widgets, "model.size");
@@ -663,6 +693,7 @@ class OpenAIGPTImageNodeV2(IO.ComfyNode):
         quality = model["quality"]
         custom_width = model.get("custom_width", 1024)
         custom_height = model.get("custom_height", 1024)
+        complexity = model.get("complexity")
 
         images_dict = model.get("images") or {}
         image_tensors: list[Input.Image] = [t for t in images_dict.values() if t is not None]
@@ -750,6 +781,7 @@ class OpenAIGPTImageNodeV2(IO.ComfyNode):
                     n=n,
                     size=size,
                     moderation="low",
+                    complexity=complexity,
                 ),
                 content_type="multipart/form-data",
                 files=files,
@@ -768,6 +800,7 @@ class OpenAIGPTImageNodeV2(IO.ComfyNode):
                     n=n,
                     size=size,
                     moderation="low",
+                    complexity=complexity,
                 ),
             )
         return IO.NodeOutput(await validate_and_cast_response(response, cls=cls))
@@ -839,6 +872,16 @@ class OpenAIChatNode(IO.ComfyNode):
                     "usd": [0.0143, 0.0715],
                     "format": { "approximate": true, "separator": "-", "suffix": " per 1K tokens" }
                   }
+                  : $contains($m, "gpt-6.1-sol") ? {
+                    "type": "list_usd",
+                    "usd": [0.00286, 0.0143],
+                    "format": { "approximate": true, "separator": "-", "suffix": " per 1K tokens" }
+                  }
+                  : $contains($m, "gpt-6.1-terra") ? {
+                    "type": "list_usd",
+                    "usd": [0.00143, 0.00715],
+                    "format": { "approximate": true, "separator": "-", "suffix": " per 1K tokens" }
+                  }
                   : $contains($m, "gpt-6-sol") ? {
                     "type": "list_usd",
                     "usd": [0.00286, 0.0143],
@@ -849,34 +892,9 @@ class OpenAIChatNode(IO.ComfyNode):
                     "usd": [0.000143, 0.000715],
                     "format": { "approximate": true, "separator": "-", "suffix": " per 1K tokens" }
                   }
-                  : $contains($m, "o4-mini") ? {
-                    "type": "list_usd",
-                    "usd": [0.0011, 0.0044],
-                    "format": { "approximate": true, "separator": "-", "suffix": " per 1K tokens" }
-                  }
-                  : $contains($m, "o1-pro") ? {
-                    "type": "list_usd",
-                    "usd": [0.15, 0.6],
-                    "format": { "approximate": true, "separator": "-", "suffix": " per 1K tokens" }
-                  }
-                  : $contains($m, "o1") ? {
-                    "type": "list_usd",
-                    "usd": [0.015, 0.06],
-                    "format": { "approximate": true, "separator": "-", "suffix": " per 1K tokens" }
-                  }
-                  : $contains($m, "o3-mini") ? {
-                    "type": "list_usd",
-                    "usd": [0.0011, 0.0044],
-                    "format": { "approximate": true, "separator": "-", "suffix": " per 1K tokens" }
-                  }
                   : $contains($m, "o3") ? {
                     "type": "list_usd",
                     "usd": [0.01, 0.04],
-                    "format": { "approximate": true, "separator": "-", "suffix": " per 1K tokens" }
-                  }
-                  : $contains($m, "gpt-4.1-nano") ? {
-                    "type": "list_usd",
-                    "usd": [0.0001, 0.0004],
                     "format": { "approximate": true, "separator": "-", "suffix": " per 1K tokens" }
                   }
                   : $contains($m, "gpt-4.1-mini") ? {
@@ -1138,10 +1156,8 @@ class OpenAIChatConfig(IO.ComfyNode):
                     options=REASONING_EFFORT_OPTIONS,
                     default="default",
                     optional=True,
-                    tooltip="How much the model reasons before answering. 'default' leaves the choice to the model. "
-                    "Supported levels differ per model: GPT-6 Astra low-max, GPT-6 Sol/Luna and GPT-5.6 none-max (no minimal), "
-                    "GPT-5.5 none-xhigh, GPT-5.5 Pro medium-xhigh, GPT-5 minimal-high, o-series low-high; "
-                    "GPT-4.1 has no reasoning. Unsupported levels are rejected before the request is sent.",
+                    tooltip="Supported levels vary by model. An unsupported level stops the run and lists the valid ones. "
+                    "'default' lets the model choose.",
                 ),
             ],
             outputs=[
@@ -1162,7 +1178,7 @@ class OpenAIChatConfig(IO.ComfyNode):
 
         Note:
             While `top_p` and `temperature` are listed as properties in the
-            spec, they are not supported for all models (e.g., o4-mini).
+            spec, they are not supported for all models (e.g., gpt-6.1-sol).
             They are not exposed as inputs at all to avoid having to manually
             remove depending on model choice.
         """
