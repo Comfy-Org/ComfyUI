@@ -1,7 +1,7 @@
 from comfy.ldm.cosmos.predict2 import MiniTrainDIT
+from comfy.ldm.modules.attention import optimized_attention_masked
 import torch
 from torch import nn
-import torch.nn.functional as F
 
 
 def rotate_half(x):
@@ -77,7 +77,7 @@ class Attention(nn.Module):
             cos, sin = position_embeddings_context
             key_states = apply_rotary_pos_emb(key_states, cos, sin)
 
-        attn_output = F.scaled_dot_product_attention(query_states, key_states, value_states, attn_mask=mask)
+        attn_output = optimized_attention_masked(query_states, key_states, value_states, self.n_heads, mask=mask, skip_reshape=True, skip_output_reshape=True)
 
         attn_output = attn_output.transpose(1, 2).reshape(*input_shape, -1).contiguous()
         attn_output = self.o_proj(attn_output)
@@ -169,13 +169,14 @@ class LLMAdapter(nn.Module):
         self.norm = operations.RMSNorm(target_dim, eps=1e-6, device=device, dtype=dtype)
 
     def forward(self, source_hidden_states, target_input_ids, target_attention_mask=None, source_attention_mask=None):
+        dtype = source_hidden_states.dtype
         if target_attention_mask is not None:
-            target_attention_mask = target_attention_mask.to(torch.bool)
+            target_attention_mask = (target_attention_mask.to(dtype) - 1) * torch.finfo(dtype).max
             if target_attention_mask.ndim == 2:
                 target_attention_mask = target_attention_mask.unsqueeze(1).unsqueeze(1)
 
         if source_attention_mask is not None:
-            source_attention_mask = source_attention_mask.to(torch.bool)
+            source_attention_mask = (source_attention_mask.to(dtype) - 1) * torch.finfo(dtype).max
             if source_attention_mask.ndim == 2:
                 source_attention_mask = source_attention_mask.unsqueeze(1).unsqueeze(1)
 
