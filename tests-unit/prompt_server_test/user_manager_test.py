@@ -33,6 +33,33 @@ async def test_listuserdata_empty_directory(aiohttp_client, app, tmp_path):
     assert resp.status == 404
 
 
+@pytest.mark.parametrize("existing_user_directory", [False, True])
+async def test_listuserdata_does_not_create_directories(
+    aiohttp_client, tmp_path, monkeypatch, existing_user_directory
+):
+    monkeypatch.setattr("folder_paths.user_directory", str(tmp_path))
+    monkeypatch.setattr("app.user_manager.args.multi_user", False)
+    user_directory = tmp_path / "default"
+    if existing_user_directory:
+        user_directory.mkdir()
+
+    manager = UserManager()
+    application = web.Application()
+    routes = web.RouteTableDef()
+    manager.add_routes(routes)
+    application.add_routes(routes)
+    client = await aiohttp_client(application)
+
+    resp = await client.get("/userdata?dir=missing/nested")
+    assert resp.status == 404
+    assert not (user_directory / "missing").exists()
+    assert user_directory.exists() == existing_user_directory
+
+    resp = await client.post("/userdata/missing%2Fnested%2Ffile.txt", data=b"test content")
+    assert resp.status == 200
+    assert (user_directory / "missing" / "nested" / "file.txt").read_bytes() == b"test content"
+
+
 async def test_listuserdata_with_files(aiohttp_client, app, tmp_path):
     os.makedirs(tmp_path / "test_dir")
     with open(tmp_path / "test_dir" / "file1.txt", "w") as f:
