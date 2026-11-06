@@ -37,6 +37,7 @@ class RecordPageSpec(NamedTuple):
     any_tags: tuple[str, ...] = ()
     none_tags: tuple[str, ...] = ()
     name_contains: str | None = None
+    content_hash: str | None = None
     limit: int = 20
     offset: int = 0
     sort: RecordSortField = "created_at"
@@ -229,6 +230,8 @@ def list_records_page(
         filters.append(
             Asset.name.ilike(f"%{escaped_name}%", escape=escape_character)
         )
+    if spec.content_hash:
+        filters.append(AssetContent.hash == spec.content_hash)
 
     sort_columns = {
         "name": Asset.name,
