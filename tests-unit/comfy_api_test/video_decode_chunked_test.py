@@ -124,7 +124,8 @@ def test_decode_chunked_uint8_is_within_a_level_of_the_float_frames(fixture_file
     _, images, alpha = joined(video.decode_chunked(chunk_frames=4, dtype=torch.uint8))
     assert images.dtype == torch.uint8
     rounded = (components.images * 255).round().clamp(0, 255).to(torch.uint8)
-    assert (images.int() - rounded.int()).abs().max() <= max_diff
+    assert (images.int() - rounded.int()).abs().max() <= max_diff, \
+        "uint8 must round the float frames, or convert 8-bit YUV straight to RGB within one level"
     if components.alpha is not None:
         rounded_alpha = (components.alpha * 255).round().clamp(0, 255).to(torch.uint8)
         assert (alpha.int() - rounded_alpha.int()).abs().max() <= max_diff
@@ -190,7 +191,7 @@ def test_decode_chunked_holds_one_chunk(fixture_files, name):
         refs.append(weakref.ref(owner))
         del chunk, owner
         gc.collect()
-        assert all(r() is None for r in refs)
+        assert all(r() is None for r in refs), "the generator still references a chunk it handed over"
     import tracemalloc
     video = VideoFromFile(fixture_files[name])
     frame_bytes = video.get_components().images[0].numel() * 4
@@ -199,8 +200,8 @@ def test_decode_chunked_holds_one_chunk(fixture_files, name):
     first = next(chunks)
     held, _ = tracemalloc.get_traced_memory()
     tracemalloc.stop()
-    held -= first.images.numel() * first.images.element_size()
-    assert held < 3 * frame_bytes, "the generator holds decoded frames across its yield"
+    held_beyond_the_chunk = held - first.images.numel() * first.images.element_size()
+    assert held_beyond_the_chunk < 3 * frame_bytes, "the generator holds decoded frames across its yield"
     del first, chunks
 
 
@@ -283,7 +284,7 @@ def test_get_audio_skips_decoding_frames(fixture_files, monkeypatch):
     assert calls
     calls.clear()
     assert VideoFromFile(fixture_files["h264"]).get_audio() is not None
-    assert calls == []
+    assert calls == [], "get_audio turned video frames into pixels"
 
 
 def test_video_from_list_cuts_complete_audio_to_the_frames(fixture_files):
@@ -299,7 +300,7 @@ def test_video_from_list_audio_cut_matches_a_partial_frame_trim(fixture_files):
     long_audio = {"waveform": torch.rand(1, 2, 48000 * 10), "sample_rate": 48000}
     video = VideoFromList([VideoFromFile(fixture_files["h264"], start_time=0.0, duration=0.1)], complete_audio=long_audio)
     expected = video.get_components()
-    assert expected.images.shape[0] == 3
+    assert expected.images.shape[0] == 3, "a trim ending between frames keeps the frame it cuts into"
     assert torch.equal(video.get_audio()["waveform"], expected.audio["waveform"])
 
 
@@ -391,7 +392,8 @@ def test_get_components_matches_pyav_on_trim_rotation_and_audio(fixture_files):
         quadrant = int(decoded[0].rotation // 90) % 4
         expected = np.stack([np.rot90(f.to_ndarray(format="gbrpf32le"), k=quadrant, axes=(0, 1)) for f in decoded])
     assert quadrant
-    assert torch.equal(VideoFromFile(rotated_path).get_components().images, torch.from_numpy(expected.copy()))
+    assert torch.equal(VideoFromFile(rotated_path).get_components().images, torch.from_numpy(expected.copy())), \
+        "rotation must follow ComfyUI's convention: np.rot90 by the frame's rotation"
 
     with av.open(path) as container:
         resampler = av.audio.resampler.AudioResampler(format="fltp")
