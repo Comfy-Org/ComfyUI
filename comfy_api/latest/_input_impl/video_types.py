@@ -12,6 +12,7 @@ import json
 import numpy as np
 import math
 import os
+import psutil
 import torch
 from .._util import VideoContainer, VideoCodec, VideoComponents, normalize_crop_rect
 import comfy.utils
@@ -135,7 +136,8 @@ class FrameBuffer:
     """Decoded frames written straight into one tensor sized up front from the expected frame count. Collecting a
     list of frames and stacking it holds every frame twice at the end; this holds them once when the count is
     right. Frames past the count wait in a list and are copied in at the end, so a short guess peaks at about
-    twice the frames, as stacking did."""
+    twice the frames, as stacking did. The first allocation is also capped at what free memory can hold, so a file
+    whose metadata overstates its length cannot ask for more than the machine has."""
 
     def __init__(self, expected: int):
         self.expected = max(1, expected)
@@ -145,7 +147,9 @@ class FrameBuffer:
 
     def append(self, frame: torch.Tensor) -> None:
         if self.data is None:
-            self.data = torch.empty((self.expected, *frame.shape), dtype=frame.dtype)
+            frame_bytes = max(1, frame.numel() * frame.element_size())
+            room = max(1, int(psutil.virtual_memory().available * 0.9) // frame_bytes)
+            self.data = torch.empty((min(self.expected, room), *frame.shape), dtype=frame.dtype)
         if self.count < self.data.shape[0]:
             self.data[self.count] = frame
         else:
