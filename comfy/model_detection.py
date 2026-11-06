@@ -44,6 +44,18 @@ def calculate_transformer_depth(prefix, state_dict_keys, state_dict):
 def detect_unet_config(state_dict, key_prefix, metadata=None):
     state_dict_keys = list(state_dict.keys())
 
+    # Prism/MOVA joint checkpoint: both video experts and audio bridge must match.
+    prism_keys = {
+        'fusion_blocks.0.video_block.self_attn.q.weight': 5120,
+        'fusion_blocks.0.audio_block.self_attn.q.weight': 1536,
+        'fusion_blocks.0.a2v_conditioner.inner.q.weight': 5120,
+        'video_dit_2.blocks.39.self_attn.q.weight': 5120,
+        'audio_dit.patch_embedding.weight': 1536,
+    }
+    if all(key_prefix + k in state_dict and state_dict[key_prefix + k].shape[0] == n
+           for k, n in prism_keys.items()):
+        return {'image_model': 'prism_mova', 'video_layers': 40, 'audio_layers': 30, 'boundary_ratio': 0.9}
+
     if (
         '{}cond_layer_logits'.format(key_prefix) in state_dict_keys
         and '{}latent_conditioners.0.weight'.format(key_prefix) in state_dict_keys
