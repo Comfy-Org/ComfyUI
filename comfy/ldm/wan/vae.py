@@ -430,6 +430,7 @@ def count_cache_layers(model):
 
 
 class WanVAE(nn.Module):
+    comfy_has_chunked_io = True
 
     def __init__(self,
                  dim=128,
@@ -449,6 +450,7 @@ class WanVAE(nn.Module):
         self.attn_scales = attn_scales
         self.temperal_downsample = temperal_downsample
         self.temperal_upsample = temperal_downsample[::-1]
+        self.conv_out_channels = conv_out_channels
 
         # modules
         self.encoder = Encoder3d(dim, z_dim * 2, image_channels, dim_mult, num_res_blocks,
@@ -458,7 +460,11 @@ class WanVAE(nn.Module):
         self.decoder = Decoder3d(dim, z_dim, conv_out_channels, dim_mult, num_res_blocks,
                                  attn_scales, self.temperal_upsample, dropout)
 
-    def encode(self, x):
+    def encode(self, x, device=None):
+        # comfy_has_chunked_io contract: x may live on the CPU as a whole, temporal chunks
+        # are uploaded to the device one by one (the chunked_io caller passes device).
+        if device is None:
+            device = x.device
         conv_idx = [0]
         ## cache
         t = x.shape[2]
@@ -472,12 +478,12 @@ class WanVAE(nn.Module):
             conv_idx = [0]
             if i == 0:
                 out = self.encoder(
-                    x[:, :, :1, :, :],
+                    x[:, :, :1, :, :].to(device),
                     feat_cache=feat_map,
                     feat_idx=conv_idx)
             else:
                 out_ = self.encoder(
-                    x[:, :, 1 + 2 * (i - 1):1 + 2 * i, :, :],
+                    x[:, :, 1 + 2 * (i - 1):1 + 2 * i, :, :].to(device),
                     feat_cache=feat_map,
                     feat_idx=conv_idx,
                     final=(i == (iter_ - 1)))
@@ -488,13 +494,25 @@ class WanVAE(nn.Module):
         mu, log_var = self.conv1(out).chunk(2, dim=1)
         return mu
 
-    def decode(self, z):
-        # z: [b,c,t,h,w]
+    def decode_output_shape(self, input_shape):
+        # latent (b, z_dim, t, h, w) -> pixels (b, 3, (t-1)*4+1, h*8, w*8)
+        b, _, t, h, w = input_shape
+        t_mul = 2 ** sum(self.temperal_upsample)
+        s_mul = 2 ** (len(self.dim_mult) - 1)
+        return (b, self.conv_out_channels, (t - 1) * t_mul + 1, h * s_mul, w * s_mul)
+
+    def decode(self, z, output_buffer=None):
+        # z: [b,c,t,h,w]; comfy_has_chunked_io contract: when output_buffer is given, decoded
+        # frames are written into it chunk by chunk, so the whole video never sits on the GPU.
+        # Without a buffer one is allocated, matching the previous torch.cat result.
+        if output_buffer is None:
+            output_buffer = torch.empty(self.decode_output_shape(z.shape), device=z.device, dtype=z.dtype)
         iter_ = 1 + z.shape[2] // 2
         feat_map = None
         if iter_ > 1:
             feat_map = [None] * count_cache_layers(self.decoder)
         x = self.conv2(z)
+        pos = 0
         for i in range(iter_):
             conv_idx = [0]
             if i == 0:
@@ -503,9 +521,11 @@ class WanVAE(nn.Module):
                     feat_cache=feat_map,
                     feat_idx=conv_idx)
             else:
-                out_ = self.decoder(
+                out = self.decoder(
                     x[:, :, 1 + 2 * (i - 1):1 + 2 * i, :, :],
                     feat_cache=feat_map,
                     feat_idx=conv_idx)
-                out += out_
-        return torch.cat(out, 2)
+            for p in out:
+                output_buffer[:, :, pos:pos + p.shape[2], :, :].copy_(p)
+                pos += p.shape[2]
+        return output_buffer
