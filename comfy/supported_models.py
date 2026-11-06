@@ -2095,7 +2095,7 @@ class Fibo2(supported_models_base.BASE):
     unet_extra_config = {}
     latent_format = latent_formats.Flux2
 
-    supported_inference_dtypes = [torch.bfloat16, torch.float32]
+    supported_inference_dtypes = [torch.bfloat16, torch.float16, torch.float32]  # fp16 for GPUs without bf16 (e.g. Turing)
 
     vae_key_prefix = ["vae."]
     text_encoder_key_prefix = ["text_encoders."]
@@ -2183,7 +2183,7 @@ class QwenImage21(supported_models_base.BASE):
     unet_extra_config = {}
     latent_format = latent_formats.QwenImage21
 
-    supported_inference_dtypes = [torch.bfloat16, torch.float32]
+    supported_inference_dtypes = [torch.bfloat16, torch.float16, torch.float32]  # fp16 for GPUs without bf16 (e.g. Turing)
 
     vae_key_prefix = ["vae."]
     text_encoder_key_prefix = ["text_encoders."]
