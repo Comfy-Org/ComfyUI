@@ -1,4 +1,6 @@
 import copy
+import gc
+import weakref
 
 import pytest
 
@@ -8,7 +10,7 @@ import comfy_extras.nodes_loop as nodes_loop
 from comfy_api.latest import io
 from comfy_execution.graph_utils import GraphBuilder
 from comfy_execution.validation import validate_loops
-from execution import PromptExecutor
+from execution import CacheType, PromptExecutor
 
 
 class Constant:
@@ -270,6 +272,39 @@ class CaptureLoopResult(nodes_loop.LoopResult):
         return super().execute(**kwargs)
 
 
+class Blob:
+    def __init__(self, value):
+        self.value = value
+
+
+class MakeBlob:
+    refs = []
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {"required": {"value": ("INT",)}}
+
+    RETURN_TYPES = ("BLOB",)
+    FUNCTION = "execute"
+
+    def execute(self, value):
+        blob = Blob(value)
+        self.refs.append(weakref.ref(blob))
+        return (blob,)
+
+
+class BlobValue:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {"required": {"blob": ("BLOB",)}, "optional": {"index": ("INT",)}}
+
+    RETURN_TYPES = ("INT",)
+    FUNCTION = "execute"
+
+    def execute(self, blob, index=None):
+        return (blob.value,)
+
+
 class Server:
     client_id = None
 
@@ -311,6 +346,8 @@ def register_internal_loop_nodes(monkeypatch):
         "TestEmptyList": EmptyList,
         "TestIntegerList": IntegerList,
         "TestCaptureLoopState": CaptureLoopState,
+        "TestMakeBlob": MakeBlob,
+        "TestBlobValue": BlobValue,
     }
     for name, node in classes.items():
         monkeypatch.setitem(nodes.NODE_CLASS_MAPPINGS, name, node)
@@ -660,6 +697,60 @@ def test_iteration_cache_policy_and_end_cache(cache_iterations, expected_calls):
     assert Progress.body_call_counts == [0, 1, 2] + ([2, 2, 2] if cache_iterations else [2, 3, 4])
     assert prompt["close"]["inputs"]["output_value"] == ["increment", 0]
     assert second_prompt["close"]["inputs"]["output_value"] == ["increment", 0]
+
+
+@pytest.mark.parametrize("cache_type", [CacheType.CLASSIC, CacheType.LRU, CacheType.RAM_PRESSURE, CacheType.NONE])
+@pytest.mark.parametrize("cache_iterations", [False, True])
+def test_uncached_iterations_release_their_outputs(cache_type, cache_iterations):
+    MakeBlob.refs = []
+    Capture.values = []
+    prompt = {
+        "loop": {
+            "class_type": "StartLoop",
+            "inputs": {"mode": "simple", "mode.num_iterations": 3, "cache_iterations": cache_iterations},
+        },
+        "blob": {"class_type": "TestMakeBlob", "inputs": {"value": ["loop", 0]}},
+        "value": {"class_type": "TestBlobValue", "inputs": {"blob": ["blob", 0]}},
+        "close": {
+            "class_type": "EndLoop",
+            "inputs": {"output_value": ["value", 0], "next_iteration_value": ["value", 0], "accumulate": True},
+        },
+        "capture": {"class_type": "TestCapture", "inputs": {"value": ["close", 0]}},
+    }
+    executor = PromptExecutor(Server(), cache_type=cache_type, cache_args={"lru": 100, "ram": 0, "ram_inactive": 0})
+    executor.execute(prompt, "loop-release", execute_outputs=["capture"])
+    gc.collect()
+
+    assert executor.success
+    assert Capture.values == [0, 1, 2]
+    assert len(MakeBlob.refs) == 3
+    # Each iteration's blob is held only by the output cache, so it survives the prompt only when iterations are cached.
+    kept = [ref() is not None for ref in MakeBlob.refs]
+    assert kept == [cache_iterations and cache_type != CacheType.NONE] * 3
+
+
+@pytest.mark.parametrize("cache_type", [CacheType.CLASSIC, CacheType.LRU, CacheType.RAM_PRESSURE])
+def test_uncached_outer_iterations_release_outputs_read_by_an_inner_loop(cache_type):
+    MakeBlob.refs = []
+    Capture.values = []
+    loop = {"mode": "simple", "mode.num_iterations": 2, "cache_iterations": False}
+    prompt = {
+        "outer": {"class_type": "StartLoop", "inputs": loop},
+        "blob": {"class_type": "TestMakeBlob", "inputs": {"value": ["outer", 0]}},
+        "inner": {"class_type": "StartLoop", "inputs": {**loop, "parent_iteration": ["outer", 0]}},
+        "value": {"class_type": "TestBlobValue", "inputs": {"blob": ["blob", 0], "index": ["inner", 0]}},
+        "inner_close": {"class_type": "EndLoop", "inputs": {"output_value": ["value", 0], "accumulate": False}},
+        "outer_close": {"class_type": "EndLoop", "inputs": {"output_value": ["inner_close", 0], "accumulate": True}},
+        "capture": {"class_type": "TestCapture", "inputs": {"value": ["outer_close", 0]}},
+    }
+    executor = PromptExecutor(Server(), cache_type=cache_type, cache_args={"lru": 100, "ram": 0, "ram_inactive": 0})
+    executor.execute(prompt, "nested-loop-release", execute_outputs=["capture"])
+    gc.collect()
+
+    assert executor.success
+    assert Capture.values == [0, 1]
+    # The inner Start Loop inhibits its template body, whose copy of "value" reads the outer iteration's blob.
+    assert [ref() is not None for ref in MakeBlob.refs] == [False, False]
 
 
 def test_iteration_cache_still_expands_when_only_termination_is_requested():
