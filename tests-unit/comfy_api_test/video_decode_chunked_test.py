@@ -57,7 +57,8 @@ def write_video(path, codec="libx264", pix_fmt="yuv420p", width=64, height=48, f
 
 
 FIXTURES = {
-    # name: (filename, write_video kwargs). Between them they take every branch of the decoder.
+    # name: (filename, write_video kwargs): the decoder's 8-bit RGB, full-range, alpha, 10-bit, odd-width and rotation
+    # paths. Float-plane sources are covered in video_types_test.
     "h264": ("a.mp4", {}),
     "h264-odd-width": ("b.mp4", {"width": 70, "height": 46}),
     "full-range": ("c.mkv", {"codec": "mjpeg", "pix_fmt": "yuvj420p"}),
@@ -117,15 +118,64 @@ def test_get_audio_matches_get_components(fixture_files, name, variant):
         assert torch.equal(audio["waveform"], expected["waveform"])
 
 
-@pytest.mark.parametrize("name", ["h264", "full-range", "png-alpha", "ffv1-alpha", "ffv1-10bit"])
-def test_decode_chunked_uint8_rounds_the_float_frames(fixture_files, name):
-    video = VideoFromFile(fixture_files[name])
+@pytest.mark.parametrize("name,max_diff", [("full-range", 0), ("png-alpha", 0), ("ffv1-10bit", 0),
+                                           ("h264", 1), ("h264-odd-width", 1), ("ffv1-alpha", 1), ("rotated", 1)])
+@pytest.mark.parametrize("variant", ["whole", "cropped"])
+def test_decode_chunked_uint8_is_within_a_level_of_the_float_frames(fixture_files, name, max_diff, variant):
+    """uint8 rounds the float frames, except that 8-bit YUV converts straight to 8-bit RGB: faster, and never more
+    than one level off. Sources that are RGB or full range already, or deeper than 8 bits, match exactly."""
+    video = VideoFromFile(fixture_files[name], **VARIANTS[variant])
     components = video.get_components()
     _, images, alpha = joined(video.decode_chunked(chunk_frames=4, dtype=torch.uint8))
     assert images.dtype == torch.uint8
-    assert torch.equal(images, (components.images * 255).round().clamp(0, 255).to(torch.uint8))
+    rounded = (components.images * 255).round().clamp(0, 255).to(torch.uint8)
+    assert (images.int() - rounded.int()).abs().max() <= max_diff
     if components.alpha is not None:
-        assert torch.equal(alpha, (components.alpha * 255).round().clamp(0, 255).to(torch.uint8))
+        rounded_alpha = (components.alpha * 255).round().clamp(0, 255).to(torch.uint8)
+        assert (alpha.int() - rounded_alpha.int()).abs().max() <= max_diff
+    assert torch.equal(images, joined(video.decode_chunked(chunk_frames=4, dtype=torch.uint8))[1])
+
+
+def test_uint8_without_the_accurate_flags_rounds_the_float_frames(fixture_files, monkeypatch):
+    """On a PyAV without swscale's accuracy flags, uint8 falls back to rounding the float frames."""
+    from comfy_api.latest._input_impl import video_types
+    monkeypatch.setattr(video_types, "ACCURATE_8BIT_FLAGS", None)
+    video = VideoFromFile(fixture_files["h264"])
+    _, images, _ = joined(video.decode_chunked(dtype=torch.uint8))
+    assert torch.equal(images, (video.get_components().images * 255).round().clamp(0, 255).to(torch.uint8))
+
+
+def reference_frames(path, format):
+    """Every frame decoded straight with PyAV, independent of the code under test."""
+    with av.open(path) as container:
+        return np.stack([f.to_ndarray(format=format) for f in container.decode(video=0)])
+
+
+@pytest.mark.parametrize("name,format", [("full-range", "rgb24"), ("png-alpha", "rgba"), ("h264", "gbrpf32le")])
+def test_get_components_matches_a_direct_pyav_decode(fixture_files, name, format):
+    reference = reference_frames(fixture_files[name], format)
+    components = VideoFromFile(fixture_files[name]).get_components()
+    pixels = torch.from_numpy(reference)
+    if pixels.dtype == torch.uint8:
+        pixels = pixels.float() / 255.0
+    assert torch.equal(components.images, pixels[..., :3])
+    if format == "rgba":
+        assert torch.equal(components.alpha, pixels[..., 3:])
+    cropped = VideoFromFile(fixture_files[name], crop=(6, 4, 20, 16)).get_components().images
+    assert torch.equal(cropped, pixels[:, 4:20, 6:26, :3])
+
+
+def test_decode_chunked_decodes_as_it_goes(fixture_files, monkeypatch):
+    """The first chunk comes before the rest of the video is decoded."""
+    from comfy_api.latest._input_impl import video_types
+    decoded = []
+    real = video_types._rotation_quadrant
+    monkeypatch.setattr(video_types, "_rotation_quadrant", lambda frame: decoded.append(1) or real(frame))
+    chunks = VideoFromFile(fixture_files["h264"]).decode_chunked(chunk_frames=4)
+    next(chunks)
+    assert len(decoded) <= 5
+    list(chunks)
+    assert len(decoded) == 20
 
 
 def test_decode_chunked_from_bytesio_interleaves(fixture_files):
@@ -140,7 +190,8 @@ def test_decode_chunked_from_bytesio_interleaves(fixture_files):
 
 @pytest.mark.parametrize("name", ["h264", "png-alpha"])
 def test_decode_chunked_holds_one_chunk(fixture_files, name):
-    """The generator keeps nothing of a chunk once it is handed over: dropping the chunk frees its storage."""
+    """The generator keeps nothing of a chunk once it is handed over: dropping the chunk frees its storage, and
+    while the consumer holds it the generator holds no second copy."""
     import gc
     import weakref
     refs = []
@@ -150,6 +201,16 @@ def test_decode_chunked_holds_one_chunk(fixture_files, name):
         del chunk, owner
         gc.collect()
         assert all(r() is None for r in refs)
+    import tracemalloc
+    video = VideoFromFile(fixture_files[name])
+    frame_bytes = video.get_components().images[0].numel() * 4
+    tracemalloc.start()
+    chunks = video.decode_chunked(chunk_frames=8)
+    first = next(chunks)
+    held, _ = tracemalloc.get_traced_memory()
+    tracemalloc.stop()
+    assert held < 3 * frame_bytes, "the generator holds decoded frames across its yield"
+    del first, chunks
 
 
 def test_decode_chunked_rejects_bad_arguments(fixture_files):
@@ -285,3 +346,48 @@ def test_video_from_list_compares_decoded_sizes(fixture_files, tmp_path):
         bad.get_components()
     with pytest.raises(ValueError, match="incompatible frame dimensions"):
         next(bad.decode_chunked())
+
+
+class TintedVideo(VideoFromFile):
+    """A custom node's VideoFromFile that changes the frames get_components gives."""
+
+    def get_components_internal(self, container):
+        components = super().get_components_internal(container)
+        components.images = components.images * 0.5
+        components.audio = {"waveform": components.audio["waveform"] * 0.5, "sample_rate": components.audio["sample_rate"]}
+        return components
+
+
+class HalfWidthVideo(VideoFromFile):
+    """A custom node's VideoFromFile whose frames are narrower than the file's."""
+
+    def get_components(self):
+        components = super().get_components()
+        components.images = components.images[:, :, : components.images.shape[2] // 2].contiguous()
+        return components
+
+
+def test_subclass_overriding_components_gets_matching_chunks_and_no_backing_file(fixture_files):
+    video = TintedVideo(fixture_files["h264"])
+    components = video.get_components()
+    assert torch.equal(joined(video.decode_chunked(chunk_frames=6))[1], components.images)
+    assert torch.equal(video.get_audio()["waveform"], components.audio["waveform"])
+    assert video.get_backing_file() is None
+    joined_video = VideoFromList([video, VideoFromFile(fixture_files["h264"])])
+    assert torch.equal(joined(joined_video.decode_chunked(chunk_frames=6))[1], joined_video.get_components().images)
+
+
+@pytest.mark.parametrize("name", ["png-alpha", "ffv1-alpha"])
+def test_video_from_list_keeps_alpha_of_each_alpha_codec(fixture_files, name):
+    both = VideoFromList([VideoFromFile(fixture_files[name]), VideoFromFile(fixture_files[name])])
+    _, _, alpha = joined(both.decode_chunked(chunk_frames=8))
+    assert alpha is not None and torch.equal(alpha, both.get_components().alpha)
+
+
+def test_join_with_a_subclass_checks_the_frames_it_gives(fixture_files):
+    """A join whose part changes the frame size is refused as get_components refuses it, not checked on the file."""
+    video = VideoFromList([HalfWidthVideo(fixture_files["h264"]), VideoFromFile(fixture_files["h264"])])
+    with pytest.raises(ValueError, match="incompatible frame dimensions"):
+        video.get_components()
+    with pytest.raises(ValueError, match="incompatible frame dimensions"):
+        list(video.decode_chunked())

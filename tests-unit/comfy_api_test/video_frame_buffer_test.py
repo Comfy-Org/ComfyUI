@@ -84,6 +84,7 @@ def test_frame_buffer_short_guess_never_holds_more_than_the_frames_twice():
         buffer.append(frame)
     assert buffer.data.shape[0] == 4 and len(buffer.overflow) == 6
     assert torch.equal(buffer.tensor(), torch.stack(frames))
+    assert buffer.data is None and buffer.overflow == []
 
 
 def test_expected_frame_count_ignores_a_longer_soundtrack(tmp_path):
@@ -124,3 +125,14 @@ def test_stream_seconds_uses_the_container_duration_only_for_a_lone_stream():
     ten_minutes = 600 * av.time_base
     assert _stream_seconds(SimpleNamespace(streams=[video, object()], duration=ten_minutes), video) == 0.0
     assert _stream_seconds(SimpleNamespace(streams=[video], duration=ten_minutes), video) == 600.0
+
+
+def test_expected_frame_count_follows_the_trim(tmp_path):
+    from comfy_api.latest._input_impl.video_types import expected_frame_count
+    path = str(tmp_path / "t.mp4")
+    _write_video(path, [np.full((48, 64, 3), i, np.uint8) for i in range(48)])
+    with av.open(path) as container:
+        stream = container.streams.video[0]
+        assert expected_frame_count(container, stream, 0.0, 0.0) == 48
+        assert expected_frame_count(container, stream, 0.5, 0.0) == 36
+        assert expected_frame_count(container, stream, 0.0, 0.5) == 13

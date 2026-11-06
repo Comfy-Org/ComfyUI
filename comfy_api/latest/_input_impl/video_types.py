@@ -204,6 +204,20 @@ def expected_frame_count(container: InputContainer, stream, start_time: float, d
     return max(total, 1)
 
 
+def _accurate_8bit_flags():
+    """swscale flags that convert YUV to 8-bit RGB through its general scaler, which interpolates chroma and rounds.
+    Without them, 4:2:0 video takes a shortcut that copies each chroma sample over 2x2 pixels, and differs from the
+    float32 frames by up to 150 levels at colour edges; with them, by at most one level."""
+    try:
+        from av.video.reformatter import Interpolation
+        return Interpolation.BILINEAR | Interpolation.ACCURATE_RND | Interpolation.FULL_CHR_H_INT
+    except (ImportError, AttributeError, TypeError):
+        return None
+
+
+ACCURATE_8BIT_FLAGS = _accurate_8bit_flags()
+
+
 def last_decodable_audio_stream(container: InputContainer):
     """Streams FFmpeg has no decoder for have no codec context, and decoding their
     packets crashes the process (e.g. APAC spatial-audio track in iPhone)."""
@@ -590,21 +604,29 @@ class VideoFromFile(VideoInput):
         with av.open(self.__file, mode='r') as container:
             return container.format.name
 
-    def _decode_trim_window(self, container: InputContainer, video: bool = True, audio: dict | None = None):
+    def _seek_trim_window(self, container: InputContainer, video_stream) -> tuple[int, int]:
+        """Move the container to the active trim window; return its (start, end) in the stream's time base."""
+        start_time, duration = self.get_active_trim_window()
+        start_pts = int(start_time / video_stream.time_base)
+        end_pts = int((start_time + duration) / video_stream.time_base)
+        if start_pts != 0:
+            container.seek(start_pts, stream=video_stream)
+        return start_pts, end_pts
+
+    def _decode_trim_window(self, container: InputContainer, video: bool = True, audio: dict | None = None,
+                            eight_bit: bool = False):
         """Decode the active trim window. With video, yields each frame's pixels, rotation and crop applied: an
-        [H, W, C] array, uint8 or float32 in 0..1, whose fourth channel (when C is 4) is alpha. With an audio dict,
-        fills it with the window's "frames" ([channels, samples] arrays) and "stream".
+        [H, W, C] array, uint8 or float32 in 0..1, whose fourth channel (when C is 4) is alpha. eight_bit converts
+        8-bit YUV straight to 8-bit RGB (within a level of the float32 frames). With an audio dict, fills it with
+        the window's "frames" ([channels, samples] arrays) and "stream".
         get_components, decode_chunked and get_audio all decode through this, so their outputs agree."""
         video_stream = self._get_first_video_stream(container)
         video_stream.thread_type = "AUTO"
         start_time, duration = self.get_active_trim_window()
 
         audio_frames = []
-        start_pts = int(start_time / video_stream.time_base)
-        end_pts = int((start_time + duration) / video_stream.time_base)
-
-        if start_pts != 0:
-            container.seek(start_pts, stream=video_stream)
+        start_pts, end_pts = self._seek_trim_window(container, video_stream)
+        accurate_8bit = None
 
         image_format = 'gbrpf32le'
         alpha_channel = False
@@ -656,6 +678,11 @@ class VideoFromFile(VideoInput):
                                     image_format = 'rgba'
                                 else:
                                     image_format = 'rgb24'
+                            elif eight_bit and ACCURATE_8BIT_FLAGS is not None and not frame.format.name.startswith(
+                                ("gbrpf", "gbrapf", "grayf")
+                            ) and all(c.bits <= 8 for c in frame.format.components):
+                                accurate_8bit = ACCURATE_8BIT_FLAGS
+                                image_format = 'rgba' if alpha_channel else 'rgb24'
                             else:
                                 if alpha_channel:
                                     image_format = 'gbrapf32le'
@@ -699,6 +726,8 @@ class VideoFromFile(VideoInput):
                                 align_graph = (g, g_src, g_sink)
                             align_graph[1].push(frame)
                             img = np.ascontiguousarray(align_graph[2].pull().to_ndarray(format=image_format)[:frame.height, :frame.width])
+                        elif accurate_8bit is not None:
+                            img = frame.reformat(format=image_format, interpolation=accurate_8bit).to_ndarray()
                         else:
                             img = frame.to_ndarray(format=image_format)
                         rotation_quadrant = _rotation_quadrant(frame)
@@ -784,8 +813,16 @@ class VideoFromFile(VideoInput):
             return self.get_components_internal(container)
         raise ValueError(f"No video stream found in file '{self.__file}'")
 
+    def _decodes_as_base(self) -> bool:
+        """False for a subclass that changes what get_components returns: the new methods then derive from
+        get_components, as for any VideoInput, instead of decoding the file themselves."""
+        cls = type(self)
+        return (cls.get_components is VideoFromFile.get_components
+                and cls.get_components_internal is VideoFromFile.get_components_internal)
+
     def get_backing_file(self) -> str | None:
-        if isinstance(self.__file, str) and not self.__start_time and not self.__duration and self.__crop is None:
+        if (isinstance(self.__file, str) and not self.__start_time and not self.__duration and self.__crop is None
+                and self._decodes_as_base()):
             return self.__file
         return None
 
@@ -805,14 +842,11 @@ class VideoFromFile(VideoInput):
 
     def _count_frames(self) -> int:
         """How many frames decoding the trim window gives, counted from the video packets' timestamps without
-        decoding them."""
+        decoding them. A damaged packet the decoder drops still counts."""
         with self._open_private() as container:
             video_stream = self._get_first_video_stream(container)
-            start_time, duration = self.get_active_trim_window()
-            start_pts = int(start_time / video_stream.time_base)
-            end_pts = int((start_time + duration) / video_stream.time_base)
-            if start_pts != 0:
-                container.seek(start_pts, stream=video_stream)
+            _, duration = self.get_active_trim_window()
+            start_pts, end_pts = self._seek_trim_window(container, video_stream)
             return sum(
                 1 for packet in container.demux(video_stream)
                 if packet.pts is not None and packet.pts >= start_pts and not (duration and packet.pts >= end_pts)
@@ -826,26 +860,38 @@ class VideoFromFile(VideoInput):
 
     def decode_chunked(self, chunk_frames: int = 16, dtype: torch.dtype = torch.float32) -> Iterator[VideoChunk]:
         check_chunk_args(chunk_frames, dtype)
+        if not self._decodes_as_base():
+            yield from super().decode_chunked(chunk_frames, dtype)
+            return
         with self._open_private() as container:
-            pending: list[np.ndarray] = []
+            buffer = None
+            count = 0
             start_frame = 0
 
-            def chunk() -> VideoChunk:
-                pixels = frames_as(torch.from_numpy(np.stack(pending)), dtype)
+            def take_chunk() -> VideoChunk:
+                """The frames gathered so far as a chunk, handed over whole: the generator keeps no reference."""
+                nonlocal buffer, count, start_frame
+                pixels = frames_as(buffer[:count], dtype)
+                first, start_frame = start_frame, start_frame + count
+                buffer, count = None, 0
                 if pixels.shape[-1] == 4:
-                    return VideoChunk(images=pixels[..., :3], start_frame=start_frame, alpha=pixels[..., 3:])
-                return VideoChunk(images=pixels, start_frame=start_frame)
+                    return VideoChunk(images=pixels[..., :3].contiguous(), start_frame=first,
+                                      alpha=pixels[..., 3:].contiguous())
+                return VideoChunk(images=pixels, start_frame=first)
 
-            for img in self._decode_trim_window(container):
-                pending.append(img)
-                if len(pending) == chunk_frames:
-                    yield chunk()
-                    start_frame += len(pending)
-                    pending = []
-            if pending:
-                yield chunk()
+            for img in self._decode_trim_window(container, eight_bit=dtype == torch.uint8):
+                if buffer is None:
+                    buffer = torch.empty((chunk_frames, *img.shape), dtype=torch.from_numpy(img).dtype)
+                buffer[count] = torch.from_numpy(img)
+                count += 1
+                if count == chunk_frames:
+                    yield take_chunk()
+            if count:
+                yield take_chunk()
 
     def get_audio(self) -> AudioInput | None:
+        if not self._decodes_as_base():
+            return super().get_audio()
         with self._open_private() as container:
             audio = {}
             for _ in self._decode_trim_window(container, video=False, audio=audio):
@@ -1554,6 +1600,9 @@ class VideoFromList(VideoInput):
         get_components, the parts must agree on frame rate and decoded size, and alpha is kept only if every part
         has it."""
         check_chunk_args(chunk_frames, dtype)
+        if not all(video._decodes_as_base() for video in self.videos):
+            yield from super().decode_chunked(chunk_frames, dtype)
+            return
         self._common_frame_rate()
         sizes = [video._decoded_dimensions() for video in self.videos]
         if any(size != sizes[0] for size in sizes[1:]):
@@ -1569,6 +1618,8 @@ class VideoFromList(VideoInput):
             offset += count
 
     def get_audio(self) -> AudioInput | None:
+        if not all(video._decodes_as_base() for video in self.videos):
+            return super().get_audio()
         frame_rate = self._common_frame_rate()
         audios = [] if self.complete_audio is not None else [video.get_audio() for video in self.videos]
         return self._join_audio(audios, sum(video._count_frames() for video in self.videos), frame_rate)

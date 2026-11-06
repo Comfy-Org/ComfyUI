@@ -47,7 +47,8 @@ class VideoInput(ABC):
         video without holding every frame in memory.
 
         Frames are the ones get_components() returns, with the same trim, crop and rotation. dtype is
-        torch.float32 (the same values as get_components) or torch.uint8 (those values rounded to 0..255).
+        torch.float32 (the same values as get_components) or torch.uint8: those values rounded to 0..255, except
+        that 8-bit YUV sources convert straight to 8-bit RGB, which is faster and within one level of them.
         Each call starts a new pass over the video.
 
         Default implementation slices get_components(); subclasses that can decode incrementally override it.
