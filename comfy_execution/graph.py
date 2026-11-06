@@ -34,6 +34,9 @@ class DynamicPrompt:
     def get_node(self, node_id):
         if node_id in self.node_overrides:
             return self.node_overrides[node_id]
+        return self.get_node_without_override(node_id)
+
+    def get_node_without_override(self, node_id):
         if node_id in self.ephemeral_prompt:
             return self.ephemeral_prompt[node_id]
         if node_id in self.original_prompt:
