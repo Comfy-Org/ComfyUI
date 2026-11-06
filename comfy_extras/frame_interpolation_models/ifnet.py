@@ -12,7 +12,14 @@ def _warp(img, flow, warp_grids):
     base_grid, flow_div = warp_grids[(H, W)]
     flow_norm = torch.cat([flow[:, 0:1] / flow_div[0], flow[:, 1:2] / flow_div[1]], 1).float()
     grid = (base_grid.expand(B, -1, -1, -1) + flow_norm).permute(0, 2, 3, 1)
-    return F.grid_sample(img.float(), grid, mode="bilinear", padding_mode="border", align_corners=True).to(img.dtype)
+    padding_mode = "border"
+    if img.device.type == "mps":
+        # MPS does not implement "border" padding. With align_corners=True the valid
+        # sampling range is exactly [-1, 1], so clamping the grid to it makes "zeros"
+        # produce results identical to "border".
+        grid = grid.clamp(-1.0, 1.0)
+        padding_mode = "zeros"
+    return F.grid_sample(img.float(), grid, mode="bilinear", padding_mode=padding_mode, align_corners=True).to(img.dtype)
 
 
 class Head(nn.Module):
