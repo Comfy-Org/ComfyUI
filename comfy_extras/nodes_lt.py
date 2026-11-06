@@ -852,6 +852,7 @@ def decode_single_frame(video_file):
 
 
 def preprocess(image: torch.Tensor, crf=29):
+    image = image[..., :3]  # frames are encoded as rgb24; drop any alpha channel
     if crf == 0:
         return image
 
