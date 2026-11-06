@@ -10,6 +10,7 @@ itself rather than any single field.
 import dataclasses
 
 import pytest
+from PIL import Image
 
 from comfy_api.latest import io
 from comfy_extras import nodes_dataset
@@ -54,3 +55,32 @@ def test_class_attributes_are_forwarded_to_schema(node_cls):
 def test_node_classes_are_discovered():
     """Guard against the parametrization above collapsing to zero cases."""
     assert _node_classes()
+
+
+@pytest.mark.parametrize(
+    "folder, filename",
+    [
+        ("dataset", "image.png"),
+        ("dataset.png", "image.png"),
+        ("dataset", "image.png.crop.png"),
+        ("dataset.jpeg", "image.jpeg.crop.jpeg"),
+        ("dataset.JPG", "image.JPG"),
+        ("dataset", "2_subject/image.png.crop.png"),
+    ],
+)
+def test_image_dataset_caption_paths(tmp_path, monkeypatch, folder, filename):
+    monkeypatch.setattr(nodes_dataset.folder_paths, "input_directory", str(tmp_path))
+    image_path = tmp_path / folder / filename
+    image_path.parent.mkdir(parents=True)
+    Image.new("RGB", (8, 8), (255, 0, 0)).save(image_path)
+    image_path.with_suffix(".txt").write_text("A red image", encoding="utf-8")
+
+    images, captions = nodes_dataset.LoadImageTextDataSetFromFolderNode.execute(folder).result
+
+    repeat = 2 if filename.startswith("2_") else 1
+    assert len(images) == repeat
+    assert captions == ["A red image"] * repeat
+
+    image_path.with_suffix(".txt").unlink()
+    _, captions = nodes_dataset.LoadImageTextDataSetFromFolderNode.execute(folder).result
+    assert captions == [""] * repeat
