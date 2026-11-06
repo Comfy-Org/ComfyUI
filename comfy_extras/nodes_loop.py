@@ -15,6 +15,13 @@ def _expand_loop(dynprompt, opener_id, body, close_id, values, list_items, initi
     next_source = close_inputs.get("next_iteration_value")
     terminations = [value for name, value in close_inputs.items() if name.startswith("termination") and is_link(value)]
     accumulate = bool(close_inputs.get("accumulate", False))
+    # Unused position flags stay False so a change in loop length keeps the iterations' cache keys.
+    used_sockets = {
+        value[1]
+        for node_id in (*body, close_id)
+        for value in dynprompt.get_node(node_id).get("inputs", {}).values()
+        if is_link(value) and value[0] == opener_id
+    }
     previous_carry = initial_value
     previous_dependencies = []
     previous_progress = None
@@ -24,8 +31,8 @@ def _expand_loop(dynprompt, opener_id, body, close_id, values, list_items, initi
         item = list_items[position] if list_items is not None else None
         iteration_inputs = {
             "iteration_index": value,
-            "is_first": position == 0,
-            "is_last": position == len(values) - 1,
+            "is_first": 1 in used_sockets and position == 0,
+            "is_last": 2 in used_sockets and position == len(values) - 1,
             "list_item": item,
             "current_iteration_value": previous_carry,
             "reuse_cache": reuse_cache,
