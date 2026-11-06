@@ -1,0 +1,49 @@
+{
+  "comment": [
+    "Custom-node packs the stable-release bar names by hand: 'A staff member",
+    "reproduces a break in KJNodes, VideoHelperSuite or ComfyUI-Manager' stops a",
+    "release. This file pins those packs so CI reproduces the break instead.",
+    "",
+    "KJNodes and VideoHelperSuite are pinned to the same commits as the",
+    "frontend's custom-node suite (browser_tests/fixtures/data/customNodeManifest.core.json),",
+    "so a break reproduces in both suites against the same source.",
+    "",
+    "nodeCount is what the pin registered when it was calibrated, recorded so a",
+    "reviewer can see the drop a failure is reporting. minNodeCount is what is",
+    "actually asserted: a floor, not the exact number, because a pack dropping a",
+    "block of nodes to a failed sub-import is the regression worth failing on,",
+    "and an exact count would also fail on a legitimate re-pin."
+  ],
+  "packs": [
+    {
+      "pack": "ComfyUI-KJNodes",
+      "repo": "https://github.com/kijai/ComfyUI-KJNodes",
+      "pin": "e27a505b3ba6ce42687fe00500deda103d9d6071",
+      "pinnedAt": "2026-08-14",
+      "expectedNodes": ["INTConstant", "FloatConstant", "ImageResizeKJv2"],
+      "nodeCount": 244,
+      "minNodeCount": 230,
+      "routes": []
+    },
+    {
+      "pack": "ComfyUI-VideoHelperSuite",
+      "repo": "https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite",
+      "pin": "115de7a9d9e34410cffb9ecfd268e993b11a50fb",
+      "pinnedAt": "2026-08-26",
+      "expectedNodes": ["VHS_LoadVideoPath", "VHS_VideoInfo", "VHS_VideoCombine"],
+      "nodeCount": 40,
+      "minNodeCount": 38,
+      "routes": []
+    },
+    {
+      "pack": "ComfyUI-Manager",
+      "repo": "https://github.com/ltdrdata/ComfyUI-Manager",
+      "pin": "65dafe577ba336f591fc6b95ea2d40d6a8d1a97a",
+      "pinnedAt": "2026-10-18",
+      "expectedNodes": [],
+      "nodeCount": 0,
+      "minNodeCount": 0,
+      "routes": ["/api/manager/version", "/api/customnode/installed?mode=cache"]
+    }
+  ]
+}
