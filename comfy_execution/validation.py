@@ -191,10 +191,11 @@ def validate_loops(prompt, outputs, node_ids, start_nodes, end_nodes):
 
 
 def validate_node_input(
-    received_type: str, input_type: str, strict: bool = False
+    received_type: str | list, input_type: str | list, strict: bool = False
 ) -> bool:
     """
-    received_type and input_type are both strings of the form "T1,T2,...".
+    received_type and input_type are strings of the form "T1,T2,..." or lists of combo options.
+    For two option lists, every received option must be allowed by the input.
 
     If strict is True, the input_type must contain the received_type.
       For example, if received_type is "STRING" and input_type is "STRING,INT",
@@ -226,6 +227,12 @@ def validate_node_input(
     # if we ever want to break them on purpose, this can be removed
     if isinstance(received_type, list) and input_type == IO.Combo.io_type:
         return True
+
+    if isinstance(received_type, list) and isinstance(input_type, list):
+        try:
+            return set(received_type).issubset(input_type)
+        except TypeError:
+            return all(option in input_type for option in received_type)
 
     # Not equal, and not strings
     if not isinstance(received_type, str) or not isinstance(input_type, str):
