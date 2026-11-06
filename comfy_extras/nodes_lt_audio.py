@@ -14,7 +14,7 @@ VAE_SUFFIX = " (vae)"
 def _vae_option(name: str) -> str:
     """Return the selector value that marks `name` as the `vae/` copy.
 
-    The suffix goes before the extension ("a (vae).safetensors") so the value
+    The marker goes before the extension ("a (vae).safetensors") so the value
     still ends in a model file extension, which is what the frontend
     missing-model scan matches on, while staying distinct from the checkpoint
     entry of the same name.
@@ -23,82 +23,51 @@ def _vae_option(name: str) -> str:
     return f"{stem}{VAE_SUFFIX}{ext}"
 
 
-def _ltxv_audio_vae_names():
-    """List selector options: `vae/` models first, then `checkpoints/`.
+def _ltxv_audio_vae_options() -> dict[str, tuple[str, str]]:
+    """Map every selector value to the folder and filename it stands for.
 
-    Every `vae/` file is offered with the marker in its value, and the marker
-    does not depend on what `checkpoints/` contains: a value therefore means
-    the same file on every installation, so a workflow saved on one machine
-    stays a valid combo value (execution rejects values absent from the
-    options it is given). Checkpoint values are untouched, and a plain name
-    still resolves to the checkpoint first, so existing `ckpt_name` values
-    keep loading exactly what they loaded before.
-
-    A checkpoint may legitimately be named with the marker text; the marker is
-    then repeated so a `vae/` entry never shares its value with a checkpoint.
+    `vae/` files are offered first, then `checkpoints/`. Both the option list
+    and the loader read this one mapping, so a value always resolves to the file
+    it was offered for. A `vae/` value carries the marker and no part of it
+    depends on what else is installed, so a workflow saved on one machine stays
+    a valid value on another; the marker is repeated only when the marked value
+    is already taken by another `vae/` entry or by a checkpoint name. A
+    checkpoint keeps its exact name, because that is what its saved values meant
+    before this change.
     """
     checkpoint_names = folder_paths.get_filename_list("checkpoints")
-    checkpoint_set = set(checkpoint_names)
+    options: dict[str, tuple[str, str]] = {}
 
-    names = []
-    seen = set()
+    taken = set(checkpoint_names)
     for name in folder_paths.get_filename_list("vae"):
         option = _vae_option(name)
-        while option in checkpoint_set or option in seen:
+        while option in taken:
             option = _vae_option(option)
-        seen.add(option)
-        names.append(option)
+        taken.add(option)
+        options[option] = ("vae", name)
     for name in checkpoint_names:
-        if name not in seen:
-            seen.add(name)
-            names.append(name)
-    return names
+        options[name] = ("checkpoints", name)
+    return options
+
+
+def _ltxv_audio_vae_names() -> list[str]:
+    """List selector values, `vae/` models before `checkpoints/`."""
+    return list(_ltxv_audio_vae_options())
 
 
 def _ltxv_audio_vae_path(name: str) -> str:
-    """Resolve a selector value to a model file, raising when it is gone.
+    """Resolve a selector value to its model file, raising when it is gone."""
+    options = _ltxv_audio_vae_options()
+    if name in options:
+        folder, filename = options[name]
+        return folder_paths.get_full_path_or_raise(folder, filename)
 
-    A checkpoint is looked up first for the exact value: a checkpoint whose own
-    filename contains the marker text always meant that checkpoint before this
-    change, so it keeps meaning it. Otherwise a value carrying the ` (vae)`
-    marker resolves inside `vae` only, so a missing VAE is reported against the
-    right folder, and a plain value falls back to `vae` for legacy or API use.
-    """
-    checkpoint_path = folder_paths.get_full_path("checkpoints", name)
-    if checkpoint_path is not None:
-        return checkpoint_path
-
-    stem, ext = os.path.splitext(name)
-    if stem.endswith(VAE_SUFFIX):
-        bases = [stem]
-    elif name.endswith(VAE_SUFFIX):
-        # Marker trailer from an earlier build of this branch, which put it
-        # after the extension; the extension may be absent from the value.
-        bases = [name[: -len(VAE_SUFFIX)]]
-    else:
-        bases = []
-
-    if bases:
-        # The marker is repeated when it would collide with a checkpoint name,
-        # and a vae file may itself contain the marker text, so try the least
-        # stripped form first.
-        while bases[-1].endswith(VAE_SUFFIX):
-            bases.append(bases[-1][: -len(VAE_SUFFIX)])
-        for base in bases:
-            found = folder_paths.get_full_path("vae", base + ext)
-            if found is not None:
-                return found
-        wanted = {os.path.splitext(base)[0] for base in bases}
-        for candidate in folder_paths.get_filename_list("vae"):
-            if os.path.splitext(candidate)[0] in wanted:
-                return folder_paths.get_full_path_or_raise("vae", candidate)
-        raise FileNotFoundError(
-            f"Model in folder 'vae' with filename '{bases[-1] + ext}' not found."
-        )
-
-    vae_path = folder_paths.get_full_path("vae", name)
-    if vae_path is not None:
-        return vae_path
+    # Not offered right now: an API caller passing a bare filename, or a value
+    # whose file has been moved away. Keep the historical lookup order.
+    for folder in ("checkpoints", "vae"):
+        path = folder_paths.get_full_path(folder, name)
+        if path is not None:
+            return path
     return folder_paths.get_full_path_or_raise("checkpoints", name)
 
 
