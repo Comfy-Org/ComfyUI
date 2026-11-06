@@ -401,7 +401,14 @@ class OpenAIGPTImage1(IO.ComfyNode):
 
 GPT_IMAGE_QUALITIES = ("low", "medium", "high")
 GPT_IMAGE_25_QUALITIES = ("low", "medium", "high", "xhigh", "max")
-GPT_IMAGE_MODELS = ("gpt-image-2.5-flare", "gpt-image-2.5-sunburst", "gpt-image-2", "gpt-image-1.5")
+GPT_IMAGE_MODELS = (
+    "gpt-image-2.6-flare",
+    "gpt-image-2.6-sunburst",
+    "gpt-image-2.5-flare",
+    "gpt-image-2.5-sunburst",
+    "gpt-image-2",
+    "gpt-image-1.5",
+)
 
 
 def _gpt_image_shared_inputs(qualities: tuple[str, ...] = GPT_IMAGE_QUALITIES):
@@ -495,13 +502,25 @@ def _gpt_image_2_model_inputs(backgrounds: tuple[str, ...], qualities: tuple[str
     ]
 
 
+def _gpt_image_26_model_inputs():
+    return [
+        *_gpt_image_2_model_inputs(("auto", "opaque", "transparent"), GPT_IMAGE_25_QUALITIES),
+        IO.Combo.Input(
+            "complexity",
+            default="high",
+            options=["low", "medium", "high"],
+            tooltip="How much the model plans the image before rendering.",
+        ),
+    ]
+
+
 class OpenAIGPTImageNodeV2(IO.ComfyNode):
 
     @classmethod
     def define_schema(cls):
         return IO.Schema(
             node_id="OpenAIGPTImageNodeV2",
-            display_name="OpenAI GPT Image 2.5",
+            display_name="OpenAI GPT Image 2.6",
             category="partner/image/OpenAI",
             description="Generates images via OpenAI's GPT Image endpoint.",
             inputs=[
@@ -514,6 +533,8 @@ class OpenAIGPTImageNodeV2(IO.ComfyNode):
                 IO.DynamicCombo.Input(
                     "model",
                     options=[
+                        IO.DynamicCombo.Option("gpt-image-2.6-flare", _gpt_image_26_model_inputs()),
+                        IO.DynamicCombo.Option("gpt-image-2.6-sunburst", _gpt_image_26_model_inputs()),
                         IO.DynamicCombo.Option(
                             "gpt-image-2.5-flare",
                             _gpt_image_2_model_inputs(("auto", "opaque", "transparent"), GPT_IMAGE_25_QUALITIES),
@@ -584,6 +605,20 @@ class OpenAIGPTImageNodeV2(IO.ComfyNode):
                       "high":   [0.0222, 0.2544],
                       "xhigh":  [0.0388, 0.4523],
                       "max":    [0.0887, 1.0175]
+                    },
+                    "gpt-image-2.6-flare": {
+                      "low":    [0.0097, 0.1188],
+                      "medium": [0.0181, 0.2100],
+                      "high":   [0.0222, 0.2544],
+                      "xhigh":  [0.0388, 0.4523],
+                      "max":    [0.0887, 1.0175]
+                    },
+                    "gpt-image-2.6-sunburst": {
+                      "low":    [0.0097, 0.1188],
+                      "medium": [0.0181, 0.2100],
+                      "high":   [0.0222, 0.2544],
+                      "xhigh":  [0.0388, 0.4523],
+                      "max":    [0.0887, 1.0175]
                     }
                   };
                   $presets := {
@@ -598,16 +633,27 @@ class OpenAIGPTImageNodeV2(IO.ComfyNode):
                       "high": {"1024x1024": 0.0753, "1024x1536": 0.0589, "1536x1024": 0.0589, "2048x2048": 0.1531, "2048x1152": 0.0606, "1152x2048": 0.0606, "3840x2160": 0.1431, "2160x3840": 0.1431},
                       "xhigh": {"1024x1024": 0.1339, "1024x1536": 0.1055, "1536x1024": 0.1055, "2048x2048": 0.2721, "2048x1152": 0.1077, "1152x2048": 0.1077, "3840x2160": 0.2544, "2160x3840": 0.2544},
                       "max": {"1024x1024": 0.3013, "1024x1536": 0.2354, "1536x1024": 0.2354, "2048x2048": 0.6123, "2048x1152": 0.2424, "1152x2048": 0.2424, "3840x2160": 0.5724, "2160x3840": 0.5724}
+                    },
+                    "gpt-image-2.6": {
+                      "low": {"1024x1024": 0.0353, "1024x1536": 0.0285, "1536x1024": 0.0285, "2048x2048": 0.0716, "2048x1152": 0.0283, "1152x2048": 0.0283, "3840x2160": 0.0669, "2160x3840": 0.0669},
+                      "medium": {"1024x1024": 0.0622, "1024x1536": 0.0486, "1536x1024": 0.0486, "2048x2048": 0.1263, "2048x1152": 0.0520, "1152x2048": 0.0520, "3840x2160": 0.1225, "2160x3840": 0.1225},
+                      "high": {"1024x1024": 0.0753, "1024x1536": 0.0589, "1536x1024": 0.0589, "2048x2048": 0.1531, "2048x1152": 0.0606, "1152x2048": 0.0606, "3840x2160": 0.1431, "2160x3840": 0.1431},
+                      "xhigh": {"1024x1024": 0.1339, "1024x1536": 0.1055, "1536x1024": 0.1055, "2048x2048": 0.2721, "2048x1152": 0.1077, "1152x2048": 0.1077, "3840x2160": 0.2544, "2160x3840": 0.2544},
+                      "max": {"1024x1024": 0.3013, "1024x1536": 0.2354, "1536x1024": 0.2354, "2048x2048": 0.6123, "2048x1152": 0.2424, "1152x2048": 0.2424, "3840x2160": 0.5724, "2160x3840": 0.5724}
                     }
                   };
                   $perImage := {
                     "gpt-image-1.5": [0.0016, 0.0016],
                     "gpt-image-2": [0.0098, 0.0147],
                     "gpt-image-2.5-flare": [0.0117, 0.0176],
-                    "gpt-image-2.5-sunburst": [0.0117, 0.0176]
+                    "gpt-image-2.5-sunburst": [0.0117, 0.0176],
+                    "gpt-image-2.6-flare": [0.0117, 0.0176],
+                    "gpt-image-2.6-sunburst": [0.0117, 0.0176]
                   };
                   $model := widgets.model;
-                  $family := ($model = "gpt-image-2.5-flare" or $model = "gpt-image-2.5-sunburst") ? "gpt-image-2.5" : $model;
+                  $family := ($model = "gpt-image-2.6-flare" or $model = "gpt-image-2.6-sunburst") ? "gpt-image-2.6"
+                    : ($model = "gpt-image-2.5-flare" or $model = "gpt-image-2.5-sunburst") ? "gpt-image-2.5"
+                    : $model;
                   $qualityRaw := $lookup(widgets, "model.quality");
                   $quality := ($qualityRaw != null) ? $qualityRaw : "";
                   $sizeRaw := $lookup(widgets, "model.size");
@@ -647,6 +693,7 @@ class OpenAIGPTImageNodeV2(IO.ComfyNode):
         quality = model["quality"]
         custom_width = model.get("custom_width", 1024)
         custom_height = model.get("custom_height", 1024)
+        complexity = model.get("complexity")
 
         images_dict = model.get("images") or {}
         image_tensors: list[Input.Image] = [t for t in images_dict.values() if t is not None]
@@ -734,6 +781,7 @@ class OpenAIGPTImageNodeV2(IO.ComfyNode):
                     n=n,
                     size=size,
                     moderation="low",
+                    complexity=complexity,
                 ),
                 content_type="multipart/form-data",
                 files=files,
@@ -752,6 +800,7 @@ class OpenAIGPTImageNodeV2(IO.ComfyNode):
                     n=n,
                     size=size,
                     moderation="low",
+                    complexity=complexity,
                 ),
             )
         return IO.NodeOutput(await validate_and_cast_response(response, cls=cls))

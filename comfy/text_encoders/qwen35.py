@@ -350,6 +350,7 @@ class GatedDeltaNet(nn.Module):
 
         self.in_proj_qkv = ops.Linear(hidden, conv_dim, bias=False, device=device, dtype=dtype)
         self.in_proj_z = ops.Linear(hidden, value_dim, bias=False, device=device, dtype=dtype)
+        self.combined_qkvz = comfy.ops.CombinedLinear((self.in_proj_qkv, self.in_proj_z))
         self.in_proj_b = ops.Linear(hidden, self.num_value_heads, bias=False, device=device, dtype=dtype)
         self.in_proj_a = ops.Linear(hidden, self.num_value_heads, bias=False, device=device, dtype=dtype)
         self.out_proj = ops.Linear(value_dim, hidden, bias=False, device=device, dtype=dtype)
@@ -366,8 +367,12 @@ class GatedDeltaNet(nn.Module):
         batch_size, seq_len, _ = x.shape
 
         # Projections (shared)
-        proj = self.in_proj_qkv(x)  # [B, seq_len, conv_dim]
-        z = self.in_proj_z(x)
+        qkvz = self.combined_qkvz.forward(x)
+        if qkvz is NotImplemented:
+            proj = self.in_proj_qkv(x)  # [B, seq_len, conv_dim]
+            z = self.in_proj_z(x)
+        else:
+            proj, z = qkvz.split((self.key_dim * 2 + self.value_dim, self.value_dim), dim=-1)
 
         if past_key_value is not None and past_key_value.decode_step(seq_len):
             # decode: conv step into the side buffer, then gates + delta rule + gated norm in one
@@ -467,6 +472,7 @@ class GatedAttention(nn.Module):
         self.q_proj = ops.Linear(config.hidden_size, self.inner_size * 2, bias=config.qkv_bias, device=device, dtype=dtype)
         self.k_proj = ops.Linear(config.hidden_size, self.num_kv_heads * self.head_dim, bias=config.qkv_bias, device=device, dtype=dtype)
         self.v_proj = ops.Linear(config.hidden_size, self.num_kv_heads * self.head_dim, bias=config.qkv_bias, device=device, dtype=dtype)
+        self.combined_qkv = comfy.ops.CombinedLinear((self.q_proj, self.k_proj, self.v_proj))
         self.o_proj = ops.Linear(self.inner_size, config.hidden_size, bias=False, device=device, dtype=dtype)
 
         # QK norms with (1+weight) scaling
@@ -491,14 +497,18 @@ class GatedAttention(nn.Module):
         batch_size, seq_length, _ = x.shape
 
         # Project Q (with gate), K, V
-        qg = self.q_proj(x)
+        qkv = self.combined_qkv.forward(x)
+        if qkv is NotImplemented:
+            qg = self.q_proj(x)
+            xk = self.k_proj(x)
+            xv = self.v_proj(x)
+        else:
+            kv_size = self.num_kv_heads * self.head_dim
+            qg, xk, xv = qkv.split((self.inner_size * 2, kv_size, kv_size), dim=-1)
         # Split into query and gate: each is [B, seq, inner_size]
         qg = qg.view(batch_size, seq_length, self.num_heads, self.head_dim * 2)
         xq, gate = qg[..., :self.head_dim], qg[..., self.head_dim:]
         gate = gate.reshape(batch_size, seq_length, -1)  # [B, seq, inner_size]
-
-        xk = self.k_proj(x)
-        xv = self.v_proj(x)
 
         xq = self.q_norm(xq).transpose(1, 2)  # [B, heads, seq, head_dim]
         xk = self.k_norm(xk.view(batch_size, seq_length, self.num_kv_heads, self.head_dim)).transpose(1, 2)
@@ -859,6 +869,8 @@ class Qwen35(BaseLlama, BaseGenerate, torch.nn.Module):
             for m in unit.modules():
                 if isinstance(m, comfy.ops.MixedPrecisionOp):
                     m.comfy_gemv_optimized = True
+                    if m._combined_linear is not None:
+                        m._combined_linear.comfy_gemv_optimized = True
         vision_overrides = QWEN35_MODELS.get(self.model_type, {}).get("vision", {})
         vision_config = {**QWEN35_VISION_DEFAULTS, **vision_overrides, "out_hidden_size": config.hidden_size}
         self.visual = Qwen35VisionModel(vision_config, device=device, dtype=dtype, ops=operations)
