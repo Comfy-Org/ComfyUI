@@ -899,7 +899,7 @@ class VideoFromFile(VideoInput):
             def take_chunk() -> VideoChunk:
                 """The frames gathered so far as a chunk, handed over whole: the generator keeps no reference."""
                 nonlocal buffer, count, start_frame
-                pixels = frames_as(buffer[:count], dtype)
+                pixels = frames_as(torch.from_numpy(buffer[:count]), dtype)
                 first, start_frame = start_frame, start_frame + count
                 buffer, count = None, 0
                 if pixels.shape[-1] == 4:
@@ -908,9 +908,9 @@ class VideoFromFile(VideoInput):
                 return VideoChunk(images=pixels, start_frame=first)
 
             for img in self._decode_trim_window(container, eight_bit=dtype == torch.uint8):
-                if buffer is None:
-                    buffer = torch.empty((chunk_frames, *img.shape), dtype=torch.from_numpy(img).dtype)
-                buffer[count] = torch.from_numpy(img)
+                if buffer is None:  # numpy fills it without waking torch's thread pool for every frame
+                    buffer = np.empty((chunk_frames, *img.shape), dtype=img.dtype)
+                buffer[count] = img
                 count += 1
                 if count == chunk_frames:
                     yield take_chunk()
