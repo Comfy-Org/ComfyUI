@@ -176,7 +176,9 @@ class UserManager():
             if not directory:
                 return web.Response(status=400, text="Directory not provided")
 
-            path = self.get_request_user_filepath(request, directory)
+            # Listing is read-only: resolve the path without creating anything so a
+            # request for a missing directory doesn't leave empty directories behind.
+            path = self.get_request_user_filepath(request, directory, create_dir=False)
             if not path:
                 return web.Response(status=403, text="Invalid directory")
 
