@@ -1744,6 +1744,21 @@ class PreviewImage(SaveImage):
                 "hidden": {"prompt": "PROMPT", "extra_pnginfo": "EXTRA_PNGINFO"},
                 }
 
+def is_heif(image_path):
+    with open(image_path, 'rb') as f:
+        header = f.read(8)
+        if len(header) < 8 or header[4:8] != b'ftyp':
+            return False
+        box_size = int.from_bytes(header[0:4], 'big')
+        if box_size < 16 or box_size > 4096:
+            return False
+        content = f.read(box_size - 8)
+    brands = {content[0:4]}
+    brands.update(content[i:i + 4] for i in range(8, len(content) - 3, 4))
+    if brands & {b'heic', b'heix', b'heim', b'heis', b'hevc', b'hevx'}:
+        return True
+    return b'mif1' in brands and not brands & {b'avif', b'avis'}
+
 class LoadImage:
     @classmethod
     def INPUT_TYPES(s):
@@ -1767,11 +1782,12 @@ class LoadImage:
         dtype = comfy.model_management.intermediate_dtype()
         device = comfy.model_management.intermediate_device()
 
-        components = InputImpl.VideoFromFile(image_path).get_components()
-        if components.images.shape[0] > 0:
-            return (components.images.to(device=device, dtype=dtype), (1.0 - components.alpha[..., -1]).to(device=device, dtype=dtype) if components.alpha is not None else torch.zeros((components.images.shape[0], 64, 64), dtype=dtype, device=device))
+        if not is_heif(image_path):
+            components = InputImpl.VideoFromFile(image_path).get_components()
+            if components.images.shape[0] > 0:
+                return (components.images.to(device=device, dtype=dtype), (1.0 - components.alpha[..., -1]).to(device=device, dtype=dtype) if components.alpha is not None else torch.zeros((components.images.shape[0], 64, 64), dtype=dtype, device=device))
 
-        # This code is left here to handle animated webp which pyav does not support loading
+        # This code is left here to handle animated webp which pyav does not support loading and HEIF images where pyav only decodes a single tile of grid encoded files
         img = node_helpers.pillow(Image.open, image_path)
 
         output_images = []
