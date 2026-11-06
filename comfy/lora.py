@@ -97,9 +97,10 @@ def load_lora(lora, to_load, log_missing=True):
             loaded_keys.add(key)
 
     if log_missing:
-        for x in lora.keys():
-            if x not in loaded_keys:
-                logging.warning("lora key not loaded: {}".format(x))
+        not_loaded = [x for x in lora.keys() if x not in loaded_keys]
+        if len(not_loaded) > 0:
+            keys = ", ".join(not_loaded[:10]) + (", ..." if len(not_loaded) > 10 else "")
+            logging.warning("lora keys not loaded: {} of {}: {}".format(len(not_loaded), len(lora), keys))
 
     return patch_dict
 
