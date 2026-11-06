@@ -1,8 +1,8 @@
 import argparse
+import errno
 import logging
 import os
 import re
-import shutil
 import sys
 import tempfile
 import zipfile
@@ -404,8 +404,9 @@ comfyui-workflow-templates is not installed.
             Path(cls.CUSTOM_FRONTENDS_ROOT) / provider.folder_name / semantic_version
         )
         if not os.path.exists(web_root):
-            os.makedirs(web_root)
-            try:
+            parent = os.path.dirname(web_root)
+            os.makedirs(parent, exist_ok=True)
+            with tempfile.TemporaryDirectory(dir=parent) as staging_root:
                 logging.info(
                     "Downloading frontend(%s) version(%s) to (%s)",
                     provider.folder_name,
@@ -413,10 +414,13 @@ comfyui-workflow-templates is not installed.
                     web_root,
                 )
                 logging.debug(release)
-                download_release_asset_zip(release, destination_path=web_root)
-            except BaseException:
-                shutil.rmtree(web_root)
-                raise
+                download_release_asset_zip(release, destination_path=staging_root)
+                try:
+                    os.rename(staging_root, web_root)
+                except OSError as e:
+                    # Another initializer may have published a completed frontend.
+                    if e.errno not in (errno.EEXIST, errno.ENOTEMPTY) or not os.path.isdir(web_root):
+                        raise
 
         return web_root
 

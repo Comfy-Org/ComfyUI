@@ -1,6 +1,10 @@
 import argparse
+import errno
 import io
 import zipfile
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+from threading import Event
 from types import SimpleNamespace
 from unittest.mock import Mock, patch, mock_open
 
@@ -136,35 +140,16 @@ def test_init_frontend_invalid_provider():
         FrontendManager.init_frontend_unsafe(version_string)
 
 
-@pytest.fixture
-def mock_os_functions():
+def test_failed_download_cleanup(tmp_path, mock_provider):
     with (
-        patch("app.frontend_management.os.makedirs") as mock_makedirs,
-        patch("app.frontend_management.shutil.rmtree") as mock_rmtree,
+        patch.object(FrontendManager, "CUSTOM_FRONTENDS_ROOT", str(tmp_path)),
+        patch("app.frontend_management.download_release_asset_zip", side_effect=Exception("Download failed")) as download,
     ):
-        yield mock_makedirs, mock_rmtree
+        with pytest.raises(Exception, match="Download failed"):
+            FrontendManager.init_frontend_unsafe("test-owner/test-repo@1.0.0", mock_provider)
 
-
-@pytest.fixture
-def mock_download():
-    with patch("app.frontend_management.download_release_asset_zip") as mock:
-        mock.side_effect = Exception("Download failed")  # Simulate download failure
-        yield mock
-
-
-def test_failed_download_cleanup(mock_os_functions, mock_download, mock_provider):
-    # Arrange
-    mock_makedirs, mock_rmtree = mock_os_functions
-    version_string = "test-owner/test-repo@1.0.0"
-
-    # Act & Assert
-    with pytest.raises(Exception, match="Download failed"):
-        FrontendManager.init_frontend_unsafe(version_string, mock_provider)
-
-    # Assert
-    mock_makedirs.assert_called_once()
-    mock_download.assert_called_once()
-    mock_rmtree.assert_called_once_with(mock_download.call_args.kwargs["destination_path"])
+    download.assert_called_once()
+    assert list((tmp_path / "test-owner_test-repo").iterdir()) == []
 
 
 @pytest.mark.parametrize("partial", [False, True])
@@ -175,7 +160,7 @@ def test_interrupted_frontend_download_cleanup(tmp_path, mock_provider, partial)
     def interrupted_download(release, destination_path):
         """Interrupt before or after writing a partial frontend asset."""
         if partial:
-            (cached / "asset.js").write_text("partial")
+            (Path(destination_path) / "asset.js").write_text("partial")
         raise interruption
 
     with (
@@ -187,6 +172,7 @@ def test_interrupted_frontend_download_cleanup(tmp_path, mock_provider, partial)
 
     assert error.value is interruption
     assert not cached.exists()
+    assert list(cached.parent.iterdir()) == []
 
 
 @pytest.mark.parametrize("version", ["1.0.0", "v1.0.0", "latest", "prerelease"])
@@ -217,22 +203,131 @@ def test_failed_frontend_extraction_is_retried(tmp_path, mock_provider, version)
     assert frontend_path == str(tmp_path / "test-owner_test-repo" / "1.0.0")
 
 
-def test_frontend_cleanup_does_not_remove_existing_directory(tmp_path, mock_provider):
+def test_frontend_is_published_after_extraction(tmp_path, mock_provider):
     cached = tmp_path / "test-owner_test-repo" / "1.0.0"
+    staging_paths = []
 
-    def create_existing_directory(*args, **kwargs):
-        cached.mkdir(parents=True)
-        (cached / "index.html").write_text("existing frontend")
-        raise FileExistsError
+    def download_frontend(release, destination_path):
+        """Write frontend assets while checking that the cache is still hidden."""
+        staging = Path(destination_path)
+        staging_paths.append(staging)
+        assert staging.is_dir()
+        assert staging.parent == cached.parent
+        assert not cached.exists()
+        (staging / "asset.js").write_text("frontend asset")
+        assert not cached.exists()
+        (staging / "index.html").write_text("complete frontend")
 
     with (
         patch.object(FrontendManager, "CUSTOM_FRONTENDS_ROOT", str(tmp_path)),
-        patch("app.frontend_management.os.makedirs", side_effect=create_existing_directory),
+        patch("app.frontend_management.download_release_asset_zip", side_effect=download_frontend),
     ):
-        with pytest.raises(FileExistsError):
-            FrontendManager.init_frontend_unsafe("test-owner/test-repo@1.0.0", mock_provider)
+        assert FrontendManager.init_frontend_unsafe("test-owner/test-repo@1.0.0", mock_provider) == str(cached)
+
+    assert (cached / "index.html").read_text() == "complete frontend"
+    assert (cached / "asset.js").read_text() == "frontend asset"
+    assert all(not path.exists() for path in staging_paths)
+    assert list(cached.parent.iterdir()) == [cached]
+
+
+@pytest.mark.parametrize("failure", [None, RuntimeError("Download failed"), KeyboardInterrupt("Download interrupted")])
+def test_concurrent_frontend_initializers(tmp_path, mock_provider, failure):
+    cached = tmp_path / "test-owner_test-repo" / "1.0.0"
+    extracting = Event()
+    finish_extraction = Event()
+
+    def download_frontend(release, destination_path):
+        """Pause the first extraction until another initializer has published."""
+        staging = Path(destination_path)
+        if not extracting.is_set():
+            (staging / "asset.js").write_text("first frontend asset")
+            extracting.set()
+            assert finish_extraction.wait(timeout=10)
+            if failure is not None:
+                raise failure
+            (staging / "index.html").write_text("first frontend")
+        else:
+            (staging / "asset.js").write_text("second frontend asset")
+            (staging / "index.html").write_text("second frontend")
+
+    with (
+        patch.object(FrontendManager, "CUSTOM_FRONTENDS_ROOT", str(tmp_path)),
+        patch("app.frontend_management.download_release_asset_zip", side_effect=download_frontend) as download,
+        ThreadPoolExecutor(max_workers=1) as executor,
+    ):
+        first = executor.submit(FrontendManager.init_frontend_unsafe, "test-owner/test-repo@1.0.0", mock_provider)
+        try:
+            assert extracting.wait(timeout=10)
+            assert not cached.exists()
+            assert FrontendManager.init_frontend_unsafe("test-owner/test-repo@1.0.0", mock_provider) == str(cached)
+            assert (cached / "index.html").read_text() == "second frontend"
+        finally:
+            finish_extraction.set()
+        if failure is None:
+            assert first.result(timeout=10) == str(cached)
+        else:
+            with pytest.raises(type(failure)) as error:
+                first.result(timeout=10)
+            assert error.value is failure
+
+    assert download.call_count == 2
+    assert (cached / "index.html").read_text() == "second frontend"
+    assert (cached / "asset.js").read_text() == "second frontend asset"
+    assert list(cached.parent.iterdir()) == [cached]
+
+
+@pytest.mark.parametrize("version", ["1.0.0", "latest"])
+def test_frontend_preserves_completed_cache(tmp_path, mock_provider, version):
+    cached = tmp_path / "test-owner_test-repo" / "1.0.0"
+    cached.mkdir(parents=True)
+    (cached / "index.html").write_text("existing frontend")
+
+    with (
+        patch.object(FrontendManager, "CUSTOM_FRONTENDS_ROOT", str(tmp_path)),
+        patch.object(mock_provider, "get_release", return_value=mock_provider.get_release("1.0.0")),
+        patch("app.frontend_management.download_release_asset_zip") as download,
+    ):
+        assert FrontendManager.init_frontend_unsafe(f"test-owner/test-repo@{version}", mock_provider) == str(cached)
+
+    download.assert_not_called()
+    assert (cached / "index.html").read_text() == "existing frontend"
+    assert list(cached.parent.iterdir()) == [cached]
+
+
+@pytest.mark.parametrize("error_number", [errno.EEXIST, errno.ENOTEMPTY])
+def test_frontend_reuses_concurrently_published_cache(tmp_path, mock_provider, error_number):
+    cached = tmp_path / "test-owner_test-repo" / "1.0.0"
+
+    def publish_other_frontend(source, destination):
+        """Simulate platform-specific rename errors after another publisher wins."""
+        assert destination == str(cached)
+        cached.mkdir()
+        (cached / "index.html").write_text("existing frontend")
+        raise OSError(error_number, "Destination already exists")
+
+    with (
+        patch.object(FrontendManager, "CUSTOM_FRONTENDS_ROOT", str(tmp_path)),
+        patch("app.frontend_management.download_release_asset_zip"),
+        patch("app.frontend_management.os.rename", side_effect=publish_other_frontend),
+    ):
+        assert FrontendManager.init_frontend_unsafe("test-owner/test-repo@1.0.0", mock_provider) == str(cached)
 
     assert (cached / "index.html").read_text() == "existing frontend"
+    assert list(cached.parent.iterdir()) == [cached]
+
+
+@pytest.mark.parametrize("error_number", [errno.EACCES, errno.ENOTEMPTY])
+def test_frontend_publication_error_falls_back(tmp_path, mock_provider, error_number):
+    with (
+        patch.object(FrontendManager, "CUSTOM_FRONTENDS_ROOT", str(tmp_path)),
+        patch.object(FrontEndProvider, "get_release", return_value=mock_provider.get_release("1.0.0")),
+        patch("app.frontend_management.download_release_asset_zip"),
+        patch("app.frontend_management.os.rename", side_effect=OSError(error_number, "Cannot publish frontend")),
+        patch.object(FrontendManager, "default_frontend_path", return_value="/default/path"),
+    ):
+        assert FrontendManager.init_frontend("test-owner/test-repo@1.0.0") == "/default/path"
+
+    assert list((tmp_path / "test-owner_test-repo").iterdir()) == []
 
 
 @pytest.mark.parametrize("version", ["1.0.0", "v1.0.0"])
