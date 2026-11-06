@@ -1,3 +1,13 @@
+# Auto-detect text/binary by default + respect `core.autocrlf` setting for checkout, but still commit as LF.
+* text=auto
+
+# Force UNIX line endings: both commit and checkout:
+*.sh text eol=lf
+*.py text eol=lf
+
+# Force Windows line endings on checkout, commit as LF:
+*.bat text eol=crlf
+
 /web/assets/** linguist-generated
 /web/** linguist-vendored
 comfy_api_nodes/apis/__init__.py linguist-generated
