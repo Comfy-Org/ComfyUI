@@ -7,9 +7,10 @@ from comfy_api.latest import ComfyExtension, io
 from comfy_extras.nodes_audio import VAEEncodeAudio
 
 
-# Selector value meaning "no standalone VAE": keeps a restored workflow that has no saved
-# `vae_name` on the checkpoint path, instead of silently taking the first vae file.
-NO_VAE = "None"
+# Selector value meaning "nothing selected". Both model inputs are optional, and a restored
+# workflow that saved neither must still validate: a plain `null` is rejected by combo validation
+# before execute runs. "None" cannot be a model filename because listings are filtered by extension.
+NO_SELECTION = "None"
 
 
 def _ltxv_audio_vae_path(ckpt_name: str | None, vae_name: str | None) -> str:
@@ -18,9 +19,9 @@ def _ltxv_audio_vae_path(ckpt_name: str | None, vae_name: str | None) -> str:
     A standalone VAE from `models/vae` wins when one is selected; otherwise the checkpoint is used,
     so existing workflows keep loading exactly what they loaded before this node offered VAEs.
     """
-    if vae_name and vae_name != NO_VAE:
+    if vae_name and vae_name != NO_SELECTION:
         return folder_paths.get_full_path_or_raise("vae", vae_name)
-    if ckpt_name:
+    if ckpt_name and ckpt_name != NO_SELECTION:
         return folder_paths.get_full_path_or_raise("checkpoints", ckpt_name)
     raise ValueError("Select an audio VAE checkpoint or a VAE from models/vae.")
 
@@ -35,15 +36,16 @@ class LTXVAudioVAELoader(io.ComfyNode):
             inputs=[
                 io.Combo.Input(
                     "ckpt_name",
-                    options=folder_paths.get_filename_list("checkpoints"),
+                    options=[NO_SELECTION, *folder_paths.get_filename_list("checkpoints")],
                     optional=True,
-                    tooltip="Audio VAE checkpoint to load. Optional when a standalone VAE is selected.",
+                    default=NO_SELECTION,
+                    tooltip="Audio VAE checkpoint to load. Leave unset when a standalone VAE is selected.",
                 ),
                 io.Combo.Input(
                     "vae_name",
-                    options=[NO_VAE, *folder_paths.get_filename_list("vae")],
+                    options=[NO_SELECTION, *folder_paths.get_filename_list("vae")],
                     optional=True,
-                    default=NO_VAE,
+                    default=NO_SELECTION,
                     tooltip="Standalone VAE from models/vae, used instead of the checkpoint when selected.",
                 ),
             ],
