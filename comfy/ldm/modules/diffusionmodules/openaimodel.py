@@ -370,6 +370,8 @@ def apply_control(h, control, name):
         ctrl = control[name].pop()
         if ctrl is not None:
             try:
+                if ctrl.shape[2] != h.shape[2] or ctrl.shape[3] != h.shape[3]:
+                    ctrl = F.interpolate(ctrl.float(), size=(h.shape[2], h.shape[3]), mode="bicubic", align_corners=False).to(h.dtype)
                 h += ctrl
             except:
                 logging.warning("warning control could not be applied {} {}".format(h.shape, ctrl.shape))
