@@ -137,22 +137,38 @@ class FrameBuffer:
     """Decoded frames written straight into one tensor sized up front from the expected frame count. Collecting a
     list of frames and stacking it holds every frame twice at the end; this holds them once when the count is
     right. Frames past the count wait in a list and are copied in at the end, so a short guess peaks at about
-    twice the frames, as stacking did. The first allocation is also capped at what free memory can hold, so a file
-    whose metadata overstates its length cannot ask for more than the machine has."""
+    twice the frames, as stacking did. When the expected count would not fit in free memory (a truncated file whose
+    header still claims its full length, say), or the allocation fails, it collects a list and stacks it, as
+    before this buffer existed."""
 
     def __init__(self, expected: int):
         self.expected = max(1, expected)
         self.data: torch.Tensor | None = None
         self.overflow: list[torch.Tensor] = []
+        self.listed: list[torch.Tensor] | None = None  # the list-and-stack fallback
         self.count = 0
 
+    def _start(self, frame: torch.Tensor) -> None:
+        frame_bytes = max(1, frame.numel() * frame.element_size())
+        if self.expected * frame_bytes > psutil.virtual_memory().available:
+            self.listed = []
+            return
+        try:
+            self.data = torch.empty((self.expected, *frame.shape), dtype=frame.dtype)
+        except RuntimeError:  # the allocator refused it
+            self.listed = []
+
     def append(self, frame: torch.Tensor) -> None:
-        if self.data is None:
-            frame_bytes = max(1, frame.numel() * frame.element_size())
-            room = max(1, int(psutil.virtual_memory().available * 0.9) // frame_bytes)
-            self.data = torch.empty((min(self.expected, room), *frame.shape), dtype=frame.dtype)
-        if self.count < self.data.shape[0]:
-            self.data[self.count] = frame
+        if self.data is None and self.listed is None:
+            self._start(frame)
+        if self.listed is not None:
+            self.listed.append(frame)
+        elif self.count < self.data.shape[0]:
+            row = self.data[self.count]
+            try:  # numpy copies without waking torch's thread pool for every frame
+                np.copyto(row.numpy(), frame.numpy())
+            except (TypeError, RuntimeError):  # a dtype numpy lacks (bfloat16)
+                row.copy_(frame)
         else:
             self.overflow.append(frame)
         self.count += 1
@@ -162,6 +178,9 @@ class FrameBuffer:
 
     def tensor(self) -> torch.Tensor:
         """The frames as one [N, ...] tensor; copied only if the guess was short or well over the count."""
+        if self.listed is not None:
+            frames, self.listed = self.listed, None
+            return torch.stack(frames)
         assert self.data is not None
         if self.overflow:
             data, self.data = self.data, None
