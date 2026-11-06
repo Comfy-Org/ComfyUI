@@ -70,7 +70,7 @@ class SkipLayerGuidanceDiT(io.ComfyNode):
             model_sampling.percent_to_sigma(start_percent)
 
             sigma_ = sigma[0].item()
-            if scale > 0 and sigma_ >= sigma_end and sigma_ <= sigma_start:
+            if scale > 0 and sigma_ > sigma_end and sigma_ <= sigma_start:
                 (slg,) = comfy.samplers.calc_cond_batch(model, [cond], x, sigma, model_options)
                 cfg_result = cfg_result + (cond_pred - slg) * scale
                 if rescaling_scale != 0:
@@ -146,7 +146,7 @@ class SkipLayerGuidanceDiTSimple(io.ComfyNode):
 
             cond, uncond = conds
             sigma_ = sigma[0].item()
-            if sigma_ >= sigma_end and sigma_ <= sigma_start and uncond is not None:
+            if sigma_ > sigma_end and sigma_ <= sigma_start and uncond is not None:
                 cond_out, _ = comfy.samplers.calc_cond_batch(model, [cond, None], x, sigma, model_options)
                 _, uncond_out = comfy.samplers.calc_cond_batch(model, [None, uncond], x, sigma, slg_model_options)
                 out = [cond_out, uncond_out]

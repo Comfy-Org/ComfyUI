@@ -70,7 +70,7 @@ class SparseAttnPatch:
         sigmas = transformer_options.get("sigmas")
         if sigmas is not None:
             sigma = float(sigmas[0])
-            if sigma > self.sigma_start or sigma < self.sigma_end:
+            if sigma > self.sigma_start or sigma <= self.sigma_end:
                 return f"sigma {sigma:.3g} outside the start/end window"
         if tokens < self.min_tokens:
             return f"{tokens} tokens < min_tokens {self.min_tokens}"
