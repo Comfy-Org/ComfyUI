@@ -703,6 +703,7 @@ class _AssetSeeder:
         total_enriched = 0
         skipped_existing = 0
         total_paths = 0
+        marked_count = 0
 
         try:
             if not dependencies_available():
@@ -834,6 +835,11 @@ class _AssetSeeder:
                     "enriched": total_enriched,
                     "skipped": skipped_existing,
                     "elapsed": round(elapsed, 3),
+                    "roots": list(roots),
+                    "missing_marked_count": scan_state.missing_marked,
+                    "recovered_count": scan_state.recovered,
+                    # Rows the startup prune marked missing for being outside every registered folder.
+                    "pruned_count": marked_count,
                 },
             )
 
