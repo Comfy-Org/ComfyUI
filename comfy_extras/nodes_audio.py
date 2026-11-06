@@ -1,4 +1,5 @@
 import av
+import math
 import comfy.audio
 import torch
 import comfy.model_management
@@ -792,6 +793,36 @@ class AudioAdjustVolume(IO.ComfyNode):
     adjust_volume = execute  # TODO: remove
 
 
+class AudioNormalizeLoudness(IO.ComfyNode):
+    @classmethod
+    def define_schema(cls):
+        return IO.Schema(
+            node_id="AudioNormalizeLoudness",
+            search_aliases=["lufs", "loudness normalization", "ebu r128", "audio level"],
+            display_name="Normalize Audio Loudness",
+            category="audio",
+            description="Apply a gain so the K-weighted loudness (ITU-R BS.1770 LUFS) of each clip matches the target. All channels are weighted equally; channel layout and LFE are not interpreted. Clips that are too short or too quiet to measure are passed through. The gain is not limited, so peaks can exceed 0 dBFS.",
+            inputs=[
+                IO.Audio.Input("audio"),
+                IO.Float.Input("target_lufs", default=-23.0, min=-70.0, max=0.0, step=0.1, tooltip="Target integrated loudness in LUFS."),
+            ],
+            outputs=[IO.Audio.Output()],
+        )
+
+    @classmethod
+    def execute(cls, audio, target_lufs) -> IO.NodeOutput:
+        waveform = audio["waveform"]
+        sample_rate = audio["sample_rate"]
+
+        normalized = waveform.clone()
+        for i in range(waveform.shape[0]):
+            loudness = comfy.audio.integrated_loudness(waveform[i], sample_rate)
+            if math.isfinite(loudness):
+                normalized[i] = waveform[i] * 10 ** ((target_lufs - loudness) / 20)
+
+        return IO.NodeOutput({"waveform": normalized, "sample_rate": sample_rate})
+
+
 class EmptyAudio(IO.ComfyNode):
     @classmethod
     def define_schema(cls):
@@ -928,6 +959,7 @@ class AudioExtension(ComfyExtension):
             AudioConcat,
             AudioMerge,
             AudioAdjustVolume,
+            AudioNormalizeLoudness,
             EmptyAudio,
             AudioEqualizer3Band,
         ]
