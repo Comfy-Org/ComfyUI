@@ -69,6 +69,23 @@ def test_recent_partial_write_is_left_alone(cache_dir, monkeypatch):
     assert files(cache_dir) == ["prefix-new.safetensors", "spill-x.safetensors.tmp7"]
 
 
+def test_room_is_made_before_writing(cache_dir, monkeypatch):
+    # the folder stays under the budget while a file is written, counting another write still in progress
+    monkeypatch.setattr(cache, "DISK_BUDGET", 1000 * 2**40)
+    old = write("spill-old.safetensors", 4, age=100)
+    partial = os.path.join(cache.CACHE_DIR, "spill-x.safetensors.tmp7")
+    with open(partial, "wb") as f:
+        f.write(b"\0" * 4 * MB)
+    monkeypatch.setattr(cache, "DISK_BUDGET", 9 * MB)
+    seen = []
+    save = cache.safetensors.torch.save_file
+    monkeypatch.setattr(cache.safetensors.torch, "save_file", lambda t, p, m: seen.append(files(cache_dir)) or save(t, p, m))
+    write("spill-new.safetensors", 4)
+    assert seen == [["spill-x.safetensors.tmp7"]]
+    assert not os.path.exists(old)
+    assert files(cache_dir) == ["spill-new.safetensors", "spill-x.safetensors.tmp7"]
+
+
 def test_missing_or_broken_file_is_a_miss(cache_dir):
     assert cache._read(os.path.join(cache.CACHE_DIR, "spill-gone.safetensors")) is None
     broken = cache_dir / "prefix-broken.safetensors"

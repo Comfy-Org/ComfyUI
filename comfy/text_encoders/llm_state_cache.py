@@ -231,16 +231,18 @@ def _file_tensors(entry_tensors, checkpoints):
 
 def _write(path, tensors, meta):
     os.makedirs(os.path.dirname(path), exist_ok=True)
+    _trim_disk(reserve=sum(t.numel() * t.element_size() for t in tensors.values()))
     tmp = path + f".tmp{os.getpid()}"
     safetensors.torch.save_file(tensors, tmp, {"llm_state_cache": json.dumps(meta)})
     os.replace(tmp, path)
-    _trim_disk(path)
+    _trim_disk(keep=path)
 
 
-def _trim_disk(keep):
-    """Delete the least recently used cache files past DISK_BUDGET, never keep; a spilled entry whose file goes is
-    dropped. Partial writes count once they are an hour old."""
-    files = []
+def _trim_disk(keep=None, reserve=0):
+    """Delete the least recently used cache files until the folder, plus reserve bytes about to be written, fits
+    DISK_BUDGET; never keep. A spilled entry whose file goes is dropped. Partial writes count toward the folder, and
+    are deleted once they are an hour old."""
+    files, writing = [], 0
     for name in os.listdir(CACHE_DIR):
         path = os.path.join(CACHE_DIR, name)
         if not name.startswith(("prefix-", "spill-")) or path == keep:
@@ -250,9 +252,10 @@ def _trim_disk(keep):
         except OSError:
             continue
         if not name.endswith(".safetensors") and time.time() - st.st_mtime < 3600:
+            writing += st.st_size
             continue
         files.append((st.st_mtime, st.st_size, path))
-    total = sum(size for _, size, _ in files) + os.path.getsize(keep)
+    total = sum(size for _, size, _ in files) + writing + reserve + (os.path.getsize(keep) if keep else 0)
     for _, size, path in sorted(files):
         if total <= DISK_BUDGET:
             break
