@@ -772,25 +772,31 @@ class VideoFromFile(VideoInput):
     def decode_chunked(self, chunk_frames: int = 16, dtype: torch.dtype = torch.float32) -> Iterator[VideoChunk]:
         check_chunk_args(chunk_frames, dtype)
         with self._open_private() as container:
-            pending: list[np.ndarray] = []
+            buffer = None
+            count = 0
             start_frame = 0
 
             def chunk() -> VideoChunk:
-                pixels = torch.from_numpy(np.stack(pending))
+                pixels = buffer[:count]
                 if not is_uint8:
                     pixels = frames_as(pixels, dtype)
                 elif dtype != torch.uint8:
                     pixels = pixels.float().div_(255.0)
-                images = pixels[..., :-1] if has_alpha else pixels
-                return VideoChunk(images=images, start_frame=start_frame, alpha=pixels[..., -1:] if has_alpha else None)
+                if not has_alpha:
+                    return VideoChunk(images=pixels, start_frame=start_frame)
+                return VideoChunk(images=pixels[..., :-1].contiguous(), start_frame=start_frame,
+                                  alpha=pixels[..., -1:].contiguous())
 
             for img, has_alpha, is_uint8 in self._decode_trim_window(container):
-                pending.append(img)
-                if len(pending) == chunk_frames:
+                if buffer is None:
+                    buffer = torch.empty((chunk_frames, *img.shape), dtype=torch.from_numpy(img).dtype)
+                buffer[count] = torch.from_numpy(img)
+                count += 1
+                if count == chunk_frames:
                     yield chunk()
-                    start_frame += len(pending)
-                    pending = []
-            if pending:
+                    start_frame += count
+                    buffer, count = None, 0
+            if count:
                 yield chunk()
 
     def get_audio(self) -> AudioInput | None:
