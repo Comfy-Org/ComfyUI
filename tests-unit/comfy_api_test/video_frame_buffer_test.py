@@ -125,14 +125,62 @@ def test_stream_seconds_uses_the_container_duration_only_for_a_lone_stream():
     assert _stream_seconds(SimpleNamespace(streams=[video], duration=ten_minutes), video) == 600.0
 
 
-def test_overstated_metadata_cannot_allocate_past_free_memory(monkeypatch):
-    """A file whose metadata claims far more frames than it has: the first allocation stops at free memory, and the
-    frames that do arrive still come out right."""
+def test_overstated_metadata_falls_back_to_a_list(monkeypatch):
+    """A header claiming more frames than free memory holds: the frames are collected in a list and stacked, as
+    before the buffer, instead of one huge allocation."""
     frames = [torch.full((4, 4, 3), float(i)) for i in range(5)]
     frame_bytes = frames[0].numel() * frames[0].element_size()
     monkeypatch.setattr(video_types.psutil, "virtual_memory", lambda: SimpleNamespace(available=frame_bytes * 3))
     buffer = FrameBuffer(10**12)
     for f in frames:
         buffer.append(f)
-    assert buffer.data is not None and buffer.data.shape[0] == 2  # 90% of room for 3 frames
+    assert buffer.data is None and buffer.listed is not None
     assert torch.equal(buffer.tensor(), torch.stack(frames))
+
+
+def test_a_refused_allocation_falls_back_to_a_list(monkeypatch):
+    frames = [torch.full((4, 4, 3), float(i)) for i in range(4)]
+
+    def refuse(*args, **kwargs):
+        raise RuntimeError("DefaultCPUAllocator: can't allocate")
+
+    monkeypatch.setattr(video_types.torch, "empty", refuse)
+    buffer = FrameBuffer(4)
+    for f in frames:
+        buffer.append(f)
+    monkeypatch.undo()
+    assert buffer.data is None and torch.equal(buffer.tensor(), torch.stack(frames))
+
+
+def test_a_truncated_faststart_mp4_decodes_what_it_has(tmp_path, monkeypatch):
+    """A faststart MP4 cut short keeps a header that counts every frame, but only the start decodes. Here free
+    memory is set too small for the header's count, so the frames go through the list; they are the frames PyAV
+    decodes."""
+    full = str(tmp_path / "full.mp4")
+    with av.open(full, "w", options={"movflags": "faststart"}) as out:
+        v = out.add_stream("mpeg4", rate=24)
+        v.width, v.height, v.pix_fmt = 64, 48, "yuv420p"
+        for i in range(300):
+            img = np.full((48, 64, 3), i % 256, dtype=np.uint8)
+            for packet in v.encode(av.VideoFrame.from_ndarray(img, format="rgb24")):
+                out.mux(packet)
+        for packet in v.encode():
+            out.mux(packet)
+    cut = str(tmp_path / "cut.mp4")
+    data = open(full, "rb").read()
+    open(cut, "wb").write(data[: len(data) // 5])
+    with av.open(cut) as c:
+        assert c.streams.video[0].frames == 300  # the header still claims the whole clip
+        want = []
+        try:
+            for f in c.decode(video=0):
+                want.append(f.to_ndarray(format="rgb24"))
+        except av.error.InvalidDataError:
+            pass
+    frame_bytes = 48 * 64 * 3 * 4
+    monkeypatch.setattr(video_types.psutil, "virtual_memory", lambda: SimpleNamespace(available=frame_bytes * 100))
+    images = VideoFromFile(cut).get_components().images
+    assert 0 < images.shape[0] == len(want) < 300
+    got = (images * 255).round().to(torch.int16)
+    # core converts YUV to RGB more carefully than PyAV's rgb24 shortcut, so they agree to within a level or two
+    assert (got - torch.from_numpy(np.stack(want)).to(torch.int16)).abs().max() <= 2
