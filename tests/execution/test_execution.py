@@ -852,6 +852,21 @@ class TestExecution:
         expected = 255 // 4
         assert numpy.array(result_image).min() == expected and numpy.array(result_image).max() == expected, "Image should be grey"
 
+    def test_value_wrapper_preserved_in_history(self, client: ComfyClient, builder: GraphBuilder):
+        g = builder
+        node = g.node("TestArrayValueEcho", values={"__value__": [1, 2, 3]})
+
+        result = client.run(g)
+
+        # The node receives the unwrapped list.
+        assert result.outputs[node.id]["arrays"] == [[1, 2, 3]]
+
+        # The stored prompt keeps the submitted __value__ wrapper (#17294).
+        # history["prompt"] is the queued item (number, prompt_id, prompt, ...).
+        history = client.get_history(result.prompt_id)[result.prompt_id]
+        stored_prompt = history["prompt"][2]
+        assert stored_prompt[node.id]["inputs"]["values"] == {"__value__": [1, 2, 3]}
+
     def test_for_loop(self, client: ComfyClient, builder: GraphBuilder):
         g = builder
         iterations = 4
