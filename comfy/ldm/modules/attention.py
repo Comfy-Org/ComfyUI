@@ -612,6 +612,16 @@ def attention_pytorch(q, k, v, heads, mask=None, attn_precision=None, skip_resha
     sdpa_extra = {k: v for k, v in kwargs.items() if k in sdpa_keys}
 
     if SDP_BATCH_LIMIT >= b:
+        # Avoid expanding the FP32 KV prefix to every query head during decode.
+        if (kwargs.get("enable_gqa", False) and mask is None and kwargs.get("scale") is None
+                and q.is_cuda and q.dtype == k.dtype == v.dtype == torch.float32
+                and q.shape[1] == heads == 32 and k.shape[1] == v.shape[1] == 8
+                and q.shape[2] == 1 and dim_head == k.shape[-1] == v.shape[-1] == 128):
+            lengths = torch.full((b,), k.shape[2], dtype=torch.int32, device=q.device)
+            out = comfy_kitchen.flash_attention_decode_gqa(q, k, v, lengths, causal=False)
+            if skip_output_reshape:
+                out = out.view(b, 1, heads, dim_head).transpose(1, 2)
+            return out
         out = comfy.ops.scaled_dot_product_attention(q, k, v, attn_mask=mask, dropout_p=0.0, is_causal=False, **sdpa_extra)
         if not skip_output_reshape:
             out = (
