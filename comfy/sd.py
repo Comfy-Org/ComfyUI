@@ -17,6 +17,7 @@ import comfy.ldm.cosmos.vae
 import comfy.ldm.wan.vae
 import comfy.ldm.trellis2.vae
 import comfy.ldm.wan.vae2_2
+import comfy.ldm.wan.model_vsr
 import comfy.ldm.hunyuan3d.vae
 import comfy.ldm.seedvr.vae
 import comfy.ldm.mage_flow.vae
@@ -987,6 +988,18 @@ class VAE:
                     self.downscale_index_formula = (4, 8, 8)
                     self.memory_used_encode = lambda shape, dtype: (700 * (max(1, (shape[-3] ** 0.66 * 0.11)) * shape[-2] * shape[-1]) * model_management.dtype_size(dtype))
                     self.memory_used_decode = lambda shape, dtype: (50 * (max(1, (shape[-3] ** 0.65 * 0.26)) * shape[-2] * shape[-1] * 32 * 32) * model_management.dtype_size(dtype))
+            elif "lr_encoder.layers.0.weight" in sd and "condition_encoder.projection.weight" in sd: # RelayVSR Flash
+                self.latent_channels = 48
+                self.latent_dim = 3
+                self.upscale_ratio = (lambda a: max(0, (a - 1) * comfy.ldm.wan.model_vsr.RELAY_KEYFRAME_INTERVAL + 1), 16, 16)
+                # x2 and x4 decoders have the same weight shapes, only the metadata tells them apart
+                config = json.loads((metadata or {}).get("config", "{}"))
+                if "upscale_factor" not in config:
+                    raise ValueError("RelayVSR Flash decoder without its upscale_factor metadata, use the released relayvsr_flash_x2/x4 file.")
+                self.first_stage_model = comfy.ldm.wan.model_vsr.RelayFlash(config["upscale_factor"])
+                self.working_dtypes = [torch.float16, torch.bfloat16, torch.float32]
+                self.process_input = self.process_output = lambda image: image
+                self.memory_used_decode = lambda shape, dtype: (40000 * shape[-2] * shape[-1] * model_management.dtype_size(dtype))
             elif "vocoder.resblocks.0.convs1.0.weight" in sd or "vocoder.vocoder.resblocks.0.convs1.0.weight" in sd: # LTX Audio
                 sd = comfy.utils.state_dict_prefix_replace(sd, {"audio_vae.": "autoencoder."})
                 self.first_stage_model = comfy.ldm.lightricks.vae.audio_vae.AudioVAE(metadata=metadata)
@@ -1366,7 +1379,7 @@ class VAE:
                 preallocated = False
                 if getattr(self.first_stage_model, 'comfy_has_chunked_io', False):
                     with comfy.model_prefetch.pause_malloc_graph():
-                        pixel_samples = torch.empty(self.first_stage_model.decode_output_shape(samples_in.shape), device=self.output_device, dtype=self.vae_output_dtype())
+                        pixel_samples = torch.empty(self.first_stage_model.decode_output_shape(samples_in.shape, **vae_options), device=self.output_device, dtype=self.vae_output_dtype())
                     preallocated = True
 
                 for x in range(0, samples_in.shape[0], batch_number):
