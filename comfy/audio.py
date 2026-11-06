@@ -67,6 +67,8 @@ def resample(waveform, orig_freq, new_freq, lowpass_filter_width=6, rolloff=0.99
 
     shape = waveform.shape
     length = shape[-1]
+    if length == 0:
+        return waveform
     waveform = waveform.reshape(-1, length)
     waveform = F.pad(waveform, (width, width + orig_freq))
     output = F.conv1d(waveform[:, None], kernel, stride=orig_freq)
