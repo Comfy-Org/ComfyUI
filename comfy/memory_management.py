@@ -5,7 +5,7 @@ import torch
 from typing import NamedTuple
 
 import comfy_aimdo.host_buffer
-from comfy.quant_ops import QuantizedTensor
+from comfy.quant_ops import QuantizedTensor, ck
 
 
 class TensorFileSlice(NamedTuple):
@@ -189,6 +189,50 @@ def interpret_gathered_like(tensors, gathered):
             dest_views.append(actuals["data"])
 
     return dest_views
+
+def cat_gathered(tensors, gathered):
+    """Concatenate quantized tensors laid out in order in gathered into one, in place.
+
+    Per-row fields are concatenated; every other field and parameter must match and is
+    shared. The codes are moved down over the earlier tensors' metadata, which is saved
+    first and rewritten after the last codes, so the result is laid out exactly like
+    interpret_gathered_like would lay out one tensor of the summed rows. Returns None
+    when the tensors cannot be concatenated."""
+    inner_tensors, ctx = tensors[0].__tensor_flatten__()
+    rows = [t._params.orig_shape[0] for t in tensors]
+    orig_shape = (sum(rows), *tensors[0]._params.orig_shape[1:])
+    for t in tensors[1:]:
+        other_inner, other_ctx = t.__tensor_flatten__()
+        other_ctx["non_tensor_fields"]["orig_shape"] = (rows[0], *t._params.orig_shape[1:])
+        if (other_inner != inner_tensors or other_ctx["layout_cls"] != ctx["layout_cls"]
+                or other_ctx["non_tensor_fields"] != ctx["non_tensor_fields"]):
+            return None
+    fields = {}
+    for attr in inner_tensors[1:]:
+        values = [getattr(t, attr) for t in tensors]
+        if all(v.ndim > 0 and v.shape[0] == n and v.shape[1:] == values[0].shape[1:] and v.dtype == values[0].dtype for v, n in zip(values, rows)):
+            fields[attr] = torch.cat(values)
+        elif all(torch.equal(v, values[0]) for v in values[1:]):
+            fields[attr] = values[0].clone()
+        else:
+            return None
+
+    offset = 0
+    for t in tensors:
+        qdata = t._qdata
+        if qdata.data_ptr() < gathered.data_ptr() + offset:
+            raise RuntimeError("Tensors must sit in order within gathered")
+        ck.memmove(gathered[offset:offset + qdata.nbytes], qdata.view(torch.uint8).view(-1))
+        offset += qdata.nbytes
+    qdata = tensors[0]._qdata
+    actuals = {"_qdata": gathered[:offset].view(qdata.dtype).view(orig_shape[0], *qdata.shape[1:])}
+    offset = vram_aligned_size(actuals["_qdata"])
+    for attr, value in fields.items():
+        actuals[attr] = gathered[offset:offset + value.nbytes].view(value.dtype).view(value.shape)
+        actuals[attr].copy_(value)
+        offset += vram_aligned_size(value)
+    ctx["non_tensor_fields"]["orig_shape"] = orig_shape
+    return QuantizedTensor.__tensor_unflatten__(actuals, ctx, 0, 0)
 
 aimdo_enabled = False
 
