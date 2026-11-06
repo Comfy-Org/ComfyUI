@@ -16,6 +16,8 @@ EXTRA_LOCALE_FILES = [
     "settings.json",
 ]
 
+FALSE_ENV_VALUES = {"", "0", "false", "no", "off"}
+
 
 def safe_load_json_file(file_path: str) -> dict:
     if not os.path.exists(file_path):
@@ -27,6 +29,27 @@ def safe_load_json_file(file_path: str) -> dict:
     except json.JSONDecodeError:
         logging.error(f"Error loading {file_path}")
         return {}
+
+
+def env_flag(name: str, default: bool) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+
+    return value.strip().lower() not in FALSE_ENV_VALUES
+
+
+def env_csv(name: str) -> set[str]:
+    value = os.getenv(name, "")
+    return {item.strip() for item in value.split(",") if item.strip()}
+
+
+def should_expose_custom_node_example_workflows(module_name: str) -> bool:
+    allowlist = env_csv("COMFY_CUSTOM_NODE_EXAMPLE_WORKFLOWS_ALLOWLIST")
+    if allowlist:
+        return module_name in allowlist
+
+    return env_flag("COMFY_CUSTOM_NODE_EXAMPLE_WORKFLOWS_ENABLED", False)
 
 
 class CustomNodeManager:
@@ -102,8 +125,15 @@ class CustomNodeManager:
             for folder in folder_paths.get_folder_paths("custom_nodes"):
                 for folder_name in example_workflow_folder_names:
                     pattern = os.path.join(folder, f"*/{folder_name}/*.json")
-                    matched_files = glob.glob(pattern)
-                    files.extend(matched_files)
+                    for file_path in sorted(glob.glob(pattern)):
+                        custom_nodes_name = os.path.basename(
+                            os.path.dirname(os.path.dirname(file_path))
+                        )
+                        if not should_expose_custom_node_example_workflows(
+                            custom_nodes_name
+                        ):
+                            continue
+                        files.append(file_path)
 
             workflow_templates_dict = (
                 {}
@@ -120,6 +150,9 @@ class CustomNodeManager:
 
         # Serve workflow templates from custom nodes.
         for module_name, module_dir in loadedModules:
+            if not should_expose_custom_node_example_workflows(module_name):
+                continue
+
             for folder_name in example_workflow_folder_names:
                 workflows_dir = os.path.join(module_dir, folder_name)
 
