@@ -1295,6 +1295,12 @@ def vae_dtype(device=None, allowed_dtypes=[]):
     elif args.fp32_vae:
         return torch.float32
 
+    # On Apple GPUs bf16 VAE decodes measured 5-10x slower than fp16 and further
+    # from fp32 (M1 Max, Torch 2.14). Prefer fp16 when the VAE runs there and lists it.
+    vae_on = device if device is not None else vae_device()
+    if is_device_mps(vae_on) and not FORCE_FP32 and torch.float16 in allowed_dtypes:
+        return torch.float16
+
     for d in allowed_dtypes:
         if d == torch.float16 and should_use_fp16(device):
             return d
