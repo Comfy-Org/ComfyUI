@@ -14,7 +14,7 @@ def write_video(path, codec="libx264", pix_fmt="yuv420p", width=64, height=48, f
                 audio=True, container_format=None, rotation=False):
     """A video whose frames all differ (a moving gradient), with a sine tone when audio."""
     buffer = io.BytesIO()
-    with av.open(buffer, mode="w", format=container_format or path.rsplit(".", 1)[-1]) as out:
+    with av.open(buffer, mode="w", format=container_format or {"mkv": "matroska"}.get(ext := path.rsplit(".", 1)[-1], ext)) as out:
         stream = out.add_stream(codec, rate=fps)
         stream.width, stream.height, stream.pix_fmt = width, height, pix_fmt
         sound = None
@@ -210,3 +210,13 @@ def test_get_audio_skips_decoding_frames(fixture_files, monkeypatch):
     calls.clear()
     assert VideoFromFile(fixture_files["h264"]).get_audio() is not None
     assert calls == []
+
+
+def test_video_from_list_cuts_complete_audio_to_the_frames(fixture_files):
+    """A Concatenate Video soundtrack longer than its parts is cut where the frames end, as get_components cuts it."""
+    long_audio = {"waveform": torch.rand(1, 2, 48000 * 10), "sample_rate": 48000}
+    parts = [VideoFromFile(fixture_files["h264"]), VideoFromFile(fixture_files["h264"], start_time=0.25)]
+    video = VideoFromList(parts, complete_audio=long_audio)
+    expected = video.get_components().audio
+    assert expected["waveform"].shape[-1] < long_audio["waveform"].shape[-1]
+    assert torch.equal(video.get_audio()["waveform"], expected["waveform"])
