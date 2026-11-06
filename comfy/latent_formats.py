@@ -880,6 +880,14 @@ class Wan22(Wan21):
                 0.3971, 1.0600, 0.3943, 0.5537, 0.5444, 0.4089, 0.7468, 0.7744
             ]).view(1, self.latent_channels, 1, 1, 1)
 
+class RelayVSR(Wan22):
+    # the keyframe Wan and the Flash decoder both work on the normalized latent
+    def process_in(self, latent):
+        return latent
+
+    def process_out(self, latent):
+        return latent
+
 class HunyuanImage21(LatentFormat):
     latent_channels = 64
     latent_dimensions = 2
