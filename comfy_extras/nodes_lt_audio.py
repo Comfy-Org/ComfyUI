@@ -26,18 +26,20 @@ def _vae_option(name: str) -> str:
 def _ltxv_audio_vae_names():
     """List selector options: `vae/` models first, then `checkpoints/`.
 
-    A `vae/` file whose name also exists in `checkpoints/` is offered as
-    "<name> (vae)" so both stay selectable, while the plain name keeps
-    resolving to the checkpoint — existing `ckpt_name` values therefore keep
+    Every `vae/` file is offered with the marker in its value, and the marker
+    does not depend on what `checkpoints/` contains: a value therefore means
+    the same file on every installation, so a workflow saved on one machine
+    stays a valid combo value (execution rejects values absent from the
+    options it is given). Checkpoint values are untouched, and a plain name
+    still resolves checkpoints-first, so existing `ckpt_name` values keep
     loading exactly what they loaded before.
     """
     checkpoint_names = folder_paths.get_filename_list("checkpoints")
-    checkpoint_set = set(checkpoint_names)
 
     names = []
     seen = set()
     for name in folder_paths.get_filename_list("vae"):
-        option = _vae_option(name) if name in checkpoint_set else name
+        option = _vae_option(name)
         if option not in seen:
             seen.add(option)
             names.append(option)
@@ -51,16 +53,27 @@ def _ltxv_audio_vae_names():
 def _ltxv_audio_vae_path(name: str) -> str:
     """Resolve a selector value to a model file, raising when it is gone.
 
-    A value carrying the ` (vae)` marker resolves only inside `vae`; plain
-    values keep the historical lookup order (checkpoints, then vae).
+    A value carrying the ` (vae)` marker resolves only inside `vae`, so a
+    missing VAE is reported against the right folder instead of falling
+    through to a checkpoint lookup. Plain values keep the historical lookup
+    order (checkpoints, then vae).
     """
     stem, ext = os.path.splitext(name)
-    if stem.endswith(VAE_SUFFIX):
-        return folder_paths.get_full_path_or_raise("vae", stem[: -len(VAE_SUFFIX)] + ext)
-    if name.endswith(VAE_SUFFIX):
-        # Value saved by an earlier build of this branch, before the suffix moved
-        # in front of the extension.
-        return folder_paths.get_full_path_or_raise("vae", name[: -len(VAE_SUFFIX)])
+    if stem.endswith(VAE_SUFFIX) or name.endswith(VAE_SUFFIX):
+        if stem.endswith(VAE_SUFFIX):
+            base = stem[: -len(VAE_SUFFIX)] + ext
+        else:
+            # Marker trailer from an earlier build of this branch, which put it
+            # after the extension; the extension may be absent from the value.
+            base = name[: -len(VAE_SUFFIX)]
+        found = folder_paths.get_full_path("vae", base)
+        if found is not None:
+            return found
+        wanted = os.path.splitext(base)[0]
+        for candidate in folder_paths.get_filename_list("vae"):
+            if os.path.splitext(candidate)[0] == wanted:
+                return folder_paths.get_full_path_or_raise("vae", candidate)
+        return folder_paths.get_full_path_or_raise("vae", base)
 
     p = folder_paths.get_full_path("checkpoints", name)
     if p is not None:
