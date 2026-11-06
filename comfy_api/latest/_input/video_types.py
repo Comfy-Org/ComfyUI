@@ -62,6 +62,16 @@ class VideoInput(ABC):
                 alpha=frames_as(alpha[start:start + chunk_frames], dtype) if alpha is not None else None,
             )
 
+    def get_backing_file(self) -> Optional[str]:
+        """
+        Return the path of the file this video plays unchanged, or None.
+
+        A path is returned only when the file is the whole video as it plays: no trim, no crop, nothing joined,
+        generated or held in memory. A consumer that reads the file itself can use it; otherwise it reads the
+        frames through decode_chunked and the sound through get_audio.
+        """
+        return None
+
     def get_audio(self) -> Optional[AudioInput]:
         """
         Return the audio get_components() would, or None when the video has none.

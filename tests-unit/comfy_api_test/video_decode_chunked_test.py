@@ -117,7 +117,7 @@ def test_get_audio_matches_get_components(fixture_files, name, variant):
         assert torch.equal(audio["waveform"], expected["waveform"])
 
 
-@pytest.mark.parametrize("name", ["h264", "full-range", "png-alpha", "ffv1-10bit"])
+@pytest.mark.parametrize("name", ["h264", "full-range", "png-alpha", "ffv1-alpha", "ffv1-10bit"])
 def test_decode_chunked_uint8_rounds_the_float_frames(fixture_files, name):
     video = VideoFromFile(fixture_files[name])
     components = video.get_components()
@@ -138,15 +138,18 @@ def test_decode_chunked_from_bytesio_interleaves(fixture_files):
     assert torch.equal(torch.cat([a1.images, a2.images]), video.get_components().images[:10])
 
 
-def test_decode_chunked_holds_one_chunk(fixture_files):
-    """The generator keeps no frames from earlier chunks: dropping a chunk frees it."""
+@pytest.mark.parametrize("name", ["h264", "png-alpha"])
+def test_decode_chunked_holds_one_chunk(fixture_files, name):
+    """The generator keeps nothing of a chunk once it is handed over: dropping the chunk frees its storage."""
+    import gc
     import weakref
-    video = VideoFromFile(fixture_files["h264"])
     refs = []
-    for chunk in video.decode_chunked(chunk_frames=2):
-        refs.append(weakref.ref(chunk.images))
-        del chunk
-        assert sum(r() is not None for r in refs) <= 1
+    for chunk in VideoFromFile(fixture_files[name]).decode_chunked(chunk_frames=2):
+        owner = chunk.images._base if chunk.images._base is not None else chunk.images
+        refs.append(weakref.ref(owner))
+        del chunk, owner
+        gc.collect()
+        assert all(r() is None for r in refs)
 
 
 def test_decode_chunked_rejects_bad_arguments(fixture_files):
@@ -168,6 +171,26 @@ def test_video_from_components_chunks_are_views():
     _, as_uint8, _ = joined(video.decode_chunked(chunk_frames=3, dtype=torch.uint8))
     assert torch.equal(as_uint8, (images * 255).round().clamp(0, 255).to(torch.uint8))
     assert video.get_audio() is None
+    audio = {"waveform": torch.rand(1, 2, 100), "sample_rate": 8000}
+    with_audio = VideoFromComponents(VideoComponents(images=images, frame_rate=Fraction(24), audio=audio))
+    assert with_audio.get_audio() is audio
+
+
+def test_rotated_fixture_decodes_rotated(fixture_files):
+    assert VideoFromFile(fixture_files["rotated"]).get_components().images.shape[1:3] == (64, 48)
+
+
+def test_get_backing_file_only_for_the_whole_file(fixture_files):
+    path = fixture_files["h264"]
+    assert VideoFromFile(path).get_backing_file() == path
+    assert VideoFromFile(path, start_time=0.2).get_backing_file() is None
+    assert VideoFromFile(path, duration=0.5).get_backing_file() is None
+    assert VideoFromFile(path).as_trimmed(0.1, 0.5).get_backing_file() is None
+    assert VideoFromFile(path).as_cropped(0, 0, 16, 16).get_backing_file() is None
+    with open(path, "rb") as f:
+        assert VideoFromFile(io.BytesIO(f.read())).get_backing_file() is None
+    assert VideoFromList([VideoFromFile(path)]).get_backing_file() is None
+    assert VideoFromComponents(VideoComponents(images=torch.rand(2, 4, 4, 3), frame_rate=Fraction(24))).get_backing_file() is None
 
 
 def test_video_from_list_chunks_and_audio_match_get_components(fixture_files):
@@ -176,8 +199,8 @@ def test_video_from_list_chunks_and_audio_match_get_components(fixture_files):
     components = video.get_components()
     chunks, images, _ = joined(video.decode_chunked(chunk_frames=7))
     assert torch.equal(images, components.images)
-    starts = [c.start_frame for c in chunks]
-    assert starts == sorted(starts) and starts[0] == 0
+    assert [c.start_frame for c in chunks] == [0, 7, 14, 20, 27]
+    assert [c.images.shape[0] for c in chunks] == [7, 7, 6, 7, 7]
     assert all(isinstance(c, VideoChunk) for c in chunks)
     audio = video.get_audio()
     assert audio["sample_rate"] == components.audio["sample_rate"]
@@ -220,3 +243,45 @@ def test_video_from_list_cuts_complete_audio_to_the_frames(fixture_files):
     expected = video.get_components().audio
     assert expected["waveform"].shape[-1] < long_audio["waveform"].shape[-1]
     assert torch.equal(video.get_audio()["waveform"], expected["waveform"])
+
+
+def test_video_from_list_audio_cut_matches_a_partial_frame_trim(fixture_files):
+    """A trim that ends between frames keeps the frame it cuts into; the soundtrack is cut after it, as in
+    get_components."""
+    long_audio = {"waveform": torch.rand(1, 2, 48000 * 10), "sample_rate": 48000}
+    video = VideoFromList([VideoFromFile(fixture_files["h264"], start_time=0.0, duration=0.1)], complete_audio=long_audio)
+    expected = video.get_components()
+    assert expected.images.shape[0] == 3
+    assert torch.equal(video.get_audio()["waveform"], expected.audio["waveform"])
+
+
+@pytest.mark.parametrize("name", ["full-range", "ffv1-alpha"])
+def test_video_from_list_audio_count_without_frame_metadata(fixture_files, name):
+    """Matroska parts carry no frame count; the cut still follows the decoded frames."""
+    long_audio = {"waveform": torch.rand(1, 2, 48000 * 10), "sample_rate": 48000}
+    video = VideoFromList([VideoFromFile(fixture_files[name]), VideoFromFile(fixture_files[name], start_time=0.3)],
+                          complete_audio=long_audio)
+    assert torch.equal(video.get_audio()["waveform"], video.get_components().audio["waveform"])
+
+
+def test_video_from_list_keeps_alpha_only_if_every_part_has_it(fixture_files):
+    mixed = VideoFromList([VideoFromFile(fixture_files["png-alpha"]), VideoFromFile(fixture_files["h264"])])
+    assert mixed.get_components().alpha is None
+    assert all(c.alpha is None for c in mixed.decode_chunked(chunk_frames=8))
+    both = VideoFromList([VideoFromFile(fixture_files["png-alpha"]), VideoFromFile(fixture_files["png-alpha"])])
+    _, _, alpha = joined(both.decode_chunked(chunk_frames=8))
+    assert torch.equal(alpha, both.get_components().alpha)
+
+
+def test_video_from_list_compares_decoded_sizes(fixture_files, tmp_path):
+    """A rotated landscape clip joins a portrait clip of the same decoded size, and not a landscape one."""
+    portrait = write_video(str(tmp_path / "portrait.mov"), codec="mpeg4", container_format="mov", width=48, height=64)
+    landscape = write_video(str(tmp_path / "landscape.mov"), codec="mpeg4", container_format="mov")
+    rotated = VideoFromFile(fixture_files["rotated"])
+    ok = VideoFromList([rotated, VideoFromFile(portrait)])
+    assert torch.equal(joined(ok.decode_chunked())[1], ok.get_components().images)
+    bad = VideoFromList([rotated, VideoFromFile(landscape)])
+    with pytest.raises(ValueError, match="incompatible frame dimensions"):
+        bad.get_components()
+    with pytest.raises(ValueError, match="incompatible frame dimensions"):
+        next(bad.decode_chunked())
