@@ -21,6 +21,7 @@ import numpy as np
 import safetensors.torch
 
 import comfy.diffusers_load
+import comfy_extras.image_formats
 import comfy.samplers
 import comfy.sample
 import comfy.sd
@@ -1757,6 +1758,7 @@ class LoadImage:
     CATEGORY = "image"
     ESSENTIALS_CATEGORY = "Basics"
     SEARCH_ALIASES = ["load image", "open image", "import image", "image input", "upload image", "read image", "image loader"]
+    DESCRIPTION = "Loads an image."
 
     RETURN_TYPES = ("IMAGE", "MASK")
     FUNCTION = "load_image"
@@ -1766,6 +1768,13 @@ class LoadImage:
 
         dtype = comfy.model_management.intermediate_dtype()
         device = comfy.model_management.intermediate_device()
+
+        loader = comfy_extras.image_formats.LOADERS.get(os.path.splitext(image_path)[1].lower())
+        if loader is not None:
+            rgb, alpha = loader(image_path)
+            output_image = torch.from_numpy(rgb).unsqueeze(0)
+            output_mask = 1.0 - torch.from_numpy(alpha).unsqueeze(0) if alpha is not None else torch.zeros((1, 64, 64), dtype=torch.float32)
+            return (output_image.to(device=device, dtype=dtype), output_mask.to(device=device, dtype=dtype))
 
         components = InputImpl.VideoFromFile(image_path).get_components()
         if components.images.shape[0] > 0:
