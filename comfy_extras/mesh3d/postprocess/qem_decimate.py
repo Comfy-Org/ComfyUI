@@ -13,6 +13,7 @@ import math
 
 import torch
 from tqdm import tqdm as _tqdm
+import comfy.gemm_chunk
 import comfy.quant_ops
 import comfy.utils as _comfy_utils
 
@@ -191,7 +192,7 @@ def _build_quadrics(
             # degenerate faces get a zero plane
             nn = torch.where((a > 1e-12).unsqueeze(-1), n / a.unsqueeze(-1).clamp_min(1e-12), n.new_zeros(()))
             p = torch.cat([nn, -(nn * v0).sum(dim=-1, keepdim=True)], dim=-1)   # (n, 4)
-            K = torch.einsum("fi,fj->fij", p, p)
+            K = comfy.gemm_chunk.einsum("fi,fj->fij", p, p)
             if cfg.area_weighted_quadrics:
                 K.mul_(a[:, None, None])
             K_flat = K.reshape(-1, 16)
@@ -224,8 +225,8 @@ def _build_quadrics(
         pa = verts[ba]
         pb = verts[bb]
         p_u, p_w, _ = _line_quadric_planes(pa, pb)
-        K_b = (torch.einsum("ei,ej->eij", p_u, p_u)
-               + torch.einsum("ei,ej->eij", p_w, p_w)) * cfg.boundary_weight
+        K_b = (comfy.gemm_chunk.einsum("ei,ej->eij", p_u, p_u)
+               + comfy.gemm_chunk.einsum("ei,ej->eij", p_w, p_w)) * cfg.boundary_weight
         K_b_flat = K_b.reshape(-1, 16)
         Q_flat.scatter_add_(0, ba.unsqueeze(1).expand(-1, 16), K_b_flat)
         Q_flat.scatter_add_(0, bb.unsqueeze(1).expand(-1, 16), K_b_flat)
@@ -325,7 +326,7 @@ def _edge_errors(
             opt = torch.where(wander_bad, midpoint, opt)
 
     v4 = torch.cat([opt, torch.ones((n_edges, 1), device=device, dtype=dtype)], dim=1)
-    err = torch.abs(torch.einsum("ei,eij,ej->e", v4, Qe, v4))
+    err = torch.abs(comfy.gemm_chunk.einsum("ei,eij,ej->e", v4, Qe, v4))
 
     length_ok = el * el > mesh_scale_sq * 1e-10
     error_ok = err < max_err
@@ -741,7 +742,7 @@ def _split_touching_sheets(v, f, max_passes=4):
         fn = torch.nn.functional.normalize(torch.cross(tri[:, 1] - tri[:, 0], tri[:, 2] - tri[:, 0], dim=-1), dim=-1)
         nrm = torch.zeros((size.numel(), 2, 2, 3), dtype=v.dtype, device=dev)
         nrm[g[first2], d[first2], rank[first2]] = fn
-        dot = torch.einsum("gic,gjc->gij", nrm[:, 0], nrm[:, 1])
+        dot = comfy.gemm_chunk.einsum("gic,gjc->gij", nrm[:, 0], nrm[:, 1])
         nf, nb = per_dir[:, 0], per_dir[:, 1]
         swap = ((dot[:, 0, 1] + dot[:, 1, 0]) > (dot[:, 0, 0] + dot[:, 1, 1])).long()
         pick_f = (dot[:, 1, 0] > dot[:, 0, 0]).long()

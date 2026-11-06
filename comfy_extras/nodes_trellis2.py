@@ -38,6 +38,13 @@ def _sparse_vae_decode_memory(point_count, dtype):
     return 2 * 1024 ** 3 + int(point_count) * bytes_per_point
 
 
+def _warn_on_corrupt_decode(stage, tensors):
+    """A decode that went wrong shows up as broken output; say so instead of failing downstream."""
+    corrupt = sum(int((~torch.isfinite(t)).sum()) for t in tensors)
+    if corrupt:
+        logging.warning("Trellis2 %s decode produced %d non-finite values, the result is corrupted.", stage, corrupt)
+
+
 def infer_batched_coord_layout(coords):
     if coords.ndim != 2 or coords.shape[1] != 4:
         raise ValueError(f"Expected Trellis2 coords with shape [N, 4], got {tuple(coords.shape)}")
@@ -183,6 +190,7 @@ class VaeDecodeShapeTrellis(IO.ComfyNode):
                          for v, _ in mesh]
         else:
             vert_list = [v.float().cpu() for v, _ in mesh]
+        _warn_on_corrupt_decode("shape", [v.reshape(-1, 3) for v in vert_list])
         face_list = [f.int().cpu() for _, f in mesh]
         if all(v.shape == vert_list[0].shape for v in vert_list) and all(f.shape == face_list[0].shape for f in face_list):
             mesh = Types.MESH(vertices=torch.stack(vert_list), faces=torch.stack(face_list))
@@ -240,6 +248,7 @@ class VaeDecodeTextureTrellis(IO.ComfyNode):
         # consumers (PaintMesh) slice [:3]
         color_feats = voxel.feats
         voxel_coords = voxel.coords
+        _warn_on_corrupt_decode("texture", [color_feats])
 
         if coord_resolution is not None:
             tex_resolution = int(coord_resolution) * 16
