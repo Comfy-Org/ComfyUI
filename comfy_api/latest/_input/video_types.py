@@ -57,7 +57,7 @@ class VideoInput(ABC):
         components = self.get_components()
         images, alpha = components.images, components.alpha
         if images.shape[-1] == 4:  # RGBA frames, as Create Video accepts: the fourth channel is the alpha
-            images, alpha = images[..., :3], (images[..., 3:] if alpha is None else alpha)
+            images, alpha = images[..., :3].contiguous(), (images[..., 3:].contiguous() if alpha is None else alpha)
         if alpha is not None and alpha.ndim == 3:
             alpha = alpha.unsqueeze(-1)
         for start in range(0, images.shape[0], chunk_frames):
