@@ -1,5 +1,6 @@
 import os
 import tempfile
+from types import SimpleNamespace
 
 import av
 import numpy as np
@@ -7,7 +8,8 @@ import pytest
 import torch
 
 from comfy_api.input_impl.video_types import VideoFromFile
-from comfy_api.latest._input_impl.video_types import FrameBuffer
+from comfy_api.latest._input_impl import video_types
+from comfy_api.latest._input_impl.video_types import FrameBuffer, _stream_seconds, expected_frame_count
 
 
 def test_frame_buffer_grows_when_the_guess_is_short():
@@ -90,7 +92,6 @@ def test_frame_buffer_short_guess_never_holds_more_than_the_frames_twice():
 def test_expected_frame_count_ignores_a_longer_soundtrack(tmp_path):
     """Matroska and WebM video streams carry no frame count or duration; the container's duration is the longest
     stream's, so a soundtrack longer than the video must not size the frame buffer."""
-    from comfy_api.latest._input_impl.video_types import expected_frame_count
     for suffix, video_codec, audio_codec in [(".mkv", "mpeg4", "aac"), (".webm", "libvpx-vp9", "libopus")]:
         path = str(tmp_path / f"long-audio{suffix}")
         with av.open(path, "w") as out:
@@ -119,8 +120,6 @@ def test_expected_frame_count_ignores_a_longer_soundtrack(tmp_path):
 
 
 def test_stream_seconds_uses_the_container_duration_only_for_a_lone_stream():
-    from types import SimpleNamespace
-    from comfy_api.latest._input_impl.video_types import _stream_seconds
     video = SimpleNamespace(duration=None, time_base=None, metadata={})
     ten_minutes = 600 * av.time_base
     assert _stream_seconds(SimpleNamespace(streams=[video, object()], duration=ten_minutes), video) == 0.0
@@ -136,3 +135,16 @@ def test_expected_frame_count_follows_the_trim(tmp_path):
         assert expected_frame_count(container, stream, 0.0, 0.0) == 48
         assert expected_frame_count(container, stream, 0.5, 0.0) == 36
         assert expected_frame_count(container, stream, 0.0, 0.5) == 13
+
+
+def test_overstated_metadata_cannot_allocate_past_free_memory(monkeypatch):
+    """A file whose metadata claims far more frames than it has: the first allocation stops at free memory, and the
+    frames that do arrive still come out right."""
+    frames = [torch.full((4, 4, 3), float(i)) for i in range(5)]
+    frame_bytes = frames[0].numel() * frames[0].element_size()
+    monkeypatch.setattr(video_types.psutil, "virtual_memory", lambda: SimpleNamespace(available=frame_bytes * 3))
+    buffer = FrameBuffer(10**12)
+    for f in frames:
+        buffer.append(f)
+    assert buffer.data is not None and buffer.data.shape[0] == 2  # 90% of room for 3 frames
+    assert torch.equal(buffer.tensor(), torch.stack(frames))
