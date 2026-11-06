@@ -35,9 +35,11 @@ class TextEncodeMageFlowEdit(io.ComfyNode):
             ],
             outputs=[
                 io.Conditioning.Output(display_name="positive"),
-                io.Conditioning.Output(display_name="negative"),
+                io.Conditioning.Output(display_name="negative", tooltip="Only encoded when linked. At cfg 1 leave it unlinked and give the sampler a ConditioningZeroOut of the positive."),
                 io.Latent.Output(display_name="latent"),
             ],
+            hidden=[io.Hidden.dynprompt, io.Hidden.unique_id],
+            skip_unlinked_outputs=True,
         )
 
     @classmethod
@@ -81,11 +83,14 @@ class TextEncodeMageFlowEdit(io.ComfyNode):
 
         # Negative branch keeps the same reference images (VL tokens + ref latents), only the instruction differs.
         positive = clip.encode_from_tokens_scheduled(clip.tokenize(prompt, images=images_vl))
-        negative = clip.encode_from_tokens_scheduled(clip.tokenize(negative_prompt if negative_prompt else " ", images=images_vl))
-
         if len(ref_latents) > 0:
             positive = node_helpers.conditioning_set_values(positive, {"reference_latents": ref_latents}, append=True)
-            negative = node_helpers.conditioning_set_values(negative, {"reference_latents": ref_latents}, append=True)
+
+        negative = None
+        if cls.hidden.dynprompt is None or 1 in cls.hidden.dynprompt.get_linked_outputs(cls.hidden.unique_id):
+            negative = clip.encode_from_tokens_scheduled(clip.tokenize(negative_prompt if negative_prompt else " ", images=images_vl))
+            if len(ref_latents) > 0:
+                negative = node_helpers.conditioning_set_values(negative, {"reference_latents": ref_latents}, append=True)
 
         latent = torch.zeros([batch_size, 128, height // 16, width // 16], device=comfy.model_management.intermediate_device())
         return io.NodeOutput(positive, negative, {"samples": latent})
