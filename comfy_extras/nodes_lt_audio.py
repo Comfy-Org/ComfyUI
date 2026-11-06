@@ -7,16 +7,22 @@ from comfy_api.latest import ComfyExtension, io
 from comfy_extras.nodes_audio import VAEEncodeAudio
 
 
-def _ltxv_audio_vae_path(ckpt_name: str, vae_name: str | None) -> str:
+# Selector value meaning "no standalone VAE": keeps a restored workflow that has no saved
+# `vae_name` on the checkpoint path, instead of silently taking the first vae file.
+NO_VAE = "None"
+
+
+def _ltxv_audio_vae_path(ckpt_name: str | None, vae_name: str | None) -> str:
     """Resolve the selected model file, raising when it is gone.
 
-    A standalone VAE from `models/vae` wins when one is selected; otherwise the
-    checkpoint is used, so existing workflows keep loading exactly what they
-    loaded before this node offered VAEs.
+    A standalone VAE from `models/vae` wins when one is selected; otherwise the checkpoint is used,
+    so existing workflows keep loading exactly what they loaded before this node offered VAEs.
     """
-    if vae_name:
+    if vae_name and vae_name != NO_VAE:
         return folder_paths.get_full_path_or_raise("vae", vae_name)
-    return folder_paths.get_full_path_or_raise("checkpoints", ckpt_name)
+    if ckpt_name:
+        return folder_paths.get_full_path_or_raise("checkpoints", ckpt_name)
+    raise ValueError("Select an audio VAE checkpoint or a VAE from models/vae.")
 
 
 class LTXVAudioVAELoader(io.ComfyNode):
@@ -30,20 +36,22 @@ class LTXVAudioVAELoader(io.ComfyNode):
                 io.Combo.Input(
                     "ckpt_name",
                     options=folder_paths.get_filename_list("checkpoints"),
-                    tooltip="Audio VAE checkpoint to load.",
+                    optional=True,
+                    tooltip="Audio VAE checkpoint to load. Optional when a standalone VAE is selected.",
                 ),
                 io.Combo.Input(
                     "vae_name",
-                    options=folder_paths.get_filename_list("vae"),
+                    options=[NO_VAE, *folder_paths.get_filename_list("vae")],
                     optional=True,
-                    tooltip="Standalone VAE from models/vae. When set, it is used instead of the checkpoint.",
+                    default=NO_VAE,
+                    tooltip="Standalone VAE from models/vae, used instead of the checkpoint when selected.",
                 ),
             ],
             outputs=[io.Vae.Output(display_name="Audio VAE")],
         )
 
     @classmethod
-    def execute(cls, ckpt_name: str, vae_name: str | None = None) -> io.NodeOutput:
+    def execute(cls, ckpt_name: str | None = None, vae_name: str | None = None) -> io.NodeOutput:
         ckpt_path = _ltxv_audio_vae_path(ckpt_name, vae_name)
         sd, metadata = comfy.utils.load_torch_file(ckpt_path, return_metadata=True)
         sd = comfy.utils.state_dict_prefix_replace(sd, {"audio_vae.": "autoencoder.", "vocoder.": "vocoder."}, filter_keys=True)
