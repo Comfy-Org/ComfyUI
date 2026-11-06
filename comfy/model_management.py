@@ -28,6 +28,7 @@ import platform
 import weakref
 import gc
 import os
+import time
 from contextlib import contextmanager, nullcontext
 import comfy.memory_management
 import comfy.system_memory
@@ -634,6 +635,9 @@ except:
 
 current_loaded_models: list[LoadedModel] = []
 
+# Seconds per byte the last load of each model took, so free_memory unloads the models that are cheapest to reload first.
+model_load_cost = weakref.WeakKeyDictionary()
+
 DIRTY_MMAPS = set()
 
 PIN_PRESSURE_HYSTERESIS = 256 * 1024 * 1024
@@ -810,6 +814,10 @@ class LoadedModel:
             return self.model_memory()
 
     def model_load(self, lowvram_model_memory=0, force_patch_weights=False):
+        loaded_size = self.model.loaded_size()
+        if loaded_size < self.model.model_size():
+            synchronize()  # keep previously queued work out of the measured load time
+        start = time.perf_counter()
         self.model.model_patches_to(self.device)
         self.model.model_patches_to(self.model.model_dtype())
 
@@ -820,6 +828,10 @@ class LoadedModel:
         self.model_use_more_vram(use_more_vram, force_patch_weights=force_patch_weights)
 
         real_model = self.model.model
+        loaded_size = self.model.loaded_size() - loaded_size
+        if loaded_size > 0:
+            synchronize()
+            model_load_cost[real_model] = (time.perf_counter() - start) / loaded_size
 
 
         self.real_model = weakref.ref(real_model)
@@ -902,7 +914,7 @@ def free_memory(memory_required, device, keep_loaded=[], for_dynamic=False, pins
         shift_model = current_loaded_models[i]
         if device is None or shift_model.device == device:
             if shift_model not in keep_loaded and not shift_model.is_dead():
-                can_unload.append((-shift_model.model_offloaded_memory(), sys.getrefcount(shift_model.model), shift_model.model_memory(), i))
+                can_unload.append((-shift_model.model_offloaded_memory(), model_load_cost.get(shift_model.model.model, 0.0), sys.getrefcount(shift_model.model), shift_model.model_memory(), i))
                 shift_model.currently_used = False
 
     can_unload_sorted = sorted(can_unload)
