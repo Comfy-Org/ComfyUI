@@ -241,6 +241,9 @@ def _mod_scale_shift(h, shift, scale, segments):
 
 
 def _mod_gate(x, gate, other, segments):
+    if comfy.model_management.in_training:
+        # training must not mutate the stream: backward and the checkpoint recompute read it
+        return torch.cat([torch.addcmul(x[a:b], other[a:b], _mod_row(gate, row, x.dtype)) for a, b, row in segments], dim=0)
     # other is the fresh attn/mlp output: accumulate the gated residual into the stream in place, one fused kernel per segment
     for a, b, row in segments:
         x[a:b].addcmul_(other[a:b], _mod_row(gate, row, x.dtype))
