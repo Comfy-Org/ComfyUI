@@ -196,7 +196,10 @@ class FrameBuffer:
             self.overflow = []
             return result
         if self.count * 10 < self.data.shape[0] * 9:
-            return self.data[: self.count].clone()
+            try:
+                return self.data[: self.count].clone()
+            except RuntimeError:  # no room for the trimmed copy (the guess was far over): keep the view
+                pass
         return self.data[: self.count]
 
 

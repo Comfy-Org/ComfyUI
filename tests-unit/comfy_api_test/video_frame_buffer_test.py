@@ -184,3 +184,20 @@ def test_a_truncated_faststart_mp4_decodes_what_it_has(tmp_path, monkeypatch):
     got = (images * 255).round().to(torch.int16)
     # core converts YUV to RGB more carefully than PyAV's rgb24 shortcut, so they agree to within a level or two
     assert (got - torch.from_numpy(np.stack(want)).to(torch.int16)).abs().max() <= 2
+
+
+def test_a_refused_trim_copy_keeps_the_view(monkeypatch):
+    """A guess far over the count normally ends in a trimmed copy; if memory refuses that copy, the frames come back
+    as a view of the buffer instead of failing."""
+    frames = [torch.full((4, 4, 3), float(i)) for i in range(3)]
+    buffer = FrameBuffer(100)
+    for f in frames:
+        buffer.append(f)
+
+    def refuse(self):
+        raise RuntimeError("DefaultCPUAllocator: can't allocate")
+
+    monkeypatch.setattr(torch.Tensor, "clone", refuse)
+    out = buffer.tensor()
+    monkeypatch.undo()
+    assert torch.equal(out, torch.stack(frames)) and out.shape[0] == 3
