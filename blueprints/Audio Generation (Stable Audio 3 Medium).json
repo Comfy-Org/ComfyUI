@@ -2082,7 +2082,7 @@
           }
         ],
         "extra": {},
-        "category": "Audio/Music generation",
+        "category": "Audio",
         "description": "Generates music, instrument loops, sound effects, and one-shots from text using Stable Audio 3 Medium, with optional Qwen 3.5 category-based prompt expansion (Music, Instrument, SFX, One-shot)."
       }
     ]
