@@ -21,7 +21,7 @@ Have you identified a reproducible problem in ComfyUI? Do you have a feature req
 
 ### Look For an Existing Issue
 
-Before you create a new issue, please do a search in [open issues](https://github.com/comfyanonymous/ComfyUI/issues) to see if the issue or feature request has already been filed.
+Before you create a new issue, please do a search in [open issues](https://github.com/Comfy-Org/ComfyUI/issues) to see if the issue or feature request has already been filed.
 
 If you find your issue already exists, make relevant comments and add your [reaction](https://github.com/blog/2119-add-reactions-to-pull-requests-issues-and-comments). Use a reaction in place of a "+1" comment:
 
@@ -33,7 +33,7 @@ If you cannot find an existing issue that describes your bug or feature, create 
 
 ### Creating Pull Requests
 
-* Please refer to the article on [creating pull requests](https://github.com/comfyanonymous/ComfyUI/wiki/How-to-Contribute-Code) and contributing to this project.
+* Please refer to the article on [creating pull requests](https://github.com/Comfy-Org/ComfyUI/wiki/How-to-Contribute-Code) and contributing to this project.
 
 
 ## Thank You

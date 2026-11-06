@@ -21,7 +21,7 @@ When submitting a report, please include a clear description of *why this is a p
 
 ## What We Do Not Consider a Security Vulnerability
 
-Please report the following through our regular [GitHub issues](https://github.com/comfyanonymous/ComfyUI/issues) instead. Filing them as security reports will likely cause them to be deprioritized or closed.
+Please report the following through our regular [GitHub issues](https://github.com/Comfy-Org/ComfyUI/issues) instead. Filing them as security reports will likely cause them to be deprioritized or closed.
 
 - **Issues requiring `--listen` or any non-default network exposure.** ComfyUI binds to localhost by default. If a remote attacker needs to reach the server for the attack to work, the user has chosen to expose it and is responsible for securing that deployment (firewall, reverse proxy, authentication, etc.). These are bugs, not vulnerabilities.
 - **`torch.load` and related deserialization issues in old PyTorch versions.** These are upstream PyTorch issues. Our distributions ship with — and our documentation recommends — recent PyTorch versions where these are addressed.
@@ -32,7 +32,7 @@ Please report the following through our regular [GitHub issues](https://github.c
 
 ## Reporting
 
-If you believe you have found an issue that falls within the scope above, please report it privately via GitHub's [Report a vulnerability](https://github.com/comfyanonymous/ComfyUI/security/advisories/new) feature rather than opening a public issue.
+If you believe you have found an issue that falls within the scope above, please report it privately via GitHub's [Report a vulnerability](https://github.com/Comfy-Org/ComfyUI/security/advisories/new) feature rather than opening a public issue.
 
 Please include:
 
