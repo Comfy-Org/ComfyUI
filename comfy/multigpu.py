@@ -140,7 +140,7 @@ def create_multigpu_deepclones(model: ModelPatcher, max_gpus: int, gpu_options: 
     # Exclude the primary model's actual device, not the global current device:
     # after SelectModelDevice(gpu:N) the primary may not live on the process's
     # current CUDA device, and excluding the wrong device picks bad extras.
-    all_devices = comfy.model_management.get_all_torch_devices(exclude_current=False)
+    all_devices = comfy.model_management.get_core_torch_devices(exclude_current=False)
     full_extra_devices = [d for d in all_devices if d != model.load_device]
     limit_extra_devices = full_extra_devices[:max_gpus-1]
     extra_devices = limit_extra_devices.copy()
