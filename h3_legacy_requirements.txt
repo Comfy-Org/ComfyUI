@@ -1,0 +1,3 @@
+# 恢复原作 ImpactSwitch 所需的两个硬依赖；只允许新增，不解析浮动依赖。
+piexif==1.1.3 --hash=sha256:3bc435d171720150b81b15d27e05e54b8abbde7b4242cddd81ef160d283108b6
+dill==0.4.1 --hash=sha256:1e1ce33e978ae97fcfcff5638477032b801c46c7c65cf717f95fbc2248f79a9d
