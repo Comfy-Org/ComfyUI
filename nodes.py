@@ -1391,8 +1391,8 @@ class LatentUpscaleBy:
 
     def upscale(self, samples, upscale_method, scale_by):
         s = samples.copy()
-        width = round(samples["samples"].shape[-1] * scale_by)
-        height = round(samples["samples"].shape[-2] * scale_by)
+        width = max(1, round(samples["samples"].shape[-1] * scale_by))
+        height = max(1, round(samples["samples"].shape[-2] * scale_by))
         s["samples"] = comfy.utils.common_upscale(samples["samples"], width, height, upscale_method, "disabled")
         return (s,)
 
@@ -1936,8 +1936,8 @@ class ImageScaleBy:
 
     def upscale(self, image, upscale_method, scale_by):
         samples = image.movedim(-1,1)
-        width = round(samples.shape[3] * scale_by)
-        height = round(samples.shape[2] * scale_by)
+        width = max(1, round(samples.shape[3] * scale_by))
+        height = max(1, round(samples.shape[2] * scale_by))
         s = comfy.utils.common_upscale(samples, width, height, upscale_method, "disabled")
         s = s.movedim(1,-1)
         return (s,)
