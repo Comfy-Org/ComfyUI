@@ -105,25 +105,32 @@ def pin_memory(module, subset="weights", size=None):
         not comfy.model_management.ensure_pin_registerable(registerable_size, evict_active=not fast)):
         return _steal_pin(module, stack, buckets, size, priority, subset)
 
-    offset = hostbuf.size
-    extended = False
-    try:
-        hostbuf.extend(size=size, register=False)
-        extended = True
-        pin = comfy_aimdo.torch.hostbuf_to_tensor(hostbuf)[offset:offset + size]
-        pin.untyped_storage()._comfy_hostbuf = hostbuf
-        if torch.cuda.cudart().cudaHostRegister(pin.data_ptr(), size, 1) != 0:
-            comfy.model_management.discard_cuda_async_error()
-            comfy.model_management.free_registrations(size, evict_active=not fast)
-            if torch.cuda.cudart().cudaHostRegister(pin.data_ptr(), size, 1) != 0:
+    for attempt in range(2):
+        offset = hostbuf.size
+        pin = None
+        registered = False
+        allocation_failed = False
+        try:
+            hostbuf.extend(size=size, register=False)
+            pin = comfy_aimdo.torch.hostbuf_to_tensor(hostbuf)[offset:offset + size]
+            pin.untyped_storage()._comfy_hostbuf = hostbuf
+            registered = torch.cuda.cudart().cudaHostRegister(pin.data_ptr(), size, 1) == 0
+            if not registered:
                 comfy.model_management.discard_cuda_async_error()
-                del pin
-                hostbuf.truncate(offset, do_unregister=False)
-                return _steal_pin(module, stack, buckets, size, priority, subset)
-    except RuntimeError:
-        if extended:
+        except RuntimeError:
+            allocation_failed = True
+
+        if registered:
+            break
+
+        # Eviction can truncate this same host buffer. Discard the uncommitted
+        # view first, then allocate again at the current offset on retry.
+        pin = None
+        if hostbuf.size > offset:
             hostbuf.truncate(offset, do_unregister=False)
-        return _steal_pin(module, stack, buckets, size, priority, subset)
+        if allocation_failed or attempt == 1:
+            return _steal_pin(module, stack, buckets, size, priority, subset)
+        comfy.model_management.free_registrations(size, evict_active=not fast)
 
     module_pin["pin"] = pin
     if pin_state["writable"]:
