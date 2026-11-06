@@ -17,7 +17,6 @@ def check_chunk_args(chunk_frames: int, dtype: torch.dtype) -> None:
 
 
 def frames_as(frames: torch.Tensor, dtype: torch.dtype) -> torch.Tensor:
-    """Frames in 0..1 as float32, or as uint8 rounded from them. A tensor already in that dtype is returned as is."""
     if frames.dtype == dtype:
         return frames
     if dtype == torch.uint8:

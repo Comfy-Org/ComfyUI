@@ -12,7 +12,6 @@ from comfy_api.latest._util.video_types import VideoChunk, VideoComponents
 
 def write_video(path, codec="libx264", pix_fmt="yuv420p", width=64, height=48, frames=20, fps=24,
                 audio=True, container_format=None, rotation=False):
-    """A video whose frames all differ (a moving gradient), with a sine tone when audio."""
     buffer = io.BytesIO()
     with av.open(buffer, mode="w", format=container_format or {"mkv": "matroska"}.get(ext := path.rsplit(".", 1)[-1], ext)) as out:
         stream = out.add_stream(codec, rate=fps)
@@ -57,8 +56,6 @@ def write_video(path, codec="libx264", pix_fmt="yuv420p", width=64, height=48, f
 
 
 FIXTURES = {
-    # name: (filename, write_video kwargs): the decoder's 8-bit RGB, full-range, alpha, 10-bit, odd-width and rotation
-    # paths. Float-plane sources are covered in video_types_test.
     "h264": ("a.mp4", {}),
     "h264-odd-width": ("b.mp4", {"width": 70, "height": 46}),
     "full-range": ("c.mkv", {"codec": "mjpeg", "pix_fmt": "yuvj420p"}),
@@ -122,8 +119,6 @@ def test_get_audio_matches_get_components(fixture_files, name, variant):
                                            ("h264", 1), ("h264-odd-width", 1), ("ffv1-alpha", 1), ("rotated", 1)])
 @pytest.mark.parametrize("variant", ["whole", "cropped"])
 def test_decode_chunked_uint8_is_within_a_level_of_the_float_frames(fixture_files, name, max_diff, variant):
-    """uint8 rounds the float frames, except that 8-bit YUV converts straight to 8-bit RGB: faster, and never more
-    than one level off. Sources that are RGB or full range already, or deeper than 8 bits, match exactly."""
     video = VideoFromFile(fixture_files[name], **VARIANTS[variant])
     components = video.get_components()
     _, images, alpha = joined(video.decode_chunked(chunk_frames=4, dtype=torch.uint8))
@@ -137,7 +132,6 @@ def test_decode_chunked_uint8_is_within_a_level_of_the_float_frames(fixture_file
 
 
 def test_uint8_without_the_accurate_flags_rounds_the_float_frames(fixture_files, monkeypatch):
-    """On a PyAV without swscale's accuracy flags, uint8 falls back to rounding the float frames."""
     from comfy_api.latest._input_impl import video_types
     monkeypatch.setattr(video_types, "ACCURATE_8BIT_FLAGS", None)
     video = VideoFromFile(fixture_files["h264"])
@@ -146,7 +140,6 @@ def test_uint8_without_the_accurate_flags_rounds_the_float_frames(fixture_files,
 
 
 def reference_frames(path, format):
-    """Every frame decoded straight with PyAV, independent of the code under test."""
     with av.open(path) as container:
         return np.stack([f.to_ndarray(format=format) for f in container.decode(video=0)])
 
@@ -166,7 +159,6 @@ def test_get_components_matches_a_direct_pyav_decode(fixture_files, name, format
 
 
 def test_decode_chunked_decodes_as_it_goes(fixture_files, monkeypatch):
-    """The first chunk comes before the rest of the video is decoded."""
     from comfy_api.latest._input_impl import video_types
     decoded = []
     real = video_types._rotation_quadrant
@@ -190,8 +182,6 @@ def test_decode_chunked_from_bytesio_interleaves(fixture_files):
 
 @pytest.mark.parametrize("name", ["h264", "png-alpha"])
 def test_decode_chunked_holds_one_chunk(fixture_files, name):
-    """The generator keeps nothing of a chunk once it is handed over: dropping the chunk frees its storage, and
-    while the consumer holds it the generator holds no second copy."""
     import gc
     import weakref
     refs = []
@@ -209,7 +199,6 @@ def test_decode_chunked_holds_one_chunk(fixture_files, name):
     first = next(chunks)
     held, _ = tracemalloc.get_traced_memory()
     tracemalloc.stop()
-    # numpy allocations are traced, so the chunk the consumer holds counts; anything past it is the generator's
     held -= first.images.numel() * first.images.element_size()
     assert held < 3 * frame_bytes, "the generator holds decoded frames across its yield"
     del first, chunks
@@ -286,7 +275,6 @@ def test_video_from_list_rejects_mixed_frame_rates(fixture_files, tmp_path):
 
 
 def test_get_audio_skips_decoding_frames(fixture_files, monkeypatch):
-    """get_audio never turns a video frame into pixels (each decoded frame's rotation is read on the way)."""
     from comfy_api.latest._input_impl import video_types
     calls = []
     real = video_types._rotation_quadrant
@@ -299,7 +287,6 @@ def test_get_audio_skips_decoding_frames(fixture_files, monkeypatch):
 
 
 def test_video_from_list_cuts_complete_audio_to_the_frames(fixture_files):
-    """A Concatenate Video soundtrack longer than its parts is cut where the frames end, as get_components cuts it."""
     long_audio = {"waveform": torch.rand(1, 2, 48000 * 10), "sample_rate": 48000}
     parts = [VideoFromFile(fixture_files["h264"]), VideoFromFile(fixture_files["h264"], start_time=0.25)]
     video = VideoFromList(parts, complete_audio=long_audio)
@@ -309,8 +296,6 @@ def test_video_from_list_cuts_complete_audio_to_the_frames(fixture_files):
 
 
 def test_video_from_list_audio_cut_matches_a_partial_frame_trim(fixture_files):
-    """A trim that ends between frames keeps the frame it cuts into; the soundtrack is cut after it, as in
-    get_components."""
     long_audio = {"waveform": torch.rand(1, 2, 48000 * 10), "sample_rate": 48000}
     video = VideoFromList([VideoFromFile(fixture_files["h264"], start_time=0.0, duration=0.1)], complete_audio=long_audio)
     expected = video.get_components()
@@ -320,7 +305,6 @@ def test_video_from_list_audio_cut_matches_a_partial_frame_trim(fixture_files):
 
 @pytest.mark.parametrize("name", ["full-range", "ffv1-alpha"])
 def test_video_from_list_audio_count_without_frame_metadata(fixture_files, name):
-    """Matroska parts carry no frame count; the cut still follows the decoded frames."""
     long_audio = {"waveform": torch.rand(1, 2, 48000 * 10), "sample_rate": 48000}
     video = VideoFromList([VideoFromFile(fixture_files[name]), VideoFromFile(fixture_files[name], start_time=0.3)],
                           complete_audio=long_audio)
@@ -337,7 +321,6 @@ def test_video_from_list_keeps_alpha_only_if_every_part_has_it(fixture_files):
 
 
 def test_video_from_list_compares_decoded_sizes(fixture_files, tmp_path):
-    """A rotated landscape clip joins a portrait clip of the same decoded size, and not a landscape one."""
     portrait = write_video(str(tmp_path / "portrait.mov"), codec="mpeg4", container_format="mov", width=48, height=64)
     landscape = write_video(str(tmp_path / "landscape.mov"), codec="mpeg4", container_format="mov")
     rotated = VideoFromFile(fixture_files["rotated"])
@@ -351,7 +334,6 @@ def test_video_from_list_compares_decoded_sizes(fixture_files, tmp_path):
 
 
 class TintedVideo(VideoFromFile):
-    """A custom node's VideoFromFile that changes the frames get_components gives."""
 
     def get_components_internal(self, container):
         components = super().get_components_internal(container)
@@ -361,7 +343,6 @@ class TintedVideo(VideoFromFile):
 
 
 class HalfWidthVideo(VideoFromFile):
-    """A custom node's VideoFromFile whose frames are narrower than the file's."""
 
     def get_components(self):
         components = super().get_components()
@@ -387,7 +368,6 @@ def test_video_from_list_keeps_alpha_of_each_alpha_codec(fixture_files, name):
 
 
 def test_join_with_a_subclass_checks_the_frames_it_gives(fixture_files):
-    """A join whose part changes the frame size is refused as get_components refuses it, not checked on the file."""
     video = VideoFromList([HalfWidthVideo(fixture_files["h264"]), VideoFromFile(fixture_files["h264"])])
     with pytest.raises(ValueError, match="incompatible frame dimensions"):
         video.get_components()
@@ -396,7 +376,6 @@ def test_join_with_a_subclass_checks_the_frames_it_gives(fixture_files):
 
 
 def test_get_components_matches_pyav_on_trim_rotation_and_audio(fixture_files):
-    """Independent of the decoder under test: frames, rotation and sound straight from PyAV."""
     path = fixture_files["h264"]
     with av.open(path) as container:
         stream = container.streams.video[0]
@@ -409,7 +388,7 @@ def test_get_components_matches_pyav_on_trim_rotation_and_audio(fixture_files):
     rotated_path = fixture_files["rotated"]
     with av.open(rotated_path) as container:
         decoded = list(container.decode(video=0))
-        quadrant = int(decoded[0].rotation // 90) % 4  # ComfyUI's convention: np.rot90 by the frame's rotation
+        quadrant = int(decoded[0].rotation // 90) % 4
         expected = np.stack([np.rot90(f.to_ndarray(format="gbrpf32le"), k=quadrant, axes=(0, 1)) for f in decoded])
     assert quadrant
     assert torch.equal(VideoFromFile(rotated_path).get_components().images, torch.from_numpy(expected.copy()))

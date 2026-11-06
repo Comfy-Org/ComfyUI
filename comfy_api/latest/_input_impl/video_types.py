@@ -240,9 +240,7 @@ def expected_frame_count(container: InputContainer, stream, start_time: float, d
 
 
 def _accurate_8bit_flags():
-    """swscale flags that convert YUV to 8-bit RGB through its general scaler, which interpolates chroma and rounds.
-    Without them, 4:2:0 video takes a shortcut that copies each chroma sample over 2x2 pixels, and differs from the
-    float32 frames by up to 150 levels at colour edges; with them, by at most one level."""
+    """Without these, swscale's 4:2:0 shortcut copies chroma over 2x2 pixels: up to 150 levels off float32 at edges."""
     try:
         from av.video.reformatter import Interpolation
         return Interpolation.BILINEAR | Interpolation.ACCURATE_RND | Interpolation.FULL_CHR_H_INT
@@ -657,7 +655,6 @@ class VideoFromFile(VideoInput):
             return count
 
     def _seek_trim_window(self, container: InputContainer, video_stream) -> tuple[int, int]:
-        """Move the container to the active trim window; return its (start, end) in the stream's time base."""
         start_time, duration = self.get_active_trim_window()
         start_pts = int(start_time / video_stream.time_base)
         end_pts = int((start_time + duration) / video_stream.time_base)
@@ -667,11 +664,7 @@ class VideoFromFile(VideoInput):
 
     def _decode_trim_window(self, container: InputContainer, video: bool = True, audio: dict | None = None,
                             eight_bit: bool = False):
-        """Decode the active trim window. With video, yields each frame's pixels, rotation and crop applied: an
-        [H, W, C] array, uint8 or float32 in 0..1, whose fourth channel (when C is 4) is alpha. eight_bit converts
-        8-bit YUV straight to 8-bit RGB (within a level of the float32 frames). With an audio dict, fills it with
-        the window's "frames" ([channels, samples] arrays) and "stream".
-        get_components, decode_chunked and get_audio all decode through this, so their outputs agree."""
+        """Yields [H, W, C] frames (alpha as channel 4); get_components, decode_chunked and get_audio share it."""
         video_stream = self._get_first_video_stream(container)
         video_stream.thread_type = "AUTO"
         start_time, duration = self.get_active_trim_window()
@@ -822,11 +815,11 @@ class VideoFromFile(VideoInput):
         if len(audio_frames) == 0:
             return None
         _, duration = self.get_active_trim_window()
-        audio_data = np.concatenate(audio_frames, axis=1)  # shape: (channels, total_samples)
+        audio_data = np.concatenate(audio_frames, axis=1)
         if duration:
             audio_data = audio_data[..., :int(duration * audio_stream.sample_rate)]
 
-        audio_tensor = torch.from_numpy(audio_data).unsqueeze(0)  # shape: (1, channels, total_samples)
+        audio_tensor = torch.from_numpy(audio_data).unsqueeze(0)
         return AudioInput({
             "waveform": audio_tensor,
             "sample_rate": int(audio_stream.sample_rate) if audio_stream.sample_rate else 1,
@@ -867,8 +860,7 @@ class VideoFromFile(VideoInput):
         raise ValueError(f"No video stream found in file '{self.__file}'")
 
     def _decodes_as_base(self) -> bool:
-        """False for a subclass that changes what get_components returns: the new methods then derive from
-        get_components, as for any VideoInput, instead of decoding the file themselves."""
+        """A subclass overriding get_components gets the base defaults, so its changes reach the new methods too."""
         cls = type(self)
         return (cls.get_components is VideoFromFile.get_components
                 and cls.get_components_internal is VideoFromFile.get_components_internal)
@@ -880,13 +872,11 @@ class VideoFromFile(VideoInput):
         return None
 
     def _decoded_dimensions(self) -> tuple[int, int]:
-        """(width, height) of the frames decoding gives: after rotation, and after the crop."""
         if self.__crop is not None:
             return self.get_dimensions()
         return self._get_display_dimensions()
 
     def _has_alpha(self) -> bool:
-        """Whether decoding gives alpha, read from the stream's pixel format as the decoder reads each frame's."""
         with self._open_private() as container:
             video_format = self._get_first_video_stream(container).codec_context.format
             return video_format is not None and (
@@ -894,8 +884,7 @@ class VideoFromFile(VideoInput):
             )
 
     def _count_frames(self) -> int:
-        """How many frames decoding the trim window gives, counted from the video packets' timestamps without
-        decoding them. A damaged packet the decoder drops still counts."""
+        """Counted from packet timestamps without decoding: a damaged packet the decoder drops still counts."""
         with self._open_private() as container:
             video_stream = self._get_first_video_stream(container)
             _, duration = self.get_active_trim_window()
@@ -1617,7 +1606,6 @@ class VideoFromList(VideoInput):
         )
 
     def _join_audio(self, audios: list[AudioInput | None], frame_count: int, frame_rate: Fraction) -> AudioInput | None:
-        """The accumulated audio: complete_audio when given, else every part's audio joined, cut to frame_count frames."""
         if self.complete_audio is not None:
             sample_rate = int(self.complete_audio["sample_rate"])
             return AudioInput({
@@ -1671,7 +1659,6 @@ class VideoFromList(VideoInput):
             offset += count
 
     def _decodes_as_base(self) -> bool:
-        """False when this class or one of its parts changes what get_components returns."""
         return (type(self).get_components is VideoFromList.get_components
                 and all(video._decodes_as_base() for video in self.videos))
 
