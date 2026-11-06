@@ -14,6 +14,8 @@ from comfy_api_nodes.util.conversions import (  # noqa: E402
     bytesio_to_image_tensor,
     downscale_image_tensor,
     pad_images_to_common_channels,
+    tensor_to_bytesio,
+    tensor_to_pil,
 )
 
 
@@ -83,6 +85,37 @@ def test_pad_leaves_homogeneous_channels_unchanged():
     images = [torch.rand(1, 4, 4, 3), torch.rand(2, 4, 4, 3)]
     padded = pad_images_to_common_channels(images)
     assert all(p is i for p, i in zip(padded, images))
+
+
+@pytest.mark.parametrize("height,width", [(1, 4), (4, 1), (1, 1)])
+def test_tensor_to_pil_preserves_thin_rgb_image(height, width):
+    image = torch.zeros(height, width, 3)
+    image[..., 0] = 1.0
+
+    result = tensor_to_pil(image)
+
+    assert result.size == (width, height)
+    assert result.mode == "RGB"
+    assert result.getpixel((0, 0)) == (255, 0, 0)
+
+
+def test_tensor_to_bytesio_accepts_single_channel_mask():
+    mask = torch.zeros(1, 4, 4, 1)
+    mask[0, 1, 2, 0] = 1.0
+
+    result = Image.open(tensor_to_bytesio(mask))
+
+    assert result.size == (4, 4)
+    assert result.mode == "L"
+    assert result.getpixel((2, 1)) == 255
+    assert result.getpixel((0, 0)) == 0
+
+
+def test_tensor_to_pil_keeps_two_dimensional_grayscale():
+    result = tensor_to_pil(torch.ones(4, 1), total_pixels=None)
+
+    assert result.size == (1, 4)
+    assert result.mode == "L"
 
 
 DOWNSCALE_CASES = [
