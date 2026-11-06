@@ -1,13 +1,16 @@
 from .wav2vec2 import Wav2Vec2Model
 from .whisper import WhisperLargeV3
+from .parakeet import ParakeetTDT
 from .sheetsage2 import SheetSage2
 from .sheetsage2_abc import events_to_abc
 import comfy.model_management
 import comfy.ops
 import comfy.storage
 import comfy.utils
+import json
 import logging
 import comfy.audio
+import os
 import torch
 
 
@@ -33,6 +36,8 @@ class AudioEncoderModel():
             self.model = WhisperLargeV3(**model_config)
         elif model_type == "sheetsage2":
             self.model = SheetSage2(**model_config)
+        elif model_type == "parakeet_tdt":
+            self.model = ParakeetTDT(**model_config)
         self.model.eval()
         self.patcher = comfy.model_patcher.CoreModelPatcher(self.model, load_device=self.load_device, offload_device=offload_device, fast_disk=fast_disk)
         comfy.model_management.archive_model_dtypes(self.model)
@@ -63,6 +68,32 @@ class SheetSage2AudioEncoder(AudioEncoderModel):
             events = self.model.transcribe(waveform[None].to(self.load_device))
             scores.append(events_to_abc(events, waveform.shape[-1] / self.model_sample_rate, melody_only=melody_only))
         return scores
+
+
+class ParakeetAudioEncoder(AudioEncoderModel):
+    def __init__(self, config, fast_disk=False):
+        super().__init__(config, fast_disk=fast_disk)
+        with open(os.path.join(os.path.dirname(__file__), "parakeet_vocab.json"), encoding="utf-8") as f:
+            self.vocab = json.load(f)
+
+    def transcribe(self, audio, sample_rate):
+        audio = comfy.audio.resample(audio.float().mean(dim=1), sample_rate, self.model_sample_rate)
+        comfy.model_management.load_model_gpu(self.patcher)
+        texts, timestamps = [], []
+        for waveform in audio:
+            words = []
+            for token, frame, duration in self.model.transcribe(waveform[None].to(self.load_device)):
+                piece = self.vocab[token]
+                if piece.startswith("<") and piece.endswith(">"):
+                    continue
+                if piece.startswith("\u2581") or not words:
+                    words.append([piece.lstrip("\u2581"), frame, frame + duration])
+                else:
+                    words[-1][0] += piece
+                    words[-1][2] = frame + duration
+            texts.append(" ".join(word for word, _, _ in words))
+            timestamps.append("\n".join(f"[{start * 0.08:.2f} - {end * 0.08:.2f}] {word}" for word, start, end in words))
+        return texts, timestamps
 
 
 def load_audio_encoder_from_sd(sd, prefix=""):
@@ -100,11 +131,14 @@ def load_audio_encoder_from_sd(sd, prefix=""):
         }
     elif "encoder.feature_extractor.mel_mean" in sd and "decoder.layernorm_embedding.weight" in sd and "layer_weight" in sd:
         config = {"model_type": "sheetsage2", "model_sample_rate": 24000}
+    elif "joint.head.weight" in sd and "encoder.subsampling.linear.weight" in sd:
+        config = {"model_type": "parakeet_tdt"}
     else:
         raise RuntimeError("ERROR: audio encoder not supported.")
 
     fast_disk = comfy.storage.state_dict_fast_disk(sd)
-    audio_encoder = SheetSage2AudioEncoder(config, fast_disk=fast_disk) if config["model_type"] == "sheetsage2" else AudioEncoderModel(config, fast_disk=fast_disk)
+    audio_encoder_class = {"sheetsage2": SheetSage2AudioEncoder, "parakeet_tdt": ParakeetAudioEncoder}.get(config["model_type"], AudioEncoderModel)
+    audio_encoder = audio_encoder_class(config, fast_disk=fast_disk)
     m, u = audio_encoder.load_sd(sd)
     if len(m) > 0:
         logging.warning("missing audio encoder: {}".format(m))
