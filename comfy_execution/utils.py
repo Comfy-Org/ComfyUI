@@ -15,6 +15,10 @@ class ExecutionContext(NamedTuple):
 
 current_executing_context: contextvars.ContextVar[Optional[ExecutionContext]] = contextvars.ContextVar("current_executing_context", default=None)
 
+# Set for the whole execution of a prompt, including the async tasks it spawns. Several prompts can
+# be in flight at once, so per-prompt state (caches, progress) is looked up through this.
+current_prompt_id: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar("current_prompt_id", default=None)
+
 def get_executing_context() -> Optional[ExecutionContext]:
     return current_executing_context.get(None)
 
