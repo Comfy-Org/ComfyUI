@@ -259,6 +259,10 @@ import asyncio
 import threading
 import gc
 
+_prompt_worker_shutdown = threading.Event()
+_prompt_worker_thread = None
+_prompt_executor = None
+
 if 'torch' in sys.modules:
     logging.warning("WARNING: Potential Error in code: Torch already imported, torch should never be imported before this point.")
 
@@ -335,6 +339,7 @@ def cuda_malloc_warning():
 
 
 def prompt_worker(q, server_instance, asset_manager):
+    global _prompt_executor
     current_time: float = 0.0
     cache_ram = 0
     cache_ram_inactive = 0
@@ -355,16 +360,20 @@ def prompt_worker(q, server_instance, asset_manager):
         cache_type = execution.CacheType.NONE
 
     e = execution.PromptExecutor(server_instance, cache_type=cache_type, cache_args={ "lru" : args.cache_lru, "ram" : cache_ram, "ram_inactive" : cache_ram_inactive }, asset_manager=asset_manager )
+    _prompt_executor = e
+    maintenance_interval = e.execution_backend_maintenance_interval()
     last_gc_collect = 0
     need_gc = False
     gc_collect_interval = 10.0
     background_scan_paused = False
 
-    while True:
-        try:
+    try:
+        while not _prompt_worker_shutdown.is_set():
             timeout = 1000.0
             if need_gc:
                 timeout = max(gc_collect_interval - (current_time - last_gc_collect), 0.0)
+            if maintenance_interval is not None:
+                timeout = min(timeout, maintenance_interval)
 
             queue_item = q.get(timeout=timeout)
             if queue_item is not None:
@@ -381,7 +390,12 @@ def prompt_worker(q, server_instance, asset_manager):
 
                 asset_manager.pause_background_scan()
                 background_scan_paused = True
-                e.execute(item[2], prompt_id, extra_data, item[4])
+                try:
+                    e.execute(item[2], prompt_id, extra_data, item[4])
+                except asyncio.CancelledError:
+                    if _prompt_worker_shutdown.is_set():
+                        break
+                    raise
 
                 need_gc = True
 
@@ -413,6 +427,8 @@ def prompt_worker(q, server_instance, asset_manager):
                 if job_hint is not None:
                     logging.info(job_hint)
 
+            e.maintain_execution_backend()
+
             flags = q.get_flags()
             free_memory = flags.get("free_memory", False)
 
@@ -438,15 +454,14 @@ def prompt_worker(q, server_instance, asset_manager):
                     asset_manager.queue_output_scan()
                     asset_manager.resume_background_scan()
                     background_scan_paused = False
-        # BaseException is deliberate. This runs on the worker thread, so Ctrl-C lands in
-        # the main thread instead, and resume only flips the seeder's pause state.
-        except BaseException:
-            if background_scan_paused:
-                try:
-                    asset_manager.resume_background_scan()
-                except Exception:
-                    logging.exception("Failed to resume background asset scanning after prompt worker failure")
-            raise
+    finally:
+        if background_scan_paused:
+            try:
+                asset_manager.resume_background_scan()
+            except Exception:
+                logging.exception("Failed to resume background asset scanning after prompt worker failure")
+        _prompt_executor = None
+        e.close()
 
 
 async def run(server_instance, address='', port=8188, verbose=True, call_on_start=None):
@@ -607,9 +622,21 @@ def start_comfyui(asyncio_loop=None):
     if args.enable_manager and not args.disable_manager_ui:
         comfyui_manager.start()
 
+    from comfy_api.latest import sdk
+    sdk.providers
+    from comfy_api.latest._sdk import (
+        load_overlay,
+        should_load_legacy_custom_nodes,
+    )
+    secure_custom_nodes = load_overlay()
+
     hook_breaker_ac10a0.save_functions()
     asyncio_loop.run_until_complete(nodes.init_extra_nodes(
-        init_custom_nodes=(not args.disable_all_custom_nodes) or len(args.whitelist_custom_nodes) > 0,
+        init_custom_nodes=should_load_legacy_custom_nodes(
+            secure_mode=secure_custom_nodes,
+            disabled=args.disable_all_custom_nodes,
+            has_whitelist=len(args.whitelist_custom_nodes) > 0,
+        ),
         init_api_nodes=not args.disable_partner_nodes
     ))
     disabled_nodes = governance.load_disabled_nodes(args.disabled_nodes_config) if args.disabled_nodes_config else set()
@@ -627,7 +654,14 @@ def start_comfyui(asyncio_loop=None):
     prompt_server.add_routes()
     hijack_progress(prompt_server)
 
-    threading.Thread(target=prompt_worker, daemon=True, args=(prompt_server.prompt_queue, prompt_server, asset_manager)).start()
+    global _prompt_worker_thread
+    _prompt_worker_shutdown.clear()
+    _prompt_worker_thread = threading.Thread(
+        target=prompt_worker,
+        daemon=True,
+        args=(prompt_server.prompt_queue, prompt_server, asset_manager),
+    )
+    _prompt_worker_thread.start()
 
     if args.quick_test_for_ci:
         exit(0)
@@ -684,6 +718,10 @@ if __name__ == "__main__":
             "dynamic vram enabled and using native ComfyUI model formats instead. "
             "ComfyUI native formats like fp8, int8 and w4a8 will be faster even if they are larger than your memory."
         )
+    def stop_on_sigterm(_signum, _frame):
+        raise KeyboardInterrupt
+
+    signal.signal(signal.SIGTERM, stop_on_sigterm)
     event_loop, prompt_server, start_all_func = start_comfyui()
     try:
         x = start_all_func()
@@ -694,5 +732,13 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         logging.info("\nStopped server")
     finally:
+        _prompt_worker_shutdown.set()
+        if _prompt_executor is not None:
+            _prompt_executor.request_shutdown()
+        prompt_server.prompt_queue.set_flag("shutdown", True)
+        if _prompt_worker_thread is not None:
+            _prompt_worker_thread.join(timeout=5)
+            if _prompt_worker_thread.is_alive():
+                logging.error("Prompt worker did not stop within five seconds")
         app.agent_host.stop()
         prompt_server.asset_manager.shutdown()

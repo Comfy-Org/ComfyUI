@@ -13,6 +13,7 @@ from abc import ABC, abstractmethod
 import nodes
 
 from comfy_execution.graph_utils import is_link
+from comfy_execution.upstream_variants import cache_identity, assert_node_current
 
 NODE_CLASS_CONTAINS_UNIQUE_ID: Dict[str, bool] = {}
 
@@ -112,9 +113,13 @@ class CacheKeySetInputSignature(CacheKeySet):
             # This node doesn't exist -- we can't cache it.
             return [float("NaN")]
         node = dynprompt.get_node(node_id)
+        assert_node_current(dynprompt,node_id)
         class_type = node["class_type"]
         class_def = nodes.NODE_CLASS_MAPPINGS[class_type]
         signature = [class_type, await self.is_changed_cache.get(node_id)]
+        variant_identity = cache_identity(node)
+        if variant_identity is not None:
+            signature.append(("native-upstream-variant",variant_identity,float('nan')))
         if self.include_node_id_in_input() or (hasattr(class_def, "NOT_IDEMPOTENT") and class_def.NOT_IDEMPOTENT) or include_unique_id_in_input(class_type):
             signature.append(node_id)
         inputs = node["inputs"]
@@ -203,6 +208,7 @@ class BasicCache:
     def get_local(self, node_id):
         if not self.initialized:
             return None
+        assert_node_current(self.dynprompt,node_id)
         cache_key = self.cache_key_set.get_data_key(node_id)
         if cache_key in self.cache:
             return self.cache[cache_key]
@@ -210,11 +216,13 @@ class BasicCache:
 
     def set_local(self, node_id, value):
         assert self.initialized
+        assert_node_current(self.dynprompt,node_id,self)
         cache_key = self.cache_key_set.get_data_key(node_id)
         self.cache[cache_key] = value
 
     async def _set_immediate(self, node_id, value):
         assert self.initialized
+        assert_node_current(self.dynprompt,node_id,self)
         cache_key = self.cache_key_set.get_data_key(node_id)
         self.cache[cache_key] = value
 
@@ -223,6 +231,7 @@ class BasicCache:
     async def _get_immediate(self, node_id):
         if not self.initialized:
             return None
+        assert_node_current(self.dynprompt,node_id)
         cache_key = self.cache_key_set.get_data_key(node_id)
 
         if cache_key in self.cache:
@@ -234,6 +243,10 @@ class BasicCache:
             return external_result
 
         return None
+
+    def remove(self,node_id):
+        if self.initialized:
+            self.cache.pop(self.cache_key_set.get_data_key(node_id),None)
 
     async def _notify_providers_store(self, node_id, cache_key, value):
         from comfy_execution.cache_provider import (
@@ -408,7 +421,15 @@ class HierarchicalCache(BasicCache):
         assert cache is not None
         return await cache._ensure_subcache(node_id, children_ids)
 
+    def remove(self,node_id):
+        cache = self._get_cache_for(node_id)
+        if cache is not None:
+            BasicCache.remove(cache,node_id)
+
 class NullCache:
+
+    def remove(self,node_id):
+        pass
 
     async def set_prompt(self, dynprompt, node_ids, is_changed_cache):
         pass
@@ -446,6 +467,16 @@ class LRUCache(BasicCache):
         self.used_generation = {}
         self.children = {}
 
+    def remove(self,node_id):
+        if not self.initialized:
+            return
+        cache_key = self.cache_key_set.get_data_key(node_id)
+        super().remove(node_id)
+        self.used_generation.pop(cache_key,None)
+        self.children.pop(cache_key,None)
+        for children in self.children.values():
+            children[:] = [key for key in children if key != cache_key]
+
     async def set_prompt(self, dynprompt, node_ids, is_changed_cache):
         await super().set_prompt(dynprompt, node_ids, is_changed_cache)
         self.generation += 1
@@ -468,6 +499,7 @@ class LRUCache(BasicCache):
         return await self._get_immediate(node_id)
 
     def _mark_used(self, node_id):
+        assert_node_current(self.dynprompt,node_id,self)
         cache_key = self.cache_key_set.get_data_key(node_id)
         if cache_key is not None:
             self.used_generation[cache_key] = self.generation
@@ -528,6 +560,12 @@ class RAMPressureCache(LRUCache):
         self.active_evictions = False
         self.full_evictions = False
 
+    def remove(self,node_id):
+        if not self.initialized:
+            return
+        self.timestamps.pop(self.cache_key_set.get_data_key(node_id),None)
+        super().remove(node_id)
+
     async def set_prompt(self, dynprompt, node_ids, is_changed_cache):
         self.active_evictions = False
         self.full_evictions = False
@@ -537,14 +575,17 @@ class RAMPressureCache(LRUCache):
         self._clean_subcaches()
 
     async def set(self, node_id, value):
+        assert_node_current(self.dynprompt,node_id,self)
         self.timestamps[self.cache_key_set.get_data_key(node_id)] = time.time()
         await super().set(node_id, value)
 
     async def get(self, node_id):
+        assert_node_current(self.dynprompt,node_id,self)
         self.timestamps[self.cache_key_set.get_data_key(node_id)] = time.time()
         return await super().get(node_id)
 
     def set_local(self, node_id, value):
+        assert_node_current(self.dynprompt,node_id,self)
         self.timestamps[self.cache_key_set.get_data_key(node_id)] = time.time()
         super().set_local(node_id, value)
 
