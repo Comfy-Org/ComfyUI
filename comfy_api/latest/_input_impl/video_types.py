@@ -3,8 +3,9 @@ from av.container import InputContainer
 from av.subtitles.stream import SubtitleStream
 from av.video.reformatter import ColorPrimaries, ColorRange, ColorTrc
 from fractions import Fraction
-from typing import Optional
+from typing import Iterator, Optional
 from .._input import AudioInput, VideoInput
+from .._input.video_types import check_chunk_args, frames_as
 import av
 import io
 import itertools
@@ -13,7 +14,7 @@ import numpy as np
 import math
 import os
 import torch
-from .._util import VideoContainer, VideoCodec, VideoComponents, normalize_crop_rect
+from .._util import VideoContainer, VideoCodec, VideoComponents, VideoChunk, normalize_crop_rect
 import comfy.utils
 import logging
 
@@ -564,15 +565,16 @@ class VideoFromFile(VideoInput):
         with av.open(self.__file, mode='r') as container:
             return container.format.name
 
-    def get_components_internal(self, container: InputContainer) -> VideoComponents:
+    def _decode_trim_window(self, container: InputContainer, video: bool = True, audio: dict | None = None):
+        """Decode the active trim window. With video, yields (pixels, has_alpha, is_uint8) for each frame, rotation and
+        crop applied: an [H, W, C] array whose last channel is alpha when has_alpha, uint8 when is_uint8, else float32
+        in 0..1. With an audio dict, fills it with the window's "frames" ([channels, samples] arrays) and "stream".
+        get_components, decode_chunked and get_audio all decode through this, so their outputs agree."""
         video_stream = self._get_first_video_stream(container)
         video_stream.thread_type = "AUTO"
         start_time, duration = self.get_active_trim_window()
 
-        # Get video frames
-        frames = FrameBuffer(expected_frame_count(container, video_stream, start_time, duration))
         audio_frames = []
-        alphas = None
         start_pts = int(start_time / video_stream.time_base)
         end_pts = int((start_time + duration) / video_stream.time_base)
 
@@ -580,25 +582,30 @@ class VideoFromFile(VideoInput):
             container.seek(start_pts, stream=video_stream)
 
         image_format = 'gbrpf32le'
-        process_image_format = lambda a: a
+        is_uint8 = False
+        alpha_channel = False
         align_graph = None
-        audio = None
 
-        streams = [video_stream]
+        streams = [video_stream] if video else []
         has_first_audio_frame = False
         checked_alpha = False
         crop_rect = None
         crop_resolved = False
 
         # Default to False so we decode until EOF if duration is 0
-        video_done = False
+        video_done = not video
         audio_done = True
 
-        audio_stream = last_decodable_audio_stream(container)
+        audio_stream = last_decodable_audio_stream(container) if audio is not None else None
         if audio_stream is not None:
             streams += [audio_stream]
             resampler = av.audio.resampler.AudioResampler(format='fltp')
             audio_done = False
+        if audio is not None:
+            audio["frames"] = audio_frames
+            audio["stream"] = audio_stream
+        if not streams:
+            return
 
         for packet in container.demux(*streams):
             if video_done and audio_done:
@@ -616,27 +623,24 @@ class VideoFromFile(VideoInput):
                             break
 
                         if not checked_alpha:
-                            alpha_channel = False
                             for comp in frame.format.components:
                                 if comp.is_alpha or frame.format.name == "pal8":
-                                    alphas = FrameBuffer(frames.expected)
                                     alpha_channel = True
                                     break
                             if frame.format.name in ("yuvj420p", "yuvj422p", "yuvj444p", "rgb24", "rgba", "pal8"):
-                                process_image_format = lambda a: a.float().div_(255.0)
+                                is_uint8 = True
                                 if alpha_channel:
                                     image_format = 'rgba'
                                 else:
                                     image_format = 'rgb24'
                             else:
-                                process_image_format = lambda a: a
+                                is_uint8 = False
                                 if alpha_channel:
                                     image_format = 'gbrapf32le'
                                 else:
                                     image_format = 'gbrpf32le'
 
                             checked_alpha = True
-
                         if frame.format.name in (
                             'gbrpf16le', 'gbrpf16be', 'gbrapf16le', 'gbrapf16be', 'grayf16le', 'grayf16be',
                             'gbrpf32le', 'gbrpf32be', 'gbrapf32le', 'gbrapf32be', 'grayf32le', 'grayf32be',
@@ -684,11 +688,7 @@ class VideoFromFile(VideoInput):
                             if crop_rect is not None:
                                 cx, cy, cw, ch = crop_rect
                                 img = np.ascontiguousarray(img[cy:cy + ch, cx:cx + cw])
-                        if alphas is None:
-                            frames.append(torch.from_numpy(img))
-                        else:
-                            frames.append(torch.from_numpy(img[..., :-1]))
-                            alphas.append(torch.from_numpy(img[..., -1:]))
+                        yield img, alpha_channel, is_uint8
                 except av.error.InvalidDataError:
                     logging.info("pyav decode error")
 
@@ -713,6 +713,38 @@ class VideoFromFile(VideoInput):
                     else:
                         audio_frames.append(frame.to_ndarray())
 
+    def _audio_input(self, audio: dict) -> AudioInput | None:
+        audio_frames, audio_stream = audio["frames"], audio["stream"]
+        if len(audio_frames) == 0:
+            return None
+        _, duration = self.get_active_trim_window()
+        audio_data = np.concatenate(audio_frames, axis=1)  # shape: (channels, total_samples)
+        if duration:
+            audio_data = audio_data[..., :int(duration * audio_stream.sample_rate)]
+
+        audio_tensor = torch.from_numpy(audio_data).unsqueeze(0)  # shape: (1, channels, total_samples)
+        return AudioInput({
+            "waveform": audio_tensor,
+            "sample_rate": int(audio_stream.sample_rate) if audio_stream.sample_rate else 1,
+        })
+
+    def get_components_internal(self, container: InputContainer) -> VideoComponents:
+        video_stream = self._get_first_video_stream(container)
+        start_time, duration = self.get_active_trim_window()
+        frames = FrameBuffer(expected_frame_count(container, video_stream, start_time, duration))
+        alphas = None
+        is_uint8 = False
+        audio = {}
+        for img, has_alpha, is_uint8 in self._decode_trim_window(container, audio=audio):
+            if has_alpha:
+                if alphas is None:
+                    alphas = FrameBuffer(frames.expected)
+                frames.append(torch.from_numpy(img[..., :-1]))
+                alphas.append(torch.from_numpy(img[..., -1:]))
+            else:
+                frames.append(torch.from_numpy(img))
+
+        process_image_format = (lambda a: a.float().div_(255.0)) if is_uint8 else (lambda a: a)
         images = process_image_format(frames.tensor()) if len(frames) > 0 else torch.zeros(0, 0, 0, 3)
         del frames
         if alphas is not None:
@@ -721,19 +753,8 @@ class VideoFromFile(VideoInput):
         # Get frame rate
         frame_rate = Fraction(video_stream.average_rate) if video_stream.average_rate else Fraction(1)
 
-        if len(audio_frames) > 0:
-            audio_data = np.concatenate(audio_frames, axis=1)  # shape: (channels, total_samples)
-            if duration:
-                audio_data = audio_data[..., :int(duration * audio_stream.sample_rate)]
-
-            audio_tensor = torch.from_numpy(audio_data).unsqueeze(0)  # shape: (1, channels, total_samples)
-            audio = AudioInput({
-                "waveform": audio_tensor,
-                "sample_rate": int(audio_stream.sample_rate) if audio_stream.sample_rate else 1,
-            })
-
         metadata = container.metadata
-        return VideoComponents(images=images, alpha=alphas, audio=audio, frame_rate=frame_rate, metadata=metadata)
+        return VideoComponents(images=images, alpha=alphas, audio=self._audio_input(audio), frame_rate=frame_rate, metadata=metadata)
 
     def get_components(self) -> VideoComponents:
         if isinstance(self.__file, io.BytesIO):
@@ -741,6 +762,43 @@ class VideoFromFile(VideoInput):
         with av.open(self.__file, mode='r') as container:
             return self.get_components_internal(container)
         raise ValueError(f"No video stream found in file '{self.__file}'")
+
+    def _open_private(self):
+        """Open the video for a pass of its own: a BytesIO source is copied (encoded size), so passes can interleave."""
+        if isinstance(self.__file, io.BytesIO):
+            return av.open(io.BytesIO(self.__file.getvalue()), mode='r')
+        return av.open(self.__file, mode='r')
+
+    def decode_chunked(self, chunk_frames: int = 16, dtype: torch.dtype = torch.float32) -> Iterator[VideoChunk]:
+        check_chunk_args(chunk_frames, dtype)
+        with self._open_private() as container:
+            pending: list[np.ndarray] = []
+            start_frame = 0
+
+            def chunk() -> VideoChunk:
+                pixels = torch.from_numpy(np.stack(pending))
+                if not is_uint8:
+                    pixels = frames_as(pixels, dtype)
+                elif dtype != torch.uint8:
+                    pixels = pixels.float().div_(255.0)
+                images = pixels[..., :-1] if has_alpha else pixels
+                return VideoChunk(images=images, start_frame=start_frame, alpha=pixels[..., -1:] if has_alpha else None)
+
+            for img, has_alpha, is_uint8 in self._decode_trim_window(container):
+                pending.append(img)
+                if len(pending) == chunk_frames:
+                    yield chunk()
+                    start_frame += len(pending)
+                    pending = []
+            if pending:
+                yield chunk()
+
+    def get_audio(self) -> AudioInput | None:
+        with self._open_private() as container:
+            audio = {}
+            for _ in self._decode_trim_window(container, video=False, audio=audio):
+                pass
+            return self._audio_input(audio)
 
     def save_to(
         self,
@@ -1395,31 +1453,7 @@ class VideoFromList(VideoInput):
         except RuntimeError as error:
             raise ValueError("Accumulated videos have incompatible frame dimensions") from error
 
-        if self.complete_audio is not None:
-            sample_rate = int(self.complete_audio["sample_rate"])
-            audio = AudioInput({
-                "waveform": self.complete_audio["waveform"][..., :round(len(images) / frame_rate * sample_rate)],
-                "sample_rate": sample_rate,
-            })
-        elif any(component.audio is not None for component in components):
-            if any(component.audio is None for component in components):
-                raise ValueError("Cannot materialize accumulated videos with missing audio segments")
-            sample_rate = int(components[0].audio["sample_rate"])
-            channels = components[0].audio["waveform"].shape[1]
-            if any(
-                int(component.audio["sample_rate"]) != sample_rate
-                or component.audio["waveform"].shape[1] != channels
-                for component in components[1:]
-            ):
-                raise ValueError("Cannot materialize accumulated videos with incompatible audio")
-            audio = AudioInput({
-                "waveform": torch.cat(
-                    [component.audio["waveform"] for component in components], dim=-1
-                )[..., :round(len(images) / frame_rate * sample_rate)],
-                "sample_rate": sample_rate,
-            })
-        else:
-            audio = None
+        audio = self._join_audio([component.audio for component in components], len(images), frame_rate)
 
         alphas = [component.alpha for component in components]
         alpha = torch.cat(alphas) if all(value is not None for value in alphas) else None
@@ -1430,6 +1464,57 @@ class VideoFromList(VideoInput):
             metadata=components[0].metadata,
             alpha=alpha,
         )
+
+    def _join_audio(self, audios: list[AudioInput | None], frame_count: int, frame_rate: Fraction) -> AudioInput | None:
+        """The accumulated audio: complete_audio when given, else every part's audio joined, cut to frame_count frames."""
+        if self.complete_audio is not None:
+            sample_rate = int(self.complete_audio["sample_rate"])
+            return AudioInput({
+                "waveform": self.complete_audio["waveform"][..., :round(frame_count / frame_rate * sample_rate)],
+                "sample_rate": sample_rate,
+            })
+        if all(audio is None for audio in audios):
+            return None
+        if any(audio is None for audio in audios):
+            raise ValueError("Cannot materialize accumulated videos with missing audio segments")
+        sample_rate = int(audios[0]["sample_rate"])
+        channels = audios[0]["waveform"].shape[1]
+        if any(
+            int(audio["sample_rate"]) != sample_rate or audio["waveform"].shape[1] != channels
+            for audio in audios[1:]
+        ):
+            raise ValueError("Cannot materialize accumulated videos with incompatible audio")
+        return AudioInput({
+            "waveform": torch.cat(
+                [audio["waveform"] for audio in audios], dim=-1
+            )[..., :round(frame_count / frame_rate * sample_rate)],
+            "sample_rate": sample_rate,
+        })
+
+    def _common_frame_rate(self) -> Fraction:
+        frame_rate = self.videos[0].get_frame_rate()
+        if any(video.get_frame_rate() != frame_rate for video in self.videos[1:]):
+            raise ValueError("Cannot materialize accumulated videos with different frame rates")
+        return frame_rate
+
+    def decode_chunked(self, chunk_frames: int = 16, dtype: torch.dtype = torch.float32) -> Iterator[VideoChunk]:
+        """Each part's chunks in turn, so a chunk never spans two parts and may be shorter than chunk_frames."""
+        check_chunk_args(chunk_frames, dtype)
+        self._common_frame_rate()
+        self.get_dimensions()
+        offset = 0
+        for video in self.videos:
+            count = 0
+            for chunk in video.decode_chunked(chunk_frames, dtype):
+                yield VideoChunk(images=chunk.images, start_frame=offset + chunk.start_frame, alpha=chunk.alpha)
+                count = chunk.start_frame + chunk.images.shape[0]
+            offset += count
+
+    def get_audio(self) -> AudioInput | None:
+        """The audio get_components() would give, cut to the parts' frame counts from their metadata."""
+        frame_rate = self._common_frame_rate()
+        audios = [] if self.complete_audio is not None else [video.get_audio() for video in self.videos]
+        return self._join_audio(audios, self.get_frame_count(), frame_rate)
 
     def get_dimensions(self):
         dimensions = [video.get_dimensions() for video in self.videos]

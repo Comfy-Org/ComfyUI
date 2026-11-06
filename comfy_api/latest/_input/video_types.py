@@ -1,10 +1,30 @@
 from __future__ import annotations
 from abc import ABC, abstractmethod
 from fractions import Fraction
-from typing import Optional, Union, IO
+from typing import Iterator, Optional, Union, IO
 import io
 import av
-from .._util import VideoContainer, VideoCodec, VideoComponents, normalize_crop_rect
+import torch
+from .._util import VideoContainer, VideoCodec, VideoComponents, VideoChunk, normalize_crop_rect
+from .basic_types import AudioInput
+
+
+def check_chunk_args(chunk_frames: int, dtype: torch.dtype) -> None:
+    if chunk_frames < 1:
+        raise ValueError(f"chunk_frames must be at least 1, got {chunk_frames}")
+    if dtype not in (torch.float32, torch.uint8):
+        raise ValueError(f"decode_chunked supports torch.float32 and torch.uint8, got {dtype}")
+
+
+def frames_as(frames: torch.Tensor, dtype: torch.dtype) -> torch.Tensor:
+    """Frames in 0..1 as float32, or as uint8 rounded from them. A tensor already in that dtype is returned as is."""
+    if frames.dtype == dtype:
+        return frames
+    if dtype == torch.uint8:
+        return frames.float().mul(255.0).round_().clamp_(0, 255).to(torch.uint8)
+    if frames.dtype == torch.uint8:
+        return frames.float().div_(255.0)
+    return frames.to(dtype)
 
 class VideoInput(ABC):
     """
@@ -20,6 +40,35 @@ class VideoInput(ABC):
             VideoComponents containing images, audio, and frame rate
         """
         pass
+
+    def decode_chunked(self, chunk_frames: int = 16, dtype: torch.dtype = torch.float32) -> Iterator[VideoChunk]:
+        """
+        Yield the video's frames in order, up to chunk_frames at a time, so a consumer can process a long
+        video without holding every frame in memory.
+
+        Frames are the ones get_components() returns, with the same trim, crop and rotation. dtype is
+        torch.float32 (the same values as get_components) or torch.uint8 (those values rounded to 0..255).
+        Each call starts a new pass over the video.
+
+        Default implementation slices get_components(); subclasses that can decode incrementally override it.
+        """
+        check_chunk_args(chunk_frames, dtype)
+        components = self.get_components()
+        for start in range(0, components.images.shape[0], chunk_frames):
+            alpha = components.alpha
+            yield VideoChunk(
+                images=frames_as(components.images[start:start + chunk_frames], dtype),
+                start_frame=start,
+                alpha=frames_as(alpha[start:start + chunk_frames], dtype) if alpha is not None else None,
+            )
+
+    def get_audio(self) -> Optional[AudioInput]:
+        """
+        Return the audio get_components() would, or None when the video has none.
+
+        Default implementation uses get_components(); subclasses override it to skip decoding frames.
+        """
+        return self.get_components().audio
 
     @abstractmethod
     def save_to(
