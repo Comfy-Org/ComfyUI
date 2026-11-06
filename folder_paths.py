@@ -349,6 +349,16 @@ def is_within_directory(directory: str, target: str) -> bool:
         return False
 
 
+def is_lexically_within_directory(directory: str, target: str) -> bool:
+    """True if `target` stays inside `directory` without resolving symlinks."""
+    try:
+        directory = os.path.abspath(directory)
+        target = os.path.abspath(target)
+        return os.path.commonpath((directory, target)) == directory
+    except ValueError:
+        return False
+
+
 def get_annotated_filepath(name: str, default_dir: str | None=None) -> str:
     name, base_dir = annotated_filepath(name)
 
@@ -558,7 +568,7 @@ def get_save_image_path(filename_prefix: str, output_dir: str, image_width=0, im
 
     full_output_folder = os.path.join(output_dir, subfolder)
 
-    if not is_within_directory(output_dir, full_output_folder):
+    if not is_lexically_within_directory(output_dir, full_output_folder):
         err = "**** ERROR: Saving image outside the output folder is not allowed." + \
               "\n full_output_folder: " + os.path.abspath(full_output_folder) + \
               "\n         output_dir: " + output_dir
