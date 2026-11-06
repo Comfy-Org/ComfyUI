@@ -201,3 +201,40 @@ def test_a_refused_trim_copy_keeps_the_view(monkeypatch):
     out = buffer.tensor()
     monkeypatch.undo()
     assert torch.equal(out, torch.stack(frames)) and out.shape[0] == 3
+
+
+def test_a_big_claim_is_recounted_from_the_file(monkeypatch):
+    """When the header's count would take over a quarter of free memory, the buffer asks for a count from the file
+    and sizes itself from that; a modest claim never pays for the extra read."""
+    frames = [torch.full((4, 4, 3), float(i)) for i in range(5)]
+    frame_bytes = frames[0].numel() * frames[0].element_size()
+    monkeypatch.setattr(video_types, "_available_memory", lambda: frame_bytes * 100)
+    asked = []
+    big = FrameBuffer(10**6, recount=lambda: asked.append(1) or 5)
+    for f in frames:
+        big.append(f)
+    assert asked == [1] and big.data is not None and big.data.shape[0] == 6
+    assert torch.equal(big.tensor(), torch.stack(frames))
+    small = FrameBuffer(5, recount=lambda: asked.append(2) or 5)
+    small.append(frames[0])
+    assert asked == [1]
+
+
+def test_packets_count_what_a_truncated_file_holds(tmp_path):
+    full = str(tmp_path / "full.mp4")
+    with av.open(full, "w", options={"movflags": "faststart"}) as out:
+        v = out.add_stream("mpeg4", rate=24)
+        v.width, v.height, v.pix_fmt = 64, 48, "yuv420p"
+        for i in range(300):
+            img = np.full((48, 64, 3), i % 256, dtype=np.uint8)
+            for packet in v.encode(av.VideoFrame.from_ndarray(img, format="rgb24")):
+                out.mux(packet)
+        for packet in v.encode():
+            out.mux(packet)
+    data = (tmp_path / "full.mp4").read_bytes()
+    (tmp_path / "cut.mp4").write_bytes(data[: len(data) // 5])
+    cut = str(tmp_path / "cut.mp4")
+    decoded = VideoFromFile(cut).get_components().images.shape[0]
+    counted = VideoFromFile(cut)._count_packets(0.0, 0.0)
+    assert decoded < 300 and abs(counted - decoded) <= 1
+    assert VideoFromFile(full)._count_packets(0.0, 0.0) == 300
