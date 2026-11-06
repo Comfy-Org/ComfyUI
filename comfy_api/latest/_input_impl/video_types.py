@@ -682,9 +682,9 @@ class VideoFromFile(VideoInput):
                                     image_format = 'rgba'
                                 else:
                                     image_format = 'rgb24'
-                            elif eight_bit and ACCURATE_8BIT_FLAGS is not None and not frame.format.name.startswith(
-                                ("gbrpf", "gbrapf", "grayf")
-                            ) and all(c.bits <= 8 for c in frame.format.components):
+                            elif eight_bit and ACCURATE_8BIT_FLAGS is not None and all(
+                                c.bits <= 8 for c in frame.format.components
+                            ):
                                 accurate_8bit = ACCURATE_8BIT_FLAGS
                                 image_format = 'rgba' if alpha_channel else 'rgb24'
                             else:
@@ -825,8 +825,8 @@ class VideoFromFile(VideoInput):
                 and cls.get_components_internal is VideoFromFile.get_components_internal)
 
     def get_backing_file(self) -> str | None:
-        if (isinstance(self.__file, str) and not self.__start_time and not self.__duration and self.__crop is None
-                and self._decodes_as_base()):
+        if (isinstance(self.__file, str) and self.__crop is None and self._decodes_as_base()
+                and self.get_active_trim_window() == (0.0, 0.0)):
             return self.__file
         return None
 
@@ -1604,7 +1604,7 @@ class VideoFromList(VideoInput):
         get_components, the parts must agree on frame rate and decoded size, and alpha is kept only if every part
         has it."""
         check_chunk_args(chunk_frames, dtype)
-        if not all(video._decodes_as_base() for video in self.videos):
+        if not self._decodes_as_base():
             yield from super().decode_chunked(chunk_frames, dtype)
             return
         self._common_frame_rate()
@@ -1621,8 +1621,15 @@ class VideoFromList(VideoInput):
                 count = chunk.start_frame + chunk.images.shape[0]
             offset += count
 
+    def _decodes_as_base(self) -> bool:
+        """False when this class or one of its parts changes what get_components returns."""
+        return (type(self).get_components is VideoFromList.get_components
+                and all(video._decodes_as_base() for video in self.videos))
+
     def get_audio(self) -> AudioInput | None:
-        if not all(video._decodes_as_base() for video in self.videos):
+        """The audio get_components() would give, cut where the parts' frames end. The frames are counted from
+        packet timestamps, so a damaged packet the decoder drops still counts."""
+        if not self._decodes_as_base():
             return super().get_audio()
         frame_rate = self._common_frame_rate()
         audios = [] if self.complete_audio is not None else [video.get_audio() for video in self.videos]

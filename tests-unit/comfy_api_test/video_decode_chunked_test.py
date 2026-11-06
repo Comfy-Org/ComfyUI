@@ -391,3 +391,81 @@ def test_join_with_a_subclass_checks_the_frames_it_gives(fixture_files):
         video.get_components()
     with pytest.raises(ValueError, match="incompatible frame dimensions"):
         list(video.decode_chunked())
+
+
+def test_get_components_matches_pyav_on_trim_rotation_and_audio(fixture_files):
+    """Independent of the decoder under test: frames, rotation and sound straight from PyAV."""
+    path = fixture_files["h264"]
+    with av.open(path) as container:
+        stream = container.streams.video[0]
+        frames = [(f.pts, f.to_ndarray(format="gbrpf32le")) for f in container.decode(stream)]
+        tb = stream.time_base
+    start, end = int(0.3 / tb), int(0.7 / tb)
+    trimmed = np.stack([img for pts, img in frames if start <= pts < end])
+    assert torch.equal(VideoFromFile(path, start_time=0.3, duration=0.4).get_components().images, torch.from_numpy(trimmed))
+
+    rotated_path = fixture_files["rotated"]
+    with av.open(rotated_path) as container:
+        decoded = list(container.decode(video=0))
+        quadrant = int(decoded[0].rotation // 90) % 4  # ComfyUI's convention: np.rot90 by the frame's rotation
+        expected = np.stack([np.rot90(f.to_ndarray(format="gbrpf32le"), k=quadrant, axes=(0, 1)) for f in decoded])
+    assert quadrant
+    assert torch.equal(VideoFromFile(rotated_path).get_components().images, torch.from_numpy(expected.copy()))
+
+    with av.open(path) as container:
+        resampler = av.audio.resampler.AudioResampler(format="fltp")
+        samples = np.concatenate([r.to_ndarray() for f in container.decode(audio=0) for r in resampler.resample(f)], axis=1)
+    audio = VideoFromFile(path).get_audio()
+    assert torch.equal(audio["waveform"][0], torch.from_numpy(samples))
+
+
+def test_get_components_internal_reads_the_container_it_is_given(fixture_files):
+    with av.open(fixture_files["full-range"]) as container:
+        from_other = VideoFromFile(fixture_files["h264"]).get_components_internal(container)
+    assert torch.equal(from_other.images, VideoFromFile(fixture_files["full-range"]).get_components().images)
+
+
+def test_get_components_sizes_its_buffer_from_the_metadata(fixture_files, monkeypatch):
+    from comfy_api.latest._input_impl import video_types
+    sizes = []
+    real = video_types.FrameBuffer.__init__
+    monkeypatch.setattr(video_types.FrameBuffer, "__init__", lambda self, expected: sizes.append(expected) or real(self, expected))
+    assert VideoFromFile(fixture_files["h264"]).get_components().images.shape[0] == 20
+    assert sizes[0] == 20
+
+
+@pytest.mark.parametrize("name", ["h264-odd-width", "ffv1-alpha"])
+def test_uint8_chunks_repeat_exactly(fixture_files, name):
+    video = VideoFromFile(fixture_files[name])
+    first = joined(video.decode_chunked(chunk_frames=3, dtype=torch.uint8))[1]
+    assert all(torch.equal(first, joined(video.decode_chunked(chunk_frames=3, dtype=torch.uint8))[1]) for _ in range(4))
+
+
+class DimmedList(VideoFromList):
+    def get_components(self):
+        components = super().get_components()
+        components.images = components.images * 0.25
+        return components
+
+
+def test_join_subclass_overriding_components_gets_matching_chunks(fixture_files):
+    video = DimmedList([VideoFromFile(fixture_files["h264"]), VideoFromFile(fixture_files["h264"])])
+    assert torch.equal(joined(video.decode_chunked(chunk_frames=8))[1], video.get_components().images)
+
+
+def test_backing_file_follows_the_effective_trim(fixture_files):
+    class TrimmedBySubclass(VideoFromFile):
+        def get_active_trim_window(self):
+            return 0.25, 0.5
+
+    assert TrimmedBySubclass(fixture_files["h264"]).get_backing_file() is None
+
+
+def test_default_chunks_split_rgba_and_shape_alpha():
+    rgba = torch.rand(5, 4, 6, 4)
+    chunks = list(VideoFromComponents(VideoComponents(images=rgba, frame_rate=Fraction(24))).decode_chunked(chunk_frames=2))
+    assert all(c.images.shape[-1] == 3 and c.alpha.shape[-1] == 1 for c in chunks)
+    assert torch.equal(torch.cat([c.alpha for c in chunks]), rgba[..., 3:])
+    mask = torch.rand(5, 4, 6)
+    flat = VideoFromComponents(VideoComponents(images=torch.rand(5, 4, 6, 3), frame_rate=Fraction(24), alpha=mask))
+    assert torch.equal(torch.cat([c.alpha for c in flat.decode_chunked(chunk_frames=2)]), mask.unsqueeze(-1))

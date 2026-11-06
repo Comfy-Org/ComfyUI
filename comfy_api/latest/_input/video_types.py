@@ -55,10 +55,14 @@ class VideoInput(ABC):
         """
         check_chunk_args(chunk_frames, dtype)
         components = self.get_components()
-        for start in range(0, components.images.shape[0], chunk_frames):
-            alpha = components.alpha
+        images, alpha = components.images, components.alpha
+        if images.shape[-1] == 4:  # RGBA frames, as Create Video accepts: the fourth channel is the alpha
+            images, alpha = images[..., :3], (images[..., 3:] if alpha is None else alpha)
+        if alpha is not None and alpha.ndim == 3:
+            alpha = alpha.unsqueeze(-1)
+        for start in range(0, images.shape[0], chunk_frames):
             yield VideoChunk(
-                images=frames_as(components.images[start:start + chunk_frames], dtype),
+                images=frames_as(images[start:start + chunk_frames], dtype),
                 start_frame=start,
                 alpha=frames_as(alpha[start:start + chunk_frames], dtype) if alpha is not None else None,
             )
