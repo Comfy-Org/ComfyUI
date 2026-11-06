@@ -74,3 +74,53 @@ def test_get_components_trim_window_count():
         video = VideoFromFile(path).as_trimmed(start_time=0.5, duration=0.5)
         images = video.get_components().images
     assert images.shape[0] == 12
+
+
+def test_frame_buffer_short_guess_never_holds_more_than_the_frames_twice():
+    """Frames past the guess wait in a list: at the end the buffer, the overflow and the result coexist once."""
+    frames = [torch.full((2, 3, 3), float(i)) for i in range(10)]
+    buffer = FrameBuffer(4)
+    for frame in frames:
+        buffer.append(frame)
+    assert buffer.data.shape[0] == 4 and len(buffer.overflow) == 6
+    assert torch.equal(buffer.tensor(), torch.stack(frames))
+
+
+def test_expected_frame_count_ignores_a_longer_soundtrack(tmp_path):
+    """Matroska and WebM video streams carry no frame count or duration; the container's duration is the longest
+    stream's, so a soundtrack longer than the video must not size the frame buffer."""
+    from comfy_api.latest._input_impl.video_types import expected_frame_count
+    for suffix, video_codec, audio_codec in [(".mkv", "mpeg4", "aac"), (".webm", "libvpx-vp9", "libopus")]:
+        path = str(tmp_path / f"long-audio{suffix}")
+        with av.open(path, "w") as out:
+            v = out.add_stream(video_codec, rate=24)
+            v.width, v.height, v.pix_fmt = 64, 48, "yuv420p"
+            a = out.add_stream(audio_codec, rate=48000)
+            a.layout = "stereo"
+            for i in range(48):
+                frame = av.VideoFrame.from_ndarray(np.full((48, 64, 3), i * 5, np.uint8), format="rgb24")
+                frame.pts = i
+                for p in v.encode(frame):
+                    out.mux(p)
+            for p in v.encode():
+                out.mux(p)
+            for off in range(0, 48000 * 10, 960):
+                af = av.AudioFrame.from_ndarray(np.zeros((2, 960), np.float32), format="fltp", layout="stereo")
+                af.sample_rate, af.pts = 48000, off
+                for p in a.encode(af):
+                    out.mux(p)
+            for p in a.encode():
+                out.mux(p)
+        with av.open(path) as container:
+            guess = expected_frame_count(container, container.streams.video[0], 0.0, 0.0)
+        assert 40 <= guess <= 60, (suffix, guess)
+        assert VideoFromFile(path).get_components().images.shape[0] == 48
+
+
+def test_stream_seconds_uses_the_container_duration_only_for_a_lone_stream():
+    from types import SimpleNamespace
+    from comfy_api.latest._input_impl.video_types import _stream_seconds
+    video = SimpleNamespace(duration=None, time_base=None, metadata={})
+    ten_minutes = 600 * av.time_base
+    assert _stream_seconds(SimpleNamespace(streams=[video, object()], duration=ten_minutes), video) == 0.0
+    assert _stream_seconds(SimpleNamespace(streams=[video], duration=ten_minutes), video) == 600.0

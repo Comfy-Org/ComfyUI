@@ -132,33 +132,62 @@ def filter_hevc_packet(hevc_filter, packet):
 
 
 class FrameBuffer:
-    """Decoded frames written straight into one tensor, sized up front from the expected frame count and grown if
-    the count was short. Collecting a list of frames and stacking it holds every frame twice at the end."""
+    """Decoded frames written straight into one tensor sized up front from the expected frame count. Collecting a
+    list of frames and stacking it holds every frame twice at the end; this holds them once when the count is
+    right. Frames past the count wait in a list and are copied in at the end, so a short guess peaks at about
+    twice the frames, as stacking did."""
 
     def __init__(self, expected: int):
         self.expected = max(1, expected)
         self.data: torch.Tensor | None = None
+        self.overflow: list[torch.Tensor] = []
         self.count = 0
 
     def append(self, frame: torch.Tensor) -> None:
         if self.data is None:
             self.data = torch.empty((self.expected, *frame.shape), dtype=frame.dtype)
-        elif self.count == self.data.shape[0]:
-            grown = torch.empty((self.count + self.count // 2 + 1, *frame.shape), dtype=frame.dtype)
-            grown[: self.count] = self.data
-            self.data = grown
-        self.data[self.count] = frame
+        if self.count < self.data.shape[0]:
+            self.data[self.count] = frame
+        else:
+            self.overflow.append(frame)
         self.count += 1
 
     def __len__(self) -> int:
         return self.count
 
     def tensor(self) -> torch.Tensor:
-        """The frames as one [N, ...] tensor; copied only if the guess was well over the count."""
+        """The frames as one [N, ...] tensor; copied only if the guess was short or well over the count."""
         assert self.data is not None
+        if self.overflow:
+            data, self.data = self.data, None
+            result = torch.empty((self.count, *data.shape[1:]), dtype=data.dtype)
+            result[: data.shape[0]] = data
+            del data
+            for i, frame in enumerate(self.overflow, start=result.shape[0] - len(self.overflow)):
+                result[i] = frame
+            self.overflow = []
+            return result
         if self.count * 10 < self.data.shape[0] * 9:
             return self.data[: self.count].clone()
         return self.data[: self.count]
+
+
+def _stream_seconds(container: InputContainer, stream) -> float:
+    """The video stream's own length from metadata, or 0 when unknown. The container's duration is the longest
+    stream's, so it is used only when the video is the container's sole stream: a soundtrack longer than the video
+    would otherwise size the frame buffer for the soundtrack."""
+    if stream.duration and stream.time_base:
+        return float(stream.duration * stream.time_base)
+    tag = (stream.metadata or {}).get("DURATION")  # Matroska and WebM keep each stream's length here
+    if tag:
+        try:
+            hours, minutes, seconds = tag.split(":")
+            return int(hours) * 3600 + int(minutes) * 60 + float(seconds)
+        except ValueError:
+            pass
+    if len(container.streams) == 1 and container.duration:
+        return float(container.duration) / av.time_base
+    return 0.0
 
 
 def expected_frame_count(container: InputContainer, stream, start_time: float, duration: float) -> int:
@@ -166,11 +195,7 @@ def expected_frame_count(container: InputContainer, stream, start_time: float, d
     rate = float(stream.average_rate or 0)
     total = int(stream.frames or 0)
     if not total and rate:
-        if stream.duration and stream.time_base:
-            seconds = float(stream.duration * stream.time_base)
-        else:
-            seconds = float(container.duration or 0) / av.time_base
-        total = math.ceil(seconds * rate)
+        total = math.ceil(_stream_seconds(container, stream) * rate)
     if rate and start_time > 0:
         total -= int(start_time * rate)
     if rate and duration > 0:
