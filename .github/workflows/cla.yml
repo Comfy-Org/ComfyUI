@@ -24,8 +24,9 @@ jobs:
         if: >
           (github.event_name == 'pull_request_target' && github.event.action != 'closed') ||
           (github.event_name == 'issue_comment' && github.event.issue.pull_request && (
-            github.event.comment.body == 'recheck' ||
-            github.event.comment.body == 'I have read and agree to the Contributor License Agreement'
+            toLower(github.event.comment.body) == 'recheck' ||
+            toLower(github.event.comment.body) == 'i have read and agree to the contributor license agreement' ||
+            toLower(github.event.comment.body) == 'i have read and agree to the contributor license agreement.'
           ))
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -53,8 +54,9 @@ jobs:
         if: >
           (github.event_name == 'pull_request_target' && github.event.action != 'closed') ||
           (github.event_name == 'issue_comment' && github.event.issue.pull_request && (
-            github.event.comment.body == 'recheck' ||
-            github.event.comment.body == 'I have read and agree to the Contributor License Agreement'
+            toLower(github.event.comment.body) == 'recheck' ||
+            toLower(github.event.comment.body) == 'i have read and agree to the contributor license agreement' ||
+            toLower(github.event.comment.body) == 'i have read and agree to the contributor license agreement.'
           ))
         uses: contributor-assistant/github-action@ca4a40a7d1004f18d9960b404b97e5f30a505a08 # v2.6.1
         env:
@@ -92,7 +94,7 @@ jobs:
 
             ✍ **To sign, please post a new comment on this PR with exactly the following text:** ✍
 
-          custom-pr-sign-comment: I have read and agree to the Contributor License Agreement
+          custom-pr-sign-comment: I have read and agree to the Contributor License Agreement.
 
           custom-allsigned-prcomment: |
             ✅ All contributors have signed the CLA. Thank you! This PR is ready to be merged.
