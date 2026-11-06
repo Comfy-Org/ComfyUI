@@ -1,0 +1,3 @@
+name,prompt,negative_prompt
+❌Low Token,,"embedding:EasyNegative, NSFW, Cleavage, Pubic Hair, Nudity, Naked, censored"
+✅Line Art / Manga,"(Anime Scene, Toonshading, Satoshi Kon, Ken Sugimori, Hiromu Arakawa:1.2), (Anime Style, Manga Style:1.3), Low detail, sketch, concept art, line art, webtoon, manhua, hand drawn, defined lines, simple shades, minimalistic, High contrast, Linear compositions, Scalable artwork, Digital art, High Contrast Shadows, glow effects, humorous illustration, big depth of field, Masterpiece, colors, concept art, trending on artstation, Vivid colors, dramatic",
