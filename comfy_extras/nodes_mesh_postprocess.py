@@ -2396,7 +2396,8 @@ class RemeshMesh(IO.ComfyNode):
                 "Re-extracts a uniformly tessellated mesh via a narrow-band distance field + Dual "
                 "Contouring, on the active compute device. Normalizes messy / non-manifold / "
                 "self-intersecting topology; run before Decimate Mesh to hit an exact face count. "
-                "Output stays welded."
+                "Output stays welded. Meshes reaching past 0.51 or spanning under 0.5 are fitted to the "
+                "[-0.5,0.5] cube first and mapped back."
             ),
             inputs=[
                 IO.Mesh.Input("mesh"),
@@ -2451,14 +2452,41 @@ class RemeshMesh(IO.ComfyNode):
             ff = f.to(compute_device).to(torch.int64)
             cc = c.to(compute_device).float() if c is not None else None
 
+            # a NaN, inf or float-limit vertex would poison every bound and distance: its faces go, and then every vertex
+            # no face uses, so neither it nor a stray can move the precluster grid or the fit below
+            bad = ~(vv.abs() < 1e38).all(dim=1)
+            if bad.any():
+                ff = ff[~bad[ff].any(dim=1)]
+            used = torch.zeros(vv.shape[0], dtype=torch.bool, device=compute_device)
+            used[ff.reshape(-1)] = True
+            vv, ff, cc = vv[used], (used.cumsum(0) - 1)[ff], cc[used] if cc is not None else None
+
             # cluster-decimate very large inputs before field queries
             if precluster_max_verts > 0 and vv.shape[0] > precluster_max_verts:
                 vv, ff, cc = qem_cluster_decimate(
                     vv, ff, target_verts=int(precluster_max_verts), colors=cc)
 
+            if ff.numel() == 0:  # none to begin with, none finite, or the precluster collapsed them all
+                return vv[:0].to(src_device), ff[:0].to(device=src_device, dtype=torch.int32), cc[:0].to(src_device) if cc is not None else None
+
             # Fixed [-0.5,0.5] cube domain (matches cumesh/TRELLIS2); scale ≈ 1.0 any resolution.
             rs_scale = (resolution + 3.0 * band) / resolution
             rs_center = torch.zeros(3, dtype=vv.dtype, device=compute_device)
+
+            # Generated meshes fill that cube, spilling to ~0.505, and stay as they are; anything else is fitted into it and mapped back
+            lo, hi = vv.min(dim=0)[0], vv.max(dim=0)[0]
+            extent = float((hi - lo).max())
+            reach = float(torch.max(-lo, hi).max())
+            fit = extent > 0 and (reach > 0.51 or extent < 0.5)
+            if fit:
+                mesh_center = 0.5 * (lo + hi)
+                cell = rs_scale / resolution
+                margin = math.ceil(band) + 1  # cells past the extremes: the band shell and a corner beyond it
+                span = (resolution - 2 * margin) * cell
+                vv = (vv - mesh_center) / extent * span
+                # the centre and the extremes land a quarter cell past a corner plane: a flat mesh or box face on a plane has no
+                # crossings in udf and sdf, and mid-cell its symmetric shell leaves the solid cut empty
+                rs_center = rs_center + ((resolution / 2 - 0.25) % 1) * cell
 
             rv, rf, rc = remesh_narrow_band_dc(
                 vv, ff,
@@ -2472,6 +2500,8 @@ class RemeshMesh(IO.ComfyNode):
                 drop_enclosed_components=drop_enclosed_components,
                 scale=rs_scale, center=rs_center, colors=cc)
 
+            if fit:
+                rv = rv / span * extent + mesh_center
             v = rv.to(src_device)
             f = rf.to(device=src_device, dtype=torch.int32)
             c = rc.to(src_device) if rc is not None else None
