@@ -1,3 +1,5 @@
+import os
+
 import folder_paths
 import comfy.utils
 import comfy.model_management
@@ -6,35 +8,66 @@ import torch
 from comfy_api.latest import ComfyExtension, io
 from comfy_extras.nodes_audio import VAEEncodeAudio
 
+VAE_SUFFIX = " (vae)"
+
+
+def _vae_option(name: str) -> str:
+    """Return the selector value that marks `name` as the `vae/` copy.
+
+    The suffix goes before the extension ("a (vae).safetensors") so the value
+    still ends in a model file extension, which is what the frontend
+    missing-model scan matches on, while staying distinct from the checkpoint
+    entry of the same name.
+    """
+    stem, ext = os.path.splitext(name)
+    return f"{stem}{VAE_SUFFIX}{ext}"
+
 
 def _ltxv_audio_vae_names():
-    names = folder_paths.get_filename_list("checkpoints")
-    checkpoint_set = set(names)
-    seen = set(names)
+    """List selector options: `vae/` models first, then `checkpoints/`.
+
+    A `vae/` file whose name also exists in `checkpoints/` is offered as
+    "<name> (vae)" so both stay selectable, while the plain name keeps
+    resolving to the checkpoint — existing `ckpt_name` values therefore keep
+    loading exactly what they loaded before.
+    """
+    checkpoint_names = folder_paths.get_filename_list("checkpoints")
+    checkpoint_set = set(checkpoint_names)
+
+    names = []
+    seen = set()
     for name in folder_paths.get_filename_list("vae"):
-        if name in checkpoint_set:
-            suffixed = f"{name} (vae)"
-            if suffixed not in seen:
-                seen.add(suffixed)
-                names.append(suffixed)
-        elif name not in seen:
+        option = _vae_option(name) if name in checkpoint_set else name
+        if option not in seen:
+            seen.add(option)
+            names.append(option)
+    for name in checkpoint_names:
+        if name not in seen:
             seen.add(name)
             names.append(name)
     return names
 
 
 def _ltxv_audio_vae_path(name: str) -> str:
-    if name.endswith(" (vae)"):
-        p = folder_paths.get_full_path("vae", name[:-6])
-        if p is not None:
-            return p
-    else:
-        p = folder_paths.get_full_path("checkpoints", name)
-        if p is not None:
-            return p
-        p = folder_paths.get_full_path("vae", name)
-        if p is not None:
-            return p
+    """Resolve a selector value to a model file, raising when it is gone.
+
+    A value carrying the ` (vae)` marker resolves only inside `vae`; plain
+    values keep the historical lookup order (checkpoints, then vae).
+    """
+    stem, ext = os.path.splitext(name)
+    if stem.endswith(VAE_SUFFIX):
+        return folder_paths.get_full_path_or_raise("vae", stem[: -len(VAE_SUFFIX)] + ext)
+    if name.endswith(VAE_SUFFIX):
+        # Value saved by an earlier build of this branch, before the suffix moved
+        # in front of the extension.
+        return folder_paths.get_full_path_or_raise("vae", name[: -len(VAE_SUFFIX)])
+
+    p = folder_paths.get_full_path("checkpoints", name)
+    if p is not None:
+        return p
+    p = folder_paths.get_full_path("vae", name)
+    if p is not None:
+        return p
     return folder_paths.get_full_path_or_raise("checkpoints", name)
 
 
