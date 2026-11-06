@@ -1581,6 +1581,26 @@ class VideoEdit(ComfyTypeIO):
             })
 
 
+@comfytype(io_type="VIDEO_CONCAT")
+class VideoConcat(ComfyTypeIO):
+    class VideoConcatDict(TypedDict, total=False):
+        order: list[str]
+    Type = VideoConcatDict
+
+    class Input(WidgetInput):
+        def __init__(self, id: str, source: str, display_name: str=None, optional=False, tooltip: str=None,
+                     socketless: bool=True, default: dict=None, advanced: bool=None):
+            super().__init__(id, display_name, optional, tooltip, None, default, socketless, None, None, None, None, advanced)
+            self.source = source
+            if default is None:
+                self.default = {"order": []}
+
+        def as_dict(self):
+            return super().as_dict() | prune_dict({
+                "source": self.source,
+            })
+
+
 @comfytype(io_type="RESOLUTION_PREVIEW")
 class ResolutionPreview(ComfyTypeIO):
     Type = dict
@@ -2724,6 +2744,7 @@ __all__ = [
     "Histogram",
     "Range",
     "VideoEdit",
+    "VideoConcat",
     "ResolutionPreview",
     "NodeReplace",
 ]

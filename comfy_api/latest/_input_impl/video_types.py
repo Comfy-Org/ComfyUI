@@ -339,6 +339,9 @@ class VideoFromFile(VideoInput):
                     return display_width, display_height
         raise ValueError(f"No video stream found in file '{self.__file}'")
 
+    def _get_frame_dimensions(self) -> tuple[int, int]:
+        return self._get_display_dimensions() if self.__crop is None else self.get_dimensions()
+
     def _get_display_dimensions(self) -> tuple[int, int]:
         if isinstance(self.__file, io.BytesIO):
             self.__file.seek(0)
@@ -1338,6 +1341,7 @@ class VideoFromList(VideoInput):
         self.__buffer = None
 
     def get_components(self) -> VideoComponents:
+        self._require_same_dimensions()
         components = [video.get_components() for video in self.videos]
         frame_rate = components[0].frame_rate
         if any(component.frame_rate != frame_rate for component in components[1:]):
@@ -1384,17 +1388,19 @@ class VideoFromList(VideoInput):
         )
 
     def get_dimensions(self):
-        dimensions = [video.get_dimensions() for video in self.videos]
-        mismatches = [
-            f"chunk {index} is {width}x{height}"
-            for index, (width, height) in enumerate(dimensions[1:], 1)
-            if (width, height) != dimensions[0]
-        ]
-        if mismatches:
-            width, height = dimensions[0]
+        return self._require_same_dimensions()
+
+    def _require_same_dimensions(self):
+        dimensions = [video._get_frame_dimensions() for video in self.videos]
+        if any(dimension != dimensions[0] for dimension in dimensions[1:]):
+            clips = ", ".join(
+                f"clip {index} is {width}x{height}"
+                for index, (width, height) in enumerate(dimensions, 1)
+                if index == 1 or (width, height) != dimensions[0]
+            )
             raise ValueError(
-                f"Accumulated videos have incompatible frame dimensions: chunk 0 is {width}x{height}; "
-                + "; ".join(mismatches)
+                f"Concatenate Video needs all clips at the same resolution: {clips}. "
+                "Resize the clips to match before concatenating."
             )
         return dimensions[0]
 
@@ -1489,6 +1495,7 @@ class VideoFromList(VideoInput):
                 video_stream_chroma_subsampling(video_stream),
             )
 
+        self._require_same_dimensions()
         source_signatures = []
         shared_encode = crf is not None or color_space is not None or chroma_subsampling is not None
         for video in self.videos:
@@ -1548,7 +1555,7 @@ class VideoFromList(VideoInput):
                         container.close()
                         fields = ("codec", "extradata", "width", "height", "bit depth", "color space", "audio rate", "audio layout", "chroma subsampling")
                         differences = "; ".join(
-                            f"{field}: expected {expected!r}, got {actual!r}"
+                            f"{field} differs" if field == "extradata" else f"{field}: expected {expected!r}, got {actual!r}"
                             for field, expected, actual in zip(fields, signature, current_signature)
                             if expected != actual
                         )
