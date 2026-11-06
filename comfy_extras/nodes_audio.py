@@ -1,5 +1,6 @@
 import av
 import comfy.audio
+import comfy.utils
 import torch
 import comfy.model_management
 import folder_paths
@@ -609,6 +610,9 @@ class JoinAudioChannels(IO.ComfyNode):
         # Join the channels into stereo
         left_channel = waveform_left[..., 0:1, :]
         right_channel = waveform_right[..., 0:1, :]
+        batch_size = max(left_channel.shape[0], right_channel.shape[0])
+        left_channel = comfy.utils.repeat_to_batch_size(left_channel, batch_size)
+        right_channel = comfy.utils.repeat_to_batch_size(right_channel, batch_size)
         stereo_waveform = torch.cat([left_channel, right_channel], dim=1)
 
         return IO.NodeOutput({"waveform": stereo_waveform, "sample_rate": output_sample_rate})
