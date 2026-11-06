@@ -86,7 +86,7 @@ class NodeReplaceManager:
             if new_node_id not in nodes.NODE_CLASS_MAPPINGS.keys():
                 continue
             # first, replace node id (class_type)
-            new_node_struct = copy_node_struct(node_struct, empty_inputs=True)
+            new_node_struct = copy_node_struct(node_struct, empty_inputs=replacement.input_mapping is not None)
             new_node_struct["class_type"] = new_node_id
             # TODO: consider replacing display_name in _meta as well for error reporting purposes; would need to query node schema
             # second, replace inputs
