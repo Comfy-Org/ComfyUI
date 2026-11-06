@@ -167,8 +167,8 @@ def test_a_truncated_faststart_mp4_decodes_what_it_has(tmp_path, monkeypatch):
         for packet in v.encode():
             out.mux(packet)
     cut = str(tmp_path / "cut.mp4")
-    data = open(full, "rb").read()
-    open(cut, "wb").write(data[: len(data) // 5])
+    data = (tmp_path / "full.mp4").read_bytes()
+    (tmp_path / "cut.mp4").write_bytes(data[: len(data) // 5])
     with av.open(cut) as c:
         assert c.streams.video[0].frames == 300  # the header still claims the whole clip
         want = []
