@@ -272,6 +272,9 @@ class MaskComposite(IO.ComfyNode):
         output = destination.reshape((-1, destination.shape[-2], destination.shape[-1])).clone()
         source = source.reshape((-1, source.shape[-2], source.shape[-1]))
         source = source.to(output.device)
+        batch_size = max(output.shape[0], source.shape[0])
+        output = comfy.utils.repeat_to_batch_size(output, batch_size)
+        source = comfy.utils.repeat_to_batch_size(source, batch_size)
 
         left, top = (x, y,)
         right, bottom = (min(left + source.shape[-1], destination.shape[-1]), min(top + source.shape[-2], destination.shape[-2]))
