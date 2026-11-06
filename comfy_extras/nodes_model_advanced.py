@@ -195,6 +195,8 @@ class ModelSamplingFlux:
 
         model_sampling = ModelSamplingAdvanced(model.model.model_config)
         model_sampling.set_parameters(shift=shift)
+        model_sampling.dynamic_shift = None
+        model_sampling.shift_terminal = None
         m.add_object_patch("model_sampling", model_sampling)
         return (m, )
 
