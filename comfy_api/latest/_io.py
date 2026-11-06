@@ -1540,10 +1540,26 @@ class BoundingBoxes(ComfyTypeIO):
 
     class Input(WidgetInput):
         def __init__(self, id: str, display_name: str=None, optional=False, tooltip: str=None,
-                     socketless: bool=True, default: list[dict]=None, advanced: bool=None):
+                     socketless: bool=True, default: list[dict]=None, advanced: bool=None,
+                     max_boxes: int=None):
             super().__init__(id, display_name, optional, tooltip, None, default, socketless, None, None, None, None, advanced)
             if default is None:
                 self.default = []
+            if max_boxes is not None:
+                if isinstance(max_boxes, bool) or not isinstance(max_boxes, int):
+                    raise TypeError("BoundingBoxes max_boxes must be an integer.")
+                if max_boxes < 1:
+                    raise ValueError("BoundingBoxes max_boxes must be at least 1.")
+            self.max_boxes = max_boxes
+
+        def as_dict(self):
+            return super().as_dict() | prune_dict({
+                "max_boxes": self.max_boxes,
+            })
+
+    @staticmethod
+    def limit_boxes(boxes: list, max_boxes: int | None) -> list:
+        return boxes if max_boxes is None else boxes[:max_boxes]
 
 
 @comfytype(io_type="VIDEO_EDIT")
