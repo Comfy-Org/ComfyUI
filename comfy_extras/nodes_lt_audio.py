@@ -31,18 +31,23 @@ def _ltxv_audio_vae_names():
     the same file on every installation, so a workflow saved on one machine
     stays a valid combo value (execution rejects values absent from the
     options it is given). Checkpoint values are untouched, and a plain name
-    still resolves checkpoints-first, so existing `ckpt_name` values keep
-    loading exactly what they loaded before.
+    still resolves to the checkpoint first, so existing `ckpt_name` values
+    keep loading exactly what they loaded before.
+
+    A checkpoint may legitimately be named with the marker text; the marker is
+    then repeated so a `vae/` entry never shares its value with a checkpoint.
     """
     checkpoint_names = folder_paths.get_filename_list("checkpoints")
+    checkpoint_set = set(checkpoint_names)
 
     names = []
     seen = set()
     for name in folder_paths.get_filename_list("vae"):
         option = _vae_option(name)
-        if option not in seen:
-            seen.add(option)
-            names.append(option)
+        while option in checkpoint_set or option in seen:
+            option = _vae_option(option)
+        seen.add(option)
+        names.append(option)
     for name in checkpoint_names:
         if name not in seen:
             seen.add(name)
@@ -53,34 +58,47 @@ def _ltxv_audio_vae_names():
 def _ltxv_audio_vae_path(name: str) -> str:
     """Resolve a selector value to a model file, raising when it is gone.
 
-    A value carrying the ` (vae)` marker resolves only inside `vae`, so a
-    missing VAE is reported against the right folder instead of falling
-    through to a checkpoint lookup. Plain values keep the historical lookup
-    order (checkpoints, then vae).
+    A checkpoint is looked up first for the exact value: a checkpoint whose own
+    filename contains the marker text always meant that checkpoint before this
+    change, so it keeps meaning it. Otherwise a value carrying the ` (vae)`
+    marker resolves inside `vae` only, so a missing VAE is reported against the
+    right folder, and a plain value falls back to `vae` for legacy or API use.
     """
-    stem, ext = os.path.splitext(name)
-    if stem.endswith(VAE_SUFFIX) or name.endswith(VAE_SUFFIX):
-        if stem.endswith(VAE_SUFFIX):
-            base = stem[: -len(VAE_SUFFIX)] + ext
-        else:
-            # Marker trailer from an earlier build of this branch, which put it
-            # after the extension; the extension may be absent from the value.
-            base = name[: -len(VAE_SUFFIX)]
-        found = folder_paths.get_full_path("vae", base)
-        if found is not None:
-            return found
-        wanted = os.path.splitext(base)[0]
-        for candidate in folder_paths.get_filename_list("vae"):
-            if os.path.splitext(candidate)[0] == wanted:
-                return folder_paths.get_full_path_or_raise("vae", candidate)
-        return folder_paths.get_full_path_or_raise("vae", base)
+    checkpoint_path = folder_paths.get_full_path("checkpoints", name)
+    if checkpoint_path is not None:
+        return checkpoint_path
 
-    p = folder_paths.get_full_path("checkpoints", name)
-    if p is not None:
-        return p
-    p = folder_paths.get_full_path("vae", name)
-    if p is not None:
-        return p
+    stem, ext = os.path.splitext(name)
+    if stem.endswith(VAE_SUFFIX):
+        bases = [stem]
+    elif name.endswith(VAE_SUFFIX):
+        # Marker trailer from an earlier build of this branch, which put it
+        # after the extension; the extension may be absent from the value.
+        bases = [name[: -len(VAE_SUFFIX)]]
+    else:
+        bases = []
+
+    if bases:
+        # The marker is repeated when it would collide with a checkpoint name,
+        # and a vae file may itself contain the marker text, so try the least
+        # stripped form first.
+        while bases[-1].endswith(VAE_SUFFIX):
+            bases.append(bases[-1][: -len(VAE_SUFFIX)])
+        for base in bases:
+            found = folder_paths.get_full_path("vae", base + ext)
+            if found is not None:
+                return found
+        wanted = {os.path.splitext(base)[0] for base in bases}
+        for candidate in folder_paths.get_filename_list("vae"):
+            if os.path.splitext(candidate)[0] in wanted:
+                return folder_paths.get_full_path_or_raise("vae", candidate)
+        raise FileNotFoundError(
+            f"Model in folder 'vae' with filename '{bases[-1] + ext}' not found."
+        )
+
+    vae_path = folder_paths.get_full_path("vae", name)
+    if vae_path is not None:
+        return vae_path
     return folder_paths.get_full_path_or_raise("checkpoints", name)
 
 
