@@ -24,7 +24,7 @@ class MOSSImageLayoutPrompt(io.ComfyNode):
                 io.Array.Input("element", tooltip="Prompt elements from the node Create Bounding Boxes. The description is the box's caption, text boxes also render their text."),
                 io.Int.Input("width", default=1024, min=16, max=16384, step=16, tooltip="Width of the generated image; the boxes are placed in its pixels."),
                 io.Int.Input("height", default=1024, min=16, max=16384, step=16, tooltip="Height of the generated image; the boxes are placed in its pixels."),
-                io.String.Input("character_boxes", default="", tooltip="Numbers of the object boxes to label as characters instead of objects, as tagged in the Create Bounding Boxes preview, e.g. \"1, 3\"."),
+                io.String.Input("character_boxes", default="", tooltip="Numbers of the boxes to label as characters instead of objects, as tagged in the Create Bounding Boxes preview (all boxes are counted, including text boxes), e.g. \"1, 3\". Text boxes are ignored."),
             ],
             outputs=[io.String.Output(display_name="prompt")],
             is_experimental=True,
