@@ -130,7 +130,7 @@ def test_overstated_metadata_falls_back_to_a_list(monkeypatch):
     before the buffer, instead of one huge allocation."""
     frames = [torch.full((4, 4, 3), float(i)) for i in range(5)]
     frame_bytes = frames[0].numel() * frames[0].element_size()
-    monkeypatch.setattr(video_types.psutil, "virtual_memory", lambda: SimpleNamespace(available=frame_bytes * 3))
+    monkeypatch.setattr(video_types, "_available_memory", lambda: frame_bytes * 3)
     buffer = FrameBuffer(10**12)
     for f in frames:
         buffer.append(f)
@@ -178,7 +178,7 @@ def test_a_truncated_faststart_mp4_decodes_what_it_has(tmp_path, monkeypatch):
         except av.error.InvalidDataError:
             pass
     frame_bytes = 48 * 64 * 3 * 4
-    monkeypatch.setattr(video_types.psutil, "virtual_memory", lambda: SimpleNamespace(available=frame_bytes * 100))
+    monkeypatch.setattr(video_types, "_available_memory", lambda: frame_bytes * 100)
     images = VideoFromFile(cut).get_components().images
     assert 0 < images.shape[0] == len(want) < 300
     got = (images * 255).round().to(torch.int16)

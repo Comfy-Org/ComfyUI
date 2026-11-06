@@ -12,9 +12,9 @@ import json
 import numpy as np
 import math
 import os
-import psutil
 import torch
 from .._util import VideoContainer, VideoCodec, VideoComponents, normalize_crop_rect
+import comfy.system_memory
 import comfy.utils
 import logging
 
@@ -132,6 +132,11 @@ def filter_hevc_packet(hevc_filter, packet):
     return hevc_filter.filter(packet)
 
 
+def _available_memory() -> int:
+    """Free memory as ComfyUI counts it: the host's, or a container's limit when that is lower."""
+    return comfy.system_memory.virtual_memory_available()
+
+
 class FrameBuffer:
     """Decoded frames written straight into one tensor sized up front from the expected frame count. Collecting a
     list of frames and stacking it holds every frame twice at the end; this holds them once when the count is
@@ -149,7 +154,7 @@ class FrameBuffer:
 
     def _start(self, frame: torch.Tensor) -> None:
         frame_bytes = max(1, frame.numel() * frame.element_size())
-        if self.expected * frame_bytes > psutil.virtual_memory().available:
+        if self.expected * frame_bytes > _available_memory():
             self.listed = []
             return
         try:
