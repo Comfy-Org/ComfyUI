@@ -3,6 +3,8 @@ import logging
 import os
 import platform
 import re
+import stat
+import psutil
 
 import comfy_aimdo.storage
 from comfy.cli_args import args
@@ -54,17 +56,48 @@ def _fast_nvme(name):
     return (speed_gts >= 8.0 and width >= 4) or (speed_gts >= 32.0 and width >= 2)
 
 
+def _btrfs_devices(name):
+    try:
+        filesystems = os.listdir("/sys/fs/btrfs")
+    except OSError:
+        filesystems = []
+    for fsid in filesystems:
+        devices = f"/sys/fs/btrfs/{fsid}/devices"
+        if os.path.exists(f"{devices}/{name}"):
+            try:
+                return os.listdir(devices)
+            except OSError:
+                return None
+    return [name]
+
+
 @functools.lru_cache(maxsize=None)
 def _linux_fast_storage(device):
     sys_device = f"/sys/dev/block/{os.major(device)}:{os.minor(device)}"
     if not os.path.exists(sys_device):
         return None
     name = os.path.basename(os.path.realpath(sys_device))
-    devices = _physical_block_devices(name)
+    members = _btrfs_devices(name)
+    if members is None:
+        return None
+    devices = [x for member in members for x in _physical_block_devices(member)]
     results = [_fast_nvme(x) for x in devices]
     if any(x is None for x in results):
         return None
     return all(results)
+
+
+def _mount_source_device(path):
+    path = os.path.realpath(path)
+    source, depth = "", -1
+    for part in psutil.disk_partitions(all=True):
+        if len(part.mountpoint) >= depth and os.path.commonpath([path, part.mountpoint]) == part.mountpoint:
+            source, depth = part.device, len(part.mountpoint)
+    try:
+        st = os.stat(source)
+    except OSError:
+        return None
+    return st.st_rdev if stat.S_ISBLK(st.st_mode) else None
 
 
 def fast_storage(path):
@@ -74,6 +107,10 @@ def fast_storage(path):
             device = os.stat(os.path.realpath(path)).st_dev
         except OSError:
             return None
+        if os.major(device) == 0:
+            device = _mount_source_device(path)
+            if device is None:
+                return None
         return _linux_fast_storage(device)
     if system == "Windows":
         return comfy_aimdo.storage.fast_disk(path)
