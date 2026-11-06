@@ -69,6 +69,8 @@ class ImageUpscaleWithModel(io.ComfyNode):
 
     @classmethod
     def execute(cls, upscale_model, image) -> io.NodeOutput:
+        if not hasattr(upscale_model, "patcher"):
+            upscale_model.patcher = comfy.model_patcher.CoreModelPatcher(upscale_model.model, load_device=model_management.get_torch_device(), offload_device=model_management.unet_offload_device())
         device = upscale_model.patcher.load_device
 
         alpha = None
