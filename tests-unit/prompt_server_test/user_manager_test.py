@@ -276,6 +276,33 @@ async def test_listuserdata_v2_normalized_separators(aiohttp_client, app, tmp_pa
         assert "/" in item["path"]
         assert "\\" not in item["path"]\
 
+async def test_post_userdata_invalid_filename_returns_400(aiohttp_client, app, tmp_path):
+    client = await aiohttp_client(app)
+    # A filename long enough to exceed the filesystem's max name length raises
+    # OSError (ENAMETOOLONG), which should be reported as a 400, not a 500.
+    long_name = "a" * 300
+    resp = await client.post(f"/userdata/{long_name}", data=b"content")
+
+    assert resp.status == 400
+    assert not os.path.exists(tmp_path / long_name)
+
+
+async def test_post_userdata_atomic_write_preserves_original_on_failure(aiohttp_client, app, tmp_path):
+    with open(tmp_path / "test.txt", "w") as f:
+        f.write("original content")
+
+    client = await aiohttp_client(app)
+    with patch("os.replace", side_effect=OSError("simulated failure")):
+        resp = await client.post("/userdata/test.txt", data=b"new content")
+
+    assert resp.status == 400
+
+    # Original file must be untouched, and no leftover temp file left behind.
+    with open(tmp_path / "test.txt", "r") as f:
+        assert f.read() == "original content"
+    assert os.listdir(tmp_path) == ["test.txt"]
+
+
 async def test_listuserdata_v2_url_encoded_path(aiohttp_client, app, tmp_path):
     # Create a directory with a space in its name and a file inside
     os.makedirs(tmp_path / "my dir")
