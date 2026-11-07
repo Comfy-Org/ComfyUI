@@ -182,6 +182,13 @@ def host_frames() -> HostFrames | None:
         return None
 
 
+def _host_empty(shape: tuple[int, ...], like: np.ndarray) -> np.ndarray:
+    """An uninitialised array from torch's allocator. numpy asks for huge pages on large arrays, and where the kernel
+    then compacts memory on each first touch (transparent huge pages with defrag=madvise, fragmented RAM) filling the
+    frames ran over ten times slower."""
+    return torch.empty(shape, dtype=torch.from_numpy(like[:0]).dtype).numpy()
+
+
 class FrameChunks:
     """Without aimdo: frames in blocks of up to CHUNK frames and BLOCK_BYTES, copied into one tensor at the end, each
     block freed once copied, so the frames are held about once (plus a block) without knowing how many there will be.
@@ -199,7 +206,7 @@ class FrameChunks:
         if self.count == 0:
             self.rows = max(1, min(self.CHUNK, self.BLOCK_BYTES // max(1, frame.nbytes)))
         if self.count % self.rows == 0:
-            self.blocks.append(np.empty((self.rows, *frame.shape), dtype=frame.dtype))
+            self.blocks.append(_host_empty((self.rows, *frame.shape), frame))
         self.blocks[-1][self.count % self.rows] = frame
         self.count += 1
 
@@ -208,7 +215,7 @@ class FrameChunks:
 
     def tensor(self) -> torch.Tensor:
         first = self.blocks[0]
-        out = torch.from_numpy(np.empty((self.count, *first.shape[1:]), dtype=first.dtype))
+        out = torch.from_numpy(_host_empty((self.count, *first.shape[1:]), first))
         rows = out.numpy()
         for i, block in enumerate(self.blocks):
             start = i * self.rows
