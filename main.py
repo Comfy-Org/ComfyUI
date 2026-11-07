@@ -28,6 +28,7 @@ from app.database.db import dependencies_available, get_database_url, get_db_pat
 from app.assets.event_log import error_kind
 from utils.install_util import get_missing_requirements_message
 from app.assets.lifecycle import cleanup_temp_filesystem
+import ipaddress
 import itertools
 import utils.extra_config
 from utils.mime_types import init_mime_types
@@ -580,6 +581,32 @@ ________________________________________________________________________
     )
 
 
+def warn_if_manager_exposed():
+    if not args.enable_manager or args.disable_manager_ui:
+        return
+    for address in args.listen.split(","):
+        address = address.strip()
+        if address == "localhost":
+            continue
+        try:
+            if ipaddress.ip_address(address).is_loopback:
+                continue
+        except ValueError:
+            pass
+        app.logger.log_startup_warning(
+            f"""
+________________________________________________________________________
+WARNING WARNING WARNING WARNING WARNING
+
+ComfyUI-Manager is enabled while listening on {args.listen}, which is not a loopback address.
+The manager has no authentication: anyone who can reach this address can install custom nodes, change manager settings and restart ComfyUI.
+Only expose it on a network you trust, or restart with --listen 127.0.0.1.
+________________________________________________________________________
+""".strip()
+        )
+        return
+
+
 def start_comfyui(asyncio_loop=None):
     """
     Starts the ComfyUI server using the provided asyncio event loop or creates a new one.
@@ -605,6 +632,7 @@ def start_comfyui(asyncio_loop=None):
     prompt_server = server.PromptServer(asyncio_loop, asset_manager)
 
     if args.enable_manager and not args.disable_manager_ui:
+        warn_if_manager_exposed()
         comfyui_manager.start()
 
     hook_breaker_ac10a0.save_functions()
