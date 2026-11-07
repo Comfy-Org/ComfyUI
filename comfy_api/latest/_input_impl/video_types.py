@@ -183,20 +183,24 @@ def host_frames() -> HostFrames | None:
 
 
 class FrameChunks:
-    """Without aimdo: frames in blocks of CHUNK, copied into one tensor at the end, each block freed once copied, so
-    the frames are held about once (plus a block) without knowing how many there will be. A video too big for memory
-    fails with an out-of-memory error, as stacking a list did."""
+    """Without aimdo: frames in blocks of up to CHUNK frames and BLOCK_BYTES, copied into one tensor at the end, each
+    block freed once copied, so the frames are held about once (plus a block) without knowing how many there will be.
+    A video too big for memory fails with an out-of-memory error, as stacking a list did."""
 
     CHUNK = 32
+    BLOCK_BYTES = 256 << 20
 
     def __init__(self):
         self.blocks: list[np.ndarray | None] = []
         self.count = 0
+        self.rows = self.CHUNK
 
     def append(self, frame: np.ndarray) -> None:
-        if self.count % self.CHUNK == 0:
-            self.blocks.append(np.empty((self.CHUNK, *frame.shape), dtype=frame.dtype))
-        self.blocks[-1][self.count % self.CHUNK] = frame
+        if self.count == 0:
+            self.rows = max(1, min(self.CHUNK, self.BLOCK_BYTES // max(1, frame.nbytes)))
+        if self.count % self.rows == 0:
+            self.blocks.append(np.empty((self.rows, *frame.shape), dtype=frame.dtype))
+        self.blocks[-1][self.count % self.rows] = frame
         self.count += 1
 
     def __len__(self) -> int:
@@ -207,8 +211,8 @@ class FrameChunks:
         out = torch.from_numpy(np.empty((self.count, *first.shape[1:]), dtype=first.dtype))
         rows = out.numpy()
         for i, block in enumerate(self.blocks):
-            start = i * self.CHUNK
-            n = min(self.CHUNK, self.count - start)
+            start = i * self.rows
+            n = min(self.rows, self.count - start)
             rows[start:start + n] = block[:n]
             self.blocks[i] = None
         self.blocks = []
