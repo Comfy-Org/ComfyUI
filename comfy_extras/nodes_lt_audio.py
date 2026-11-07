@@ -53,6 +53,24 @@ class LTXVAudioVAELoader(io.ComfyNode):
         )
 
     @classmethod
+    def validate_inputs(cls, ckpt_name: str | None = None, vae_name: str | None = None) -> bool | str:
+        """Validate only the model the loader will actually use.
+
+        ComfyUI's generic combo check rejects any value that is not in the current options, so a
+        workflow that carries a checkpoint which is no longer installed would fail before the loader
+        ran, even when a standalone VAE is selected and the checkpoint is unused.
+        """
+        if vae_name and vae_name != NO_SELECTION:
+            if vae_name in folder_paths.get_filename_list("vae"):
+                return True
+            return f"Invalid VAE file: {vae_name}"
+        if ckpt_name and ckpt_name != NO_SELECTION:
+            if ckpt_name in folder_paths.get_filename_list("checkpoints"):
+                return True
+            return f"Invalid audio VAE checkpoint: {ckpt_name}"
+        return "Select an audio VAE checkpoint or a VAE from models/vae."
+
+    @classmethod
     def execute(cls, ckpt_name: str | None = None, vae_name: str | None = None) -> io.NodeOutput:
         ckpt_path = _ltxv_audio_vae_path(ckpt_name, vae_name)
         sd, metadata = comfy.utils.load_torch_file(ckpt_path, return_metadata=True)
