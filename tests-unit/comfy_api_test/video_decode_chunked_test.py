@@ -1,4 +1,7 @@
+import gc
 import io
+import tracemalloc
+import weakref
 from fractions import Fraction
 
 import av
@@ -7,6 +10,7 @@ import pytest
 import torch
 
 from comfy_api.input_impl.video_types import VideoFromComponents, VideoFromFile, VideoFromList
+from comfy_api.latest._input_impl import video_types
 from comfy_api.latest._util.video_types import VideoChunk, VideoComponents
 
 
@@ -133,7 +137,6 @@ def test_decode_chunked_uint8_is_within_a_level_of_the_float_frames(fixture_file
 
 
 def test_uint8_without_the_accurate_flags_rounds_the_float_frames(fixture_files, monkeypatch):
-    from comfy_api.latest._input_impl import video_types
     monkeypatch.setattr(video_types, "ACCURATE_8BIT_FLAGS", None)
     video = VideoFromFile(fixture_files["h264"])
     _, images, _ = joined(video.decode_chunked(dtype=torch.uint8))
@@ -160,7 +163,6 @@ def test_get_components_matches_a_direct_pyav_decode(fixture_files, name, format
 
 
 def test_decode_chunked_decodes_as_it_goes(fixture_files, monkeypatch):
-    from comfy_api.latest._input_impl import video_types
     decoded = []
     real = video_types._rotation_quadrant
     monkeypatch.setattr(video_types, "_rotation_quadrant", lambda frame: decoded.append(1) or real(frame))
@@ -183,8 +185,6 @@ def test_decode_chunked_from_bytesio_interleaves(fixture_files):
 
 @pytest.mark.parametrize("name", ["h264", "png-alpha"])
 def test_decode_chunked_holds_one_chunk(fixture_files, name):
-    import gc
-    import weakref
     refs = []
     for chunk in VideoFromFile(fixture_files[name]).decode_chunked(chunk_frames=2):
         owner = chunk.images._base if chunk.images._base is not None else chunk.images
@@ -192,7 +192,6 @@ def test_decode_chunked_holds_one_chunk(fixture_files, name):
         del chunk, owner
         gc.collect()
         assert all(r() is None for r in refs), "the generator still references a chunk it handed over"
-    import tracemalloc
     video = VideoFromFile(fixture_files[name])
     frame_bytes = video.get_components().images[0].numel() * 4
     tracemalloc.start()
@@ -276,7 +275,6 @@ def test_video_from_list_rejects_mixed_frame_rates(fixture_files, tmp_path):
 
 
 def test_get_audio_skips_decoding_frames(fixture_files, monkeypatch):
-    from comfy_api.latest._input_impl import video_types
     calls = []
     real = video_types._rotation_quadrant
     monkeypatch.setattr(video_types, "_rotation_quadrant", lambda frame: calls.append(1) or real(frame))
