@@ -407,6 +407,8 @@ comfyui-workflow-templates is not installed.
             parent = os.path.dirname(web_root)
             os.makedirs(parent, exist_ok=True)
             with tempfile.TemporaryDirectory(dir=parent) as staging_root:
+                download_root = os.path.join(staging_root, "frontend")
+                os.mkdir(download_root)
                 logging.info(
                     "Downloading frontend(%s) version(%s) to (%s)",
                     provider.folder_name,
@@ -414,9 +416,9 @@ comfyui-workflow-templates is not installed.
                     web_root,
                 )
                 logging.debug(release)
-                download_release_asset_zip(release, destination_path=staging_root)
+                download_release_asset_zip(release, destination_path=download_root)
                 try:
-                    os.rename(staging_root, web_root)
+                    os.rename(download_root, web_root)
                 except OSError as e:
                     # Another initializer may have published a completed frontend.
                     if e.errno not in (errno.EEXIST, errno.ENOTEMPTY) or not os.path.isdir(web_root):

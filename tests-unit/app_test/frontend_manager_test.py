@@ -1,10 +1,14 @@
 import argparse
 import errno
 import io
+import os
+import subprocess
+import sys
 import zipfile
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from threading import Event
+from textwrap import dedent
 from types import SimpleNamespace
 from unittest.mock import Mock, patch, mock_open
 
@@ -204,6 +208,7 @@ def test_failed_frontend_extraction_is_retried(tmp_path, mock_provider, version)
 
 
 def test_frontend_is_published_after_extraction(tmp_path, mock_provider):
+    """Keep staged assets hidden until the completed frontend is published."""
     cached = tmp_path / "test-owner_test-repo" / "1.0.0"
     staging_paths = []
 
@@ -212,7 +217,7 @@ def test_frontend_is_published_after_extraction(tmp_path, mock_provider):
         staging = Path(destination_path)
         staging_paths.append(staging)
         assert staging.is_dir()
-        assert staging.parent == cached.parent
+        assert staging.parent.parent == cached.parent
         assert not cached.exists()
         (staging / "asset.js").write_text("frontend asset")
         assert not cached.exists()
@@ -230,8 +235,49 @@ def test_frontend_is_published_after_extraction(tmp_path, mock_provider):
     assert list(cached.parent.iterdir()) == [cached]
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX directory modes follow umask")
+@pytest.mark.parametrize("umask", [0o022, 0o002, 0o027, 0o077])
+def test_frontend_publication_preserves_directory_mode(tmp_path, umask):
+    """Published frontends use ordinary mkdir permissions under the caller's umask."""
+    script = dedent("""
+        import os
+        import stat
+        import sys
+        from pathlib import Path
+        from unittest.mock import patch
+        from app.frontend_management import FrontendManager, FrontEndProvider
+
+        os.umask(int(sys.argv[2]))
+        root = Path(sys.argv[1])
+        ordinary = root / "ordinary"
+        ordinary.mkdir()
+
+        def download_frontend(release, destination_path):
+            (Path(destination_path) / "index.html").write_text("complete frontend")
+
+        with (
+            patch.object(FrontendManager, "CUSTOM_FRONTENDS_ROOT", str(root)),
+            patch.object(FrontEndProvider, "get_release", return_value={"tag_name": "v1.0.0"}),
+            patch("app.frontend_management.download_release_asset_zip", side_effect=download_frontend),
+        ):
+            cached = Path(FrontendManager.init_frontend_unsafe("test-owner/test-repo@1.0.0"))
+
+        published_mode = stat.S_IMODE(cached.stat().st_mode)
+        ordinary_mode = stat.S_IMODE(ordinary.stat().st_mode)
+        assert published_mode == ordinary_mode, (oct(published_mode), oct(ordinary_mode))
+        assert (cached / "index.html").read_text() == "complete frontend"
+        assert list(cached.parent.iterdir()) == [cached]
+    """)
+    result = subprocess.run(
+        [sys.executable, "-B", "-c", script, str(tmp_path), str(umask)],
+        cwd=Path(__file__).resolve().parents[2], capture_output=True, text=True, timeout=30,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
 @pytest.mark.parametrize("failure", [None, RuntimeError("Download failed"), KeyboardInterrupt("Download interrupted")])
 def test_concurrent_frontend_initializers(tmp_path, mock_provider, failure):
+    """Preserve a concurrent winner when the first extraction completes or fails."""
     cached = tmp_path / "test-owner_test-repo" / "1.0.0"
     extracting = Event()
     finish_extraction = Event()
