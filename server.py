@@ -483,7 +483,7 @@ class PromptServer():
                 full_output_folder = os.path.join(upload_dir, os.path.normpath(subfolder))
                 filepath = os.path.abspath(os.path.join(full_output_folder, filename))
 
-                if os.path.commonpath((upload_dir, filepath)) != upload_dir:
+                if not folder_paths.is_within_directory(upload_dir, filepath):
                     return web.Response(status=400), None, None
 
                 if not os.path.exists(full_output_folder):
@@ -574,11 +574,14 @@ class PromptServer():
 
                 if original_ref.get("subfolder", "") != "":
                     full_output_dir = os.path.join(output_dir, original_ref["subfolder"])
-                    if os.path.commonpath((os.path.abspath(full_output_dir), output_dir)) != output_dir:
+                    if not folder_paths.is_within_directory(output_dir, full_output_dir):
                         return web.Response(status=403)
                     output_dir = full_output_dir
 
+                filename = os.path.basename(filename)
                 file = os.path.join(output_dir, filename)
+                if not folder_paths.is_within_directory(output_dir, file):
+                    return web.Response(status=403)
 
                 if os.path.isfile(file):
                     with Image.open(file) as original_pil:
@@ -636,12 +639,14 @@ class PromptServer():
 
                     if "subfolder" in request.rel_url.query:
                         full_output_dir = os.path.join(output_dir, request.rel_url.query["subfolder"])
-                        if os.path.commonpath((os.path.abspath(full_output_dir), output_dir)) != output_dir:
+                        if not folder_paths.is_within_directory(output_dir, full_output_dir):
                             return web.Response(status=403)
                         output_dir = full_output_dir
 
                     filename = os.path.basename(filename)
                     file = os.path.join(output_dir, filename)
+                    if not folder_paths.is_within_directory(output_dir, file):
+                        return web.Response(status=403)
 
                 if os.path.isfile(file):
                     if 'preview' in request.rel_url.query:
