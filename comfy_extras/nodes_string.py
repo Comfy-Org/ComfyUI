@@ -66,16 +66,16 @@ class StringConcatenateMulti(io.ComfyNode):
         return io.Schema(
             node_id="StringConcatenateMulti",
             search_aliases=["concatenate", "text concat", "join text", "merge text", "combine strings", "string concat", "append text", "combine text", "multiple text"],
-            display_name="Concatenate Multiple Texts",
+            display_name="Concatenate Text (Multiple)",
             category="text",
-            description="Join 2 to 20 texts with a delimiter. Add one row per text.",
+            description="Join 2 to 20 strings of text with a delimiter. Add one input per string.",
             inputs=[
                 _DynamicGroup.Input(
                     "texts",
                     template=[io.String.Input("text", multiline=True)],
                     min=2,
                     max=20,
-                    tooltip="Each row is one text, joined in order.",
+                    tooltip="Each row is one string of text, joined in order.",
                     group_name="Text",
                 ),
                 io.String.Input("delimiter", multiline=False, default=""),
