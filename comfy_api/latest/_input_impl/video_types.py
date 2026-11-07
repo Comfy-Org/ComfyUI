@@ -215,12 +215,16 @@ class FrameChunks:
 
     def tensor(self) -> torch.Tensor:
         first = self.blocks[0]
-        out = torch.from_numpy(_host_empty((self.count, *first.shape[1:]), first))
+        eight_bit = first.dtype == np.uint8  # 8-bit video: made float here, many frames at a time, as stacking did
+        out = torch.from_numpy(_host_empty((self.count, *first.shape[1:]), first[:0].astype(np.float32) if eight_bit else first))
         rows = out.numpy()
         for i, block in enumerate(self.blocks):
             start = i * self.rows
             n = min(self.rows, self.count - start)
-            rows[start:start + n] = block[:n]
+            if eight_bit:
+                torch.div(torch.from_numpy(block[:n]), 255.0, out=out[start:start + n])
+            else:
+                rows[start:start + n] = block[:n]
             self.blocks[i] = None
         self.blocks = []
         return out
@@ -826,8 +830,8 @@ class VideoFromFile(VideoInput):
                     img = img[..., :-1]
                 yield stored(img, frames)
 
-        images = frames_as(frames_to_tensor(decoded_frames(), frames), torch.float32)
-        alphas = frames_as(alphas.tensor(), torch.float32) if alphas.count > 0 else None
+        images = frames_to_tensor(decoded_frames(), frames)
+        alphas = alphas.tensor() if alphas.count > 0 else None
 
         # Get frame rate
         frame_rate = Fraction(video_stream.average_rate) if video_stream.average_rate else Fraction(1)
