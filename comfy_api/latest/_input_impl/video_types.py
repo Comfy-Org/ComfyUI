@@ -862,10 +862,13 @@ class VideoFromFile(VideoInput):
             video_stream = self._get_first_video_stream(container)
             _, duration = self.get_active_trim_window()
             start_pts, end_pts = self._seek_trim_window(container, video_stream)
-            return sum(
-                1 for packet in container.demux(video_stream)
-                if packet.pts is not None and packet.pts >= start_pts and not (duration and packet.pts >= end_pts)
-            )
+            count = 0
+            for packet in container.demux(video_stream):
+                if duration and packet.dts is not None and packet.dts >= end_pts:
+                    break
+                if packet.pts is not None and packet.pts >= start_pts and not (duration and packet.pts >= end_pts):
+                    count += 1
+            return count
 
     def _open_private(self):
         """Open the video for a pass of its own: a BytesIO source is copied (encoded size), so passes can interleave."""

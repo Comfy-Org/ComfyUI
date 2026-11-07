@@ -302,6 +302,36 @@ def test_video_from_list_audio_cut_matches_a_partial_frame_trim(fixture_files):
     assert torch.equal(video.get_audio()["waveform"], expected.audio["waveform"])
 
 
+def test_frame_count_stops_reading_at_the_trim_end(fixture_files, monkeypatch):
+    demuxed = []
+    real_open = VideoFromFile._open_private
+
+    class CountingContainer:
+        def __init__(self, container):
+            self.container = container
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return self.container.__exit__(*exc)
+
+        def __getattr__(self, name):
+            return getattr(self.container, name)
+
+        def demux(self, *streams):
+            for packet in self.container.demux(*streams):
+                demuxed.append(packet.pts)
+                yield packet
+
+    monkeypatch.setattr(VideoFromFile, "_open_private", lambda self: CountingContainer(real_open(self)))
+    assert VideoFromFile(fixture_files["h264"])._count_frames() == 20
+    whole_file = len(demuxed)
+    demuxed.clear()
+    assert VideoFromFile(fixture_files["h264"], start_time=0.0, duration=0.1)._count_frames() == 3
+    assert len(demuxed) < whole_file / 2, f"a 3-frame window read {len(demuxed)} of {whole_file} packets"
+
+
 @pytest.mark.parametrize("name", ["full-range", "ffv1-alpha"])
 def test_video_from_list_audio_count_without_frame_metadata(fixture_files, name):
     long_audio = {"waveform": torch.rand(1, 2, 48000 * 10), "sample_rate": 48000}
