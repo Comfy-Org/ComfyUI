@@ -408,15 +408,6 @@ def test_get_components_internal_reads_the_container_it_is_given(fixture_files):
     assert torch.equal(from_other.images, VideoFromFile(fixture_files["full-range"]).get_components().images)
 
 
-def test_get_components_sizes_its_buffer_from_the_metadata(fixture_files, monkeypatch):
-    from comfy_api.latest._input_impl import video_types
-    sizes = []
-    real = video_types.FrameBuffer.__init__
-    monkeypatch.setattr(video_types.FrameBuffer, "__init__", lambda self, expected, **kw: sizes.append(expected) or real(self, expected, **kw))
-    assert VideoFromFile(fixture_files["h264"]).get_components().images.shape[0] == 20
-    assert sizes[0] == 20
-
-
 @pytest.mark.parametrize("name", ["h264-odd-width", "ffv1-alpha"])
 def test_uint8_chunks_repeat_exactly(fixture_files, name):
     video = VideoFromFile(fixture_files[name])

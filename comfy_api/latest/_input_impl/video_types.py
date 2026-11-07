@@ -15,9 +15,13 @@ import math
 import os
 import torch
 from .._util import VideoContainer, VideoCodec, VideoComponents, VideoChunk, normalize_crop_rect
-import comfy.system_memory
+import comfy.memory_management
 import comfy.utils
+import comfy_aimdo.host_buffer
+import comfy_aimdo.torch
+import ctypes
 import logging
+import psutil
 
 
 VIDEO_ENCODERS = {
@@ -133,110 +137,95 @@ def filter_hevc_packet(hevc_filter, packet):
     return hevc_filter.filter(packet)
 
 
-def _available_memory() -> int:
-    """Free memory as ComfyUI counts it: the host's, or a container's limit when that is lower."""
-    return comfy.system_memory.virtual_memory_available()
+class FrameHostBuffer(comfy_aimdo.host_buffer.HostBuffer):
+    def __del__(self):
+        if self.size:
+            self.truncate(0, do_unregister=False)
+        super().__del__()
 
 
-class FrameBuffer:
-    """Decoded frames written straight into one tensor sized up front from the expected frame count. Collecting a
-    list of frames and stacking it holds every frame twice at the end; this holds them once when the count is
-    right. Frames past the count wait in a list and are copied in at the end, so a short guess peaks at about
-    twice the frames, as stacking did. When the expected count would not fit in free memory (a truncated file whose
-    header still claims its full length, say), or the allocation fails, it collects a list and stacks it, as
-    before this buffer existed."""
+def reserve_host_buffer() -> FrameHostBuffer:
+    reservation = psutil.virtual_memory().total + psutil.swap_memory().total
+    hostbuf = FrameHostBuffer(0, 0, reservation, mark_cold=False)
+    hostbuf.extend(1, register=False)
+    return hostbuf
 
-    def __init__(self, expected: int, recount=None):
-        self.expected = max(1, expected)
-        self.recount = recount  # counts the frames from the file when the header's claim looks too big to trust
-        self.data: torch.Tensor | None = None
-        self.overflow: list[torch.Tensor] = []
-        self.listed: list[torch.Tensor] | None = None  # the list-and-stack fallback
+
+class HostFrames:
+    """Frames written into reserved address space, committed as they arrive so the buffer never moves or overallocates."""
+
+    def __init__(self):
+        self.hostbuf = reserve_host_buffer()
+        self.shape = None
         self.count = 0
 
-    def _start(self, frame: torch.Tensor) -> None:
-        frame_bytes = max(1, frame.numel() * frame.element_size())
-        if self.recount is not None and self.expected * frame_bytes > _available_memory() // 4:
-            # A big claim may come from a header that outlives a cut-short file: count the packets that are there.
-            self.expected = max(1, min(self.expected, self.recount() + 1))
-        if self.expected * frame_bytes > _available_memory():
-            self.listed = []
-            return
-        try:
-            self.data = torch.empty((self.expected, *frame.shape), dtype=frame.dtype)
-        except RuntimeError:  # the allocator refused it
-            self.listed = []
+    def append(self, frame: np.ndarray) -> None:
+        self.shape = self.shape or frame.shape
+        address = self.hostbuf.extend(frame.nbytes, reallocate=self.count == 0, register=False)
+        row = (ctypes.c_uint8 * frame.nbytes).from_address(address)
+        np.copyto(np.frombuffer(row, dtype=np.float32).reshape(self.shape), frame)
+        self.count += 1
 
-    def append(self, frame: torch.Tensor) -> None:
-        if self.data is None and self.listed is None:
-            self._start(frame)
-        if self.listed is not None:
-            self.listed.append(frame)
-        elif self.count < self.data.shape[0]:
-            row = self.data[self.count]
-            try:  # numpy copies without waking torch's thread pool for every frame
-                np.copyto(row.numpy(), frame.numpy())
-            except (TypeError, RuntimeError):  # a dtype numpy lacks (bfloat16)
-                row.copy_(frame)
-        else:
-            self.overflow.append(frame)
+    def tensor(self) -> torch.Tensor:
+        frames = comfy_aimdo.torch.hostbuf_to_tensor(self.hostbuf).view(torch.float32).view(self.count, *self.shape)
+        frames.untyped_storage()._comfy_hostbuf = self.hostbuf
+        return frames
+
+
+def host_frames() -> HostFrames | None:
+    if not comfy.memory_management.aimdo_enabled:
+        return None
+    try:
+        return HostFrames()
+    except RuntimeError:
+        logging.warning("Could not reserve a host buffer for video frames")
+        return None
+
+
+class FrameChunks:
+    """Without aimdo: frames in blocks of CHUNK, copied into one tensor at the end, each block freed once copied, so
+    the frames are held about once (plus a block) without knowing how many there will be. A video too big for memory
+    fails with an out-of-memory error, as stacking a list did."""
+
+    CHUNK = 32
+
+    def __init__(self):
+        self.blocks: list[np.ndarray | None] = []
+        self.count = 0
+
+    def append(self, frame: np.ndarray) -> None:
+        if self.count % self.CHUNK == 0:
+            self.blocks.append(np.empty((self.CHUNK, *frame.shape), dtype=frame.dtype))
+        self.blocks[-1][self.count % self.CHUNK] = frame
         self.count += 1
 
     def __len__(self) -> int:
         return self.count
 
     def tensor(self) -> torch.Tensor:
-        """The frames as one [N, ...] tensor; copied only if the guess was short or well over the count."""
-        if self.listed is not None:
-            frames, self.listed = self.listed, None
-            return torch.stack(frames)
-        assert self.data is not None
-        if self.overflow:
-            data, self.data = self.data, None
-            result = torch.empty((self.count, *data.shape[1:]), dtype=data.dtype)
-            result[: data.shape[0]] = data
-            del data
-            for i, frame in enumerate(self.overflow, start=result.shape[0] - len(self.overflow)):
-                result[i] = frame
-            self.overflow = []
-            return result
-        if self.count * 10 < self.data.shape[0] * 9:
-            try:
-                return self.data[: self.count].clone()
-            except RuntimeError:  # no room for the trimmed copy (the guess was far over): keep the view
-                pass
-        return self.data[: self.count]
+        first = self.blocks[0]
+        out = torch.from_numpy(np.empty((self.count, *first.shape[1:]), dtype=first.dtype))
+        rows = out.numpy()
+        for i, block in enumerate(self.blocks):
+            start = i * self.CHUNK
+            n = min(self.CHUNK, self.count - start)
+            rows[start:start + n] = block[:n]
+            self.blocks[i] = None
+        self.blocks = []
+        return out
 
 
-def _stream_seconds(container: InputContainer, stream) -> float:
-    """The video stream's own length from metadata, or 0 when unknown. The container's duration is the longest
-    stream's, so it is used only when the video is the container's sole stream: a soundtrack longer than the video
-    would otherwise size the frame buffer for the soundtrack."""
-    if stream.duration and stream.time_base:
-        return float(stream.duration * stream.time_base)
-    tag = (stream.metadata or {}).get("DURATION")  # Matroska and WebM keep each stream's length here
-    if tag:
-        try:
-            hours, minutes, seconds = tag.split(":")
-            return int(hours) * 3600 + int(minutes) * 60 + float(seconds)
-        except ValueError:
-            pass
-    if len(container.streams) == 1 and container.duration:
-        return float(container.duration) / av.time_base
-    return 0.0
+def frame_store() -> "HostFrames | FrameChunks":
+    """Where decoded frames go: aimdo's host buffer when aimdo is on, else blocks copied together at the end."""
+    return host_frames() or FrameChunks()
 
 
-def expected_frame_count(container: InputContainer, stream, start_time: float, duration: float) -> int:
-    """How many frames decoding the trim window should give, from the stream's metadata (a guess: 1 if unknown)."""
-    rate = float(stream.average_rate or 0)
-    total = int(stream.frames or 0)
-    if not total and rate:
-        total = math.ceil(_stream_seconds(container, stream) * rate)
-    if rate and start_time > 0:
-        total -= int(start_time * rate)
-    if rate and duration > 0:
-        total = min(total, math.ceil(duration * rate) + 1)
-    return max(total, 1)
+def frames_to_tensor(frames, store: "HostFrames | FrameChunks") -> torch.Tensor:
+    for frame in frames:
+        store.append(frame)
+    if isinstance(store, HostFrames):
+        return store.tensor() if store.count > 0 else torch.zeros(0, 0, 0, 3)
+    return store.tensor() if len(store) else torch.zeros(0, 0, 0, 3)
 
 
 def _accurate_8bit_flags():
@@ -637,23 +626,6 @@ class VideoFromFile(VideoInput):
         with av.open(self.__file, mode='r') as container:
             return container.format.name
 
-    def _count_packets(self, start_time: float, duration: float) -> int:
-        """The video packets in the trim window, read without decoding them: a file cut short has packets only for
-        the frames it really holds, whatever its header claims."""
-        source = io.BytesIO(self.__file.getvalue()) if isinstance(self.__file, io.BytesIO) else self.__file
-        with av.open(source, mode='r') as container:
-            stream = self._get_first_video_stream(container)
-            base = stream.start_time or 0
-            count = 0
-            for packet in container.demux(stream):
-                if packet.pts is None or packet.size == 0:
-                    continue
-                t = float((packet.pts - base) * stream.time_base) if stream.time_base else 0.0
-                if t + 1e-6 < start_time or (duration > 0 and t >= start_time + duration):
-                    continue
-                count += 1
-            return count
-
     def _seek_trim_window(self, container: InputContainer, video_stream) -> tuple[int, int]:
         start_time, duration = self.get_active_trim_window()
         start_pts = int(start_time / video_stream.time_base)
@@ -827,24 +799,21 @@ class VideoFromFile(VideoInput):
 
     def get_components_internal(self, container: InputContainer) -> VideoComponents:
         video_stream = self._get_first_video_stream(container)
-        start_time, duration = self.get_active_trim_window()
-        frames = FrameBuffer(expected_frame_count(container, video_stream, start_time, duration),
-                             recount=lambda: self._count_packets(start_time, duration))
-        alphas = None
+        frames = frame_store()
+        alphas = frame_store()
         audio = {}
-        for img in self._decode_trim_window(container, audio=audio):
-            if img.shape[-1] == 4:
-                if alphas is None:
-                    alphas = FrameBuffer(frames.expected)
-                frames.append(torch.from_numpy(img[..., :-1]))
-                alphas.append(torch.from_numpy(img[..., -1:]))
-            else:
-                frames.append(torch.from_numpy(img))
 
-        images = frames_as(frames.tensor(), torch.float32) if len(frames) > 0 else torch.zeros(0, 0, 0, 3)
-        del frames
-        if alphas is not None:
-            alphas = frames_as(alphas.tensor(), torch.float32) if len(alphas) > 0 else torch.zeros(0, 0, 0, 1)
+        def float_frames():
+            for img in self._decode_trim_window(container, audio=audio):
+                if img.dtype == np.uint8:
+                    img = np.divide(img, 255.0, dtype=np.float32)
+                if img.shape[-1] == 4:
+                    alphas.append(img[..., -1:].copy())
+                    img = img[..., :-1]
+                yield img
+
+        images = frames_to_tensor(float_frames(), frames)
+        alphas = alphas.tensor() if alphas.count > 0 else None
 
         # Get frame rate
         frame_rate = Fraction(video_stream.average_rate) if video_stream.average_rate else Fraction(1)
