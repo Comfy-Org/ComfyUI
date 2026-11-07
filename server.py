@@ -501,11 +501,15 @@ class PromptServer():
                             break
                         filename = f"{split[0]} ({i}){split[1]}"
                         filepath = os.path.join(full_output_folder, filename)
+                        if not folder_paths.is_within_directory(upload_dir, filepath):
+                            return web.Response(status=400), None, None
                         i += 1
 
                 if not image_is_duplicate:
                     if image_save_function is not None:
-                        image_save_function(image, post, filepath)
+                        save_resp = image_save_function(image, post, filepath)
+                        if isinstance(save_resp, web.Response):
+                            return save_resp, None, None
                     else:
                         with open(filepath, "wb") as f:
                             f.write(image.file.read())
