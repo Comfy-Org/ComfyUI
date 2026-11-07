@@ -153,6 +153,7 @@ attn_group.add_argument("--use-flash-attention", action="store_true", help="Use 
 attn_group.add_argument("--use-ck-attention", action="store_true", help="Use Comfy Kitchen attention.")
 
 parser.add_argument("--disable-xformers", action="store_true", help="Disable xformers.")
+parser.add_argument("--disable-mac-teacache", action="store_true", help="Disable automatic Flux TeaCache acceleration on Apple Silicon (MPS).")
 
 upcast = parser.add_mutually_exclusive_group()
 upcast.add_argument("--force-upcast-attention", action="store_true", help="Force enable attention upcasting, please report if it fixes black images.")

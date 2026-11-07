@@ -1625,6 +1625,35 @@ def mixed_precision_ops(quant_config={}, compute_dtype=torch.bfloat16, full_prec
                 )
                 quantize_input = QUANT_ALGOS.get(getattr(self, 'quant_format', None), {}).get("quantize_input", True)
 
+                # Apple Silicon: weight-only INT8 via comfy-kitchen metal backend
+                # (torch._weight_int8pack_mm) without materializing FP weights.
+                if (
+                    _use_quantized
+                    and not quantize_input
+                    and not input.requires_grad
+                    and getattr(input, "device", None) is not None
+                    and input.device.type == "mps"
+                    and getattr(self, "quant_format", None) == "int8_tensorwise"
+                    and isinstance(self.weight, QuantizedTensor)
+                ):
+                    try:
+                        with CastBiasWeightContext(
+                            self,
+                            input=None,
+                            dtype=self.weight.dtype,
+                            device=input.device,
+                            bias_dtype=input.dtype,
+                            offloadable=True,
+                            compute_dtype=compute_dtype,
+                            want_requant=True,
+                        ) as (weight, bias):
+                            if isinstance(weight, QuantizedTensor):
+                                out = weight.linear_input_act(input, bias)
+                                if out is not NotImplemented:
+                                    return out
+                    except Exception:
+                        pass
+
                 # Training path: quantized forward with compute_dtype backward via autograd function
                 if (input.requires_grad and _use_quantized and quantize_input):
                     with CastBiasWeightContext(
