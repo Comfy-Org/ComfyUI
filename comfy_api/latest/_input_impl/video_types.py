@@ -814,17 +814,20 @@ class VideoFromFile(VideoInput):
         alphas = frame_store()
         audio = {}
 
-        def float_frames():
-            for img in self._decode_trim_window(container, audio=audio):
-                if img.dtype == np.uint8:
-                    img = np.divide(img, 255.0, dtype=np.float32)
-                if img.shape[-1] == 4:
-                    alphas.append(img[..., -1:].copy())
-                    img = img[..., :-1]
-                yield img
+        def stored(img: np.ndarray, store) -> np.ndarray:
+            if img.dtype == np.uint8 and isinstance(store, HostFrames):
+                return np.divide(img, 255.0, dtype=np.float32)
+            return img
 
-        images = frames_to_tensor(float_frames(), frames)
-        alphas = alphas.tensor() if alphas.count > 0 else None
+        def decoded_frames():
+            for img in self._decode_trim_window(container, audio=audio):
+                if img.shape[-1] == 4:
+                    alphas.append(stored(img[..., -1:], alphas))
+                    img = img[..., :-1]
+                yield stored(img, frames)
+
+        images = frames_as(frames_to_tensor(decoded_frames(), frames), torch.float32)
+        alphas = frames_as(alphas.tensor(), torch.float32) if alphas.count > 0 else None
 
         # Get frame rate
         frame_rate = Fraction(video_stream.average_rate) if video_stream.average_rate else Fraction(1)

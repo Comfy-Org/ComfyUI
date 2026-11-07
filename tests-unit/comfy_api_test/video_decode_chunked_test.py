@@ -302,6 +302,17 @@ def test_video_from_list_audio_cut_matches_a_partial_frame_trim(fixture_files):
     assert torch.equal(video.get_audio()["waveform"], expected.audio["waveform"])
 
 
+@pytest.mark.parametrize("name", ["full-range", "png-alpha"])
+def test_eight_bit_frames_are_stored_as_eight_bit_without_aimdo(fixture_files, monkeypatch, name):
+    stored = []
+    real_append = video_types.FrameChunks.append
+    monkeypatch.setattr(video_types.comfy.memory_management, "aimdo_enabled", False)
+    monkeypatch.setattr(video_types.FrameChunks, "append", lambda self, frame: stored.append(frame.dtype) or real_append(self, frame))
+    components = VideoFromFile(fixture_files[name]).get_components()
+    assert stored and set(stored) == {np.dtype(np.uint8)}, "8-bit frames go into the blocks as 8-bit and convert once at the end"
+    assert components.images.dtype == torch.float32
+
+
 def test_frame_count_stops_reading_at_the_trim_end(fixture_files, monkeypatch):
     demuxed = []
     real_open = VideoFromFile._open_private
