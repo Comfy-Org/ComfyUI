@@ -210,3 +210,13 @@ def test_frame_chunks_cap_a_block_by_bytes(monkeypatch):
         chunks.append(frame)
     assert chunks.rows == 2 and len(chunks.blocks) == 4  # one frame never reserves CHUNK frames' worth
     assert torch.equal(chunks.tensor(), torch.from_numpy(np.stack(frames)))
+
+
+def test_frame_chunks_make_8_bit_frames_float_at_the_end():
+    frames = [np.full((2, 3, 3), i * 50, dtype=np.uint8) for i in range(6)]
+    chunks = FrameChunks()
+    for frame in frames:
+        chunks.append(frame)
+    assert chunks.blocks[0].dtype == np.uint8  # a quarter of the bytes while decoding
+    out = chunks.tensor()
+    assert out.dtype == torch.float32 and torch.equal(out, torch.from_numpy(np.stack(frames)).float() / 255.0)
