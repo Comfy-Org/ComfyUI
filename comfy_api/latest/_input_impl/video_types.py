@@ -15,6 +15,7 @@ import os
 import torch
 from .._util import VideoContainer, VideoCodec, VideoComponents, normalize_crop_rect
 import comfy.memory_management
+import comfy.system_memory
 import comfy.utils
 import comfy_aimdo.host_buffer
 import comfy_aimdo.torch
@@ -181,16 +182,119 @@ def host_frames() -> HostFrames | None:
         return None
 
 
-def frames_to_tensor(frames) -> torch.Tensor:
-    store = host_frames()
-    if store is not None:
-        for frame in frames:
-            store.append(frame)
+def _available_memory() -> int:
+    """Free memory as ComfyUI counts it: the host's, or a container's limit when that is lower."""
+    return comfy.system_memory.virtual_memory_available()
+
+
+class FrameBuffer:
+    """Without aimdo: decoded frames written straight into one tensor sized up front from the expected frame count.
+    Collecting a list of frames and stacking it holds every frame twice at the end; this holds them once when the
+    count is right. Frames past the count wait in a list and are copied in at the end, so a short guess peaks at
+    about twice the frames, as stacking did. When the expected count would not fit in free memory (a truncated file
+    whose header still claims its full length, say), or the allocation fails, it collects a list and stacks it."""
+
+    def __init__(self, expected: int, recount=None):
+        self.expected = max(1, expected)
+        self.recount = recount  # counts the frames from the file when the header's claim looks too big to trust
+        self.data: torch.Tensor | None = None
+        self.overflow: list[np.ndarray] = []
+        self.listed: list[np.ndarray] | None = None  # the list-and-stack fallback
+        self.count = 0
+
+    def _start(self, frame: np.ndarray) -> None:
+        frame_bytes = max(1, frame.nbytes)
+        if self.recount is not None and self.expected * frame_bytes > _available_memory() // 4:
+            # A big claim may come from a header that outlives a cut-short file: count the packets that are there.
+            self.expected = max(1, min(self.expected, self.recount() + 1))
+        if self.expected * frame_bytes > _available_memory():
+            self.listed = []
+            return
+        try:
+            self.data = torch.empty((self.expected, *frame.shape), dtype=torch.from_numpy(frame[:0]).dtype)
+        except RuntimeError:  # the allocator refused it
+            self.listed = []
+
+    def append(self, frame: np.ndarray) -> None:
+        if self.data is None and self.listed is None:
+            self._start(frame)
+        if self.listed is not None:
+            self.listed.append(frame)
+        elif self.count < self.data.shape[0]:
+            np.copyto(self.data[self.count].numpy(), frame)  # numpy: no torch thread pool woken per frame
+        else:
+            self.overflow.append(frame)
+        self.count += 1
+
+    def __len__(self) -> int:
+        return self.count
+
+    def tensor(self) -> torch.Tensor:
+        """The frames as one [N, ...] tensor; copied only if the guess was short or well over the count."""
+        if self.listed is not None:
+            frames, self.listed = self.listed, None
+            return torch.from_numpy(np.stack(frames))
+        assert self.data is not None
+        if self.overflow:
+            data, self.data = self.data, None
+            result = torch.empty((self.count, *data.shape[1:]), dtype=data.dtype)
+            result[: data.shape[0]] = data
+            del data
+            for i, frame in enumerate(self.overflow, start=result.shape[0] - len(self.overflow)):
+                np.copyto(result[i].numpy(), frame)
+            self.overflow = []
+            return result
+        if self.count * 10 < self.data.shape[0] * 9:
+            try:
+                return self.data[: self.count].clone()
+            except RuntimeError:  # no room for the trimmed copy (the guess was far over): keep the view
+                pass
+        return self.data[: self.count]
+
+
+def _stream_seconds(container: InputContainer, stream) -> float:
+    """The video stream's own length from metadata, or 0 when unknown. The container's duration is the longest
+    stream's, so it is used only when the video is the container's sole stream: a soundtrack longer than the video
+    would otherwise size the frame buffer for the soundtrack."""
+    if stream.duration and stream.time_base:
+        return float(stream.duration * stream.time_base)
+    tag = (stream.metadata or {}).get("DURATION")  # Matroska and WebM keep each stream's length here
+    if tag:
+        try:
+            hours, minutes, seconds = tag.split(":")
+            return int(hours) * 3600 + int(minutes) * 60 + float(seconds)
+        except ValueError:
+            pass
+    if len(container.streams) == 1 and container.duration:
+        return float(container.duration) / av.time_base
+    return 0.0
+
+
+def expected_frame_count(container: InputContainer, stream, start_time: float, duration: float) -> int:
+    """How many frames decoding the trim window should give, from the stream's metadata (a guess: 1 if unknown)."""
+    rate = float(stream.average_rate or 0)
+    total = int(stream.frames or 0)
+    if not total and rate:
+        total = math.ceil(_stream_seconds(container, stream) * rate)
+    if rate and start_time > 0:
+        total -= int(start_time * rate)
+    if rate and duration > 0:
+        total = min(total, math.ceil(duration * rate) + 1)
+    return max(total, 1)
+
+
+def frame_store(expected: int, recount=None) -> "HostFrames | FrameBuffer":
+    """Where decoded frames go: aimdo's host buffer when aimdo is on (it needs no frame count), else a FrameBuffer
+    sized from the expected count."""
+    return host_frames() or FrameBuffer(expected, recount)
+
+
+def frames_to_tensor(frames, store: "HostFrames | FrameBuffer") -> torch.Tensor:
+    for frame in frames:
+        store.append(frame)
+    if isinstance(store, HostFrames):
         return store.tensor() if store.count > 0 else torch.zeros(0, 0, 0, 3)
-    first = next(frames, None)
-    if first is None:
-        return torch.zeros(0, 0, 0, 3)
-    return torch.from_numpy(np.fromiter(itertools.chain([first], frames), np.dtype((first.dtype, first.shape))))
+    return store.tensor() if len(store) else torch.zeros(0, 0, 0, 3)
 
 
 def last_decodable_audio_stream(container: InputContainer):
@@ -719,20 +823,39 @@ class VideoFromFile(VideoInput):
                     else:
                         audio_frames.append(frame.to_ndarray())
 
+    def _count_packets(self, start_time: float, duration: float) -> int:
+        """The video packets in the trim window, read without decoding them: a file cut short has packets only for
+        the frames it really holds, whatever its header claims."""
+        source = io.BytesIO(self.__file.getvalue()) if isinstance(self.__file, io.BytesIO) else self.__file
+        with av.open(source, mode='r') as container:
+            stream = self._get_first_video_stream(container)
+            base = stream.start_time or 0
+            count = 0
+            for packet in container.demux(stream):
+                if packet.pts is None or packet.size == 0:
+                    continue
+                t = float((packet.pts - base) * stream.time_base) if stream.time_base else 0.0
+                if t + 1e-6 < start_time or (duration > 0 and t >= start_time + duration):
+                    continue
+                count += 1
+            return count
+
     def get_components_internal(self, container: InputContainer) -> VideoComponents:
         video_stream = self._get_first_video_stream(container)
         video_stream.thread_type = "AUTO"
-        _, duration = self.get_active_trim_window()
+        start_time, duration = self.get_active_trim_window()
         audio_stream = last_decodable_audio_stream(container)
         audio = None
         audio_frames = []
-        alphas = host_frames() or []
+        expected = expected_frame_count(container, video_stream, start_time, duration)
+        frames = frame_store(expected, recount=lambda: self._count_packets(start_time, duration))
+        alphas = frame_store(expected)
 
-        images = frames_to_tensor(self._decode_frames(container, video_stream, audio_stream, audio_frames, alphas))
+        images = frames_to_tensor(self._decode_frames(container, video_stream, audio_stream, audio_frames, alphas), frames)
         if isinstance(alphas, HostFrames):
             alphas = alphas.tensor() if alphas.count > 0 else None
         else:
-            alphas = torch.from_numpy(np.stack(alphas)) if alphas else None
+            alphas = alphas.tensor() if len(alphas) else None
 
         # Get frame rate
         frame_rate = Fraction(video_stream.average_rate) if video_stream.average_rate else Fraction(1)
