@@ -200,3 +200,13 @@ def test_frame_chunks_give_the_frames_in_order(n):
     out = chunks.tensor()
     assert out.dtype == torch.float32 and torch.equal(out, torch.from_numpy(np.stack(frames)))
     assert chunks.blocks == []  # each block let go once copied
+
+
+def test_frame_chunks_cap_a_block_by_bytes(monkeypatch):
+    frames = _frames(7, shape=(4, 4, 3))  # 192 bytes a frame
+    monkeypatch.setattr(FrameChunks, "BLOCK_BYTES", 2 * frames[0].nbytes)
+    chunks = FrameChunks()
+    for frame in frames:
+        chunks.append(frame)
+    assert chunks.rows == 2 and len(chunks.blocks) == 4  # one frame never reserves CHUNK frames' worth
+    assert torch.equal(chunks.tensor(), torch.from_numpy(np.stack(frames)))
