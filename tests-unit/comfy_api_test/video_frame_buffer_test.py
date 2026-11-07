@@ -1,7 +1,6 @@
 import os
 import subprocess
 import sys
-from types import SimpleNamespace
 
 import av
 import numpy as np
@@ -9,8 +8,7 @@ import pytest
 import torch
 
 from comfy_api.input_impl.video_types import VideoFromFile
-from comfy_api.latest._input_impl import video_types
-from comfy_api.latest._input_impl.video_types import FrameBuffer, _stream_seconds, expected_frame_count
+from comfy_api.latest._input_impl.video_types import FrameChunks
 
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 
@@ -185,153 +183,20 @@ def test_a_refused_reservation_falls_back_to_plain_arrays(tmp_path):
     _run_with_aimdo(REFUSED_RESERVATION_DECODE, path)
 
 
-# ---- without aimdo: FrameBuffer, sized from the expected frame count ------------------------------------------
+# ---- without aimdo: blocks of frames, copied into one tensor at the end ---------------------------------------
+
 
 def _frames(n, shape=(2, 3, 3)):
     return [np.full(shape, float(i), dtype=np.float32) for i in range(n)]
 
 
-def _stacked(frames):
-    return torch.from_numpy(np.stack(frames))
-
-
-def _filled(buffer, frames):
+@pytest.mark.parametrize("n", [1, FrameChunks.CHUNK, 2 * FrameChunks.CHUNK + 5])
+def test_frame_chunks_give_the_frames_in_order(n):
+    frames = _frames(n)
+    chunks = FrameChunks()
     for frame in frames:
-        buffer.append(frame)
-    return buffer
-
-
-def test_frame_buffer_grows_when_the_guess_is_short():
-    frames = _frames(7)
-    buffer = _filled(FrameBuffer(2), frames)
-    assert len(buffer) == 7
-    assert torch.equal(buffer.tensor(), _stacked(frames))
-
-
-def test_frame_buffer_short_guess_never_holds_more_than_the_frames_twice():
-    """Frames past the guess wait in a list: at the end the buffer, the overflow and the result coexist once."""
-    frames = _frames(10)
-    buffer = _filled(FrameBuffer(4), frames)
-    assert buffer.data.shape[0] == 4 and len(buffer.overflow) == 6
-    assert torch.equal(buffer.tensor(), _stacked(frames))
-
-
-def test_frame_buffer_drops_unused_room_when_the_guess_is_long():
-    result = _filled(FrameBuffer(100), _frames(5, (4, 4, 3))).tensor()
-    assert result.shape == (5, 4, 4, 3)
-    assert result.untyped_storage().nbytes() == result.numel() * result.element_size()
-
-
-def test_frame_buffer_keeps_a_close_guess_without_copying():
-    buffer = _filled(FrameBuffer(10), _frames(10, (2, 2)))
-    assert buffer.tensor().data_ptr() == buffer.data.data_ptr()
-
-
-def test_expected_frame_count_ignores_a_longer_soundtrack(tmp_path):
-    """Matroska and WebM video streams carry no frame count or duration; the container's duration is the longest
-    stream's, so a soundtrack longer than the video must not size the frame buffer."""
-    for suffix, video_codec, audio_codec in [(".mkv", "mpeg4", "aac"), (".webm", "libvpx-vp9", "libopus")]:
-        path = str(tmp_path / f"long-audio{suffix}")
-        with av.open(path, "w") as out:
-            v = out.add_stream(video_codec, rate=24)
-            v.width, v.height, v.pix_fmt = 64, 48, "yuv420p"
-            a = out.add_stream(audio_codec, rate=48000)
-            a.layout = "stereo"
-            for i in range(48):
-                frame = av.VideoFrame.from_ndarray(np.full((48, 64, 3), i * 5, np.uint8), format="rgb24")
-                frame.pts = i
-                for p in v.encode(frame):
-                    out.mux(p)
-            for p in v.encode():
-                out.mux(p)
-            for off in range(0, 48000 * 10, 960):
-                af = av.AudioFrame.from_ndarray(np.zeros((2, 960), np.float32), format="fltp", layout="stereo")
-                af.sample_rate, af.pts = 48000, off
-                for p in a.encode(af):
-                    out.mux(p)
-            for p in a.encode():
-                out.mux(p)
-        with av.open(path) as container:
-            guess = expected_frame_count(container, container.streams.video[0], 0.0, 0.0)
-        assert 40 <= guess <= 60, (suffix, guess)
-
-
-def test_stream_seconds_uses_the_container_duration_only_for_a_lone_stream():
-    video = SimpleNamespace(duration=None, time_base=None, metadata={})
-    ten_minutes = 600 * av.time_base
-    assert _stream_seconds(SimpleNamespace(streams=[video, object()], duration=ten_minutes), video) == 0.0
-    assert _stream_seconds(SimpleNamespace(streams=[video], duration=ten_minutes), video) == 600.0
-
-
-def test_overstated_metadata_falls_back_to_a_list(monkeypatch):
-    """A header claiming more frames than free memory holds: the frames are collected in a list and stacked, as
-    before the buffer, instead of one huge allocation."""
-    frames = _frames(5, (4, 4, 3))
-    monkeypatch.setattr(video_types, "_available_memory", lambda: frames[0].nbytes * 3)
-    buffer = _filled(FrameBuffer(10**12), frames)
-    assert buffer.data is None and buffer.listed is not None
-    assert torch.equal(buffer.tensor(), _stacked(frames))
-
-
-def test_a_refused_allocation_falls_back_to_a_list(monkeypatch):
-    frames = _frames(4, (4, 4, 3))
-
-    def refuse(*args, **kwargs):
-        raise RuntimeError("DefaultCPUAllocator: can't allocate")
-
-    monkeypatch.setattr(video_types.torch, "empty", refuse)
-    buffer = _filled(FrameBuffer(4), frames)
-    monkeypatch.undo()
-    assert buffer.data is None and torch.equal(buffer.tensor(), _stacked(frames))
-
-
-def test_a_refused_trim_copy_keeps_the_view(monkeypatch):
-    """A guess far over the count normally ends in a trimmed copy; if memory refuses that copy, the frames come back
-    as a view of the buffer instead of failing."""
-    frames = _frames(3, (4, 4, 3))
-    buffer = _filled(FrameBuffer(100), frames)
-
-    def refuse(self):
-        raise RuntimeError("DefaultCPUAllocator: can't allocate")
-
-    monkeypatch.setattr(torch.Tensor, "clone", refuse)
-    out = buffer.tensor()
-    monkeypatch.undo()
-    assert torch.equal(out, _stacked(frames)) and out.shape[0] == 3
-
-
-def test_a_big_claim_is_recounted_from_the_file(monkeypatch):
-    """When the header's count would take over a quarter of free memory, the buffer asks for a count from the file
-    and sizes itself from that; a modest claim never pays for the extra read."""
-    frames = _frames(5, (4, 4, 3))
-    monkeypatch.setattr(video_types, "_available_memory", lambda: frames[0].nbytes * 100)
-    asked = []
-    big = _filled(FrameBuffer(10**6, recount=lambda: asked.append(1) or 5), frames)
-    assert asked == [1] and big.data is not None and big.data.shape[0] == 6
-    assert torch.equal(big.tensor(), _stacked(frames))
-    small = FrameBuffer(5, recount=lambda: asked.append(2) or 5)
-    small.append(frames[0])
-    assert asked == [1]
-
-
-def test_without_aimdo_a_truncated_faststart_mp4_with_little_free_memory_decodes_what_it_has(tmp_path, monkeypatch):
-    """A faststart MP4 cut short keeps a header that counts every frame, but only the start decodes. With free memory
-    too small for the header's count, the frames go through the list; they are the frames PyAV decodes."""
-    full = tmp_path / "full.mp4"
-    with av.open(str(full), "w", options={"movflags": "faststart"}) as out:
-        v = out.add_stream("mpeg4", rate=24)
-        v.width, v.height, v.pix_fmt = 64, 48, "yuv420p"
-        for i in range(300):
-            img = np.full((48, 64, 3), i % 256, dtype=np.uint8)
-            for packet in v.encode(av.VideoFrame.from_ndarray(img, format="rgb24")):
-                out.mux(packet)
-        for packet in v.encode():
-            out.mux(packet)
-    data = full.read_bytes()
-    cut = tmp_path / "cut.mp4"
-    cut.write_bytes(data[: len(data) // 5])
-    monkeypatch.setattr(video_types, "_available_memory", lambda: 48 * 64 * 3 * 4 * 100)
-    images = VideoFromFile(str(cut)).get_components().images
-    counted = VideoFromFile(str(cut))._count_packets(0.0, 0.0)
-    assert 0 < images.shape[0] < 300 and abs(counted - images.shape[0]) <= 1
-    assert VideoFromFile(str(full))._count_packets(0.0, 0.0) == 300
+        chunks.append(frame)
+    assert len(chunks) == n
+    out = chunks.tensor()
+    assert out.dtype == torch.float32 and torch.equal(out, torch.from_numpy(np.stack(frames)))
+    assert chunks.blocks == []  # each block let go once copied
