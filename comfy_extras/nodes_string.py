@@ -68,7 +68,7 @@ class StringConcatenateMulti(io.ComfyNode):
             search_aliases=["concatenate", "text concat", "join text", "merge text", "combine strings", "string concat", "append text", "combine text", "multiple text"],
             display_name="Concatenate Multiple Texts",
             category="text",
-            description="Join any number of texts with a delimiter. Add one row per text.",
+            description="Join 2 to 20 texts with a delimiter. Add one row per text.",
             inputs=[
                 _DynamicGroup.Input(
                     "texts",

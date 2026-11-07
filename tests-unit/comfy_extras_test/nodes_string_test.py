@@ -20,6 +20,13 @@ def test_joins_rows_in_order(values, delimiter, expected):
     assert StringConcatenateMulti.execute(_rows(values), delimiter).result == (expected,)
 
 
+@pytest.mark.parametrize('values', [{}, {'texts.0.text': 'a'}])
+def test_rejects_fewer_than_two_rows(values):
+    schema = create_input_dict_v1(StringConcatenateMulti.define_schema().inputs)
+    with pytest.raises(ValueError, match='expected between 2 and 20'):
+        get_finalized_class_inputs(schema, values)
+
+
 def test_rejects_rows_past_the_limit():
     schema = create_input_dict_v1(StringConcatenateMulti.define_schema().inputs)
     with pytest.raises(ValueError, match='exceeds the index limit of 19'):
