@@ -1,7 +1,11 @@
 from __future__ import annotations
 
 import ast
+import asyncio
 import ipaddress
+import logging
+import os
+import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -75,3 +79,94 @@ def test_warning_when_any_listen_address_is_not_loopback():
     warn()
 
     assert len(warnings) == 1
+
+
+def test_no_warning_on_uppercase_localhost():
+    warn, warnings = _load_warn_if_manager_exposed(_args(listen="LOCALHOST,LocalHost"))
+
+    warn()
+
+    assert warnings == []
+
+
+def test_warning_when_localhost_mixed_with_non_loopback():
+    warn, warnings = _load_warn_if_manager_exposed(_args(listen="LOCALHOST,0.0.0.0"))
+
+    warn()
+
+    assert len(warnings) == 1
+
+
+def _load_start_comfyui(args):
+    main_path = Path(__file__).resolve().parents[1] / "main.py"
+    module = ast.parse(main_path.read_text(), filename=str(main_path))
+    functions = [node for node in module.body if isinstance(node, ast.FunctionDef) and node.name in ("warn_if_manager_exposed", "start_comfyui")]
+    compiled = compile(ast.Module(body=functions, type_ignores=[]), filename=str(main_path), mode="exec")
+    warnings: list[str] = []
+    prompt_server = SimpleNamespace(prompt_queue=None, add_routes=lambda: None)
+    namespace = {
+        "args": args,
+        "app": SimpleNamespace(logger=SimpleNamespace(log_startup_warning=warnings.append)),
+        "ipaddress": ipaddress,
+        "os": os,
+        "logging": logging,
+        "asyncio": asyncio,
+        "folder_paths": SimpleNamespace(set_temp_directory=lambda path: None, get_temp_directory=lambda: tempfile.gettempdir()),
+        "dependencies_available": lambda: True,
+        "missing_dependencies": lambda: [],
+        "stop_startup": lambda *a, **k: None,
+        "get_missing_requirements_message": lambda: "",
+        "WITHOUT_ASSETS": "",
+        "default_asset_manager": lambda: SimpleNamespace(enabled=True),
+        "feature_flags": SimpleNamespace(set_server_feature=lambda *a, **k: None),
+        "cleanup_temp_filesystem": lambda: None,
+        "server": SimpleNamespace(PromptServer=lambda loop, asset_manager: prompt_server),
+        "comfyui_manager": SimpleNamespace(start=lambda: None),
+        "hook_breaker_ac10a0": SimpleNamespace(save_functions=lambda: None, restore_functions=lambda: None),
+        "nodes": SimpleNamespace(init_extra_nodes=lambda **k: None),
+        "governance": SimpleNamespace(apply_disabled_nodes=lambda disabled: None),
+        "comfy": SimpleNamespace(model_management=SimpleNamespace(set_cudnn_benchmark=lambda: None)),
+        "cuda_malloc_warning": lambda: None,
+        "setup_database": lambda asset_manager: None,
+        "hijack_progress": lambda server: None,
+        "prompt_worker": lambda *a, **k: None,
+        "threading": SimpleNamespace(Thread=lambda *a, **k: SimpleNamespace(start=lambda: None)),
+    }
+    exec(compiled, namespace)  # noqa: S102 - trusted AST extracted from main.py itself, not external input
+    return namespace["start_comfyui"], warnings
+
+
+def _startup_args(**overrides):
+    values = {
+        "enable_manager": True,
+        "disable_manager_ui": False,
+        "listen": "0.0.0.0",
+        "temp_directory": None,
+        "disable_assets": True,
+        "disable_all_custom_nodes": False,
+        "whitelist_custom_nodes": [],
+        "disable_partner_nodes": False,
+        "disabled_nodes_config": None,
+        "quick_test_for_ci": False,
+        "auto_launch": False,
+        "enable_agent": False,
+    }
+    values.update(overrides)
+    return SimpleNamespace(**values)
+
+
+def test_start_comfyui_warns_when_manager_exposed():
+    start, warnings = _load_start_comfyui(_startup_args())
+
+    start(SimpleNamespace(run_until_complete=lambda value: None))
+
+    assert len(warnings) == 1
+    assert "ComfyUI-Manager" in warnings[0]
+
+
+def test_start_comfyui_no_warning_on_loopback():
+    start, warnings = _load_start_comfyui(_startup_args(listen="127.0.0.1"))
+
+    start(SimpleNamespace(run_until_complete=lambda value: None))
+
+    assert warnings == []

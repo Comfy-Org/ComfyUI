@@ -582,11 +582,12 @@ ________________________________________________________________________
 
 
 def warn_if_manager_exposed():
+    """Warn when the unauthenticated manager API is reachable from other machines."""
     if not args.enable_manager or args.disable_manager_ui:
         return
     for address in args.listen.split(","):
         address = address.strip()
-        if address == "localhost":
+        if address.lower() == "localhost":
             continue
         try:
             if ipaddress.ip_address(address).is_loopback:
