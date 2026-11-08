@@ -180,10 +180,15 @@ def cast_modules_with_vbar(comfy_modules, dtype, device, bias_dtype, non_blockin
         cast_buffer_offset += buffer_size
         return buffer
 
+    comfy_modules_set = set(comfy_modules)
     group_faults = {}
     dropped_groups = []
     for s in comfy_modules:
         group = s._combined_linear
+        if group is not None and group._v_weight is not None and not all(m in comfy_modules_set for m in group.linears):
+            group._v_weight = None
+            for m in group.linears:
+                m._v_signature = None
         if group is None or group._v_weight is None:
             signature = comfy_aimdo.model_vbar.vbar_fault(s._v)
             resident = comfy_aimdo.model_vbar.vbar_signature_compare(signature, s._v_signature)
@@ -1034,6 +1039,7 @@ if CUBLAS_IS_AVAILABLE:
 from . import quant_ops
 from .quant_ops import (
     QuantizedTensor,
+    QuantizedLayout,
     QUANT_ALGOS,
     TensorCoreFP8Layout,
     get_layout_class,
@@ -1129,6 +1135,7 @@ class CombinedLinear:
         for s in self.linears:
             # FIXME: add bias support if ever needed
             if (not isinstance(s, MixedPrecisionOp) or not isinstance(s._v_weight, QuantizedTensor)
+                    or s._v_weight.layout_cls.linear_input_act.__func__ is QuantizedLayout.linear_input_act.__func__
                     or s._full_precision_mm or s.comfy_force_forward or s.bias is not None):
                 return
             weights.append(s._v_weight)
@@ -1148,7 +1155,7 @@ class CombinedLinear:
     def linear_input_act(self, x, input_act, act_weight=None, act_eps=0.0,
                          residual=None, residual_scale=None):
         run_every_op()
-        if self._v_weight is None:
+        if self._v_weight is None or (hasattr(self.linears[0], "_v") and not all(hasattr(s, "_prefetch") for s in self.linears)):
             return NotImplemented
         if self._full_precision_mm:
             x = _eager_input_act(x, input_act, act_weight, act_eps)
