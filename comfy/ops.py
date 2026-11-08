@@ -185,7 +185,10 @@ def cast_modules_with_vbar(comfy_modules, dtype, device, bias_dtype, non_blockin
     dropped_groups = []
     for s in comfy_modules:
         group = s._combined_linear
-        if group is not None and group._v_weight is not None and not all(m in comfy_modules_set for m in group.linears):
+        if group is not None and group._v_weight is not None and (
+            not all(m in comfy_modules_set for m in group.linears)
+            or any(m.comfy_force_forward for m in group.linears)
+        ):
             group._v_weight = None
             for m in group.linears:
                 m._v_signature = None
@@ -315,6 +318,18 @@ def cast_modules_with_vbar(comfy_modules, dtype, device, bias_dtype, non_blockin
 def resolve_cast_module_with_vbar(s, dtype, device, bias_dtype, compute_dtype, want_requant, return_weights=True):
 
     prefetch = getattr(s, "_prefetch", None)
+    if prefetch["resident"] and s._v_weight is None and getattr(s, "_combined_linear", None) is not None:
+        group = s._combined_linear
+        group._v_weight = None
+        for m in group.linears:
+            m._v_signature = None
+            if hasattr(m, "_prefetch"):
+                if m._prefetch["signature"] is not None:
+                    comfy_aimdo.model_vbar.vbar_unpin(m._v)
+                delattr(m, "_prefetch")
+        offload_stream = cast_modules_with_vbar(group.linears, dtype, device, bias_dtype, False)
+        comfy.model_management.sync_stream(device, offload_stream)
+        prefetch = s._prefetch
 
     if prefetch["resident"]:
         weight = s._v_weight
@@ -1156,9 +1171,10 @@ class CombinedLinear:
     def linear_input_act(self, x, input_act, act_weight=None, act_eps=0.0,
                          residual=None, residual_scale=None):
         run_every_op()
-        if self._v_weight is None or (hasattr(self.linears[0], "_v") and not all(hasattr(s, "_prefetch") for s in self.linears)):
+        if (self._v_weight is None or any(s.comfy_force_forward for s in self.linears)
+                or (hasattr(self.linears[0], "_v") and not all(hasattr(s, "_prefetch") for s in self.linears))):
             return NotImplemented
-        if not self._full_precision_mm and not any(s.comfy_force_forward for s in self.linears):
+        if not self._full_precision_mm:
             out = _try_quantized_linear_input_act(x, self._v_weight, None, input_act, act_weight, act_eps,
                                                   residual, residual_scale)
             if out is not NotImplemented:

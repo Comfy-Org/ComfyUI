@@ -102,16 +102,13 @@ def test_combined_linear_prepare_declines_layouts_without_linear_input_act(layou
     ("TensorWiseINT8Layout", {"per_channel": True, "convrot": True}),
     ("AsymW4A8Int8Layout", {}),
 ])
-@pytest.mark.parametrize("force_forward", [False, True])
-def test_combined_linear_falls_back_to_quantized_linear_when_fusion_declines(monkeypatch, layout, kwargs, force_forward):
+def test_combined_linear_falls_back_to_quantized_linear_when_fusion_declines(monkeypatch, layout, kwargs):
     torch.manual_seed(7)
     ops = comfy.ops.mixed_precision_ops(full_precision_mm=False)
     linears = (ops.Linear(512, 128, bias=False), ops.Linear(512, 256, bias=False))
     combined = comfy.ops.CombinedLinear(linears)
     _, views, gathered = _gathered(layout, (128, 256), 512, **kwargs)
     combined._v_weight = comfy.memory_management.cat_gathered(views, gathered)
-    for s in linears:
-        s.comfy_force_forward = force_forward
     calls = []
 
     def decline(*args):
@@ -120,10 +117,18 @@ def test_combined_linear_falls_back_to_quantized_linear_when_fusion_declines(mon
 
     monkeypatch.setattr(comfy.ops, "_try_quantized_linear_input_act", decline)
     x = torch.randn(3, 512, dtype=torch.bfloat16)
-    out = combined.forward(x)
-    assert len(calls) == (0 if force_forward else 1)
+    residual = torch.randn(3, 384, dtype=torch.bfloat16)
+    residual_scale = torch.tensor(0.5, dtype=torch.bfloat16)
+    out = combined.linear_input_act(x, "gelu_tanh", residual=residual, residual_scale=residual_scale)
+    assert len(calls) == 1
     assert out is not NotImplemented
-    assert torch.equal(out, torch.nn.functional.linear(x, combined._v_weight.to(dtype=x.dtype)))
+    expected_act = torch.nn.functional.gelu(x, approximate="tanh")
+    expected_mm = torch.nn.functional.linear(expected_act, combined._v_weight.to(dtype=x.dtype))
+    assert torch.equal(out, torch.addcmul(residual, expected_mm, residual_scale))
+
+    linears[0].comfy_force_forward = True
+    assert combined.linear_input_act(x, "gelu_tanh", residual=residual, residual_scale=residual_scale) is NotImplemented
+    assert len(calls) == 1
 
 
 def test_combined_linear_declines_when_vbar_members_are_not_prefetched():
