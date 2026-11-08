@@ -1,4 +1,5 @@
 import os
+import shutil
 import time
 
 import pytest
@@ -94,8 +95,7 @@ def test_missing_or_broken_file_is_a_miss(cache_dir):
 
 
 def free_bytes(path):
-    st = os.statvfs(path)
-    return st.f_bavail * st.f_frsize
+    return shutil.disk_usage(path).free
 
 
 def test_restored_states_do_not_hold_deleted_spill_files(cache_dir, monkeypatch):
@@ -107,9 +107,9 @@ def test_restored_states_do_not_hold_deleted_spill_files(cache_dir, monkeypatch)
         cache._write(path, {"t": torch.ones(16 * MB, dtype=torch.uint8), "ckpt.5.0.conv": torch.ones(4, dtype=torch.uint8),
                             "ckpt.5.0.rec": torch.ones(4, dtype=torch.uint8)}, {"key": "k", "ids": [1, 2]})
         tensors, checkpoints, _ = cache._read(path)
-        cache._remove(path)  # as _take does, before the state is built
         restored.append((cache._padded(tensors, {"t": torch.empty(16 * MB, dtype=torch.uint8)}), checkpoints))
         del tensors
+        cache._remove(path)
     assert all(state["t"].sum() == 16 * MB for state, _ in restored)
     assert free_before - free_bytes(cache_dir) < 160 * MB, "deleted spill files' space is freed while their states live"
     if os.path.exists("/proc/self/maps"):
@@ -125,3 +125,33 @@ def test_file_deleted_after_a_complete_read_is_still_a_hit(cache_dir, monkeypatc
         raise FileNotFoundError(p)
     monkeypatch.setattr(cache.os, "utime", gone)  # another server deleted it once the read was done
     assert cache._read(path) is not None
+
+
+def mapped(path):
+    with open("/proc/self/maps") as f:
+        return [line for line in f if path in line]
+
+
+@pytest.mark.skipif(not os.path.exists("/proc/self/maps"), reason="needs /proc")
+def test_restoring_a_spill_deletes_its_file_after_the_views_are_gone(cache_dir, monkeypatch):
+    monkeypatch.setattr(cache, "DISK_BUDGET", 1000 * 2**40)
+    path = os.path.join(cache.CACHE_DIR, "spill-a.safetensors")
+    cache._write(path, {"t": torch.zeros(MB, dtype=torch.uint8), "ckpt.2.0.conv": torch.zeros(4), "ckpt.2.0.rec": torch.zeros(4)},
+                 {"key": "k", "ids": [1, 2]})
+    entry = cache._Entry("k", None, 64)
+    entry.file, entry.ids, entry.checkpoints = path, [1, 2], {2: {}}
+    cache._entries.append(entry)
+    monkeypatch.setattr(cache, "_load", lambda model, cap, device, dtype, tensors: (object(), object()))
+    monkeypatch.setattr(cache, "_restore_linear", lambda *a: None)
+    monkeypatch.setattr(cache, "_set_index", lambda *a: None)
+    remove = cache._remove
+    at_delete = []
+
+    def checked_remove(p):
+        at_delete.append(mapped(p))
+        remove(p)
+    monkeypatch.setattr(cache, "_remove", checked_remove)
+    taken, _, n = cache._take(None, "k", [1, 2] + [3] * (cache.MIN_SUFFIX + 1), 4, "cpu", None)
+    assert taken is entry and n == 2
+    assert at_delete == [[]], "Windows doesn't free a file deleted while a view of it lives"
+    assert not os.path.exists(path)

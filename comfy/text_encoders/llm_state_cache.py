@@ -266,8 +266,8 @@ def _trim_disk(keep=None, reserve=0):
 
 def _read(path):
     """(tensors, checkpoints, metadata) from a cache file, or None if it is gone or unreadable. The tensors view the
-    file's mapping, which keeps the file's space in use even once deleted, so _padded copies them; the checkpoints,
-    kept as they are, are copies."""
+    file's mapping, so drop them before deleting the file, and _padded copies them; the checkpoints, kept as they are,
+    are copies."""
     try:
         with safetensors.safe_open(path, "pt") as f:
             meta = json.loads(f.metadata()["llm_state_cache"])
@@ -357,16 +357,18 @@ def _take(model, key, ids, need, device, dtype):
     if entry is not None:
         _entries.remove(entry)
         if entry.state is None:
-            loaded = _read(entry.file)
-            _remove(entry.file)
-            entry.file = None
+            spill, entry.file = entry.file, None
+            loaded = _read(spill)
             if loaded is None:  # deleted past the disk budget, by this or another server
+                _remove(spill)
                 entry, n = None, 0
     if entry is not None:
         if entry.state is None:
             tensors, cps, _ = loaded
             cap = max(_capacity(need), entry.capacity)
             entry.state, kvm = _load(model, cap, device, dtype, tensors)
+            del tensors, loaded  # Windows doesn't free a file deleted while a view of its mapping lives
+            _remove(spill)
             entry.capacity = cap
             entry.checkpoints = {p: cps[p] for p in cps if p in entry.checkpoints}
             stats["restore"] = "from-disk"
