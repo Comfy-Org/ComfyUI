@@ -22,6 +22,7 @@ import logging
 from enum import Enum
 from comfy.cli_args import args, PerformanceFeature
 import threading
+import subprocess
 import torch
 import sys
 import platform
@@ -526,10 +527,40 @@ try:
                 logging.warning("Could not run flash attention, disabling it: {}".format(e))
                 return False
 
+        AOTRITON_PROBE_CHILD_ENV = 'COMFYUI_AOTRITON_PROBE'
+
+        def aotriton_supported_isolated():
+            """aotriton_supported() in a throwaway process, answered to this one.
+
+            The probe confirms the aotriton kernel images by launching one attention.
+            Dispatching a kernel in a long lived process permanently arms the ROCr
+            AsyncEventsLoop busy spin on some gfx11 gpus, which burns a full cpu core
+            for the rest of the process (ComfyUI#16339). An idle server that never
+            loads a model should not pay for it, so the launch happens in a child that
+            exits right after answering.
+            """
+            if os.getenv(AOTRITON_PROBE_CHILD_ENV) == '1':  # we are the probe child
+                return aotriton_supported()
+
+            repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            code = ("import os, sys; os.environ[{}] = '1'; sys.path.insert(0, {!r});"
+                    "from comfy.model_management import aotriton_supported;"
+                    "print('AOTRITON ' + ('1' if aotriton_supported() else '0'))").format(repr(AOTRITON_PROBE_CHILD_ENV), repo_root)
+            try:
+                probe = subprocess.run([sys.executable, '-c', code], capture_output=True, text=True, timeout=120)
+            except Exception as e:
+                logging.warning("Could not run the flash attention probe process, disabling it: {}".format(e))
+                return False
+            if 'AOTRITON 1' not in probe.stdout:
+                if probe.returncode != 0:
+                    logging.warning("Flash attention probe process exited with {}, disabling it".format(probe.returncode))
+                return False
+            return True
+
         logging.info("AMD arch: {}".format(arch))
         logging.info("ROCm version: {}".format(rocm_version))
         if args.use_split_cross_attention == False and args.use_quad_cross_attention == False:
-            if aotriton_supported():  # AMD efficient attention implementation depends on aotriton.
+            if aotriton_supported_isolated():  # AMD efficient attention implementation depends on aotriton.
                 if torch_version_numeric >= (2, 7):  # works on 2.6 but doesn't actually seem to improve much
                     if any((a in arch) for a in ["gfx90a", "gfx942", "gfx950", "gfx1100", "gfx1101", "gfx1150", "gfx1151", "gfx1170", "gfx1171"]):  # TODO: more arches, TODO: gfx950
                         ENABLE_PYTORCH_ATTENTION = True
