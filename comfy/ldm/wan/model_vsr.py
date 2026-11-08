@@ -133,7 +133,7 @@ class RelayVSRWanModel(WanModel):
         starts = range(0, frames, chunk)
         # the sampler's bars only count the one step
         progress = comfy.utils.ProgressBar(len(starts) * len(self.blocks))
-        with comfy.utils.model_trange(len(starts) * len(self.blocks), desc="RelayVSR", unit="block") as pbar:
+        with comfy.utils.model_trange(len(starts) * len(self.blocks), desc="RelayVSR", unit="block", position=0) as pbar:
             for start in starts:
                 end = min(start + chunk, frames)
                 # only a following chunk reads the cache
@@ -350,7 +350,7 @@ class RelayFlash(nn.Module):
         freqs, freqs_past = self.grid_rope(0, height, width, device), self.grid_rope(-1, height, width, device)
         pbar = comfy.utils.ProgressBar(frames)
         # finished frames go to the output without the GPU waiting on each copy
-        with comfy.model_management.HostWriter(device, out, (b, 3, *out.shape[-2:])) as writer, comfy.utils.model_trange(frames, desc="RelayVSR Flash decode", unit="frame") as console:
+        with comfy.model_management.HostWriter(device, out, (b, 3, *out.shape[-2:])) as writer, comfy.utils.model_trange(frames, desc="RelayVSR Flash decode", unit="frame", position=0) as console:
             start = self.prepare_condition(x[:, :, 0], freqs)
             for window, (first, last) in enumerate(zip(keyframes, keyframes[1:] or keyframes)):
                 comfy.model_management.throw_exception_if_processing_interrupted()
