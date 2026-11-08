@@ -966,9 +966,10 @@ class Qwen35(BaseLlama, BaseGenerate, torch.nn.Module):
         h_buf.copy_(x[:, -1:, :])
         del x, lg0
         if hasattr(self.model.embed_tokens, "_v"):
-            vbar = self.model.embed_tokens._v[0]
+            # prefill's transients can evict body pages and lower the VBAR watermarks: let the decode fault them back
             comfy.model_management.reset_cast_buffers()
-            vbar.set_watermark(vbar.max_size)
+            for vbar in {m._v[0] for m in self.model.modules() if hasattr(m, "_v")}:
+                vbar.set_watermark(vbar.max_size)
         ids = [nt_buf[0].item()]
         if penalized:
             pen_mask.index_fill_(0, nt_buf.reshape(-1), True)
