@@ -19,6 +19,7 @@ def test_relay_vsr_reports_progress_without_writing_a_nested_terminal_bar(class_
     calls = [node for node in ast.walk(method) if isinstance(node, ast.Call)]
 
     assert not any(isinstance(call.func, ast.Attribute) and call.func.attr == "model_trange" for call in calls)
+    assert not any(isinstance(call.func, ast.Name) and call.func.id == "model_trange" for call in calls)
     assert any(isinstance(call.func, ast.Attribute) and call.func.attr == "ProgressBar" for call in calls)
     assert any(isinstance(call.func, ast.Attribute) and isinstance(call.func.value, ast.Name)
                and call.func.value.id == progress_name and call.func.attr == "update" for call in calls)
