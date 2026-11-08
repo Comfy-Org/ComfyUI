@@ -122,8 +122,8 @@ SEEDANCE_MODELS = {
 }
 
 SEEDANCE_MODEL_TOOLTIP = (
-    "Seedance 2.5 for the newest model, videos up to 30 seconds and mp4/mov output; "
-    "Seedance 2.5 Draft for a quick 480p preview whose draft_task_id renders the 1080p final "
+    "Seedance 2.5 for the newest model, videos up to 30 seconds, 4k for enterprise accounts and mp4/mov output; "
+    "Seedance 2.5 Draft for a quick 480p preview whose draft_task_id renders the 1080p or 4k final "
     "in the Seedance 2.5 Draft to Final Video node; "
     "Seedance 2.0 for maximum quality and 4k; Fast for speed optimization; "
     "Mini for the fastest, lowest-cost generation."
@@ -2136,9 +2136,11 @@ def _seedance25_text_inputs(
         ),
         IO.Combo.Input(
             "resolution",
-            options=["480p"] if draft else ["480p", "720p", "1080p"],
+            options=["480p"] if draft else ["480p", "720p", "1080p", "4k"],
             default="480p" if draft else "720p",
-            tooltip="Resolution of the output video.",
+            tooltip="Resolution of the output video."
+            if draft
+            else "Resolution of the output video. 4k is available to enterprise accounts only.",
         ),
         *(
             [
@@ -2319,14 +2321,15 @@ _SEEDANCE2_PRICE_EXPR_TEMPLATE = """
     $contains($m, "2.5") ? (
       $is480 := $res = "480p";
       $is1080 := $res = "1080p";
-      $perFrame := $ratio = "1:1"  ? ($is480 ? 400      : $is1080 ? 2025      : 900) :
-                   $ratio = "4:3"  ? ($is480 ? 411.25   : $is1080 ? 2028      : 905.6719) :
-                   $ratio = "3:4"  ? ($is480 ? 411.25   : $is1080 ? 2028      : 905.6719) :
-                   $ratio = "21:9" ? ($is480 ? 418.5    : $is1080 ? 2037.9648 : 904.3945) :
-                                     ($is480 ? 400.3125 : $is1080 ? 2025      : 900);
-      $price := $is1080
-        ? ($hasVideo ? 0.01001 : 0.016731)
-        : ($hasVideo ? 0.009152 : 0.015301);
+      $is4k := $res = "4k";
+      $perFrame := $ratio = "1:1"  ? ($is480 ? 400      : $is1080 ? 2025      : $is4k ? 8100      : 900) :
+                   $ratio = "4:3"  ? ($is480 ? 411.25   : $is1080 ? 2028      : $is4k ? 8100.6289 : 905.6719) :
+                   $ratio = "3:4"  ? ($is480 ? 411.25   : $is1080 ? 2028      : $is4k ? 8100.6289 : 905.6719) :
+                   $ratio = "21:9" ? ($is480 ? 418.5    : $is1080 ? 2037.9648 : $is4k ? 8100.2227 : 904.3945) :
+                                     ($is480 ? 400.3125 : $is1080 ? 2025      : $is4k ? 8100      : 900);
+      $price := $is4k   ? ($hasVideo ? 0.004147 : 0.006721) :
+                $is1080 ? ($hasVideo ? 0.01001 : 0.016731) :
+                          ($hasVideo ? 0.009152 : 0.015301);
       $costFor := function($d) { $floor($perFrame * (24 * $d + 1)) / 1000 * $price };
       $lo := $costFor($auto ? 4 : $dur);
       $hi := $costFor(($auto ? 30 : $dur) + ($hasVideo ? 30 : 0));
@@ -2361,6 +2364,31 @@ _SEEDANCE2_PRICE_EXPR_TEMPLATE = """
 _SEEDANCE_AUDIO_POLICY_CODE = "OutputAudioSensitiveContentDetected.PolicyViolation"
 _SEEDANCE_TASK_TYPE_CONSTRAINT_CODE = "InvalidParameter.TaskTypeConstraint"
 _SEEDANCE_TASK_TYPE_MISMATCH_CODE = "InvalidParameter.TaskTypeMismatch"
+_SEEDANCE_MODEL_UNAVAILABLE_CODE = "PARTNER_MODEL_UNAVAILABLE"
+
+
+async def _seedance2_create_task(
+    cls: type[IO.ComfyNode],
+    request: Seedance2TaskCreationRequest,
+) -> TaskCreationResponse:
+    try:
+        return await sync_op(
+            cls,
+            ApiEndpoint(path=BYTEPLUS_TASK_ENDPOINT, method="POST"),
+            data=request,
+            response_model=TaskCreationResponse,
+        )
+    except Exception as exc:
+        if (
+            request.model == SEEDANCE_MODELS["Seedance 2.5"]
+            and request.resolution == "4k"
+            and _SEEDANCE_MODEL_UNAVAILABLE_CODE in str(exc)
+        ):
+            raise ValueError(
+                "Seedance 2.5 at 4k is available to enterprise accounts only. "
+                "Contact us at https://comfy.org/contact to get access."
+            ) from exc
+        raise
 
 
 async def _seedance2_poll_video_task(
@@ -2484,7 +2512,7 @@ class ByteDance2TextToVideoNode(IO.ComfyNode):
                 IO.String.Output(
                     "draft_task_id",
                     tooltip="Task ID of a Seedance 2.5 Draft run. Connect it to the Seedance 2.5 Draft to "
-                    "Final Video node to render the 1080p final.",
+                    "Final Video node to render the 1080p or 4k final.",
                 ),
             ],
             hidden=[
@@ -2507,10 +2535,9 @@ class ByteDance2TextToVideoNode(IO.ComfyNode):
         validate_string(model["prompt"], strip_whitespace=True, min_length=1)
         _seedance2_validate_draft_output(cls, model)
         model_id = SEEDANCE_MODELS[model["model"]]
-        initial_response = await sync_op(
+        initial_response = await _seedance2_create_task(
             cls,
-            ApiEndpoint(path=BYTEPLUS_TASK_ENDPOINT, method="POST"),
-            data=_seedance2_build_request(
+            _seedance2_build_request(
                 model,
                 model_id,
                 [TaskTextContent(text=model["prompt"])],
@@ -2518,7 +2545,6 @@ class ByteDance2TextToVideoNode(IO.ComfyNode):
                 watermark,
                 ratio=model["ratio"],
             ),
-            response_model=TaskCreationResponse,
         )
         response = await _seedance2_poll_video_task(cls, initial_response.id)
         return IO.NodeOutput(await download_url_to_video_output(response.content.video_url), initial_response.id)
@@ -2604,7 +2630,7 @@ class ByteDance2FirstLastFrameNode(IO.ComfyNode):
                 IO.String.Output(
                     "draft_task_id",
                     tooltip="Task ID of a Seedance 2.5 Draft run. Connect it to the Seedance 2.5 Draft to "
-                    "Final Video node to render the 1080p final.",
+                    "Final Video node to render the 1080p or 4k final.",
                 ),
             ],
             hidden=[
@@ -2715,11 +2741,9 @@ class ByteDance2FirstLastFrameNode(IO.ComfyNode):
                 ),
             )
 
-        initial_response = await sync_op(
+        initial_response = await _seedance2_create_task(
             cls,
-            ApiEndpoint(path=BYTEPLUS_TASK_ENDPOINT, method="POST"),
-            data=_seedance2_build_request(model, model_id, content, seed, watermark, ratio=request_ratio),
-            response_model=TaskCreationResponse,
+            _seedance2_build_request(model, model_id, content, seed, watermark, ratio=request_ratio),
         )
         response = await _seedance2_poll_video_task(cls, initial_response.id)
         return IO.NodeOutput(await download_url_to_video_output(response.content.video_url), initial_response.id)
@@ -2856,7 +2880,7 @@ class ByteDance2ReferenceNodeV2(IO.ComfyNode):
                 IO.String.Output(
                     "draft_task_id",
                     tooltip="Task ID of a Seedance 2.5 Draft run. Connect it to the Seedance 2.5 Draft to "
-                    "Final Video node to render the 1080p final.",
+                    "Final Video node to render the 1080p or 4k final.",
                 ),
             ],
             hidden=[
@@ -3039,11 +3063,9 @@ class ByteDance2ReferenceNodeV2(IO.ComfyNode):
             content.append(
                 TaskAudioContent(audio_url=TaskAudioContentUrl(url=url)),
             )
-        initial_response = await sync_op(
+        initial_response = await _seedance2_create_task(
             cls,
-            ApiEndpoint(path=BYTEPLUS_TASK_ENDPOINT, method="POST"),
-            data=_seedance2_build_request(model, model_id, content, seed, watermark, ratio=model["ratio"]),
-            response_model=TaskCreationResponse,
+            _seedance2_build_request(model, model_id, content, seed, watermark, ratio=model["ratio"]),
         )
         response = await _seedance2_poll_video_task(
             cls,
@@ -3123,7 +3145,7 @@ class ByteDance2DraftToFinalVideoNode(IO.ComfyNode):
             node_id="ByteDance2DraftToFinalVideoNode",
             display_name="ByteDance Seedance 2.5 Draft to Final Video",
             category="partner/video/ByteDance",
-            description="Render the 1080p final video of a Seedance 2.5 Draft. The final keeps the draft's "
+            description="Render the 1080p or 4k final video of a Seedance 2.5 Draft. The final keeps the draft's "
             "scene and motion, and reuses its prompt, references, duration, aspect ratio, and audio setting.",
             inputs=[
                 IO.String.Input(
@@ -3140,6 +3162,13 @@ class ByteDance2DraftToFinalVideoNode(IO.ComfyNode):
                     tooltip="Whether to add a watermark to the video.",
                     advanced=True,
                 ),
+                IO.Combo.Input(
+                    "resolution",
+                    options=["1080p", "4k"],
+                    default="1080p",
+                    tooltip="Resolution of the final video. 4k is available to enterprise accounts only.",
+                    optional=True,
+                ),
             ],
             outputs=[
                 IO.Video.Output(),
@@ -3151,23 +3180,26 @@ class ByteDance2DraftToFinalVideoNode(IO.ComfyNode):
             ],
             is_api_node=True,
             price_badge=IO.PriceBadge(
-                expr='{"type":"range_usd","min_usd":3.2864,"max_usd":29.3964,"format":{"approximate":true}}',
+                depends_on=IO.PriceBadgeDepends(widgets=["resolution"]),
+                expr="""
+                widgets.resolution = "4k"
+                  ? {"type":"range_usd","min_usd":5.2807,"max_usd":48.408,"format":{"approximate":true}}
+                  : {"type":"range_usd","min_usd":3.2864,"max_usd":29.3964,"format":{"approximate":true}}
+                """,
             ),
         )
 
     @classmethod
-    async def execute(cls, draft_task_id: str, watermark: bool) -> IO.NodeOutput:
+    async def execute(cls, draft_task_id: str, watermark: bool, resolution: str = "1080p") -> IO.NodeOutput:
         validate_string(draft_task_id, strip_whitespace=True, field_name="draft_task_id", min_length=1)
-        initial_response = await sync_op(
+        initial_response = await _seedance2_create_task(
             cls,
-            ApiEndpoint(path=BYTEPLUS_TASK_ENDPOINT, method="POST"),
-            data=Seedance2TaskCreationRequest(
+            Seedance2TaskCreationRequest(
                 model=SEEDANCE_MODELS["Seedance 2.5"],
                 content=[TaskDraftTaskContent(draft_task=TaskDraftTaskContentTask(id=draft_task_id.strip()))],
-                resolution="1080p",
+                resolution=resolution,
                 watermark=watermark,
             ),
-            response_model=TaskCreationResponse,
         )
         response = await _seedance2_poll_video_task(cls, initial_response.id)
         return IO.NodeOutput(await download_url_to_video_output(response.content.video_url))
