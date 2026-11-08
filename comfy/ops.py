@@ -1215,7 +1215,7 @@ def linear_input_act_(x, weight, bias, input_act=None, act_weight=None, act_eps=
 
 # Grouped-scale integer weights that run through the shared INT8 GEMM (comfy_kitchen
 # AsymW4A8Int8Layout): format -> code width, which also fixes the packed weight width K*bits/8.
-_GROUPED_INT8_FORMATS = {"asym_w4a8_int8": 4, "w6a8_int8": 6}
+_GROUPED_INT8_FORMATS = {"w3a8_int8": 3, "asym_w4a8_int8": 4, "w6a8_int8": 6}
 
 
 class QuantLinearFunc(torch.autograd.Function):
@@ -1430,7 +1430,8 @@ def _load_quantized_module(module, super_load, state_dict, prefix, local_metadat
             }
         elif module.quant_format in _GROUPED_INT8_FORMATS:
             # asym_w4a8_int8: int4 weight (packed int8 [N,K/2]) + optional Lloyd-Max codebook;
-            # w6a8_int8: uniform int6 weight (packed int8 [N,3K/4]). Both carry an fp8 per-group
+            # w3a8_int8: int3 weight (packed int8 [N,3K/8]) + 8-level codebook;
+            # w6a8_int8: uniform int6 weight (packed int8 [N,3K/4]). All carry an fp8 per-group
             # scale (weight_s_rel) and an fp32 per-channel scale (weight_s_channel).
             bits = _GROUPED_INT8_FORMATS[module.quant_format]
             if weight.shape[1] * 8 != module._orig_shape[1] * bits:
