@@ -1135,7 +1135,8 @@ class CombinedLinear:
         for s in self.linears:
             # FIXME: add bias support if ever needed
             if (not isinstance(s, MixedPrecisionOp) or not isinstance(s._v_weight, QuantizedTensor)
-                    or s._v_weight.layout_cls.linear_input_act.__func__ is QuantizedLayout.linear_input_act.__func__
+                    or getattr(s._v_weight.layout_cls.linear_input_act, "__func__", QuantizedLayout.linear_input_act.__func__) is QuantizedLayout.linear_input_act.__func__
+                    or getattr(s._v_weight.params, "transposed", False)
                     or s._full_precision_mm or s.comfy_force_forward or s.bias is not None):
                 return
             weights.append(s._v_weight)
@@ -1157,12 +1158,14 @@ class CombinedLinear:
         run_every_op()
         if self._v_weight is None or (hasattr(self.linears[0], "_v") and not all(hasattr(s, "_prefetch") for s in self.linears)):
             return NotImplemented
-        if self._full_precision_mm:
-            x = _eager_input_act(x, input_act, act_weight, act_eps)
-            out = torch.nn.functional.linear(x, self._v_weight.to(dtype=x.dtype).dequantize())
-            return _linear_residual(out, residual, residual_scale)
-        return _try_quantized_linear_input_act(x, self._v_weight, None, input_act, act_weight, act_eps,
-                                               residual, residual_scale)
+        if not self._full_precision_mm and not any(s.comfy_force_forward for s in self.linears):
+            out = _try_quantized_linear_input_act(x, self._v_weight, None, input_act, act_weight, act_eps,
+                                                  residual, residual_scale)
+            if out is not NotImplemented:
+                return out
+        x = _eager_input_act(x, input_act, act_weight, act_eps)
+        out = torch.nn.functional.linear(x, self._v_weight.to(dtype=x.dtype).dequantize())
+        return _linear_residual(out, residual, residual_scale)
 
 
 def linear_input_act(linear, x, input_act, act_weight=None, act_eps=0.0,

@@ -98,6 +98,21 @@ def test_combined_linear_prepare_declines_layouts_without_linear_input_act(layou
     assert all(s._v_weight is view for s, view in zip(linears, views))
 
 
+def test_combined_linear_falls_back_to_eager_dequantize_when_layout_declines_at_call_time():
+    torch.manual_seed(7)
+    ops = comfy.ops.mixed_precision_ops(full_precision_mm=False)
+    linears = (ops.Linear(512, 128, bias=False), ops.Linear(512, 256, bias=False))
+    combined = comfy.ops.CombinedLinear(linears)
+    _, views, gathered = _gathered("AsymW4A8Int8Layout", (128, 256), 512)
+    combined._v_weight = comfy.memory_management.cat_gathered(views, gathered)
+    for s in linears:
+        s.comfy_force_forward = True
+    x = torch.randn(3, 512, dtype=torch.float32)
+    out = combined.forward(x)
+    assert out is not NotImplemented
+    assert torch.equal(out, torch.nn.functional.linear(x, combined._v_weight.to(dtype=torch.float32).dequantize()))
+
+
 def test_combined_linear_declines_when_vbar_members_are_not_prefetched():
     # After a prefetched generate pass combines weights in VBAR and cleans up _prefetch,
     # a subsequent unprefetched encode pass must not read the unpinned/evicted _v_weight.
