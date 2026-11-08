@@ -1164,7 +1164,10 @@ class CombinedLinear:
             if out is not NotImplemented:
                 return out
         x = _eager_input_act(x, input_act, act_weight, act_eps)
-        out = torch.nn.functional.linear(x, self._v_weight.to(dtype=x.dtype).dequantize())
+        weight = self._v_weight.to(dtype=x.dtype)
+        if self._full_precision_mm:
+            weight = weight.dequantize()
+        out = torch.nn.functional.linear(x, weight)
         return _linear_residual(out, residual, residual_scale)
 
 
