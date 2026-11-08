@@ -1982,8 +1982,6 @@ class ModelPatcherDynamic(ModelPatcher):
                 pin_state["hostbufs_initialized"] = True
             pin_state["failed"] = False
             pin_state["active"] = True
-            if vbar is not None:
-                vbar.prioritize()
 
             loading = self._load_list(for_dynamic=True, default_device=device_to)
             loading.sort()
@@ -2015,7 +2013,16 @@ class ModelPatcherDynamic(ModelPatcher):
             unit_loading(last_dynamic_units, last_loading)
             loading.extend((*entry, None) for entry in loading_by_module.values())
             loading.extend(last_loading)
-            v_block = None
+
+            # Downgradable weights live in the Full VBAR with the model's last units (the embedding)
+            # above them, and a one-bit-narrower copy of each in the Compact VBAR. Their allocation
+            # order is the downgrade order, so they are placed after the loop.
+            adaptive = {m for m in self.model.modules() if hasattr(m, "_downgrade")}
+            last_modules = {entry[-3] for entry in last_loading} if adaptive else set()
+            deferred = []
+            deferred_last = []
+            blocks = []
+            block_modules = []
 
             for x in loading:
                 *_, module_mem, n, m, params, end_of_block = x
@@ -2091,7 +2098,12 @@ class ModelPatcherDynamic(ModelPatcher):
                         force_load_param(self, "bias", device_to)
                     else:
                         if vbar is not None and not hasattr(m, "_v"):
-                            m._v = vbar.alloc(v_weight_size)
+                            if m in adaptive:
+                                deferred.append((m, v_weight_size))
+                            elif m in last_modules:
+                                deferred_last.append((m, v_weight_size))
+                            else:
+                                m._v = vbar.alloc(v_weight_size)
                         allocated_size += v_weight_size
 
                     for param in params:
@@ -2111,12 +2123,55 @@ class ModelPatcherDynamic(ModelPatcher):
 
                 move_weight_functions(m, device_to)
 
-                if hasattr(m, "_v"):
-                    v_block = m._v if v_block is None else (v_block[0], v_block[1], max(v_block[2], m._v[1] + m._v[2] - v_block[1]))
+                block_modules.append(m)
                 if end_of_block is not None:
-                    unit = end_of_block
-                    (unit[0] if isinstance(unit, (list, tuple)) else unit)._v_block = (v_block, []) if v_block is not None else None
-                    v_block = None
+                    blocks.append((end_of_block, block_modules))
+                    block_modules = []
+
+            if adaptive:
+                compact_sizes = {m: size - comfy.memory_management.vram_aligned_size(m.weight._params.lsb_tier) for m, size in deferred}
+                full, compact = self._adaptive_vbars_get()
+                if full is None:
+                    full = comfy_aimdo.model_vbar.ModelVBAR(sum(size for _, size in deferred + deferred_last), self.load_device.index)
+                    compact = comfy_aimdo.model_vbar.ModelVBAR(sum(compact_sizes.values()), self.load_device.index)
+                    self.model.dynamic_vbars[(self.load_device, "full")] = full
+                    self.model.dynamic_vbars[(self.load_device, "compact")] = compact
+                    logging.info(f"Model {self.model.__class__.__name__} has {len(deferred)} downgradable weights: {full.max_size // (1024 ** 2)}MB full, {compact.max_size // (1024 ** 2)}MB compact.")
+                # Eviction walks the lowest priority VBAR top-down: the embedding sits above rank 0 in
+                # Full, while Compact fills bottom-up in downgrade order.
+                deferred.sort(key=lambda entry: entry[0]._downgrade)
+                for m, size in reversed(deferred):
+                    m._v_full = full.alloc(size)
+                    m._v = m._v_full
+                for m, size in deferred_last:
+                    m._v = full.alloc(size)
+                for m, size in deferred:
+                    m._v_compact = compact.alloc(compact_sizes[m])
+                # A downgraded weight returns to Full once nothing of its compact copy is resident,
+                # so the same weight is never resident in both.
+                residency = compact.get_residency()
+                for m in adaptive:
+                    if m._v is m._v_compact:
+                        _, address, length = m._v_compact
+                        first = (address - compact.base_addr) >> 25
+                        last = (address - compact.base_addr + length - 1) >> 25
+                        if not any(residency[page] & 1 for page in range(first, last + 1)):
+                            m._v = m._v_full
+                            m._v_signature = None
+                full.prioritize()
+                compact.prioritize()
+            if vbar is not None:
+                vbar.prioritize()
+
+            for unit, modules in blocks:
+                v_block = None
+                v_block_adaptive = []
+                for m in modules:
+                    if m in adaptive:
+                        v_block_adaptive.append(m)
+                    elif hasattr(m, "_v"):
+                        v_block = m._v if v_block is None else (v_block[0], v_block[1], max(v_block[2], m._v[1] + m._v[2] - v_block[1]))
+                (unit[0] if isinstance(unit, (list, tuple)) else unit)._v_block = (v_block, v_block_adaptive) if v_block is not None or v_block_adaptive else None
 
             for key, buf in self.model.named_buffers(recurse=True):
                 if key not in self.backup_buffers:

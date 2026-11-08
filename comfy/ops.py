@@ -180,13 +180,21 @@ def cast_modules_with_vbar(comfy_modules, dtype, device, bias_dtype, non_blockin
         cast_buffer_offset += buffer_size
         return buffer
 
+    def fault_weight(s):
+        signature = comfy_aimdo.model_vbar.vbar_fault(s._v)
+        if signature is None and hasattr(s, "_v_compact") and s._v is not s._v_compact:
+            s._v = s._v_compact
+            s._v_signature = None
+            signature = comfy_aimdo.model_vbar.vbar_fault(s._v)
+            logging.info(f"Downgraded {s.seed_key} under VRAM pressure")
+        return signature, comfy_aimdo.model_vbar.vbar_signature_compare(signature, s._v_signature)
+
     group_faults = {}
     dropped_groups = []
     for s in comfy_modules:
         group = s._combined_linear
         if group is None or group._v_weight is None:
-            signature = comfy_aimdo.model_vbar.vbar_fault(s._v)
-            resident = comfy_aimdo.model_vbar.vbar_signature_compare(signature, s._v_signature)
+            signature, resident = fault_weight(s)
         else:
             # A combined group's members hold each other's bytes, so one member's miss
             # is a miss for all of them. Fault the peers now; each keeps that fault's
@@ -195,8 +203,7 @@ def cast_modules_with_vbar(comfy_modules, dtype, device, bias_dtype, non_blockin
             # single-module cast path from pinning peers it never releases.
             if s not in group_faults:
                 for m in group.linears:
-                    signature = comfy_aimdo.model_vbar.vbar_fault(m._v)
-                    group_faults[m] = (signature, comfy_aimdo.model_vbar.vbar_signature_compare(signature, m._v_signature))
+                    group_faults[m] = fault_weight(m)
                 if not all(group_faults[m][1] for m in group.linears):
                     # Dropped after the loop: a member that already holds its group fault
                     # must not fall into the uncombined branch and take a second pin.
@@ -204,6 +211,7 @@ def cast_modules_with_vbar(comfy_modules, dtype, device, bias_dtype, non_blockin
                     for m in group.linears:
                         group_faults[m] = (group_faults[m][0], False)
             signature, resident = group_faults.pop(s)
+        compact = hasattr(s, "_v_compact") and s._v is s._v_compact
         if return_faulted and (signature is None or not resident):
             fully_faulted = False
         prefetch = {
@@ -217,11 +225,15 @@ def cast_modules_with_vbar(comfy_modules, dtype, device, bias_dtype, non_blockin
 
         materialize_meta_param(s, ["weight", "bias"])
         xfer_dest = comfy_aimdo.torch.aimdo_to_tensor(s._v, device) if signature is not None else None
-        cast_geometry = comfy.memory_management.tensors_to_geometries([ s.weight, s.bias ])
+        weight = s.weight
+        if compact:
+            weight = QuantizedTensor(weight._qdata, weight._layout_cls, dataclasses.replace(weight._params, lsb_tier=None))
+        cast_geometry = comfy.memory_management.tensors_to_geometries([ weight, s.bias ])
         cast_dest = None
         needs_cast = False
 
-        xfer_source = [ s.weight, s.bias ]
+        xfer_source = [ weight, s.bias ]
+        dest_size = comfy.memory_management.vram_aligned_size(xfer_source)
         fast_disk = s._pin_state["fast_disk"]
         subset = "weights-fast" if fast_disk else "weights"
         pin = comfy.pinned_memory.get_pin(s, subset=subset)
@@ -233,7 +245,7 @@ def cast_modules_with_vbar(comfy_modules, dtype, device, bias_dtype, non_blockin
         if pin is not None:
             xfer_source = [ pin ]
 
-        for data, geometry in zip([ s.weight, s.bias ], cast_geometry):
+        for data, geometry in zip([ weight, s.bias ], cast_geometry):
             if data is None:
                 continue
             if data.dtype != geometry.dtype:
@@ -242,7 +254,6 @@ def cast_modules_with_vbar(comfy_modules, dtype, device, bias_dtype, non_blockin
                 xfer_dest = None
                 break
 
-        dest_size = comfy.memory_management.vram_aligned_size(xfer_source)
         ensure_offload_stream(s, dest_size if xfer_dest is None else 0, True)
         if xfer_dest is None:
             xfer_dest = get_cast_buffer(dest_size)
@@ -271,7 +282,13 @@ def cast_modules_with_vbar(comfy_modules, dtype, device, bias_dtype, non_blockin
                 pin = comfy.pinned_memory.get_pin(m, subset=subset)
             cast_maybe_lowvram_patch(source, pin, offload_stream, xfer_dest2=dest)
 
-        if not isinstance(s, WritableWeight) or s.read_before_write:
+        if compact:
+            # The pin holds the full weight; the compact weight is its byte prefix.
+            if pin is None:
+                handle_pin(s, None, [ s.weight, s.bias ], None, subset=subset, size=comfy.memory_management.vram_aligned_size([ s.weight, s.bias ]))
+                pin = comfy.pinned_memory.get_pin(s, subset=subset)
+            cast_maybe_lowvram_patch(xfer_source if pin is None else [ pin[:dest_size] ], xfer_dest, offload_stream)
+        elif not isinstance(s, WritableWeight) or s.read_before_write:
             handle_pin(s, pin, xfer_source, xfer_dest, subset=subset, size=dest_size)
 
         for param_key in ("weight", "bias"):
