@@ -265,17 +265,19 @@ def _trim_disk(keep=None, reserve=0):
 
 
 def _read(path):
-    """(tensors, checkpoints, metadata) from a cache file, or None if it is gone or unreadable."""
+    """(tensors, checkpoints, metadata) from a cache file, or None if it is gone or unreadable. The tensors are copies:
+    a view of the file's mapping would keep a deleted file's space in use for as long as the state lives."""
     try:
         with safetensors.safe_open(path, "pt") as f:
             meta = json.loads(f.metadata()["llm_state_cache"])
             tensors, cps = {}, {}
             for name in f.keys():
+                t = f.get_tensor(name).clone()
                 if name.startswith("ckpt."):
                     _, pos, i, kind = name.split(".")
-                    cps.setdefault(int(pos), {}).setdefault(int(i), [None, None])[0 if kind == "conv" else 1] = f.get_tensor(name)
+                    cps.setdefault(int(pos), {}).setdefault(int(i), [None, None])[0 if kind == "conv" else 1] = t
                 else:
-                    tensors[name] = f.get_tensor(name)
+                    tensors[name] = t
         os.utime(path)
     except (OSError, safetensors.SafetensorError, KeyError, ValueError) as e:
         logging.warning("llm state cache: could not read %s: %s", path, e)

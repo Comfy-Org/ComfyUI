@@ -91,3 +91,26 @@ def test_missing_or_broken_file_is_a_miss(cache_dir):
     broken = cache_dir / "prefix-broken.safetensors"
     broken.write_bytes(b"not a safetensors file")
     assert cache._read(str(broken)) is None
+
+
+def free_bytes(path):
+    st = os.statvfs(path)
+    return st.f_bavail * st.f_frsize
+
+
+def test_restored_states_do_not_hold_deleted_spill_files(cache_dir, monkeypatch):
+    monkeypatch.setattr(cache, "DISK_BUDGET", 1000 * 2**40)
+    restored = []
+    free_before = free_bytes(cache_dir)
+    for i in range(20):
+        path = os.path.join(cache.CACHE_DIR, f"spill-{i}.safetensors")
+        cache._write(path, {"t": torch.ones(16 * MB, dtype=torch.uint8), "ckpt.5.0.conv": torch.ones(4, dtype=torch.uint8),
+                            "ckpt.5.0.rec": torch.ones(4, dtype=torch.uint8)}, {"key": "k", "ids": [1, 2]})
+        restored.append(cache._read(path))  # kept, as a resident entry keeps its state and checkpoints
+        cache._remove(path)
+    assert all(r[0]["t"].sum() == 16 * MB for r in restored)
+    assert free_before - free_bytes(cache_dir) < 160 * MB, "deleted spill files' space is freed while their states live"
+    if os.path.exists("/proc/self/maps"):
+        with open("/proc/self/maps") as f:
+            held = [line for line in f if str(cache_dir) in line]
+        assert held == [], "no deleted spill file stays mapped"
