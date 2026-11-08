@@ -1898,9 +1898,16 @@ class ModelPatcherDynamic(ModelPatcher):
             self.model.dynamic_vbars[self.load_device] = vbar
         return vbar
 
+    def _adaptive_vbars_get(self):
+        return (self.model.dynamic_vbars.get((self.load_device, "full"), None),
+                self.model.dynamic_vbars.get((self.load_device, "compact"), None))
+
+    def _vbars(self):
+        """Full, Compact, Core: the order they give up VRAM in."""
+        return [vbar for vbar in (*self._adaptive_vbars_get(), self._vbar_get()) if vbar is not None]
+
     def loaded_size(self):
-        vbar = self._vbar_get()
-        return (vbar.loaded_size() if vbar is not None else 0) + self.model.model_loaded_weight_memory
+        return sum(vbar.loaded_size() for vbar in self._vbars()) + self.model.model_loaded_weight_memory
 
     #Pinning is deferred to ops time. Assert against this API to avoid pin leaks.
 
@@ -2140,8 +2147,10 @@ class ModelPatcherDynamic(ModelPatcher):
         assert not force_patch_weights #See above
         assert self.load_device != torch.device("cpu")
 
-        vbar = self._vbar_get()
-        vbar_freed = 0 if vbar is None else vbar.free_memory(memory_to_free)
+        vbar_freed = 0
+        for vbar in self._vbars():
+            if vbar_freed < memory_to_free:
+                vbar_freed += vbar.free_memory(memory_to_free - vbar_freed)
         freed = vbar_freed
 
         backup_freed = 0
