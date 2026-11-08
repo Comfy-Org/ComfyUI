@@ -200,6 +200,99 @@ def test_a_failed_batch_keeps_the_batches_before_it(session, catalog, temp_dir):
     assert len(_live_ids(session)) == 600 - scanner.WRITE_BATCH_ROWS
 
 
+@pytest.mark.parametrize("failure_phase", ["open", "execute", "commit"])
+def test_prune_retries_cantopen_without_partial_writes(
+    session, catalog, db_engine, temp_dir, monkeypatch, failure_phase
+):
+    _rows(session, temp_dir, 600)
+    factory = scanner.create_write_session
+    delays = []
+
+    def fail():
+        raise sa.exc.OperationalError(None, None, sqlite3.OperationalError("unable to open database file"))
+
+    def create_write_session():
+        sess = factory()
+        if 2 <= len(catalog) <= 4:
+            if failure_phase == "open":
+                fail()
+            if failure_phase == "commit":
+                monkeypatch.setattr(sess, "commit", fail)
+        return sess
+
+    def execute(cursor, statement, parameters, context):
+        if failure_phase == "execute" and 2 <= len(catalog) <= 4 and statement.startswith("INSERT INTO asset_tags"):
+            raise sqlite3.OperationalError("unable to open database file")
+
+    def sleep(delay):
+        if delay:
+            delays.append(delay)
+            # The failed batch must release its transaction before waiting.
+            assert len(_live_ids(session)) == 600 - scanner.WRITE_BATCH_ROWS
+            assert session.scalar(sa.select(sa.func.count()).select_from(AssetTag).where(AssetTag.tag_name == "missing")) == scanner.WRITE_BATCH_ROWS
+
+    event.listen(db_engine, "do_execute", execute)
+    try:
+        with patch.object(scanner, "create_write_session", create_write_session), patch.object(scanner.time, "sleep", sleep):
+            assert _prune([]) == 600
+    finally:
+        event.remove(db_engine, "do_execute", execute)
+
+    assert len(catalog) == 6
+    assert delays == pytest.approx([0.2, 0.4, 0.6])
+    assert _live_ids(session) == set()
+    assert session.scalar(sa.select(sa.func.count()).select_from(AssetTag).where(AssetTag.tag_name == "missing")) == 600
+
+
+@pytest.mark.parametrize("message, attempts", [
+    ("unable to open database file", 4),
+    ("attempt to write a readonly database", 1),
+    ("database is locked", 1),
+    ("database or disk is full", 1),
+    ("no such table: asset_tags", 1),
+])
+def test_failed_write_retries_are_limited_to_cantopen(
+    session, catalog, temp_dir, monkeypatch, message, attempts
+):
+    ids = _rows(session, temp_dir, 600)
+    failure = sa.exc.OperationalError(None, None, sqlite3.OperationalError(message))
+    delays = []
+
+    def write_batch(sess, batch):
+        count = len(mark_contents_missing(sess, batch))
+        if len(catalog) > 1:
+            raise failure
+        return count
+
+    monkeypatch.setattr(scanner.time, "sleep", delays.append)
+    committed = []
+    with pytest.raises(sa.exc.OperationalError) as caught:
+        scanner._write_in_batches(ids, write_batch, lambda: False, committed)
+
+    assert caught.value is failure
+    assert len(catalog) == 1 + attempts
+    assert len([delay for delay in delays if delay]) == attempts - 1
+    assert committed == [scanner.WRITE_BATCH_ROWS]
+    assert len(_live_ids(session)) == 600 - scanner.WRITE_BATCH_ROWS
+
+
+def test_stop_during_write_retry_leaves_the_batch_uncommitted(session, catalog, temp_dir, monkeypatch):
+    ids = _rows(session, temp_dir, 5)
+    delays = []
+
+    def write_batch(sess, batch):
+        mark_contents_missing(sess, batch)
+        raise sa.exc.OperationalError(None, None, sqlite3.OperationalError("unable to open database file"))
+
+    monkeypatch.setattr(scanner.time, "sleep", delays.append)
+    committed = []
+    scanner._write_in_batches(ids, write_batch, lambda: bool(catalog), committed)
+
+    assert len(catalog) == 1
+    assert committed == []
+    assert _live_ids(session) == set(ids)
+
+
 def test_sync_root_counts_the_batches_committed_before_a_failure(session, catalog, temp_dir, monkeypatch):
     output = temp_dir / "output"
     output.mkdir()
