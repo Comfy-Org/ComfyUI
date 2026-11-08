@@ -338,7 +338,10 @@ def _enforce_budget(keep):
         if total <= BUDGET and len(resident) <= MAX_ENTRIES:
             break
         total -= e.nbytes()
-        _spill(e)
+        if DISK_BUDGET > 0:
+            _spill(e)
+        else:
+            _drop(e)
         resident = [r for r in resident if r is not e]
     spilled = [e for e in _entries if e.state is None]
     spilled.sort(key=lambda e: e.used)
@@ -490,7 +493,7 @@ def prefill(model, embeds, ids, need, forward, position_ids=None):
 def _save_shared_start(model, kvm, key, ids, pos, linear_states, device):
     """Write the shared start (KV up to pos + the DeltaNet states at pos) once, if no file has it."""
     path = _prefix_path(key, ids[:pos])
-    if os.path.exists(path):
+    if DISK_BUDGET <= 0 or os.path.exists(path):
         return
     linear = _linear(kvm)
     attn = {i: kv for i, kv in enumerate(kvm.caches) if i not in linear}

@@ -155,3 +155,29 @@ def test_restoring_a_spill_deletes_its_file_after_the_views_are_gone(cache_dir, 
     assert taken is entry and n == 2
     assert at_delete == [[]], "Windows doesn't free a file deleted while a view of it lives"
     assert not os.path.exists(path)
+
+
+class FakeState:
+    patcher = None
+    released = False
+
+    def release(self):
+        self.released = True
+
+
+def test_disk_budget_zero_drops_instead_of_spilling(cache_dir, monkeypatch):
+    monkeypatch.setattr(cache, "DISK_BUDGET", 0)
+    monkeypatch.setattr(cache, "BUDGET", -1)
+    entry = cache._Entry("k", FakeState(), 64)
+    state = entry.state
+    cache._entries.append(entry)
+    cache._enforce_budget(None)
+    assert cache._entries == [] and state.released
+    assert files(cache_dir) == []
+
+
+def test_disk_budget_zero_saves_no_shared_start(cache_dir, monkeypatch):
+    monkeypatch.setattr(cache, "DISK_BUDGET", 0)
+    monkeypatch.setattr(cache, "_linear", lambda kvm: pytest.fail("nothing is built for a file that won't be written"))
+    cache._save_shared_start(None, None, "k", [1, 2, 3], 2, {}, "cpu")
+    assert files(cache_dir) == []
