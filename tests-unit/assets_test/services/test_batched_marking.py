@@ -246,12 +246,12 @@ def test_prune_retries_cantopen_without_partial_writes(
 
 @pytest.mark.parametrize("message, attempts", [
     ("unable to open database file", 4),
-    ("attempt to write a readonly database", 1),
-    ("database is locked", 1),
+    ("attempt to write a readonly database", 4),
+    ("database is locked", 4),
     ("database or disk is full", 1),
     ("no such table: asset_tags", 1),
 ])
-def test_failed_write_retries_are_limited_to_cantopen(
+def test_failed_write_retries_are_limited_to_transient_errors(
     session, catalog, temp_dir, monkeypatch, message, attempts
 ):
     ids = _rows(session, temp_dir, 600)
