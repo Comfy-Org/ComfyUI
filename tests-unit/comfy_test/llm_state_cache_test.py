@@ -106,11 +106,22 @@ def test_restored_states_do_not_hold_deleted_spill_files(cache_dir, monkeypatch)
         path = os.path.join(cache.CACHE_DIR, f"spill-{i}.safetensors")
         cache._write(path, {"t": torch.ones(16 * MB, dtype=torch.uint8), "ckpt.5.0.conv": torch.ones(4, dtype=torch.uint8),
                             "ckpt.5.0.rec": torch.ones(4, dtype=torch.uint8)}, {"key": "k", "ids": [1, 2]})
-        restored.append(cache._read(path))  # kept, as a resident entry keeps its state and checkpoints
-        cache._remove(path)
-    assert all(r[0]["t"].sum() == 16 * MB for r in restored)
+        tensors, checkpoints, _ = cache._read(path)
+        cache._remove(path)  # as _take does, before the state is built
+        restored.append((cache._padded(tensors, {"t": torch.empty(16 * MB, dtype=torch.uint8)}), checkpoints))
+        del tensors
+    assert all(state["t"].sum() == 16 * MB for state, _ in restored)
     assert free_before - free_bytes(cache_dir) < 160 * MB, "deleted spill files' space is freed while their states live"
     if os.path.exists("/proc/self/maps"):
         with open("/proc/self/maps") as f:
             held = [line for line in f if str(cache_dir) in line]
         assert held == [], "no deleted spill file stays mapped"
+
+
+def test_file_deleted_after_a_complete_read_is_still_a_hit(cache_dir, monkeypatch):
+    path = write("spill-a.safetensors", 1)
+
+    def gone(p, *a, **k):
+        raise FileNotFoundError(p)
+    monkeypatch.setattr(cache.os, "utime", gone)  # another server deleted it once the read was done
+    assert cache._read(path) is not None

@@ -169,15 +169,15 @@ def _capacity(need):
 
 
 def _padded(tensors, model_sd):
-    """CPU tensors shaped like model_sd: equal shapes pass through, attention caches (capacity on dim 2) are copied into
-    zeros of the new capacity, cut to it if longer."""
+    """CPU tensors shaped like model_sd: equal shapes are copied, attention caches (capacity on dim 2) are copied into
+    zeros of the new capacity, cut to it if longer. Nothing returned views tensors, which may map a deleted file."""
     out = {}
     for name, like in model_sd.items():
         t = tensors.get(name)
         if t is None:
             out[name] = torch.zeros(like.shape, dtype=like.dtype)
         elif tuple(t.shape) == tuple(like.shape):
-            out[name] = t
+            out[name] = t.clone()
         else:
             z = torch.zeros(like.shape, dtype=like.dtype)
             n = min(t.shape[2], like.shape[2])
@@ -265,23 +265,26 @@ def _trim_disk(keep=None, reserve=0):
 
 
 def _read(path):
-    """(tensors, checkpoints, metadata) from a cache file, or None if it is gone or unreadable. The tensors are copies:
-    a view of the file's mapping would keep a deleted file's space in use for as long as the state lives."""
+    """(tensors, checkpoints, metadata) from a cache file, or None if it is gone or unreadable. The tensors view the
+    file's mapping, which keeps the file's space in use even once deleted, so _padded copies them; the checkpoints,
+    kept as they are, are copies."""
     try:
         with safetensors.safe_open(path, "pt") as f:
             meta = json.loads(f.metadata()["llm_state_cache"])
             tensors, cps = {}, {}
             for name in f.keys():
-                t = f.get_tensor(name).clone()
                 if name.startswith("ckpt."):
                     _, pos, i, kind = name.split(".")
-                    cps.setdefault(int(pos), {}).setdefault(int(i), [None, None])[0 if kind == "conv" else 1] = t
+                    cps.setdefault(int(pos), {}).setdefault(int(i), [None, None])[0 if kind == "conv" else 1] = f.get_tensor(name).clone()
                 else:
-                    tensors[name] = t
-        os.utime(path)
+                    tensors[name] = f.get_tensor(name)
     except (OSError, safetensors.SafetensorError, KeyError, ValueError) as e:
         logging.warning("llm state cache: could not read %s: %s", path, e)
         return None
+    try:
+        os.utime(path)
+    except OSError:  # deleted by another server since the read, which is complete
+        pass
     return tensors, {p: {i: tuple(v) for i, v in st.items()} for p, st in cps.items()}, meta
 
 
