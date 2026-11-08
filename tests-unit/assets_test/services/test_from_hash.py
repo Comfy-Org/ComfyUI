@@ -1,7 +1,9 @@
+from contextlib import contextmanager
 from unittest.mock import patch
 
 from sqlalchemy import select
 
+import app.assets.services.ingest as ingest_module
 from app.assets.database.models import Asset, AssetContent
 from app.assets.database.queries.records import create_content, mark_content_missing
 from app.assets.helpers import to_stored_hash
@@ -116,3 +118,38 @@ def test_file_vanishing_between_claim_and_refresh_mints_nothing(
     with mock_create_session() as session:
         assert list(session.scalars(select(Asset))) == []
         assert session.get(AssetContent, content_id) is not None
+
+
+def test_create_from_hash_reads_the_file_before_the_claim_transaction(
+    mock_create_session, monkeypatch, temp_dir
+):
+    digest = "e" * 64
+    path = temp_dir / "claimed.bin"
+    path.write_bytes(b"claimed bytes")
+    monkeypatch.setattr("app.assets.mode.hashing_enabled", lambda: True)
+    _seed_live_content(mock_create_session, path, digest)
+    sessions = []
+
+    @contextmanager
+    def recording_create_session():
+        with mock_create_session() as session:
+            sessions.append(session)
+            yield session
+
+    in_transaction_while_reading = []
+    real_extract = ingest_module._extract_system_metadata_sync
+
+    def recording_extract(*args, **kwargs):
+        in_transaction_while_reading.append(
+            sessions[-1].connection().connection.driver_connection.in_transaction
+        )
+        return real_extract(*args, **kwargs)
+
+    monkeypatch.setattr(ingest_module, "create_session", recording_create_session)
+    monkeypatch.setattr(ingest_module, "_extract_system_metadata_sync", recording_extract)
+
+    result = create_from_hash(digest, "derived.bin")
+
+    assert result is not None
+    assert result.ref.system_metadata["content_length"] == len(b"claimed bytes")
+    assert in_transaction_while_reading == [False]

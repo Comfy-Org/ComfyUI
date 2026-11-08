@@ -800,7 +800,7 @@ def load_controlnet_state_dict(state_dict, model=None, model_options={}):
             return load_controlnet_qwen_instantx(controlnet_data, model_options=model_options)
         elif "controlnet_x_embedder.weight" in controlnet_data:
             return load_controlnet_flux_instantx(controlnet_data, model_options=model_options)
-    elif "control_blocks.0.after_proj.weight" in controlnet_data and "control_img_in.weight" in controlnet_data:
+    elif "control_blocks.0.after_proj.weight" in controlnet_data and "control_blocks.0.img_mod.1.weight" in controlnet_data and "control_img_in.weight" in controlnet_data:
         return load_controlnet_qwen_fun(controlnet_data, model_options=model_options)
 
     elif "controlnet_blocks.0.linear.weight" in controlnet_data: #mistoline flux

@@ -27,6 +27,7 @@ import comfy.text_encoders.qwen_image21
 import comfy.text_encoders.hunyuan_image
 import comfy.text_encoders.kandinsky5
 import comfy.text_encoders.z_image
+import comfy.text_encoders.ming_image
 import comfy.text_encoders.ideogram4
 import comfy.text_encoders.boogu
 import comfy.text_encoders.krea2
@@ -41,6 +42,8 @@ import comfy.text_encoders.cogvideo
 import comfy.text_encoders.hidream_o1
 import comfy.text_encoders.sensenova
 import comfy.text_encoders.pixeldit
+import comfy.text_encoders.moss_image
+import comfy.text_encoders.fibo2
 
 from . import supported_models_base
 from . import latent_formats
@@ -841,6 +844,26 @@ class Flux2(Flux):
         return None
 
 
+class Flux3(Flux2):
+    unet_config = {
+        "image_model": "flux3",
+    }
+
+    sampling_settings = {
+        "shift": 1.93586,  # mu = ln(6.93), the reference timestep shift
+    }
+
+    supported_inference_dtypes = [torch.bfloat16, torch.float32]
+
+    def get_model(self, state_dict, prefix="", device=None):
+        return model_base.Flux3(self, device=device)
+
+    def clip_target(self, state_dict={}):
+        pref = self.text_encoder_key_prefix[0]
+        detect = comfy.text_encoders.hunyuan_video.llama_detect(state_dict, "{}qwen3vl_4b.transformer.".format(pref))
+        return supported_models_base.ClipTarget(comfy.text_encoders.flux.Flux3Tokenizer, comfy.text_encoders.flux.flux3_te(**detect))
+
+
 class Lens(supported_models_base.BASE):
     """Microsoft Lens (3.8B dual-stream MMDiT, GPT-OSS-20B text features, Flux2 VAE)."""
 
@@ -1242,6 +1265,24 @@ class ZImagePixelSpace(ZImage):
     def get_model(self, state_dict, prefix="", device=None):
         return model_base.ZImagePixelSpace(self, device=device)
 
+class MingImage(ZImage):
+    unet_config = {
+        "image_model": "ming_image",
+    }
+
+    sampling_settings = {
+        "multiplier": 1.0,
+        "shift": 3.16,  # reference dynamic shift at the 1024 bucket
+    }
+
+    latent_format = latent_formats.MingImage
+
+    def get_model(self, state_dict, prefix="", device=None):
+        return model_base.MingImage(self, device=device)
+
+    def clip_target(self, state_dict={}):
+        return supported_models_base.ClipTarget(comfy.text_encoders.ming_image.MingImageTokenizer, comfy.text_encoders.ming_image.te())
+
 class PixelDiTT2I(supported_models_base.BASE):
     unet_config = {
         "image_model": "pixeldit_t2i",
@@ -1415,7 +1456,7 @@ class WAN21_Vace(WAN21_T2V):
         self.memory_usage_factor = 1.2 * self.memory_usage_factor
 
     def get_model(self, state_dict, prefix="", device=None):
-        out = model_base.WAN21_Vace(self, image_to_video=False, device=device)
+        out = model_base.WAN21_Vace(self, image_to_video=self.unet_config.get("vace_image_input", False), device=device)
         return out
 
 class WAN21_HuMo(WAN21_T2V):
@@ -1536,6 +1577,19 @@ class WAN21_SCAIL2(WAN21_T2V):
     def get_model(self, state_dict, prefix="", device=None):
         out = model_base.WAN21_SCAIL2(self, image_to_video=False, device=device)
         return out
+
+class WAN22_RelayVSR(WAN21_T2V):
+    unet_config = {
+        "image_model": "wan2.1",
+        "model_type": "relayvsr",
+    }
+
+    latent_format = latent_formats.RelayVSR
+
+    def get_model(self, state_dict, prefix="", device=None):
+        out = model_base.WAN22_RelayVSR(self, device=device)
+        return out
+
 
 class WAN22_WanDancer(WAN21_T2V):
     unet_config = {
@@ -1993,6 +2047,67 @@ class Krea2(supported_models_base.BASE):
         pref = self.text_encoder_key_prefix[0]
         hunyuan_detect = comfy.text_encoders.hunyuan_video.llama_detect(state_dict, "{}qwen3vl_4b.transformer.".format(pref))
         return supported_models_base.ClipTarget(comfy.text_encoders.krea2.Krea2Tokenizer, comfy.text_encoders.krea2.te(**hunyuan_detect))
+
+class MOSSImage(supported_models_base.BASE):
+    unet_config = {
+        "image_model": "moss_image",
+    }
+
+    sampling_settings = {
+        "multiplier": 1.0,
+        "shift": 5.0,
+    }
+
+    memory_usage_factor = 14.6
+
+    unet_extra_config = {}
+    latent_format = latent_formats.Flux2
+
+    supported_inference_dtypes = [torch.bfloat16, torch.float32]
+
+    vae_key_prefix = ["vae."]
+    text_encoder_key_prefix = ["text_encoders."]
+
+    def process_unet_state_dict(self, state_dict):
+        state_dict.pop("rope.bands", None)
+        return state_dict
+
+    def get_model(self, state_dict, prefix="", device=None):
+        out = model_base.MOSSImage(self, device=device)
+        return out
+
+    def clip_target(self, state_dict={}):
+        pref = self.text_encoder_key_prefix[0]
+        hunyuan_detect = comfy.text_encoders.hunyuan_video.llama_detect(state_dict, "{}qwen35_9b.transformer.".format(pref))
+        return supported_models_base.ClipTarget(comfy.text_encoders.moss_image.MOSSImageTokenizer, comfy.text_encoders.moss_image.te(**hunyuan_detect))
+
+class Fibo2(supported_models_base.BASE):
+    unet_config = {
+        "image_model": "fibo2",
+    }
+
+    sampling_settings = {
+        "shift": 1.15,
+    }
+
+    memory_usage_factor = 17.0
+
+    unet_extra_config = {}
+    latent_format = latent_formats.Flux2
+
+    supported_inference_dtypes = [torch.bfloat16, torch.float32]
+
+    vae_key_prefix = ["vae."]
+    text_encoder_key_prefix = ["text_encoders."]
+
+    def get_model(self, state_dict, prefix="", device=None):
+        out = model_base.Fibo2(self, device=device)
+        return out
+
+    def clip_target(self, state_dict={}):
+        pref = self.text_encoder_key_prefix[0]
+        hunyuan_detect = comfy.text_encoders.hunyuan_video.llama_detect(state_dict, "{}qwen3vl_4b.transformer.".format(pref))
+        return supported_models_base.ClipTarget(comfy.text_encoders.fibo2.Fibo2Tokenizer, comfy.text_encoders.fibo2.te(**hunyuan_detect))
 
 class MageFlow(supported_models_base.BASE):
     unet_config = {
@@ -2602,6 +2717,7 @@ models = [
     CosmosT2IPredict2,
     CosmosI2VPredict2,
     ZImagePixelSpace,
+    MingImage,
     ZImage,
     PiD,
     PixelDiTT2I,
@@ -2621,6 +2737,7 @@ models = [
     WAN21_FlowRVS,
     WAN21_SCAIL,
     WAN21_SCAIL2,
+    WAN22_RelayVSR,
     WAN22_WanDancer,
     Hunyuan3Dv2mini,
     Hunyuan3Dv2,
@@ -2644,7 +2761,10 @@ models = [
     JoyImage,
     Ideogram4,
     Krea2,
+    MOSSImage,
+    Fibo2,
     Flux2,
+    Flux3,
     Lens,
     Kandinsky5Image,
     Kandinsky5,

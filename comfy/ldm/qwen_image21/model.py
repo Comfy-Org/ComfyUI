@@ -1,8 +1,10 @@
 # https://github.com/huggingface/diffusers (Apache 2.0) Qwen-Image 2.1
+import contextlib
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+import comfy.memory_management
 import comfy.model_management
 import comfy.model_prefetch
 import comfy.ops
@@ -12,8 +14,8 @@ import comfy.rmsnorm
 from comfy.ldm.flux.layers import EmbedND, timestep_embedding
 from comfy.ldm.flux.math import apply_rope1
 from comfy.ldm.lightricks.model import TimestepEmbedding
-from comfy.ldm.modules.attention import ComfyAttention, optimized_attention
-from comfy.ldm.wan.model_animate2 import PoseBranchCache
+from comfy.ldm.modules.attention import AttentionTensorContainer, ComfyAttention, optimized_attention
+from comfy.ldm.wan.model_animate2 import PoseBranchCache, quantize_cache
 
 
 class ZeroCenteredRMSNorm(nn.Module):
@@ -104,6 +106,7 @@ class Attention(nn.Module):
             q, k = comfy.quant_ops.ck.rms_rope(q, k, pe, q_scale, k_scale, self.norm_q.eps)
             comfy.ops.uncast_bias_weight(self.norm_q, q_scale, None, q_stream)
             comfy.ops.uncast_bias_weight(self.norm_k, k_scale, None, k_stream)
+        q, k, v = AttentionTensorContainer(q), AttentionTensorContainer(k), AttentionTensorContainer(v)
         return self.to_out[0](attn_fn(q, k, v, self.heads, preferred_attention=self.comfy_attention))
 
 
@@ -145,7 +148,7 @@ class QwenImage21TransformerBlock(nn.Module):
         x = _gated_residual(x, self.attn(_modulated_norm(self.img_norm1, x, scale1, prefix_len, zero), pe, attn_fn, prefix_len, transformer_options), gate1, prefix_len)
         x = _gated_residual(x, self.img_mlp(_modulated_norm(self.img_norm2, x, scale2, prefix_len, zero)), gate2, prefix_len)
         if x.dtype == torch.float16:
-            x = x.clip(-65504, 65504)
+            x.clamp_(-65504, 65504)
         return x
 
 
@@ -163,14 +166,51 @@ class LastLayer(nn.Module):
         return comfy.quant_ops.ck.adaln(x, scale, torch.zeros_like(scale[:1]), self.norm.eps)
 
 
+class QwenImage21FunControlBlock(QwenImage21TransformerBlock):
+    def __init__(self, dim, num_attention_heads, attention_head_dim, mlp_ratio=3, eps=1e-6, fused_mlp=True, first=False, dtype=None, device=None, operations=None):
+        super().__init__(dim, num_attention_heads, attention_head_dim, mlp_ratio, eps, fused_mlp, dtype=dtype, device=device, operations=operations)
+        if first:
+            self.before_proj = operations.Linear(dim, dim, dtype=dtype, device=device)
+        self.after_proj = operations.Linear(dim, dim, dtype=dtype, device=device)
+
+
+class QwenImage21FunControl(nn.Module):
+    # VACE-style branch: a stream of block copies started from the embedded joint sequence, each skip added after one base block
+    def __init__(self, num_blocks=16, control_in_dim=129, inner_dim=4096, attention_head_dim=128, mlp_ratio=3, eps=1e-6, fused_mlp=True, dtype=None, device=None, operations=None):
+        super().__init__()
+        self.control_img_in = operations.Linear(control_in_dim, inner_dim, dtype=dtype, device=device)
+        self.control_blocks = nn.ModuleList([
+            QwenImage21FunControlBlock(inner_dim, inner_dim // attention_head_dim, attention_head_dim, mlp_ratio, eps, fused_mlp, first=i == 0, dtype=dtype, device=device, operations=operations)
+            for i in range(num_blocks)
+        ])
+
+    def init_stream(self, x, control, prefix_len):
+        # control latents fill the target rows, text and reference rows stay zero
+        joint = torch.zeros_like(x)
+        joint[:, prefix_len:] = self.control_img_in(control)
+        return self.control_blocks[0].before_proj(joint) + x
+
+    def step(self, index, c, mod, pe, attn_fn, prefix_len, transformer_options={}):
+        block = self.control_blocks[index]
+        c = block(c, mod, pe, attn_fn, prefix_len, transformer_options)
+        return c, block.after_proj(c)
+
+
 def block_causal_attention(segments, transformer_options={}, cache=None, block_index=0, prefix_len=0):
     # segments: (start, end, mask); text segments get a causal mask, image blocks attend to everything before their end
     def attn(q, k, v, heads, preferred_attention=None):
+        q, k, v = q.take(), k.take(), v.take()
         if cache is not None:
             # K and V stacked on dim 1 so batch stays first and quantized rows are per token and head
             cache.put(block_index, torch.stack([k[:, :prefix_len], v[:, :prefix_len]], dim=1))
-        outs = [optimized_attention(q[:, start:end].flatten(2), k[:, :end].flatten(2), v[:, :end].flatten(2), heads, mask=mask, transformer_options=transformer_options, preferred_attention=preferred_attention)
-                for start, end, mask in segments]
+        outs = []
+        for i, (start, end, mask) in enumerate(segments):
+            query = AttentionTensorContainer(q[:, start:end].flatten(2))
+            key = AttentionTensorContainer(k[:, :end].flatten(2))
+            value = AttentionTensorContainer(v[:, :end].flatten(2))
+            if i == len(segments) - 1:
+                del q, k, v
+            outs.append(optimized_attention(query, key, value, heads, mask=mask, transformer_options=transformer_options, preferred_attention=preferred_attention))
         return torch.cat(outs, dim=1) if len(outs) > 1 else outs[0]
     return attn
 
@@ -178,16 +218,88 @@ def block_causal_attention(segments, transformer_options={}, cache=None, block_i
 def prefix_cached_attention(prefix_k, prefix_v, transformer_options={}):
     # target-only queries: block-causal reduces to full attention over [cached prefix, target]
     def attn(q, k, v, heads, preferred_attention=None):
-        return optimized_attention(q.flatten(2), torch.cat([prefix_k, k], dim=1).flatten(2), torch.cat([prefix_v, v], dim=1).flatten(2), heads, transformer_options=transformer_options, preferred_attention=preferred_attention)
+        q = AttentionTensorContainer(q.take().flatten(2))
+        k = AttentionTensorContainer(torch.cat([prefix_k, k.take()], dim=1).flatten(2))
+        v = AttentionTensorContainer(torch.cat([prefix_v, v.take()], dim=1).flatten(2))
+        return optimized_attention(q, k, v, heads, transformer_options=transformer_options, preferred_attention=preferred_attention)
     return attn
 
 
 def prefix_cache_key(x, context, refs, slots):
     # one fp32 tensor per batch row: lengths and slots, then the prompt embedding and reference latents
     # the target shape is part of it because reference rope ids are centred on the target
-    header = [context.shape[1], len(refs)] + list(x.shape[-2:]) + list(slots) + [s for r in refs for s in r.shape[-2:]]
+    # Batch size also matters: prefix GEMMs can round differently when CFG batching changes.
+    header = [context.shape[0], context.shape[1], len(refs)] + list(x.shape[-2:]) + list(slots) + [s for r in refs for s in r.shape[-2:]]
     header = torch.tensor(header, dtype=torch.float32, device=context.device).expand(context.shape[0], -1)
     return torch.cat([header, context.float().flatten(1)] + [r.float().flatten(1) for r in refs], dim=1)
+
+
+class PrefixCacheSlot(nn.ModuleList):
+    def __init__(self, shape, num_blocks, dtype, cache_dtype):
+        template, params = quantize_cache(torch.empty(shape, device="meta", dtype=dtype), cache_dtype)
+        if params is not None:
+            layout = "TensorCoreConvRotW4A4Layout" if cache_dtype == "int4" else "TensorWiseINT8Layout"
+            template = comfy.quant_ops.QuantizedTensor(template, layout, params)
+        size = comfy.memory_management.vram_aligned_size(template)
+        super().__init__([comfy.ops.WritableWeight((size,), torch.uint8) for _ in range(num_blocks)])
+        self.template = template
+        self.cache_shape = shape
+        self.cache_dtype = cache_dtype
+        self.key = None
+
+
+class KVCacheModel(nn.Module):
+    comfy_writable = True
+
+    def __init__(self, slots):
+        super().__init__()
+        self.slots = nn.ModuleList(slots)
+
+    def get_dynamic_vram__units(self):
+        return [layer for slot in self.slots for layer in slot], []
+
+
+class PrefixCache:
+    """Forward-local views; every layer of a selected prefix is retained or filled together."""
+    def __init__(self, slots):
+        self.slots = slots
+
+    def filled(self, key):
+        keys = key.split([slot.cache_shape[0] for slot in self.slots])
+        return all(slot.key is not None and torch.equal(slot.key, k) for slot, k in zip(self.slots, keys))
+
+    def finish(self, key):
+        for slot, k in zip(self.slots, key.split([s.cache_shape[0] for s in self.slots])):
+            slot.key = k.clone()
+
+    @contextlib.contextmanager
+    def layer(self, i, device, write):
+        with contextlib.ExitStack() as stack:
+            unprefetched = [slot[i] for slot in self.slots if slot[i].comfy_cast_weights and not hasattr(slot[i], "_prefetch")]
+            if unprefetched:
+                comfy.model_prefetch.pin_modules(unprefetched, device)
+                stack.callback(comfy.model_prefetch.cleanup_prefetched_modules, self, unprefetched)
+            self.values = []
+            for slot in self.slots:
+                layer = slot[i]
+                value, _ = stack.enter_context(layer.access(device, write=write))
+                self.values.append(comfy.memory_management.interpret_gathered_like([slot.template], value)[0])
+            try:
+                yield
+            finally:
+                del self.values
+
+    def put(self, i, tensor):
+        for slot, dest, t in zip(self.slots, self.values, tensor.split([s.cache_shape[0] for s in self.slots])):
+            t, params = quantize_cache(t, slot.cache_dtype)
+            if params is None:
+                dest.copy_(t)
+            else:
+                dest.copy_(comfy.quant_ops.QuantizedTensor(t, dest._layout_cls, params))
+
+    def take(self, i, device, dtype, batch_size):
+        values = [(t.dequantize() if isinstance(t, comfy.quant_ops.QuantizedTensor) else t).reshape(slot.cache_shape).to(dtype) for slot, t in zip(self.slots, self.values)]
+        return values[0] if len(values) == 1 else torch.cat(values)
 
 
 class QwenImage21Transformer2DModel(nn.Module):
@@ -238,6 +350,13 @@ class QwenImage21Transformer2DModel(nn.Module):
             self.prefix_cache.free()
         self.prefix_cache = None
         self.prefix_cache_enabled = enabled
+
+    def can_cache_prefix(self, transformer_options):
+        # Cached steps run target rows only; block hooks require the complete sequence.
+        patches = transformer_options.get("patches", {})
+        hooked = (transformer_options.get("patches_replace", {}).get("dit") or patches.get("post_input")
+                  or patches.get("single_block") or patches.get("attn1_patch"))
+        return self.prefix_cache_enabled and not hooked
 
     def select_prefix_cache(self, key, cache_bytes, device, options):
         # returns (cache with the slot to read or fill selected, whether the slot is filled), or (None, False) to recompute
@@ -304,7 +423,7 @@ class QwenImage21Transformer2DModel(nn.Module):
             comfy.patcher_extension.get_all_wrappers(comfy.patcher_extension.WrappersMP.DIFFUSION_MODEL, transformer_options)
         ).execute(x, timestep, context, ref_latents, image_slots, transformer_options, **kwargs)
 
-    def _forward(self, x, timesteps, context, ref_latents=None, image_slots=None, transformer_options={}, **kwargs):
+    def _forward(self, x, timesteps, context, ref_latents=None, image_slots=None, transformer_options={}, prefix_cache=None, **kwargs):
         B, C, H, W = x.shape
         dtype = x.dtype
         ref_latents = list(ref_latents or [])
@@ -325,12 +444,18 @@ class QwenImage21Transformer2DModel(nn.Module):
 
         blocks_replace = transformer_options.get("patches_replace", {}).get("dit", {})
         cache, cached = None, False
-        # a cached step runs target rows only, so anything hooked into a block would see a different sequence from step 2
-        hooked = blocks_replace or patches.get("post_input") or patches.get("single_block") or patches.get("attn1_patch")
-        if self.prefix_cache_enabled and prefix_len > 0 and not hooked:
+        if prefix_len > 0 and self.can_cache_prefix(transformer_options):
             key = prefix_cache_key(x, context, ref_latents, image_slots)
-            cache_bytes = 2 * len(self.transformer_blocks) * B * prefix_len * self.inner_dim * hidden_states.element_size()
-            cache, cached = self.select_prefix_cache(key, cache_bytes, x.device, transformer_options.get("qwen_image21_cache", {}))
+            options = transformer_options.get("qwen_image21_cache", {})
+            if prefix_cache is not None and x.device in prefix_cache:
+                cache = PrefixCache(prefix_cache[x.device])
+                cached = cache.filled(key)
+                for slot in cache.slots:
+                    for layer in slot:
+                        layer.read_before_write = cached
+            elif options.get("device", "auto") in ("cpu", "gpu") or not self.current_patcher.is_dynamic():
+                cache_bytes = 2 * len(self.transformer_blocks) * B * prefix_len * self.inner_dim * hidden_states.element_size()
+                cache, cached = self.select_prefix_cache(key, cache_bytes, x.device, options)
         if cached:
             hidden_states, pe, prefix_len = hidden_states[:, prefix_len:], pe[:, prefix_len:], 0
         elif cache is not None:
@@ -340,33 +465,41 @@ class QwenImage21Transformer2DModel(nn.Module):
 
         transformer_options["total_blocks"] = len(self.transformer_blocks)
         transformer_options["block_type"] = "single"
-        prefetch_queue = comfy.model_prefetch.make_prefetch_queue(list(self.transformer_blocks), x.device, transformer_options)
+        units = [(block, *(slot[i] for slot in cache.slots)) for i, block in enumerate(self.transformer_blocks)] if isinstance(cache, PrefixCache) else list(self.transformer_blocks)
+        prefetch_queue = comfy.model_prefetch.make_prefetch_queue(units, x.device, transformer_options)
         comfy.model_prefetch.malloc_graph_begin(x.device)
         for i, block in enumerate(self.transformer_blocks):
             comfy.model_prefetch.prefetch_queue_pop(prefetch_queue, x.device, block, dtype, malloc_scope="block")
             transformer_options["block_index"] = i
-            if cache is not None:
-                if not cached:
-                    with comfy.model_prefetch.pause_malloc_graph():
-                        prefix_attn = block_causal_attention(segments[:-1], transformer_options, cache, i, prefix_states.shape[1])
-                        prefix_states = block(prefix_states, mod, prefix_pe, prefix_attn, prefix_states.shape[1], transformer_options)
-                prefix_k, prefix_v = cache.take(i, x.device, dtype, B).unbind(1)
-                if cached:
-                    cache.prefetch(i + 1, x.device, dtype)  # queue the next block before the compute it should overlap
-                attn_fn = prefix_cached_attention(prefix_k, prefix_v, transformer_options)
-            else:
-                attn_fn = block_causal_attention(segments, transformer_options, cache, i, prefix_len)
-            if ("single_block", i) in blocks_replace:
-                def block_wrap(args):
-                    return {"img": block(args["img"], mod, args["pe"], attn_fn, prefix_len, args["transformer_options"])}
-                hidden_states = blocks_replace[("single_block", i)]({"img": hidden_states, "vec": temb, "pe": pe, "transformer_options": transformer_options}, {"original_block": block_wrap})["img"]
-            else:
-                hidden_states = block(hidden_states, mod, pe, attn_fn, prefix_len, transformer_options)
-            for p in patches.get("single_block", []):
-                hidden_states = p({"img": hidden_states, "x": x, "block_index": i, "transformer_options": transformer_options})["img"]
+            with cache.layer(i, x.device, write=not cached) if isinstance(cache, PrefixCache) else contextlib.nullcontext():
+                if cache is not None:
+                    if not cached:
+                        with comfy.model_prefetch.pause_malloc_graph():
+                            prefix_attn = block_causal_attention(segments[:-1], transformer_options, cache, i, prefix_states.shape[1])
+                            prefix_states = block(prefix_states, mod, prefix_pe, prefix_attn, prefix_states.shape[1], transformer_options)
+                    prefix_k, prefix_v = cache.take(i, x.device, dtype, B).unbind(1)
+                    if cached and not isinstance(cache, PrefixCache):
+                        cache.prefetch(i + 1, x.device, dtype)  # queue the next block before the compute it should overlap
+                    attn_fn = prefix_cached_attention(prefix_k, prefix_v, transformer_options)
+                else:
+                    attn_fn = block_causal_attention(segments, transformer_options, cache, i, prefix_len)
+                if ("single_block", i) in blocks_replace:
+                    def block_wrap(args):
+                        return {"img": block(args["img"], mod, args["pe"], attn_fn, prefix_len, args["transformer_options"])}
+                    args = {"img": hidden_states, "vec": temb, "pe": pe, "mod": mod, "attn_fn": attn_fn, "prefix_len": prefix_len, "transformer_options": transformer_options}
+                    hidden_states = blocks_replace[("single_block", i)](args, {"original_block": block_wrap})["img"]
+                else:
+                    hidden_states = block(hidden_states, mod, pe, attn_fn, prefix_len, transformer_options)
+                for p in patches.get("single_block", []):
+                    hidden_states = p({"img": hidden_states, "x": x, "block_index": i, "transformer_options": transformer_options})["img"]
+                if cache is not None:
+                    # Release dequantized K/V before leaving the block's allocation scope.
+                    del attn_fn, prefix_k, prefix_v
 
         comfy.model_prefetch.prefetch_queue_pop(prefetch_queue, x.device, None, malloc_scope="block")
         comfy.model_prefetch.malloc_graph_end()
+        if isinstance(cache, PrefixCache) and not cached:
+            cache.finish(key)
         hidden_states = self.norm_out(hidden_states[:, prefix_len:], temb[:-1])
         hidden_states = self.proj_out(hidden_states)
         return hidden_states.transpose(1, 2).reshape(B, self.out_channels, H, W)

@@ -26,11 +26,10 @@ class BooguTokenizer(comfy.text_encoders.qwen3vl.Qwen3VLTokenizer):
         # Reference SYSTEM_PROMPT_DROP: used for the empty negative/uncond instruction.
         self.llama_template_drop = "<|im_start|>system\n" + BOOGU_DROP_SYSTEM + "<|im_end|>\n<|im_start|>user\n{}<|im_end|>\n"
 
-    def tokenize_with_weights(self, text, return_word_ids=False, llama_template=None, images=[], prevent_empty_text=False, thinking=True, **kwargs):
+    def tokenize_with_weights(self, text, return_word_ids=False, llama_template=None, images=[], prevent_empty_text=False, **kwargs):
         if llama_template is None and len(images) == 0 and text.strip() == "":
             llama_template = self.llama_template_drop
-        # Boogu conditions on the no-think template; thinking=True drops the empty <think> block qwen3vl adds by default.
-        return super().tokenize_with_weights(text, return_word_ids=return_word_ids, llama_template=llama_template, images=images, prevent_empty_text=prevent_empty_text, thinking=thinking, **kwargs)
+        return super().tokenize_with_weights(text, return_word_ids=return_word_ids, llama_template=llama_template, images=images, prevent_empty_text=prevent_empty_text, **kwargs)
 
 
 class BooguQwen3VLClipModel(comfy.text_encoders.qwen3vl.Qwen3VLClipModel):

@@ -42,7 +42,8 @@ class TAESDPreviewerImpl(LatentPreviewer):
         self.taesd = taesd
 
     def decode_latent_to_preview(self, x0):
-        x_sample = self.taesd.decode(x0[:1])[0].movedim(0, 2)
+        # RGB only: previews are JPEG
+        x_sample = self.taesd.decode(x0[:1])[0, :3].movedim(0, 2)
         return preview_to_image(x_sample)
 
 class TAEHVPreviewerImpl(TAESDPreviewerImpl):

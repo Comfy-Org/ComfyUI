@@ -10,7 +10,6 @@ def assert_asset_metadata_tables():
     assert set(Base.metadata.tables) == {
         "assets",
         "asset_contents",
-        "asset_meta",
         "asset_tags",
         "tags",
         "asset_system_state",

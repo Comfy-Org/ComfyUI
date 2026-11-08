@@ -119,7 +119,7 @@ def _orphaned_content_paths(session: Session) -> list[str]:
     ]
 
 
-def test_seed_asset_specs_orphans_nothing_and_keeps_earlier_specs_on_record_failure(
+def test_seed_asset_specs_orphans_nothing_and_keeps_surrounding_specs_on_record_failure(
     session: Session, tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     specs: list[SeedAssetSpec] = []
@@ -144,10 +144,11 @@ def test_seed_asset_specs_orphans_nothing_and_keeps_earlier_specs_on_record_fail
 
     monkeypatch.setattr("app.assets.scanner.create_record", _create_record_or_raise)
 
-    with pytest.raises(RuntimeError, match="forced create_record failure"):
-        seed_asset_specs(session, specs)
-    session.rollback()
+    _created, error = seed_asset_specs(session, specs)
+    session.commit()
 
+    assert isinstance(error, RuntimeError)
+    assert str(error) == "forced create_record failure"
     assert _content_at(session, paths[fail_name]) is None, (
         "the failed spec's content must not outlive the record that would have referenced it"
     )
@@ -162,7 +163,10 @@ def test_seed_asset_specs_orphans_nothing_and_keeps_earlier_specs_on_record_fail
     assert session.scalar(select(Asset).where(Asset.name == "first.bin")) is not None
     assert _reference_count(session, survivor.id) == 1
 
-    assert attempted == ["first.bin", fail_name]
-    assert _content_at(session, paths["last.bin"]) is None, (
-        "the raise aborts the loop, so the spec after the failed one is never attempted"
+    assert attempted == ["first.bin", fail_name, "last.bin"]
+    last_survivor = _content_at(session, paths["last.bin"])
+    assert last_survivor is not None, (
+        "a failed spec must not prevent the remaining specs in the batch from being seeded"
     )
+    assert session.scalar(select(Asset).where(Asset.name == "last.bin")) is not None
+    assert _reference_count(session, last_survivor.id) == 1

@@ -776,6 +776,32 @@ class Wan21(LatentFormat):
         latents_std = self.latents_std.to(latent.device, latent.dtype)
         return latent * latents_std / self.scale_factor + latents_mean
 
+class MingImage(LatentFormat):
+    latent_channels = 16
+    latent_dimensions = 3
+    temporal_downscale_ratio = 4
+    scale_factor = 8.0064
+
+    latent_rgb_factors = [
+        [ 0.0028,  0.4359,  1.6986],
+        [-0.3094, -0.3620, -0.0783],
+        [ 0.9806,  0.5697,  0.1953],
+        [ 1.0482,  1.0832,  0.4385],
+        [ 0.0648, -0.0981, -0.2756],
+        [ 0.8954, -0.0321, -0.2461],
+        [-0.8438, -1.0825, -0.4071],
+        [-0.4610,  0.2319,  0.1578],
+        [-1.0171, -0.9257, -1.3410],
+        [-0.6377,  0.1949,  0.2250],
+        [ 0.0362,  0.6733, -0.0450],
+        [-0.0530,  0.3718,  0.7762],
+        [-0.9903,  0.2123,  0.4190],
+        [-0.2607, -0.7047, -0.1375],
+        [ 0.8319,  0.1645,  0.6854],
+        [ 0.7366,  0.4105,  0.6899],
+    ]
+    latent_rgb_factors_bias = [-0.1048, -0.1049, -0.1874]
+
 class Wan22(Wan21):
     latent_channels = 48
     latent_dimensions = 3
@@ -853,6 +879,14 @@ class Wan22(Wan21):
                 0.5709, 0.6065, 0.6415, 0.4944, 0.5726, 1.2042, 0.5458, 1.6887,
                 0.3971, 1.0600, 0.3943, 0.5537, 0.5444, 0.4089, 0.7468, 0.7744
             ]).view(1, self.latent_channels, 1, 1, 1)
+
+class RelayVSR(Wan22):
+    # the keyframe Wan and the Flash decoder both work on the normalized latent
+    def process_in(self, latent):
+        return latent
+
+    def process_out(self, latent):
+        return latent
 
 class HunyuanImage21(LatentFormat):
     latent_channels = 64
@@ -932,6 +966,7 @@ class QwenImage21(LatentFormat):
     latent_channels = 64
     latent_dimensions = 2
     spacial_downscale_ratio = 16
+    taesd_decoder_name = "taeqi2_1_decoder"
 
     latent_rgb_factors = [
         [-0.0158, -0.0115, -0.0174], [ 0.0030,  0.0120,  0.0027], [ 0.0637,  0.0470, -0.0127], [ 0.0360,  0.0661, -0.0030],

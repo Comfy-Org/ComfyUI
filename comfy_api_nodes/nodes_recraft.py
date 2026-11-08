@@ -422,7 +422,7 @@ class RecraftCreateStyleNode(IO.ComfyNode):
             ],
             is_api_node=True,
             price_badge=IO.PriceBadge(
-                expr="""{"type":"usd","usd": 0.04}""",
+                expr="""{"type":"usd","usd": 0.00715}""",
             ),
         )
 
@@ -499,7 +499,7 @@ class RecraftV4CreateStyleNode(IO.ComfyNode):
             ],
             is_api_node=True,
             price_badge=IO.PriceBadge(
-                expr="""{"type":"usd","usd": 0.005}""",
+                expr="""{"type":"usd","usd": 0.00715}""",
             ),
         )
 
@@ -584,7 +584,7 @@ class RecraftTextToImageNode(IO.ComfyNode):
             is_api_node=True,
             price_badge=IO.PriceBadge(
                 depends_on=IO.PriceBadgeDepends(widgets=["n"]),
-                expr="""{"type":"usd","usd": $round(0.04 * widgets.n, 2)}""",
+                expr="""{"type":"usd","usd": 0.0572 * widgets.n}""",
             ),
         )
 
@@ -699,7 +699,7 @@ class RecraftImageToImageNode(IO.ComfyNode):
             is_api_node=True,
             price_badge=IO.PriceBadge(
                 depends_on=IO.PriceBadgeDepends(widgets=["n"]),
-                expr="""{"type":"usd","usd": $round(0.04 * widgets.n, 2)}""",
+                expr="""{"type":"usd","usd": 0.0572 * widgets.n}""",
             ),
         )
 
@@ -804,7 +804,7 @@ class RecraftImageInpaintingNode(IO.ComfyNode):
             is_api_node=True,
             price_badge=IO.PriceBadge(
                 depends_on=IO.PriceBadgeDepends(widgets=["n"]),
-                expr="""{"type":"usd","usd": $round(0.04 * widgets.n, 2)}""",
+                expr="""{"type":"usd","usd": 0.0572 * widgets.n}""",
             ),
         )
 
@@ -909,7 +909,7 @@ class RecraftTextToVectorNode(IO.ComfyNode):
             is_api_node=True,
             price_badge=IO.PriceBadge(
                 depends_on=IO.PriceBadgeDepends(widgets=["n"]),
-                expr="""{"type":"usd","usd": $round(0.08 * widgets.n, 2)}""",
+                expr="""{"type":"usd","usd": 0.1144 * widgets.n}""",
             ),
         )
 
@@ -980,7 +980,7 @@ class RecraftVectorizeImageNode(IO.ComfyNode):
             is_api_node=True,
             price_badge=IO.PriceBadge(
                 depends_on=IO.PriceBadgeDepends(),
-                expr="""{"type":"usd","usd": 0.01}""",
+                expr="""{"type":"usd","usd": 0.0143}""",
             ),
         )
 
@@ -1041,7 +1041,7 @@ class RecraftReplaceBackgroundNode(IO.ComfyNode):
             ],
             is_api_node=True,
             price_badge=IO.PriceBadge(
-                expr="""{"type":"usd","usd":0.04}""",
+                expr="""{"type":"usd","usd":0.0572}""",
             ),
         )
 
@@ -1111,7 +1111,7 @@ class RecraftRemoveBackgroundNode(IO.ComfyNode):
             ],
             is_api_node=True,
             price_badge=IO.PriceBadge(
-                expr="""{"type":"usd","usd":0.01}""",
+                expr="""{"type":"usd","usd":0.0143}""",
             ),
         )
 
@@ -1160,7 +1160,7 @@ class RecraftCrispUpscaleNode(IO.ComfyNode):
             ],
             is_api_node=True,
             price_badge=IO.PriceBadge(
-                expr="""{"type":"usd","usd":0.004}""",
+                expr="""{"type":"usd","usd":0.00572}""",
             ),
         )
 
@@ -1206,7 +1206,7 @@ class RecraftCreativeUpscaleNode(RecraftCrispUpscaleNode):
             ],
             is_api_node=True,
             price_badge=IO.PriceBadge(
-                expr="""{"type":"usd","usd":0.25}""",
+                expr="""{"type":"usd","usd":0.3575}""",
             ),
         )
 
@@ -1236,6 +1236,17 @@ class RecraftV4TextToImageNode(IO.ComfyNode):
                     options=[
                         IO.DynamicCombo.Option(
                             "recraftv4_1",
+                            [
+                                IO.Combo.Input(
+                                    "size",
+                                    options=RECRAFT_V4_SIZES,
+                                    default="1024x1024",
+                                    tooltip="The size of the generated image.",
+                                ),
+                            ],
+                        ),
+                        IO.DynamicCombo.Option(
+                            "recraftv4_1_flash",
                             [
                                 IO.Combo.Input(
                                     "size",
@@ -1324,7 +1335,8 @@ class RecraftV4TextToImageNode(IO.ComfyNode):
                         ),
                     ],
                     tooltip="The model to use for generation. The recraftv4_styles models are built for "
-                    "style-consistent generation and always require a style_id or style_references.",
+                    "style-consistent generation and always require a style_id or style_references; "
+                    "recraftv4_1_flash is the fastest and cheapest model and supports no styles at all.",
                 ),
                 IO.Int.Input(
                     "n",
@@ -1389,17 +1401,18 @@ class RecraftV4TextToImageNode(IO.ComfyNode):
                 expr="""
                 (
                     $prices := {
-                        "recraftv4_1": 0.035,
-                        "recraftv4_1_utility": 0.035,
-                        "recraftv4_1_pro": 0.21,
-                        "recraftv4_1_utility_pro": 0.21,
-                        "recraftv4": 0.04,
-                        "recraftv4_pro": 0.25,
-                        "recraftv4_styles": 0.035,
-                        "recraftv4_styles_pro": 0.10
+                        "recraftv4_1": 0.05005,
+                        "recraftv4_1_flash": 0.01001,
+                        "recraftv4_1_utility": 0.05005,
+                        "recraftv4_1_pro": 0.3003,
+                        "recraftv4_1_utility_pro": 0.3003,
+                        "recraftv4": 0.0572,
+                        "recraftv4_pro": 0.3575,
+                        "recraftv4_styles": 0.05005,
+                        "recraftv4_styles_pro": 0.143
                     };
                     $references := $lookup(inputGroups, "style_references");
-                    $style := ($references ? $references : 0) > 0 ? 0.005 : 0;
+                    $style := ($references ? $references : 0) > 0 ? 0.00715 : 0;
                     {"type":"usd","usd": $lookup($prices, widgets.model) * widgets.n + $style}
                 )
                 """,
@@ -1624,17 +1637,17 @@ class RecraftV4TextToVectorNode(IO.ComfyNode):
                 expr="""
                 (
                     $prices := {
-                        "recraftv4_1_vector": 0.08,
-                        "recraftv4_1_utility_vector": 0.08,
-                        "recraftv4_1_pro_vector": 0.30,
-                        "recraftv4_1_utility_pro_vector": 0.30,
-                        "recraftv4": 0.08,
-                        "recraftv4_pro": 0.30,
-                        "recraftv4_styles_vector": 0.05,
-                        "recraftv4_styles_pro_vector": 0.12
+                        "recraftv4_1_vector": 0.1144,
+                        "recraftv4_1_utility_vector": 0.1144,
+                        "recraftv4_1_pro_vector": 0.429,
+                        "recraftv4_1_utility_pro_vector": 0.429,
+                        "recraftv4": 0.1144,
+                        "recraftv4_pro": 0.429,
+                        "recraftv4_styles_vector": 0.0715,
+                        "recraftv4_styles_pro_vector": 0.1716
                     };
                     $references := $lookup(inputGroups, "style_references");
-                    $style := ($references ? $references : 0) > 0 ? 0.005 : 0;
+                    $style := ($references ? $references : 0) > 0 ? 0.00715 : 0;
                     {"type":"usd","usd": $lookup($prices, widgets.model) * widgets.n + $style}
                 )
                 """,

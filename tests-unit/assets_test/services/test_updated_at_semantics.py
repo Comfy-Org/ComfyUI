@@ -111,6 +111,18 @@ def test_rename_moves_updated_at(session, mock_create_session, temp_dir):
     assert _updated_at(session, record.id) > STALE, "a rename is an explicit user edit"
 
 
+def test_same_name_rename_does_not_move_updated_at(
+    session, mock_create_session, temp_dir
+):
+    record = _seed_record(session, _write_file(temp_dir, "rename-noop.bin"))
+
+    update_asset_metadata(record.id, name=record.name)
+
+    assert _updated_at(session, record.id) == STALE, (
+        "requesting the existing name changes nothing"
+    )
+
+
 @pytest.mark.parametrize(
     "field,kwargs",
     [

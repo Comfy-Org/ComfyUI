@@ -1,6 +1,6 @@
 # code adapted from: https://github.com/Stability-AI/stable-audio-tools
 
-from comfy.ldm.modules.attention import optimized_attention
+from comfy.ldm.modules.attention import AttentionTensorContainer, ComfyAttention, optimized_attention
 import typing as tp
 
 import torch
@@ -285,6 +285,7 @@ class Attention(nn.Module):
         operations=None,
     ):
         super().__init__()
+        self.comfy_attention = ComfyAttention()
         self.dim = dim
         self.dim_heads = dim_heads
         self.causal = causal
@@ -430,11 +431,14 @@ class Attention(nn.Module):
         if self.differential:
             q, q_diff = q.unbind(dim=1)
             k, k_diff = k.unbind(dim=1)
-            out      = optimized_attention(q,      k,      v, h, skip_reshape=True, low_precision_attention=False, transformer_options=transformer_options, **gqa_kwargs)
-            out_diff = optimized_attention(q_diff, k_diff, v, h, skip_reshape=True, low_precision_attention=False, transformer_options=transformer_options, **gqa_kwargs)
+            q, k = AttentionTensorContainer(q), AttentionTensorContainer(k)
+            out      = optimized_attention(q,      k,      AttentionTensorContainer(v), h, skip_reshape=True, low_precision_attention=False, preferred_attention=self.comfy_attention, transformer_options=transformer_options, **gqa_kwargs)
+            q_diff, k_diff, v = AttentionTensorContainer(q_diff), AttentionTensorContainer(k_diff), AttentionTensorContainer(v)
+            out_diff = optimized_attention(q_diff, k_diff, v, h, skip_reshape=True, low_precision_attention=False, preferred_attention=self.comfy_attention, transformer_options=transformer_options, **gqa_kwargs)
             out = out - out_diff
         else:
-            out = optimized_attention(q, k, v, h, skip_reshape=True, low_precision_attention=False, transformer_options=transformer_options, **gqa_kwargs)
+            q, k, v = AttentionTensorContainer(q), AttentionTensorContainer(k), AttentionTensorContainer(v)
+            out = optimized_attention(q, k, v, h, skip_reshape=True, low_precision_attention=False, preferred_attention=self.comfy_attention, transformer_options=transformer_options, **gqa_kwargs)
 
         out = self.to_out(out)
 

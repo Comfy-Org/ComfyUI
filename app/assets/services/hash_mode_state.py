@@ -14,7 +14,7 @@ from collections import deque
 from dataclasses import dataclass
 from typing import Final
 
-from sqlalchemy import select
+from sqlalchemy import false, select
 from sqlalchemy.orm import Session
 
 from app.assets import mode as _mode
@@ -102,7 +102,7 @@ def _retry_or_retire(session: Session, entry: _PendingEntry) -> None:
         return
     content = session.scalars(
         select(AssetContent).where(
-            AssetContent.path == entry.path, AssetContent.is_missing.is_(False)
+            AssetContent.path == entry.path, AssetContent.is_missing == false()
         )
     ).first()
     if content is not None:
@@ -120,6 +120,9 @@ def drain_transition_queue(session: Session) -> None:
 
     pending_count = len(_PENDING_QUEUE)
     for _ in range(pending_count):
+        # Commit the previous entry's writes so this entry's hash runs with no transaction open.
+        # That needs a create_session() session: on a write session the next read takes the lock.
+        session.commit()
         entry = _PENDING_QUEUE.popleft()
         _PENDING_PATHS.discard(entry.path)
         path = entry.path
@@ -135,7 +138,7 @@ def drain_transition_queue(session: Session) -> None:
             except FileNotFoundError:
                 gone = session.scalars(
                     select(AssetContent).where(
-                        AssetContent.path == path, AssetContent.is_missing.is_(False)
+                        AssetContent.path == path, AssetContent.is_missing == false()
                     )
                 ).first()
                 if gone is not None:
@@ -149,7 +152,7 @@ def drain_transition_queue(session: Session) -> None:
         stored_hash = to_stored_hash(digest)
         content = session.scalars(
             select(AssetContent).where(
-                AssetContent.path == path, AssetContent.is_missing.is_(False)
+                AssetContent.path == path, AssetContent.is_missing == false()
             )
         ).first()
         if content is None:

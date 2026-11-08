@@ -65,9 +65,10 @@ def test_single_hash_match_recovers(session, temp_dir: Path):
     content, record = _missing_content(session, path, _stored_hash(path))
 
     with patch("app.assets.scanner.mode.hashing_enabled", return_value=True):
-        created = seed_asset_specs(session, [_spec(path)])
+        created, error = seed_asset_specs(session, [_spec(path)])
     session.commit()
 
+    assert error is None
     assert created == 0
     assert session.get(AssetContent, content.id).is_missing is False
     assert session.get(AssetTag, {"asset_id": record.id, "tag_name": "missing"}) is None
@@ -81,9 +82,10 @@ def test_ambiguous_hash_match_recovers_nothing(session, temp_dir: Path):
     second, _ = _missing_content(session, path, digest)
 
     with patch("app.assets.scanner.mode.hashing_enabled", return_value=True):
-        created = seed_asset_specs(session, [_spec(path)])
+        created, error = seed_asset_specs(session, [_spec(path)])
     session.commit()
 
+    assert error is None
     assert created == 1
     assert session.get(AssetContent, first.id).is_missing is True
     assert session.get(AssetContent, second.id).is_missing is True
@@ -96,27 +98,58 @@ def test_no_hash_match_creates_fresh_rows(session, temp_dir: Path):
     missing, _ = _missing_content(session, path, "old")
 
     with patch("app.assets.scanner.mode.hashing_enabled", return_value=True):
-        created = seed_asset_specs(session, [_spec(path)])
+        created, error = seed_asset_specs(session, [_spec(path)])
     session.commit()
 
+    assert error is None
     assert created == 1
     assert session.get(AssetContent, missing.id).is_missing is True
     assert len(session.scalars(select(Asset)).all()) == 2
 
 
-def test_off_mode_no_recovery(session, temp_dir: Path):
+def _stat_content(session, path: Path, hash_value: str | None) -> tuple[AssetContent, Asset]:
+    content, record = _missing_content(session, path, hash_value)
+    stat_result = path.stat()
+    content.size_bytes = stat_result.st_size
+    content.mtime_ns = stat_result.st_mtime_ns
+    session.commit()
+    return content, record
+
+
+def test_off_mode_recovers_by_exact_stat_without_hashing(session, temp_dir: Path):
     path = temp_dir / "off.bin"
     path.write_bytes(b"bytes")
-    missing, _ = _missing_content(session, path, _stored_hash(path))
+    missing, record = _stat_content(session, path, _stored_hash(path))
 
     with (
         patch("app.assets.scanner.mode.hashing_enabled", return_value=False),
-        patch("app.assets.scanner_changes.snapshot_hash") as hash_mock,
+        patch("app.assets.scanner.snapshot_hash") as hash_mock,
     ):
-        created = seed_asset_specs(session, [_spec(path)])
+        created, error = seed_asset_specs(session, [_spec(path)])
     session.commit()
 
     hash_mock.assert_not_called()
+    assert error is None
+    assert created == 0
+    recovered = session.get(AssetContent, missing.id)
+    assert recovered.is_missing is False
+    assert recovered.hash == _stored_hash(path)
+    assert session.get(AssetTag, {"asset_id": record.id, "tag_name": "missing"}) is None
+
+
+@pytest.mark.parametrize("field", ["size_bytes", "mtime_ns"])
+def test_off_mode_stat_mismatch_creates_fresh_rows(session, temp_dir: Path, field: str):
+    path = temp_dir / "off-changed.bin"
+    path.write_bytes(b"bytes")
+    missing, _ = _stat_content(session, path, None)
+    setattr(missing, field, getattr(missing, field) + 1)
+    session.commit()
+
+    with patch("app.assets.scanner.mode.hashing_enabled", return_value=False):
+        created, error = seed_asset_specs(session, [_spec(path)])
+    session.commit()
+
+    assert error is None
     assert created == 1
     assert session.get(AssetContent, missing.id).is_missing is True
 
@@ -128,11 +161,12 @@ def test_unstable_hash_requeues(session, temp_dir: Path):
 
     with (
         patch("app.assets.scanner.mode.hashing_enabled", return_value=True),
-        patch("app.assets.scanner_changes.snapshot_hash", return_value=None),
+        patch("app.assets.scanner.snapshot_hash", return_value=None),
     ):
-        created = seed_asset_specs(session, [_spec(path)])
+        created, error = seed_asset_specs(session, [_spec(path)])
     session.commit()
 
+    assert error is None
     assert created == 0
     assert pending_recovery_count() == 1
     assert session.get(AssetContent, missing.id).is_missing is True
@@ -156,7 +190,7 @@ def test_recovery_skips_a_path_a_live_row_already_occupies(session, temp_dir: Pa
     live_b_id = live_b.id
 
     result = recover_missing_content(
-        session, str(path), stat_result, hashing_is_enabled=True
+        session, str(path), snapshot_hash(str(path)), hashing_is_enabled=True
     )
     session.commit()
 
@@ -166,3 +200,24 @@ def test_recovery_skips_a_path_a_live_row_already_occupies(session, temp_dir: Pa
     )
     assert session.get(AssetContent, missing_a.id).is_missing is True
     assert session.get(AssetContent, live_b_id).is_missing is False
+
+
+def test_seeded_row_takes_the_stat_its_hash_was_verified_against(session, temp_dir: Path):
+    path = temp_dir / "rewritten.bin"
+    path.write_bytes(b"old")
+
+    def rewrite_then_hash(candidate_path: str):
+        path.write_bytes(b"rewritten between the stat and the hash")
+        return snapshot_hash(candidate_path)
+
+    with (
+        patch("app.assets.scanner.mode.hashing_enabled", return_value=True),
+        patch("app.assets.scanner.snapshot_hash", side_effect=rewrite_then_hash),
+    ):
+        created, _ = seed_asset_specs(session, [_spec(path)])
+    session.commit()
+
+    assert created == 1
+    content = session.scalars(select(AssetContent)).one()
+    assert content.size_bytes == path.stat().st_size
+    assert content.mtime_ns == path.stat().st_mtime_ns

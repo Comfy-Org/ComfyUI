@@ -50,6 +50,10 @@ def _output(filename: str, *, subfolder: str = "", type_: str = "output") -> dic
     return {"images": [{"filename": filename, "subfolder": subfolder, "type": type_}]}
 
 
+def _meta(node_id: str) -> dict:
+    return {"node_id": node_id, "display_node": node_id, "parent_node": None, "real_node_id": node_id}
+
+
 def _wrapper(filename: str, node_id: str = "1") -> dict:
     return {
         "meta": {
@@ -220,7 +224,7 @@ def test_cached_registration_happens_without_client(output_path_environment) -> 
     emit_cached_output(
         server,
         "node-1",
-        "node-1",
+        _meta("node-1"),
         _CacheEntry(ui=_wrapper("noclient.png"), outputs=[]),
         "job-x",
         ui_outputs,
@@ -254,7 +258,7 @@ def test_cached_ui_object_unmodified_after_emission(output_path_environment) -> 
     snapshot = copy.deepcopy(cached.ui)
 
     register_executed_outputs(_output("immut.png"), "seed-job", manager)
-    emit_cached_output(server, "1", "1", cached, "prompt-1", {}, manager)
+    emit_cached_output(server, "1", _meta("1"), cached, "prompt-1", {}, manager)
 
     assert cached.ui == snapshot
 
@@ -266,8 +270,8 @@ def test_double_emission_yields_single_delivery(output_path_environment) -> None
     cached = _CacheEntry(ui=_wrapper("dbl.png"), outputs=[])
 
     register_executed_outputs(_output("dbl.png"), "seed-job", manager)
-    emit_cached_output(server, "1", "1", cached, "prompt-1", ui_outputs, manager)
-    emit_cached_output(server, "1", "1", cached, "prompt-1", ui_outputs, manager)
+    emit_cached_output(server, "1", _meta("1"), cached, "prompt-1", ui_outputs, manager)
+    emit_cached_output(server, "1", _meta("1"), cached, "prompt-1", ui_outputs, manager)
 
     deliveries = manager.deliveries_by_path[os.path.join(_BASE, "dbl.png")]
     assert len([delivery for delivery in deliveries if delivery.asset.job_id == "prompt-1"]) == 1
@@ -372,7 +376,7 @@ def test_emit_cached_sends_enriched_output_to_client(output_path_environment) ->
     emit_cached_output(
         server,
         "1",
-        "1",
+        _meta("1"),
         _CacheEntry(ui=_wrapper("send.png"), outputs=[]),
         "prompt-1",
         ui_outputs,
@@ -384,3 +388,18 @@ def test_emit_cached_sends_enriched_output_to_client(output_path_environment) ->
     assert event == "executed"
     assert client_id == "client-1"
     assert payload["output"]["images"][0]["id"] is not None
+
+
+def test_cached_output_records_the_current_nodes_meta(output_path_environment) -> None:
+    """A cache entry shared by two nodes must not carry the first node's meta into the second's history."""
+    manager = InMemoryAssets()
+    server = _Server(client_id="client-1")
+    ui_outputs: dict = {}
+    cached = _CacheEntry(ui=_wrapper("shared.png", node_id="4"), outputs=[])
+    current_meta = _meta("7")
+
+    register_executed_outputs(_output("shared.png"), "seed-job", manager)
+    emit_cached_output(server, "7", current_meta, cached, "prompt-1", ui_outputs, manager)
+
+    assert ui_outputs["7"]["meta"] == current_meta
+    assert cached.ui["meta"]["node_id"] == "4"

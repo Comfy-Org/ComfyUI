@@ -103,4 +103,4 @@ def test_av1_zero_crf_uses_lossless_mode():
     assert video_encoder_options(VideoCodec.AV1, 0) == {"svtav1-params": "lossless=1"}
     assert video_encoder_options(VideoCodec.AV1, 30.0) == {"crf": "30.0"}
     assert video_encoder_options(VideoCodec.H264, 0) == {"crf": "0"}
-    assert video_encoder_options(VideoCodec.AV1, None) == {}
+    assert video_encoder_options(VideoCodec.AV1, None) == {"crf": "24"}

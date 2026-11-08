@@ -9,7 +9,7 @@ from unittest.mock import MagicMock, Mock, call
 import folder_paths
 import pytest
 from sqlalchemy import create_engine, select
-from sqlalchemy.orm import Session, Session as SASession
+from sqlalchemy.orm import Session, Session as SASession, sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from app.assets import lifecycle
@@ -18,7 +18,7 @@ from app.assets import scanner, seeder as seeder_module
 from app.assets.database.models import Asset, AssetContent
 from app.assets.database.queries.records import create_content, create_record
 from app.assets.manager import AssetsEnabled
-from app.assets.seeder import ScanStatus, asset_seeder
+from app.assets.seeder import ScanPhase, ScanStatus, asset_seeder
 from app.database.models import Base
 from app.assets.services.schemas import RegisteredAsset, UploadAssetView
 
@@ -76,6 +76,7 @@ def threaded_create_session(
     monkeypatch.setattr(seeder_module, "create_session", _create_session)
     monkeypatch.setattr(scanner, "create_session", _create_session)
     monkeypatch.setattr("app.assets.services.ingest.create_session", _create_session)
+    monkeypatch.setattr("app.database.db.WriteSession", sessionmaker(bind=engine))
     yield _create_session
     engine.dispose()
 
@@ -156,6 +157,32 @@ def test_queue_output_scan_does_not_duplicate_declared_output(
     )
 
 
+@pytest.mark.parametrize("hashing", [False, True])
+def test_queue_output_scan_queues_a_full_output_walk_with_the_hashing_setting(
+    monkeypatch: pytest.MonkeyPatch, hashing: bool
+) -> None:
+    enqueue = Mock(return_value=True)
+    monkeypatch.setattr(asset_seeder, "enqueue_scan", enqueue)
+    monkeypatch.setattr(asset_seeder, "is_disabled", lambda: False)
+
+    args = _ArgsStub()
+    args.enable_asset_hashing = hashing
+
+    AssetsEnabled(args).queue_output_scan()
+
+    enqueue.assert_called_once_with(roots=("output",), phase=ScanPhase.FULL, compute_hashes=hashing)
+
+
+def test_queue_output_scan_does_nothing_while_the_seeder_is_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    enqueue = Mock(return_value=True)
+    monkeypatch.setattr(asset_seeder, "enqueue_scan", enqueue)
+    monkeypatch.setattr(asset_seeder, "is_disabled", lambda: True)
+
+    AssetsEnabled(_ArgsStub()).queue_output_scan()
+
+    enqueue.assert_not_called()
+
+
 def test_executed_and_cached_outputs_share_unhashed_content(
     enabled_manager: AssetsEnabled,
     asset_roots: tuple[Path, Path, Path],
@@ -180,6 +207,7 @@ def test_executed_and_cached_outputs_share_unhashed_content(
         "content_id",
         "job_id",
         "name",
+        "preview_id",
     }
     with mock_create_session() as session:
         asset = session.get(Asset, executed.id)

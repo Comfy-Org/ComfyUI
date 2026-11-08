@@ -260,6 +260,17 @@ def detect_unet_config(state_dict, key_prefix, metadata=None):
             dit_config["meanflow_sum"] = False
         return dit_config
 
+    if '{}content_mode_blocks.image.0.attn_out.weight'.format(key_prefix) in state_dict_keys and '{}single_stream_modulations.txt.lin.weight'.format(key_prefix) in state_dict_keys:  # FLUX.3
+        dit_config = {}
+        dit_config["image_model"] = "flux3"
+        dit_config["hidden_size"] = state_dict['{}content_mode_blocks.image.0.attn_out.weight'.format(key_prefix)].shape[0]
+        dit_config["num_heads"] = dit_config["hidden_size"] // 128
+        dit_config["fused_qkv"] = '{}single_blocks.0.qkv.weight'.format(key_prefix) in state_dict_keys
+        dit_config["flow_map"] = '{}ref_time_in.in_layer.weight'.format(key_prefix) in state_dict_keys
+        dit_config["depth"] = count_blocks(state_dict_keys, '{}txt_mode_blocks.'.format(key_prefix) + '{}.')
+        dit_config["depth_single_blocks"] = count_blocks(state_dict_keys, '{}single_blocks.'.format(key_prefix) + '{}.')
+        return dit_config
+
     if any_suffix_in(state_dict_keys, key_prefix, 'double_blocks.0.img_attn.norm.key_norm.', ["weight", "scale"]) and ('{}img_in.weight'.format(key_prefix) in state_dict_keys or any_suffix_in(state_dict_keys, key_prefix, 'distilled_guidance_layer.norms.0.', ["weight", "scale"])): #Flux, Chroma or Chroma Radiance (has no img_in.weight)
         dit_config = {}
         if '{}double_stream_modulation_img.lin.weight'.format(key_prefix) in state_dict_keys:
@@ -393,8 +404,12 @@ def detect_unet_config(state_dict, key_prefix, metadata=None):
         dit_config["num_layers"] = count_blocks(state_dict_keys, '{}blocks.'.format(key_prefix) + '{}.')
         dit_config["token_refiner_num_layers"] = count_blocks(state_dict_keys, '{}token_refiner.blocks.'.format(key_prefix) + '{}.')
         dit_config["hidden_size"] = state_dict['{}video_patch_proj.weight'.format(key_prefix)].shape[0]
-        dit_config["latents_dim"] = state_dict['{}final_layer.video_out.weight'.format(key_prefix)].shape[0] // 4  # patch 1x2x2
-        dit_config["audio_latents_dim"] = state_dict['{}final_layer.audio_out.weight'.format(key_prefix)].shape[0]
+        # a PDD checkpoint stacks pdd_steps output heads per stream (declared in its config metadata)
+        pdd_steps = 1
+        if metadata is not None and "config" in metadata:
+            pdd_steps = json.loads(metadata["config"]).get("transformer", {}).get("pdd_steps", 1)
+        dit_config["latents_dim"] = state_dict['{}final_layer.video_out.weight'.format(key_prefix)].shape[0] // (4 * pdd_steps)  # patch 1x2x2
+        dit_config["audio_latents_dim"] = state_dict['{}final_layer.audio_out.weight'.format(key_prefix)].shape[0] // pdd_steps
         dit_config["attention_head_dim"] = state_dict['{}blocks.0.attn.q_norm.weight'.format(key_prefix)].shape[0]
         qkv = state_dict['{}blocks.0.attn.qkv_proj.weight'.format(key_prefix)]
         dit_config["num_attention_heads"] = qkv.shape[0] // (3 * dit_config["attention_head_dim"])
@@ -609,13 +624,19 @@ def detect_unet_config(state_dict, key_prefix, metadata=None):
                 dit_config["allow_fp16"] = torch.std(state_dict['{}layers.{}.ffn_norm1.weight'.format(key_prefix, dit_config["n_layers"] - 2)], unbiased=False).item() < 0.42
             except Exception:
                 pass
+            dec_cond_key = '{}dec_net.cond_embed.weight'.format(key_prefix)
             if '{}cap_pad_token'.format(key_prefix) in state_dict_keys:
                 dit_config["pad_tokens_multiple"] = 32
+            # Ming-Image Design has no learned pad tokens; Layer needs a saved marker or repack metadata.
+            ming_metadata = metadata is not None and "config" in metadata and json.loads(metadata["config"]).get("transformer", {}).get("image_model") == "ming_image"
+            if '{}__ming_image__'.format(key_prefix) in state_dict_keys or ming_metadata or ("pad_tokens_multiple" not in dit_config and dec_cond_key not in state_dict_keys):
+                dit_config["image_model"] = "ming_image"
+                if "pad_tokens_multiple" not in dit_config:
+                    dit_config["masked_pad_multiple"] = 32
             sig_weight = state_dict.get('{}siglip_embedder.0.weight'.format(key_prefix), None)
             if sig_weight is not None:
                 dit_config["siglip_feat_dim"] = sig_weight.shape[0]
 
-            dec_cond_key = '{}dec_net.cond_embed.weight'.format(key_prefix)
             if dec_cond_key in state_dict_keys:  # pixel-space variant
                 dit_config["image_model"] = "zimage_pixel"
                 # patch_size and in_channels are derived from x_embedder:
@@ -747,6 +768,8 @@ def detect_unet_config(state_dict, key_prefix, metadata=None):
             dit_config["model_type"] = "vace"
             dit_config["vace_in_dim"] = state_dict['{}vace_patch_embedding.weight'.format(key_prefix)].shape[1]
             dit_config["vace_layers"] = count_blocks(state_dict_keys, '{}vace_blocks.'.format(key_prefix) + '{}.')
+            if '{}img_emb.proj.0.bias'.format(key_prefix) in state_dict_keys:  # ID-V2V, vace on an i2v model
+                dit_config["vace_image_input"] = True
         elif '{}control_adapter.conv.weight'.format(key_prefix) in state_dict_keys:
             if '{}img_emb.proj.0.bias'.format(key_prefix) in state_dict_keys:
                 dit_config["model_type"] = "camera"
@@ -764,6 +787,10 @@ def detect_unet_config(state_dict, key_prefix, metadata=None):
             dit_config["model_type"] = "scail"
         elif '{}patch_embedding_global.weight'.format(key_prefix) in state_dict_keys:
             dit_config["model_type"] = "wandancer"
+        elif '{}lq_proj_in.conv1.weight'.format(key_prefix) in state_dict_keys:
+            dit_config["model_type"] = "relayvsr"
+            # the LQ frames go in pixel-unshuffled by 4 * upscale_factor
+            dit_config["upscale_factor"] = math.isqrt(state_dict['{}lq_proj_in.conv1.weight'.format(key_prefix)].shape[1] // 3) // 4
         else:
             if '{}img_emb.proj.0.bias'.format(key_prefix) in state_dict_keys:
                 dit_config["model_type"] = "i2v"
@@ -997,6 +1024,35 @@ def detect_unet_config(state_dict, key_prefix, metadata=None):
         dit_config["image_model"] = "ideogram4"
         dit_config["in_channels"] = state_dict['{}input_proj.weight'.format(key_prefix)].shape[1]
         dit_config["num_layers"] = count_blocks(state_dict_keys, '{}layers.'.format(key_prefix) + '{}.')
+        return dit_config
+
+    if ('{}perceiver.latent_queries'.format(key_prefix) in state_dict_keys and '{}layers.0.attention.qkv.weight'.format(key_prefix) in state_dict_keys and '{}final_layer.linear.weight'.format(key_prefix) in state_dict_keys
+            and ('{}layers.0.feed_forward.w13.weight'.format(key_prefix) in state_dict_keys or '{}layers.0.feed_forward.w1.weight'.format(key_prefix) in state_dict_keys)):  # Fibo 2.0 (repacked)
+        dit_config = {}
+        dit_config["image_model"] = "fibo2"
+        dit_config["max_gist_tokens"], dit_config["dim"] = state_dict['{}perceiver.latent_queries'.format(key_prefix)].shape
+        dit_config["n_heads"] = dit_config["dim"] // 128
+        dit_config["in_channels"] = state_dict['{}final_layer.linear.weight'.format(key_prefix)].shape[0]
+        dit_config["n_layers"] = count_blocks(state_dict_keys, '{}layers.'.format(key_prefix) + '{}.')
+        dit_config["n_refiner_layers"] = count_blocks(state_dict_keys, '{}noise_refiner.'.format(key_prefix) + '{}.')
+        dit_config["perceiver_layers"] = count_blocks(state_dict_keys, '{}perceiver.layers.'.format(key_prefix) + '{}.')
+        dit_config["injection_layers"] = [i for i in range(dit_config["n_layers"]) if '{}layers.{}.cross_attn_gate'.format(key_prefix, i) in state_dict_keys]
+        w13 = '{}layers.0.feed_forward.w13.weight'.format(key_prefix)
+        if w13 in state_dict_keys:  # w1 and w3 fused, hidden width padded for the fused int8 swiglu
+            dit_config["ffn_dim"] = state_dict[w13].shape[0] // 2
+        else:
+            dit_config["ffn_dim"] = state_dict['{}layers.0.feed_forward.w1.weight'.format(key_prefix)].shape[0]
+            dit_config["fused_ffn"] = False
+        return dit_config
+
+    if '{}shared_block_modulation.weight'.format(key_prefix) in state_dict_keys and '{}layers.0.proj.ffn_up_gate.weight'.format(key_prefix) in state_dict_keys:  # MOSS-Image
+        dit_config = {}
+        dit_config["image_model"] = "moss_image"
+        dit_config["dim"] = state_dict['{}shared_block_modulation.weight'.format(key_prefix)].shape[0] // 6
+        dit_config["ffn_dim"] = state_dict['{}layers.0.proj.ffn_up_gate.weight'.format(key_prefix)].shape[0] // 2
+        dit_config["num_heads"] = dit_config["dim"] // 128
+        dit_config["num_layers"] = count_blocks(state_dict_keys, '{}layers.'.format(key_prefix) + '{}.')
+        dit_config["fused_qkv"] = '{}layers.0.proj.qkv.weight'.format(key_prefix) in state_dict_keys
         return dit_config
 
     if '{}txtfusion.projector.weight'.format(key_prefix) in state_dict_keys:  # Krea 2 (K2)

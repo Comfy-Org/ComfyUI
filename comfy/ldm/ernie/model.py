@@ -3,7 +3,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from comfy.ldm.modules.attention import optimized_attention
+from comfy.ldm.modules.attention import AttentionTensorContainer, ComfyAttention, optimized_attention
 import comfy.model_management
 import comfy.ops
 import comfy.quant_ops
@@ -86,6 +86,7 @@ class TimestepEmbedding(nn.Module):
 class ErnieImageAttention(nn.Module):
     def __init__(self, query_dim: int, heads: int, dim_head: int, eps: float = 1e-6, operations=None, device=None, dtype=None):
         super().__init__()
+        self.comfy_attention = ComfyAttention()
         self.heads = heads
         self.head_dim = dim_head
         self.inner_dim = heads * dim_head
@@ -124,10 +125,12 @@ class ErnieImageAttention(nn.Module):
             if image_rotary_emb is not None:
                 query, key = comfy.quant_ops.ck.apply_rope_split_half(query, key, image_rotary_emb)
 
-        q_flat = query.reshape(B, S, -1)
-        k_flat = key.reshape(B, S, -1)
+        q_flat = AttentionTensorContainer(query.reshape(B, S, -1))
+        k_flat = AttentionTensorContainer(key.reshape(B, S, -1))
+        v_flat = AttentionTensorContainer(v_flat)
+        del query, key
 
-        hidden_states = optimized_attention(q_flat, k_flat, v_flat, self.heads, mask=attention_mask)
+        hidden_states = optimized_attention(q_flat, k_flat, v_flat, self.heads, mask=attention_mask, preferred_attention=self.comfy_attention)
 
         return self.to_out[0](hidden_states)
 
