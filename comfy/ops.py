@@ -1456,6 +1456,26 @@ def _load_quantized_module(module, super_load, state_dict, prefix, local_metadat
                     layer_conf.get("convrot_groupsize", params_conf.get("convrot_groupsize", 256))
                 ),
             }
+        elif module.quant_format == "nested_w4a8_int8":
+            s_channel = pop_scale("weight_s_channel")
+            codebook = pop_scale("weight_codebook")
+            lsb_tier = pop_scale("weight_lsb_tier")
+            if s_channel is None or codebook is None or lsb_tier is None:
+                raise ValueError(f"Missing nested_w4a8_int8 s_channel/codebook/lsb_tier for layer {layer_name}")
+            if module.bias is not None:
+                # The compact weight is streamed as a byte prefix of the full one; a bias would sit behind the tier.
+                raise ValueError(f"nested_w4a8_int8 layer {layer_name} must not have a bias")
+            scales = {
+                "scale": torch.empty((0,), dtype=torch.float8_e4m3fn, device=device),
+                "s_channel": s_channel,
+                "codebook": codebook,
+                "lsb_tier": lsb_tier,
+                "mma_packed": True,
+                "group_size": 16,
+                "convrot_groupsize": int(layer_conf.get("convrot_groupsize", 256)),
+            }
+            # Position in the model's VRAM-pressure downgrade order; see ModelPatcherDynamic.load.
+            module._downgrade = int(layer_conf["downgrade"])
         else:
             raise ValueError(f"Unsupported quantization format: {module.quant_format}")
 
@@ -1510,6 +1530,9 @@ def _quantized_weight_state_dict(module, sd, prefix, extra_quant_conf=None, extr
         elif module.quant_format in _GROUPED_INT8_FORMATS:
             quant_conf["group_size"] = getattr(params, "group_size", 16)
             quant_conf["convrot_groupsize"] = getattr(params, "convrot_groupsize", 256)
+        elif module.quant_format == "nested_w4a8_int8":
+            quant_conf["convrot_groupsize"] = params.convrot_groupsize
+            quant_conf["downgrade"] = module._downgrade
         if extra_quant_conf:
             quant_conf.update(extra_quant_conf)
         sd[f"{prefix}comfy_quant"] = torch.tensor(list(json.dumps(quant_conf).encode("utf-8")), dtype=torch.uint8)

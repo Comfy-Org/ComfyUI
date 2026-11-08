@@ -272,6 +272,16 @@ QUANT_ALGOS["w3a8_int8"] = {
     "quantize_input": False,
 }
 
+# Nested codebook, resident-packed: weight is the 1D MMA stream of (bits-1)-wide codes with the
+# group scales interleaved, weight_lsb_tier the low bit of each code. Dropping the tier is the
+# same weight one bit narrower, so VRAM pressure can downgrade it in place.
+QUANT_ALGOS["nested_w4a8_int8"] = {
+    "storage_t": torch.int8,
+    "parameters": {"weight_scale"},
+    "comfy_tensor_layout": "AsymW4A8Int8Layout",
+    "quantize_input": False,
+}
+
 
 # ==============================================================================
 # Re-exports for backward compatibility
