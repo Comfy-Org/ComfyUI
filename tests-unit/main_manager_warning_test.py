@@ -10,25 +10,41 @@ from pathlib import Path
 from types import SimpleNamespace
 
 
-def _load_warn_if_manager_exposed(args):
+def _load_warn_if_manager_exposed(args, custom_nodes_paths=()):
     main_path = Path(__file__).resolve().parents[1] / "main.py"
     module = ast.parse(main_path.read_text(), filename=str(main_path))
-    function = next(node for node in module.body if isinstance(node, ast.FunctionDef) and node.name == "warn_if_manager_exposed")
-    compiled = compile(ast.Module(body=[function], type_ignores=[]), filename=str(main_path), mode="exec")
+    functions = [node for node in module.body if isinstance(node, ast.FunctionDef) and node.name in ("legacy_manager_pack_will_load", "warn_if_manager_exposed")]
+    compiled = compile(ast.Module(body=functions, type_ignores=[]), filename=str(main_path), mode="exec")
     warnings: list[str] = []
     namespace = {
         "args": args,
         "app": SimpleNamespace(logger=SimpleNamespace(log_startup_warning=warnings.append)),
         "ipaddress": ipaddress,
+        "os": os,
+        "folder_paths": SimpleNamespace(get_folder_paths=lambda name: list(custom_nodes_paths)),
     }
     exec(compiled, namespace)  # noqa: S102 - trusted AST extracted from main.py itself, not external input
     return namespace["warn_if_manager_exposed"], warnings
 
 
 def _args(**overrides):
-    values = {"enable_manager": True, "disable_manager_ui": False, "listen": "127.0.0.1"}
+    values = {
+        "enable_manager": True,
+        "disable_manager_ui": False,
+        "listen": "127.0.0.1",
+        "disable_all_custom_nodes": False,
+        "whitelist_custom_nodes": [],
+    }
     values.update(overrides)
     return SimpleNamespace(**values)
+
+
+def _make_custom_nodes(tmp_path, pack_name):
+    pack = Path(tmp_path) / "custom_nodes" / pack_name
+    (pack / "glob").mkdir(parents=True)
+    (pack / "__init__.py").write_text("")
+    (pack / "glob" / "manager_server.py").write_text("")
+    return [str(Path(tmp_path) / "custom_nodes")]
 
 
 def test_no_warning_on_loopback():
@@ -97,10 +113,72 @@ def test_warning_when_localhost_mixed_with_non_loopback():
     assert len(warnings) == 1
 
 
-def _load_start_comfyui(args):
+def test_warning_when_ui_disabled_but_legacy_pack_loads():
+    with tempfile.TemporaryDirectory() as tmp:
+        custom_nodes = _make_custom_nodes(tmp, "manager")
+        warn, warnings = _load_warn_if_manager_exposed(
+            _args(disable_manager_ui=True, listen="0.0.0.0"), custom_nodes
+        )
+
+        warn()
+
+    assert len(warnings) == 1
+    assert "ComfyUI-Manager" in warnings[0]
+
+
+def test_no_warning_when_ui_disabled_and_legacy_pack_blocked_by_name():
+    with tempfile.TemporaryDirectory() as tmp:
+        custom_nodes = _make_custom_nodes(tmp, "ComfyUI-Manager")
+        warn, warnings = _load_warn_if_manager_exposed(
+            _args(disable_manager_ui=True, listen="0.0.0.0"), custom_nodes
+        )
+
+        warn()
+
+    assert warnings == []
+
+
+def test_no_warning_when_ui_disabled_and_legacy_pack_is_disabled():
+    with tempfile.TemporaryDirectory() as tmp:
+        custom_nodes = _make_custom_nodes(tmp, "manager.disabled")
+        warn, warnings = _load_warn_if_manager_exposed(
+            _args(disable_manager_ui=True, listen="0.0.0.0"), custom_nodes
+        )
+
+        warn()
+
+    assert warnings == []
+
+
+def test_no_warning_when_ui_disabled_and_custom_nodes_disabled():
+    with tempfile.TemporaryDirectory() as tmp:
+        custom_nodes = _make_custom_nodes(tmp, "manager")
+        warn, warnings = _load_warn_if_manager_exposed(
+            _args(disable_manager_ui=True, listen="0.0.0.0", disable_all_custom_nodes=True),
+            custom_nodes,
+        )
+
+        warn()
+
+    assert warnings == []
+
+
+def test_no_warning_when_legacy_pack_loads_on_loopback():
+    with tempfile.TemporaryDirectory() as tmp:
+        custom_nodes = _make_custom_nodes(tmp, "manager")
+        warn, warnings = _load_warn_if_manager_exposed(
+            _args(disable_manager_ui=True, listen="127.0.0.1"), custom_nodes
+        )
+
+        warn()
+
+    assert warnings == []
+
+
+def _load_start_comfyui(args, custom_nodes_paths=()):
     main_path = Path(__file__).resolve().parents[1] / "main.py"
     module = ast.parse(main_path.read_text(), filename=str(main_path))
-    functions = [node for node in module.body if isinstance(node, ast.FunctionDef) and node.name in ("warn_if_manager_exposed", "start_comfyui")]
+    functions = [node for node in module.body if isinstance(node, ast.FunctionDef) and node.name in ("legacy_manager_pack_will_load", "warn_if_manager_exposed", "start_comfyui")]
     compiled = compile(ast.Module(body=functions, type_ignores=[]), filename=str(main_path), mode="exec")
     warnings: list[str] = []
     prompt_server = SimpleNamespace(prompt_queue=None, add_routes=lambda: None)
@@ -111,7 +189,11 @@ def _load_start_comfyui(args):
         "os": os,
         "logging": logging,
         "asyncio": asyncio,
-        "folder_paths": SimpleNamespace(set_temp_directory=lambda path: None, get_temp_directory=lambda: tempfile.gettempdir()),
+        "folder_paths": SimpleNamespace(
+            set_temp_directory=lambda path: None,
+            get_temp_directory=lambda: tempfile.gettempdir(),
+            get_folder_paths=lambda name: list(custom_nodes_paths),
+        ),
         "dependencies_available": lambda: True,
         "missing_dependencies": lambda: [],
         "stop_startup": lambda *a, **k: None,
@@ -170,3 +252,14 @@ def test_start_comfyui_no_warning_on_loopback():
     start(SimpleNamespace(run_until_complete=lambda value: None))
 
     assert warnings == []
+
+
+def test_start_comfyui_warns_when_ui_disabled_but_legacy_pack_loads():
+    with tempfile.TemporaryDirectory() as tmp:
+        custom_nodes = _make_custom_nodes(tmp, "manager")
+        start, warnings = _load_start_comfyui(_startup_args(disable_manager_ui=True), custom_nodes)
+
+        start(SimpleNamespace(run_until_complete=lambda value: None))
+
+    assert len(warnings) == 1
+    assert "ComfyUI-Manager" in warnings[0]

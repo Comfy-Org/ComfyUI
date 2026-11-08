@@ -581,9 +581,27 @@ ________________________________________________________________________
     )
 
 
+def legacy_manager_pack_will_load():
+    """Check whether a legacy ComfyUI-Manager pack will load as a custom node."""
+    # comfyui_manager.should_be_disabled() only blocks the legacy pack when its
+    # folder name contains "comfyui-manager". The same pack under another name
+    # still loads and registers the manager's unauthenticated routes.
+    for node_path in folder_paths.get_folder_paths("custom_nodes"):
+        for name in os.listdir(node_path):
+            if "comfyui-manager" in name.lower() or name.endswith(".disabled"):
+                continue
+            if args.disable_all_custom_nodes and name not in args.whitelist_custom_nodes:
+                continue
+            if os.path.isfile(os.path.join(node_path, name, "glob", "manager_server.py")):
+                return True
+    return False
+
+
 def warn_if_manager_exposed():
     """Warn when the unauthenticated manager API is reachable from other machines."""
-    if not args.enable_manager or args.disable_manager_ui:
+    if not args.enable_manager:
+        return
+    if args.disable_manager_ui and not legacy_manager_pack_will_load():
         return
     for address in args.listen.split(","):
         address = address.strip()
@@ -632,9 +650,10 @@ def start_comfyui(asyncio_loop=None):
         asyncio.set_event_loop(asyncio_loop)
     prompt_server = server.PromptServer(asyncio_loop, asset_manager)
 
-    if args.enable_manager and not args.disable_manager_ui:
+    if args.enable_manager:
         warn_if_manager_exposed()
-        comfyui_manager.start()
+        if not args.disable_manager_ui:
+            comfyui_manager.start()
 
     hook_breaker_ac10a0.save_functions()
     asyncio_loop.run_until_complete(nodes.init_extra_nodes(
