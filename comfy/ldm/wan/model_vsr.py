@@ -112,6 +112,7 @@ class RelayVSRWanModel(WanModel):
         self.latent_stride = 16 // upscale_factor
 
     def forward_orig(self, x, t, context, freqs=None, lq_pixels=None, transformer_options={}, **kwargs):
+        """Denoise RelayVSR frames in chunks while reporting block progress."""
         b, frames = x.shape[0], x.shape[2]
         height, width = x.shape[3] // self.patch_size[1], x.shape[4] // self.patch_size[2]
         tokens = height * width
@@ -133,32 +134,30 @@ class RelayVSRWanModel(WanModel):
         starts = range(0, frames, chunk)
         # the sampler's bars only count the one step
         progress = comfy.utils.ProgressBar(len(starts) * len(self.blocks))
-        with comfy.utils.model_trange(len(starts) * len(self.blocks), desc="RelayVSR", unit="block", position=0) as pbar:
-            for start in starts:
-                end = min(start + chunk, frames)
-                # only a following chunk reads the cache
-                store = end < frames
-                grid_sizes = (end - start, height, width)
-                transformer_options["grid_sizes"] = grid_sizes
-                # the projected LQ frames go first so the sum is row-major, the blocks update it in place
-                hidden = self.lq_proj_in(lq_pixels[:, :, start:end]) + self.patch_embedding(x[:, :, start:end].float()).to(x.dtype).flatten(2).transpose(1, 2)
-                chunk_freqs = freqs[:, start * tokens:end * tokens]
-                prefetch_queue = comfy.model_prefetch.make_prefetch_queue(list(self.blocks), x.device, transformer_options)
-                comfy.model_prefetch.malloc_graph_begin(x.device)
-                for i, block in enumerate(self.blocks):
-                    comfy.model_prefetch.prefetch_queue_pop(prefetch_queue, x.device, block, x.dtype, malloc_scope="block")
-                    transformer_options["block_index"] = i
-                    if ("double_block", i) in blocks_replace:
-                        def block_wrap(args):
-                            return {"img": block(args["img"], args["vec"], args["pe"], args["txt"], caches[i], start, store, transformer_options=args["transformer_options"])}
-                        hidden = blocks_replace[("double_block", i)]({"img": hidden, "txt": context, "vec": e0, "pe": chunk_freqs, "transformer_options": transformer_options}, {"original_block": block_wrap})["img"]
-                    else:
-                        hidden = block(hidden, e0, chunk_freqs, context, caches[i], start, store, transformer_options=transformer_options)
-                    pbar.update(1)
-                    progress.update(1)
-                comfy.model_prefetch.prefetch_queue_pop(prefetch_queue, x.device, None, malloc_scope="block")
-                comfy.model_prefetch.malloc_graph_end()
-                out[:, :, start:end] = self.unpatchify(self.head(hidden, e), grid_sizes)
+        for start in starts:
+            end = min(start + chunk, frames)
+            # only a following chunk reads the cache
+            store = end < frames
+            grid_sizes = (end - start, height, width)
+            transformer_options["grid_sizes"] = grid_sizes
+            # the projected LQ frames go first so the sum is row-major, the blocks update it in place
+            hidden = self.lq_proj_in(lq_pixels[:, :, start:end]) + self.patch_embedding(x[:, :, start:end].float()).to(x.dtype).flatten(2).transpose(1, 2)
+            chunk_freqs = freqs[:, start * tokens:end * tokens]
+            prefetch_queue = comfy.model_prefetch.make_prefetch_queue(list(self.blocks), x.device, transformer_options)
+            comfy.model_prefetch.malloc_graph_begin(x.device)
+            for i, block in enumerate(self.blocks):
+                comfy.model_prefetch.prefetch_queue_pop(prefetch_queue, x.device, block, x.dtype, malloc_scope="block")
+                transformer_options["block_index"] = i
+                if ("double_block", i) in blocks_replace:
+                    def block_wrap(args):
+                        return {"img": block(args["img"], args["vec"], args["pe"], args["txt"], caches[i], start, store, transformer_options=args["transformer_options"])}
+                    hidden = blocks_replace[("double_block", i)]({"img": hidden, "txt": context, "vec": e0, "pe": chunk_freqs, "transformer_options": transformer_options}, {"original_block": block_wrap})["img"]
+                else:
+                    hidden = block(hidden, e0, chunk_freqs, context, caches[i], start, store, transformer_options=transformer_options)
+                progress.update(1)
+            comfy.model_prefetch.prefetch_queue_pop(prefetch_queue, x.device, None, malloc_scope="block")
+            comfy.model_prefetch.malloc_graph_end()
+            out[:, :, start:end] = self.unpatchify(self.head(hidden, e), grid_sizes)
         return out
 
     def _forward(self, x, timestep, context, clip_fea=None, time_dim_concat=None, transformer_options={}, lq_pixels=None, **kwargs):
@@ -338,6 +337,7 @@ class RelayFlash(nn.Module):
         return (input_shape[0], 3, frames, height * self.upscale_factor, width * self.upscale_factor)
 
     def decode(self, x, lq_images=None, output_buffer=None, detail=1.0):
+        """Decode RelayVSR Flash frames into the output buffer."""
         # detail scales what the model adds to the bicubic upscale of each frame
         out = output_buffer
         if out is None:
@@ -350,7 +350,7 @@ class RelayFlash(nn.Module):
         freqs, freqs_past = self.grid_rope(0, height, width, device), self.grid_rope(-1, height, width, device)
         pbar = comfy.utils.ProgressBar(frames)
         # finished frames go to the output without the GPU waiting on each copy
-        with comfy.model_management.HostWriter(device, out, (b, 3, *out.shape[-2:])) as writer, comfy.utils.model_trange(frames, desc="RelayVSR Flash decode", unit="frame", position=0) as console:
+        with comfy.model_management.HostWriter(device, out, (b, 3, *out.shape[-2:])) as writer:
             start = self.prepare_condition(x[:, :, 0], freqs)
             for window, (first, last) in enumerate(zip(keyframes, keyframes[1:] or keyframes)):
                 comfy.model_management.throw_exception_if_processing_interrupted()
@@ -367,6 +367,5 @@ class RelayFlash(nn.Module):
                         # finished [0, 1] pixels on the GPU, the VAE's process_output is the identity
                         writer.write(out[:, :, frame], decoded[..., :out.shape[-2], :out.shape[-1]].add_(1.0).div_(2.0).clamp_(0.0, 1.0).to(out.dtype))
                         pbar.update(1)
-                        console.update(1)
                 start = end
         return out

@@ -1,39 +1,24 @@
 import ast
 from pathlib import Path
-from types import FunctionType, SimpleNamespace
 
-from tqdm import trange
+import pytest
 
 
 MODEL_VSR = Path(__file__).resolve().parents[2] / "comfy/ldm/wan/model_vsr.py"
 
 
-class CursorIncompatibleStream:
-    def write(self, text):
-        if "\x1b[A" in text:
-            raise AttributeError("'NoneType' object has no attribute 'cursor_adjust'")
-
-    def flush(self):
-        pass
-
-
-def test_relay_vsr_progress_works_with_cursor_incompatible_console():
+@pytest.mark.parametrize("class_name, method_name, progress_name", [
+    ("RelayVSRWanModel", "forward_orig", "progress"),
+    ("RelayFlash", "decode", "pbar"),
+])
+def test_relay_vsr_reports_progress_without_writing_a_nested_terminal_bar(class_name, method_name, progress_name):
+    """Keep UI progress without replacing the sampler's terminal display."""
     source = ast.parse(MODEL_VSR.read_text())
-    bars = {}
-    for node in ast.walk(source):
-        if not isinstance(node, ast.Call):
-            continue
-        if not isinstance(node.func, ast.Attribute) or node.func.attr != "model_trange":
-            continue
-        desc = next(keyword.value.value for keyword in node.keywords if keyword.arg == "desc")
-        bars[desc] = compile(ast.Expression(node), str(MODEL_VSR), "eval")
+    cls = next(node for node in source.body if isinstance(node, ast.ClassDef) and node.name == class_name)
+    method = next(node for node in cls.body if isinstance(node, ast.FunctionDef) and node.name == method_name)
+    calls = [node for node in ast.walk(method) if isinstance(node, ast.Call)]
 
-    assert set(bars) == {"RelayVSR", "RelayVSR Flash decode"}
-    stream = CursorIncompatibleStream()
-    comfy = SimpleNamespace(utils=SimpleNamespace(model_trange=lambda *args, **kwargs: trange(*args, file=stream, **kwargs)))
-    scope = {"comfy": comfy, "starts": range(1), "self": SimpleNamespace(blocks=[None]), "frames": 1}
-
-    with trange(1, file=stream):
-        for call in bars.values():
-            with FunctionType(call, scope)() as bar:
-                bar.update(1)
+    assert not any(isinstance(call.func, ast.Attribute) and call.func.attr == "model_trange" for call in calls)
+    assert any(isinstance(call.func, ast.Attribute) and call.func.attr == "ProgressBar" for call in calls)
+    assert any(isinstance(call.func, ast.Attribute) and isinstance(call.func.value, ast.Name)
+               and call.func.value.id == progress_name and call.func.attr == "update" for call in calls)
