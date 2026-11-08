@@ -25,6 +25,12 @@ def frames_as(frames: torch.Tensor, dtype: torch.dtype) -> torch.Tensor:
         return frames.float().div_(255.0)
     return frames.to(dtype)
 
+
+def owned_chunk(frames: torch.Tensor, dtype: torch.dtype) -> torch.Tensor:
+    out = frames_as(frames, dtype)
+    return out.clone() if out is frames else out
+
+
 class VideoInput(ABC):
     """
     Abstract base class for video input types.
@@ -61,9 +67,9 @@ class VideoInput(ABC):
             alpha = alpha.unsqueeze(-1)
         for start in range(0, images.shape[0], chunk_frames):
             yield VideoChunk(
-                images=frames_as(images[start:start + chunk_frames], dtype),
+                images=owned_chunk(images[start:start + chunk_frames], dtype),
                 start_frame=start,
-                alpha=frames_as(alpha[start:start + chunk_frames], dtype) if alpha is not None else None,
+                alpha=owned_chunk(alpha[start:start + chunk_frames], dtype) if alpha is not None else None,
             )
 
     def get_backing_file(self) -> Optional[str]:

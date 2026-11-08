@@ -212,13 +212,15 @@ def test_decode_chunked_rejects_bad_arguments(fixture_files):
         next(video.decode_chunked(dtype=torch.float16))
 
 
-def test_video_from_components_chunks_are_views():
+def test_video_from_components_chunks_own_their_frames():
     images = torch.rand(7, 4, 6, 3)
     alpha = torch.rand(7, 4, 6, 1)
     video = VideoFromComponents(VideoComponents(images=images, frame_rate=Fraction(24), alpha=alpha))
     chunks = list(video.decode_chunked(chunk_frames=3))
     assert [c.start_frame for c in chunks] == [0, 3, 6]
-    assert all(c.images.data_ptr() == images[c.start_frame].data_ptr() for c in chunks)
+    assert all(c.images.untyped_storage().nbytes() == c.images.nbytes for c in chunks), "a kept chunk must not pin the whole video"
+    assert all(c.alpha.untyped_storage().nbytes() == c.alpha.nbytes for c in chunks), "a kept chunk must not pin the whole alpha"
+    assert torch.equal(torch.cat([c.images for c in chunks]), images)
     assert torch.equal(torch.cat([c.alpha for c in chunks]), alpha)
     _, as_uint8, _ = joined(video.decode_chunked(chunk_frames=3, dtype=torch.uint8))
     assert torch.equal(as_uint8, (images * 255).round().clamp(0, 255).to(torch.uint8))
