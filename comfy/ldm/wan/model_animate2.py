@@ -210,7 +210,7 @@ class PoseBranchCache:
                 with comfy.model_prefetch.pause_malloc_graph():
                     self._staging[buf_key] = [torch.empty(t.shape, dtype=buf_key[1], device=device) for _ in range(2)]
             r = self._staging[buf_key][i % 2]
-            stream = comfy.model_management.get_offload_stream(device)
+            stream = comfy.model_management.get_data_stream(device)
             cs = comfy.model_management.current_stream(device)
             if stream is not None and cs is not None:
                 # Wait for staging allocation and the previous consumer's reads before overwriting the buffer.
