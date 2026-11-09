@@ -52,12 +52,31 @@ class GetItemFromList(io.ComfyNode):
         return io.NodeOutput(list[index[0]])
 
 
+class ListLength(io.ComfyNode):
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="ListLength",
+            display_name="List Length",
+            category="utilities",
+            is_input_list=True,
+            search_aliases=["Count", "Size", "len"],
+            inputs=[io.AnyType.Input("list")],
+            outputs=[io.Int.Output(display_name="length")],
+        )
+
+    @classmethod
+    def execute(cls, list) -> io.NodeOutput:
+        return io.NodeOutput(len(list))
+
+
 class ToolkitExtension(ComfyExtension):
     @override
     async def get_node_list(self) -> list[type[io.ComfyNode]]:
         return [
             CreateList,
             GetItemFromList,
+            ListLength,
         ]
 
 

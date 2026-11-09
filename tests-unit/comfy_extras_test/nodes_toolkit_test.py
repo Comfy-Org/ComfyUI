@@ -1,4 +1,4 @@
-from comfy_extras.nodes_toolkit import CreateList, GetItemFromList
+from comfy_extras.nodes_toolkit import CreateList, GetItemFromList, ListLength
 
 
 def test_create_list_accepts_heterogeneous_inputs():
@@ -18,3 +18,9 @@ def test_get_item_from_list_uses_integer_index():
     assert GetItemFromList.execute(
         [["image 1", "image 2"], ["text 1", "text 2"]], [0]
     ).result == (["image 1", "image 2"],)
+
+
+def test_list_length_counts_list_items():
+    assert ListLength.RETURN_TYPES == ["INT"]
+    assert ListLength.OUTPUT_IS_LIST == [False]
+    assert ListLength.execute([["image 1", "image 2", "image 3"], "text"]).result == (2,)
