@@ -184,6 +184,10 @@ def cast_modules_with_vbar(comfy_modules, dtype, device, bias_dtype, non_blockin
     dropped_groups = []
     for s in comfy_modules:
         group = s._combined_linear
+        if group is not None and group._v_weight is not None and len(comfy_modules) == 1:
+            group._v_weight = None
+            for m in group.linears:
+                m._v_signature = None
         if group is None or group._v_weight is None:
             signature = comfy_aimdo.model_vbar.vbar_fault(s._v)
             resident = comfy_aimdo.model_vbar.vbar_signature_compare(signature, s._v_signature)
@@ -1148,7 +1152,7 @@ class CombinedLinear:
     def linear_input_act(self, x, input_act, act_weight=None, act_eps=0.0,
                          residual=None, residual_scale=None):
         run_every_op()
-        if self._v_weight is None:
+        if self._v_weight is None or (self._v is not None and not hasattr(self.linears[0], "_prefetch")):
             return NotImplemented
         if self._full_precision_mm:
             x = _eager_input_act(x, input_act, act_weight, act_eps)
