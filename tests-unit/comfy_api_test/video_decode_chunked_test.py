@@ -10,6 +10,7 @@ import pytest
 import torch
 
 from comfy_api.input_impl.video_types import VideoFromComponents, VideoFromFile, VideoFromList
+from comfy_api.latest._input.video_types import frames_as
 from comfy_api.latest._input_impl import video_types
 from comfy_api.latest._util.video_types import VideoChunk, VideoComponents
 
@@ -487,13 +488,27 @@ def test_default_chunks_split_rgba_and_shape_alpha():
 
 
 def test_default_chunks_are_contiguous_and_chunk_sized_for_any_layout():
-    rgba = torch.rand(5, 4, 6, 4)
-    channels_first = torch.rand(5, 3, 4, 6).permute(0, 2, 3, 1)
-    for images in (rgba, channels_first):
+    inputs = {
+        "rgba": torch.rand(5, 4, 6, 4),
+        "channels-first": torch.rand(5, 3, 4, 6).permute(0, 2, 3, 1),
+        "uint8 rgba": torch.randint(0, 256, (5, 4, 6, 4), dtype=torch.uint8),
+        "float16 channels-first": torch.rand(5, 4, 4, 6, dtype=torch.float16).permute(0, 2, 3, 1),
+    }
+    for name, images in inputs.items():
         video = VideoFromComponents(VideoComponents(images=images, frame_rate=Fraction(24)))
         for dtype in (torch.float32, torch.uint8):
-            for c in video.decode_chunked(chunk_frames=2, dtype=dtype):
+            chunks = list(video.decode_chunked(chunk_frames=2, dtype=dtype))
+            for c in chunks:
                 for t in (c.images, c.alpha) if c.alpha is not None else (c.images,):
-                    assert t.is_contiguous(), f"{dtype} chunk from shape {tuple(images.shape)} is not contiguous"
-                    assert t.untyped_storage().nbytes() == t.nbytes, "a chunk must hold only its own frames"
-        assert torch.equal(torch.cat([c.images for c in video.decode_chunked(chunk_frames=2)]), images[..., :3])
+                    assert t.is_contiguous(), f"{name} {dtype} chunk is not contiguous"
+                    assert t.untyped_storage().nbytes() == t.nbytes, f"{name} {dtype} chunk holds more than its own frames"
+            assert torch.equal(torch.cat([c.images for c in chunks]), frames_as(images[..., :3], dtype)), f"{name} {dtype} images"
+            if images.shape[-1] == 4:
+                assert torch.equal(torch.cat([c.alpha for c in chunks]), frames_as(images[..., 3:], dtype)), f"{name} {dtype} alpha"
+
+
+def test_rgba_images_with_a_separate_alpha_drop_the_fourth_channel():
+    rgba, alpha = torch.rand(5, 4, 6, 4), torch.rand(5, 4, 6)
+    chunks = list(VideoFromComponents(VideoComponents(images=rgba, frame_rate=Fraction(24), alpha=alpha)).decode_chunked(chunk_frames=2))
+    assert torch.equal(torch.cat([c.images for c in chunks]), rgba[..., :3])
+    assert torch.equal(torch.cat([c.alpha for c in chunks]), alpha.unsqueeze(-1)), "a supplied alpha wins over the fourth channel"
