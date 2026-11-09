@@ -350,6 +350,7 @@ class GatedDeltaNet(nn.Module):
 
         self.in_proj_qkv = ops.Linear(hidden, conv_dim, bias=False, device=device, dtype=dtype)
         self.in_proj_z = ops.Linear(hidden, value_dim, bias=False, device=device, dtype=dtype)
+        self.combined_qkvz = comfy.ops.CombinedLinear((self.in_proj_qkv, self.in_proj_z))
         self.in_proj_b = ops.Linear(hidden, self.num_value_heads, bias=False, device=device, dtype=dtype)
         self.in_proj_a = ops.Linear(hidden, self.num_value_heads, bias=False, device=device, dtype=dtype)
         self.out_proj = ops.Linear(value_dim, hidden, bias=False, device=device, dtype=dtype)
@@ -366,8 +367,12 @@ class GatedDeltaNet(nn.Module):
         batch_size, seq_len, _ = x.shape
 
         # Projections (shared)
-        proj = self.in_proj_qkv(x)  # [B, seq_len, conv_dim]
-        z = self.in_proj_z(x)
+        qkvz = self.combined_qkvz.forward(x)
+        if qkvz is NotImplemented:
+            proj = self.in_proj_qkv(x)  # [B, seq_len, conv_dim]
+            z = self.in_proj_z(x)
+        else:
+            proj, z = qkvz.split((self.key_dim * 2 + self.value_dim, self.value_dim), dim=-1)
 
         if past_key_value is not None and past_key_value.decode_step(seq_len):
             # decode: conv step into the side buffer, then gates + delta rule + gated norm in one
@@ -467,6 +472,7 @@ class GatedAttention(nn.Module):
         self.q_proj = ops.Linear(config.hidden_size, self.inner_size * 2, bias=config.qkv_bias, device=device, dtype=dtype)
         self.k_proj = ops.Linear(config.hidden_size, self.num_kv_heads * self.head_dim, bias=config.qkv_bias, device=device, dtype=dtype)
         self.v_proj = ops.Linear(config.hidden_size, self.num_kv_heads * self.head_dim, bias=config.qkv_bias, device=device, dtype=dtype)
+        self.combined_qkv = comfy.ops.CombinedLinear((self.q_proj, self.k_proj, self.v_proj))
         self.o_proj = ops.Linear(self.inner_size, config.hidden_size, bias=False, device=device, dtype=dtype)
 
         # QK norms with (1+weight) scaling
@@ -491,14 +497,18 @@ class GatedAttention(nn.Module):
         batch_size, seq_length, _ = x.shape
 
         # Project Q (with gate), K, V
-        qg = self.q_proj(x)
+        qkv = self.combined_qkv.forward(x)
+        if qkv is NotImplemented:
+            qg = self.q_proj(x)
+            xk = self.k_proj(x)
+            xv = self.v_proj(x)
+        else:
+            kv_size = self.num_kv_heads * self.head_dim
+            qg, xk, xv = qkv.split((self.inner_size * 2, kv_size, kv_size), dim=-1)
         # Split into query and gate: each is [B, seq, inner_size]
         qg = qg.view(batch_size, seq_length, self.num_heads, self.head_dim * 2)
         xq, gate = qg[..., :self.head_dim], qg[..., self.head_dim:]
         gate = gate.reshape(batch_size, seq_length, -1)  # [B, seq, inner_size]
-
-        xk = self.k_proj(x)
-        xv = self.v_proj(x)
 
         xq = self.q_norm(xq).transpose(1, 2)  # [B, heads, seq, head_dim]
         xk = self.k_norm(xk.view(batch_size, seq_length, self.num_kv_heads, self.head_dim)).transpose(1, 2)
@@ -859,6 +869,8 @@ class Qwen35(BaseLlama, BaseGenerate, torch.nn.Module):
             for m in unit.modules():
                 if isinstance(m, comfy.ops.MixedPrecisionOp):
                     m.comfy_gemv_optimized = True
+                    if m._combined_linear is not None:
+                        m._combined_linear.comfy_gemv_optimized = True
         vision_overrides = QWEN35_MODELS.get(self.model_type, {}).get("vision", {})
         vision_config = {**QWEN35_VISION_DEFAULTS, **vision_overrides, "out_hidden_size": config.hidden_size}
         self.visual = Qwen35VisionModel(vision_config, device=device, dtype=dtype, ops=operations)
@@ -880,6 +892,10 @@ class Qwen35(BaseLlama, BaseGenerate, torch.nn.Module):
             # Qwen3.5 normalizes to [-1, 1] (mean/std 0.5), same as Qwen3-VL.
             image, grid = comfy.text_encoders.qwen_vl.process_qwen2vl_images(embed["data"], patch_size=16, image_mean=[0.5, 0.5, 0.5], image_std=[0.5, 0.5, 0.5])
             return self.visual(image.to(device, dtype=torch.float32), grid), grid
+        if embed["type"] == "video":
+            height, width = embed["size"]
+            video, grid = comfy.text_encoders.qwen_vl.process_qwen2vl_video(embed["data"], height, width, patch_size=16, image_mean=[0.5, 0.5, 0.5], image_std=[0.5, 0.5, 0.5])
+            return self.visual(video.to(device, dtype=torch.float32), grid), grid
         return None, None
 
     def forward(self, x, attention_mask=None, embeds=None, num_tokens=None, intermediate_output=None, final_layer_norm_intermediate=True, dtype=None, embeds_info=[], past_key_values=None):
@@ -1199,10 +1215,36 @@ class Qwen35ImageTokenizer(sd1_clip.SD1Tokenizer):
         self.llama_template = "<|im_start|>user\n{}<|im_end|>\n<|im_start|>assistant\n"
         self.llama_template_images = "<|im_start|>user\n<|vision_start|><|image_pad|><|vision_end|>{}<|im_end|>\n<|im_start|>assistant\n"
 
-    def tokenize_with_weights(self, text, return_word_ids=False, llama_template=None, images=[], prevent_empty_text=False, thinking=False, system_prompt="", **kwargs):
+    def video_embeds(self, frames, fps):
+        # Qwen3-VL sampling: 2 fps, 4 to 768 frames, consecutive pairs form one temporal patch
+        # introduced by its midpoint timestamp. Returns (prompt text, one embed per pair).
+        total = frames.shape[0]
+        num_frames = min(max(int(total / fps * 2), 4), 768, total)
+        indices = [round(i * (total - 1) / max(num_frames - 1, 1)) for i in range(num_frames)]
+        if len(indices) % 2 == 1:
+            indices.append(indices[-1])
+        height, width = comfy.text_encoders.qwen_vl.qwen2vl_video_smart_resize(num_frames, frames.shape[1], frames.shape[2])
+        text = ""
+        embeds = []
+        for i in range(0, len(indices), 2):
+            seconds = (indices[i] + indices[i + 1]) / (2 * fps)
+            text += f"<{seconds:.1f} seconds><|vision_start|><|video_pad|><|vision_end|>"
+            embeds.append({"type": "video", "data": frames[indices[i:i + 2]], "size": (height, width), "original_type": "video"})
+        return text, embeds
+
+    def tokenize_with_weights(self, text, return_word_ids=False, llama_template=None, images=[], videos=[], prevent_empty_text=False, thinking=False, system_prompt="", **kwargs):
         image = kwargs.get("image", None)
         if image is not None and len(images) == 0:
             images = [image[i:i + 1] for i in range(image.shape[0])]
+        video = kwargs.get("video", None)
+        if video is not None and len(videos) == 0:
+            videos = [video]
+        video_text = ""
+        video_embeds = []
+        for v in videos:
+            t, e = self.video_embeds(v, kwargs.get("fps", 24))
+            video_text += t
+            video_embeds += e
 
         skip_template = False
         if text.startswith('<|im_start|>'):
@@ -1215,13 +1257,12 @@ class Qwen35ImageTokenizer(sd1_clip.SD1Tokenizer):
         else:
             if llama_template is not None:
                 template = llama_template
-            elif len(images) == 0:
+            elif len(images) == 0 and len(video_embeds) == 0:
                 template = self.llama_template
             else:
                 template = self.llama_template_images
-                if len(images) > 1:
-                    vision_block = "<|vision_start|><|image_pad|><|vision_end|>"
-                    template = template.replace(vision_block, vision_block * len(images), 1)
+                vision_block = "<|vision_start|><|image_pad|><|vision_end|>"
+                template = template.replace(vision_block, vision_block * len(images) + video_text, 1)
             llama_text = template.format(text)
             if system_prompt:
                 llama_text = "<|im_start|>system\n" + system_prompt + "<|im_end|>\n" + llama_text
@@ -1231,6 +1272,7 @@ class Qwen35ImageTokenizer(sd1_clip.SD1Tokenizer):
         tokens = super().tokenize_with_weights(llama_text, return_word_ids=return_word_ids, disable_weights=True, **kwargs)
         key_name = next(iter(tokens))
         embed_count = 0
+        video_count = 0
         qwen_tokens = tokens[key_name]
         for r in qwen_tokens:
             for i in range(len(r)):
@@ -1238,6 +1280,10 @@ class Qwen35ImageTokenizer(sd1_clip.SD1Tokenizer):
                     if len(images) > embed_count:
                         r[i] = ({"type": "image", "data": images[embed_count], "original_type": "image"},) + r[i][1:]
                         embed_count += 1
+                elif isinstance(r[i][0], (int, float)) and r[i][0] == 248057:  # <|video_pad|>
+                    if len(video_embeds) > video_count:
+                        r[i] = (video_embeds[video_count],) + r[i][1:]
+                        video_count += 1
         return tokens
 
 
