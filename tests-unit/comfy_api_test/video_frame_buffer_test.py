@@ -7,8 +7,7 @@ import numpy as np
 import pytest
 import torch
 
-from comfy_api.input_impl.video_types import VideoFromFile
-from comfy_api.latest._input_impl.video_types import FrameChunks
+from comfy_api._impl._input_impl.video_types import FrameChunks, VideoFromFile
 
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 
@@ -123,7 +122,7 @@ if not comfy_aimdo.control.init():
 import gc
 import numpy as np
 import comfy.memory_management
-from comfy_api.input_impl.video_types import VideoFromFile
+from comfy_api._impl._input_impl.video_types import VideoFromFile
 comfy.memory_management.aimdo_enabled = True
 components = VideoFromFile(sys.argv[1]).get_components()
 arrays = {}
@@ -165,7 +164,7 @@ if not comfy_aimdo.control.init():
     sys.exit("comfy-aimdo unavailable")
 import psutil
 import comfy.memory_management
-from comfy_api.latest._input_impl import video_types
+from comfy_api._impl._input_impl import video_types
 comfy.memory_management.aimdo_enabled = True
 address_space = psutil.Process().memory_info().vms + 2**30
 resource.setrlimit(resource.RLIMIT_AS, (address_space, resource.getrlimit(resource.RLIMIT_AS)[1]))
@@ -181,6 +180,26 @@ def test_a_refused_reservation_falls_back_to_plain_arrays(tmp_path):
     path = str(tmp_path / "video.mov")
     _write_rgba_video(path, 4)
     _run_with_aimdo(REFUSED_RESERVATION_DECODE, path)
+
+
+def test_decoding_without_the_engine_uses_plain_frame_storage(tmp_path):
+    path = str(tmp_path / "video.mov")
+    _write_rgba_video(path, 4)
+    script = """
+import sys
+import torch
+from comfy_api.index import InputImpl
+
+components = InputImpl.VideoFromFile(sys.argv[1]).get_components()
+expected = torch.arange(4, dtype=torch.float32) * 16 / 255
+assert components.images.shape == (4, 48, 64, 3)
+assert torch.equal(components.images[:, 0, 0, 0], expected)
+assert torch.equal(components.alpha[:, 0, 0, 0], expected)
+assert not any(name.split('.')[0] == 'comfy' for name in sys.modules)
+"""
+    result = subprocess.run([sys.executable, "-c", script, path], cwd=REPO_ROOT,
+                            capture_output=True, text=True)
+    assert result.returncode == 0, result.stdout + result.stderr
 
 
 # ---- without aimdo: blocks of frames, copied into one tensor at the end ---------------------------------------

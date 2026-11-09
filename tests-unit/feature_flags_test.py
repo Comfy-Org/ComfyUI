@@ -199,18 +199,18 @@ class TestCliFeatureFlagRegistry:
         assert CLI_FEATURE_FLAG_REGISTRY[key]["default"] is True
 
     def test_server_features_report_registry_defaults(self, monkeypatch):
-        monkeypatch.setattr("comfy_api.feature_flags.args", type("Args", (), {"feature_flag": []})())
+        monkeypatch.setattr("comfy_api._impl.feature_flags.args", type("Args", (), {"feature_flag": []})())
         features = _server_feature_flags()
         for key, info in CLI_FEATURE_FLAG_REGISTRY.items():
             assert features[key] == info["default"], key
 
     @pytest.mark.parametrize("key", ["partner_node_token", "local_web_sso"])
     def test_cli_flag_turns_a_default_on_flag_off(self, monkeypatch, key):
-        monkeypatch.setattr("comfy_api.feature_flags.args", type("Args", (), {"feature_flag": [f"{key}=false"]})())
+        monkeypatch.setattr("comfy_api._impl.feature_flags.args", type("Args", (), {"feature_flag": [f"{key}=false"]})())
         assert _server_feature_flags()[key] is False
 
     def test_cli_flags_cannot_override_core_flags(self, monkeypatch):
-        monkeypatch.setattr("comfy_api.feature_flags.args", type("Args", (), {"feature_flag": ["node_replacements=false"]})())
+        monkeypatch.setattr("comfy_api._impl.feature_flags.args", type("Args", (), {"feature_flag": ["node_replacements=false"]})())
         assert _server_feature_flags()["node_replacements"] is True
 
     def test_registry_entries_have_required_fields(self):
