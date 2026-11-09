@@ -103,6 +103,7 @@ def test_combined_linear_follows_members_full_precision():
     assert not combined._full_precision_mm
     for s in linears:
         s._full_precision_mm = True
+        s._prefetch = {"resident": True}
     assert combined._full_precision_mm
     x = torch.randn(3, 512, dtype=torch.float32)
     out = combined.forward(x)
