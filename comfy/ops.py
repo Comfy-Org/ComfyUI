@@ -180,10 +180,18 @@ def cast_modules_with_vbar(comfy_modules, dtype, device, bias_dtype, non_blockin
         cast_buffer_offset += buffer_size
         return buffer
 
+    comfy_modules_set = set(comfy_modules)
     group_faults = {}
     dropped_groups = []
     for s in comfy_modules:
         group = s._combined_linear
+        if group is not None and group._v_weight is not None and (
+            not all(m in comfy_modules_set for m in group.linears)
+            or any(m.comfy_force_forward for m in group.linears)
+        ):
+            group._v_weight = None
+            for m in group.linears:
+                m._v_signature = None
         if group is None or group._v_weight is None:
             signature = comfy_aimdo.model_vbar.vbar_fault(s._v)
             resident = comfy_aimdo.model_vbar.vbar_signature_compare(signature, s._v_signature)
@@ -310,6 +318,18 @@ def cast_modules_with_vbar(comfy_modules, dtype, device, bias_dtype, non_blockin
 def resolve_cast_module_with_vbar(s, dtype, device, bias_dtype, compute_dtype, want_requant, return_weights=True):
 
     prefetch = getattr(s, "_prefetch", None)
+    if prefetch["resident"] and s._v_weight is None and getattr(s, "_combined_linear", None) is not None:
+        group = s._combined_linear
+        group._v_weight = None
+        for m in group.linears:
+            m._v_signature = None
+            if hasattr(m, "_prefetch"):
+                if m._prefetch["signature"] is not None:
+                    comfy_aimdo.model_vbar.vbar_unpin(m._v)
+                delattr(m, "_prefetch")
+        offload_stream = cast_modules_with_vbar(group.linears, dtype, device, bias_dtype, False)
+        comfy.model_management.sync_stream(device, offload_stream)
+        prefetch = s._prefetch
 
     if prefetch["resident"]:
         weight = s._v_weight
@@ -1034,6 +1054,7 @@ if CUBLAS_IS_AVAILABLE:
 from . import quant_ops
 from .quant_ops import (
     QuantizedTensor,
+    QuantizedLayout,
     QUANT_ALGOS,
     TensorCoreFP8Layout,
     get_layout_class,
@@ -1129,6 +1150,8 @@ class CombinedLinear:
         for s in self.linears:
             # FIXME: add bias support if ever needed
             if (not isinstance(s, MixedPrecisionOp) or not isinstance(s._v_weight, QuantizedTensor)
+                    or getattr(s._v_weight.layout_cls.linear_input_act, "__func__", QuantizedLayout.linear_input_act.__func__) is QuantizedLayout.linear_input_act.__func__
+                    or getattr(s._v_weight.params, "transposed", False)
                     or s._full_precision_mm or s.comfy_force_forward or s.bias is not None):
                 return
             # Other formats may concatenate but cannot run the combined linear_input_act path.
@@ -1151,14 +1174,20 @@ class CombinedLinear:
     def linear_input_act(self, x, input_act, act_weight=None, act_eps=0.0,
                          residual=None, residual_scale=None):
         run_every_op()
-        if self._v_weight is None:
+        if (self._v_weight is None or any(s.comfy_force_forward for s in self.linears)
+                or (hasattr(self.linears[0], "_v") and not all(hasattr(s, "_prefetch") for s in self.linears))):
             return NotImplemented
+        if not self._full_precision_mm:
+            out = _try_quantized_linear_input_act(x, self._v_weight, None, input_act, act_weight, act_eps,
+                                                  residual, residual_scale)
+            if out is not NotImplemented:
+                return out
+        x = _eager_input_act(x, input_act, act_weight, act_eps)
+        weight = self._v_weight.to(dtype=x.dtype)
         if self._full_precision_mm:
-            x = _eager_input_act(x, input_act, act_weight, act_eps)
-            out = torch.nn.functional.linear(x, self._v_weight.to(dtype=x.dtype).dequantize())
-            return _linear_residual(out, residual, residual_scale)
-        return _try_quantized_linear_input_act(x, self._v_weight, None, input_act, act_weight, act_eps,
-                                               residual, residual_scale)
+            weight = weight.dequantize()
+        out = torch.nn.functional.linear(x, weight)
+        return _linear_residual(out, residual, residual_scale)
 
 
 def linear_input_act(linear, x, input_act, act_weight=None, act_eps=0.0,

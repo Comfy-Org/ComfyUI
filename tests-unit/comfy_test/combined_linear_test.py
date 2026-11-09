@@ -110,6 +110,78 @@ def test_combined_linear_follows_members_full_precision():
     assert torch.equal(out, torch.nn.functional.linear(x, combined._v_weight.to(dtype=torch.float32).dequantize()))
 
 
+@pytest.mark.parametrize("layout", ["TensorCoreFP8E4M3Layout", "TensorCoreNVFP4Layout"])
+def test_combined_linear_prepare_declines_layouts_without_linear_input_act(layout):
+    # Sibling FP8 / NVFP4 projections can share an identical tensor-wise scale (e.g. Qwen3-VL
+    # Layer 2 gate_proj and up_proj), which makes cat_gathered succeed, but their layout classes
+    # do not implement linear_input_act. Combining them would clear the members' _v_weight and
+    # then fall back to the split path with weight=None.
+    torch.manual_seed(7)
+    ops = comfy.ops.mixed_precision_ops(full_precision_mm=False)
+    linears = (ops.Linear(512, 128, bias=False), ops.Linear(512, 256, bias=False))
+    combined = comfy.ops.CombinedLinear(linears)
+    scale = torch.tensor(0.001802884740754962, dtype=torch.float32)
+    _, views, _ = _gathered(layout, (128, 256), 512, scale=scale)
+    for s, view in zip(linears, views):
+        s._v = (None, 0, 0)
+        s._v_weight = view
+    combined.prepare(torch.device("cpu"))
+    assert combined._v_weight is None
+    assert all(s._v_weight is view for s, view in zip(linears, views))
+
+
+@pytest.mark.parametrize("layout, kwargs", [
+    ("TensorWiseINT8Layout", {"per_channel": True, "convrot": True}),
+    ("AsymW4A8Int8Layout", {}),
+])
+def test_combined_linear_falls_back_to_quantized_linear_when_fusion_declines(monkeypatch, layout, kwargs):
+    torch.manual_seed(7)
+    ops = comfy.ops.mixed_precision_ops(full_precision_mm=False)
+    linears = (ops.Linear(512, 128, bias=False), ops.Linear(512, 256, bias=False))
+    combined = comfy.ops.CombinedLinear(linears)
+    _, views, gathered = _gathered(layout, (128, 256), 512, **kwargs)
+    combined._v_weight = comfy.memory_management.cat_gathered(views, gathered)
+    calls = []
+
+    def decline(*args):
+        calls.append(args)
+        return NotImplemented
+
+    monkeypatch.setattr(comfy.ops, "_try_quantized_linear_input_act", decline)
+    x = torch.randn(3, 512, dtype=torch.bfloat16)
+    residual = torch.randn(3, 384, dtype=torch.bfloat16)
+    residual_scale = torch.tensor(0.5, dtype=torch.bfloat16)
+    out = combined.linear_input_act(x, "gelu_tanh", residual=residual, residual_scale=residual_scale)
+    assert len(calls) == 1
+    assert out is not NotImplemented
+    expected_act = torch.nn.functional.gelu(x, approximate="tanh")
+    expected_mm = torch.nn.functional.linear(expected_act, combined._v_weight.to(dtype=x.dtype))
+    assert torch.equal(out, torch.addcmul(residual, expected_mm, residual_scale))
+
+    linears[0].comfy_force_forward = True
+    assert combined.linear_input_act(x, "gelu_tanh", residual=residual, residual_scale=residual_scale) is NotImplemented
+    assert len(calls) == 1
+
+
+def test_combined_linear_declines_when_vbar_members_are_not_prefetched():
+    # After a prefetched generate pass combines weights in VBAR and cleans up _prefetch,
+    # a subsequent unprefetched encode pass must not read the unpinned/evicted _v_weight.
+    torch.manual_seed(7)
+    ops = comfy.ops.mixed_precision_ops(full_precision_mm=True)
+    linears = (ops.Linear(512, 128, bias=False), ops.Linear(512, 256, bias=False))
+    combined = comfy.ops.CombinedLinear(linears)
+    _, views, gathered = _gathered("AsymW4A8Int8Layout", (128, 256), 512)
+    combined._v_weight = comfy.memory_management.cat_gathered(views, gathered)
+    for s in linears:
+        s._v = (None, 0, 0)
+    x = torch.randn(3, 512, dtype=torch.float32)
+    assert combined.forward(x) is NotImplemented
+    for s in linears:
+        s._prefetch = {"signature": None, "resident": True}
+    out = combined.forward(x)
+    assert torch.equal(out, torch.nn.functional.linear(x, combined._v_weight.to(dtype=torch.float32).dequantize()))
+
+
 def test_cat_gathered_declines_incompatible_weights():
     torch.manual_seed(7)
     # A tensor-wise scale cannot be shared across rows.
@@ -198,6 +270,11 @@ def test_int8_combined_on_hit_reloaded_on_partial_miss_including_lora():
         assert_unpinned()
         # The first pin after a load misses, resolves and combines in the same pin.
         results = [split, step(True, canonical), step(True, canonical)]
+        # An unprefetched forward after combination declines the unpinned group and reloads each member.
+        results += [model(x)]
+        assert model.combined._v_weight is None
+        assert_unpinned()
+        results += [step(True, canonical)]
         # A member missing from a combined group reloads the group's canonical bytes and recombines.
         model.b._v_signature = None
         results += [step(True, canonical)]
