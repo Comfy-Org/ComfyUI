@@ -126,3 +126,30 @@ def test_malloc_graph_cleanup_failure_still_cleans_queues(monkeypatch):
 
     assert model_prefetch.PREFETCH_QUEUES == []
     assert not hasattr(module, "_prefetch")
+
+
+@pytest.mark.parametrize("failing", ["weight", "first", "second"])
+def test_failed_unpin_still_cleans_all_graph_blocks(monkeypatch, failing):
+    calls = []
+    def unpin(block):
+        calls.append(block)
+        if block == failing:
+            raise RuntimeError("unpin failed")
+    monkeypatch.setattr(model_prefetch.comfy_aimdo.model_vbar, "vbar_unpin", unpin)
+    module = torch.nn.Linear(4, 4)
+    module._v = "weight"
+    module._prefetch = {"signature": "sig"}
+    module._v_blocks_faulted = ["first", "second"]
+    with pytest.raises(RuntimeError, match="unpin failed"):
+        model_prefetch.cleanup_prefetched_modules(module, [module])
+    assert calls == ["weight", "first", "second"]
+    assert not hasattr(module, "_prefetch") and not hasattr(module, "_v_blocks_faulted")
+
+
+def test_partial_graph_fault_releases_already_pinned_blocks(monkeypatch):
+    released = []
+    monkeypatch.setattr(model_prefetch.comfy_aimdo.model_vbar, "vbar_fault", lambda block: "sig" if block == "first" else None)
+    monkeypatch.setattr(model_prefetch.comfy_aimdo.model_vbar, "vbar_unpin", released.append)
+    module = torch.nn.Linear(4, 4)
+    assert model_prefetch.fault_graph_blocks(module, ["first", "second"]) is None
+    assert released == ["first"] and not hasattr(module, "_v_blocks_faulted")
