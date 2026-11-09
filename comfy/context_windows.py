@@ -220,6 +220,7 @@ class WindowingState:
     guide_entries: list[list[dict] | None]       # per-modality guide_attention_entry metadata
     keyframe_idxs: list[torch.Tensor | None]     # per-modality keyframe_idxs tensor for guide latent_start derivation
     latent_shapes: list | None                   # original packed shapes for unpack/pack (None if not multimodal)
+    modality_dims: list[int]                     # per-modality temporal dim, modality_dims[0] == dim
     dim: int = 0                                 # primary modality temporal dim for context windowing
     is_multimodal: bool = False
     temporal_downscale_ratio: int = 1            # model's pixel-to-latent temporal compression ratio
@@ -248,11 +249,12 @@ class WindowingState:
                 f"{type(model).__name__} must implement map_context_window_to_modalities for multimodal context windows.")
         modality_windows = {}
         for mod_idx in range(1, len(self.latents)):
-            modality_total_frames = self.latents[mod_idx].shape[self.dim]
+            mod_dim = self.modality_dims[mod_idx]
+            modality_total_frames = self.latents[mod_idx].shape[mod_dim]
             ratio = modality_total_frames / primary_total if primary_total > 0 else 1
             modality_overlap = max(round(primary_overlap * ratio), 0)
             modality_windows[mod_idx] = IndexListContextWindow(
-                per_modality_indices[mod_idx], dim=self.dim,
+                per_modality_indices[mod_idx], dim=mod_dim,
                 total_frames=modality_total_frames,
                 context_overlap=modality_overlap)
         return IndexListContextWindow(
@@ -393,7 +395,7 @@ class IndexListContextHandler(ContextHandlerABC):
                     return kf.cond
         return None
 
-    def _apply_freenoise(self, noise: torch.Tensor, conds: list[list[dict]], seed: int) -> torch.Tensor:
+    def _apply_freenoise(self, noise: torch.Tensor, conds: list[list[dict]], seed: int, model: BaseModel) -> torch.Tensor:
         """Apply FreeNoise shuffling, scaling context length/overlap per-modality by frame ratio.
         If guide frames are present on the primary modality, only the video portion is shuffled.
         """
@@ -402,16 +404,17 @@ class IndexListContextHandler(ContextHandlerABC):
 
         latent_shapes = self._get_latent_shapes(conds)
         if latent_shapes is not None and len(latent_shapes) > 1:
+            modality_dims = model.context_window_modality_dims(latent_shapes, self.dim)
             modalities = comfy.utils.unpack_latents(noise, latent_shapes)
             primary_total = latent_shapes[0][self.dim]
             primary_video_count = modalities[0].size(self.dim) - guide_count
             apply_freenoise(modalities[0].narrow(self.dim, 0, primary_video_count), self.dim, self.context_length, self.context_overlap, seed)
             for i in range(1, len(modalities)):
-                mod_total = latent_shapes[i][self.dim]
+                mod_total = latent_shapes[i][modality_dims[i]]
                 ratio = mod_total / primary_total if primary_total > 0 else 1
                 mod_ctx_len = max(round(self.context_length * ratio), 1)
                 mod_ctx_overlap = max(round(self.context_overlap * ratio), 0)
-                modalities[i] = apply_freenoise(modalities[i], self.dim, mod_ctx_len, mod_ctx_overlap, seed)
+                modalities[i] = apply_freenoise(modalities[i], modality_dims[i], mod_ctx_len, mod_ctx_overlap, seed)
             noise, _ = comfy.utils.pack_latents(modalities)
             return noise
         video_count = noise.size(self.dim) - guide_count
@@ -450,6 +453,7 @@ class IndexListContextHandler(ContextHandlerABC):
             guide_entries=guide_entries_list,
             keyframe_idxs=keyframe_idxs_list,
             latent_shapes=latent_shapes,
+            modality_dims=model.context_window_modality_dims(latent_shapes, self.dim) if is_multimodal else [self.dim],
             dim=self.dim,
             is_multimodal=is_multimodal,
             temporal_downscale_ratio=model.latent_format.temporal_downscale_ratio)
@@ -582,11 +586,12 @@ class IndexListContextHandler(ContextHandlerABC):
 
         # Initialize per-modality accumulators (length 1 for single-modality)
         accum = [[torch.zeros_like(m) for _ in conds] for m in window_state.latents]
+        modalities = list(zip(window_state.latents, window_state.modality_dims))
         if self.fuse_method.name == ContextFuseMethods.RELATIVE:
-            counts = [[torch.ones(get_shape_for_dim(m, self.dim), device=m.device) for _ in conds] for m in window_state.latents]
+            counts = [[torch.ones(get_shape_for_dim(m, d), device=m.device) for _ in conds] for m, d in modalities]
         else:
-            counts = [[torch.zeros(get_shape_for_dim(m, self.dim), device=m.device) for _ in conds] for m in window_state.latents]
-        biases = [[([0.0] * m.shape[self.dim]) for _ in conds] for m in window_state.latents]
+            counts = [[torch.zeros(get_shape_for_dim(m, d), device=m.device) for _ in conds] for m, d in modalities]
+        biases = [[([0.0] * m.shape[d]) for _ in conds] for m, d in modalities]
 
         for callback in comfy.patcher_extension.get_all_callbacks(IndexListCallbacks.EXECUTE_START, self.callbacks):
             callback(self, model, x_in, conds, timestep, model_options)
@@ -721,15 +726,15 @@ class IndexListContextHandler(ContextHandlerABC):
                     prev_weight = (bias_total / (bias_total + bias))
                     new_weight = (bias / (bias_total + bias))
                     # account for dims of tensors
-                    idx_window = tuple([slice(None)] * self.dim + [idx])
-                    pos_window = tuple([slice(None)] * self.dim + [pos])
+                    idx_window = tuple([slice(None)] * window.dim + [idx])
+                    pos_window = tuple([slice(None)] * window.dim + [pos])
                     # apply new values
                     conds_final[i][idx_window] = conds_final[i][idx_window] * prev_weight + sub_conds_out[i][pos_window] * new_weight
                     biases_final[i][idx] = bias_total + bias
         else:
             # add conds and counts based on weights of fuse method
-            weights = get_context_weights(window.context_length, x_in.shape[self.dim], window.index_list, self, sigma=timestep, context_overlap=window.context_overlap)
-            weights_tensor = match_weights_to_dim(weights, x_in, self.dim, device=x_in.device)
+            weights = get_context_weights(window.context_length, x_in.shape[window.dim], window.index_list, self, sigma=timestep, context_overlap=window.context_overlap)
+            weights_tensor = match_weights_to_dim(weights, x_in, window.dim, device=x_in.device)
             for i in range(len(sub_conds_out)):
                 window.add_window(conds_final[i], sub_conds_out[i] * weights_tensor)
                 window.add_window(counts_final[i], weights_tensor)
@@ -775,7 +780,7 @@ def _sampler_sample_wrapper(executor, guider, sigmas, extra_args, callback, nois
         return executor(guider, sigmas, extra_args, callback, noise, *args, **kwargs)
 
     conds = [guider.conds.get('positive', guider.conds.get('negative', []))]
-    noise = handler._apply_freenoise(noise, conds, extra_args["seed"])
+    noise = handler._apply_freenoise(noise, conds, extra_args["seed"], guider.model_patcher.model)
 
     return executor(guider, sigmas, extra_args, callback, noise, *args, **kwargs)
 

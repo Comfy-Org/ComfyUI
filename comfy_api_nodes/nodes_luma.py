@@ -118,6 +118,7 @@ class LumaConceptsNode(IO.ComfyNode):
                 ),
             ],
             outputs=[IO.Custom(LumaIO.LUMA_CONCEPTS).Output(display_name="luma_concepts")],
+            is_deprecated=True,
         )
 
     @classmethod
@@ -430,6 +431,7 @@ class LumaTextToVideoGenerationNode(IO.ComfyNode):
                 IO.Hidden.unique_id,
             ],
             is_api_node=True,
+            is_deprecated=True,
             price_badge=PRICE_BADGE_VIDEO,
         )
 
@@ -541,6 +543,7 @@ class LumaImageToVideoGenerationNode(IO.ComfyNode):
                 IO.Hidden.unique_id,
             ],
             is_api_node=True,
+            is_deprecated=True,
             price_badge=PRICE_BADGE_VIDEO,
         )
 

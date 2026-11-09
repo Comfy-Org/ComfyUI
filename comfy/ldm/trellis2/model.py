@@ -125,16 +125,13 @@ class SparseRotaryPositionEmbedder(nn.Module):
             freqs_cis = self._get_freqs_cis(coords)
             q.register_spatial_cache(cache_name, freqs_cis)
 
-        if q.feats.ndim == 3:
-            f_cis = freqs_cis.unsqueeze(1)
-        else:
-            f_cis = freqs_cis
-
+        f_cis = freqs_cis.unsqueeze(1) if q.feats.ndim == 3 else freqs_cis
+        # a leading batch dim gives the (B, L, H, D) layout the kitchen kernel takes; without it RoPE runs in float32 torch
         if k is None:
-            return q.replace(apply_rope1(q.feats, f_cis))
+            return q.replace(apply_rope1(q.feats[None], f_cis[None])[0])
 
-        q_feats, k_feats = apply_rope(q.feats, k.feats, f_cis)
-        return q.replace(q_feats), k.replace(k_feats)
+        q_feats, k_feats = apply_rope(q.feats[None], k.feats[None], f_cis[None])
+        return q.replace(q_feats[0]), k.replace(k_feats[0])
 
 
 class RotaryPositionEmbedder(SparseRotaryPositionEmbedder):

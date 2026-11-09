@@ -51,6 +51,7 @@ EXPECTED_CALL_SITES: frozenset[CallSite] = frozenset(
         CallSite("app/assets/seeder.py", "_run_scan", "seeder.marked_missing"),
         CallSite("app/assets/seeder.py", "mark_missing_outside_prefixes", "seeder.marked_missing"),
         CallSite("app/assets/seeder.py", "_run_fast_phase", "seeder.batch_insert_failed"),
+        CallSite("app/assets/seeder.py", "_emit_marked_missing", "seeder.marked_missing"),
         # todo 11 - scanner failure paths
         CallSite("app/assets/scanner.py", "sync_root_safely", "scanner.fast_scan_failed"),
         CallSite("app/assets/scanner.py", "live_references_safely", "scanner.fast_scan_failed"),
@@ -77,6 +78,10 @@ EXPECTED_CALL_SITES: frozenset[CallSite] = frozenset(
         CallSite(
             "app/assets/scanner_admission.py", "tick_watch_list", "scanner.watch_seed_failed"
         ),
+        # preview generation outcomes, for rollout failure rates
+        CallSite("app/assets/previews.py", "generate_upload_preview", "previews.generated"),
+        CallSite("app/assets/previews.py", "_emit_failed", "previews.generation_failed"),
+        CallSite("app/assets/previews.py", "_emit_error", "previews.generation_failed"),
     }
 )
 

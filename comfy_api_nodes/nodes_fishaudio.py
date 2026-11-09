@@ -37,6 +37,8 @@ FISHAUDIO_VOICES = [
     ("5212eb29e500460391d03af42af6552e", "Warm Conversational Voice (en)"),
     ("5c8dc6a69c0b4edfb32634db6384bf34", "Warm Storyteller (en)"),
     ("7a18a1851d2649108c48ec9f2c80eb2c", "Dramatic Character Male (en)"),
+    ("c70cfb98867a4bfb9ae20d2401257b92", "Delia (en)"),
+    ("f3a2b90078d54a65af4b95f63bc7798e", "Sheila (en)"),
     ("59cb5986671546eaa6ca8ae6f29f6d22", "News Narrator (zh)"),
     ("bf6c479f5a384b8d857310030035824b", "Lively Female (zh)"),
     ("faccba1a8ac54016bcfc02761285e67f", "Gentle Female (zh)"),
@@ -123,7 +125,7 @@ def _multi_speaker_inputs() -> list:
                 min=0,
                 max=5,
             ),
-            tooltip="Voices for synthesis. Leave empty for the default voice. "
+            tooltip="Voices for synthesis. Leave empty for a random voice. "
             "With two or more voices, mark speaker changes in the text with @Voice1, @Voice2, etc.",
         ),
         *_tts_option_inputs(),
@@ -186,7 +188,8 @@ class FishAudioTextToSpeech(IO.ComfyNode):
             display_name="Fish Audio Text to Speech",
             category="partner/audio/Fish Audio",
             description="Convert text to speech. Supports emotion cues in the text "
-            "([happy], [whispering] on s2.1-pro; (happy) on s1) and multi-speaker dialogue "
+            "([happy], [whispering] on s2.1-pro; (happy) on s1), plain-language [directions] and "
+            "`<whisper>...</whisper>` word tags on drama-3, and multi-speaker dialogue "
             "via @Voice1/@Voice2 tags with multiple connected voices.",
             inputs=[
                 IO.String.Input(
@@ -199,6 +202,7 @@ class FishAudioTextToSpeech(IO.ComfyNode):
                 IO.DynamicCombo.Input(
                     "model",
                     options=[
+                        IO.DynamicCombo.Option("drama-3", _multi_speaker_inputs()),
                         IO.DynamicCombo.Option("s2.1-pro", _multi_speaker_inputs()),
                         IO.DynamicCombo.Option(
                             "s1",
@@ -206,7 +210,7 @@ class FishAudioTextToSpeech(IO.ComfyNode):
                                 IO.Custom(FISHAUDIO_VOICE).Input(
                                     "voice",
                                     optional=True,
-                                    tooltip="Voice for synthesis. Leave unconnected for the default voice.",
+                                    tooltip="Voice for synthesis. Leave unconnected for a random voice.",
                                 ),
                                 *_tts_option_inputs(),
                             ],
@@ -235,16 +239,19 @@ class FishAudioTextToSpeech(IO.ComfyNode):
             ],
             is_api_node=True,
             price_badge=IO.PriceBadge(
-                depends_on=IO.PriceBadgeDepends(widgets=["text"]),
+                depends_on=IO.PriceBadgeDepends(widgets=["text", "model"]),
                 expr="""
                 (
                   $t := widgets.text;
+                  $rate := widgets.model = "drama-3"
+                    ? ($now() < "2026-11-13T00:00:00.000Z" ? 14.3 : 35.75)
+                    : 21.45;
                   $type($t) = "string"
                     ? (
                         $bytes := $length($t) + 2 * $count($match($t, /[^\\x00-\\x7F]/));
-                        {"type":"usd","usd": $bytes * 21.45 / 1000000, "format":{"approximate":true}}
+                        {"type":"usd","usd": $bytes * $rate / 1000000, "format":{"approximate":true}}
                       )
-                    : {"type":"usd","usd": 0.02145, "format":{"approximate":true, "suffix":"/1K bytes"}}
+                    : {"type":"usd","usd": $rate / 1000, "format":{"approximate":true, "suffix":"/1K bytes"}}
                 )
                 """,
             ),

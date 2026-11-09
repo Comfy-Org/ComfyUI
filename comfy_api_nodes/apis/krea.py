@@ -23,6 +23,16 @@ class KreaGenerateImageRequest(BaseModel):
     image_style_references: list[KreaImageStyleReference] | None = Field(default=None)
 
 
+class Krea3GenerateImageRequest(BaseModel):
+    prompt: str = Field(...)
+    thinking_mode: str = Field(...)
+    resolution: str = Field(...)
+    aspect_ratio: str | None = Field(default=None)
+    seed: int = Field(...)
+    image_urls: list[str] | None = Field(default=None)
+    regional_edit: bool | None = Field(default=None)
+
+
 class KreaJobResult(BaseModel):
     urls: list[str] | None = Field(default=None)
     style_id: str | None = Field(default=None)

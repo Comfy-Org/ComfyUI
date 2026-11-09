@@ -1,14 +1,19 @@
 """Serves the per-asset operations behind the API: reading an asset's detail,
-updating its name, tags, metadata and preview, deleting a record, and resolving
-a hash to a servable path. Name and tag updates move ``updated_at`` only when
-the requested values differ. Other supplied metadata fields record a write.
+updating its name, tags, metadata and preview, deleting a record, resolving
+a hash to a servable path, and looking up the files an export zips. Name and
+tag updates move ``updated_at`` only when the requested values differ. Other
+supplied metadata fields record a write.
 """
 
+import logging
 import mimetypes
 import os
+from pathlib import Path
 from typing import Sequence
 
 from sqlalchemy import delete, select, update
+
+import folder_paths
 
 from app.assets.database.models import Asset, AssetContent, AssetTag
 from app.assets.database.queries import (
@@ -30,10 +35,11 @@ from app.assets.services.schemas import (
     AssetData,
     AssetDetailResult,
     DownloadResolutionResult,
+    ExportableAssetFile,
     ReferenceData,
     UserMetadata,
 )
-from app.database.db import create_session
+from app.database.db import create_session, create_write_session
 
 
 def _record_to_detail_result(session, record) -> AssetDetailResult:
@@ -92,10 +98,12 @@ def update_asset_metadata(
     mime_type: str | None = None,
     preview_id: str | None = None,
 ) -> AssetDetailResult:
-    with create_session() as session:
+    # A write session: reclaiming a replaced preview can't interleave with a registration linking it.
+    with create_write_session() as session:
         record = get_record_by_id(session, reference_id)
         if record is None:
             raise ValueError(f"Asset {reference_id} not found")
+        replaced_preview_id = record.preview_id
 
         if name is not None:
             rename_record(session, reference_id, name)
@@ -130,6 +138,9 @@ def update_asset_metadata(
                 .where(Asset.id == reference_id)
                 .values(preview_id=preview_id, updated_at=get_utc_now())
             )
+            if replaced_preview_id and replaced_preview_id != preview_id:
+                session.flush()
+                reclaim_preview(session, replaced_preview_id)
         if tags is not None:
             for tag_name in normalize_tags(list(tags)):
                 ensure_tag(session, tag_name)
@@ -150,13 +161,56 @@ def update_asset_metadata(
     return detail
 
 
+def _is_core_preview(session, record: Asset) -> bool:
+    """A preview Core made: tagged ``preview`` and stored under previews/."""
+    if "preview" not in fetch_record_tags(session, record.id):
+        return False
+    path = session.get(AssetContent, record.content_id).path
+    return Path(os.path.realpath(path)).is_relative_to(os.path.realpath(folder_paths.get_previews_directory()))
+
+
+def _drop_unused_content(session, content_id: str) -> None:
+    """Remove a preview's content row and file once no record uses them."""
+    if session.scalar(select(Asset.id).where(Asset.content_id == content_id).limit(1)) is not None:
+        return
+    content = session.get(AssetContent, content_id)
+    session.delete(content)
+    session.flush()
+    # A missing row's path may since belong to a live row: an identical preview saved again.
+    if content.is_missing or session.scalar(select(AssetContent.id).where(AssetContent.path == content.path).limit(1)):
+        return
+    try:
+        os.remove(content.path)
+    except OSError:
+        logging.warning("Could not remove preview file %s", content.path, exc_info=True)
+
+
+def reclaim_preview(session, preview_id: str) -> None:
+    """Delete a Core preview, and its file, once no record links or uses them."""
+    preview = session.get(Asset, preview_id)
+    if preview is None or session.scalar(select(Asset.id).where(Asset.preview_id == preview_id).limit(1)) is not None:
+        return
+    if _is_core_preview(session, preview):
+        content_id = preview.content_id
+        delete_record(session, preview_id)
+        _drop_unused_content(session, content_id)
+
+
 def delete_asset_reference(
     reference_id: str,
 ) -> bool:
-    with create_session() as session:
-        if get_record_by_id(session, reference_id) is None:
+    # A write session: a registration linking the same preview file can't interleave.
+    with create_write_session() as session:
+        record = get_record_by_id(session, reference_id)
+        if record is None:
             return False
+        content_id, preview_id = record.content_id, record.preview_id
+        is_core_preview = _is_core_preview(session, record)
         delete_record(session, reference_id)
+        if is_core_preview:
+            _drop_unused_content(session, content_id)
+        if preview_id:
+            reclaim_preview(session, preview_id)
         session.commit()
         return True
 
@@ -234,6 +288,7 @@ def get_preview_file_paths(preview_ids: list[str]) -> dict[str, str]:
 
 def resolve_asset_for_download(
     reference_id: str,
+    record_access: bool = True,
 ) -> DownloadResolutionResult:
     with create_session() as session:
         record = get_record_by_id(session, reference_id)
@@ -255,8 +310,9 @@ def resolve_asset_for_download(
         asset_mime = record.mime_type
         abs_path = content.path
 
-        update_record_access_time(session, reference_id)
-        session.commit()
+        if record_access:
+            update_record_access_time(session, reference_id)
+            session.commit()
 
         ctype = (
             asset_mime
@@ -268,4 +324,63 @@ def resolve_asset_for_download(
             abs_path=abs_path,
             content_type=ctype,
             download_name=download_name,
+        )
+
+
+def list_job_export_files(
+    job_ids: Sequence[str], include_previews: bool
+) -> list[ExportableAssetFile]:
+    """Live output records of the given jobs, plus their temp records when previews are requested."""
+    if not job_ids:
+        return []
+    tags = ["output", "temp"] if include_previews else ["output"]
+    with create_session() as session:
+        rows = session.execute(
+            select(
+                Asset.id,
+                Asset.name,
+                Asset.job_id,
+                Asset.created_at,
+                AssetContent.path,
+                AssetContent.hash,
+            )
+            .join(AssetContent, Asset.content_id == AssetContent.id)
+            .where(
+                Asset.job_id.in_(list(job_ids)),
+                AssetContent.is_missing.is_(False),
+                Asset.id.in_(
+                    select(AssetTag.asset_id).where(AssetTag.tag_name.in_(tags))
+                ),
+            )
+        ).all()
+    return [
+        ExportableAssetFile(
+            id=row.id,
+            name=row.name,
+            path=row.path,
+            hash=row.hash,
+            job_id=row.job_id,
+            created_at=row.created_at,
+        )
+        for row in rows
+    ]
+
+
+def get_export_file(reference_id: str) -> ExportableAssetFile:
+    with create_session() as session:
+        record = get_record_by_id(session, reference_id)
+        if record is None:
+            raise ValueError(f"AssetReference {reference_id} not found")
+        content = session.get(AssetContent, record.content_id)
+        if content is None or content.is_missing:
+            raise FileNotFoundError(
+                f"No live content for AssetReference {reference_id}"
+            )
+        return ExportableAssetFile(
+            id=record.id,
+            name=record.name,
+            path=content.path,
+            hash=content.hash,
+            job_id=record.job_id,
+            created_at=record.created_at,
         )
