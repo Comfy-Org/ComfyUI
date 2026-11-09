@@ -806,7 +806,8 @@ class Qwen35VisionModel(nn.Module):
             patch_pos_embeds_permute.append(pos_embed)
         return torch.cat(patch_pos_embeds_permute)
 
-    def forward(self, x, grid_thw):
+    def forward(self, x, grid_thw, premerge=None):
+        # premerge: optional {block index: None}, filled with those blocks' outputs (before any merger)
         x = self.patch_embed(x)
         pos_embeds = self.fast_pos_embed_interpolate(grid_thw).to(x.device)
         x = x + pos_embeds
@@ -829,6 +830,8 @@ class Qwen35VisionModel(nn.Module):
             x = blk(x, cu_seqlens=cu_seqlens, position_embeddings=position_embeddings, optimized_attention=optimized_attention)
             if self.deepstack_merger_list is not None and layer_num in self.deepstack_visual_indexes:
                 deepstack_features.append(self.deepstack_merger_list[self.deepstack_visual_indexes.index(layer_num)](x))
+            if premerge is not None and layer_num in premerge:
+                premerge[layer_num] = x
         merged = self.merger(x)
         if self.deepstack_merger_list is not None:
             return merged, deepstack_features
