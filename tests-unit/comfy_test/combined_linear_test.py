@@ -78,6 +78,43 @@ def test_combined_linear_follows_members_full_precision():
     assert torch.equal(out, torch.nn.functional.linear(x, combined._v_weight.to(dtype=torch.float32).dequantize()))
 
 
+@pytest.mark.parametrize("layout", ["TensorCoreFP8E4M3Layout", "TensorCoreNVFP4Layout"])
+def test_combined_linear_preserves_unsupported_layouts(monkeypatch, layout):
+    ops = comfy.ops.mixed_precision_ops()
+    linears = (ops.Linear(512, 128, bias=False), ops.Linear(512, 256, bias=False))
+    combined = comfy.ops.CombinedLinear(linears)
+    _, views, gathered = _gathered(layout, (128, 256), 512, scale=torch.tensor(0.0018))
+    original = [view.dequantize().clone() for view in views]
+    for s, view in zip(linears, views):
+        s._v = (None, 0, 0)
+        s._v_weight = view
+    monkeypatch.setattr(comfy.ops.comfy_aimdo.torch, "aimdo_to_tensor", lambda *args: gathered)
+    combined.prepare(torch.device("cpu"))
+    assert combined._v_weight is None
+    for s, view, expected in zip(linears, views, original):
+        assert s._v_weight is view
+        assert torch.equal(view.dequantize(), expected)
+
+
+@pytest.mark.parametrize("layout, kwargs", [
+    ("TensorWiseINT8Layout", {"per_channel": True, "convrot": True}),
+    ("AsymW4A8Int8Layout", {}),
+    ("AsymW4A8Int8Layout", {"bits": 6}),
+])
+def test_combined_linear_prepares_supported_layouts(monkeypatch, layout, kwargs):
+    ops = comfy.ops.mixed_precision_ops()
+    linears = (ops.Linear(512, 128, bias=False), ops.Linear(512, 256, bias=False))
+    combined = comfy.ops.CombinedLinear(linears)
+    weights, views, gathered = _gathered(layout, (128, 256), 512, **kwargs)
+    for s, view in zip(linears, views):
+        s._v = (None, 0, 0)
+        s._v_weight = view
+    monkeypatch.setattr(comfy.ops.comfy_aimdo.torch, "aimdo_to_tensor", lambda *args: gathered)
+    combined.prepare(torch.device("cpu"))
+    assert torch.equal(combined._v_weight.dequantize(), torch.cat([w.dequantize() for w in weights]))
+    assert all(s._v_weight is None for s in linears)
+
+
 def test_cat_gathered_declines_incompatible_weights():
     torch.manual_seed(7)
     # A tensor-wise scale cannot be shared across rows.
