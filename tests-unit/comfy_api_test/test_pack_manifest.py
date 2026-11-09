@@ -30,7 +30,9 @@ class ManifestDouble(io.ComfyNode):
                          inputs=[io.Image.Input("image"),
                                  io.Combo.Input("lora", options=io.ModelFolder("loras"), optional=True),
                                  io.Float.Input("factor", default=2.0, min=0.0, max=10.0)],
-                         outputs=[io.Image.Output(), io.Int.Output()])
+                         outputs=[io.Image.Output(), io.Int.Output()],
+                         price_badge=io.PriceBadge(expr="factor * 0.05",
+                             depends_on=io.PriceBadgeDepends(widgets=["factor"], inputs=["image"])))
 
     @classmethod
     async def execute(cls, image, factor, lora=None):
@@ -145,6 +147,9 @@ def test_the_manifest_carries_identity_and_every_nodes_schema(made):
     schema = manifest.decode_schema(node["schema"])
     assert schema.node_id == "ManifestDouble"
     assert [i.id for i in schema.inputs] == ["image", "lora", "factor"]
+    assert schema.price_badge.expr == "factor * 0.05"
+    assert schema.price_badge.depends_on.widgets == ["factor"]
+    assert schema.price_badge.depends_on.inputs == ["image"]
     json.dumps(data)  # plain JSON throughout
 
 
@@ -328,6 +333,26 @@ def test_a_node_registered_from_the_manifest_is_the_node_its_code_declares(made,
     _, pack, _ = made
     result = _same_as_code(pack, tmp_path)
     assert result == {"nodes": 1, "differ": []}
+
+
+@pytest.mark.parametrize("attrs, message", [
+    ({"expr": ""}, "non-empty string"),
+    ({"expr": "1", "engine": "python"}, "Only 'jsonata'"),
+    ({"expr": "1", "depends_on": {"$type": "price-badge-depends", "attrs": {"widgets": [1]}}}, "list\\[str\\]"),
+])
+def test_manifest_price_badges_keep_the_schema_validation(attrs, message):
+    with pytest.raises(ValueError, match=message):
+        manifest._decode_value({"$type": "price-badge", "attrs": attrs})
+
+
+def test_manifest_price_badges_preserve_group_dependencies():
+    from comfy_api.index import io
+
+    badge = io.PriceBadge(expr="1", depends_on=io.PriceBadgeDepends(
+        widgets=["count"], inputs=["image"], input_groups=["references"]))
+    decoded = manifest._decode_value(json.loads(json.dumps(manifest._encode_value(badge))))
+    assert decoded == badge
+    assert type(decoded) is io.PriceBadge and type(decoded.depends_on) is io.PriceBadgeDepends
 
 
 def test_every_kjnodes_node_registers_from_its_manifest_as_its_code_declares(tmp_path):

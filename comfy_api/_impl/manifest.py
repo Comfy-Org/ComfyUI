@@ -321,6 +321,12 @@ def _encode_value(value: Any):
         return {"$type": "autogrow-names", "input": _encode_input(value.input), "names": value.names, "min": value.min}
     if isinstance(value, io.RemoteOptions):
         return {"$type": "remote-options", "attrs": _encode_value(vars(value))}
+    if isinstance(value, io.PriceBadge):
+        value.validate()
+        return {"$type": "price-badge", "attrs": _encode_value(vars(value))}
+    if isinstance(value, io.PriceBadgeDepends):
+        value.validate()
+        return {"$type": "price-badge-depends", "attrs": _encode_value(vars(value))}
     if isinstance(value, type) and getattr(value, "io_type", None):
         return {"$type": "io-class", "io_type": value.io_type}
     if isinstance(value, tuple):
@@ -359,6 +365,11 @@ def _decode_value(value: Any):
         remote = object.__new__(io.RemoteOptions)
         remote.__dict__.update(_decode_value(value["attrs"]))
         return remote
+    if tag in ("price-badge", "price-badge-depends"):
+        cls = io.PriceBadge if tag == "price-badge" else io.PriceBadgeDepends
+        result = cls(**_decode_value(value["attrs"]))
+        result.validate()
+        return result
     if tag == "io-class":
         return _io_class(value["io_type"])
     if tag == "enum":
