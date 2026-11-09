@@ -207,7 +207,10 @@ class ModelState:
         """Select this snapshot in the owner's managed model and return it ready to run."""
         self._values.check_valid(self.patcher)
         if self._values.saved_versions:
-            self._values = self.copy()._values
+            values = self.copy()._values
+            # Generation already holds a reference to this metadata.
+            values.metadata = self.metadata
+            self._values = values
         patcher = self.patcher
         owner = self.owner
         if owner is not None:
