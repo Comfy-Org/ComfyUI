@@ -193,6 +193,12 @@ def cast_modules_with_vbar(comfy_modules, dtype, device, bias_dtype, non_blockin
     dropped_groups = []
     for s in comfy_modules:
         group = s._combined_linear
+        if group is not None and group._v_weight is not None and not all(m in comfy_modules for m in group.linears):
+            group._v_weight = None
+            for m in group.linears:
+                m._v_signature = None
+    for s in comfy_modules:
+        group = s._combined_linear
         if group is None or group._v_weight is None:
             signature, resident = fault_weight(s)
         else:
@@ -1149,11 +1155,16 @@ class CombinedLinear:
                     or s._full_precision_mm or s.comfy_force_forward or s.bias is not None):
                 return
             # Other formats may concatenate but cannot run the combined linear_input_act path.
-            if s.quant_format not in ("int8_tensorwise", "asym_w4a8_int8", "w6a8_int8"):
+            if s.quant_format not in ("int8_tensorwise", "w3a8_int8", "asym_w4a8_int8", "w6a8_int8", "nested_w4a8_int8"):
                 return
             weights.append(s._v_weight)
-        # Members are loaded back to back, so their VBAR allocations are consecutive in member order.
-        v = (self.linears[0]._v[0], min(s._v[1] for s in self.linears), sum(s._v[2] for s in self.linears))
+        allocations = [s._v for s in self.linears]
+        if any(v[0] is not allocations[0][0] for v in allocations[1:]):
+            return
+        ordered = sorted(allocations, key=lambda v: v[1])
+        if any(a[1] + a[2] != b[1] for a, b in zip(ordered, ordered[1:])):
+            return
+        v = (ordered[0][0], ordered[0][1], sum(v[2] for v in ordered))
         weight = comfy.memory_management.cat_gathered(weights, comfy_aimdo.torch.aimdo_to_tensor(v, device))
         if weight is None:
             return
@@ -1168,7 +1179,7 @@ class CombinedLinear:
     def linear_input_act(self, x, input_act, act_weight=None, act_eps=0.0,
                          residual=None, residual_scale=None):
         run_every_op()
-        if self._v_weight is None:
+        if self._v_weight is None or not all(hasattr(s, "_prefetch") and s._prefetch["resident"] for s in self.linears):
             return NotImplemented
         if self._full_precision_mm:
             x = _eager_input_act(x, input_act, act_weight, act_eps)

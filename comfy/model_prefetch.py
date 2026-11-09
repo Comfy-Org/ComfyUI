@@ -134,13 +134,15 @@ def pin_modules(comfy_modules, device, dtype=None):
     else:
         return offload_stream, fully_faulted
     relayout = []
+    groups = set()
     for s in comfy_modules:
         if s._v_relayout:
             continue
         s._v_relayout = True
         group = s._combined_linear
-        if group is not None and s is group.linears[0]:
+        if group is not None and group not in groups:
             group.prepare(device)
+            groups.add(group)
             relayout.append(group)
         relayout.append(s)
     for s in relayout:

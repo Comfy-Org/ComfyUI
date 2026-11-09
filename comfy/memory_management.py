@@ -6,6 +6,7 @@ from typing import NamedTuple
 
 import comfy_aimdo.host_buffer
 from comfy.quant_ops import QuantizedTensor, ck
+from comfy_kitchen.tensor.w4a8_int8 import cat_packed_weights
 
 
 class TensorFileSlice(NamedTuple):
@@ -198,6 +199,17 @@ def cat_gathered(tensors, gathered):
     first and rewritten after the last codes, so the result is laid out exactly like
     interpret_gathered_like would lay out one tensor of the summed rows. Returns None
     when the tensors cannot be concatenated."""
+    if tensors[0]._layout_cls == "AsymW4A8Int8Layout" and tensors[0]._params.mma_packed:
+        weight = cat_packed_weights(tuple(tensors))
+        if weight is None:
+            return None
+        combined = interpret_gathered_like([weight], gathered)[0]
+        inner_tensors, _ = weight.__tensor_flatten__()
+        combined.__tensor_flatten__()
+        for attr in inner_tensors:
+            getattr(combined, attr).copy_(getattr(weight, attr))
+        return combined
+
     inner_tensors, ctx = tensors[0].__tensor_flatten__()
     rows = [t._params.orig_shape[0] for t in tensors]
     orig_shape = (sum(rows), *tensors[0]._params.orig_shape[1:])
