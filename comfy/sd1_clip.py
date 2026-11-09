@@ -136,6 +136,7 @@ class SDClipModel(torch.nn.Module, ClipTokenWeightEncoder):
         self.return_projected_pooled = return_projected_pooled
         self.return_attention_masks = return_attention_masks
         self.execution_device = None
+        self.model_state = None
 
         if layer == "hidden":
             assert layer_idx is not None
@@ -153,6 +154,7 @@ class SDClipModel(torch.nn.Module, ClipTokenWeightEncoder):
         layer_idx = options.get("layer", self.layer_idx)
         self.return_projected_pooled = options.get("projected_pooled", self.return_projected_pooled)
         self.execution_device = options.get("execution_device", self.execution_device)
+        self.model_state = options.get("model_state", self.model_state)
         if isinstance(self.layer, list) or self.layer == "all":
             pass
         elif isinstance(layer_idx, list):
@@ -168,6 +170,7 @@ class SDClipModel(torch.nn.Module, ClipTokenWeightEncoder):
         self.layer_idx = self.options_default[1]
         self.return_projected_pooled = self.options_default[2]
         self.execution_device = None
+        self.model_state = None
 
     def process_tokens(self, tokens, device):
         end_token = self.special_tokens.get("end", None)

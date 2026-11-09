@@ -106,7 +106,7 @@ async def register_replacements_textgenerate():
                 {"new_id": "videos.video1", "old_id": "video"},
                 {"new_id": "audios.audio1", "old_id": "audio"},
                 {"new_id": "sampling_mode.presence_penalty", "set_value": 0.0},
-                *[{"new_id": name, "old_id": name} for name in ["clip", "system_prompt", *widgets]],
+                *[{"new_id": name, "old_id": name} for name in ["clip", "system_prompt", "state", *widgets]],
             ],
         ))
 

@@ -6,6 +6,7 @@ class CallbacksMP:
     ON_MATCH_MULTIGPU_CLONES = "on_match_multigpu_clones"
     ON_LOAD = "on_load_after"
     ON_DETACH = "on_detach_after"
+    ON_UNLOAD_RAM = "on_unload_ram"
     ON_CLEANUP = "on_cleanup"
     ON_PRE_RUN = "on_pre_run"
     ON_PREPARE_STATE = "on_prepare_state"

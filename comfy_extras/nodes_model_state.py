@@ -1,0 +1,80 @@
+import os
+
+from typing_extensions import override
+
+import comfy.model_state
+import folder_paths
+from comfy_api.latest import ComfyExtension, io
+
+
+def state_path(filename):
+    output_dir = folder_paths.get_output_directory()
+    path = os.path.abspath(os.path.join(output_dir, filename))
+    if not folder_paths.is_within_directory(output_dir, path):
+        raise ValueError(f"Model state files must be inside the output folder: {filename}")
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    return path
+
+
+class OpenModelState(io.ComfyNode):
+    @classmethod
+    def define_schema(cls) -> io.Schema:
+        return io.Schema(
+            node_id="OpenModelState",
+            display_name="Open Model State",
+            category="model_state",
+            search_aliases=["KV cache", "conversation", "resume"],
+            description="Opens a model state file in the output folder, such as a text generation conversation, so a sampler can continue from it. The file is only written by Save Model State.",
+            inputs=[
+                io.String.Input("filename", default="model_states/ComfyUI.safetensors"),
+                io.Combo.Input("create", options=["if_missing", "never", "always"], default="if_missing", tooltip="What to do when the file is missing: start from an empty state, or fail. always ignores the file and starts empty on every run."),
+            ],
+            outputs=[io.ModelState.Output(display_name="state")],
+        )
+
+    @classmethod
+    def fingerprint_inputs(cls, filename, create):
+        if create == "always":
+            return float("NaN")
+        path = state_path(filename)
+        return comfy.model_state.ModelState.fingerprint(path)
+
+    @classmethod
+    def execute(cls, filename, create) -> io.NodeOutput:
+        return io.NodeOutput(comfy.model_state.ModelState.open(state_path(filename), create))
+
+
+class SaveModelState(io.ComfyNode):
+    @classmethod
+    def define_schema(cls) -> io.Schema:
+        return io.Schema(
+            node_id="SaveModelState",
+            display_name="Save Model State",
+            category="model/merging",
+            description="Writes a model state's values to a file in the folder output/model_states.",
+            is_output_node=True,
+            inputs=[
+                io.ModelState.Input("state"),
+                io.String.Input("filename", default="model_states/ComfyUI.safetensors"),
+                io.Boolean.Input("writethrough", default=True, optional=True, tooltip="Write the file now. When disabled, keep the saved state resident and write it when its model is evicted from RAM."),
+            ],
+            outputs=[io.ModelState.Output(display_name="state", tooltip="The saved state, for chaining or ending a loop.")],
+        )
+
+    @classmethod
+    def execute(cls, state, filename, writethrough=True) -> io.NodeOutput:
+        state.save(state_path(filename), writethrough=writethrough)
+        return io.NodeOutput(state)
+
+
+class ModelStateExtension(ComfyExtension):
+    @override
+    async def get_node_list(self) -> list[type[io.ComfyNode]]:
+        return [
+            OpenModelState,
+            SaveModelState,
+        ]
+
+
+async def comfy_entrypoint() -> ModelStateExtension:
+    return ModelStateExtension()
