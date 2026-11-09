@@ -244,6 +244,8 @@ class CreateCameraOrbit(IO.ComfyNode):
                 ux, uy, uz = (0.0, 0.0, 1.0) if abs(fz) < 0.99 * math.hypot(fx, fy, fz) else (0.0, 1.0, 0.0)
             ax, ay, az = uy * fz - uz * fy, uz * fx - ux * fz, ux * fy - uy * fx   # up x forward: tilting about it rises
             n = math.hypot(ax, ay, az)
+            if n == 0.0:
+                raise ValueError("Create Camera Orbit: the camera's position equals its target, so it has no view direction.")
             for i in range(count):
                 cam = _rotate_camera_info(base, (ax / n, ay / n, az / n), pitch_step * i)
                 rig.append(_rotate_camera_info(cam, (0.0, 1.0, 0.0), yaw_step * i))

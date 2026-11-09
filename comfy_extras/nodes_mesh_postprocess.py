@@ -2289,6 +2289,8 @@ class BakeTextureFromViews(IO.ComfyNode):
         if resolution == 0:
             resolution = max(int(mesh.texture.shape[1]), int(mesh.texture.shape[2])) if mesh.texture is not None else 2048
         v_i, f_i, colors_i, uvs_i, normals_i = get_mesh_batch_item(mesh, 0)
+        if f_i.numel() == 0:
+            raise ValueError("BakeTextureFromViews: the mesh has no faces.")
         dev = comfy.model_management.get_torch_device()
         _prepare_gpu_mesh_processing(dev, max(resolution * resolution * 256, int(f_i.shape[0]) * 512))  # measured 140-200 B/texel
         lv, lf = v_i.to(dev).float(), f_i.to(dev).long()
