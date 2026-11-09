@@ -19,6 +19,7 @@ pytestmark = pytest.mark.asyncio
 
 
 def _register_probe_nodes(monkeypatch):
+    """Register a fingerprinted Source and an autogrow Consumer and return the shared execution log."""
     executions = []
     change_counter = [0]
 
