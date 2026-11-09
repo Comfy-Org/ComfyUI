@@ -1609,7 +1609,8 @@
           }
         ],
         "extra": {},
-        "category": "Image Tools/Crop"
+        "category": "Image Tools/Crop",
+        "description": "Splits an image into a 2×2 grid of four equal tiles."
       }
     ]
   },

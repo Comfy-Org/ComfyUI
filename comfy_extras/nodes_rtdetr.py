@@ -14,8 +14,8 @@ class RTDETR_detect(io.ComfyNode):
     def define_schema(cls):
         return io.Schema(
             node_id="RTDETR_detect",
-            display_name="RT-DETR Detect",
-            category="detection/",
+            display_name="Run Real-Time Detection (RT-DETR)",
+            category="image/detection",
             search_aliases=["bbox", "bounding box", "object detection", "coco"],
             inputs=[
                 io.Model.Input("model", display_name="model"),
@@ -71,7 +71,7 @@ class DrawBBoxes(io.ComfyNode):
         return io.Schema(
             node_id="DrawBBoxes",
             display_name="Draw BBoxes",
-            category="detection/",
+            category="image/detection",
             search_aliases=["bbox", "bounding box", "object detection", "rt_detr", "visualize detections", "coco"],
             inputs=[
                 io.Image.Input("image", optional=True),

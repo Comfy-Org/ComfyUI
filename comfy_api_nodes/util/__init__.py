@@ -1,8 +1,10 @@
-from ._helpers import get_fs_object_size
+from ._helpers import get_fs_object_size, get_output_consumers, validate_output_unlinked
 from .client import (
     ApiEndpoint,
     poll_op,
     poll_op_raw,
+    router_op,
+    router_op_raw,
     sync_op,
     sync_op_raw,
 )
@@ -16,17 +18,22 @@ from .conversions import (
     convert_mask_to_image,
     downscale_image_tensor,
     downscale_image_tensor_by_max_side,
+    downscale_image_tensor_by_max_sides,
+    downscale_video_to_max_pixels,
     image_tensor_pair_to_batch,
+    pad_images_to_common_channels,
     pil_to_bytesio,
     resize_mask_to_image,
-    resize_video_to_pixel_budget,
     tensor_to_base64_string,
     tensor_to_bytesio,
     tensor_to_pil,
     text_filepath_to_base64_string,
     text_filepath_to_data_uri,
     trim_video,
+    upscale_image_tensor_to_min_pixels,
+    upscale_video_to_min_pixels,
     video_to_base64_string,
+    video_to_images_and_mask,
 )
 from .download_helpers import (
     download_url_as_bytesio,
@@ -63,6 +70,8 @@ __all__ = [
     "ApiEndpoint",
     "poll_op",
     "poll_op_raw",
+    "router_op",
+    "router_op_raw",
     "sync_op",
     "sync_op_raw",
     # Upload helpers
@@ -88,17 +97,22 @@ __all__ = [
     "convert_mask_to_image",
     "downscale_image_tensor",
     "downscale_image_tensor_by_max_side",
+    "downscale_image_tensor_by_max_sides",
+    "downscale_video_to_max_pixels",
     "image_tensor_pair_to_batch",
+    "pad_images_to_common_channels",
     "pil_to_bytesio",
     "resize_mask_to_image",
-    "resize_video_to_pixel_budget",
     "tensor_to_base64_string",
     "tensor_to_bytesio",
     "tensor_to_pil",
     "text_filepath_to_base64_string",
     "text_filepath_to_data_uri",
     "trim_video",
+    "upscale_image_tensor_to_min_pixels",
+    "upscale_video_to_min_pixels",
     "video_to_base64_string",
+    "video_to_images_and_mask",
     # Validation utilities
     "get_image_dimensions",
     "get_number_of_images",
@@ -114,4 +128,7 @@ __all__ = [
     "validate_video_frame_count",
     # Misc functions
     "get_fs_object_size",
+    # Graph helpers
+    "get_output_consumers",
+    "validate_output_unlinked",
 ]

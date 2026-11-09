@@ -10,7 +10,7 @@ class LatentRebatch(io.ComfyNode):
         return io.Schema(
             node_id="RebatchLatents",
             display_name="Rebatch Latents",
-            category="latent/batch",
+            category="model/latent/batch",
             is_input_list=True,
             inputs=[
                 io.Latent.Input("latents"),

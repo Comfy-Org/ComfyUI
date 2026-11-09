@@ -30,38 +30,13 @@ from comfy_api_nodes.util import (
     validate_image_dimensions,
 )
 
-_EUR_TO_USD = 1.19
-
-
-def _tier_price_eur(megapixels: float) -> float:
-    """Price in EUR for a single Magnific upscaling step based on input megapixels."""
-    if megapixels <= 1.3:
-        return 0.143
-    if megapixels <= 3.0:
-        return 0.286
-    if megapixels <= 6.4:
-        return 0.429
-    return 1.716
-
-
-def _calculate_magnific_upscale_price_usd(width: int, height: int, scale: int) -> float:
-    """Calculate total Magnific upscale price in USD for given input dimensions and scale factor."""
-    num_steps = int(math.log2(scale))
-    total_eur = 0.0
-    pixels = width * height
-    for _ in range(num_steps):
-        total_eur += _tier_price_eur(pixels / 1_000_000)
-        pixels *= 4
-    return round(total_eur * _EUR_TO_USD, 2)
-
-
 class MagnificImageUpscalerCreativeNode(IO.ComfyNode):
     @classmethod
     def define_schema(cls):
         return IO.Schema(
             node_id="MagnificImageUpscalerCreativeNode",
             display_name="Magnific Image Upscale (Creative)",
-            category="api node/image/Magnific",
+            category="partner/image/Magnific",
             description="Prompt‑guided enhancement, stylization, and 2x/4x/8x/16x upscaling. "
             "Maximum output: 25.3 megapixels.",
             inputs=[
@@ -203,10 +178,6 @@ class MagnificImageUpscalerCreativeNode(IO.ComfyNode):
                     f"Use a smaller input image or lower scale factor."
                 )
 
-        final_height, final_width = get_image_dimensions(image)
-        actual_scale = int(scale_factor.rstrip("x"))
-        price_usd = _calculate_magnific_upscale_price_usd(final_width, final_height, actual_scale)
-
         initial_res = await sync_op(
             cls,
             ApiEndpoint(path="/proxy/freepik/v1/ai/image-upscaler", method="POST"),
@@ -228,7 +199,6 @@ class MagnificImageUpscalerCreativeNode(IO.ComfyNode):
             ApiEndpoint(path=f"/proxy/freepik/v1/ai/image-upscaler/{initial_res.task_id}"),
             response_model=TaskResponse,
             status_extractor=lambda x: x.status,
-            price_extractor=lambda _: price_usd,
             poll_interval=10.0,
         )
         return IO.NodeOutput(await download_url_to_image_tensor(final_response.generated[0]))
@@ -240,7 +210,7 @@ class MagnificImageUpscalerPreciseV2Node(IO.ComfyNode):
         return IO.Schema(
             node_id="MagnificImageUpscalerPreciseV2Node",
             display_name="Magnific Image Upscale (Precise V2)",
-            category="api node/image/Magnific",
+            category="partner/image/Magnific",
             description="High-fidelity upscaling with fine control over sharpness, grain, and detail. "
             "Maximum output: 10060×10060 pixels.",
             inputs=[
@@ -367,9 +337,6 @@ class MagnificImageUpscalerPreciseV2Node(IO.ComfyNode):
                     f"Use a smaller input image or lower scale factor."
                 )
 
-        final_height, final_width = get_image_dimensions(image)
-        price_usd = _calculate_magnific_upscale_price_usd(final_width, final_height, requested_scale)
-
         initial_res = await sync_op(
             cls,
             ApiEndpoint(path="/proxy/freepik/v1/ai/image-upscaler-precision-v2", method="POST"),
@@ -388,7 +355,6 @@ class MagnificImageUpscalerPreciseV2Node(IO.ComfyNode):
             ApiEndpoint(path=f"/proxy/freepik/v1/ai/image-upscaler-precision-v2/{initial_res.task_id}"),
             response_model=TaskResponse,
             status_extractor=lambda x: x.status,
-            price_extractor=lambda _: price_usd,
             poll_interval=10.0,
         )
         return IO.NodeOutput(await download_url_to_image_tensor(final_response.generated[0]))
@@ -400,7 +366,7 @@ class MagnificImageStyleTransferNode(IO.ComfyNode):
         return IO.Schema(
             node_id="MagnificImageStyleTransferNode",
             display_name="Magnific Image Style Transfer",
-            category="api node/image/Magnific",
+            category="partner/image/Magnific",
             description="Transfer the style from a reference image to your input image.",
             inputs=[
                 IO.Image.Input("image", tooltip="The image to apply style transfer to."),
@@ -549,7 +515,7 @@ class MagnificImageRelightNode(IO.ComfyNode):
         return IO.Schema(
             node_id="MagnificImageRelightNode",
             display_name="Magnific Image Relight",
-            category="api node/image/Magnific",
+            category="partner/image/Magnific",
             description="Relight an image with lighting adjustments and optional reference-based light transfer.",
             inputs=[
                 IO.Image.Input("image", tooltip="The image to relight."),
@@ -789,7 +755,7 @@ class MagnificImageSkinEnhancerNode(IO.ComfyNode):
         return IO.Schema(
             node_id="MagnificImageSkinEnhancerNode",
             display_name="Magnific Image Skin Enhancer",
-            category="api node/image/Magnific",
+            category="partner/image/Magnific",
             description="Skin enhancement for portraits with multiple processing modes.",
             inputs=[
                 IO.Image.Input("image", tooltip="The portrait image to enhance."),

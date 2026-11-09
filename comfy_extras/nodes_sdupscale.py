@@ -9,7 +9,7 @@ class SD_4XUpscale_Conditioning(io.ComfyNode):
     def define_schema(cls):
         return io.Schema(
             node_id="SD_4XUpscale_Conditioning",
-            category="conditioning/upscale_diffusion",
+            category="model/conditioning/stable diffusion upscaler",
             inputs=[
                 io.Image.Input("images"),
                 io.Conditioning.Input("positive"),

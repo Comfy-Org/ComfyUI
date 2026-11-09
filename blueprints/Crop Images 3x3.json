@@ -2946,7 +2946,8 @@
           }
         ],
         "extra": {},
-        "category": "Image Tools/Crop"
+        "category": "Image Tools/Crop",
+        "description": "Splits an image into a 3×3 grid of nine equal tiles."
       }
     ]
   },

@@ -1,4 +1,3 @@
-from __future__ import annotations
 import argparse
 import logging
 import os
@@ -10,7 +9,7 @@ import importlib
 from dataclasses import dataclass
 from functools import cached_property
 from pathlib import Path
-from typing import Dict, TypedDict, Optional
+from typing import Dict, Iterator, TypedDict, Optional
 from aiohttp import web
 from importlib.metadata import version
 
@@ -27,7 +26,7 @@ def frontend_install_warning_message():
     return f"""
 {get_missing_requirements_message()}
 
-This error is happening because the ComfyUI frontend is no longer shipped as part of the main repo but as a pip package instead.
+The ComfyUI frontend is shipped in a pip package so it needs to be updated separately from the ComfyUI code.
 """.strip()
 
 def parse_version(version: str) -> tuple[int, int, int]:
@@ -38,40 +37,63 @@ def is_valid_version(version: str) -> bool:
     pattern = r"^(\d+)\.(\d+)\.(\d+)$"
     return bool(re.match(pattern, version))
 
-def get_installed_frontend_version():
-    """Get the currently installed frontend package version."""
-    frontend_version_str = version("comfyui-frontend-package")
-    return frontend_version_str
-
-
 def get_required_frontend_version():
     return get_required_packages_versions().get("comfyui-frontend-package", None)
 
 
-def check_frontend_version():
-    """Check if the frontend version is up to date."""
+COMFY_PACKAGE_VERSIONS = []
+def get_comfy_package_versions():
+    """List installed/required versions for every comfy* package in requirements.txt."""
+    if COMFY_PACKAGE_VERSIONS:
+        return COMFY_PACKAGE_VERSIONS.copy()
+    out = COMFY_PACKAGE_VERSIONS
+    for name, required in (get_required_packages_versions() or {}).items():
+        if not name.startswith("comfy"):
+            continue
+        try:
+            installed = version(name)
+        except Exception:
+            installed = None
+        out.append({"name": name, "installed": installed, "required": required})
+    return out.copy()
 
-    try:
-        frontend_version_str = get_installed_frontend_version()
-        frontend_version = parse_version(frontend_version_str)
-        required_frontend_str = get_required_frontend_version()
-        required_frontend = parse_version(required_frontend_str)
-        if frontend_version < required_frontend:
-            app.logger.log_startup_warning(
-                f"""
+
+def check_comfy_packages_versions():
+    """Warn for every comfy* package whose installed version is below requirements.txt."""
+    from packaging.version import InvalidVersion, parse as parse_pep440
+    outdated_packages = []
+
+    for pkg in get_comfy_package_versions():
+        installed_str = pkg["installed"]
+        required_str = pkg["required"]
+        if not installed_str or not required_str:
+            continue
+        try:
+            outdated = parse_pep440(installed_str) < parse_pep440(required_str)
+        except InvalidVersion as e:
+            logging.error(f"Failed to check {pkg['name']} version: {e}")
+            continue
+        if outdated:
+            outdated_packages.append((pkg["name"], installed_str, required_str))
+        else:
+            logging.info("{} version: {}".format(pkg["name"], installed_str))
+
+    if outdated_packages:
+        package_warnings = "\n".join(
+            f"Installed {name} version {installed} is lower than the recommended version {required}."
+            for name, installed, required in outdated_packages
+        )
+        app.logger.log_startup_warning(
+            f"""
 ________________________________________________________________________
 WARNING WARNING WARNING WARNING WARNING
 
-Installed frontend version {".".join(map(str, frontend_version))} is lower than the recommended version {".".join(map(str, required_frontend))}.
+{package_warnings}
 
-{frontend_install_warning_message()}
+{get_missing_requirements_message()}
 ________________________________________________________________________
 """.strip()
-            )
-        else:
-            logging.info("ComfyUI frontend version: {}".format(frontend_version_str))
-    except Exception as e:
-        logging.error(f"Failed to check frontend version: {e}")
+        )
 
 
 REQUEST_TIMEOUT = 10  # seconds
@@ -105,20 +127,22 @@ class FrontEndProvider:
     def release_url(self) -> str:
         return f"https://api.github.com/repos/{self.owner}/{self.repo}/releases"
 
-    @cached_property
-    def all_releases(self) -> list[Release]:
-        releases = []
+    def iter_releases(self) -> Iterator[Release]:
+        """Yield releases newest first, fetching the next page only when the caller needs it."""
         api_url = self.release_url
         while api_url:
             response = requests.get(api_url, timeout=REQUEST_TIMEOUT)
             response.raise_for_status()  # Raises an HTTPError if the response was an error
-            releases.extend(response.json())
+            yield from response.json()
             # GitHub uses the Link header to provide pagination links. Check if it exists and update api_url accordingly.
             if "next" in response.links:
                 api_url = response.links["next"]["url"]
             else:
                 api_url = None
-        return releases
+
+    @cached_property
+    def all_releases(self) -> list[Release]:
+        return list(self.iter_releases())
 
     @cached_property
     def latest_release(self) -> Release:
@@ -130,13 +154,19 @@ class FrontEndProvider:
     @cached_property
     def latest_prerelease(self) -> Release:
         """Get the latest pre-release version - even if it's older than the latest release"""
-        release = [release for release in self.all_releases if release["prerelease"]]
+        # GitHub returns releases in reverse chronological order, so the first pre-release is the
+        # latest. Stop there instead of paging through every release: each page is one request
+        # against the 60/hour unauthenticated GitHub API limit.
+        # Reuse the full list if a caller already fetched it (cached_property stores it on the instance).
+        releases = self.__dict__.get("all_releases")
+        if releases is None:
+            releases = self.iter_releases()
+        release = next((release for release in releases if release["prerelease"]), None)
 
-        if not release:
+        if release is None:
             raise ValueError("No pre-releases found")
 
-        # GitHub returns releases in reverse chronological order, so first is latest
-        return release[0]
+        return release
 
     def get_release(self, version: str) -> Release:
         if version == "latest":
@@ -144,10 +174,14 @@ class FrontEndProvider:
         elif version == "prerelease":
             return self.latest_prerelease
         else:
-            for release in self.all_releases:
-                if release["tag_name"] in [version, f"v{version}"]:
-                    return release
-            raise ValueError(f"Version {version} not found in releases")
+            tags = [version] if version.startswith("v") else [f"v{version}", version]
+            for tag in tags:
+                response = requests.get(f"{self.release_url}/tags/{tag}", timeout=REQUEST_TIMEOUT)
+                if response.status_code == 404:
+                    continue
+                response.raise_for_status()
+                return response.json()
+            raise ValueError(f"Version {version} not found in {self.owner}/{self.repo} releases")
 
 
 def download_release_asset_zip(release: Release, destination_path: str) -> None:
@@ -202,6 +236,11 @@ class FrontendManager:
         return get_required_packages_versions().get("comfyui-workflow-templates", None)
 
     @classmethod
+    def get_comfy_package_versions(cls):
+        """List installed/required versions for every comfy* package in requirements.txt."""
+        return get_comfy_package_versions()
+
+    @classmethod
     def default_frontend_path(cls) -> str:
         try:
             import comfyui_frontend_package
@@ -250,15 +289,17 @@ comfyui-workflow-templates is not installed.
             return None
 
         asset_map: Dict[str, str] = {}
-        try:
-            for entry in template_entries:
-                for asset in entry.assets:
+        for entry in template_entries:
+            for asset in entry.assets:
+                try:
                     asset_map[asset.filename] = get_asset_path(
                         entry.template_id, asset.filename
                     )
-        except Exception as exc:
-            logging.error(f"Failed to resolve template asset paths: {exc}")
-            return None
+                except FileNotFoundError:
+                    continue
+                except Exception as exc:
+                    logging.error(f"Failed to resolve template asset paths: {exc}")
+                    return None
 
         if not asset_map:
             logging.error("No workflow template assets found. Did the packages install correctly?")
@@ -341,12 +382,12 @@ comfyui-workflow-templates is not installed.
             main error source might be request timeout or invalid URL.
         """
         if version_string == DEFAULT_VERSION_STRING:
-            check_frontend_version()
+            check_comfy_packages_versions()
             return cls.default_frontend_path()
 
         repo_owner, repo_name, version = cls.parse_version_string(version_string)
 
-        if version.startswith("v"):
+        if version not in ("latest", "prerelease"):
             expected_path = str(
                 Path(cls.CUSTOM_FRONTENDS_ROOT)
                 / f"{repo_owner}_{repo_name}"
@@ -403,7 +444,7 @@ comfyui-workflow-templates is not installed.
         except Exception as e:
             logging.error("Failed to initialize frontend: %s", e)
             logging.info("Falling back to the default frontend.")
-            check_frontend_version()
+            check_comfy_packages_versions()
             return cls.default_frontend_path()
     @classmethod
     def template_asset_handler(cls):

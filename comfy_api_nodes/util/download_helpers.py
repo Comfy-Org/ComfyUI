@@ -17,12 +17,13 @@ from folder_paths import get_output_directory
 from . import request_logger
 from ._helpers import (
     default_base_url,
-    get_auth_header,
+    diagnose_connectivity,
+    get_comfy_api_headers,
     is_processing_interrupted,
+    refresh_partner_token,
     sleep_with_interrupt,
     to_aiohttp_url,
 )
-from .client import _diagnose_connectivity
 from .common_exceptions import ApiServerError, LocalNetworkError, ProcessingInterrupted
 from .conversions import bytesio_to_image_tensor
 
@@ -38,6 +39,7 @@ async def download_url_to_bytesio(
     retry_delay: float = 1.0,
     retry_backoff: float = 2.0,
     cls: type[COMFY_IO.ComfyNode] = None,
+    allow_redirects: bool = True,
 ) -> None:
     """Stream-download a URL to `dest`.
 
@@ -48,6 +50,10 @@ async def download_url_to_bytesio(
 
     If `url` starts with `/proxy/`, `cls` must be provided so the URL can be expanded
     to an absolute URL and authentication headers can be applied.
+
+    Pass `allow_redirects=False` when the caller has already vetted `url` and a
+    redirect would move the download somewhere it did not vet. The default keeps
+    aiohttp's redirect following.
 
     Raises:
         ProcessingInterrupted, LocalNetworkError, ApiServerError, Exception (HTTP and other errors)
@@ -64,10 +70,19 @@ async def download_url_to_bytesio(
         if cls is None:
             raise ValueError("For relative 'cloud' paths, the `cls` parameter is required.")
         url = urljoin(default_base_url().rstrip("/") + "/", url.lstrip("/"))
-        headers = get_auth_header(cls)
+        try:
+            await refresh_partner_token(cls)
+        except asyncio.CancelledError:
+            raise ProcessingInterrupted("Task cancelled") from None
+        headers = get_comfy_api_headers(cls)
 
     while True:
         attempt += 1
+        # A retry re-reads from byte zero, so a part-filled BytesIO must be emptied
+        # or the two bodies concatenate.
+        if isinstance(dest, BytesIO):
+            dest.seek(0)
+            dest.truncate(0)
         op_id = _generate_operation_id("GET", url, attempt)
         timeout_cfg = aiohttp.ClientTimeout(total=timeout)
 
@@ -82,7 +97,7 @@ async def download_url_to_bytesio(
             with contextlib.suppress(Exception):
                 request_logger.log_request_response(operation_id=op_id, request_method="GET", request_url=url)
 
-            session = aiohttp.ClientSession(timeout=timeout_cfg)
+            session = aiohttp.ClientSession(timeout=timeout_cfg, trust_env=True)
             stop_evt = asyncio.Event()
 
             async def _monitor():
@@ -96,7 +111,9 @@ async def download_url_to_bytesio(
 
             monitor_task = asyncio.create_task(_monitor())
 
-            req_task = asyncio.create_task(session.get(to_aiohttp_url(url), headers=headers))
+            req_task = asyncio.create_task(
+                session.get(to_aiohttp_url(url), headers=headers, allow_redirects=allow_redirects)
+            )
             done, pending = await asyncio.wait({req_task, monitor_task}, return_when=asyncio.FIRST_COMPLETED)
 
             if monitor_task in done and req_task in pending:
@@ -111,7 +128,9 @@ async def download_url_to_bytesio(
                 raise ProcessingInterrupted("Task cancelled") from None
 
             async with resp:
-                if resp.status >= 400:
+                # Under allow_redirects=False a redirect lands here unfollowed, and its
+                # body is not the file that was asked for.
+                if resp.status >= 300:
                     with contextlib.suppress(Exception):
                         try:
                             body = await resp.json()
@@ -129,7 +148,7 @@ async def download_url_to_bytesio(
                         )
 
                     if resp.status in _RETRY_STATUS and attempt <= max_retries:
-                        await sleep_with_interrupt(delay, cls, None, None, None)
+                        await sleep_with_interrupt(delay, cls, None, None)
                         delay *= retry_backoff
                         continue
                     raise Exception(f"Failed to download (HTTP {resp.status}).")
@@ -144,24 +163,29 @@ async def download_url_to_bytesio(
                     sink = dest  # BytesIO or file-like
 
                 written = 0
-                while True:
-                    try:
-                        chunk = await asyncio.wait_for(resp.content.read(1024 * 1024), timeout=1.0)
-                    except asyncio.TimeoutError:
-                        chunk = b""
-                    except asyncio.CancelledError:
-                        raise ProcessingInterrupted("Task cancelled") from None
-
-                    if is_processing_interrupted():
-                        raise ProcessingInterrupted("Task cancelled")
-
-                    if not chunk:
-                        if resp.content.at_eof():
-                            break
-                        continue
-
-                    sink.write(chunk)
-                    written += len(chunk)
+                read_task: asyncio.Task | None = None
+                try:
+                    while True:
+                        if read_task is None:
+                            read_task = asyncio.create_task(resp.content.read(1024 * 1024))
+                        done, _ = await asyncio.wait({read_task}, timeout=1.0)
+                        if is_processing_interrupted():
+                            raise ProcessingInterrupted("Task cancelled")
+                        if not done:
+                            continue
+                        chunk = read_task.result()
+                        read_task = None
+                        if not chunk:
+                            if resp.content.at_eof():
+                                break
+                            continue
+                        sink.write(chunk)
+                        written += len(chunk)
+                finally:
+                    if read_task is not None:
+                        read_task.cancel()
+                        with contextlib.suppress(asyncio.CancelledError, Exception):
+                            await read_task
 
                 if isinstance(dest, BytesIO):
                     with contextlib.suppress(Exception):
@@ -178,7 +202,7 @@ async def download_url_to_bytesio(
                 return
         except asyncio.CancelledError:
             raise ProcessingInterrupted("Task cancelled") from None
-        except (ClientError, OSError) as e:
+        except (ClientError, OSError, asyncio.TimeoutError) as e:
             if attempt <= max_retries:
                 request_logger.log_request_response(
                     operation_id=op_id,
@@ -186,14 +210,14 @@ async def download_url_to_bytesio(
                     request_url=url,
                     error_message=f"{type(e).__name__}: {str(e)} (will retry)",
                 )
-                await sleep_with_interrupt(delay, cls, None, None, None)
+                await sleep_with_interrupt(delay, cls, None, None)
                 delay *= retry_backoff
                 continue
 
-            diag = await _diagnose_connectivity()
+            diag = await diagnose_connectivity()
             if not diag["internet_accessible"]:
                 raise LocalNetworkError(
-                    "Unable to connect to the network. Please check your internet connection and try again."
+                    "Unable to connect to the network. Please check your internet connection or proxy settings and try again."
                 ) from e
             raise ApiServerError("The remote service appears unreachable at this time.") from e
         finally:
@@ -221,10 +245,11 @@ async def download_url_to_image_tensor(
     *,
     timeout: float = None,
     cls: type[COMFY_IO.ComfyNode] = None,
+    allow_redirects: bool = True,
 ) -> torch.Tensor:
     """Downloads an image from a URL and returns a [B, H, W, C] tensor."""
     result = BytesIO()
-    await download_url_to_bytesio(url, result, timeout=timeout, cls=cls)
+    await download_url_to_bytesio(url, result, timeout=timeout, cls=cls, allow_redirects=allow_redirects)
     return bytesio_to_image_tensor(result)
 
 
@@ -234,10 +259,18 @@ async def download_url_to_video_output(
     timeout: float = None,
     max_retries: int = 5,
     cls: type[COMFY_IO.ComfyNode] = None,
+    allow_redirects: bool = True,
 ) -> InputImpl.VideoFromFile:
     """Downloads a video from a URL and returns a `VIDEO` output."""
     result = BytesIO()
-    await download_url_to_bytesio(video_url, result, timeout=timeout, max_retries=max_retries, cls=cls)
+    await download_url_to_bytesio(
+        video_url,
+        result,
+        timeout=timeout,
+        max_retries=max_retries,
+        cls=cls,
+        allow_redirects=allow_redirects,
+    )
     return InputImpl.VideoFromFile(result)
 
 
@@ -270,6 +303,7 @@ async def download_url_to_file_3d(
     timeout: float | None = None,
     max_retries: int = 5,
     cls: type[COMFY_IO.ComfyNode] = None,
+    allow_redirects: bool = True,
 ) -> Types.File3D:
     """Downloads a 3D model file from a URL into memory as BytesIO.
 
@@ -284,6 +318,7 @@ async def download_url_to_file_3d(
         timeout=timeout,
         max_retries=max_retries,
         cls=cls,
+        allow_redirects=allow_redirects,
     )
 
     if task_id is not None:

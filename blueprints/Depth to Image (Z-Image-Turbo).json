@@ -1579,7 +1579,8 @@
           "VHS_MetadataImage": true,
           "VHS_KeepIntermediate": true
         },
-        "category": "Image generation and editing/Depth to image"
+        "category": "Image generation/Conditioned",
+        "description": "Generates an image from a depth map using Z-Image-Turbo with text conditioning."
       },
       {
         "id": "458bdf3c-4b58-421c-af50-c9c663a4d74c",
@@ -2461,7 +2462,8 @@
             ]
           },
           "workflowRendererVersion": "LG"
-        }
+        },
+        "description": "Estimates a monocular depth map from an input image using the Lotus depth estimation model."
       }
     ]
   },

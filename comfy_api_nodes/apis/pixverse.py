@@ -1,7 +1,4 @@
-from __future__ import annotations
-
 from enum import Enum
-from typing import Optional
 
 from pydantic import BaseModel, Field
 
@@ -60,33 +57,32 @@ class PixverseStyle(str, Enum):
     cyberpunk = "cyberpunk"
 
 
-# NOTE: forgoing descriptions for now in return for dev speed
 class PixverseTextVideoRequest(BaseModel):
     aspect_ratio: PixverseAspectRatio = Field(...)
     quality: PixverseQuality = Field(...)
     duration: PixverseDuration = Field(...)
-    model: Optional[str] = Field("v3.5")
-    motion_mode: Optional[PixverseMotionMode] = Field(PixverseMotionMode.normal)
+    model: str | None = Field("v3.5")
+    motion_mode: PixverseMotionMode | None = Field(PixverseMotionMode.normal)
     prompt: str = Field(...)
-    negative_prompt: Optional[str] = Field(None)
-    seed: Optional[int] = Field(None)
-    style: Optional[str] = Field(None)
-    template_id: Optional[int] = Field(None)
-    water_mark: Optional[bool] = Field(None)
+    negative_prompt: str | None = Field(None)
+    seed: int | None = Field(None)
+    style: str | None = Field(None)
+    template_id: int | None = Field(None)
+    water_mark: bool | None = Field(None)
 
 
 class PixverseImageVideoRequest(BaseModel):
     quality: PixverseQuality = Field(...)
     duration: PixverseDuration = Field(...)
     img_id: int = Field(...)
-    model: Optional[str] = Field("v3.5")
-    motion_mode: Optional[PixverseMotionMode] = Field(PixverseMotionMode.normal)
+    model: str | None = Field("v3.5")
+    motion_mode: PixverseMotionMode | None = Field(PixverseMotionMode.normal)
     prompt: str = Field(...)
-    negative_prompt: Optional[str] = Field(None)
-    seed: Optional[int] = Field(None)
-    style: Optional[str] = Field(None)
-    template_id: Optional[int] = Field(None)
-    water_mark: Optional[bool] = Field(None)
+    negative_prompt: str | None = Field(None)
+    seed: int | None = Field(None)
+    style: str | None = Field(None)
+    template_id: int | None = Field(None)
+    water_mark: bool | None = Field(None)
 
 
 class PixverseTransitionVideoRequest(BaseModel):
@@ -94,53 +90,141 @@ class PixverseTransitionVideoRequest(BaseModel):
     duration: PixverseDuration = Field(...)
     first_frame_img: int = Field(...)
     last_frame_img: int = Field(...)
-    model: Optional[str] = Field("v3.5")
-    motion_mode: Optional[PixverseMotionMode] = Field(PixverseMotionMode.normal)
+    model: str | None = Field("v3.5")
+    motion_mode: PixverseMotionMode | None = Field(PixverseMotionMode.normal)
     prompt: str = Field(...)
-    # negative_prompt: Optional[str] = Field(None)
-    seed: Optional[int] = Field(None)
-    # style: Optional[str] = Field(None)
-    # template_id: Optional[int] = Field(None)
-    # water_mark: Optional[bool] = Field(None)
-
-
-class PixverseImageUploadResponse(BaseModel):
-    ErrCode: Optional[int] = None
-    ErrMsg: Optional[str] = None
-    Resp: Optional[PixverseImgIdResponseObject] = Field(None, alias='Resp')
+    seed: int | None = Field(None)
 
 
 class PixverseImgIdResponseObject(BaseModel):
-    img_id: Optional[int] = None
+    img_id: int | None = None
 
 
-class PixverseVideoResponse(BaseModel):
-    ErrCode: Optional[int] = Field(None)
-    ErrMsg: Optional[str] = Field(None)
-    Resp: Optional[PixverseVideoIdResponseObject] = Field(None)
+class PixverseImageUploadResponse(BaseModel):
+    ErrCode: int | None = None
+    ErrMsg: str | None = None
+    Resp: PixverseImgIdResponseObject | None = Field(None)
 
 
 class PixverseVideoIdResponseObject(BaseModel):
-    video_id: int = Field(..., description='Video_id')
+    video_id: int = Field(...)
+    credits: int | None = Field(None)
 
 
-class PixverseGenerationStatusResponse(BaseModel):
-    ErrCode: Optional[int] = Field(None)
-    ErrMsg: Optional[str] = Field(None)
-    Resp: Optional[PixverseGenerationStatusResponseObject] = Field(None)
+class PixverseVideoResponse(BaseModel):
+    ErrCode: int | None = Field(None)
+    ErrMsg: str | None = Field(None)
+    Resp: PixverseVideoIdResponseObject | None = Field(None)
 
 
 class PixverseGenerationStatusResponseObject(BaseModel):
-    create_time: Optional[str] = Field(None)
-    id: Optional[int] = Field(None)
-    modify_time: Optional[str] = Field(None)
-    negative_prompt: Optional[str] = Field(None)
-    outputHeight: Optional[int] = Field(None)
-    outputWidth: Optional[int] = Field(None)
-    prompt: Optional[str] = Field(None)
-    resolution_ratio: Optional[int] = Field(None)
-    seed: Optional[int] = Field(None)
-    size: Optional[int] = Field(None)
-    status: Optional[int] = Field(None)
-    style: Optional[str] = Field(None)
-    url: Optional[str] = Field(None)
+    create_time: str | None = Field(None)
+    id: int | None = Field(None)
+    modify_time: str | None = Field(None)
+    negative_prompt: str | None = Field(None)
+    outputHeight: int | None = Field(None)
+    outputWidth: int | None = Field(None)
+    prompt: str | None = Field(None)
+    resolution_ratio: int | None = Field(None)
+    seed: int | None = Field(None)
+    size: int | None = Field(None)
+    status: int | None = Field(None)
+    style: str | None = Field(None)
+    has_audio: bool | None = Field(None)
+    credits: int | None = Field(None)
+    url: str | None = Field(None)
+
+
+class PixverseGenerationStatusResponse(BaseModel):
+    ErrCode: int | None = Field(None)
+    ErrMsg: str | None = Field(None)
+    Resp: PixverseGenerationStatusResponseObject | None = Field(None)
+
+
+class PixverseV6AspectRatio(str, Enum):
+    ratio_16_9 = "16:9"
+    ratio_4_3 = "4:3"
+    ratio_1_1 = "1:1"
+    ratio_3_4 = "3:4"
+    ratio_9_16 = "9:16"
+    ratio_2_3 = "2:3"
+    ratio_3_2 = "3:2"
+    ratio_21_9 = "21:9"
+
+
+class PixverseV6Style(str, Enum):
+    none = "none"
+    anime = "anime"
+    animation_3d = "3d_animation"
+    clay = "clay"
+    comic = "comic"
+    cyberpunk = "cyberpunk"
+    realistic = "realistic"
+
+
+class PixverseReferenceType(str, Enum):
+    subject = "subject"
+    background = "background"
+
+
+class PixverseImageReference(BaseModel):
+    img_id: int = Field(...)
+    ref_name: str = Field(...)
+    type: PixverseReferenceType = Field(...)
+
+
+class PixverseVideoReference(BaseModel):
+    ref_name: str = Field(...)
+    video_media_id: int | None = Field(None)
+    source_video_id: int | None = Field(None)
+
+
+class PixverseV6BaseRequest(BaseModel):
+    model: str = Field("v6")
+    prompt: str = Field(...)
+    duration: int = Field(...)
+    quality: PixverseQuality = Field(...)
+    negative_prompt: str | None = Field(None)
+    seed: int | None = Field(None)
+    style: str | None = Field(None)
+    generate_audio_switch: bool | None = Field(None)
+
+
+class PixverseV6TextVideoRequest(PixverseV6BaseRequest):
+    aspect_ratio: PixverseV6AspectRatio = Field(...)
+    generate_multi_clip_switch: bool | None = Field(None)
+
+
+class PixverseV6ImageVideoRequest(PixverseV6BaseRequest):
+    img_id: int = Field(...)
+    generate_multi_clip_switch: bool | None = Field(None)
+
+
+class PixverseV6TransitionVideoRequest(PixverseV6BaseRequest):
+    first_frame_img: int = Field(...)
+    last_frame_img: int = Field(...)
+
+
+class PixverseV6ExtendVideoRequest(PixverseV6BaseRequest):
+    video_media_id: int = Field(...)
+
+
+class PixverseV6FusionVideoRequest(PixverseV6BaseRequest):
+    aspect_ratio: str = Field(...)
+    image_references: list[PixverseImageReference] | None = Field(None)
+    video_references: list[PixverseVideoReference] | None = Field(None)
+    reference_mode: str | None = Field(None)
+
+
+class PixverseMediaIdResponseObject(BaseModel):
+    media_id: int | None = Field(None)
+    media_type: str | None = Field(None)
+    url: str | None = Field(None)
+    width: int | None = Field(None)
+    height: int | None = Field(None)
+
+
+class PixverseMediaUploadResponse(BaseModel):
+    ErrCode: int | None = Field(None)
+    ErrMsg: str | None = Field(None)
+    Resp: PixverseMediaIdResponseObject | None = Field(None)

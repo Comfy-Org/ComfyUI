@@ -1472,7 +1472,8 @@
         "extra": {
           "workflowRendererVersion": "LG"
         },
-        "category": "Image generation and editing/Edit image"
+        "category": "Image editing/Edit image",
+        "description": "Edits an input image via text instructions using FLUX.2 [klein] 4B."
       },
       {
         "id": "6007e698-2ebd-4917-84d8-299b35d7b7ab",
@@ -1821,7 +1822,8 @@
         ],
         "extra": {
           "workflowRendererVersion": "LG"
-        }
+        },
+        "description": "Applies reference image conditioning for style/identity transfer (Flux.2 Klein 4B)."
       }
     ]
   },

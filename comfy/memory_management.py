@@ -1,45 +1,71 @@
 import math
 import ctypes
-import threading
 import dataclasses
 import torch
 from typing import NamedTuple
 
-from comfy.quant_ops import QuantizedTensor
+import comfy_aimdo.host_buffer
+from comfy.quant_ops import QuantizedTensor, ck
 
 
 class TensorFileSlice(NamedTuple):
     file_ref: object
-    thread_id: int
+    lock: object
     offset: int
     size: int
 
 
-def read_tensor_file_slice_into(tensor, destination):
+def write_tensor_file_slice(tensor, source, stream=None):
+    """Write one complete tensor; missing or incompatible file backing is an error."""
+    info = getattr(tensor.untyped_storage(), "_comfy_tensor_file_slice", None)
+    size = source.numel() * source.element_size()
+    if (info is None or tensor.storage_offset() != 0 or not tensor.is_contiguous()
+            or tensor.numel() * tensor.element_size() != info.size or not source.is_contiguous()
+            or size != info.size):
+        raise ValueError("Writable tensors require an exact file descriptor and a complete contiguous source")
+
+    with info.lock:
+        if source.device.type == "cuda":
+            stream = torch.cuda.current_stream(source.device) if stream is None else stream
+            comfy_aimdo.host_buffer.write_device_to_file(info.file_ref, info.offset, size,
+                                                        stream.cuda_stream, source.data_ptr(), source.device.index)
+        elif source.device.type == "cpu":
+            comfy_aimdo.host_buffer.write_host_to_file(info.file_ref, info.offset, size, source.data_ptr())
+        else:
+            raise ValueError("Tensor file writes require a CPU or CUDA source")
+
+
+def read_tensor_file_slice_into(tensor, destination, stream=None, destination2=None):
 
     if isinstance(tensor, QuantizedTensor):
-        if not isinstance(destination, QuantizedTensor):
-            return False
-        if tensor._layout_cls != destination._layout_cls:
-            return False
-
-        if not read_tensor_file_slice_into(tensor._qdata, destination._qdata):
+        if not read_tensor_file_slice_into(tensor._qdata,
+                                           destination._qdata if destination is not None else None, stream=stream,
+                                           destination2=(destination2._qdata if destination2 is not None else None)):
             return False
 
-        dst_orig_dtype = destination._params.orig_dtype
-        destination._params.copy_from(tensor._params, non_blocking=False)
-        destination._params = dataclasses.replace(destination._params, orig_dtype=dst_orig_dtype)
+        if destination is not None:
+            dst_orig_dtype = destination._params.orig_dtype
+            destination._params.copy_from(tensor._params, non_blocking=False)
+            destination._params = dataclasses.replace(destination._params, orig_dtype=dst_orig_dtype)
+        if destination2 is not None:
+            dst_orig_dtype = destination2._params.orig_dtype
+            destination2._params.copy_from(destination._params if destination is not None else tensor._params, non_blocking=True)
+            destination2._params = dataclasses.replace(destination2._params, orig_dtype=dst_orig_dtype)
         return True
 
     info = getattr(tensor.untyped_storage(), "_comfy_tensor_file_slice", None)
     if info is None:
         return False
 
+    if destination is not None and destination.device.type != "cpu" and destination2 is None:
+        destination2 = destination
+        destination = None
+
     file_obj = info.file_ref
-    if (destination.device.type != "cpu"
-            or file_obj is None
-            or threading.get_ident() != info.thread_id
-            or destination.numel() * destination.element_size() < info.size
+    if (file_obj is None
+            or (destination is None and destination2 is None)
+            or (destination is not None and (destination.device.type != "cpu" or destination.numel() * destination.element_size() < info.size))
+            or (destination2 is not None and (destination2.device.type == "cpu" or destination2.numel() * destination2.element_size() < info.size))
             or tensor.numel() * tensor.element_size() != info.size
             or tensor.storage_offset() != 0
             or not tensor.is_contiguous()):
@@ -48,20 +74,44 @@ def read_tensor_file_slice_into(tensor, destination):
     if info.size == 0:
         return True
 
+    if destination is None:
+        stream_ptr = getattr(stream, "cuda_stream", 0) if stream is not None else 0
+        comfy_aimdo.host_buffer.read_file_to_device(file_obj, info.offset, info.size,
+                                                    stream_ptr, destination2.data_ptr(),
+                                                    destination2.device.index,
+                                                    mark_cold=False)
+        return True
+
+    hostbuf = getattr(destination.untyped_storage(), "_comfy_hostbuf", None)
+    if hostbuf is not None:
+        stream_ptr = getattr(stream, "cuda_stream", 0) if stream is not None else 0
+        device_ptr = destination2.data_ptr() if destination2 is not None else 0
+        with info.lock:
+            hostbuf.read_file_slice(file_obj, info.offset, info.size,
+                                    offset=destination.data_ptr() - hostbuf.get_raw_address(),
+                                    stream=stream_ptr,
+                                    device_ptr=device_ptr,
+                                    device=None if destination2 is None else destination2.device.index)
+        return True
+
+    if not hasattr(file_obj, "seek") or not hasattr(file_obj, "readinto"):
+        return False
+
     buf_type = ctypes.c_ubyte * info.size
     view = memoryview(buf_type.from_address(destination.data_ptr()))
 
     try:
-        file_obj.seek(info.offset)
-        done = 0
-        while done < info.size:
-            try:
-                n = file_obj.readinto(view[done:])
-            except OSError:
-                return False
-            if n <= 0:
-                return False
-            done += n
+        with info.lock:
+            file_obj.seek(info.offset)
+            done = 0
+            while done < info.size:
+                try:
+                    n = file_obj.readinto(view[done:])
+                except OSError:
+                    return False
+                if n <= 0:
+                    return False
+                done += n
         return True
     finally:
         view.release()
@@ -140,6 +190,50 @@ def interpret_gathered_like(tensors, gathered):
 
     return dest_views
 
+def cat_gathered(tensors, gathered):
+    """Concatenate quantized tensors laid out in order in gathered into one, in place.
+
+    Per-row fields are concatenated; every other field and parameter must match and is
+    shared. The codes are moved down over the earlier tensors' metadata, which is saved
+    first and rewritten after the last codes, so the result is laid out exactly like
+    interpret_gathered_like would lay out one tensor of the summed rows. Returns None
+    when the tensors cannot be concatenated."""
+    inner_tensors, ctx = tensors[0].__tensor_flatten__()
+    rows = [t._params.orig_shape[0] for t in tensors]
+    orig_shape = (sum(rows), *tensors[0]._params.orig_shape[1:])
+    for t in tensors[1:]:
+        other_inner, other_ctx = t.__tensor_flatten__()
+        other_ctx["non_tensor_fields"]["orig_shape"] = (rows[0], *t._params.orig_shape[1:])
+        if (other_inner != inner_tensors or other_ctx["layout_cls"] != ctx["layout_cls"]
+                or other_ctx["non_tensor_fields"] != ctx["non_tensor_fields"]):
+            return None
+    fields = {}
+    for attr in inner_tensors[1:]:
+        values = [getattr(t, attr) for t in tensors]
+        if all(v.ndim > 0 and v.shape[0] == n and v.shape[1:] == values[0].shape[1:] and v.dtype == values[0].dtype for v, n in zip(values, rows)):
+            fields[attr] = torch.cat(values)
+        elif all(torch.equal(v, values[0]) for v in values[1:]):
+            fields[attr] = values[0].clone()
+        else:
+            return None
+
+    offset = 0
+    for t in tensors:
+        qdata = t._qdata
+        if qdata.data_ptr() < gathered.data_ptr() + offset:
+            raise RuntimeError("Tensors must sit in order within gathered")
+        ck.memmove(gathered[offset:offset + qdata.nbytes], qdata.view(torch.uint8).view(-1))
+        offset += qdata.nbytes
+    qdata = tensors[0]._qdata
+    actuals = {"_qdata": gathered[:offset].view(qdata.dtype).view(orig_shape[0], *qdata.shape[1:])}
+    offset = vram_aligned_size(actuals["_qdata"])
+    for attr, value in fields.items():
+        actuals[attr] = gathered[offset:offset + value.nbytes].view(value.dtype).view(value.shape)
+        actuals[attr].copy_(value)
+        offset += vram_aligned_size(value)
+    ctx["non_tensor_fields"]["orig_shape"] = orig_shape
+    return QuantizedTensor.__tensor_unflatten__(actuals, ctx, 0, 0)
+
 aimdo_enabled = False
 
 extra_ram_release_callback = None
@@ -151,7 +245,7 @@ def set_ram_cache_release_state(callback, headroom):
     extra_ram_release_callback = callback
     RAM_CACHE_HEADROOM = max(0, int(headroom))
 
-def extra_ram_release(target):
+def extra_ram_release(target, free_active=False):
     if extra_ram_release_callback is None:
         return 0
-    return extra_ram_release_callback(target)
+    return extra_ram_release_callback(target, free_active=free_active)

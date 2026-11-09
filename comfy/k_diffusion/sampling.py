@@ -242,6 +242,7 @@ def sample_euler_ancestral_RF(model, x, sigmas, extra_args=None, callback=None, 
     extra_args = {} if extra_args is None else extra_args
     seed = extra_args.get("seed", None)
     noise_sampler = default_noise_sampler(x, seed=seed) if noise_sampler is None else noise_sampler
+    s_noise = s_noise * getattr(model.inner_model.model_patcher.get_model_object('model_sampling'), "noise_scale", 1.0)
     s_in = x.new_ones([x.shape[0]])
     for i in trange(len(sigmas) - 1, disable=disable):
         denoised = model(x, sigmas[i] * s_in, **extra_args)
@@ -373,6 +374,7 @@ def sample_dpm_2_ancestral_RF(model, x, sigmas, extra_args=None, callback=None, 
     extra_args = {} if extra_args is None else extra_args
     seed = extra_args.get("seed", None)
     noise_sampler = default_noise_sampler(x, seed=seed) if noise_sampler is None else noise_sampler
+    s_noise = s_noise * getattr(model.inner_model.model_patcher.get_model_object('model_sampling'), "noise_scale", 1.0)
     s_in = x.new_ones([x.shape[0]])
     for i in trange(len(sigmas) - 1, disable=disable):
         denoised = model(x, sigmas[i] * s_in, **extra_args)
@@ -412,6 +414,74 @@ def linear_multistep_coeff(order, t, i, j):
             prod *= (tau - t[i - k]) / (t[i - j] - t[i - k])
         return prod
     return integrate.quad(fn, t[i], t[i + 1], epsrel=1e-4)[0]
+
+
+def _sample_cfgpp_history(model, x, sigmas, extra_args=None, callback=None, disable=None, history_weight=0.5, zero_weight=None, zero_order=1, uncond_history_weight=0.0):
+    """CFG++ Euler with variable-step AB2 history and optional sigma-zero extrapolation."""
+    extra_args = {} if extra_args is None else extra_args
+    model_sampling = model.inner_model.model_patcher.get_model_object("model_sampling")
+    lambda_fn = partial(sigma_to_half_log_snr, model_sampling=model_sampling)
+    s_in = x.new_ones([x.shape[0]])
+    sigmas_cpu = sigmas.detach().cpu().numpy()
+    derivatives = []
+    denoised_history = []
+    old_uncond_d = None
+    uncond_denoised = None
+
+    def post_cfg_function(args):
+        nonlocal uncond_denoised
+        uncond_denoised = args["uncond_denoised"] if args["uncond"] is not None else args["cond_denoised"]
+        return args["denoised"]
+
+    model_options = extra_args.get("model_options", {}).copy()
+    extra_args["model_options"] = comfy.model_patcher.set_model_options_post_cfg_function(model_options, post_cfg_function)
+
+    for i in trange(len(sigmas) - 1, disable=disable):
+        denoised = model(x, sigmas[i] * s_in, **extra_args)
+        if callback is not None:
+            callback({'x': x, 'i': i, 'sigma': sigmas[i], 'sigma_hat': sigmas[i], 'denoised': denoised})
+
+        alpha_s = sigmas[i] * lambda_fn(sigmas[i]).exp()
+        alpha_t = sigmas[i + 1] * lambda_fn(sigmas[i + 1]).exp() if sigmas[i + 1] != 0 else sigmas[i + 1].new_ones([])
+        current_uncond_d = to_d(x, sigmas[i], alpha_s * uncond_denoised)
+        uncond_d = current_uncond_d
+        dt = sigmas[i + 1] - sigmas[i]
+        if i > 0 and uncond_history_weight:
+            step_ratio = dt / (sigmas[i] - sigmas[i - 1])
+            uncond_d = uncond_d + uncond_history_weight * step_ratio * (current_uncond_d - old_uncond_d)
+        euler_step = alpha_t * denoised + sigmas[i + 1] * uncond_d - x
+        d = euler_step / dt
+        derivatives.append(d)
+        if len(derivatives) > 2:
+            derivatives.pop(0)
+
+        if len(derivatives) == 1:
+            step = euler_step
+        else:
+            coeffs = [linear_multistep_coeff(2, sigmas_cpu, i, j) for j in range(2)]
+            history_step = sum(coeff * derivative for coeff, derivative in zip(coeffs, reversed(derivatives)))
+            step = torch.lerp(euler_step, history_step, history_weight)
+        x = x + step
+        if sigmas[i + 1] == 0 and zero_weight is not None and denoised_history:
+            if zero_order == 2 and len(denoised_history) > 1:
+                sigma_0, sigma_1, sigma_2 = sigmas[i - 2], sigmas[i - 1], sigmas[i]
+                weight_0 = sigma_1 * sigma_2 / ((sigma_0 - sigma_1) * (sigma_0 - sigma_2))
+                weight_1 = sigma_0 * sigma_2 / ((sigma_1 - sigma_0) * (sigma_1 - sigma_2))
+                weight_2 = sigma_0 * sigma_1 / ((sigma_2 - sigma_0) * (sigma_2 - sigma_1))
+                zero_prediction = weight_0 * denoised_history[-2] + weight_1 * denoised_history[-1] + weight_2 * denoised
+            else:
+                denoised_slope = (denoised - denoised_history[-1]) / (sigmas[i] - sigmas[i - 1])
+                zero_prediction = denoised - sigmas[i] * denoised_slope
+            x = torch.lerp(x, zero_prediction, zero_weight)
+        denoised_history.append(denoised)
+        if len(denoised_history) > 2:
+            denoised_history.pop(0)
+        old_uncond_d = current_uncond_d
+    return x
+
+
+def sample_cfgpp_ud10_ab(model, x, sigmas, extra_args=None, callback=None, disable=None):
+    return _sample_cfgpp_history(model, x, sigmas, extra_args=extra_args, callback=callback, disable=disable, history_weight=0.25, zero_weight=1.0, uncond_history_weight=0.1)
 
 
 @torch.no_grad()
@@ -686,6 +756,7 @@ def sample_dpmpp_2s_ancestral_RF(model, x, sigmas, extra_args=None, callback=Non
     extra_args = {} if extra_args is None else extra_args
     seed = extra_args.get("seed", None)
     noise_sampler = default_noise_sampler(x, seed=seed) if noise_sampler is None else noise_sampler
+    s_noise = s_noise * getattr(model.inner_model.model_patcher.get_model_object('model_sampling'), "noise_scale", 1.0)
     s_in = x.new_ones([x.shape[0]])
     sigma_fn = lambda lbda: (lbda.exp() + 1) ** -1
     lambda_fn = lambda sigma: ((1-sigma)/sigma).log()
@@ -747,6 +818,7 @@ def sample_dpmpp_sde(model, x, sigmas, extra_args=None, callback=None, disable=N
     sigma_fn = partial(half_log_snr_to_sigma, model_sampling=model_sampling)
     lambda_fn = partial(sigma_to_half_log_snr, model_sampling=model_sampling)
     sigmas = offset_first_sigma_for_snr(sigmas, model_sampling)
+    s_noise = s_noise * getattr(model_sampling, "noise_scale", 1.0)
 
     for i in trange(len(sigmas) - 1, disable=disable):
         denoised = model(x, sigmas[i] * s_in, **extra_args)
@@ -832,6 +904,7 @@ def sample_dpmpp_2m_sde(model, x, sigmas, extra_args=None, callback=None, disabl
     model_sampling = model.inner_model.model_patcher.get_model_object('model_sampling')
     lambda_fn = partial(sigma_to_half_log_snr, model_sampling=model_sampling)
     sigmas = offset_first_sigma_for_snr(sigmas, model_sampling)
+    s_noise = s_noise * getattr(model_sampling, "noise_scale", 1.0)
 
     old_denoised = None
     h, h_last = None, None
@@ -889,6 +962,7 @@ def sample_dpmpp_3m_sde(model, x, sigmas, extra_args=None, callback=None, disabl
     model_sampling = model.inner_model.model_patcher.get_model_object('model_sampling')
     lambda_fn = partial(sigma_to_half_log_snr, model_sampling=model_sampling)
     sigmas = offset_first_sigma_for_snr(sigmas, model_sampling)
+    s_noise = s_noise * getattr(model_sampling, "noise_scale", 1.0)
 
     denoised_1, denoised_2 = None, None
     h, h_1, h_2 = None, None, None
@@ -1006,21 +1080,37 @@ def sample_ddpm(model, x, sigmas, extra_args=None, callback=None, disable=None, 
     return generic_step_sampler(model, x, sigmas, extra_args, callback, disable, noise_sampler, DDPMSampler_step)
 
 @torch.no_grad()
-def sample_lcm(model, x, sigmas, extra_args=None, callback=None, disable=None, noise_sampler=None):
+def sample_lcm(model, x, sigmas, extra_args=None, callback=None, disable=None, noise_sampler=None, s_noise=1.0, s_noise_end=None, noise_clip_std=0.0):
+
+    # s_noise / s_noise_end: per-step noise multiplier, linearly interpolated across steps
+    # noise_clip_std: clamp injected noise to +/- N stddevs (0 disables).
+
     extra_args = {} if extra_args is None else extra_args
     seed = extra_args.get("seed", None)
     noise_sampler = default_noise_sampler(x, seed=seed) if noise_sampler is None else noise_sampler
     s_in = x.new_ones([x.shape[0]])
-    for i in trange(len(sigmas) - 1, disable=disable):
+    n_steps = max(1, len(sigmas) - 1)
+    model_sampling = model.inner_model.model_patcher.get_model_object('model_sampling')
+
+    s_start = float(s_noise)
+    s_end = s_start if s_noise_end is None else float(s_noise_end)
+    for i in trange(n_steps, disable=disable):
         denoised = model(x, sigmas[i] * s_in, **extra_args)
         if callback is not None:
             callback({'x': x, 'i': i, 'sigma': sigmas[i], 'sigma_hat': sigmas[i], 'denoised': denoised})
 
         x = denoised
         if sigmas[i + 1] > 0:
-            x = model.inner_model.inner_model.model_sampling.noise_scaling(sigmas[i + 1], noise_sampler(sigmas[i], sigmas[i + 1]), x)
+            noise = noise_sampler(sigmas[i], sigmas[i + 1])
+            if noise_clip_std > 0:
+                clip_val = noise_clip_std * noise.std()
+                noise = noise.clamp(min=-clip_val, max=clip_val)
+            t = (i / (n_steps - 1)) if n_steps > 1 else 0.0
+            s_noise_i = s_start + (s_end - s_start) * t
+            if s_noise_i != 1.0:
+                noise = noise * s_noise_i
+            x = model_sampling.noise_scaling(sigmas[i + 1], noise, x)
     return x
-
 
 
 @torch.no_grad()
@@ -1249,6 +1339,7 @@ def sample_euler_ancestral_cfg_pp(model, x, sigmas, extra_args=None, callback=No
 
     model_sampling = model.inner_model.model_patcher.get_model_object("model_sampling")
     lambda_fn = partial(sigma_to_half_log_snr, model_sampling=model_sampling)
+    s_noise = s_noise * getattr(model_sampling, "noise_scale", 1.0)
 
     uncond_denoised = None
 
@@ -1296,6 +1387,7 @@ def sample_dpmpp_2s_ancestral_cfg_pp(model, x, sigmas, extra_args=None, callback
     extra_args = {} if extra_args is None else extra_args
     seed = extra_args.get("seed", None)
     noise_sampler = default_noise_sampler(x, seed=seed) if noise_sampler is None else noise_sampler
+    s_noise = s_noise * getattr(model.inner_model.model_patcher.get_model_object('model_sampling'), "noise_scale", 1.0)
 
     temp = [0]
     def post_cfg_function(args):
@@ -1371,6 +1463,7 @@ def res_multistep(model, x, sigmas, extra_args=None, callback=None, disable=None
     extra_args = {} if extra_args is None else extra_args
     seed = extra_args.get("seed", None)
     noise_sampler = default_noise_sampler(x, seed=seed) if noise_sampler is None else noise_sampler
+    s_noise = s_noise * getattr(model.inner_model.model_patcher.get_model_object('model_sampling'), "noise_scale", 1.0)
     s_in = x.new_ones([x.shape[0]])
     sigma_fn = lambda t: t.neg().exp()
     t_fn = lambda sigma: sigma.log().neg()
@@ -1420,7 +1513,7 @@ def res_multistep(model, x, sigmas, extra_args=None, callback=None, disable=None
                 x = sigma_fn(h) * x + h * (b1 * denoised + b2 * old_denoised)
 
         # Noise addition
-        if sigmas[i + 1] > 0:
+        if sigma_up > 0:
             x = x + noise_sampler(sigmas[i], sigmas[i + 1]) * s_noise * sigma_up
 
         if cfg_pp:
@@ -1504,6 +1597,7 @@ def sample_er_sde(model, x, sigmas, extra_args=None, callback=None, disable=None
     extra_args = {} if extra_args is None else extra_args
     seed = extra_args.get("seed", None)
     noise_sampler = default_noise_sampler(x, seed=seed) if noise_sampler is None else noise_sampler
+    s_noise = s_noise * getattr(model.inner_model.model_patcher.get_model_object('model_sampling'), "noise_scale", 1.0)
     s_in = x.new_ones([x.shape[0]])
 
     def default_er_sde_noise_scaler(x):
@@ -1574,9 +1668,10 @@ def sample_seeds_2(model, x, sigmas, extra_args=None, callback=None, disable=Non
     seed = extra_args.get("seed", None)
     noise_sampler = default_noise_sampler(x, seed=seed) if noise_sampler is None else noise_sampler
     s_in = x.new_ones([x.shape[0]])
-    inject_noise = eta > 0 and s_noise > 0
 
     model_sampling = model.inner_model.model_patcher.get_model_object('model_sampling')
+    s_noise = s_noise * getattr(model_sampling, "noise_scale", 1.0)
+    inject_noise = eta > 0 and s_noise > 0
     sigma_fn = partial(half_log_snr_to_sigma, model_sampling=model_sampling)
     lambda_fn = partial(sigma_to_half_log_snr, model_sampling=model_sampling)
     sigmas = offset_first_sigma_for_snr(sigmas, model_sampling)
@@ -1645,9 +1740,10 @@ def sample_seeds_3(model, x, sigmas, extra_args=None, callback=None, disable=Non
     seed = extra_args.get("seed", None)
     noise_sampler = default_noise_sampler(x, seed=seed) if noise_sampler is None else noise_sampler
     s_in = x.new_ones([x.shape[0]])
-    inject_noise = eta > 0 and s_noise > 0
 
     model_sampling = model.inner_model.model_patcher.get_model_object('model_sampling')
+    s_noise = s_noise * getattr(model_sampling, "noise_scale", 1.0)
+    inject_noise = eta > 0 and s_noise > 0
     sigma_fn = partial(half_log_snr_to_sigma, model_sampling=model_sampling)
     lambda_fn = partial(sigma_to_half_log_snr, model_sampling=model_sampling)
     sigmas = offset_first_sigma_for_snr(sigmas, model_sampling)
@@ -1713,6 +1809,7 @@ def sample_sa_solver(model, x, sigmas, extra_args=None, callback=None, disable=F
     s_in = x.new_ones([x.shape[0]])
 
     model_sampling = model.inner_model.model_patcher.get_model_object("model_sampling")
+    s_noise = s_noise * getattr(model_sampling, "noise_scale", 1.0)
     sigmas = offset_first_sigma_for_snr(sigmas, model_sampling)
     lambdas = sigma_to_half_log_snr(sigmas, model_sampling=model_sampling)
 
@@ -1859,6 +1956,23 @@ def sample_ar_video(model, x, sigmas, extra_args=None, callback=None, disable=No
     output = torch.zeros_like(x)
     s_in = x.new_ones([x.shape[0]])
     current_start_frame = 0
+
+    # I2V: seed KV cache with the initial image latent before the denoising loop
+    initial_latent = transformer_options.get("ar_config", {}).get("initial_latent", None)
+    if initial_latent is not None:
+        initial_latent = inner_model.process_latent_in(initial_latent).to(device=device, dtype=model_dtype)
+        n_init = initial_latent.shape[2]
+        output[:, :, :n_init] = initial_latent
+
+        ar_state = {"start_frame": 0, "kv_caches": kv_caches, "crossattn_caches": crossattn_caches}
+        transformer_options["ar_state"] = ar_state
+        zero_sigma = sigmas.new_zeros([1])
+        _ = model(initial_latent, zero_sigma * s_in, **extra_args)
+
+        current_start_frame = n_init
+        remaining = lat_t - n_init
+        num_blocks = -(-remaining // num_frame_per_block)
+
     num_sigma_steps = len(sigmas) - 1
     total_real_steps = num_blocks * num_sigma_steps
     step_count = 0

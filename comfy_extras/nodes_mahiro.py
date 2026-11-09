@@ -11,7 +11,7 @@ class Mahiro(io.ComfyNode):
         return io.Schema(
             node_id="Mahiro",
             display_name="Positive-Biased Guidance",
-            category="_for_testing",
+            category="experimental",
             description="Modify the guidance to scale more on the 'direction' of the positive prompt rather than the difference between the negative prompt.",
             inputs=[
                 io.Model.Input("model"),

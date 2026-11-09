@@ -11,7 +11,7 @@ class TextEncodeAceStepAudio(IO.ComfyNode):
     def define_schema(cls):
         return IO.Schema(
             node_id="TextEncodeAceStepAudio",
-            category="conditioning",
+            category="model/conditioning/ace",
             inputs=[
                 IO.Clip.Input("clip"),
                 IO.String.Input("tags", multiline=True, dynamic_prompts=True),
@@ -33,7 +33,7 @@ class TextEncodeAceStepAudio15(IO.ComfyNode):
     def define_schema(cls):
         return IO.Schema(
             node_id="TextEncodeAceStepAudio1.5",
-            category="conditioning",
+            category="model/conditioning/ace",
             inputs=[
                 IO.Clip.Input("clip"),
                 IO.String.Input("tags", multiline=True, dynamic_prompts=True),
@@ -67,7 +67,7 @@ class EmptyAceStepLatentAudio(IO.ComfyNode):
         return IO.Schema(
             node_id="EmptyAceStepLatentAudio",
             display_name="Empty Ace Step 1.0 Latent Audio",
-            category="latent/audio",
+            category="model/latent/ace",
             inputs=[
                 IO.Float.Input("seconds", default=120.0, min=1.0, max=1000.0, step=0.1),
                 IO.Int.Input(
@@ -90,7 +90,7 @@ class EmptyAceStep15LatentAudio(IO.ComfyNode):
         return IO.Schema(
             node_id="EmptyAceStep1.5LatentAudio",
             display_name="Empty Ace Step 1.5 Latent Audio",
-            category="latent/audio",
+            category="model/latent/ace",
             inputs=[
                 IO.Float.Input("seconds", default=120.0, min=1.0, max=1000.0, step=0.01),
                 IO.Int.Input(
@@ -104,15 +104,15 @@ class EmptyAceStep15LatentAudio(IO.ComfyNode):
     def execute(cls, seconds, batch_size) -> IO.NodeOutput:
         length = round((seconds * 48000 / 1920))
         latent = torch.zeros([batch_size, 64, length], device=comfy.model_management.intermediate_device(), dtype=comfy.model_management.intermediate_dtype())
-        return IO.NodeOutput({"samples": latent, "type": "audio"})
+        return IO.NodeOutput({"samples": latent, "type": "audio", "downscale_ratio_temporal": 1764})
 
 class ReferenceAudio(IO.ComfyNode):
     @classmethod
     def define_schema(cls):
         return IO.Schema(
             node_id="ReferenceTimbreAudio",
-            display_name="Reference Audio",
-            category="advanced/conditioning/audio",
+            display_name="Set Reference Audio",
+            category="model/conditioning",
             is_experimental=True,
             description="This node sets the reference audio for ace step 1.5",
             inputs=[

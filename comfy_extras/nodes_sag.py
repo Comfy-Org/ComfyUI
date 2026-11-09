@@ -113,7 +113,7 @@ class SelfAttentionGuidance(io.ComfyNode):
         return io.Schema(
             node_id="SelfAttentionGuidance",
             display_name="Self-Attention Guidance",
-            category="_for_testing",
+            category="experimental",
             inputs=[
                 io.Model.Input("model"),
                 io.Float.Input("scale", default=0.5, min=-2.0, max=5.0, step=0.01),

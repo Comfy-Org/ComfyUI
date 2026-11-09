@@ -16,7 +16,6 @@
     along with this program.  If not, see <https://www.gnu.org/licenses/>.
 """
 
-from __future__ import annotations
 import comfy.memory_management
 import comfy.utils
 import comfy.model_management
@@ -33,6 +32,10 @@ LORA_CLIP_MAP = {
     "self_attn.v_proj": "self_attn_v_proj",
     "self_attn.out_proj": "self_attn_out_proj",
 }
+
+
+def bias_key(to):  # a weight sliced along dim 0 slices its bias the same way
+    return (bias_key(to[0]), to[1]) if isinstance(to, tuple) else to[:-len(".weight")] + ".bias"
 
 
 def load_lora(lora, to_load, log_missing=True):
@@ -68,7 +71,7 @@ def load_lora(lora, to_load, log_missing=True):
             patch_dict[to_load[x]] = ("diff", (w_norm,))
             if b_norm is not None:
                 loaded_keys.add(b_norm_name)
-                patch_dict["{}.bias".format(to_load[x][:-len(".weight")])] = ("diff", (b_norm,))
+                patch_dict[bias_key(to_load[x])] = ("diff", (b_norm,))
 
         diff_name = "{}.diff".format(x)
         diff_weight = lora.get(diff_name, None)
@@ -79,7 +82,7 @@ def load_lora(lora, to_load, log_missing=True):
         diff_bias_name = "{}.diff_b".format(x)
         diff_bias = lora.get(diff_bias_name, None)
         if diff_bias is not None:
-            patch_dict["{}.bias".format(to_load[x][:-len(".weight")])] = ("diff", (diff_bias,))
+            patch_dict[bias_key(to_load[x])] = ("diff", (diff_bias,))
             loaded_keys.add(diff_bias_name)
 
         set_weight_name = "{}.set_weight".format(x)
@@ -87,6 +90,11 @@ def load_lora(lora, to_load, log_missing=True):
         if set_weight is not None:
             patch_dict[to_load[x]] = ("set", (set_weight,))
             loaded_keys.add(set_weight_name)
+
+    for key in lora:
+        if key.endswith(".config"):
+            patch_dict[key] = ("config", (lora[key],))
+            loaded_keys.add(key)
 
     if log_missing:
         for x in lora.keys():
@@ -97,12 +105,14 @@ def load_lora(lora, to_load, log_missing=True):
 
 def model_lora_keys_clip(model, key_map={}):
     sdk = model.state_dict().keys()
+    prefix_set = set()
     for k in sdk:
         if k.endswith(".weight"):
             key_map["text_encoders.{}".format(k[:-len(".weight")])] = k #generic lora format without any weird key names
             tp = k.find(".transformer.") #also map without wrapper prefix for composite text encoder models
             if tp > 0 and not k.startswith("clip_"):
                 key_map["text_encoders.{}".format(k[tp + 1:-len(".weight")])] = k
+            prefix_set.add(k.split('.')[0])
 
     text_model_lora_key = "lora_te_text_model_encoder_layers_{}_{}"
     clip_l_present = False
@@ -163,6 +173,13 @@ def model_lora_keys_clip(model, key_map={}):
                 lora_key = "lora_te1_{}".format(l_key.replace(".", "_"))
                 key_map[lora_key] = k
 
+    if len(prefix_set) == 1:
+        full_prefix = "{}.transformer.model.".format(next(iter(prefix_set)))  # kohya anima and maybe other single TE models that use a single llama arch based te
+        for k in sdk:
+            if k.endswith(".weight"):
+                if k.startswith(full_prefix):
+                    l_key = k[len(full_prefix):-len(".weight")]
+                    key_map["lora_te_{}".format(l_key.replace(".", "_"))] = k
 
     k = "clip_g.transformer.text_projection.weight"
     if k in sdk:
@@ -296,6 +313,13 @@ def model_lora_keys_unet(model, key_map={}):
                     key_map["lycoris_{}".format(key_lora.replace(".", "_"))] = k #SimpleTuner lycoris format
                     key_map["transformer.{}".format(key_lora)] = k #SimpleTuner regular format
 
+    if isinstance(model, comfy.model_base.HiDreamO1):
+        for k in sdk:
+            if k.startswith("diffusion_model."):
+                if k.endswith(".weight"):
+                    key_lora = k[len("diffusion_model."):-len(".weight")]
+                    key_map["model.{}".format(key_lora)] = k
+
     if isinstance(model, comfy.model_base.ACEStep):
         for k in sdk:
             if k.startswith("diffusion_model.") and k.endswith(".weight"): #Official ACE step lora format
@@ -312,11 +336,48 @@ def model_lora_keys_unet(model, key_map={}):
         for k in sdk:
             if k.startswith("diffusion_model.") and k.endswith(".weight"): #QwenImage lora format
                 key_lora = k[len("diffusion_model."):-len(".weight")]
-                # Direct mapping for transformer_blocks format (QwenImage LoRA format)
-                key_map["{}".format(key_lora)] = k
-                # Support transformer prefix format
-                key_map["transformer.{}".format(key_lora)] = k
-                key_map["lycoris_{}".format(key_lora.replace(".", "_"))] = k #SimpleTuner lycoris format
+                targets = [(key_lora, k)]
+                if key_lora.endswith(".img_mlp.gate_up"):  # Qwen Image 2.1 fuses gate_layer/proj at load; LoRAs address the halves
+                    half = sd[k].shape[0] // 2
+                    targets = [(key_lora.replace(".gate_up", ".gate_layer"), (k, (0, 0, half))), (key_lora.replace(".gate_up", ".proj"), (k, (0, half, half)))]
+                for key_lora, to in targets:
+                    # Direct mapping for transformer_blocks format (QwenImage LoRA format)
+                    key_map["{}".format(key_lora)] = to
+                    # Support transformer prefix format
+                    key_map["transformer.{}".format(key_lora)] = to
+                    key_map["lycoris_{}".format(key_lora.replace(".", "_"))] = to #SimpleTuner lycoris format
+
+    if isinstance(model, comfy.model_base.Flux3):
+        for k in sdk:
+            if k.endswith(".qkv.weight"):  # fused q/k/v files; LoRAs address the separate projections
+                third = sd[k].shape[0] // 3
+                for i, proj in enumerate(("q_proj", "k_proj", "v_proj")):
+                    key_lora = "{}.{}".format(k[:-len(".qkv.weight")], proj)
+                    key_map[key_lora] = (k, (0, i * third, third))
+                    key_map["lora_unet_{}".format(key_lora[len("diffusion_model."):].replace(".", "_"))] = (k, (0, i * third, third))
+
+    if isinstance(model, comfy.model_base.MOSSImage):
+        for k in sdk:
+            if k.startswith("diffusion_model.") and k.endswith(".weight"):
+                key_map[k[len("diffusion_model."):-len(".weight")]] = k  # bare module paths
+            if k.endswith(".proj.qkv.weight"):  # fused q/k/v files; LoRAs address the separate projections
+                third = sd[k].shape[0] // 3
+                for i, proj in enumerate(("q", "k", "v")):
+                    key_lora = "{}.{}".format(k[:-len(".qkv.weight")], proj)
+                    key_map[key_lora] = (k, (0, i * third, third))
+                    key_map[key_lora[len("diffusion_model."):]] = (k, (0, i * third, third))
+                    key_map["lora_unet_{}".format(key_lora[len("diffusion_model."):].replace(".", "_"))] = (k, (0, i * third, third))
+
+    if isinstance(model, comfy.model_base.Krea2):
+        diffusers_keys = comfy.utils.krea2_to_diffusers(model.model_config.unet_config, output_prefix="diffusion_model.")
+        for k in diffusers_keys:
+            if k.endswith(".weight"):
+                to = diffusers_keys[k]
+                key_lora = k[:-len(".weight")]
+                key_map["diffusion_model.{}".format(key_lora)] = to
+                key_map["transformer.{}".format(key_lora)] = to
+                key_map["lycoris_{}".format(key_lora.replace(".", "_"))] = to
+                key_map[key_lora] = to
 
     if isinstance(model, comfy.model_base.Lumina2):
         diffusers_keys = comfy.utils.z_image_to_diffusers(model.model_config.unet_config, output_prefix="diffusion_model.")
@@ -348,6 +409,22 @@ def model_lora_keys_unet(model, key_map={}):
             if k.startswith("diffusion_model.") and k.endswith(".weight"):
                 key_lora = k[len("diffusion_model."):-len(".weight")]
                 key_map["transformer.{}".format(key_lora)] = k
+
+    if isinstance(model, (comfy.model_base.LTXV, comfy.model_base.LTXAV)):
+        for k in sdk:
+            if k.startswith("diffusion_model.") and k.endswith(".weight"):
+                key_lora = k[len("diffusion_model."):-len(".weight")]
+                key_map["{}".format(key_lora)] = k
+
+    if isinstance(model, comfy.model_base.MiniMaxH3):
+        for k in sdk:
+            if k.startswith("diffusion_model.") and k.endswith(".weight"):
+                key_lora = k[len("diffusion_model."):-len(".weight")]
+                key_map[key_lora] = k
+        pdd_steps = model.model_config.unet_config.get("pdd_steps", 1)
+        if pdd_steps > 1:  # baked PDD bank: single-head LoRAs patch head 0, the base of every interval head
+            heads = {k: (k, (0, 0, sd[k].shape[0] // pdd_steps)) for k in ("diffusion_model.final_layer.video_out.weight", "diffusion_model.final_layer.audio_out.weight")}
+            key_map.update({key_lora: heads[k] for key_lora, k in key_map.items() if k in heads})
 
     return key_map
 
@@ -407,6 +484,8 @@ def calculate_shape(patches, weight, key, original_weights=None):
             patch_type, patch_data = v[0], v[1]
             if patch_type == "diff" and len(patch_data) > 1 and patch_data[1]['pad_weight']:
                 current_shape = patch_data[0].shape
+            elif patch_type == "set":
+                current_shape = patch_data[0].shape
 
     return current_shape
 
@@ -461,7 +540,10 @@ def calculate_weight(patches, weight, key, intermediate_dtype=torch.float32, ori
                 else:
                     weight += function(strength * comfy.model_management.cast_to_device(diff, weight.device, weight.dtype))
         elif patch_type == "set":
-            weight.copy_(v[0])
+            if v[0].shape != weight.shape:
+                weight = comfy.model_management.cast_to_device(v[0], weight.device, weight.dtype, copy=True)
+            else:
+                weight.copy_(v[0])
         elif patch_type == "model_as_lora":
             target_weight: torch.Tensor = v[0]
             diff_weight = comfy.model_management.cast_to_device(target_weight, weight.device, intermediate_dtype) - \
@@ -475,16 +557,23 @@ def calculate_weight(patches, weight, key, intermediate_dtype=torch.float32, ori
 
     return weight
 
-def prefetch_prepared_value(value, allocate_buffer, stream):
+def prefetch_prepared_value(value, counter, destination, stream, copy):
     if isinstance(value, torch.Tensor):
-        dest = allocate_buffer(comfy.memory_management.vram_aligned_size(value))
-        comfy.model_management.cast_to_gathered([value], dest, non_blocking=True, stream=stream)
+        size = comfy.memory_management.vram_aligned_size(value)
+        offset = counter[0]
+        counter[0] += size
+        if destination is None:
+            return value
+
+        dest = destination[offset:offset + size]
+        if copy:
+            comfy.model_management.cast_to_gathered([value], dest, non_blocking=True, stream=stream)
         return comfy.memory_management.interpret_gathered_like([value], dest)[0]
     elif isinstance(value, weight_adapter.WeightAdapterBase):
-        return type(value)(value.loaded_keys, prefetch_prepared_value(value.weights, allocate_buffer, stream))
+        return type(value)(value.loaded_keys, prefetch_prepared_value(value.weights, counter, destination, stream, copy))
     elif isinstance(value, tuple):
-        return tuple(prefetch_prepared_value(item, allocate_buffer, stream) for item in value)
+        return tuple(prefetch_prepared_value(item, counter, destination, stream, copy) for item in value)
     elif isinstance(value, list):
-        return [prefetch_prepared_value(item, allocate_buffer, stream) for item in value]
+        return [prefetch_prepared_value(item, counter, destination, stream, copy) for item in value]
 
     return value

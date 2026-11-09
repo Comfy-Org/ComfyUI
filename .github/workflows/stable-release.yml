@@ -23,6 +23,11 @@ on:
         required: true
         type: string
         default: "6"
+      python_arch:
+        description: 'Python architecture'
+        required: false
+        type: string
+        default: "amd64"
       rel_name:
         description: 'Release name'
         required: true
@@ -59,6 +64,14 @@ on:
         required: true
         type: string
         default: "6"
+      python_arch:
+        description: 'Python architecture'
+        required: false
+        type: choice
+        options:
+          - amd64
+          - arm64
+        default: "amd64"
       rel_name:
         description: 'Release name'
         required: true
@@ -81,7 +94,7 @@ jobs:
       contents: "write"
       packages: "write"
       pull-requests: "read"
-    runs-on: windows-latest
+    runs-on: ${{ inputs.python_arch == 'arm64' && 'windows-11-arm' || 'windows-latest' }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -95,6 +108,7 @@ jobs:
             ${{ inputs.cache_tag }}_python_deps.tar
             update_comfyui_and_python_dependencies.bat
           key: ${{ runner.os }}-build-${{ inputs.cache_tag }}-${{ inputs.python_minor }}
+          fail-on-cache-miss: true
       - shell: bash
         run: |
           mv ${{ inputs.cache_tag }}_python_deps.tar ../
@@ -108,7 +122,7 @@ jobs:
         run: |
           cd ..
           cp -r ComfyUI ComfyUI_copy
-          curl https://www.python.org/ftp/python/3.${{ inputs.python_minor }}.${{ inputs.python_patch }}/python-3.${{ inputs.python_minor }}.${{ inputs.python_patch }}-embed-amd64.zip -o python_embeded.zip
+          curl https://www.python.org/ftp/python/3.${{ inputs.python_minor }}.${{ inputs.python_patch }}/python-3.${{ inputs.python_minor }}.${{ inputs.python_patch }}-embed-${{ inputs.python_arch }}.zip -o python_embeded.zip
           unzip python_embeded.zip -d python_embeded
           cd python_embeded
           echo ${{ env.MINOR_VERSION }}
@@ -119,6 +133,7 @@ jobs:
 
           grep comfy ../ComfyUI/requirements.txt > ./requirements_comfyui.txt
           ./python.exe -s -m pip install -r requirements_comfyui.txt
+          ./python.exe -s -m pip uninstall -y comfyui-workflow-templates-media-image comfyui-workflow-templates-media-video comfyui-workflow-templates-media-other
           rm requirements_comfyui.txt
 
           sed -i '1i../ComfyUI' ./python3${{ inputs.python_minor }}._pth

@@ -1,20 +1,15 @@
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
 
-class Text2ImageTaskCreationRequest(BaseModel):
-    model: str = Field(...)
-    prompt: str = Field(...)
-    response_format: str | None = Field("url")
-    size: str | None = Field(None)
-    seed: int | None = Field(0, ge=0, le=2147483647)
-    guidance_scale: float | None = Field(..., ge=1.0, le=10.0)
-    watermark: bool | None = Field(False)
-
-
 class Seedream4Options(BaseModel):
     max_images: int = Field(15)
+
+
+class Seedream5OptimizePromptOptions(BaseModel):
+    thinking: Literal["auto", "enabled", "disabled"] | None = Field(None)
+    mode: Literal["standard", "fast"] | None = Field(None)
 
 
 class Seedream4TaskCreationRequest(BaseModel):
@@ -24,10 +19,28 @@ class Seedream4TaskCreationRequest(BaseModel):
     image: list[str] | None = Field(None, description="Image URLs")
     size: str = Field(...)
     seed: int = Field(..., ge=0, le=2147483647)
-    sequential_image_generation: str = Field("disabled")
-    sequential_image_generation_options: Seedream4Options = Field(Seedream4Options(max_images=15))
+    sequential_image_generation: str | None = Field("disabled")
+    sequential_image_generation_options: Seedream4Options | None = Field(Seedream4Options(max_images=15))
     watermark: bool = Field(False)
     output_format: str | None = None
+    optimize_prompt_options: Seedream5OptimizePromptOptions | None = None
+
+
+class Seedream5LayerOptimizePromptOptions(BaseModel):
+    mode: Literal["standard", "fast"] = Field(...)
+
+
+class Seedream5LayerSeparationRequest(BaseModel):
+    model: str = Field(...)
+    prompt: str | None = Field(None)
+    image: str = Field(..., description="Single image URL")
+    size: str = Field("auto")
+    seed: int = Field(..., ge=0, le=2147483647)
+    response_format: str = Field("url")
+    output_format: str = Field("png")
+    layer_decomposition: bool = Field(True)
+    watermark: bool = Field(False)
+    optimize_prompt_options: Seedream5LayerOptimizePromptOptions | None = Field(None)
 
 
 class ImageTaskCreationResponse(BaseModel):
@@ -72,6 +85,15 @@ class TaskAudioContent(BaseModel):
     role: str = Field("reference_audio")
 
 
+class TaskDraftTaskContentTask(BaseModel):
+    id: str = Field(...)
+
+
+class TaskDraftTaskContent(BaseModel):
+    type: str = Field("draft_task")
+    draft_task: TaskDraftTaskContentTask = Field(...)
+
+
 class Text2VideoTaskCreationRequest(BaseModel):
     model: str = Field(...)
     content: list[TaskTextContent] = Field(..., min_length=1)
@@ -86,13 +108,18 @@ class Image2VideoTaskCreationRequest(BaseModel):
 
 class Seedance2TaskCreationRequest(BaseModel):
     model: str = Field(...)
-    content: list[TaskTextContent | TaskImageContent | TaskVideoContent | TaskAudioContent] = Field(..., min_length=1)
+    content: list[
+        TaskTextContent | TaskImageContent | TaskVideoContent | TaskAudioContent | TaskDraftTaskContent
+    ] = Field(..., min_length=1)
     generate_audio: bool | None = Field(None)
     resolution: str | None = Field(None)
     ratio: str | None = Field(None)
-    duration: int | None = Field(None, ge=4, le=15)
+    duration: int | None = Field(None)
     seed: int | None = Field(None, ge=0, le=2147483647)
     watermark: bool | None = Field(None)
+    output_format: str | None = Field(None)
+    omni_reference_task_type: str | None = Field(None, description="One of: auto, reference, edit, extend.")
+    draft: bool | None = Field(None)
 
 
 class TaskCreationResponse(BaseModel):
@@ -158,31 +185,10 @@ class SeedanceCreateAssetResponse(BaseModel):
 
 
 class SeedanceVirtualLibraryCreateAssetRequest(BaseModel):
-    url: str = Field(..., description="Publicly accessible URL of the image asset to upload.")
+    url: str = Field(..., description="Publicly accessible URL of the asset to upload.")
     hash: str = Field(..., description="Dedup key. Re-submitting the same hash returns the existing asset id.")
+    asset_type: str | None = Field(None, description="BytePlus asset type. Defaults to Image server-side when omitted.")
 
-
-# Dollars per 1K tokens, keyed by (model_id, has_video_input).
-SEEDANCE2_PRICE_PER_1K_TOKENS = {
-    ("dreamina-seedance-2-0-260128", False): 0.007,
-    ("dreamina-seedance-2-0-260128", True): 0.0043,
-    ("dreamina-seedance-2-0-fast-260128", False): 0.0056,
-    ("dreamina-seedance-2-0-fast-260128", True): 0.0033,
-}
-
-
-RECOMMENDED_PRESETS = [
-    ("1024x1024 (1:1)", 1024, 1024),
-    ("864x1152 (3:4)", 864, 1152),
-    ("1152x864 (4:3)", 1152, 864),
-    ("1280x720 (16:9)", 1280, 720),
-    ("720x1280 (9:16)", 720, 1280),
-    ("832x1248 (2:3)", 832, 1248),
-    ("1248x832 (3:2)", 1248, 832),
-    ("1512x648 (21:9)", 1512, 648),
-    ("2048x2048 (1:1)", 2048, 2048),
-    ("Custom", None, None),
-]
 
 RECOMMENDED_PRESETS_SEEDREAM_4 = [
     ("2048x2048 (1:1)", 2048, 2048),
@@ -198,6 +204,91 @@ RECOMMENDED_PRESETS_SEEDREAM_4 = [
     ("Custom", None, None),
 ]
 
+_PRESETS_SEEDREAM_1K = [
+    ("(1K) 1024x1024 (1:1)", 1024, 1024),
+    ("(1K) 864x1152 (3:4)", 864, 1152),
+    ("(1K) 1152x864 (4:3)", 1152, 864),
+    ("(1K) 1312x736 (16:9)", 1312, 736),
+    ("(1K) 736x1312 (9:16)", 736, 1312),
+    ("(1K) 832x1248 (2:3)", 832, 1248),
+    ("(1K) 1248x832 (3:2)", 1248, 832),
+    ("(1K) 1568x672 (21:9)", 1568, 672),
+]
+
+_PRESETS_SEEDREAM_2K = [
+    ("(2K) 2048x2048 (1:1)", 2048, 2048),
+    ("(2K) 1728x2304 (3:4)", 1728, 2304),
+    ("(2K) 2304x1728 (4:3)", 2304, 1728),
+    ("(2K) 2848x1600 (16:9)", 2848, 1600),
+    ("(2K) 1600x2848 (9:16)", 1600, 2848),
+    ("(2K) 1664x2496 (2:3)", 1664, 2496),
+    ("(2K) 2496x1664 (3:2)", 2496, 1664),
+    ("(2K) 3136x1344 (21:9)", 3136, 1344),
+]
+
+_PRESETS_SEEDREAM_3K = [
+    ("(3K) 3072x3072 (1:1)", 3072, 3072),
+    ("(3K) 2592x3456 (3:4)", 2592, 3456),
+    ("(3K) 3456x2592 (4:3)", 3456, 2592),
+    ("(3K) 4096x2304 (16:9)", 4096, 2304),
+    ("(3K) 2304x4096 (9:16)", 2304, 4096),
+    ("(3K) 2496x3744 (2:3)", 2496, 3744),
+    ("(3K) 3744x2496 (3:2)", 3744, 2496),
+    ("(3K) 4704x2016 (21:9)", 4704, 2016),
+]
+
+_PRESETS_SEEDREAM_4K = [
+    ("(4K) 4096x4096 (1:1)", 4096, 4096),
+    ("(4K) 3520x4704 (3:4)", 3520, 4704),
+    ("(4K) 4704x3520 (4:3)", 4704, 3520),
+    ("(4K) 5504x3040 (16:9)", 5504, 3040),
+    ("(4K) 3040x5504 (9:16)", 3040, 5504),
+    ("(4K) 3328x4992 (2:3)", 3328, 4992),
+    ("(4K) 4992x3328 (3:2)", 4992, 3328),
+    ("(4K) 6240x2656 (21:9)", 6240, 2656),
+]
+
+_CUSTOM_PRESET = [("Custom", None, None)]
+
+RECOMMENDED_PRESETS_SEEDREAM_5_PRO = (
+    _PRESETS_SEEDREAM_1K + _PRESETS_SEEDREAM_2K + _CUSTOM_PRESET
+)
+RECOMMENDED_PRESETS_SEEDREAM_5_FLASH = [
+    ("(1K) 1024x1024 (1:1)", 1024, 1024),
+    ("(1K) 864x1152 (3:4)", 864, 1152),
+    ("(1K) 1152x864 (4:3)", 1152, 864),
+    ("(1K) 1424x800 (16:9)", 1424, 800),
+    ("(1K) 800x1424 (9:16)", 800, 1424),
+    ("(1K) 832x1248 (2:3)", 832, 1248),
+    ("(1K) 1248x832 (3:2)", 1248, 832),
+    ("(1K) 1568x672 (21:9)", 1568, 672),
+    ("(1.5K) 1536x1536 (1:1)", 1536, 1536),
+    ("(1.5K) 1344x1792 (3:4)", 1344, 1792),
+    ("(1.5K) 1792x1344 (4:3)", 1792, 1344),
+    ("(1.5K) 2048x1152 (16:9)", 2048, 1152),
+    ("(1.5K) 1152x2048 (9:16)", 1152, 2048),
+    ("(1.5K) 1248x1872 (2:3)", 1248, 1872),
+    ("(1.5K) 1872x1248 (3:2)", 1872, 1248),
+    ("(1.5K) 2352x1008 (21:9)", 2352, 1008),
+    ("(2K) 2048x2048 (1:1)", 2048, 2048),
+    ("(2K) 1776x2368 (3:4)", 1776, 2368),
+    ("(2K) 2368x1776 (4:3)", 2368, 1776),
+    ("(2K) 2816x1584 (16:9)", 2816, 1584),
+    ("(2K) 1584x2816 (9:16)", 1584, 2816),
+    ("(2K) 1664x2496 (2:3)", 1664, 2496),
+    ("(2K) 2496x1664 (3:2)", 2496, 1664),
+    ("(2K) 3136x1344 (21:9)", 3136, 1344),
+] + _CUSTOM_PRESET
+RECOMMENDED_PRESETS_SEEDREAM_5_LITE = (
+    _PRESETS_SEEDREAM_2K + _PRESETS_SEEDREAM_3K + _PRESETS_SEEDREAM_4K + _CUSTOM_PRESET
+)
+RECOMMENDED_PRESETS_SEEDREAM_4_5 = (
+    _PRESETS_SEEDREAM_2K + _PRESETS_SEEDREAM_4K + _CUSTOM_PRESET
+)
+RECOMMENDED_PRESETS_SEEDREAM_4_0 = (
+    _PRESETS_SEEDREAM_1K + _PRESETS_SEEDREAM_2K + _PRESETS_SEEDREAM_4K + _CUSTOM_PRESET
+)
+
 # Seedance 2.0 reference video pixel count limits per model and output resolution.
 SEEDANCE2_REF_VIDEO_PIXEL_LIMITS = {
     "dreamina-seedance-2-0-260128": {
@@ -209,20 +300,39 @@ SEEDANCE2_REF_VIDEO_PIXEL_LIMITS = {
         "480p": {"min": 409_600, "max": 927_408},
         "720p": {"min": 409_600, "max": 927_408},
     },
+    "dreamina-seedance-2-0-mini": {
+        "480p": {"min": 409_600, "max": 927_408},
+        "720p": {"min": 409_600, "max": 927_408},
+    },
+    "dreamina-seedance-2-5-260628": {
+        "480p": {"min": 409_600, "max": 8_295_044},
+        "720p": {"min": 409_600, "max": 8_295_044},
+        "1080p": {"min": 409_600, "max": 8_295_044},
+        "4k": {"min": 409_600, "max": 8_295_044},
+    },
 }
+
+SEEDANCE2_REFERENCE_LIMITS_DEFAULT = {
+    "max_images": 9,
+    "max_videos": 3,
+    "max_audios": 3,
+    "max_total_seconds": 15.1,
+}
+SEEDANCE2_REFERENCE_LIMITS = {
+    "dreamina-seedance-2-5-260628": {
+        "max_images": 30,
+        "max_videos": 10,
+        "max_audios": 10,
+        "max_total_seconds": 30.1,
+    },
+}
+
+
+def seedance2_reference_limits(model_id: str) -> dict:
+    return SEEDANCE2_REFERENCE_LIMITS.get(model_id, SEEDANCE2_REFERENCE_LIMITS_DEFAULT)
 
 # The time in this dictionary are given for 10 seconds duration.
 VIDEO_TASKS_EXECUTION_TIME = {
-    "seedance-1-0-lite-t2v-250428": {
-        "480p": 40,
-        "720p": 60,
-        "1080p": 90,
-    },
-    "seedance-1-0-lite-i2v-250428": {
-        "480p": 40,
-        "720p": 60,
-        "1080p": 90,
-    },
     "seedance-1-0-pro-250528": {
         "480p": 70,
         "720p": 85,
@@ -239,3 +349,78 @@ VIDEO_TASKS_EXECUTION_TIME = {
         "1080p": 150,
     },
 }
+
+
+class SeedAudioConfig(BaseModel):
+    format: str = Field(default="mp3")
+    sample_rate: int = Field(default=24000)
+    speech_rate: int = Field(default=0)
+    loudness_rate: int = Field(default=0)
+    pitch_rate: int = Field(default=0)
+
+
+class SeedAudioReference(BaseModel):
+    speaker: str | None = Field(default=None)
+    audio_data: str | None = Field(default=None)
+    audio_url: str | None = Field(default=None)
+    image_data: str | None = Field(default=None)
+    image_url: str | None = Field(default=None)
+
+
+class SeedAudioRequest(BaseModel):
+    model: str = Field(default="seed-audio-1.0")
+    text_prompt: str = Field(...)
+    references: list[SeedAudioReference] | None = Field(default=None)
+    audio_config: SeedAudioConfig = Field(default_factory=SeedAudioConfig)
+    watermark: dict[str, Any] = Field(default_factory=dict)
+
+
+class SeedAudioResponse(BaseModel):
+    audio: str | None = Field(default=None)
+    url: str | None = Field(default=None)
+    duration: float | None = Field(default=None)
+    original_duration: float | None = Field(default=None)
+    code: int | None = Field(default=None)
+    message: str | None = Field(default=None)
+
+
+class MediaKitVideoEnhanceRequest(BaseModel):
+    video_url: str = Field(...)
+    tool_version: str = Field(...)
+    scene: str | None = Field(None)
+    enhance_style: str | None = Field(None)
+    resolution: str | None = Field(None)
+    resolution_limit: int | None = Field(None)
+    fps: float | None = Field(None)
+    bitrate_level: str = Field(...)
+
+
+class MediaKitError(BaseModel):
+    code: str | None = Field(None)
+    type: str | None = Field(None)
+    message: str | None = Field(None)
+    param: str | None = Field(None)
+
+
+class MediaKitTaskCreateResponse(BaseModel):
+    success: bool = Field(...)
+    task_id: str | None = Field(None)
+    request_id: str | None = Field(None)
+    error: MediaKitError | None = Field(None)
+
+
+class MediaKitTaskResult(BaseModel):
+    video_url: str = Field(...)
+    duration: float | None = Field(None)
+    fps: float | None = Field(None)
+    resolution: str | None = Field(None)
+    tool_version: str | None = Field(None)
+
+
+class MediaKitTaskResponse(BaseModel):
+    success: bool = Field(...)
+    task_id: str | None = Field(None)
+    task_type: str | None = Field(None)
+    status: str | None = Field(None)
+    result: MediaKitTaskResult | None = Field(None)
+    error: MediaKitError | None = Field(None)

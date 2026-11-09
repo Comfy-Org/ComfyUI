@@ -377,7 +377,8 @@
         "extra": {
           "workflowRendererVersion": "LG"
         },
-        "category": "Image Tools/Color adjust"
+        "category": "Image Tools/Color adjust",
+        "description": "Adds lens-style chromatic aberration (color fringing) using a real-time GPU fragment shader."
       }
     ]
   }

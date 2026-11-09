@@ -15,19 +15,18 @@ def process_qwen2vl_images(
     merge_size: int = 2,
     image_mean: list = None,
     image_std: list = None,
+    interpolation: str = "bilinear",
 ):
     if image_mean is None:
         image_mean = [0.48145466, 0.4578275, 0.40821073]
     if image_std is None:
         image_std = [0.26862954, 0.26130258, 0.27577711]
 
+    images = images[..., :3]
     batch_size, height, width, channels = images.shape
-    device = images.device
-    # dtype = images.dtype
 
     images = images.permute(0, 3, 1, 2)
 
-    grid_thw_list = []
     img = images[0]
 
     factor = patch_size * merge_size
@@ -47,25 +46,47 @@ def process_qwen2vl_images(
     img_resized = F.interpolate(
         img.unsqueeze(0),
         size=(h_bar, w_bar),
-        mode='bilinear',
+        mode=interpolation,
         align_corners=False
     ).squeeze(0)
-
     normalized = img_resized.clone()
     for c in range(3):
         normalized[c] = (img_resized[c] - image_mean[c]) / image_std[c]
 
-    grid_h = h_bar // patch_size
-    grid_w = w_bar // patch_size
-    grid_thw = torch.tensor([1, grid_h, grid_w], device=device, dtype=torch.long)
+    return qwen2vl_patchify(normalized.unsqueeze(0).repeat(temporal_patch_size, 1, 1, 1), patch_size, temporal_patch_size, merge_size)
 
-    pixel_values = normalized
-    grid_thw_list.append(grid_thw)
-    image_grid_thw = torch.stack(grid_thw_list)
 
-    grid_t = 1
-    channel = pixel_values.shape[0]
-    pixel_values = pixel_values.unsqueeze(0).repeat(2, 1, 1, 1)
+def qwen2vl_video_smart_resize(num_frames, height, width, factor=32, temporal_factor=2, min_pixels=128 * 128, max_pixels=32 * 32 * 768):
+    # Qwen3-VL video budget: total t*h*w pixels, t rounded up to the temporal patch.
+    h_bar = round(height / factor) * factor
+    w_bar = round(width / factor) * factor
+    t_bar = math.ceil(num_frames / temporal_factor) * temporal_factor
+    if t_bar * h_bar * w_bar > max_pixels:
+        beta = math.sqrt((num_frames * height * width) / max_pixels)
+        h_bar = max(factor, math.floor(height / beta / factor) * factor)
+        w_bar = max(factor, math.floor(width / beta / factor) * factor)
+    elif t_bar * h_bar * w_bar < min_pixels:
+        beta = math.sqrt(min_pixels / (num_frames * height * width))
+        h_bar = math.ceil(height * beta / factor) * factor
+        w_bar = math.ceil(width * beta / factor) * factor
+    return h_bar, w_bar
+
+
+def process_qwen2vl_video(frames, height, width, patch_size=14, temporal_patch_size=2, merge_size=2, image_mean=None, image_std=None, interpolation="bilinear"):
+    # frames: [T, H, W, C] in [0, 1], T a multiple of temporal_patch_size, already sized by qwen2vl_video_smart_resize.
+    frames = frames[..., :3].permute(0, 3, 1, 2)
+    frames = F.interpolate(frames, size=(height, width), mode=interpolation, align_corners=False)
+    mean = torch.tensor(image_mean, device=frames.device, dtype=frames.dtype).view(1, 3, 1, 1)
+    std = torch.tensor(image_std, device=frames.device, dtype=frames.dtype).view(1, 3, 1, 1)
+    return qwen2vl_patchify((frames - mean) / std, patch_size, temporal_patch_size, merge_size)
+
+
+def qwen2vl_patchify(pixel_values, patch_size, temporal_patch_size, merge_size):
+    # pixel_values: [T, C, H, W] -> (flattened patches, grid_thw [1, 3])
+    grid_t = pixel_values.shape[0] // temporal_patch_size
+    channel = pixel_values.shape[1]
+    grid_h = pixel_values.shape[2] // patch_size
+    grid_w = pixel_values.shape[3] // patch_size
 
     patches = pixel_values.reshape(
         grid_t,
@@ -85,7 +106,34 @@ def process_qwen2vl_images(
         channel * temporal_patch_size * patch_size * patch_size
     )
 
-    return flatten_patches, image_grid_thw
+    return flatten_patches, torch.tensor([[grid_t, grid_h, grid_w]], device=pixel_values.device, dtype=torch.long)
+
+
+def qwen2vl_mrope_position_ids(embeds_info, seq_len, device):
+    # (3, seq_len) T/H/W MRoPE position ids: text runs sequentially, each image span gets its grid positions.
+    # Video frame pairs arrive as separate t=1 spans split by their timestamp text, so they index like images.
+    # Returns None when there are no image embeds. `extra` is the image grid_thw, or a dict carrying it under "grid".
+    position_ids = None
+    offset = 0
+    for e in embeds_info:
+        if e.get("type") in ("image", "video"):
+            extra = e.get("extra", None)
+            grid = extra["grid"] if isinstance(extra, dict) else extra
+            start = e.get("index")
+            if position_ids is None:
+                position_ids = torch.zeros((3, seq_len), device=device)
+                position_ids[:, :start] = torch.arange(0, start, device=device)
+            end = e.get("size") + start
+            len_max = int(grid.max()) // 2
+            start_next = len_max + start
+            position_ids[:, end:] = torch.arange(start_next + offset, start_next + (seq_len - end) + offset, device=device)
+            position_ids[0, start:end] = start + offset
+            max_d = int(grid[0][1]) // 2
+            position_ids[1, start:end] = torch.arange(start + offset, start + max_d + offset, device=device).unsqueeze(1).repeat(1, math.ceil((end - start) / max_d)).flatten(0)[:end - start]
+            max_d = int(grid[0][2]) // 2
+            position_ids[2, start:end] = torch.arange(start + offset, start + max_d + offset, device=device).unsqueeze(0).repeat(math.ceil((end - start) / max_d), 1).flatten(0)[:end - start]
+            offset += len_max - (end - start)
+    return position_ids
 
 
 class VisionPatchEmbed(nn.Module):

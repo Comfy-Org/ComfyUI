@@ -302,7 +302,8 @@
         "extra": {
           "workflowRendererVersion": "LG"
         },
-        "category": "Image Tools/Sharpen"
+        "category": "Image Tools/Sharpen",
+        "description": "Sharpens image details using a GPU fragment shader for enhanced clarity."
       }
     ]
   }

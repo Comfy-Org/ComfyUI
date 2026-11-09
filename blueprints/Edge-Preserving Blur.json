@@ -450,7 +450,8 @@
         "extra": {
           "workflowRendererVersion": "LG"
         },
-        "category": "Image Tools/Blur"
+        "category": "Image Tools/Blur",
+        "description": "Applies bilateral (edge-preserving) blur to soften images while retaining detail."
       }
     ]
   },

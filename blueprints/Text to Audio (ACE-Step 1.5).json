@@ -222,7 +222,7 @@
         },
         "revision": 0,
         "config": {},
-        "name": "local-Text to Audio (ACE-Step 1.5)",
+        "name": "Text to Audio (ACE-Step 1.5)",
         "inputNode": {
           "id": -10,
           "bounding": [
@@ -1502,7 +1502,8 @@
         "extra": {
           "workflowRendererVersion": "LG"
         },
-        "category": "Audio/Music generation"
+        "category": "Audio/Music generation",
+        "description": "Generates audio/music from text prompts using ACE-Step 1.5, a diffusion-based audio generation model."
       }
     ]
   },

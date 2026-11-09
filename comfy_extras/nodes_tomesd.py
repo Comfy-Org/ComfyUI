@@ -151,7 +151,7 @@ class TomePatchModel(io.ComfyNode):
     def define_schema(cls):
         return io.Schema(
             node_id="TomePatchModel",
-            category="model_patches/unet",
+            category="model/patch/unet",
             inputs=[
                 io.Model.Input("model"),
                 io.Float.Input("ratio", default=0.3, min=0.0, max=1.0, step=0.01),

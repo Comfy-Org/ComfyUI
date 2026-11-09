@@ -1,8 +1,39 @@
 import re
 import json
+import string
 from typing_extensions import override
 
 from comfy_api.latest import ComfyExtension, io
+
+
+class StringFormat(io.ComfyNode):
+    @classmethod
+    def define_schema(cls) -> io.Schema:
+        autogrow = io.Autogrow.TemplateNames(
+            input=io.AnyType.Input("value"),
+            names=list(string.ascii_lowercase),
+            min=0,
+        )
+        return io.Schema(
+            node_id="StringFormat",
+            display_name="Format Text",
+            category="text",
+            search_aliases=["string", "format"],
+            description="Same as Python's string format method. Supports all of Python's format options and features.",
+            inputs=[
+                io.Autogrow.Input("values", template=autogrow),
+                io.String.Input("f_string", default="{a}", multiline=True),
+            ],
+            outputs=[
+                io.String.Output(),
+            ],
+        )
+
+    @classmethod
+    def execute(
+        cls, values: io.Autogrow.Type, f_string: str
+    ) -> io.NodeOutput:
+        return io.NodeOutput(f_string.format(**values))
 
 
 class StringConcatenate(io.ComfyNode):
@@ -384,6 +415,7 @@ class JsonExtractString(io.ComfyNode):
             display_name="Extract Text from JSON",
             category="text",
             search_aliases=["json", "extract json", "parse json", "json value", "read json"],
+            description="Extract a key's value from the first valid JSON object in the text, including Markdown code blocks.",
             inputs=[
                 io.String.Input("json_string", multiline=True),
                 io.String.Input("key", multiline=False),
@@ -395,24 +427,74 @@ class JsonExtractString(io.ComfyNode):
 
     @classmethod
     def execute(cls, json_string, key):
-        try:
-            data = json.loads(json_string)
-            if isinstance(data, dict) and key in data:
-                value = data[key]
-                if value is None:
-                    return io.NodeOutput("")
+        decoder = json.JSONDecoder()
+        for match in re.finditer(r"\{", json_string):
+            try:
+                data, _ = decoder.raw_decode(json_string, match.start())
+            except json.JSONDecodeError:
+                continue
 
-                return io.NodeOutput(str(value))
+            value = data.get(key)
+            return io.NodeOutput("" if value is None else str(value))
 
-            return io.NodeOutput("")
+        return io.NodeOutput("")
 
-        except (json.JSONDecodeError, TypeError):
-            return io.NodeOutput("")
+
+def _dump_json(value, indent):
+    return json.dumps(value, ensure_ascii=False, indent=indent or None)
+
+
+class ConvertDictionaryToString(io.ComfyNode):
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="ConvertDictionaryToString",
+            display_name="Convert Dictionary to String",
+            category="text",
+            search_aliases=["json", "dict to json", "stringify", "serialize", "dict to string"],
+            inputs=[
+                io.Dict.Input("dictionary"),
+                io.Int.Input("indent", default=2, min=0, max=8,
+                             tooltip="Spaces per indent level. 0 produces compact single-line string."),
+            ],
+            outputs=[
+                io.String.Output(),
+            ],
+        )
+
+    @classmethod
+    def execute(cls, dictionary, indent=2):
+        return io.NodeOutput(_dump_json(dictionary, indent))
+
+
+class ConvertArrayToString(io.ComfyNode):
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="ConvertArrayToString",
+            display_name="Convert Array to String",
+            category="text",
+            search_aliases=["json", "list to json", "stringify", "serialize", "list to string", "array to json"],
+            inputs=[
+                io.Array.Input("array"),
+                io.Int.Input("indent", default=2, min=0, max=8,
+                             tooltip="Spaces per indent level. 0 produces compact single-line string."),
+            ],
+            outputs=[
+                io.String.Output(),
+            ],
+        )
+
+    @classmethod
+    def execute(cls, array, indent=2):
+        return io.NodeOutput(_dump_json(array, indent))
+
 
 class StringExtension(ComfyExtension):
     @override
     async def get_node_list(self) -> list[type[io.ComfyNode]]:
         return [
+            StringFormat,
             StringConcatenate,
             StringSubstring,
             StringLength,
@@ -425,6 +507,8 @@ class StringExtension(ComfyExtension):
             RegexExtract,
             RegexReplace,
             JsonExtractString,
+            ConvertDictionaryToString,
+            ConvertArrayToString,
         ]
 
 async def comfy_entrypoint() -> StringExtension:

@@ -89,3 +89,12 @@ rules:
     then:
       field: description
       function: truthy
+
+overrides:
+  # /ws uses HTTP 101 (Switching Protocols) — a legitimate response for a
+  # WebSocket upgrade, but not a 2xx, so operation-success-response fires
+  # as a false positive. OpenAPI 3.x has no native WebSocket support.
+  - files:
+      - "openapi.yaml#/paths/~1ws"
+    rules:
+      operation-success-response: off

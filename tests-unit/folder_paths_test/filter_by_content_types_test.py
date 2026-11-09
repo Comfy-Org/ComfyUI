@@ -5,12 +5,14 @@ from folder_paths import filter_files_content_types, extension_mimetypes_cache
 from unittest.mock import patch
 
 
+
+
 @pytest.fixture(scope="module")
 def file_extensions():
     return {
         'image': ['gif', 'heif', 'ico', 'jpeg', 'jpg', 'png', 'pnm', 'ppm', 'svg', 'tiff', 'webp', 'xbm', 'xpm'],
         'audio': ['aif', 'aifc', 'aiff', 'au', 'flac', 'm4a', 'mp2', 'mp3', 'ogg', 'snd', 'wav'],
-        'video': ['avi', 'm2v', 'm4v', 'mkv', 'mov', 'mp4', 'mpeg', 'mpg', 'ogv', 'qt', 'webm', 'wmv'],
+        'video': ['avi', 'm4v', 'mkv', 'mov', 'mp4', 'mpeg', 'mpg', 'ogv', 'qt', 'webm', 'wmv'],
         'model': ['gltf', 'glb', 'obj', 'fbx', 'stl']
     }
 
@@ -64,3 +66,13 @@ def test_handles_no_extension():
 def test_handles_no_files():
     files = []
     assert filter_files_content_types(files, ["image", "audio", "video"]) == []
+
+
+
+def test_exr_is_listed_as_an_image_once_registered():
+    # LoadImage decodes EXR through PyAV, so registering .exr makes it selectable.
+    from utils.mime_types import init_mime_types
+
+    init_mime_types()
+    with patch("folder_paths.extension_mimetypes_cache", extension_mimetypes_cache.copy()):
+        assert filter_files_content_types(["a.exr", "b.png"], ["image"]) == ["a.exr", "b.png"]

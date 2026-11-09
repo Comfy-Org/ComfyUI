@@ -1,8 +1,9 @@
-from __future__ import annotations
 from typing import Callable
 
 class CallbacksMP:
     ON_CLONE = "on_clone"
+    ON_DEEPCLONE_MULTIGPU = "on_deepclone_multigpu"
+    ON_MATCH_MULTIGPU_CLONES = "on_match_multigpu_clones"
     ON_LOAD = "on_load_after"
     ON_DETACH = "on_detach_after"
     ON_CLEANUP = "on_cleanup"

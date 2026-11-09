@@ -3,7 +3,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import itertools
-from comfy.ldm.modules.attention import optimized_attention
+from comfy.ldm.modules.attention import AttentionTensorContainer, ComfyAttention, optimized_attention
 import comfy.model_management
 from comfy.ldm.flux.layers import timestep_embedding
 
@@ -159,6 +159,7 @@ class AceStepAttention(nn.Module):
         operations=None
     ):
         super().__init__()
+        self.comfy_attention = ComfyAttention()
         self.hidden_size = hidden_size
         self.num_heads = num_heads
         self.num_kv_heads = num_kv_heads
@@ -217,10 +218,7 @@ class AceStepAttention(nn.Module):
                 cos, sin = position_embeddings
                 query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
 
-        n_rep = self.num_heads // self.num_kv_heads
-        if n_rep > 1:
-            key_states = key_states.repeat_interleave(n_rep, dim=1)
-            value_states = value_states.repeat_interleave(n_rep, dim=1)
+        gqa_kwargs = {"enable_gqa": True} if self.num_heads != self.num_kv_heads else {}
 
         attn_bias = None
         if self.sliding_window is not None and not self.is_cross_attention:
@@ -244,7 +242,8 @@ class AceStepAttention(nn.Module):
             else:
                 attn_bias = window_bias
 
-        attn_output = optimized_attention(query_states, key_states, value_states, self.num_heads, attn_bias, skip_reshape=True, low_precision_attention=False)
+        query_states, key_states, value_states = AttentionTensorContainer(query_states), AttentionTensorContainer(key_states), AttentionTensorContainer(value_states)
+        attn_output = optimized_attention(query_states, key_states, value_states, self.num_heads, attn_bias, skip_reshape=True, low_precision_attention=False, preferred_attention=self.comfy_attention, **gqa_kwargs)
         attn_output = self.o_proj(attn_output)
 
         return attn_output

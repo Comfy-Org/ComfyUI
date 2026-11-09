@@ -340,7 +340,7 @@ class GITSScheduler(io.ComfyNode):
     def define_schema(cls):
         return io.Schema(
             node_id="GITSScheduler",
-            category="sampling/custom_sampling/schedulers",
+            category="model/sampling/schedulers",
             inputs=[
                 io.Float.Input("coeff", default=1.20, min=0.80, max=1.50, step=0.05, advanced=True),
                 io.Int.Input("steps", default=10, min=2, max=1000),

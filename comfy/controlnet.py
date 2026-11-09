@@ -15,17 +15,19 @@
     You should have received a copy of the GNU General Public License
     along with this program.  If not, see <https://www.gnu.org/licenses/>.
 """
-
+from __future__ import annotations
 
 import torch
 from enum import Enum
 import math
 import os
 import logging
+import copy
 import comfy.utils
 import comfy.model_management
 import comfy.model_detection
 import comfy.model_patcher
+import comfy.storage
 import comfy.ops
 import comfy.latent_formats
 import comfy.model_base
@@ -38,7 +40,7 @@ import comfy.ldm.hydit.controlnet
 import comfy.ldm.flux.controlnet
 import comfy.ldm.qwen_image.controlnet
 import comfy.cldm.dit_embedder
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Union
 if TYPE_CHECKING:
     from comfy.hooks import HookGroup
 
@@ -64,6 +66,18 @@ class StrengthType(Enum):
     CONSTANT = 1
     LINEAR_UP = 2
 
+class ControlIsolation:
+    '''Temporarily set a ControlBase object's previous_controlnet to None to prevent cascading calls.'''
+    def __init__(self, control: ControlBase):
+        self.control = control
+        self.orig_previous_controlnet = control.previous_controlnet
+
+    def __enter__(self):
+        self.control.previous_controlnet = None
+
+    def __exit__(self, *args):
+        self.control.previous_controlnet = self.orig_previous_controlnet
+
 class ControlBase:
     def __init__(self):
         self.cond_hint_original = None
@@ -77,7 +91,7 @@ class ControlBase:
         self.compression_ratio = 8
         self.upscale_algorithm = 'nearest-exact'
         self.extra_args = {}
-        self.previous_controlnet = None
+        self.previous_controlnet: Union[ControlBase, None] = None
         self.extra_conds = []
         self.strength_type = StrengthType.CONSTANT
         self.concat_mask = False
@@ -85,6 +99,7 @@ class ControlBase:
         self.extra_concat = None
         self.extra_hooks: HookGroup = None
         self.preprocess_image = lambda a: a
+        self.multigpu_clones: dict[torch.device, ControlBase] = {}
 
     def set_cond_hint(self, cond_hint, strength=1.0, timestep_percent_range=(0.0, 1.0), vae=None, extra_concat=[]):
         self.cond_hint_original = cond_hint
@@ -111,16 +126,37 @@ class ControlBase:
     def cleanup(self):
         if self.previous_controlnet is not None:
             self.previous_controlnet.cleanup()
-
+        for device_cnet in self.multigpu_clones.values():
+            with ControlIsolation(device_cnet):
+                device_cnet.cleanup()
         self.cond_hint = None
         self.extra_concat = None
         self.timestep_range = None
 
     def get_models(self):
         out = []
+        for device_cnet in self.multigpu_clones.values():
+            out += device_cnet.get_models_only_self()
         if self.previous_controlnet is not None:
             out += self.previous_controlnet.get_models()
         return out
+
+    def get_models_only_self(self):
+        'Calls get_models, but temporarily sets previous_controlnet to None.'
+        with ControlIsolation(self):
+            return self.get_models()
+
+    def get_instance_for_device(self, device):
+        'Returns instance of this Control object intended for selected device.'
+        return self.multigpu_clones.get(device, self)
+
+    def deepclone_multigpu(self, load_device, autoregister=False):
+        '''
+        Create deep clone of Control object where model(s) is set to other devices.
+
+        When autoregister is set to True, the deep clone is also added to multigpu_clones dict.
+        '''
+        raise NotImplementedError("Classes inheriting from ControlBase should define their own deepclone_multigpu funtion.")
 
     def get_extra_hooks(self):
         out = []
@@ -130,7 +166,7 @@ class ControlBase:
             out += self.previous_controlnet.get_extra_hooks()
         return out
 
-    def copy_to(self, c):
+    def copy_to(self, c: ControlBase):
         c.cond_hint_original = self.cond_hint_original
         c.strength = self.strength
         c.timestep_percent_range = self.timestep_percent_range
@@ -198,12 +234,12 @@ class ControlBase:
 
 
 class ControlNet(ControlBase):
-    def __init__(self, control_model=None, global_average_pooling=False, compression_ratio=8, latent_format=None, load_device=None, manual_cast_dtype=None, extra_conds=["y"], strength_type=StrengthType.CONSTANT, concat_mask=False, preprocess_image=lambda a: a):
+    def __init__(self, control_model=None, global_average_pooling=False, compression_ratio=8, latent_format=None, load_device=None, manual_cast_dtype=None, extra_conds=["y"], strength_type=StrengthType.CONSTANT, concat_mask=False, preprocess_image=lambda a: a, fast_disk=False):
         super().__init__()
         self.control_model = control_model
         self.load_device = load_device
         if control_model is not None:
-            self.control_model_wrapped = comfy.model_patcher.CoreModelPatcher(self.control_model, load_device=load_device, offload_device=comfy.model_management.unet_offload_device())
+            self.control_model_wrapped = comfy.model_patcher.CoreModelPatcher(self.control_model, load_device=load_device, offload_device=comfy.model_management.unet_offload_device(), fast_disk=fast_disk)
 
         self.compression_ratio = compression_ratio
         self.global_average_pooling = global_average_pooling
@@ -284,6 +320,14 @@ class ControlNet(ControlBase):
         self.copy_to(c)
         return c
 
+    def deepclone_multigpu(self, load_device, autoregister=False):
+        c = self.copy()
+        c.control_model = copy.deepcopy(c.control_model)
+        c.control_model_wrapped = comfy.model_patcher.ModelPatcher(c.control_model, load_device=load_device, offload_device=comfy.model_management.unet_offload_device(), fast_disk=self.control_model_wrapped.fast_disk)
+        if autoregister:
+            self.multigpu_clones[load_device] = c
+        return c
+
     def get_models(self):
         out = super().get_models()
         out.append(self.control_model_wrapped)
@@ -314,6 +358,10 @@ class QwenFunControlNet(ControlNet):
         super().pre_run(model, percent_to_timestep_function)
         self.set_extra_arg("base_model", model.diffusion_model)
 
+    def cleanup(self):
+        self.extra_args.pop("base_model", None)
+        super().cleanup()
+
     def copy(self):
         c = QwenFunControlNet(None, global_average_pooling=self.global_average_pooling, load_device=self.load_device, manual_cast_dtype=self.manual_cast_dtype)
         c.control_model = self.control_model
@@ -334,13 +382,10 @@ class ControlLoraOps:
             self.bias = None
 
         def forward(self, input):
-            weight, bias, offload_stream = comfy.ops.cast_bias_weight(self, input, offloadable=True)
-            if self.up is not None:
-                x = torch.nn.functional.linear(input, weight + (torch.mm(self.up.flatten(start_dim=1), self.down.flatten(start_dim=1))).reshape(self.weight.shape).type(input.dtype), bias)
-            else:
-                x = torch.nn.functional.linear(input, weight, bias)
-            comfy.ops.uncast_bias_weight(self, weight, bias, offload_stream)
-            return x
+            with comfy.ops.CastBiasWeightContext(self, input, offloadable=True) as (weight, bias):
+                if self.up is None:
+                    return torch.nn.functional.linear(input, weight, bias)
+                return torch.nn.functional.linear(input, weight + (torch.mm(self.up.flatten(start_dim=1), self.down.flatten(start_dim=1))).reshape(self.weight.shape).type(input.dtype), bias)
 
     class Conv2d(torch.nn.Module, comfy.ops.CastWeightBiasOp):
         def __init__(
@@ -457,7 +502,7 @@ def controlnet_config(sd, model_options={}):
 
     operations = model_options.get("custom_operations", None)
     if operations is None:
-        operations = comfy.ops.pick_operations(unet_dtype, manual_cast_dtype, disable_fast_fp8=True)
+        operations = comfy.ops.pick_operations(unet_dtype, manual_cast_dtype, load_device=load_device, disable_fast_fp8=True)
 
     offload_device = comfy.model_management.unet_offload_device()
     return model_config, operations, load_device, unet_dtype, manual_cast_dtype, offload_device
@@ -490,7 +535,7 @@ def load_controlnet_mmdit(sd, model_options={}):
 
     latent_format = comfy.latent_formats.SD3()
     latent_format.shift_factor = 0 #SD3 controlnet weirdness
-    control = ControlNet(control_model, compression_ratio=1, latent_format=latent_format, concat_mask=concat_mask, load_device=load_device, manual_cast_dtype=manual_cast_dtype)
+    control = ControlNet(control_model, compression_ratio=1, latent_format=latent_format, concat_mask=concat_mask, load_device=load_device, manual_cast_dtype=manual_cast_dtype, fast_disk=comfy.storage.state_dict_fast_disk(new_sd))
     return control
 
 
@@ -541,7 +586,7 @@ def load_controlnet_sd35(sd, model_options={}):
 
     operations = model_options.get("custom_operations", None)
     if operations is None:
-        operations = comfy.ops.pick_operations(unet_dtype, manual_cast_dtype, disable_fast_fp8=True)
+        operations = comfy.ops.pick_operations(unet_dtype, manual_cast_dtype, load_device=load_device, disable_fast_fp8=True)
 
     control_model = comfy.cldm.dit_embedder.ControlNetEmbedder(img_size=None,
                                                                patch_size=2,
@@ -565,7 +610,7 @@ def load_controlnet_sd35(sd, model_options={}):
     elif depth_cnet:
         preprocess_image = lambda a: 1.0 - a
 
-    control = ControlNetSD35(control_model, compression_ratio=1, latent_format=latent_format, load_device=load_device, manual_cast_dtype=manual_cast_dtype, preprocess_image=preprocess_image)
+    control = ControlNetSD35(control_model, compression_ratio=1, latent_format=latent_format, load_device=load_device, manual_cast_dtype=manual_cast_dtype, preprocess_image=preprocess_image, fast_disk=comfy.storage.state_dict_fast_disk(sd))
     return control
 
 
@@ -578,7 +623,7 @@ def load_controlnet_hunyuandit(controlnet_data, model_options={}):
 
     latent_format = comfy.latent_formats.SDXL()
     extra_conds = ['text_embedding_mask', 'encoder_hidden_states_t5', 'text_embedding_mask_t5', 'image_meta_size', 'style', 'cos_cis_img', 'sin_cis_img']
-    control = ControlNet(control_model, compression_ratio=1, latent_format=latent_format, load_device=load_device, manual_cast_dtype=manual_cast_dtype, extra_conds=extra_conds, strength_type=StrengthType.CONSTANT)
+    control = ControlNet(control_model, compression_ratio=1, latent_format=latent_format, load_device=load_device, manual_cast_dtype=manual_cast_dtype, extra_conds=extra_conds, strength_type=StrengthType.CONSTANT, fast_disk=comfy.storage.state_dict_fast_disk(controlnet_data))
     return control
 
 def load_controlnet_flux_xlabs_mistoline(sd, mistoline=False, model_options={}):
@@ -587,7 +632,7 @@ def load_controlnet_flux_xlabs_mistoline(sd, mistoline=False, model_options={}):
     sd = model_config.process_unet_state_dict(sd)
     control_model = controlnet_load_state_dict(control_model, sd)
     extra_conds = ['y', 'guidance']
-    control = ControlNet(control_model, load_device=load_device, manual_cast_dtype=manual_cast_dtype, extra_conds=extra_conds)
+    control = ControlNet(control_model, load_device=load_device, manual_cast_dtype=manual_cast_dtype, extra_conds=extra_conds, fast_disk=comfy.storage.state_dict_fast_disk(sd))
     return control
 
 def load_controlnet_flux_instantx(sd, model_options={}):
@@ -611,7 +656,7 @@ def load_controlnet_flux_instantx(sd, model_options={}):
 
     latent_format = comfy.latent_formats.Flux()
     extra_conds = ['y', 'guidance']
-    control = ControlNet(control_model, compression_ratio=1, latent_format=latent_format, concat_mask=concat_mask, load_device=load_device, manual_cast_dtype=manual_cast_dtype, extra_conds=extra_conds)
+    control = ControlNet(control_model, compression_ratio=1, latent_format=latent_format, concat_mask=concat_mask, load_device=load_device, manual_cast_dtype=manual_cast_dtype, extra_conds=extra_conds, fast_disk=comfy.storage.state_dict_fast_disk(new_sd))
     return control
 
 def load_controlnet_qwen_instantx(sd, model_options={}):
@@ -627,7 +672,7 @@ def load_controlnet_qwen_instantx(sd, model_options={}):
     control_model = controlnet_load_state_dict(control_model, sd)
     latent_format = comfy.latent_formats.Wan21()
     extra_conds = []
-    control = ControlNet(control_model, compression_ratio=1, latent_format=latent_format, concat_mask=concat_mask, load_device=load_device, manual_cast_dtype=manual_cast_dtype, extra_conds=extra_conds)
+    control = ControlNet(control_model, compression_ratio=1, latent_format=latent_format, concat_mask=concat_mask, load_device=load_device, manual_cast_dtype=manual_cast_dtype, extra_conds=extra_conds, fast_disk=comfy.storage.state_dict_fast_disk(sd))
     return control
 
 
@@ -639,7 +684,7 @@ def load_controlnet_qwen_fun(sd, model_options={}):
 
     operations = model_options.get("custom_operations", None)
     if operations is None:
-        operations = comfy.ops.pick_operations(unet_dtype, manual_cast_dtype, disable_fast_fp8=True)
+        operations = comfy.ops.pick_operations(unet_dtype, manual_cast_dtype, load_device=load_device, disable_fast_fp8=True)
 
     in_features = sd["control_img_in.weight"].shape[1]
     inner_dim = sd["control_img_in.weight"].shape[0]
@@ -674,6 +719,7 @@ def load_controlnet_qwen_fun(sd, model_options={}):
         load_device=load_device,
         manual_cast_dtype=manual_cast_dtype,
         extra_conds=[],
+        fast_disk=comfy.storage.state_dict_fast_disk(sd),
     )
     return control
 
@@ -754,7 +800,7 @@ def load_controlnet_state_dict(state_dict, model=None, model_options={}):
             return load_controlnet_qwen_instantx(controlnet_data, model_options=model_options)
         elif "controlnet_x_embedder.weight" in controlnet_data:
             return load_controlnet_flux_instantx(controlnet_data, model_options=model_options)
-    elif "control_blocks.0.after_proj.weight" in controlnet_data and "control_img_in.weight" in controlnet_data:
+    elif "control_blocks.0.after_proj.weight" in controlnet_data and "control_blocks.0.img_mod.1.weight" in controlnet_data and "control_img_in.weight" in controlnet_data:
         return load_controlnet_qwen_fun(controlnet_data, model_options=model_options)
 
     elif "controlnet_blocks.0.linear.weight" in controlnet_data: #mistoline flux
@@ -794,7 +840,7 @@ def load_controlnet_state_dict(state_dict, model=None, model_options={}):
     manual_cast_dtype = comfy.model_management.unet_manual_cast(unet_dtype, load_device)
     operations = model_options.get("custom_operations", None)
     if operations is None:
-        operations = comfy.ops.pick_operations(unet_dtype, manual_cast_dtype)
+        operations = comfy.ops.pick_operations(unet_dtype, manual_cast_dtype, load_device=load_device, disable_fast_fp8=True)
 
     controlnet_config["operations"] = operations
     controlnet_config["dtype"] = unet_dtype
@@ -833,7 +879,7 @@ def load_controlnet_state_dict(state_dict, model=None, model_options={}):
         logging.debug("unexpected controlnet keys: {}".format(unexpected))
 
     global_average_pooling = model_options.get("global_average_pooling", False)
-    control = ControlNet(control_model, global_average_pooling=global_average_pooling, load_device=load_device, manual_cast_dtype=manual_cast_dtype)
+    control = ControlNet(control_model, global_average_pooling=global_average_pooling, load_device=load_device, manual_cast_dtype=manual_cast_dtype, fast_disk=comfy.storage.state_dict_fast_disk(controlnet_data))
     return control
 
 def load_controlnet(ckpt_path, model=None, model_options={}):
@@ -904,6 +950,14 @@ class T2IAdapter(ControlBase):
     def copy(self):
         c = T2IAdapter(self.t2i_model, self.channels_in, self.compression_ratio, self.upscale_algorithm)
         self.copy_to(c)
+        return c
+
+    def deepclone_multigpu(self, load_device, autoregister=False):
+        c = self.copy()
+        c.t2i_model = copy.deepcopy(c.t2i_model)
+        c.device = load_device
+        if autoregister:
+            self.multigpu_clones[load_device] = c
         return c
 
 def load_t2i_adapter(t2i_data, model_options={}): #TODO: model_options

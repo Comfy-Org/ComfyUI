@@ -1,16 +1,18 @@
 from __future__ import annotations
+import torch
 import uuid
 import math
 import collections
 import comfy.model_management
 import comfy.conds
+import comfy.model_patcher
 import comfy.utils
 import comfy.hooks
 import comfy.patcher_extension
 from typing import TYPE_CHECKING
 if TYPE_CHECKING:
-    from comfy.model_patcher import ModelPatcher
     from comfy.model_base import BaseModel
+    from comfy.model_patcher import ModelPatcher
     from comfy.controlnet import ControlBase
 
 def prepare_mask(noise_mask, shape, device):
@@ -119,6 +121,47 @@ def cleanup_additional_models(models):
         if hasattr(m, 'cleanup'):
             m.cleanup()
 
+def preprocess_multigpu_conds(conds: dict[str, list[dict[str]]], model: ModelPatcher, model_options: dict[str]):
+    '''If multigpu acceleration required, creates deepclones of ControlNets and GLIGEN per device.'''
+    multigpu_models: list[ModelPatcher] = model.get_additional_models_with_key("multigpu")
+    if len(multigpu_models) == 0:
+        return
+    extra_devices = [x.load_device for x in multigpu_models]
+    # handle controlnets
+    controlnets: set[ControlBase] = set()
+    for k in conds:
+        for kk in conds[k]:
+            if 'control' in kk:
+                controlnets.add(kk['control'])
+    if len(controlnets) > 0:
+        # first, unload all controlnet clones
+        for cnet in list(controlnets):
+            cnet_models = cnet.get_models()
+            for cm in cnet_models:
+                comfy.model_management.unload_model_and_clones(cm, unload_additional_models=True)
+
+        # next, make sure each controlnet has a deepclone for all relevant devices
+        for cnet in controlnets:
+            curr_cnet = cnet
+            while curr_cnet is not None:
+                for device in extra_devices:
+                    if device not in curr_cnet.multigpu_clones:
+                        curr_cnet.deepclone_multigpu(device, autoregister=True)
+                curr_cnet = curr_cnet.previous_controlnet
+        # since all device clones are now present, recreate the linked list for cloned cnets per device
+        for cnet in controlnets:
+            curr_cnet = cnet
+            while curr_cnet is not None:
+                prev_cnet = curr_cnet.previous_controlnet
+                for device in extra_devices:
+                    device_cnet = curr_cnet.get_instance_for_device(device)
+                    prev_device_cnet = None
+                    if prev_cnet is not None:
+                        prev_device_cnet = prev_cnet.get_instance_for_device(device)
+                    device_cnet.set_previous_controlnet(prev_device_cnet)
+                curr_cnet = prev_cnet
+    # potentially handle gligen - since not widely used, ignored for now
+
 def estimate_memory(model, noise_shape, conds):
     cond_shapes = collections.defaultdict(list)
     cond_shapes_min = {}
@@ -143,7 +186,8 @@ def prepare_sampling(model: ModelPatcher, noise_shape, conds, model_options=None
     return executor.execute(model, noise_shape, conds, model_options=model_options, force_full_load=force_full_load, force_offload=force_offload)
 
 def _prepare_sampling(model: ModelPatcher, noise_shape, conds, model_options=None, force_full_load=False, force_offload=False):
-    real_model: BaseModel = None
+    model.match_multigpu_clones()
+    preprocess_multigpu_conds(conds, model, model_options)
     models, inference_memory = get_additional_models(conds, model.model_dtype())
     models += get_additional_models_from_model_options(model_options)
     models += model.get_nested_additional_models()  # TODO: does this require inference_memory update?
@@ -155,7 +199,7 @@ def _prepare_sampling(model: ModelPatcher, noise_shape, conds, model_options=Non
         memory_required += inference_memory
         minimum_memory_required += inference_memory
     comfy.model_management.load_models_gpu([model] + models, memory_required=memory_required, minimum_memory_required=minimum_memory_required, force_full_load=force_full_load)
-    real_model = model.model
+    real_model: BaseModel = model.model
 
     return real_model, conds, models
 
@@ -201,3 +245,18 @@ def prepare_model_patcher(model: ModelPatcher, conds, model_options: dict):
         comfy.patcher_extension.merge_nested_dicts(to_load_options.setdefault(wc_name, {}), model_options["transformer_options"][wc_name],
                                                     copy_dict1=False)
     return to_load_options
+
+def prepare_model_patcher_multigpu_clones(model_patcher: ModelPatcher, loaded_models: list[ModelPatcher], model_options: dict):
+    '''
+    In case multigpu acceleration is enabled, prep ModelPatchers for each device.
+    '''
+    multigpu_patchers: list[ModelPatcher] = [x for x in loaded_models if x.is_multigpu_base_clone]
+    if len(multigpu_patchers) > 0:
+        multigpu_dict: dict[torch.device, ModelPatcher] = {}
+        multigpu_dict[model_patcher.load_device] = model_patcher
+        for x in multigpu_patchers:
+            x.hook_patches = comfy.model_patcher.create_hook_patches_clone(model_patcher.hook_patches, copy_tuples=True)
+            x.hook_mode = model_patcher.hook_mode # match main model's hook_mode
+            multigpu_dict[x.load_device] = x
+        model_options["multigpu_clones"] = multigpu_dict
+    return multigpu_patchers

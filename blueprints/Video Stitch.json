@@ -1,21 +1,21 @@
 {
   "revision": 0,
-  "last_node_id": 84,
+  "last_node_id": 85,
   "last_link_id": 0,
   "nodes": [
     {
-      "id": 84,
-      "type": "8e8aa94a-647e-436d-8440-8ee4691864de",
+      "id": 85,
+      "type": "637913e7-0206-46ba-8ded-70ae3a7c2e19",
       "pos": [
-        -6100,
-        2620
+        -880,
+        -2260
       ],
       "size": [
         290,
         160
       ],
       "flags": {},
-      "order": 0,
+      "order": 2,
       "mode": 0,
       "inputs": [
         {
@@ -76,31 +76,26 @@
       "properties": {
         "proxyWidgets": [
           [
-            "-1",
+            "79",
             "direction"
           ],
           [
-            "-1",
+            "79",
             "match_image_size"
           ],
           [
-            "-1",
+            "79",
             "spacing_width"
           ],
           [
-            "-1",
+            "79",
             "spacing_color"
           ]
         ],
         "cnr_id": "comfy-core",
         "ver": "0.13.0"
       },
-      "widgets_values": [
-        "right",
-        true,
-        0,
-        "white"
-      ],
+      "widgets_values": [],
       "title": "Video Stitch"
     }
   ],
@@ -109,12 +104,12 @@
   "definitions": {
     "subgraphs": [
       {
-        "id": "8e8aa94a-647e-436d-8440-8ee4691864de",
+        "id": "637913e7-0206-46ba-8ded-70ae3a7c2e19",
         "version": 1,
         "state": {
           "lastGroupId": 1,
-          "lastNodeId": 84,
-          "lastLinkId": 262,
+          "lastNodeId": 97,
+          "lastLinkId": 282,
           "lastRerouteId": 0
         },
         "revision": 0,
@@ -123,8 +118,8 @@
         "inputNode": {
           "id": -10,
           "bounding": [
-            -6580,
-            2649,
+            -6810,
+            2580,
             143.55859375,
             160
           ]
@@ -132,8 +127,8 @@
         "outputNode": {
           "id": -20,
           "bounding": [
-            -5720,
-            2659,
+            -4770,
+            2600,
             120,
             60
           ]
@@ -149,8 +144,8 @@
             "localized_name": "video",
             "label": "Before Video",
             "pos": [
-              -6456.44140625,
-              2669
+              -6686.44140625,
+              2600
             ]
           },
           {
@@ -163,8 +158,8 @@
             "localized_name": "video_1",
             "label": "After Video",
             "pos": [
-              -6456.44140625,
-              2689
+              -6686.44140625,
+              2620
             ]
           },
           {
@@ -175,8 +170,8 @@
               259
             ],
             "pos": [
-              -6456.44140625,
-              2709
+              -6686.44140625,
+              2640
             ]
           },
           {
@@ -187,8 +182,8 @@
               260
             ],
             "pos": [
-              -6456.44140625,
-              2729
+              -6686.44140625,
+              2660
             ]
           },
           {
@@ -199,8 +194,8 @@
               261
             ],
             "pos": [
-              -6456.44140625,
-              2749
+              -6686.44140625,
+              2680
             ]
           },
           {
@@ -211,8 +206,8 @@
               262
             ],
             "pos": [
-              -6456.44140625,
-              2769
+              -6686.44140625,
+              2700
             ]
           }
         ],
@@ -226,8 +221,8 @@
             ],
             "localized_name": "VIDEO",
             "pos": [
-              -5700,
-              2679
+              -4750,
+              2620
             ]
           }
         ],
@@ -238,11 +233,11 @@
             "type": "GetVideoComponents",
             "pos": [
               -6390,
-              2560
+              2600
             ],
             "size": [
-              193.530859375,
-              66
+              230,
+              120
             ],
             "flags": {},
             "order": 1,
@@ -278,9 +273,9 @@
               }
             ],
             "properties": {
+              "Node name for S&R": "GetVideoComponents",
               "cnr_id": "comfy-core",
-              "ver": "0.13.0",
-              "Node name for S&R": "GetVideoComponents"
+              "ver": "0.13.0"
             }
           },
           {
@@ -291,8 +286,8 @@
               2420
             ],
             "size": [
-              193.530859375,
-              66
+              230,
+              120
             ],
             "flags": {},
             "order": 0,
@@ -332,21 +327,254 @@
               }
             ],
             "properties": {
+              "Node name for S&R": "GetVideoComponents",
               "cnr_id": "comfy-core",
-              "ver": "0.13.0",
-              "Node name for S&R": "GetVideoComponents"
+              "ver": "0.13.0"
             }
+          },
+          {
+            "id": 90,
+            "type": "GetImageSize",
+            "pos": [
+              -6390,
+              3030
+            ],
+            "size": [
+              230,
+              120
+            ],
+            "flags": {},
+            "order": 4,
+            "mode": 0,
+            "inputs": [
+              {
+                "localized_name": "image",
+                "name": "image",
+                "type": "IMAGE",
+                "link": 266
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "width",
+                "name": "width",
+                "type": "INT",
+                "links": [
+                  274
+                ]
+              },
+              {
+                "localized_name": "height",
+                "name": "height",
+                "type": "INT",
+                "links": [
+                  276
+                ]
+              },
+              {
+                "localized_name": "batch_size",
+                "name": "batch_size",
+                "type": "INT",
+                "links": null
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "GetImageSize"
+            }
+          },
+          {
+            "id": 80,
+            "type": "CreateVideo",
+            "pos": [
+              -5190,
+              2420
+            ],
+            "size": [
+              270,
+              130
+            ],
+            "flags": {},
+            "order": 3,
+            "mode": 0,
+            "inputs": [
+              {
+                "localized_name": "images",
+                "name": "images",
+                "type": "IMAGE",
+                "link": 282
+              },
+              {
+                "localized_name": "audio",
+                "name": "audio",
+                "shape": 7,
+                "type": "AUDIO",
+                "link": 251
+              },
+              {
+                "localized_name": "fps",
+                "name": "fps",
+                "type": "FLOAT",
+                "widget": {
+                  "name": "fps"
+                },
+                "link": 252
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "VIDEO",
+                "name": "VIDEO",
+                "type": "VIDEO",
+                "links": [
+                  255
+                ]
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "CreateVideo",
+              "cnr_id": "comfy-core",
+              "ver": "0.13.0"
+            },
+            "widgets_values": [
+              30
+            ]
+          },
+          {
+            "id": 95,
+            "type": "ComfyMathExpression",
+            "pos": [
+              -6040,
+              3020
+            ],
+            "size": [
+              400,
+              200
+            ],
+            "flags": {},
+            "order": 5,
+            "mode": 0,
+            "inputs": [
+              {
+                "label": "a",
+                "localized_name": "values.a",
+                "name": "values.a",
+                "type": "FLOAT,INT",
+                "link": 274
+              },
+              {
+                "label": "b",
+                "localized_name": "values.b",
+                "name": "values.b",
+                "shape": 7,
+                "type": "FLOAT,INT",
+                "link": null
+              },
+              {
+                "localized_name": "expression",
+                "name": "expression",
+                "type": "STRING",
+                "widget": {
+                  "name": "expression"
+                },
+                "link": null
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "FLOAT",
+                "name": "FLOAT",
+                "type": "FLOAT",
+                "links": null
+              },
+              {
+                "localized_name": "INT",
+                "name": "INT",
+                "type": "INT",
+                "links": [
+                  279
+                ]
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "ComfyMathExpression"
+            },
+            "widgets_values": [
+              "a & ~1"
+            ]
+          },
+          {
+            "id": 96,
+            "type": "ComfyMathExpression",
+            "pos": [
+              -6040,
+              3290
+            ],
+            "size": [
+              400,
+              200
+            ],
+            "flags": {},
+            "order": 6,
+            "mode": 0,
+            "inputs": [
+              {
+                "label": "a",
+                "localized_name": "values.a",
+                "name": "values.a",
+                "type": "FLOAT,INT",
+                "link": 276
+              },
+              {
+                "label": "b",
+                "localized_name": "values.b",
+                "name": "values.b",
+                "shape": 7,
+                "type": "FLOAT,INT",
+                "link": null
+              },
+              {
+                "localized_name": "expression",
+                "name": "expression",
+                "type": "STRING",
+                "widget": {
+                  "name": "expression"
+                },
+                "link": null
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "FLOAT",
+                "name": "FLOAT",
+                "type": "FLOAT",
+                "links": null
+              },
+              {
+                "localized_name": "INT",
+                "name": "INT",
+                "type": "INT",
+                "links": [
+                  280
+                ]
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "ComfyMathExpression"
+            },
+            "widgets_values": [
+              "a & ~1"
+            ]
           },
           {
             "id": 79,
             "type": "ImageStitch",
             "pos": [
               -6390,
-              2700
+              2780
             ],
             "size": [
               270,
-              150
+              160
             ],
             "flags": {},
             "order": 2,
@@ -408,14 +636,15 @@
                 "name": "IMAGE",
                 "type": "IMAGE",
                 "links": [
-                  250
+                  266,
+                  281
                 ]
               }
             ],
             "properties": {
+              "Node name for S&R": "ImageStitch",
               "cnr_id": "comfy-core",
-              "ver": "0.13.0",
-              "Node name for S&R": "ImageStitch"
+              "ver": "0.13.0"
             },
             "widgets_values": [
               "right",
@@ -425,60 +654,91 @@
             ]
           },
           {
-            "id": 80,
-            "type": "CreateVideo",
+            "id": 97,
+            "type": "ResizeImageMaskNode",
             "pos": [
-              -6040,
-              2610
+              -5560,
+              2790
             ],
             "size": [
               270,
-              78
+              160
             ],
             "flags": {},
-            "order": 3,
+            "order": 7,
             "mode": 0,
             "inputs": [
               {
-                "localized_name": "images",
-                "name": "images",
-                "type": "IMAGE",
-                "link": 250
+                "localized_name": "input",
+                "name": "input",
+                "type": "IMAGE,MASK",
+                "link": 281
               },
               {
-                "localized_name": "audio",
-                "name": "audio",
-                "shape": 7,
-                "type": "AUDIO",
-                "link": 251
-              },
-              {
-                "localized_name": "fps",
-                "name": "fps",
-                "type": "FLOAT",
+                "localized_name": "resize_type",
+                "name": "resize_type",
+                "type": "COMFY_DYNAMICCOMBO_V3",
                 "widget": {
-                  "name": "fps"
+                  "name": "resize_type"
                 },
-                "link": 252
+                "link": null
+              },
+              {
+                "localized_name": "width",
+                "name": "resize_type.width",
+                "type": "INT",
+                "widget": {
+                  "name": "resize_type.width"
+                },
+                "link": 279
+              },
+              {
+                "localized_name": "height",
+                "name": "resize_type.height",
+                "type": "INT",
+                "widget": {
+                  "name": "resize_type.height"
+                },
+                "link": 280
+              },
+              {
+                "localized_name": "crop",
+                "name": "resize_type.crop",
+                "type": "COMBO",
+                "widget": {
+                  "name": "resize_type.crop"
+                },
+                "link": null
+              },
+              {
+                "localized_name": "scale_method",
+                "name": "scale_method",
+                "type": "COMBO",
+                "widget": {
+                  "name": "scale_method"
+                },
+                "link": null
               }
             ],
             "outputs": [
               {
-                "localized_name": "VIDEO",
-                "name": "VIDEO",
-                "type": "VIDEO",
+                "localized_name": "resized",
+                "name": "resized",
+                "type": "*",
                 "links": [
-                  255
+                  282
                 ]
               }
             ],
             "properties": {
-              "cnr_id": "comfy-core",
-              "ver": "0.13.0",
-              "Node name for S&R": "CreateVideo"
+              "Node name for S&R": "ResizeImageMaskNode"
             },
             "widgets_values": [
-              30
+              "scale dimensions",
+              512,
+              512,
+              "center",
+              "area"
             ]
           }
         ],
@@ -498,14 +758,6 @@
             "origin_slot": 0,
             "target_id": 79,
             "target_slot": 1,
-            "type": "IMAGE"
-          },
-          {
-            "id": 250,
-            "origin_id": 79,
-            "origin_slot": 0,
-            "target_id": 80,
-            "target_slot": 0,
             "type": "IMAGE"
           },
           {
@@ -579,13 +831,71 @@
             "target_id": 79,
             "target_slot": 5,
             "type": "COMBO"
+          },
+          {
+            "id": 266,
+            "origin_id": 79,
+            "origin_slot": 0,
+            "target_id": 90,
+            "target_slot": 0,
+            "type": "IMAGE"
+          },
+          {
+            "id": 274,
+            "origin_id": 90,
+            "origin_slot": 0,
+            "target_id": 95,
+            "target_slot": 0,
+            "type": "INT"
+          },
+          {
+            "id": 276,
+            "origin_id": 90,
+            "origin_slot": 1,
+            "target_id": 96,
+            "target_slot": 0,
+            "type": "INT"
+          },
+          {
+            "id": 279,
+            "origin_id": 95,
+            "origin_slot": 1,
+            "target_id": 97,
+            "target_slot": 2,
+            "type": "INT"
+          },
+          {
+            "id": 280,
+            "origin_id": 96,
+            "origin_slot": 1,
+            "target_id": 97,
+            "target_slot": 3,
+            "type": "INT"
+          },
+          {
+            "id": 281,
+            "origin_id": 79,
+            "origin_slot": 0,
+            "target_id": 97,
+            "target_slot": 0,
+            "type": "IMAGE"
+          },
+          {
+            "id": 282,
+            "origin_id": 97,
+            "origin_slot": 0,
+            "target_id": 80,
+            "target_slot": 0,
+            "type": "IMAGE"
           }
         ],
         "extra": {
           "workflowRendererVersion": "LG"
         },
-        "category": "Video Tools/Stitch videos"
+        "category": "Video Tools/Stitch videos",
+        "description": "Stitches multiple video clips into a single sequential video file."
       }
     ]
-  }
+  },
+  "extra": {}
 }

@@ -8,6 +8,7 @@ from io import BytesIO
 import av
 import numpy as np
 import torch
+from av.codec import CodecContext
 from PIL import Image
 
 from comfy.utils import common_upscale
@@ -16,12 +17,14 @@ from comfy_api.latest import Input, InputImpl, Types
 from ._helpers import mimetype_to_extension
 
 
-def bytesio_to_image_tensor(image_bytesio: BytesIO, mode: str = "RGBA") -> torch.Tensor:
+def bytesio_to_image_tensor(image_bytesio: BytesIO, mode: str | None = None) -> torch.Tensor:
     """Converts image data from BytesIO to a torch.Tensor.
 
     Args:
         image_bytesio: BytesIO object containing the image data.
-        mode: The PIL mode to convert the image to (e.g., "RGB", "RGBA").
+        mode: The PIL mode to convert the image to (e.g., "RGB", "RGBA"). Defaults
+            to RGBA when the decoded image carries transparency and RGB when it
+            does not, so an API that returns no alpha does not get an opaque one.
 
     Returns:
         A torch.Tensor representing the image (1, H, W, C).
@@ -31,6 +34,8 @@ def bytesio_to_image_tensor(image_bytesio: BytesIO, mode: str = "RGBA") -> torch
         ValueError: If the specified mode is invalid.
     """
     image = Image.open(image_bytesio)
+    if mode is None:
+        mode = "RGBA" if "A" in image.getbands() or "transparency" in image.info else "RGB"
     image = image.convert(mode)
     image_array = np.array(image).astype(np.float32) / 255.0
     return torch.from_numpy(image_array).unsqueeze(0)
@@ -51,6 +56,17 @@ def image_tensor_pair_to_batch(image1: torch.Tensor, image2: torch.Tensor) -> to
             "center",
         ).movedim(1, -1)
     return torch.cat((image1, image2), dim=0)
+
+
+def pad_images_to_common_channels(images: list[torch.Tensor]) -> list[torch.Tensor]:
+    """Pads [B, H, W, C] image tensors with opaque alpha so they all share the largest channel count."""
+    channels = max(image.shape[-1] for image in images)
+    return [
+        torch.nn.functional.pad(image, (0, channels - image.shape[-1]), value=1.0)
+        if image.shape[-1] < channels
+        else image
+        for image in images
+    ]
 
 
 def tensor_to_bytesio(
@@ -132,25 +148,26 @@ def pil_to_bytesio(img: Image.Image, mime_type: str = "image/png") -> BytesIO:
 def _compute_downscale_dims(src_w: int, src_h: int, total_pixels: int) -> tuple[int, int] | None:
     """Return downscaled (w, h) with even dims fitting ``total_pixels``, or None if already fits.
 
-    Source aspect ratio is preserved; output may drift by a fraction of a percent because both dimensions
-    are rounded down to even values (many  codecs require divisible-by-2).
+    Both dimensions are rounded to even values (many codecs require divisible-by-2).
     """
     pixels = src_w * src_h
     if pixels <= total_pixels:
         return None
     scale = math.sqrt(total_pixels / pixels)
-    new_w = max(2, int(src_w * scale))
-    new_h = max(2, int(src_h * scale))
-    new_w -= new_w % 2
-    new_h -= new_h % 2
-    return new_w, new_h
+    long_src, short_src = max(src_w, src_h), min(src_w, src_h)
+    long_new = max(2, int(long_src * scale) // 2 * 2)
+    short_new = max(2, math.ceil(long_new * short_src / long_src / 2) * 2)
+    if long_new * short_new > total_pixels:
+        long_new = max(2, total_pixels // short_new // 2 * 2)
+        short_new = max(2, math.ceil(long_new * short_src / long_src / 2) * 2)
+    return (long_new, short_new) if src_w >= src_h else (short_new, long_new)
 
 
 def downscale_image_tensor(image: torch.Tensor, total_pixels: int = 1536 * 1024) -> torch.Tensor:
     """Downscale input image tensor to roughly the specified total pixels.
 
-    Output dimensions are rounded down to even values so that the result is guaranteed to fit within ``total_pixels``
-    and is compatible with codecs that require even dimensions (e.g. yuv420p).
+    Resized output has even dimensions and always fits within ``total_pixels``;
+    an image that already fits is returned unchanged.
     """
     samples = image.movedim(-1, 1)
     dims = _compute_downscale_dims(samples.shape[3], samples.shape[2], int(total_pixels))
@@ -158,6 +175,23 @@ def downscale_image_tensor(image: torch.Tensor, total_pixels: int = 1536 * 1024)
         return image
     new_w, new_h = dims
     return common_upscale(samples, new_w, new_h, "lanczos", "disabled").movedim(1, -1)
+
+
+def downscale_image_tensor_by_max_sides(
+    image: torch.Tensor, *, max_long_side: int, max_short_side: int
+) -> torch.Tensor:
+    """Downscale input image tensor so the long side is at most max_long_side and the short side at most max_short_side."""
+    samples = image.movedim(-1, 1)
+    height, width = samples.shape[2], samples.shape[3]
+    long_side, short_side = max(width, height), min(width, height)
+    scale_by = min(1.0, max_long_side / long_side, max_short_side / short_side)
+    if scale_by >= 1.0:
+        return image
+    long_new = max(1, math.floor(long_side * scale_by))
+    short_new = max(1, min(long_new, math.ceil(short_side * scale_by)))
+    new_width, new_height = (long_new, short_new) if width >= height else (short_new, long_new)
+    s = common_upscale(samples, new_width, new_height, "lanczos", "disabled")
+    return s.movedim(1, -1)
 
 
 def downscale_image_tensor_by_max_side(image: torch.Tensor, *, max_side: int) -> torch.Tensor:
@@ -266,15 +300,13 @@ def audio_tensor_to_contiguous_ndarray(waveform: torch.Tensor) -> np.ndarray:
         waveform: a tensor of shape (1, channels, samples) derived from a Comfy `AUDIO` type.
 
     Returns:
-        Contiguous numpy array of the audio waveform. If the audio was batched,
-            the first item is taken.
+        Contiguous numpy array of the audio waveform.
+
+    Raises:
+        ValueError: If the waveform is not shaped (1, channels, samples).
     """
     if waveform.ndim != 3 or waveform.shape[0] != 1:
         raise ValueError("Expected waveform tensor shape (1, channels, samples)")
-
-    # If batch is > 1, take first item
-    if waveform.shape[0] > 1:
-        waveform = waveform[0]
 
     # Prepare for av: remove batch dim, move to CPU, make contiguous, convert to numpy array
     audio_data_np = waveform.squeeze(0).cpu().contiguous().numpy()
@@ -285,20 +317,21 @@ def audio_tensor_to_contiguous_ndarray(waveform: torch.Tensor) -> np.ndarray:
 
 
 def audio_input_to_mp3(audio: Input.Audio) -> BytesIO:
-    waveform = audio["waveform"].cpu()
+    audio_data_np = audio_tensor_to_contiguous_ndarray(audio["waveform"])
+    sample_rate = int(audio["sample_rate"])
 
     output_buffer = BytesIO()
     output_container = av.open(output_buffer, mode="w", format="mp3")
 
-    out_stream = output_container.add_stream("libmp3lame", rate=audio["sample_rate"])
+    out_stream = output_container.add_stream("libmp3lame", rate=sample_rate)
     out_stream.bit_rate = 320000
 
     frame = av.AudioFrame.from_ndarray(
-        waveform.movedim(0, 1).reshape(1, -1).float().numpy(),
-        format="flt",
-        layout="mono" if waveform.shape[0] == 1 else "stereo",
+        audio_data_np,
+        format="fltp",
+        layout="stereo" if audio_data_np.shape[0] > 1 else "mono",
     )
-    frame.sample_rate = audio["sample_rate"]
+    frame.sample_rate = sample_rate
     frame.pts = 0
     output_container.mux(out_stream.encode(frame))
     output_container.mux(out_stream.encode(None))
@@ -415,14 +448,57 @@ def trim_video(video: Input.Video, duration_sec: float) -> Input.Video:
         raise RuntimeError(f"Failed to trim video: {str(e)}") from e
 
 
-def resize_video_to_pixel_budget(video: Input.Video, total_pixels: int) -> Input.Video:
-    """Downscale a video to fit within ``total_pixels`` (w * h), preserving aspect ratio.
+def downscale_video_to_max_pixels(video: Input.Video, max_pixels: int) -> Input.Video:
+    """Downscale a video to fit within ``max_pixels`` (w * h), preserving aspect ratio.
 
     Returns the original video object untouched when it already fits. Preserves frame rate, duration, and audio.
     Aspect ratio is preserved up to a fraction of a percent (even-dim rounding).
     """
     src_w, src_h = video.get_dimensions()
-    scale_dims = _compute_downscale_dims(src_w, src_h, total_pixels)
+    scale_dims = _compute_downscale_dims(src_w, src_h, max_pixels)
+    if scale_dims is None:
+        return video
+    return _apply_video_scale(video, scale_dims)
+
+
+def _compute_upscale_dims(src_w: int, src_h: int, total_pixels: int) -> tuple[int, int] | None:
+    """Return upscaled (w, h) with even dims meeting at least ``total_pixels``, or None if already large enough.
+
+    Source aspect ratio is preserved; output may drift by a fraction of a percent because both dimensions
+    are rounded up to even values (many codecs require divisible-by-2). The result is guaranteed to be at
+    least ``total_pixels``.
+    """
+    pixels = src_w * src_h
+    if pixels >= total_pixels:
+        return None
+    scale = math.sqrt(total_pixels / pixels)
+    new_w = math.ceil(src_w * scale)
+    new_h = math.ceil(src_h * scale)
+    if new_w % 2:
+        new_w += 1
+    if new_h % 2:
+        new_h += 1
+    return new_w, new_h
+
+
+def upscale_image_tensor_to_min_pixels(image: torch.Tensor, total_pixels: int) -> torch.Tensor:
+    samples = image.movedim(-1, 1)
+    dims = _compute_upscale_dims(samples.shape[3], samples.shape[2], int(total_pixels))
+    if dims is None:
+        return image
+    new_w, new_h = dims
+    return common_upscale(samples, new_w, new_h, "lanczos", "disabled").movedim(1, -1)
+
+
+def upscale_video_to_min_pixels(video: Input.Video, min_pixels: int) -> Input.Video:
+    """Upscale a video to meet at least ``min_pixels`` (w * h), preserving aspect ratio.
+
+    Returns the original video object untouched when it already meets the minimum. Preserves frame rate,
+    duration, and audio. Aspect ratio is preserved up to a fraction of a percent (even-dim rounding).
+    Note: upscaling a low-resolution source does not add real detail; downstream model quality may suffer.
+    """
+    src_w, src_h = video.get_dimensions()
+    scale_dims = _compute_upscale_dims(src_w, src_h, min_pixels)
     if scale_dims is None:
         return video
     return _apply_video_scale(video, scale_dims)
@@ -434,6 +510,11 @@ def _apply_video_scale(video: Input.Video, scale_dims: tuple[int, int]) -> Input
     output_buffer = BytesIO()
     input_container = None
     output_container = None
+
+    # get_stream_source() is untrimmed, so apply the trim window in this same pass.
+    # start_time is normalized (>= 0); duration == 0 means "until the end".
+    start_time, duration = video.get_active_trim_window()
+    trimming = bool(start_time or duration)
 
     try:
         input_source = video.get_stream_source()
@@ -453,16 +534,45 @@ def _apply_video_scale(video: Input.Video, scale_dims: tuple[int, int]) -> Input
                 audio_stream.layout = stream.layout
                 break
 
+        in_video = input_container.streams.video[0]
+        start_pts = int(start_time / in_video.time_base) if trimming else 0
+        end_pts = int((start_time + duration) / in_video.time_base) if duration else None
+        if start_pts:
+            input_container.seek(start_pts, stream=in_video)
+
+        encoded = 0
         for frame in input_container.decode(video=0):
+            if trimming:
+                if frame.pts is None or frame.pts < start_pts:
+                    continue
+                if end_pts is not None and frame.pts >= end_pts:
+                    break
             frame = frame.reformat(width=out_w, height=out_h, format="yuv420p")
+            # Re-wrap as a fresh frame: dropping irregular source timestamps (VFR/AVI/GIF/...)
+            # lets the encoder assign clean ones and avoids mp4 muxer errors.
+            frame = av.VideoFrame.from_ndarray(frame.to_ndarray(format="yuv420p"), format="yuv420p")
             for packet in video_stream.encode(frame):
                 output_container.mux(packet)
+            encoded += 1
         for packet in video_stream.encode():
             output_container.mux(packet)
+
+        if encoded == 0:
+            raise ValueError(
+                f"resize produced no frames (start_time={start_time}, duration={duration} "
+                "selected nothing from the source)"
+            )
 
         if audio_stream is not None:
             input_container.seek(0)
             for audio_frame in input_container.decode(audio=0):
+                if trimming:
+                    if audio_frame.time is None or audio_frame.time < start_time:
+                        continue
+                    if duration and audio_frame.time > start_time + duration:
+                        break
+                # Carry odd audio time bases the mp4 muxer rejects; reset pts, encoder assigns clean ones (MP3-in-AVI)
+                audio_frame.pts = None
                 for packet in audio_stream.encode(audio_frame):
                     output_container.mux(packet)
             for packet in audio_stream.encode():
@@ -479,6 +589,26 @@ def _apply_video_scale(video: Input.Video, scale_dims: tuple[int, int]) -> Input
         if output_container is not None:
             output_container.close()
         raise RuntimeError(f"Failed to resize video: {str(e)}") from e
+
+
+def video_to_images_and_mask(video: Input.Video) -> tuple[Input.Image, Input.Mask]:
+    frames: list[torch.Tensor | None] = []
+    with av.open(video.get_stream_source(), mode="r") as container:
+        stream = container.streams.video[0]
+        decoder = CodecContext.create("libvpx-vp9", "r") if stream.codec_context.name == "vp9" else None
+        for packet in container.demux(stream):
+            for frame in decoder.decode(packet) if decoder is not None else packet.decode():
+                frames.append(torch.from_numpy(frame.to_ndarray(format="rgba")))
+    if not frames:
+        raise ValueError("The video contains no frames.")
+    height, width = frames[0].shape[:2]
+    images = torch.empty((len(frames), height, width, 3))
+    mask = torch.empty((len(frames), height, width))
+    for i, rgba in enumerate(frames):
+        images[i] = rgba[..., :3] / 255.0
+        mask[i] = 1.0 - rgba[..., 3] / 255.0
+        frames[i] = None
+    return images, mask
 
 
 def _f32_pcm(wav: torch.Tensor) -> torch.Tensor:

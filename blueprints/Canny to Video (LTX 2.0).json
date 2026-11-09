@@ -192,7 +192,7 @@
         },
         "revision": 0,
         "config": {},
-        "name": "local-Canny to Video (LTX 2.0)",
+        "name": "Canny to Video (LTX 2.0)",
         "inputNode": {
           "id": -10,
           "bounding": [
@@ -3600,7 +3600,8 @@
         "extra": {
           "workflowRendererVersion": "LG"
         },
-        "category": "Video generation and editing/Canny to video"
+        "category": "Video generation/Conditioned",
+        "description": "Generates video from Canny edge maps using LTX-2, with optional synchronized audio."
       }
     ]
   },

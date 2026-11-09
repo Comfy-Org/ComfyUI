@@ -742,7 +742,8 @@
         "extra": {
           "workflowRendererVersion": "LG"
         },
-        "category": "Image Tools/Color adjust"
+        "category": "Image Tools/Color adjust",
+        "description": "Adjusts black point, white point, and gamma for tonal range control via GPU shader."
       }
     ]
   },

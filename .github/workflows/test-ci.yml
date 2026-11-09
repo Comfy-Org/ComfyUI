@@ -2,18 +2,18 @@
 # Results are reported as checkmarks on the commits, as well as onto https://ci.comfy.org/
 name: Full Comfy CI Workflow Runs
 on:
-  push:
-    branches:
-      - master
-      - release/**
-    paths-ignore:
-      - 'app/**'
-      - 'input/**'
-      - 'output/**'
-      - 'notebooks/**'
-      - 'script_examples/**'
-      - '.github/**'
-      - 'web/**'
+  # push:
+  #   branches:
+  #     - master
+  #     - release/**
+  #   paths-ignore:
+  #     - 'app/**'
+  #     - 'input/**'
+  #     - 'output/**'
+  #     - 'notebooks/**'
+  #     - 'script_examples/**'
+  #     - '.github/**'
+  #     - 'web/**'
   workflow_dispatch:
 
 jobs:

@@ -1,0 +1,2091 @@
+{
+  "revision": 0,
+  "last_node_id": 52,
+  "last_link_id": 0,
+  "nodes": [
+    {
+      "id": 52,
+      "type": "8b66c757-fe2f-4184-91f3-479a19deb565",
+      "pos": [
+        370,
+        1120
+      ],
+      "size": [
+        420,
+        450
+      ],
+      "flags": {
+        "collapsed": false
+      },
+      "order": 0,
+      "mode": 0,
+      "inputs": [
+        {
+          "label": "user_input",
+          "name": "user_input",
+          "type": "STRING",
+          "widget": {
+            "name": "user_input"
+          },
+          "link": null
+        },
+        {
+          "label": "duration",
+          "name": "duration",
+          "type": "FLOAT",
+          "widget": {
+            "name": "duration"
+          },
+          "link": null
+        },
+        {
+          "label": "seed",
+          "name": "seed",
+          "type": "INT",
+          "widget": {
+            "name": "seed"
+          },
+          "link": null
+        },
+        {
+          "label": "use_reprompt",
+          "name": "use_reprompt",
+          "type": "BOOLEAN",
+          "widget": {
+            "name": "use_reprompt"
+          },
+          "link": null
+        },
+        {
+          "label": "reprompt_category",
+          "name": "category",
+          "type": "COMBO",
+          "widget": {
+            "name": "category"
+          },
+          "link": null
+        },
+        {
+          "label": "ckpt_name",
+          "name": "ckpt_name",
+          "type": "COMBO",
+          "widget": {
+            "name": "ckpt_name"
+          },
+          "link": null
+        },
+        {
+          "label": "sa_clip",
+          "name": "sa_clip",
+          "type": "COMBO",
+          "widget": {
+            "name": "sa_clip"
+          },
+          "link": null
+        },
+        {
+          "label": "qwen_clip",
+          "name": "qwen_clip",
+          "type": "COMBO",
+          "widget": {
+            "name": "qwen_clip"
+          },
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "localized_name": "AUDIO",
+          "name": "AUDIO",
+          "type": "AUDIO",
+          "links": []
+        }
+      ],
+      "title": "Audio Generation (Stable Audio 3 Medium)",
+      "properties": {
+        "proxyWidgets": [
+          [
+            "31",
+            "value"
+          ],
+          [
+            "36",
+            "value"
+          ],
+          [
+            "3",
+            "seed"
+          ],
+          [
+            "35",
+            "value"
+          ],
+          [
+            "43",
+            "choice"
+          ],
+          [
+            "25",
+            "ckpt_name"
+          ],
+          [
+            "26",
+            "clip_name"
+          ],
+          [
+            "29",
+            "clip_name"
+          ]
+        ]
+      },
+      "widgets_values": []
+    }
+  ],
+  "links": [],
+  "version": 0.4,
+  "definitions": {
+    "subgraphs": [
+      {
+        "id": "8b66c757-fe2f-4184-91f3-479a19deb565",
+        "version": 1,
+        "state": {
+          "lastGroupId": 8,
+          "lastNodeId": 56,
+          "lastLinkId": 84,
+          "lastRerouteId": 0
+        },
+        "revision": 0,
+        "config": {},
+        "name": "Audio Generation (Stable Audio 3 Medium)",
+        "inputNode": {
+          "id": -10,
+          "bounding": [
+            -810,
+            400,
+            155.953125,
+            208
+          ]
+        },
+        "outputNode": {
+          "id": -20,
+          "bounding": [
+            1750,
+            1041,
+            128,
+            68
+          ]
+        },
+        "inputs": [
+          {
+            "id": "78ae2515-114b-494a-becc-43c7b6c2dc2f",
+            "name": "user_input",
+            "type": "STRING",
+            "linkIds": [
+              68
+            ],
+            "label": "user_input",
+            "pos": [
+              -678.046875,
+              424
+            ]
+          },
+          {
+            "id": "5ca95030-aff4-4544-b545-f0d814e0e49a",
+            "name": "duration",
+            "type": "FLOAT",
+            "linkIds": [
+              82
+            ],
+            "label": "duration",
+            "pos": [
+              -678.046875,
+              444
+            ]
+          },
+          {
+            "id": "718eb10f-da1a-4cea-a9c7-3040f98fe960",
+            "name": "seed",
+            "type": "INT",
+            "linkIds": [
+              76
+            ],
+            "label": "seed",
+            "pos": [
+              -678.046875,
+              464
+            ]
+          },
+          {
+            "id": "dc020099-39e6-4009-9937-408409d71736",
+            "name": "use_reprompt",
+            "type": "BOOLEAN",
+            "linkIds": [
+              83
+            ],
+            "label": "use_reprompt",
+            "pos": [
+              -678.046875,
+              484
+            ]
+          },
+          {
+            "id": "edae394c-6324-44d6-8ac5-d8caa5ae2169",
+            "name": "category",
+            "type": "COMBO",
+            "linkIds": [
+              78
+            ],
+            "label": "reprompt_category",
+            "pos": [
+              -678.046875,
+              504
+            ]
+          },
+          {
+            "id": "be19b747-6a47-4028-9c30-d52f54a712ea",
+            "name": "ckpt_name",
+            "type": "COMBO",
+            "linkIds": [
+              79
+            ],
+            "label": "ckpt_name",
+            "pos": [
+              -678.046875,
+              524
+            ]
+          },
+          {
+            "id": "bc9241a2-bc20-4c5d-8cb1-f2958f598642",
+            "name": "sa_clip",
+            "type": "COMBO",
+            "linkIds": [
+              80
+            ],
+            "label": "sa_clip",
+            "pos": [
+              -678.046875,
+              544
+            ]
+          },
+          {
+            "id": "a33a2468-6d6d-4cb6-937c-3510bf16ebac",
+            "name": "qwen_clip",
+            "type": "COMBO",
+            "linkIds": [
+              81
+            ],
+            "label": "qwen_clip",
+            "pos": [
+              -678.046875,
+              564
+            ]
+          }
+        ],
+        "outputs": [
+          {
+            "id": "bbe988dd-5c03-44fd-a965-c712f9204988",
+            "name": "AUDIO",
+            "type": "AUDIO",
+            "linkIds": [
+              27
+            ],
+            "localized_name": "AUDIO",
+            "pos": [
+              1774,
+              1065
+            ]
+          }
+        ],
+        "widgets": [],
+        "nodes": [
+          {
+            "id": 7,
+            "type": "CLIPTextEncode",
+            "pos": [
+              620,
+              420
+            ],
+            "size": [
+              440,
+              140
+            ],
+            "flags": {},
+            "order": 2,
+            "mode": 0,
+            "inputs": [
+              {
+                "localized_name": "clip",
+                "name": "clip",
+                "type": "CLIP",
+                "link": 35
+              },
+              {
+                "localized_name": "text",
+                "name": "text",
+                "type": "STRING",
+                "widget": {
+                  "name": "text"
+                },
+                "link": null
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "CONDITIONING",
+                "name": "CONDITIONING",
+                "type": "CONDITIONING",
+                "slot_index": 0,
+                "links": [
+                  6
+                ]
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "CLIPTextEncode",
+              "cnr_id": "comfy-core",
+              "ver": "0.21.1",
+              "enableTabs": false,
+              "tabWidth": 65,
+              "tabXOffset": 10,
+              "hasSecondTab": false,
+              "secondTabText": "Send Back",
+              "secondTabOffset": 80,
+              "secondTabWidth": 65
+            },
+            "widgets_values": [
+              ""
+            ],
+            "color": "#223",
+            "bgcolor": "#335"
+          },
+          {
+            "id": 12,
+            "type": "VAEDecodeAudio",
+            "pos": [
+              1450,
+              110
+            ],
+            "size": [
+              230,
+              100
+            ],
+            "flags": {},
+            "order": 4,
+            "mode": 0,
+            "inputs": [
+              {
+                "localized_name": "samples",
+                "name": "samples",
+                "type": "LATENT",
+                "link": 13
+              },
+              {
+                "localized_name": "vae",
+                "name": "vae",
+                "type": "VAE",
+                "link": 39
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "AUDIO",
+                "name": "AUDIO",
+                "type": "AUDIO",
+                "slot_index": 0,
+                "links": [
+                  27
+                ]
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "VAEDecodeAudio",
+              "cnr_id": "comfy-core",
+              "ver": "0.21.1",
+              "enableTabs": false,
+              "tabWidth": 65,
+              "tabXOffset": 10,
+              "hasSecondTab": false,
+              "secondTabText": "Send Back",
+              "secondTabOffset": 80,
+              "secondTabWidth": 65
+            }
+          },
+          {
+            "id": 11,
+            "type": "EmptyLatentAudio",
+            "pos": [
+              630,
+              610
+            ],
+            "size": [
+              430,
+              140
+            ],
+            "flags": {},
+            "order": 3,
+            "mode": 0,
+            "inputs": [
+              {
+                "localized_name": "seconds",
+                "name": "seconds",
+                "type": "FLOAT",
+                "widget": {
+                  "name": "seconds"
+                },
+                "link": 50
+              },
+              {
+                "localized_name": "batch_size",
+                "name": "batch_size",
+                "type": "INT",
+                "widget": {
+                  "name": "batch_size"
+                },
+                "link": null
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "LATENT",
+                "name": "LATENT",
+                "type": "LATENT",
+                "links": [
+                  12
+                ]
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "EmptyLatentAudio",
+              "cnr_id": "comfy-core",
+              "ver": "0.21.1",
+              "enableTabs": false,
+              "tabWidth": 65,
+              "tabXOffset": 10,
+              "hasSecondTab": false,
+              "secondTabText": "Send Back",
+              "secondTabOffset": 80,
+              "secondTabWidth": 65
+            },
+            "widgets_values": [
+              60,
+              1
+            ]
+          },
+          {
+            "id": 3,
+            "type": "KSampler",
+            "pos": [
+              1100,
+              100
+            ],
+            "size": [
+              320,
+              350
+            ],
+            "flags": {},
+            "order": 0,
+            "mode": 0,
+            "inputs": [
+              {
+                "localized_name": "model",
+                "name": "model",
+                "type": "MODEL",
+                "link": 30
+              },
+              {
+                "localized_name": "positive",
+                "name": "positive",
+                "type": "CONDITIONING",
+                "link": 4
+              },
+              {
+                "localized_name": "negative",
+                "name": "negative",
+                "type": "CONDITIONING",
+                "link": 6
+              },
+              {
+                "localized_name": "latent_image",
+                "name": "latent_image",
+                "type": "LATENT",
+                "link": 12
+              },
+              {
+                "localized_name": "seed",
+                "name": "seed",
+                "type": "INT",
+                "widget": {
+                  "name": "seed"
+                },
+                "link": 76
+              },
+              {
+                "localized_name": "steps",
+                "name": "steps",
+                "type": "INT",
+                "widget": {
+                  "name": "steps"
+                },
+                "link": null
+              },
+              {
+                "localized_name": "cfg",
+                "name": "cfg",
+                "type": "FLOAT",
+                "widget": {
+                  "name": "cfg"
+                },
+                "link": null
+              },
+              {
+                "localized_name": "sampler_name",
+                "name": "sampler_name",
+                "type": "COMBO",
+                "widget": {
+                  "name": "sampler_name"
+                },
+                "link": null
+              },
+              {
+                "localized_name": "scheduler",
+                "name": "scheduler",
+                "type": "COMBO",
+                "widget": {
+                  "name": "scheduler"
+                },
+                "link": null
+              },
+              {
+                "localized_name": "denoise",
+                "name": "denoise",
+                "type": "FLOAT",
+                "widget": {
+                  "name": "denoise"
+                },
+                "link": null
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "LATENT",
+                "name": "LATENT",
+                "type": "LATENT",
+                "slot_index": 0,
+                "links": [
+                  13
+                ]
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "KSampler",
+              "cnr_id": "comfy-core",
+              "ver": "0.21.1",
+              "enableTabs": false,
+              "tabWidth": 65,
+              "tabXOffset": 10,
+              "hasSecondTab": false,
+              "secondTabText": "Send Back",
+              "secondTabOffset": 80,
+              "secondTabWidth": 65
+            },
+            "widgets_values": [
+              0,
+              "randomize",
+              8,
+              1,
+              "lcm",
+              "simple",
+              1
+            ]
+          },
+          {
+            "id": 29,
+            "type": "CLIPLoader",
+            "pos": [
+              690,
+              1580
+            ],
+            "size": [
+              430,
+              170
+            ],
+            "flags": {},
+            "order": 8,
+            "mode": 0,
+            "showAdvanced": false,
+            "inputs": [
+              {
+                "localized_name": "clip_name",
+                "name": "clip_name",
+                "type": "COMBO",
+                "widget": {
+                  "name": "clip_name"
+                },
+                "link": 81
+              },
+              {
+                "localized_name": "type",
+                "name": "type",
+                "type": "COMBO",
+                "widget": {
+                  "name": "type"
+                },
+                "link": null
+              },
+              {
+                "localized_name": "device",
+                "name": "device",
+                "shape": 7,
+                "type": "COMBO",
+                "widget": {
+                  "name": "device"
+                },
+                "link": null
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "CLIP",
+                "name": "CLIP",
+                "type": "CLIP",
+                "links": [
+                  40
+                ]
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "CLIPLoader",
+              "cnr_id": "comfy-core",
+              "ver": "0.18.1",
+              "models": [
+                {
+                  "name": "qwen3.5_2b_bf16.safetensors",
+                  "url": "https://huggingface.co/Comfy-Org/Qwen3.5/resolve/main/text_encoders/qwen3.5_2b_bf16.safetensors",
+                  "directory": "text_encoders"
+                }
+              ],
+              "enableTabs": false,
+              "tabWidth": 65,
+              "tabXOffset": 10,
+              "hasSecondTab": false,
+              "secondTabText": "Send Back",
+              "secondTabOffset": 80,
+              "secondTabWidth": 65
+            },
+            "widgets_values": [
+              "qwen3.5_2b_bf16.safetensors",
+              "stable_diffusion",
+              "default"
+            ]
+          },
+          {
+            "id": 6,
+            "type": "CLIPTextEncode",
+            "pos": [
+              610,
+              130
+            ],
+            "size": [
+              450,
+              240
+            ],
+            "flags": {},
+            "order": 1,
+            "mode": 0,
+            "inputs": [
+              {
+                "localized_name": "clip",
+                "name": "clip",
+                "type": "CLIP",
+                "link": 34
+              },
+              {
+                "localized_name": "text",
+                "name": "text",
+                "type": "STRING",
+                "widget": {
+                  "name": "text"
+                },
+                "link": 49
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "CONDITIONING",
+                "name": "CONDITIONING",
+                "type": "CONDITIONING",
+                "slot_index": 0,
+                "links": [
+                  4
+                ]
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "CLIPTextEncode",
+              "cnr_id": "comfy-core",
+              "ver": "0.21.1",
+              "enableTabs": false,
+              "tabWidth": 65,
+              "tabXOffset": 10,
+              "hasSecondTab": false,
+              "secondTabText": "Send Back",
+              "secondTabOffset": 80,
+              "secondTabWidth": 65
+            },
+            "widgets_values": [
+              ""
+            ],
+            "color": "#232",
+            "bgcolor": "#353"
+          },
+          {
+            "id": 34,
+            "type": "ComfySwitchNode",
+            "pos": [
+              210,
+              610
+            ],
+            "size": [
+              270,
+              130
+            ],
+            "flags": {},
+            "order": 10,
+            "mode": 0,
+            "inputs": [
+              {
+                "localized_name": "on_false",
+                "name": "on_false",
+                "type": "*",
+                "link": 47
+              },
+              {
+                "localized_name": "on_true",
+                "name": "on_true",
+                "type": "*",
+                "link": 46
+              },
+              {
+                "localized_name": "switch",
+                "name": "switch",
+                "type": "BOOLEAN",
+                "widget": {
+                  "name": "switch"
+                },
+                "link": 48
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "output",
+                "name": "output",
+                "type": "*",
+                "links": [
+                  49
+                ]
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "ComfySwitchNode"
+            },
+            "widgets_values": [
+              false
+            ]
+          },
+          {
+            "id": 41,
+            "type": "ComfyMathExpression",
+            "pos": [
+              1370,
+              1360
+            ],
+            "size": [
+              230,
+              80
+            ],
+            "flags": {
+              "collapsed": true
+            },
+            "order": 16,
+            "mode": 0,
+            "inputs": [
+              {
+                "label": "a",
+                "localized_name": "values.a",
+                "name": "values.a",
+                "type": "FLOAT,INT,BOOLEAN",
+                "link": 56
+              },
+              {
+                "label": "b",
+                "localized_name": "values.b",
+                "name": "values.b",
+                "shape": 7,
+                "type": "FLOAT,INT,BOOLEAN",
+                "link": null
+              },
+              {
+                "localized_name": "expression",
+                "name": "expression",
+                "type": "STRING",
+                "widget": {
+                  "name": "expression"
+                },
+                "link": null
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "FLOAT",
+                "name": "FLOAT",
+                "type": "FLOAT",
+                "links": null
+              },
+              {
+                "localized_name": "INT",
+                "name": "INT",
+                "type": "INT",
+                "links": [
+                  57
+                ]
+              },
+              {
+                "localized_name": "BOOL",
+                "name": "BOOL",
+                "type": "BOOLEAN",
+                "links": null
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "ComfyMathExpression"
+            },
+            "widgets_values": [
+              "a"
+            ]
+          },
+          {
+            "id": 42,
+            "type": "PreviewAny",
+            "pos": [
+              1370,
+              1310
+            ],
+            "size": [
+              230,
+              40
+            ],
+            "flags": {
+              "collapsed": true
+            },
+            "order": 17,
+            "mode": 0,
+            "inputs": [
+              {
+                "localized_name": "source",
+                "name": "source",
+                "type": "*",
+                "link": 57
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "STRING",
+                "name": "STRING",
+                "type": "STRING",
+                "links": [
+                  58
+                ]
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "PreviewAny"
+            },
+            "widgets_values": [
+              null,
+              null,
+              null
+            ]
+          },
+          {
+            "id": 39,
+            "type": "StringReplace",
+            "pos": [
+              1040,
+              900
+            ],
+            "size": [
+              270,
+              280
+            ],
+            "flags": {},
+            "order": 14,
+            "mode": 0,
+            "inputs": [
+              {
+                "localized_name": "string",
+                "name": "string",
+                "type": "STRING",
+                "widget": {
+                  "name": "string"
+                },
+                "link": 52
+              },
+              {
+                "localized_name": "find",
+                "name": "find",
+                "type": "STRING",
+                "widget": {
+                  "name": "find"
+                },
+                "link": null
+              },
+              {
+                "localized_name": "replace",
+                "name": "replace",
+                "type": "STRING",
+                "widget": {
+                  "name": "replace"
+                },
+                "link": 53
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "STRING",
+                "name": "STRING",
+                "type": "STRING",
+                "links": [
+                  59
+                ]
+              }
+            ],
+            "title": "Text Replace (USER INPUT)",
+            "properties": {
+              "Node name for S&R": "StringReplace"
+            },
+            "widgets_values": [
+              "",
+              "USER_INPUT",
+              ""
+            ]
+          },
+          {
+            "id": 28,
+            "type": "TextGenerate",
+            "pos": [
+              1200,
+              1580
+            ],
+            "size": [
+              430,
+              420
+            ],
+            "flags": {},
+            "order": 7,
+            "mode": 0,
+            "inputs": [
+              {
+                "localized_name": "clip",
+                "name": "clip",
+                "type": "CLIP",
+                "link": 40
+              },
+              {
+                "localized_name": "image",
+                "name": "image",
+                "shape": 7,
+                "type": "IMAGE",
+                "link": null
+              },
+              {
+                "localized_name": "video",
+                "name": "video",
+                "shape": 7,
+                "type": "IMAGE",
+                "link": null
+              },
+              {
+                "localized_name": "audio",
+                "name": "audio",
+                "shape": 7,
+                "type": "AUDIO",
+                "link": null
+              },
+              {
+                "localized_name": "prompt",
+                "name": "prompt",
+                "type": "STRING",
+                "widget": {
+                  "name": "prompt"
+                },
+                "link": 60
+              },
+              {
+                "localized_name": "max_length",
+                "name": "max_length",
+                "type": "INT",
+                "widget": {
+                  "name": "max_length"
+                },
+                "link": null
+              },
+              {
+                "localized_name": "sampling_mode",
+                "name": "sampling_mode",
+                "type": "COMFY_DYNAMICCOMBO_V3",
+                "widget": {
+                  "name": "sampling_mode"
+                },
+                "link": null
+              },
+              {
+                "localized_name": "temperature",
+                "name": "sampling_mode.temperature",
+                "type": "FLOAT",
+                "widget": {
+                  "name": "sampling_mode.temperature"
+                },
+                "link": null
+              },
+              {
+                "localized_name": "top_k",
+                "name": "sampling_mode.top_k",
+                "type": "INT",
+                "widget": {
+                  "name": "sampling_mode.top_k"
+                },
+                "link": null
+              },
+              {
+                "localized_name": "top_p",
+                "name": "sampling_mode.top_p",
+                "type": "FLOAT",
+                "widget": {
+                  "name": "sampling_mode.top_p"
+                },
+                "link": null
+              },
+              {
+                "localized_name": "min_p",
+                "name": "sampling_mode.min_p",
+                "type": "FLOAT",
+                "widget": {
+                  "name": "sampling_mode.min_p"
+                },
+                "link": null
+              },
+              {
+                "localized_name": "repetition_penalty",
+                "name": "sampling_mode.repetition_penalty",
+                "type": "FLOAT",
+                "widget": {
+                  "name": "sampling_mode.repetition_penalty"
+                },
+                "link": null
+              },
+              {
+                "localized_name": "seed",
+                "name": "sampling_mode.seed",
+                "type": "INT",
+                "widget": {
+                  "name": "sampling_mode.seed"
+                },
+                "link": null
+              },
+              {
+                "localized_name": "presence_penalty",
+                "name": "sampling_mode.presence_penalty",
+                "shape": 7,
+                "type": "FLOAT",
+                "widget": {
+                  "name": "sampling_mode.presence_penalty"
+                },
+                "link": null
+              },
+              {
+                "localized_name": "thinking",
+                "name": "thinking",
+                "shape": 7,
+                "type": "BOOLEAN",
+                "widget": {
+                  "name": "thinking"
+                },
+                "link": null
+              },
+              {
+                "localized_name": "use_default_template",
+                "name": "use_default_template",
+                "shape": 7,
+                "type": "BOOLEAN",
+                "widget": {
+                  "name": "use_default_template"
+                },
+                "link": null
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "generated_text",
+                "name": "generated_text",
+                "type": "STRING",
+                "links": [
+                  46,
+                  84
+                ]
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "TextGenerate",
+              "cnr_id": "comfy-core",
+              "ver": "0.18.1",
+              "enableTabs": false,
+              "tabWidth": 65,
+              "tabXOffset": 10,
+              "hasSecondTab": false,
+              "secondTabText": "Send Back",
+              "secondTabOffset": 80,
+              "secondTabWidth": 65
+            },
+            "widgets_values": [
+              "",
+              256,
+              "on",
+              0.7,
+              64,
+              0.95,
+              0.05,
+              1.05,
+              0,
+              0,
+              false,
+              true
+            ]
+          },
+          {
+            "id": 31,
+            "type": "PrimitiveStringMultiline",
+            "pos": [
+              -390,
+              160
+            ],
+            "size": [
+              400,
+              200
+            ],
+            "flags": {},
+            "order": 9,
+            "mode": 0,
+            "inputs": [
+              {
+                "localized_name": "value",
+                "name": "value",
+                "type": "STRING",
+                "widget": {
+                  "name": "value"
+                },
+                "link": 68
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "STRING",
+                "name": "STRING",
+                "type": "STRING",
+                "links": [
+                  47,
+                  53
+                ]
+              }
+            ],
+            "title": "User: short description (USER_INPUT in template)",
+            "properties": {
+              "Node name for S&R": "PrimitiveStringMultiline"
+            },
+            "widgets_values": [
+              ""
+            ]
+          },
+          {
+            "id": 43,
+            "type": "CustomCombo",
+            "pos": [
+              140,
+              910
+            ],
+            "size": [
+              550,
+              320
+            ],
+            "flags": {},
+            "order": 18,
+            "mode": 0,
+            "inputs": [
+              {
+                "localized_name": "choice",
+                "name": "choice",
+                "type": "COMBO",
+                "widget": {
+                  "name": "choice"
+                },
+                "link": 78
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "STRING",
+                "name": "STRING",
+                "type": "STRING",
+                "links": [
+                  65
+                ]
+              },
+              {
+                "localized_name": "INDEX",
+                "name": "INDEX",
+                "type": "INT",
+                "links": null
+              }
+            ],
+            "title": "Custom Combo (Category index)",
+            "properties": {
+              "Node name for S&R": "CustomCombo"
+            },
+            "widgets_values": [
+              "Music",
+              0,
+              "Music",
+              "Instrument",
+              "SFX",
+              "One-shot",
+              ""
+            ]
+          },
+          {
+            "id": 49,
+            "type": "JsonExtractString",
+            "pos": [
+              720,
+              1200
+            ],
+            "size": [
+              300,
+              180
+            ],
+            "flags": {},
+            "order": 19,
+            "mode": 0,
+            "inputs": [
+              {
+                "localized_name": "json_string",
+                "name": "json_string",
+                "type": "STRING",
+                "widget": {
+                  "name": "json_string"
+                },
+                "link": null
+              },
+              {
+                "localized_name": "key",
+                "name": "key",
+                "type": "STRING",
+                "widget": {
+                  "name": "key"
+                },
+                "link": 65
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "STRING",
+                "name": "STRING",
+                "type": "STRING",
+                "links": [
+                  66
+                ]
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "JsonExtractString"
+            },
+            "widgets_values": [
+              "{\n  \"Music\": \"You are an expert musician and musicologist and prompt engineer. Transform the user's input into a detailed, vivid music prompt for a full instrumental track.\\n\\n1. Start with the genre or style and optional adjectives (e.g., upbeat, dreamy, aggressive).\\n2. List the main instruments that define the track.\\n3. Add supporting elements or layers such as pads, harmonics, effects, or field recordings.\\n4. Include rhythm or percussion elements like drums, hi-hats, congas, brushes, or polyrhythms.\\n5. Integrate mood and energy naturally in the sentence (e.g., \\\"creating suspenseful tension\\\" or \\\"bright and uplifting\\\").\\n6. Specify the BPM.\\n7. Specify the track length as an integer in seconds. Use ranges: energetic/dance 120-180s, pop/rock 180-210s, cinematic/ambient 240-300s.\\n8. Combine all elements into one natural, fluid sentence. Avoid semicolons.\\n\\nTemplate:\\nGenre/Style with main instruments, supporting instruments/layers, and rhythm/percussion creating mood/energy. BPM: X. Length: Y seconds\\n\\nExamples:\\n- Jazz ballad with smooth saxophone lead, piano chords, upright bass, brushed drums, and soft strings that swing gently for a warm and cozy evening. BPM: 85. Length: 180 seconds\\n- EDM festival track with pulsing synth leads, plucked arpeggios, layered pads, side-chained bass, punchy kick and snare, and hi-hat rolls creating bright, energetic, and uplifting dance energy. BPM: 128. Length: 150 seconds\\n- Lo-fi hip-hop chill track with mellow electric piano, soft vinyl crackle, subtle synth pads, low-pass filtered drums, percussion loops, and soft plucked bass for a relaxed, dreamy vibe. BPM: 75. Length: 150 seconds\\n- Heavy metal anthem with distorted electric guitars, bass guitar, double bass drums, and cymbal crashes with fast palm-muted riffs creating intense, aggressive energy. BPM: 160. Length: 180 seconds\\n- Melancholic piano piece with soft piano lead, string pads, subtle atmospheric synths, and minimal brush percussion evoking a reflective rainy-day feeling. BPM: 60. Length: 240 seconds\\n- Suspenseful electronic thriller with pulsing bass synth, arpeggiated lead synth, cinematic pads, glitchy percussion, and high string stabs creating dark and tense energy. BPM: 100. Length: 200 seconds\\n- Dreamy ambient soundscape with layered pads, soft bell textures, gentle drones, and wind and water field recordings for ethereal and spacious meditation. BPM: 40. Length: 300 seconds\\n- Fingerpicking acoustic guitar solo with harmonics, subtle reverb, occasional shaker and soft stomp percussion, and soft pad layers for warm intimate storytelling. BPM: 70. Length: 120 seconds\\n- Synthwave 80s retro track with arpeggiated synth leads, analog pads, electric bass, punchy electronic drums, gated reverb snares, and atmospheric FX for nostalgic and vibrant energy. BPM: 110. Length: 180 seconds\\n- Tribal percussion ensemble with congas, djembes, bongos, shakers, and frame drums layered with deep synthetic sub-bass in complex polyrhythms. BPM: 100. Length: 140 seconds\\n- 1920s swing jazz with brass section, upright bass, piano, brushed drums, banjo, clarinet, and soft strings that swing lively for energetic dance vibes. BPM: 110. Length: 180 seconds\\n- Futuristic electronic sci-fi track with pulsing bass synth, evolving lead synths, layered pads, glitch percussion, robotic FX, and sub-bass for tense cinematic energy. BPM: 125. Length: 200 seconds\\n- Ambient underwater soundscape with flowing water textures, soft piano motifs, synth drones, distant bells, and underwater reverb for spacious meditative immersion. BPM: 45. Length: 300 seconds\\n- Horror cinematic track with dissonant strings, eerie piano stabs, cinematic percussion including taiko and low toms, and synth FX producing suspenseful creepy tension. BPM: 90. Length: 240 seconds\\n- Reggae track with offbeat guitar, warm basslines, snare, kick, congas, and horn stabs giving laid-back groovy energy. BPM: 85. Length: 150 seconds\\n- Blues track with soulful electric guitar solos, walking bass, piano, and shuffle drums creating expressive and emotive storytelling. BPM: 90. Length: 180 seconds\\n- Latin salsa with congas, timbales, horns, piano montunos, bass, and layered percussion for vibrant danceable energy. BPM: 120. Length: 210 seconds\\n- Afrobeat track with electric guitar stabs, horns, layered percussion, congas, shakers, bass groove, and synth pads for vibrant rhythmic energy. BPM: 105. Length: 200 seconds\\n- Indie rock track with electric guitar riffs, bass, live drum kit, layered synths, and subtle strings for energetic yet emotional feel. BPM: 110. Length: 180 seconds\\n- Funk groove with slap bass, electric guitar chords, brass stabs, drums, congas, and rhythmic keyboards creating high-energy danceable rhythm. BPM: 105. Length: 180 seconds\\n- Drum and bass track with fast breakbeat drums, deep sub-bass, sharp synth leads, pads, and atmospheric FX for high-energy club motion. BPM: 175. Length: 150 seconds\\n- Dark ambient track with drones, distant bells, low rumbles, soft wind textures, and synth pads producing eerie immersive tension. BPM: 50. Length: 300 seconds\\n- Tropical house track with marimba, steel drums, soft synths, smooth bass, layered percussion, and light piano riffs for sunny chill dance vibes. BPM: 110. Length: 180 seconds\\n- Progressive rock track with electric guitar leads, organ, bass, drum kit, synth layers, and occasional strings for epic layered energy. BPM: 100. Length: 220 seconds\\n- Music box melody with delicate metallic tones and soft resonance, lullaby style, with gentle ambient reverb. BPM: 60. Length: 20 seconds\\n- Soft piano arpeggio with warm felted tone and slow attack, lullaby style, with intimate room ambience. BPM: 60. Length: 30 seconds\\n- Harp gentle plucked pattern with airy resonance, lullaby style, with dreamy reverb tail. BPM: 65. Length: 25 seconds\\n- Acoustic guitar fingerstyle pattern with warm nylon strings and soft dynamics, lullaby style, with subtle room resonance. BPM: 60. Length: 30 seconds\\n- Ambient synth pad with smooth evolving texture and soft harmonics, lullaby style, with wide stereo ambience. BPM: 50. Length: 40 seconds\\n- Early rock piano with walking left-hand bass line, shuffle rhythms, and blues scale improvisations in energetic 1950s boogie-woogie style. BPM: 160. Length: 180 seconds\\n- Trip Hop track with jazzy sampled vibraphone, mid-tempo breakbeat drums, harp, Latin ethnic percussion, and sweeping cinematic strings creating airy, relaxing, soulful lounge vibes. BPM: 90. Length: 180 seconds\\n- Country outlaw cinematic instrumental with blues pedal steel guitar, rustic mandolin, fiddle call-and-response, tape-driven rattly drum kit, autoharp, and soaring accordion solo for raw, emotional southern blues expression. BPM: 85. Length: 200 seconds\\n- Neo Classical track with sweeping string section, elegant horns, and delicate piano creating soothing, hypnotic, modern, soft, and classic mood. BPM: 70. Length: 180 seconds\\n- Art Rock desert track with desolate piano chords, western-themed rhythm guitars, unique lead guitars, rattly vintage drum kit, and supporting bass creating lonely, expansive, beautiful, and strange atmospheres. BPM: 95. Length: 180 seconds\\n- Cinematic Sci-Fi score with dramatic horn section, building marcato strings, gliding bassoon, thunderous cymbals, subdued timpani, and subtle synth drones producing awe-inspiring, uplifting, epic intergalactic energy. BPM: 100. Length: 220 seconds\\n- West Coast Hip Hop instrumental with cascading harp melodies, smooth Rhodes piano chops, vintage boom bap drums, and walking double bass producing raw, street, and soulful block-party vibes. BPM: 92. Length: 180 seconds\\n- Synthwave futuristic track with pulsating synth bass, exciting chords, soaring leads, and reverberating drum machine patterns creating gritty, pounding, and cool energy. BPM: 110. Length: 180 seconds\\n- Breakbeat track with complex percussion, intricate breakbeats, gritty synths, lush pads, and 808 bassline producing fresh, modern, futuristic, and rave-ready energy. BPM: 140. Length: 160 seconds\\n- Lounge Jazz 1960s smooth track with laid-back drums, piano chords, double bass, soft electric piano, subtle flute, and unique percussion creating beautiful, atmospheric, eclectic, retro, and chill vibes. BPM: 85. Length: 180 seconds\\n- Latin Jazz 1950s blissful track with laid-back Latin drums, euphoric piano chords, double bass, orchestral accompaniment, acoustic guitar, and vibraphone producing nostalgic, beautiful, atmospheric, cinematic, and chill mood. BPM: 95. Length: 180 seconds\\n- Acid Jazz 1970s summertime track with smooth electric piano, trippy synth leads, laid-back vintage drum kit, fuzzy electric bass, and uplifting violin producing retro, psychedelic, jazzy, relaxing energy. BPM: 100. Length: 180 seconds\\n- Progressive Soul 1970s track with feel-good piano, psychedelic organ, groovy vintage drum kit with percussion, fuzzy electric bass, and synth strings producing retro, raw, soulful, joyous atmosphere. BPM: 90. Length: 180 seconds\\n- Discotheque 1970s French-inspired track with sultry piano, psychedelic guitars, groovy drum kit, fuzzy electric bass, and melancholic organ producing retro, raw, laid-back, and relaxing mood. BPM: 105. Length: 180 seconds\\n- Soul Jazz 1970s track with expressive saxophone, smooth piano, groovy drum kit, rhythmic upright bass, sweeping strings, and minimal vibraphone producing retro, raw, laid-back, and epic energy. BPM: 95. Length: 180 seconds\\n- Vintage R&B 1970s live studio track with subtle brass, smooth piano, sweeping strings, and minimal drums producing retro, beautiful, uplifting, nostalgic mood. BPM: 85. Length: 180 seconds\\n- 50s Pop track with Latin influence, string section, bold brass, vibraphone, acoustic guitar, flute, ethnic percussion, and brushed drums creating sexy, epic, vintage, retro, melancholic, jazzy, dramatic energy. BPM: 100. Length: 180 seconds\\n- A piece of calm, quiet, mellow, serene music perfect for a peaceful film score, featuring soft modulating piano, ambient sfx and foley, beautiful vibraphone, and subtle synthesizer drones. The mood is cinematic, thoughtful, serene and nostalgic. BPM: 55. Length: 300 seconds\",\n  \"Instrument\": \"You are a music metadata expert. Given an instrument, generate a descriptive prompt for a generative audio model.\\n\\n1. Identify the instrument.\\n2. Add playing style or technique.\\n3. Include details about material, timbre, or texture.\\n4. Add musical style or mood. Specify the genre, context, or emotional character.\\n5. Add spatial or production qualities.\\n6. Specify BPM: Always include a BPM appropriate to the style and context.\\n7. Specify length: Provide an integer in seconds (6–20 s for loops, 20–180 s for stems).\\n\\nExamples:\\n- Synth arpeggio loop with bright detuned oscillators. BPM: 120. Length: 8 seconds\\n- Chord stab loop with sharp percussive attack. BPM: 90. Length: 6 seconds\\n- Guitar muted strum loop with tight rhythmic feel. BPM: 100. Length: 8 seconds\\n- Pluck sequence loop with bright resonant tone. BPM: 128. Length: 10 seconds\\n- Marimba and vibraphone percussive loop with resonant wooden and metallic tones. BPM: 110. Length: 12 seconds\\n- Drum loop with deep muffled kick on beat one, snappy rimshot snare on beats two and four with rolling ghost note fills, and tight closed hi-hats with subtle open accents. BPM: 85. Length: 10 seconds\\n- Drum groove loop with brushed snare swinging on the ride, soft feathered kick on downbeats, and light closed hi-hat taps on the upbeats. BPM: 130. Length: 12 seconds\\n- Kick and hi-hat loop with four-on-the-floor punchy kick, tight closed hi-hats on every eighth note, and a sharp dry snare on beats two and four. BPM: 130. Length: 15 seconds\\n- Vinyl crackle drum loop with warm low-pass filtered kick, dusty snare with tape saturation, and shuffled closed hi-hats with subtle vinyl crackle ambiance. BPM: 80. Length: 10 seconds\\n- Ambient pad loop with evolving texture. BPM: 80. Length: 12 seconds\\n- Melodic synth bass groove loop with pumping sidechain feel. BPM: 122. Length: 10 seconds\\n- Melodic Bass slap and pop rhythm loop. BPM: 100. Length: 8 seconds\\n- Acoustic bass walking line loop with natural wooden resonance. BPM: 120. Length: 12 seconds\\n- String pizzicato motif loop, suspenseful, with tight string texture. BPM: 90. Length: 8 seconds\\n- Brass staccato riff loop with sharp bright attack. BPM: 130. Length: 10 seconds\\n- Flute airy melodic loop with wooden headjoint resonance. BPM: 100. Length: 6 seconds\\n- Pan flute ambient loop with breathy timbre. BPM: 75. Length: 8 seconds\\n- Clarinet riff loop with warm smooth reed tone. BPM: 120. Length: 10 seconds\\n- Oboe motif loop, orchestral, with rich double reed resonance. BPM: 80. Length: 8 seconds\\n- Recorder Renaissance motif loop with soft wooden timbre. BPM: 100. Length: 6 seconds\\n- Electric sitar riff loop with buzzing resonant tone. BPM: 90. Length: 10 seconds\\n- Koto plucked motif loop with resonant wooden strings. BPM: 90. Length: 8 seconds\\n- Shamisen folk melody loop with percussive twang. BPM: 100. Length: 8 seconds\\n- Banjo fingerpicking loop with metallic string resonance. BPM: 110. Length: 10 seconds\\n- Mandolin tremolo loop with crisp wooden body tone. BPM: 120. Length: 10 seconds\\n- Acoustic guitar chord vamp loop with natural room resonance. BPM: 110. Length: 12 seconds\\n- Nylon string guitar arpeggio loop with warm, soft timbre. BPM: 90. Length: 15 seconds\\n- Electric guitar riff loop with driven distorted tone. BPM: 130. Length: 10 seconds\\n- Slide guitar melody loop with warm resonant glide. BPM: 100. Length: 12 seconds\\n- Steel guitar slide loop with bright pedal steel tone. BPM: 95. Length: 12 seconds\\n- Harpsichord arpeggio loop with crisp plucked attack. BPM: 120. Length: 10 seconds\\n- Rhodes chord vamp loop with warm electric piano tone. BPM: 100. Length: 12 seconds\\n- Clavinet funky rhythm loop. BPM: 105. Length: 10 seconds\\n- Organ chord vamp loop with full drawbar warmth. BPM: 90. Length: 12 seconds\\n- Drum loop with booming 808 kick on beat one, crisp snare on beat three, and rapid triplet hi-hat rolls with open hat accents for aggressive high-energy feel. BPM: 140. Length: 8 seconds\\n- Breakbeat drum loop with chopped Amen-style snare flurries, driving kick on the one, fast sixteenth-note closed hi-hats, and syncopated open hat accents. BPM: 170. Length: 10 seconds\\n- Glitch percussion loop with stuttered kick transients, randomised snare hits processed with bit-crushing, and erratic hi-hat patterns with pitch-shifted metallic ticks. BPM: 120. Length: 12 seconds\\n- Metallic hits loop with distorted kick impacts, processed metal-plate snare slams, and grinding hi-hat noise bursts for aggressive mechanical texture. BPM: 120. Length: 10 seconds\\n- Timpani hits loop, cinematic, with deep resonant kick-like timpani strikes on beat one, rolling snare-style timpani fills, and no hi-hats for a grand orchestral feel. BPM: 70. Length: 8 seconds\\n- Snare roll loop, dramatic, with accelerating snare drum rolls building from soft to crashing, deep supporting kick pulses, and no hi-hats for maximum impact. BPM: 100. Length: 8 seconds\\n- Accordion motif loop with bright reedy bellows tone. BPM: 100. Length: 10 seconds\\n- Harmonica blues riff loop with expressive reed timbre. BPM: 90. Length: 10 seconds\\n- Trombone riff loop with warm sliding brass tone. BPM: 120. Length: 10 seconds\\n- French horn melodic loop, cinematic. BPM: 80. Length: 12 seconds\\n- Soprano sax ballad loop. BPM: 70. Length: 12 seconds\\n- Alto sax bebop riff loop. BPM: 200. Length: 10 seconds\\n- Electric violin melodic loop with reverb. BPM: 90. Length: 10 seconds\\n- String pad loop with cinematic texture. BPM: 70. Length: 15 seconds\\n- Granular synth evolving texture loop. BPM: 90. Length: 15 seconds\\n- Piano motif loop with soft felt hammer tone. BPM: 80. Length: 10 seconds\\n- Pad and synth loop with lush detuned shimmer. BPM: 85. Length: 12 seconds\\n- Synth lead loop with sidechain pumping compression. BPM: 128. Length: 10 seconds\\n- Analog synth bassline loop with deep warm low-end. BPM: 122. Length: 12 seconds\\n- FM synth lead motif loop with bright metallic shimmer. BPM: 110. Length: 10 seconds\\n- Bass groove loop with tight rhythmic two-bar pattern. BPM: 100. Length: 16 seconds\\n- Acoustic guitar fingerstyle motif loop with warm wood resonance. BPM: 90. Length: 45 seconds\\n- Sombre acoustic guitar motif loop with cavernous reverb, delicate fingerpicking, and expressive melancholic tone. BPM: 70. Length: 45 seconds\\n- Electric guitar rock riff motif loop. BPM: 130. Length: 40 seconds\\n- Vintage electric guitar motif loop, live-recorded in a vintage studio, with expressive and dynamic solo performance. BPM: 90. Length: 40 seconds\\n- Piano chord progression motif loop with rich harmonic movement. BPM: 120. Length: 60 seconds\\n- String ensemble cinematic motif loop with rich wooden resonance. BPM: 80. Length: 120 seconds\\n- Brass ensemble cinematic motif loop with bright metallic timbre. BPM: 90. Length: 90 seconds\\n- Ethnic percussion ensemble motif loop with deep resonant djembe kick tones, slapped snare-like rim hits on congas, and layered shakers and bells providing hi-hat-like rhythmic texture with polyrhythmic patterns. BPM: 100. Length: 90 seconds\\n- Synth ambient motif loop with evolving textures. BPM: 80. Length: 180 seconds\\n- Motif loop with warm dusty vinyl crackle and tape saturation. BPM: 80. Length: 60 seconds\\n- Synth lead and bass motif loop with bright punchy energy. BPM: 128. Length: 90 seconds\\n- Funk band motif loop: bass, drums, guitar. BPM: 100. Length: 90 seconds\\n- Ethnic flute motif for cinematic use. BPM: 80. Length: 30 seconds\\n- Steel drum melodic motif loop with bright metallic resonance. BPM: 110. Length: 20 seconds\\n- Marimba percussive motif loop with resonant wooden tone. BPM: 100. Length: 20 seconds\\n- Vibraphone melodic motif loop with metallic shimmer. BPM: 90. Length: 25 seconds\\n- Piano cinematic motif loop with resonant wooden tone. BPM: 80. Length: 30 seconds\\n- Violin expressive cinematic motif loop with rich wooden resonance. BPM: 75. Length: 25 seconds\\n- Cello expressive motif loop with deep wooden resonance. BPM: 70. Length: 30 seconds\\n- Trumpet expressive motif loop with brassy overtones. BPM: 100. Length: 25 seconds\\n- Sax expressive motif loop with warm reed timbre. BPM: 95. Length: 25 seconds\\n- Ethnic drum ensemble motif loop with booming natural-skin bass drum kicks, sharp hand-slap snare accents on djembes and talking drums, and layered wooden and metal percussion providing rhythmic hi-hat-like patterns. BPM: 95. Length: 30 seconds\\n- Ambient drone motif loop. BPM: 60. Length: 180 seconds\\n- Orchestral tension motif loop. BPM: 90. Length: 150 seconds\\n- Electronic track motif loop with drums, bass, synth. BPM: 128. Length: 180 seconds\",\n  \"SFX\": \"You are a professional sound design expert. Convert the user's input into a precise, vivid sound effects description suitable for generative audio models.\\n\\nDescribe clearly:\\n- Sound source\\n- Physical character (texture, timbre, material: metal, wood, glass, concrete, etc.)\\n- Spatial qualities (indoor/outdoor, cave/open field/underwater, dry/reverberant, close-up/distant, echoing/muffled)\\n- Temporal evolution (attack, decay, movement, transitions over time)\\n- Include motion or spatial movement if applicable (passing, approaching, stereo movement)\\n\\nAudio length rules:\\n- Very short sounds (impacts, clicks, gunshots): 1–3 seconds\\n- Medium actions (footsteps, object movement, transitions): 3–6 seconds\\n- Ambience / environments: 6–15 seconds\\n- Always append: Length: X seconds (integer only, no decimals).\\n\\nOutput constraints:\\n- Length: 1–2 dense sentences maximum\\n- Output ONLY the final rewritten prompt\\n- No explanations, no formatting, no quotes\\n- Use concise but dense technical language\\n- Focus strictly on sound effects or ambience\\n- Always append: Length: X seconds (integer only, no decimals).\\n\\nQuality guidelines:\\n- Be specific and avoid vague terms\\n- Prioritize clarity and realism\\n- Combine elements into one coherent scene\\n- Avoid redundancy\\n\\nExamples:\\n- Heavy rain hitting a metal roof during a thunderstorm, distant thunder rumbles, stereo, realistic ambience. Length: 45 seconds\\n- Quiet forest at dawn with birds chirping, soft wind through leaves, distant stream flowing. Length: 60 seconds\\n- Busy city street at night, cars passing, muffled conversations, occasional horn, urban ambience. Length: 50 seconds\\n- Ocean waves crashing against rocky cliffs, strong wind, dramatic and cinematic. Length: 70 seconds\\n- Wooden door creaking open slowly in an old house, echoing interior, eerie tone. Length: 3 seconds\\n- Glass bottle shattering on concrete, sharp impact, scattered fragments. Length: 2 seconds\\n- Footsteps on gravel, steady walking pace, close perspective. Length: 8 seconds\\n- Typing rapidly on a mechanical keyboard, crisp tactile clicks. Length: 5 seconds\\n- Punch impact with deep bass hit, cinematic trailer style. Length: 2 seconds\\n- Car speeding past at high velocity, doppler effect, realistic whoosh. Length: 3 seconds\\n- Object falling from height and hitting ground with a heavy thud. Length: 2 seconds\\n- Sword swing whooshing through air, fast motion, clean metallic tone. Length: 2 seconds\\n- Futuristic laser blast, clean energy pulse, high-tech sound design. Length: 1 seconds\\n- Spaceship engine humming, low frequency rumble, interior perspective. Length: 90 seconds\\n- Magical spell casting, shimmering particles, rising tonal energy. Length: 8 seconds\\n- Teleportation effect, glitchy digital distortion with a soft whoosh. Length: 5 seconds\\n- Dark eerie drone with distant whispers, creepy, slow build tension. Length: 120 seconds\\n- Sudden horror jump scare sting, sharp violin hit, cinematic. Length: 1 second\\n- Metal scraping slowly in a dark tunnel, echoing and ominous. Length: 20 seconds\\n- Explosion with debris scattering, deep bass, cinematic realism. Length: 4 seconds\\n- Building collapsing, rumbling concrete, dust and debris falling. Length: 25 seconds\\n- Fire crackling intensely, wood burning, close-up detail. Length: 80 seconds\\n- Gunshot in a large empty warehouse, loud echo decay. Length: 2 seconds\\n- Retro arcade coin insert sound, 8-bit style. Length: 1 second\\n- Level up chime, bright, rewarding, fantasy RPG style. Length: 2 seconds\\n- Error buzzer, short, digital, UI feedback. Length: 1 second\\n- Menu navigation clicks, soft futuristic interface sounds. Length: 3 seconds\\n- Layered soundscape: rain, thunder, footsteps, and distant sirens all blending naturally. Length: 90 seconds\\n- Rapid sequence of three impacts: metal hit, glass break, wood crack, spaced evenly. Length: 4 seconds\\n- Sound moving from left to right stereo field: passing motorcycle. Length: 5 seconds\\n- Close vs far perspective transition: footsteps approaching then fading away. Length: 6 seconds\\n- Tape stop sub drop, a massive sub-bass note that mimics a vinyl record or tape machine being turned off, the pitch and speed drop simultaneously, causing the high-end harmonics to smear and thicken as the sound grinds to a halt at a sub-sonic frequency. Length: 11 seconds\\n- Gravel and leaves footsteps, the sound of a hard boot stepping onto dry leaves or gravel, crisp and natural with detailed texture. Length: 11 seconds\\n- Ghostship moan, a massive, deep wooden groan with a low-frequency moan, like heavy timber under immense structural tension, swaying slowly, processed with long, dark wooden room reverb for a sense of scale. Length: 11 seconds\\n- Bicycle chain, a continuous metallic whirring sound of a chain moving over sprockets, with individual teeth catching the links, processed with resonant band-pass filter to emphasize metallic singing. Length: 11 seconds\\n- Warp drive, a sound that starts with a massive suck-back of ambient noise, followed by a supersonic crack and high-pitched zing that disappears into the distance, giving the sense of stretching space-time. Length: 11 seconds\\n- Ice cubes, high-pitched musical clinking of hard ice hitting a thin glass, bright resonant ring with subtle liquid sloshing around the edges. Length: 11 seconds\\n- Paper shuffle, the sound of a thick stack of heavy bond paper being squared up on a desk, dry papery thud with a quick fanning sound as air moves between the pages. Length: 11 seconds\\n- Drawer slam, a blunt, powerful thud made by slamming a wooden desk drawer shut, pronounced low-mid body, slightly distorted for aggressive character. Length: 3 seconds\",\n  \"One-shot\": \"You are a music metadata expert. Given an instrument or sound, generate a descriptive prompt for a short, isolated one-shot audio sample for music production.\\n\\n1. Identify the instrument or sound source.\\n2. Describe the playing technique or hit type (e.g., pluck, slam, tap, stab).\\n3. Include details about material, timbre, or texture.\\n4. Add spatial or production qualities (dry/wet, room, close-mic).\\n5. Specify length: short integer in seconds (1–11 s).\\n\\nExamples:\\n- Piano key hit with bright percussive attack and resonant wooden body. Length: 2 seconds\\n- Kick drum punchy low-end hit with warm skin resonance. Length: 2 seconds\\n- Snare drum rimshot accent with crisp snare wires. Length: 2 seconds\\n- Acoustic guitar fingerstyle note with warm spruce tone. Length: 3 seconds\\n- Bass pluck with jazzy tone and resonant wooden body. Length: 3 seconds\\n- Electric guitar power chord with distortion. Length: 3 seconds\\n- Metallic glitch percussion hit with sharp metallic texture. Length: 2 seconds\\n- Tabla resonant tone hit with natural skin timbre. Length: 2 seconds\\n- Djembe slap accent with dry wooden resonance. Length: 2 seconds\\n- Synth stab with reverb tail. Length: 3 seconds\\n- Violin expressive note with vibrato and rich wooden resonance. Length: 3 seconds\\n- Cello legato note, cinematic, with warm resonant body. Length: 3 seconds\\n- Trumpet bright accent with slightly brassy overtones. Length: 2 seconds\\n- Melodic saxophone jazz riff with smooth reed timbre and a slight vibrato bend. Length: 3 seconds\\n- Harp pluck with airy tone and resonant strings. Length: 2 seconds\\n- Glockenspiel bell-like note with bright metallic clarity. Length: 2 seconds\\n- Metallic clang sound design hit. Length: 2 seconds\\n- Granular texture hit. Length: 3 seconds\\n- Reversed piano hit. Length: 2 seconds\\n- Synth riser effect. Length: 6 seconds\\n- Percussion impact hit. Length: 2 seconds\\n- Cinematic hit. Length: 2 seconds\\n- Dry clap, a crisp, natural single hand clap recorded in a dead room with an extremely sharp transient and no room reflections. Length: 1 second\\n- Studio hat, a classic, natural recording of 14-inch hi-hats played tightly closed, zero ring, very fast decay. Length: 1 second\\n- Disco open hat, bright 14-inch open hi-hat with long, shimmering decay, perfect for disco or dance grooves. Length: 1 second\\n- Pillow kick, acoustic kick drum muffled with a heavy blanket, producing a short, dry \\\"thump\\\" with almost zero resonance. Length: 1 second\\n- Short 808, punchy 808 kick with sharp, distorted transient and fast-decaying sub-tail. Length: 1 second\\n- Egg shaker, classic plastic egg shaker recorded with a small-diaphragm condenser mic, producing a light, consistent \\\"tick\\\" with very short sustain. Length: 1 second\\n- African drums, dynamic African drums and percussion ensemble with natural acoustic textures. Length: 3 seconds\\n- Latin drums, dynamic Latin drums and percussion ensemble featuring authentic rhythmic patterns. Length: 3 seconds\\n- String quartet, euphoric string quartet with dynamic and emotional playing, full of expressive harmonies and movement. Length: 3 seconds\\n- Piano, nostalgic, atmospheric piano piece with dynamic and emotional performance, intimate and resonant. Length: 3 seconds\\n- Analogue drift pad, warm polyphonic pad with three detuned oscillators (saw + triangle), subtle pitch drift, and lush bucket-brigade chorus for wide, nostalgic stereo image. Length: 11 seconds\\n- Phase distortion bass, Casio CZ-style phase-distorted sine wave warped into a jagged sawtooth for retro synth bass tone. Length: 11 seconds\\n- Vibrato saxophone, bright lyrical alto sax with fast fluttery vibrato, reedy vintage tone, captured with ribbon mic for warm nostalgic sound. Length: 11 seconds\\n- Lofi upright bass, upright bass recorded with ribbon mic in a wooden room, natural air with slightly boxy resonance, tape-saturated for dusty 1950s jazz feel. Length: 2 seconds\"\n}",
+              "Music"
+            ]
+          },
+          {
+            "id": 40,
+            "type": "StringReplace",
+            "pos": [
+              1350,
+              900
+            ],
+            "size": [
+              260,
+              280
+            ],
+            "flags": {},
+            "order": 15,
+            "mode": 0,
+            "inputs": [
+              {
+                "localized_name": "string",
+                "name": "string",
+                "type": "STRING",
+                "widget": {
+                  "name": "string"
+                },
+                "link": 59
+              },
+              {
+                "localized_name": "find",
+                "name": "find",
+                "type": "STRING",
+                "widget": {
+                  "name": "find"
+                },
+                "link": null
+              },
+              {
+                "localized_name": "replace",
+                "name": "replace",
+                "type": "STRING",
+                "widget": {
+                  "name": "replace"
+                },
+                "link": 58
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "STRING",
+                "name": "STRING",
+                "type": "STRING",
+                "links": [
+                  60
+                ]
+              }
+            ],
+            "title": "Text Replace (AUDIO LENGTH)",
+            "properties": {
+              "Node name for S&R": "StringReplace"
+            },
+            "widgets_values": [
+              "",
+              "AUDIO_LENGTH",
+              ""
+            ]
+          },
+          {
+            "id": 38,
+            "type": "StringReplace",
+            "pos": [
+              720,
+              900
+            ],
+            "size": [
+              290,
+              280
+            ],
+            "flags": {},
+            "order": 13,
+            "mode": 0,
+            "inputs": [
+              {
+                "localized_name": "string",
+                "name": "string",
+                "type": "STRING",
+                "widget": {
+                  "name": "string"
+                },
+                "link": null
+              },
+              {
+                "localized_name": "find",
+                "name": "find",
+                "type": "STRING",
+                "widget": {
+                  "name": "find"
+                },
+                "link": null
+              },
+              {
+                "localized_name": "replace",
+                "name": "replace",
+                "type": "STRING",
+                "widget": {
+                  "name": "replace"
+                },
+                "link": 66
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "STRING",
+                "name": "STRING",
+                "type": "STRING",
+                "links": [
+                  52
+                ]
+              }
+            ],
+            "title": "Text Replace (PROMPT TEMPLATE)",
+            "properties": {
+              "Node name for S&R": "StringReplace"
+            },
+            "widgets_values": [
+              "SYSTEM_PROMPTS\n\nInput: USER_INPUT\nTarget audio length: AUDIO_LENGTH seconds.\nOutput:",
+              "SYSTEM_PROMPTS",
+              ""
+            ]
+          },
+          {
+            "id": 35,
+            "type": "PrimitiveBoolean",
+            "pos": [
+              -390,
+              570
+            ],
+            "size": [
+              400,
+              100
+            ],
+            "flags": {},
+            "order": 11,
+            "mode": 0,
+            "inputs": [
+              {
+                "localized_name": "value",
+                "name": "value",
+                "type": "BOOLEAN",
+                "widget": {
+                  "name": "value"
+                },
+                "link": 83
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "BOOLEAN",
+                "name": "BOOLEAN",
+                "type": "BOOLEAN",
+                "links": [
+                  48
+                ]
+              }
+            ],
+            "title": "Boolean (Enable_Reprompt)",
+            "properties": {
+              "Node name for S&R": "PrimitiveBoolean"
+            },
+            "widgets_values": [
+              true
+            ]
+          },
+          {
+            "id": 36,
+            "type": "PrimitiveFloat",
+            "pos": [
+              -390,
+              410
+            ],
+            "size": [
+              400,
+              110
+            ],
+            "flags": {},
+            "order": 12,
+            "mode": 0,
+            "inputs": [
+              {
+                "localized_name": "value",
+                "name": "value",
+                "type": "FLOAT",
+                "widget": {
+                  "name": "value"
+                },
+                "link": 82
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "FLOAT",
+                "name": "FLOAT",
+                "type": "FLOAT",
+                "links": [
+                  50,
+                  56
+                ]
+              }
+            ],
+            "title": "Float (Duration)",
+            "properties": {
+              "Node name for S&R": "PrimitiveFloat"
+            },
+            "widgets_values": [
+              150
+            ]
+          },
+          {
+            "id": 25,
+            "type": "CheckpointLoaderSimple",
+            "pos": [
+              100,
+              130
+            ],
+            "size": [
+              440,
+              190
+            ],
+            "flags": {},
+            "order": 5,
+            "mode": 0,
+            "inputs": [
+              {
+                "localized_name": "ckpt_name",
+                "name": "ckpt_name",
+                "type": "COMBO",
+                "widget": {
+                  "name": "ckpt_name"
+                },
+                "link": 79
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "MODEL",
+                "name": "MODEL",
+                "type": "MODEL",
+                "links": [
+                  30
+                ]
+              },
+              {
+                "localized_name": "CLIP",
+                "name": "CLIP",
+                "type": "CLIP",
+                "links": []
+              },
+              {
+                "localized_name": "VAE",
+                "name": "VAE",
+                "type": "VAE",
+                "links": [
+                  39
+                ]
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "CheckpointLoaderSimple",
+              "cnr_id": "comfy-core",
+              "ver": "0.21.1",
+              "models": [
+                {
+                  "name": "stable_audio_3_medium.safetensors",
+                  "url": "https://huggingface.co/Comfy-Org/stable-audio-3/resolve/main/checkpoints/stable_audio_3_medium.safetensors",
+                  "directory": "checkpoints"
+                }
+              ],
+              "enableTabs": false,
+              "tabWidth": 65,
+              "tabXOffset": 10,
+              "hasSecondTab": false,
+              "secondTabText": "Send Back",
+              "secondTabOffset": 80,
+              "secondTabWidth": 65
+            },
+            "widgets_values": [
+              "stable_audio_3_medium.safetensors"
+            ]
+          },
+          {
+            "id": 26,
+            "type": "CLIPLoader",
+            "pos": [
+              100,
+              390
+            ],
+            "size": [
+              440,
+              170
+            ],
+            "flags": {},
+            "order": 6,
+            "mode": 0,
+            "inputs": [
+              {
+                "localized_name": "clip_name",
+                "name": "clip_name",
+                "type": "COMBO",
+                "widget": {
+                  "name": "clip_name"
+                },
+                "link": 80
+              },
+              {
+                "localized_name": "type",
+                "name": "type",
+                "type": "COMBO",
+                "widget": {
+                  "name": "type"
+                },
+                "link": null
+              },
+              {
+                "localized_name": "device",
+                "name": "device",
+                "shape": 7,
+                "type": "COMBO",
+                "widget": {
+                  "name": "device"
+                },
+                "link": null
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "CLIP",
+                "name": "CLIP",
+                "type": "CLIP",
+                "links": [
+                  34,
+                  35
+                ]
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "CLIPLoader",
+              "cnr_id": "comfy-core",
+              "ver": "0.21.1",
+              "models": [
+                {
+                  "name": "t5gemma_b_b_ul2.safetensors",
+                  "url": "https://huggingface.co/Comfy-Org/stable-audio-3/resolve/main/text_encoders/t5gemma_b_b_ul2.safetensors",
+                  "directory": "text_encoders"
+                }
+              ],
+              "enableTabs": false,
+              "tabWidth": 65,
+              "tabXOffset": 10,
+              "hasSecondTab": false,
+              "secondTabText": "Send Back",
+              "secondTabOffset": 80,
+              "secondTabWidth": 65
+            },
+            "widgets_values": [
+              "t5gemma_b_b_ul2.safetensors",
+              "stable_audio",
+              "default"
+            ]
+          },
+          {
+            "id": 54,
+            "type": "PreviewAny",
+            "pos": [
+              1720,
+              1580
+            ],
+            "size": [
+              420,
+              550
+            ],
+            "flags": {},
+            "order": 20,
+            "mode": 4,
+            "inputs": [
+              {
+                "localized_name": "source",
+                "name": "source",
+                "type": "*",
+                "link": 84
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "STRING",
+                "name": "STRING",
+                "type": "STRING",
+                "links": null
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "PreviewAny"
+            },
+            "widgets_values": [
+              null,
+              null,
+              null
+            ]
+          }
+        ],
+        "groups": [
+          {
+            "id": 1,
+            "title": "Loaders: checkpoint & CLIP",
+            "bounding": [
+              80,
+              50,
+              485.721654232725,
+              527.2848777754299
+            ],
+            "color": "#3f789e",
+            "flags": {}
+          },
+          {
+            "id": 2,
+            "title": "CLIP encode: conditioning",
+            "bounding": [
+              600,
+              60,
+              470,
+              510
+            ],
+            "color": "#3f789e",
+            "flags": {}
+          },
+          {
+            "id": 3,
+            "title": "User inputs: prompt & duration",
+            "bounding": [
+              -400,
+              10,
+              430,
+              740
+            ],
+            "color": "#3f789e",
+            "flags": {}
+          },
+          {
+            "id": 7,
+            "title": "Reprompt: full branch (template + LLM)",
+            "bounding": [
+              60,
+              780,
+              1630,
+              1360
+            ],
+            "color": "#444",
+            "flags": {}
+          },
+          {
+            "id": 4,
+            "title": "Reprompt: JSON extract & template fills",
+            "bounding": [
+              120,
+              820,
+              1520,
+              650
+            ],
+            "color": "#444",
+            "flags": {}
+          },
+          {
+            "id": 5,
+            "title": "Helpers: duration to string",
+            "bounding": [
+              1340,
+              1180,
+              280,
+              250
+            ],
+            "color": "#444",
+            "flags": {}
+          },
+          {
+            "id": 6,
+            "title": "Reprompt: Qwen TextGenerate",
+            "bounding": [
+              680,
+              1510,
+              960,
+              614.65625
+            ],
+            "color": "#444",
+            "flags": {}
+          },
+          {
+            "id": 8,
+            "title": "Audio generation: Stable Audio",
+            "bounding": [
+              60,
+              10,
+              1627.3616782294932,
+              737.0545987464304
+            ],
+            "color": "#3f789e",
+            "flags": {}
+          }
+        ],
+        "links": [
+          {
+            "id": 35,
+            "origin_id": 26,
+            "origin_slot": 0,
+            "target_id": 7,
+            "target_slot": 0,
+            "type": "CLIP"
+          },
+          {
+            "id": 13,
+            "origin_id": 3,
+            "origin_slot": 0,
+            "target_id": 12,
+            "target_slot": 0,
+            "type": "LATENT"
+          },
+          {
+            "id": 39,
+            "origin_id": 25,
+            "origin_slot": 2,
+            "target_id": 12,
+            "target_slot": 1,
+            "type": "VAE"
+          },
+          {
+            "id": 50,
+            "origin_id": 36,
+            "origin_slot": 0,
+            "target_id": 11,
+            "target_slot": 0,
+            "type": "FLOAT"
+          },
+          {
+            "id": 30,
+            "origin_id": 25,
+            "origin_slot": 0,
+            "target_id": 3,
+            "target_slot": 0,
+            "type": "MODEL"
+          },
+          {
+            "id": 4,
+            "origin_id": 6,
+            "origin_slot": 0,
+            "target_id": 3,
+            "target_slot": 1,
+            "type": "CONDITIONING"
+          },
+          {
+            "id": 6,
+            "origin_id": 7,
+            "origin_slot": 0,
+            "target_id": 3,
+            "target_slot": 2,
+            "type": "CONDITIONING"
+          },
+          {
+            "id": 12,
+            "origin_id": 11,
+            "origin_slot": 0,
+            "target_id": 3,
+            "target_slot": 3,
+            "type": "LATENT"
+          },
+          {
+            "id": 34,
+            "origin_id": 26,
+            "origin_slot": 0,
+            "target_id": 6,
+            "target_slot": 0,
+            "type": "CLIP"
+          },
+          {
+            "id": 49,
+            "origin_id": 34,
+            "origin_slot": 0,
+            "target_id": 6,
+            "target_slot": 1,
+            "type": "STRING"
+          },
+          {
+            "id": 47,
+            "origin_id": 31,
+            "origin_slot": 0,
+            "target_id": 34,
+            "target_slot": 0,
+            "type": "STRING"
+          },
+          {
+            "id": 46,
+            "origin_id": 28,
+            "origin_slot": 0,
+            "target_id": 34,
+            "target_slot": 1,
+            "type": "STRING"
+          },
+          {
+            "id": 48,
+            "origin_id": 35,
+            "origin_slot": 0,
+            "target_id": 34,
+            "target_slot": 2,
+            "type": "BOOLEAN"
+          },
+          {
+            "id": 56,
+            "origin_id": 36,
+            "origin_slot": 0,
+            "target_id": 41,
+            "target_slot": 0,
+            "type": "FLOAT"
+          },
+          {
+            "id": 57,
+            "origin_id": 41,
+            "origin_slot": 1,
+            "target_id": 42,
+            "target_slot": 0,
+            "type": "INT"
+          },
+          {
+            "id": 52,
+            "origin_id": 38,
+            "origin_slot": 0,
+            "target_id": 39,
+            "target_slot": 0,
+            "type": "STRING"
+          },
+          {
+            "id": 53,
+            "origin_id": 31,
+            "origin_slot": 0,
+            "target_id": 39,
+            "target_slot": 2,
+            "type": "STRING"
+          },
+          {
+            "id": 40,
+            "origin_id": 29,
+            "origin_slot": 0,
+            "target_id": 28,
+            "target_slot": 0,
+            "type": "CLIP"
+          },
+          {
+            "id": 60,
+            "origin_id": 40,
+            "origin_slot": 0,
+            "target_id": 28,
+            "target_slot": 4,
+            "type": "STRING"
+          },
+          {
+            "id": 65,
+            "origin_id": 43,
+            "origin_slot": 0,
+            "target_id": 49,
+            "target_slot": 1,
+            "type": "STRING"
+          },
+          {
+            "id": 59,
+            "origin_id": 39,
+            "origin_slot": 0,
+            "target_id": 40,
+            "target_slot": 0,
+            "type": "STRING"
+          },
+          {
+            "id": 58,
+            "origin_id": 42,
+            "origin_slot": 0,
+            "target_id": 40,
+            "target_slot": 2,
+            "type": "STRING"
+          },
+          {
+            "id": 66,
+            "origin_id": 49,
+            "origin_slot": 0,
+            "target_id": 38,
+            "target_slot": 2,
+            "type": "STRING"
+          },
+          {
+            "id": 27,
+            "origin_id": 12,
+            "origin_slot": 0,
+            "target_id": -20,
+            "target_slot": 0,
+            "type": "AUDIO"
+          },
+          {
+            "id": 68,
+            "origin_id": -10,
+            "origin_slot": 0,
+            "target_id": 31,
+            "target_slot": 0,
+            "type": "STRING"
+          },
+          {
+            "id": 76,
+            "origin_id": -10,
+            "origin_slot": 2,
+            "target_id": 3,
+            "target_slot": 4,
+            "type": "INT"
+          },
+          {
+            "id": 78,
+            "origin_id": -10,
+            "origin_slot": 4,
+            "target_id": 43,
+            "target_slot": 0,
+            "type": "COMBO"
+          },
+          {
+            "id": 79,
+            "origin_id": -10,
+            "origin_slot": 5,
+            "target_id": 25,
+            "target_slot": 0,
+            "type": "COMBO"
+          },
+          {
+            "id": 80,
+            "origin_id": -10,
+            "origin_slot": 6,
+            "target_id": 26,
+            "target_slot": 0,
+            "type": "COMBO"
+          },
+          {
+            "id": 81,
+            "origin_id": -10,
+            "origin_slot": 7,
+            "target_id": 29,
+            "target_slot": 0,
+            "type": "COMBO"
+          },
+          {
+            "id": 82,
+            "origin_id": -10,
+            "origin_slot": 1,
+            "target_id": 36,
+            "target_slot": 0,
+            "type": "FLOAT"
+          },
+          {
+            "id": 83,
+            "origin_id": -10,
+            "origin_slot": 3,
+            "target_id": 35,
+            "target_slot": 0,
+            "type": "BOOLEAN"
+          },
+          {
+            "id": 84,
+            "origin_id": 28,
+            "origin_slot": 0,
+            "target_id": 54,
+            "target_slot": 0,
+            "type": "STRING"
+          }
+        ],
+        "extra": {},
+        "category": "Audio/Music generation",
+        "description": "Generates music, instrument loops, sound effects, and one-shots from text using Stable Audio 3 Medium, with optional Qwen 3.5 category-based prompt expansion (Music, Instrument, SFX, One-shot)."
+      }
+    ]
+  },
+  "extra": {}
+}

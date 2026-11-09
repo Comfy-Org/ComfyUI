@@ -3,6 +3,7 @@ from tqdm import tqdm
 from typing_extensions import override
 
 import comfy.model_patcher
+import comfy.storage
 import comfy.utils
 import folder_paths
 from comfy import model_management
@@ -19,7 +20,7 @@ class FrameInterpolationModelLoader(io.ComfyNode):
         return io.Schema(
             node_id="FrameInterpolationModelLoader",
             display_name="Load Frame Interpolation Model",
-            category="loaders",
+            category="model/loaders",
             inputs=[
                 io.Combo.Input("model_name", options=folder_paths.get_filename_list("frame_interpolation"),
                                tooltip="Select a frame interpolation model to load. Models must be placed in the 'frame_interpolation' folder."),
@@ -41,6 +42,7 @@ class FrameInterpolationModelLoader(io.ComfyNode):
             model,
             load_device=model_management.get_torch_device(),
             offload_device=model_management.unet_offload_device(),
+            fast_disk=comfy.storage.state_dict_fast_disk(sd),
         )
         return io.NodeOutput(patcher)
 
@@ -77,7 +79,7 @@ class FrameInterpolate(io.ComfyNode):
     def define_schema(cls):
         return io.Schema(
             node_id="FrameInterpolate",
-            display_name="Frame Interpolate",
+            display_name="Run Frame Interpolation Model",
             category="video",
             search_aliases=["rife", "film", "frame interpolation", "slow motion", "interpolate frames", "vfi"],
             inputs=[

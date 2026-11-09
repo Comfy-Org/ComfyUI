@@ -596,7 +596,8 @@
         "extra": {
           "workflowRendererVersion": "LG"
         },
-        "category": "Image Tools/Color adjust"
+        "category": "Image Tools/Color adjust",
+        "description": "Adjusts saturation, temperature, tint, and vibrance using a real-time GPU fragment shader."
       }
     ]
   }

@@ -1,0 +1,397 @@
+{
+  "revision": 0,
+  "last_node_id": 19,
+  "last_link_id": 0,
+  "nodes": [
+    {
+      "id": 19,
+      "type": "5b40ca21-ba1a-41d5-b403-4d2d7acdc195",
+      "pos": [
+        -6411.330578108367,
+        1940.2638932730042
+      ],
+      "size": [
+        349.609375,
+        145.9375
+      ],
+      "flags": {},
+      "order": 2,
+      "mode": 0,
+      "inputs": [
+        {
+          "localized_name": "image",
+          "name": "image",
+          "type": "IMAGE",
+          "link": null
+        },
+        {
+          "name": "bg_removal_name",
+          "type": "COMBO",
+          "widget": {
+            "name": "bg_removal_name"
+          },
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "localized_name": "IMAGE",
+          "name": "IMAGE",
+          "type": "IMAGE",
+          "links": []
+        },
+        {
+          "name": "mask",
+          "type": "MASK",
+          "links": []
+        }
+      ],
+      "properties": {
+        "proxyWidgets": [
+          [
+            "14",
+            "bg_removal_name"
+          ]
+        ]
+      },
+      "widgets_values": [],
+      "title": "Remove Background (BiRefNet)"
+    }
+  ],
+  "links": [],
+  "version": 0.4,
+  "definitions": {
+    "subgraphs": [
+      {
+        "id": "5b40ca21-ba1a-41d5-b403-4d2d7acdc195",
+        "version": 1,
+        "state": {
+          "lastGroupId": 0,
+          "lastNodeId": 21,
+          "lastLinkId": 16,
+          "lastRerouteId": 0
+        },
+        "revision": 0,
+        "config": {},
+        "name": "Remove Background (BiRefNet)",
+        "description": "Removes or replaces image backgrounds using BiRefNet segmentation and alpha compositing.",
+        "inputNode": {
+          "id": -10,
+          "bounding": [
+            -6728.534070722246,
+            1475.2619799128663,
+            150.9140625,
+            88
+          ]
+        },
+        "outputNode": {
+          "id": -20,
+          "bounding": [
+            -6169.049695722246,
+            1475.2619799128663,
+            128,
+            88
+          ]
+        },
+        "inputs": [
+          {
+            "id": "7bc321cd-df31-4c39-aaf7-7f0d01326189",
+            "name": "image",
+            "type": "IMAGE",
+            "linkIds": [
+              5,
+              7
+            ],
+            "localized_name": "image",
+            "pos": [
+              -6601.620008222246,
+              1499.2619799128663
+            ]
+          },
+          {
+            "id": "e89d2cd8-daa3-4e29-8a69-851db85072cb",
+            "name": "bg_removal_name",
+            "type": "COMBO",
+            "linkIds": [
+              12
+            ],
+            "pos": [
+              -6601.620008222246,
+              1519.2619799128663
+            ]
+          }
+        ],
+        "outputs": [
+          {
+            "id": "16e7863c-4c38-46c2-aa74-e82991fbfe8d",
+            "name": "IMAGE",
+            "type": "IMAGE",
+            "linkIds": [
+              8
+            ],
+            "localized_name": "IMAGE",
+            "pos": [
+              -6145.049695722246,
+              1499.2619799128663
+            ]
+          },
+          {
+            "id": "f7240c19-5b80-406e-a8e2-9b12440ee2d6",
+            "name": "mask",
+            "type": "MASK",
+            "linkIds": [
+              11
+            ],
+            "pos": [
+              -6145.049695722246,
+              1519.2619799128663
+            ]
+          }
+        ],
+        "widgets": [],
+        "nodes": [
+          {
+            "id": 13,
+            "type": "RemoveBackground",
+            "pos": [
+              -6536.764823982709,
+              1444.9963409012412
+            ],
+            "size": [
+              302.25,
+              72
+            ],
+            "flags": {},
+            "order": 0,
+            "mode": 0,
+            "inputs": [
+              {
+                "localized_name": "image",
+                "name": "image",
+                "type": "IMAGE",
+                "link": 5
+              },
+              {
+                "localized_name": "bg_removal_model",
+                "name": "bg_removal_model",
+                "type": "BACKGROUND_REMOVAL",
+                "link": 3
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "mask",
+                "name": "mask",
+                "type": "MASK",
+                "links": [
+                  4,
+                  11
+                ]
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "RemoveBackground"
+            }
+          },
+          {
+            "id": 14,
+            "type": "LoadBackgroundRemovalModel",
+            "pos": [
+              -6540.534070722246,
+              1302.223464635445
+            ],
+            "size": [
+              311.484375,
+              85.515625
+            ],
+            "flags": {},
+            "order": 1,
+            "mode": 0,
+            "inputs": [
+              {
+                "localized_name": "bg_removal_name",
+                "name": "bg_removal_name",
+                "type": "COMBO",
+                "widget": {
+                  "name": "bg_removal_name"
+                },
+                "link": 12
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "bg_model",
+                "name": "bg_model",
+                "type": "BACKGROUND_REMOVAL",
+                "links": [
+                  3
+                ]
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "LoadBackgroundRemovalModel",
+              "models": [
+                {
+                  "name": "birefnet.safetensors",
+                  "url": "https://huggingface.co/Comfy-Org/BiRefNet/resolve/main/background_removal/birefnet.safetensors",
+                  "directory": "background_removal"
+                }
+              ]
+            },
+            "widgets_values": [
+              "birefnet.safetensors"
+            ]
+          },
+          {
+            "id": 15,
+            "type": "InvertMask",
+            "pos": [
+              -6532.446160529669,
+              1571.1111286839914
+            ],
+            "size": [
+              285.984375,
+              48
+            ],
+            "flags": {},
+            "order": 2,
+            "mode": 0,
+            "inputs": [
+              {
+                "localized_name": "mask",
+                "name": "mask",
+                "type": "MASK",
+                "link": 4
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "MASK",
+                "name": "MASK",
+                "type": "MASK",
+                "links": [
+                  6
+                ]
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "InvertMask"
+            }
+          },
+          {
+            "id": 16,
+            "type": "JoinImageWithAlpha",
+            "pos": [
+              -6527.4370171636665,
+              1674.3004951902876
+            ],
+            "size": [
+              284.96875,
+              72
+            ],
+            "flags": {},
+            "order": 3,
+            "mode": 0,
+            "inputs": [
+              {
+                "localized_name": "image",
+                "name": "image",
+                "type": "IMAGE",
+                "link": 7
+              },
+              {
+                "localized_name": "alpha",
+                "name": "alpha",
+                "type": "MASK",
+                "link": 6
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "IMAGE",
+                "name": "IMAGE",
+                "type": "IMAGE",
+                "links": [
+                  8
+                ]
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "JoinImageWithAlpha"
+            }
+          }
+        ],
+        "groups": [],
+        "links": [
+          {
+            "id": 3,
+            "origin_id": 14,
+            "origin_slot": 0,
+            "target_id": 13,
+            "target_slot": 1,
+            "type": "BACKGROUND_REMOVAL"
+          },
+          {
+            "id": 4,
+            "origin_id": 13,
+            "origin_slot": 0,
+            "target_id": 15,
+            "target_slot": 0,
+            "type": "MASK"
+          },
+          {
+            "id": 6,
+            "origin_id": 15,
+            "origin_slot": 0,
+            "target_id": 16,
+            "target_slot": 1,
+            "type": "MASK"
+          },
+          {
+            "id": 5,
+            "origin_id": -10,
+            "origin_slot": 0,
+            "target_id": 13,
+            "target_slot": 0,
+            "type": "IMAGE"
+          },
+          {
+            "id": 7,
+            "origin_id": -10,
+            "origin_slot": 0,
+            "target_id": 16,
+            "target_slot": 0,
+            "type": "IMAGE"
+          },
+          {
+            "id": 8,
+            "origin_id": 16,
+            "origin_slot": 0,
+            "target_id": -20,
+            "target_slot": 0,
+            "type": "IMAGE"
+          },
+          {
+            "id": 11,
+            "origin_id": 13,
+            "origin_slot": 0,
+            "target_id": -20,
+            "target_slot": 1,
+            "type": "MASK"
+          },
+          {
+            "id": 12,
+            "origin_id": -10,
+            "origin_slot": 1,
+            "target_id": 14,
+            "target_slot": 0,
+            "type": "COMBO"
+          }
+        ],
+        "extra": {},
+        "category": "Image Tools/Background Removal"
+      }
+    ]
+  },
+  "extra": {}
+}

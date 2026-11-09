@@ -7,7 +7,7 @@ class ScaleROPE(io.ComfyNode):
     def define_schema(cls):
         return io.Schema(
             node_id="ScaleROPE",
-            category="advanced/model_patches",
+            category="model/patch",
             description="Scale and shift the ROPE of the model.",
             is_experimental=True,
             inputs=[
