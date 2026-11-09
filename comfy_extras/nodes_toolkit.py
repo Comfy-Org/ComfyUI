@@ -55,19 +55,23 @@ class GetItemFromList(io.ComfyNode):
 class ListLength(io.ComfyNode):
     @classmethod
     def define_schema(cls):
+        template = io.MatchType.Template("type")
         return io.Schema(
             node_id="ListLength",
             display_name="List Length",
             category="utilities",
             is_input_list=True,
             search_aliases=["Count", "Size", "len"],
-            inputs=[io.AnyType.Input("list")],
-            outputs=[io.Int.Output(display_name="length")],
+            inputs=[io.MatchType.Input("list", template=template)],
+            outputs=[
+                io.MatchType.Output(template=template, is_output_list=True, display_name="list"),
+                io.Int.Output(display_name="length"),
+            ],
         )
 
     @classmethod
     def execute(cls, list) -> io.NodeOutput:
-        return io.NodeOutput(len(list))
+        return io.NodeOutput(list, len(list))
 
 
 class ToolkitExtension(ComfyExtension):

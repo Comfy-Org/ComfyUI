@@ -20,7 +20,7 @@ def test_get_item_from_list_uses_integer_index():
     ).result == (["image 1", "image 2"],)
 
 
-def test_list_length_counts_list_items():
-    assert ListLength.RETURN_TYPES == ["INT"]
-    assert ListLength.OUTPUT_IS_LIST == [False]
-    assert ListLength.execute([["image 1", "image 2", "image 3"], "text"]).result == (2,)
+def test_list_length_passes_list_through_and_counts_items():
+    assert ListLength.OUTPUT_IS_LIST == [True, False]
+    items = [["image 1", "image 2", "image 3"], "text"]
+    assert ListLength.execute(items).result == (items, 2)
