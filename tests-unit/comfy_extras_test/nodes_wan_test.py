@@ -50,3 +50,18 @@ def test_phantom_subject_to_video_without_images():
     assert pos is positive
     assert neg_text is negative
     assert neg_img_text is negative
+
+
+def test_phantom_subject_to_video_with_images():
+    positive = [[torch.zeros(1, 4, 8), {}]]
+    negative = [[torch.zeros(1, 4, 8), {}]]
+    vae = MagicMock()
+    vae.encode.side_effect = lambda px: torch.ones(1, 16, 1, 4, 8)
+
+    out = nodes_wan.WanPhantomSubjectToVideo.execute(positive, negative, vae, 64, 32, 9, 1, images=torch.rand(2, 32, 64, 3))
+
+    pos, neg_text, neg_img_text, _ = out.result
+    assert vae.encode.call_count == 2
+    assert pos[0][1]["time_dim_concat"].shape == (1, 16, 2, 4, 8)
+    assert torch.equal(neg_text[0][1]["time_dim_concat"], pos[0][1]["time_dim_concat"])
+    assert "time_dim_concat" in neg_img_text[0][1]
