@@ -911,12 +911,11 @@ class Qwen35(BaseLlama, BaseGenerate, torch.nn.Module):
         sampling = None
         if do_sample and temperature != 0.0:
             sampling = {"temperature": temperature, "top_k": top_k, "top_p": top_p, "min_p": min_p,
-                        "repetition_penalty": repetition_penalty,
-                        "presence_penalty": kwargs.get("presence_penalty", 0.0) or 0.0,
                         "seed": seed if seed is not None else 42}
-        return self._generate_mtp(embeds, max_length, stop_tokens, mtp, sampling=sampling, position_ids=kwargs.get("position_ids"))
+        return self._generate_mtp(embeds, max_length, stop_tokens, mtp, sampling=sampling, position_ids=kwargs.get("position_ids"),
+                                  repetition_penalty=repetition_penalty, presence_penalty=kwargs.get("presence_penalty", 0.0) or 0.0)
 
-    def _generate_mtp(self, embeds, max_length, stop_tokens, mtp, sampling=None, position_ids=None):
+    def _generate_mtp(self, embeds, max_length, stop_tokens, mtp, sampling=None, position_ids=None, repetition_penalty=1.0, presence_penalty=0.0):
         device = embeds.device
         cfg = self.model.config
         if stop_tokens is None:
@@ -940,7 +939,7 @@ class Qwen35(BaseLlama, BaseGenerate, torch.nn.Module):
         generator = None
         if sampling is not None:
             generator = torch.Generator(device=device).manual_seed(sampling["seed"])
-        penalized = sampling is not None and penalty_active(sampling["repetition_penalty"], sampling["presence_penalty"])
+        penalized = penalty_active(repetition_penalty, presence_penalty)
 
         # after an image, text positions run behind the cache index (MRoPE); decode continues from the last prefill position
         rope_offset = 0 if position_ids is None else int(position_ids[:, -1].max()) + 1 - embeds.shape[1]
@@ -960,7 +959,7 @@ class Qwen35(BaseLlama, BaseGenerate, torch.nn.Module):
             nt_buf.copy_(lg0.argmax(dim=-1, keepdim=True))
         else:
             nt_buf.copy_(self.sample_token(lg0, sampling["temperature"], sampling["top_k"], sampling["top_p"], sampling["min_p"],
-                                           sampling["repetition_penalty"], [], generator, presence_penalty=sampling["presence_penalty"]))
+                                           1.0, [], generator))
         pen_mask = torch.zeros((lg0.shape[-1],), device=device, dtype=torch.bool) if penalized else None
         h_buf.copy_(x[:, -1:, :])
         del x, lg0
@@ -1050,7 +1049,9 @@ class Qwen35(BaseLlama, BaseGenerate, torch.nn.Module):
                 for r in range(1, tree.rows):
                     mask[r].copy_(mask[tree.parent[r]])
                     mask[r].index_fill_(0, verify_tokens[:, r], True)
-                rows = torch.where(mask, apply_penalty(rows, s["repetition_penalty"], s["presence_penalty"]), rows)
+                rows = torch.where(mask, apply_penalty(rows, repetition_penalty, presence_penalty), rows)
+            if s is None:
+                return rows.argmax(dim=-1).unsqueeze(0)
             return self.sample_token(rows, s["temperature"], s["top_k"], s["top_p"], s["min_p"],
                                      1.0, [], generator).transpose(0, 1)
 
@@ -1087,7 +1088,7 @@ class Qwen35(BaseLlama, BaseGenerate, torch.nn.Module):
             x, _, _ = self.model.forward(None, embeds=ev, attention_mask=None, past_key_values=pkv, position_ids=verify_pos, decode_buffers=verify_buffers)
             # all verify positions in one lm_head GEMV, accept decided GPU-side, one sync
             lg = verify_logits(x)
-            toks = lg.argmax(dim=-1) if sampling is None else verify_sample(lg)
+            toks = lg.argmax(dim=-1) if sampling is None and not penalized else verify_sample(lg)
             if adaptive:
                 if timers:
                     timers[2].record(torch.cuda.current_stream(device))
