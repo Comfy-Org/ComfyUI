@@ -544,23 +544,26 @@ try:
 
             repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
             code = ("import os, sys; os.environ[{}] = '1'; sys.path.insert(0, {!r});"
-                    "from comfy.model_management import aotriton_supported;"
-                    "print('AOTRITON ' + ('1' if aotriton_supported() else '0'))").format(repr(AOTRITON_PROBE_CHILD_ENV), repo_root)
+                    "from comfy.model_management import AOTRITON_SUPPORTED;"
+                    "print('AOTRITON ' + ('1' if AOTRITON_SUPPORTED else '0'))").format(repr(AOTRITON_PROBE_CHILD_ENV), repo_root)
             try:
                 probe = subprocess.run([sys.executable, '-c', code], capture_output=True, text=True, timeout=120)
-            except Exception as e:
+            except (OSError, subprocess.SubprocessError) as e:
                 logging.warning("Could not run the flash attention probe process, disabling it: {}".format(e))
                 return False
-            if 'AOTRITON 1' not in probe.stdout:
+            if probe.returncode != 0 or 'AOTRITON 1' not in probe.stdout.splitlines():
                 if probe.returncode != 0:
                     logging.warning("Flash attention probe process exited with {}, disabling it".format(probe.returncode))
+                if probe.stderr.strip():
+                    logging.warning("%s", probe.stderr.strip())
                 return False
             return True
 
         logging.info("AMD arch: {}".format(arch))
         logging.info("ROCm version: {}".format(rocm_version))
         if args.use_split_cross_attention == False and args.use_quad_cross_attention == False:
-            if aotriton_supported_isolated():  # AMD efficient attention implementation depends on aotriton.
+            AOTRITON_SUPPORTED = aotriton_supported_isolated()
+            if AOTRITON_SUPPORTED:  # AMD efficient attention implementation depends on aotriton.
                 if torch_version_numeric >= (2, 7):  # works on 2.6 but doesn't actually seem to improve much
                     if any((a in arch) for a in ["gfx90a", "gfx942", "gfx950", "gfx1100", "gfx1101", "gfx1150", "gfx1151", "gfx1170", "gfx1171"]):  # TODO: more arches, TODO: gfx950
                         ENABLE_PYTORCH_ATTENTION = True
