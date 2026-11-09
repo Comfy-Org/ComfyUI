@@ -1,4 +1,11 @@
-from comfy_extras.nodes_toolkit import CreateList, GetItemFromList, ListLength
+import torch
+
+from comfy.cli_args import args as cli_args
+
+if not torch.cuda.is_available():
+    cli_args.cpu = True
+
+from comfy_extras.nodes_toolkit import CreateList, GetItemFromList, ListLength  # noqa: E402
 
 
 def test_create_list_accepts_heterogeneous_inputs():
