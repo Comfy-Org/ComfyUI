@@ -37,6 +37,7 @@ async def test_listuserdata_empty_directory(aiohttp_client, app, tmp_path):
 async def test_listuserdata_does_not_create_directories(
     aiohttp_client, tmp_path, monkeypatch, existing_user_directory
 ):
+    """GET /userdata must not create missing directories, but POST still does."""
     monkeypatch.setattr("folder_paths.user_directory", str(tmp_path))
     monkeypatch.setattr("app.user_manager.args.multi_user", False)
     user_directory = tmp_path / "default"
