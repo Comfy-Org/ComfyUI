@@ -1129,6 +1129,7 @@ class CombinedLinear:
         for s in self.linears:
             # FIXME: add bias support if ever needed
             if (not isinstance(s, MixedPrecisionOp) or not isinstance(s._v_weight, QuantizedTensor)
+                    or s._v_weight.layout_cls not in (quant_ops.TensorWiseINT8Layout, quant_ops.AsymW4A8Int8Layout)
                     or s._full_precision_mm or s.comfy_force_forward or s.bias is not None):
                 return
             weights.append(s._v_weight)
