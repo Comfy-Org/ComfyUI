@@ -10,7 +10,7 @@ import comfy.lora  # noqa: E402
 import comfy.model_patcher  # noqa: E402
 import comfy.model_prefetch  # noqa: E402
 import comfy.ops  # noqa: E402
-from comfy.quant_ops import QuantizedTensor  # noqa: E402
+from comfy.quant_ops import QUANT_ALGOS, QuantizedTensor  # noqa: E402
 
 
 def test_combined_linear_declines_without_running_split_or_activation():
@@ -33,6 +33,38 @@ def _gathered(layout, rows, k, **kwargs):
         for attr in inner_tensors:
             getattr(view, attr).copy_(getattr(weight, attr))
     return weights, views, gathered
+
+
+@pytest.mark.parametrize("quant_format", ["float8_e4m3fn", "float8_e5m2"])
+def test_combined_linear_preserves_fp8_split_forward(monkeypatch, quant_format):
+    torch.manual_seed(7)
+    ops = comfy.ops.mixed_precision_ops(compute_dtype=torch.float32)
+    linears = (ops.Linear(256, 32, bias=False), ops.Linear(256, 64, bias=False))
+    layout = QUANT_ALGOS[quant_format]["comfy_tensor_layout"]
+    weights, views, gathered = _gathered(layout, (32, 64), 256, scale=1.0)
+    for s, weight, view in zip(linears, weights, views):
+        s.weight = torch.nn.Parameter(weight.to("meta"), requires_grad=False)
+        s.quant_format = quant_format
+        s.layout_type = layout
+        s._v = (None, view._qdata.data_ptr(), comfy.memory_management.vram_aligned_size(view))
+        s._v_weight = view
+        s._v_bias = None
+        s._prefetch = {"resident": True, "signature": None}
+    # Exercise the resident VBAR cast path using CPU storage and offloaded meta parameters.
+    monkeypatch.setattr(comfy.model_management, "is_device_cpu", lambda device: False)
+    monkeypatch.setattr(comfy.ops.comfy_aimdo.torch, "aimdo_to_tensor", lambda v, device: gathered)
+    combined = comfy.ops.CombinedLinear(linears)
+    x = torch.randn(3, 256)
+    expected = torch.cat([s(x) for s in linears], dim=-1)
+
+    combined.prepare(x.device)
+    out = combined.forward(x)
+    if out is NotImplemented:
+        out = torch.cat([s(x) for s in linears], dim=-1)
+
+    torch.testing.assert_close(out, expected, rtol=0, atol=0)
+    assert combined._v_weight is None
+    assert all(s._v_weight is view for s, view in zip(linears, views))
 
 
 @pytest.mark.parametrize("layout, kwargs", [
