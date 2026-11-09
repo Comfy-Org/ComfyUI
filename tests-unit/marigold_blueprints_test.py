@@ -18,5 +18,7 @@ def test_marigold_blueprint_sampling_values(prediction):
 
     assert len(sampling_nodes) == 1
     node = sampling_nodes[0]
+    assert node["widgets_values"][0] == 1.73
     assert node["widgets_values"][1] == "img_to_img_velocity"
+    assert node["widgets_values_named"]["shift"] == 1.73
     assert node["widgets_values_named"]["sampling"] == "img_to_img_velocity"
