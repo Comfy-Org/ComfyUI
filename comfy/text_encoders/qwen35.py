@@ -1042,7 +1042,7 @@ class Qwen35(BaseLlama, BaseGenerate, torch.nn.Module):
 
         def verify_sample(lg):
             s = sampling
-            rows = lg[0].float()
+            rows = lg[0] if s is None else lg[0].float()
             if penalized:
                 # Each row sees committed history and its own path, never siblings.
                 mask = pen_mask.unsqueeze(0).repeat(tree.rows, 1)
