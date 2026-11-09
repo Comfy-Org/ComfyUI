@@ -180,13 +180,27 @@ def cast_modules_with_vbar(comfy_modules, dtype, device, bias_dtype, non_blockin
         cast_buffer_offset += buffer_size
         return buffer
 
+    def fault_weight(s):
+        signature = comfy_aimdo.model_vbar.vbar_fault(s._v)
+        if signature is None and hasattr(s, "_v_compact") and s._v is not s._v_compact:
+            s._v = s._v_compact
+            s._v_signature = None
+            signature = comfy_aimdo.model_vbar.vbar_fault(s._v)
+            logging.info(f"Downgraded {s.seed_key} under VRAM pressure")
+        return signature, comfy_aimdo.model_vbar.vbar_signature_compare(signature, s._v_signature)
+
     group_faults = {}
     dropped_groups = []
     for s in comfy_modules:
         group = s._combined_linear
+        if group is not None and group._v_weight is not None and not all(m in comfy_modules for m in group.linears):
+            group._v_weight = None
+            for m in group.linears:
+                m._v_signature = None
+    for s in comfy_modules:
+        group = s._combined_linear
         if group is None or group._v_weight is None:
-            signature = comfy_aimdo.model_vbar.vbar_fault(s._v)
-            resident = comfy_aimdo.model_vbar.vbar_signature_compare(signature, s._v_signature)
+            signature, resident = fault_weight(s)
         else:
             # A combined group's members hold each other's bytes, so one member's miss
             # is a miss for all of them. Fault the peers now; each keeps that fault's
@@ -195,8 +209,7 @@ def cast_modules_with_vbar(comfy_modules, dtype, device, bias_dtype, non_blockin
             # single-module cast path from pinning peers it never releases.
             if s not in group_faults:
                 for m in group.linears:
-                    signature = comfy_aimdo.model_vbar.vbar_fault(m._v)
-                    group_faults[m] = (signature, comfy_aimdo.model_vbar.vbar_signature_compare(signature, m._v_signature))
+                    group_faults[m] = fault_weight(m)
                 if not all(group_faults[m][1] for m in group.linears):
                     # Dropped after the loop: a member that already holds its group fault
                     # must not fall into the uncombined branch and take a second pin.
@@ -204,6 +217,7 @@ def cast_modules_with_vbar(comfy_modules, dtype, device, bias_dtype, non_blockin
                     for m in group.linears:
                         group_faults[m] = (group_faults[m][0], False)
             signature, resident = group_faults.pop(s)
+        compact = hasattr(s, "_v_compact") and s._v is s._v_compact
         if return_faulted and (signature is None or not resident):
             fully_faulted = False
         prefetch = {
@@ -217,11 +231,15 @@ def cast_modules_with_vbar(comfy_modules, dtype, device, bias_dtype, non_blockin
 
         materialize_meta_param(s, ["weight", "bias"])
         xfer_dest = comfy_aimdo.torch.aimdo_to_tensor(s._v, device) if signature is not None else None
-        cast_geometry = comfy.memory_management.tensors_to_geometries([ s.weight, s.bias ])
+        weight = s.weight
+        if compact:
+            weight = QuantizedTensor(weight._qdata, weight._layout_cls, dataclasses.replace(weight._params, lsb_tier=None))
+        cast_geometry = comfy.memory_management.tensors_to_geometries([ weight, s.bias ])
         cast_dest = None
         needs_cast = False
 
-        xfer_source = [ s.weight, s.bias ]
+        xfer_source = [ weight, s.bias ]
+        dest_size = comfy.memory_management.vram_aligned_size(xfer_source)
         fast_disk = s._pin_state["fast_disk"]
         subset = "weights-fast" if fast_disk else "weights"
         pin = comfy.pinned_memory.get_pin(s, subset=subset)
@@ -233,7 +251,7 @@ def cast_modules_with_vbar(comfy_modules, dtype, device, bias_dtype, non_blockin
         if pin is not None:
             xfer_source = [ pin ]
 
-        for data, geometry in zip([ s.weight, s.bias ], cast_geometry):
+        for data, geometry in zip([ weight, s.bias ], cast_geometry):
             if data is None:
                 continue
             if data.dtype != geometry.dtype:
@@ -242,7 +260,6 @@ def cast_modules_with_vbar(comfy_modules, dtype, device, bias_dtype, non_blockin
                 xfer_dest = None
                 break
 
-        dest_size = comfy.memory_management.vram_aligned_size(xfer_source)
         ensure_offload_stream(s, dest_size if xfer_dest is None else 0, True)
         if xfer_dest is None:
             xfer_dest = get_cast_buffer(dest_size)
@@ -271,7 +288,13 @@ def cast_modules_with_vbar(comfy_modules, dtype, device, bias_dtype, non_blockin
                 pin = comfy.pinned_memory.get_pin(m, subset=subset)
             cast_maybe_lowvram_patch(source, pin, offload_stream, xfer_dest2=dest)
 
-        if not isinstance(s, WritableWeight) or s.read_before_write:
+        if compact:
+            # The pin holds the full weight; the compact weight is its byte prefix.
+            if pin is None:
+                handle_pin(s, None, [ s.weight, s.bias ], None, subset=subset, size=comfy.memory_management.vram_aligned_size([ s.weight, s.bias ]))
+                pin = comfy.pinned_memory.get_pin(s, subset=subset)
+            cast_maybe_lowvram_patch(xfer_source if pin is None else [ pin[:dest_size] ], xfer_dest, offload_stream)
+        elif not isinstance(s, WritableWeight) or s.read_before_write:
             handle_pin(s, pin, xfer_source, xfer_dest, subset=subset, size=dest_size)
 
         for param_key in ("weight", "bias"):
@@ -1132,11 +1155,16 @@ class CombinedLinear:
                     or s._full_precision_mm or s.comfy_force_forward or s.bias is not None):
                 return
             # Other formats may concatenate but cannot run the combined linear_input_act path.
-            if s.quant_format not in ("int8_tensorwise", "asym_w4a8_int8", "w6a8_int8"):
+            if s.quant_format not in ("int8_tensorwise", "w3a8_int8", "asym_w4a8_int8", "w6a8_int8", "nested_w4a8_int8"):
                 return
             weights.append(s._v_weight)
-        # Members are loaded back to back, so their VBAR allocations are consecutive in member order.
-        v = (self.linears[0]._v[0], min(s._v[1] for s in self.linears), sum(s._v[2] for s in self.linears))
+        allocations = [s._v for s in self.linears]
+        if any(v[0] is not allocations[0][0] for v in allocations[1:]):
+            return
+        ordered = sorted(allocations, key=lambda v: v[1])
+        if any(a[1] + a[2] != b[1] for a, b in zip(ordered, ordered[1:])):
+            return
+        v = (ordered[0][0], ordered[0][1], sum(v[2] for v in ordered))
         weight = comfy.memory_management.cat_gathered(weights, comfy_aimdo.torch.aimdo_to_tensor(v, device))
         if weight is None:
             return
@@ -1151,7 +1179,7 @@ class CombinedLinear:
     def linear_input_act(self, x, input_act, act_weight=None, act_eps=0.0,
                          residual=None, residual_scale=None):
         run_every_op()
-        if self._v_weight is None:
+        if self._v_weight is None or not all(hasattr(s, "_prefetch") and s._prefetch["resident"] for s in self.linears):
             return NotImplemented
         if self._full_precision_mm:
             x = _eager_input_act(x, input_act, act_weight, act_eps)
@@ -1215,7 +1243,7 @@ def linear_input_act_(x, weight, bias, input_act=None, act_weight=None, act_eps=
 
 # Grouped-scale integer weights that run through the shared INT8 GEMM (comfy_kitchen
 # AsymW4A8Int8Layout): format -> code width, which also fixes the packed weight width K*bits/8.
-_GROUPED_INT8_FORMATS = {"asym_w4a8_int8": 4, "w6a8_int8": 6}
+_GROUPED_INT8_FORMATS = {"w3a8_int8": 3, "asym_w4a8_int8": 4, "w6a8_int8": 6}
 
 
 class QuantLinearFunc(torch.autograd.Function):
@@ -1430,7 +1458,8 @@ def _load_quantized_module(module, super_load, state_dict, prefix, local_metadat
             }
         elif module.quant_format in _GROUPED_INT8_FORMATS:
             # asym_w4a8_int8: int4 weight (packed int8 [N,K/2]) + optional Lloyd-Max codebook;
-            # w6a8_int8: uniform int6 weight (packed int8 [N,3K/4]). Both carry an fp8 per-group
+            # w3a8_int8: int3 weight (packed int8 [N,3K/8]) + 8-level codebook;
+            # w6a8_int8: uniform int6 weight (packed int8 [N,3K/4]). All carry an fp8 per-group
             # scale (weight_s_rel) and an fp32 per-channel scale (weight_s_channel).
             bits = _GROUPED_INT8_FORMATS[module.quant_format]
             if weight.shape[1] * 8 != module._orig_shape[1] * bits:
@@ -1455,6 +1484,26 @@ def _load_quantized_module(module, super_load, state_dict, prefix, local_metadat
                     layer_conf.get("convrot_groupsize", params_conf.get("convrot_groupsize", 256))
                 ),
             }
+        elif module.quant_format == "nested_w4a8_int8":
+            s_channel = pop_scale("weight_s_channel")
+            codebook = pop_scale("weight_codebook")
+            lsb_tier = pop_scale("weight_lsb_tier")
+            if s_channel is None or codebook is None or lsb_tier is None:
+                raise ValueError(f"Missing nested_w4a8_int8 s_channel/codebook/lsb_tier for layer {layer_name}")
+            if module.bias is not None:
+                # The compact weight is streamed as a byte prefix of the full one; a bias would sit behind the tier.
+                raise ValueError(f"nested_w4a8_int8 layer {layer_name} must not have a bias")
+            scales = {
+                "scale": torch.empty((0,), dtype=torch.float8_e4m3fn, device=device),
+                "s_channel": s_channel,
+                "codebook": codebook,
+                "lsb_tier": lsb_tier,
+                "mma_packed": True,
+                "group_size": 16,
+                "convrot_groupsize": int(layer_conf.get("convrot_groupsize", 256)),
+            }
+            # Position in the model's VRAM-pressure downgrade order; see ModelPatcherDynamic.load.
+            module._downgrade = int(layer_conf["downgrade"])
         else:
             raise ValueError(f"Unsupported quantization format: {module.quant_format}")
 
@@ -1509,6 +1558,9 @@ def _quantized_weight_state_dict(module, sd, prefix, extra_quant_conf=None, extr
         elif module.quant_format in _GROUPED_INT8_FORMATS:
             quant_conf["group_size"] = getattr(params, "group_size", 16)
             quant_conf["convrot_groupsize"] = getattr(params, "convrot_groupsize", 256)
+        elif module.quant_format == "nested_w4a8_int8":
+            quant_conf["convrot_groupsize"] = params.convrot_groupsize
+            quant_conf["downgrade"] = module._downgrade
         if extra_quant_conf:
             quant_conf.update(extra_quant_conf)
         sd[f"{prefix}comfy_quant"] = torch.tensor(list(json.dumps(quant_conf).encode("utf-8")), dtype=torch.uint8)

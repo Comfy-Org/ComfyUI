@@ -1283,10 +1283,10 @@ class BaseGenerate:
                 generated_token_ids.append(token_id)
 
                 if step == 0 and hasattr(self.model.embed_tokens, "_v"):
-                    # prefill's transients can evict body pages and lower the VBAR watermark: let the decode fault them back
-                    vbar = self.model.embed_tokens._v[0]
+                    # prefill's transients can evict body pages and lower the VBAR watermarks: let the decode fault them back
                     comfy.model_management.reset_cast_buffers()
-                    vbar.set_watermark(vbar.max_size)
+                    for vbar in {m._v[0] for m in self.model.modules() if hasattr(m, "_v")}:
+                        vbar.set_watermark(vbar.max_size)
 
                 if step > 0 and next_pos is not None:
                     next_pos += 1

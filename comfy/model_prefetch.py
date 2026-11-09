@@ -134,13 +134,15 @@ def pin_modules(comfy_modules, device, dtype=None):
     else:
         return offload_stream, fully_faulted
     relayout = []
+    groups = set()
     for s in comfy_modules:
         if s._v_relayout:
             continue
         s._v_relayout = True
         group = s._combined_linear
-        if group is not None and s is group.linears[0]:
+        if group is not None and group not in groups:
             group.prepare(device)
+            groups.add(group)
             relayout.append(group)
         relayout.append(s)
     for s in relayout:
@@ -169,16 +171,30 @@ def cleanup_prefetched_modules(module, comfy_modules):
                 first_error = e
         finally:
             delattr(s, "_prefetch")
-    if getattr(module, "_v_block_faulted", False):
-        try:
-            comfy_aimdo.model_vbar.vbar_unpin(module._v_block)
-        except Exception as e:
-            if first_error is None:
-                first_error = e
-        finally:
-            del module._v_block_faulted
+    if getattr(module, "_v_block_faulted", None) is not None:
+        for alloc, _ in module._v_block_faulted:
+            try:
+                comfy_aimdo.model_vbar.vbar_unpin(alloc)
+            except Exception as e:
+                if first_error is None:
+                    first_error = e
+        del module._v_block_faulted
     if first_error is not None:
         raise first_error
+
+def block_fault(module):
+    """Pins a unit's weights across its VBARs: the shared span plus each adaptive module's
+    current copy. Returns the (alloc, signature) list the graph was captured against, or None."""
+    span, adaptive = module._v_block
+    faulted = []
+    module._v_block_faulted = faulted
+    for alloc in ([] if span is None else [span]) + [m._v for m in adaptive]:
+        signature = comfy_aimdo.model_vbar.vbar_fault(alloc)
+        if signature is None:
+            cleanup_prefetched_modules(module, [])
+            return None
+        faulted.append((alloc, bytes(signature)))
+    return faulted
 
 def _drop_graph(module):
     graph = getattr(module, "_comfy_graph", None)
@@ -259,10 +275,8 @@ def prefetch_queue_pop(queue, device, module, dtype=None, core=None, enable_grap
     graph_hit = False
     graph = getattr(module, "_comfy_graph", None) if enable_graph else None
     if graph is not None:
-        signature = comfy_aimdo.model_vbar.vbar_fault(module._v_block)
-        if signature is not None:
-            module._v_block_faulted = True
-            graph_hit = comfy_aimdo.model_vbar.vbar_signature_compare(signature, graph["signature"])
+        signature = block_fault(module)
+        graph_hit = signature is not None and signature == graph["signature"]
 
     if malloc_graph is not None and malloc_scope is not None:
         if malloc_graph.iterate(malloc_scope if module is not None and not graph_hit else None):
@@ -300,9 +314,7 @@ def prefetch_queue_pop(queue, device, module, dtype=None, core=None, enable_grap
     if core is not None:
         if enable_graph and fully_faulted and module in GRAPH_WARMED_MODULES:
             if signature is None:
-                signature = comfy_aimdo.model_vbar.vbar_fault(module._v_block)
-                if signature is not None:
-                    module._v_block_faulted = True
+                signature = block_fault(module)
             if signature is not None:
                 _drop_graph(module)
                 malloc_graph.pause()

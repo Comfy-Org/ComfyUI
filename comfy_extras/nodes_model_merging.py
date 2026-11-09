@@ -278,6 +278,7 @@ class CLIPSave:
 
         clip.load_model()
         clip_sd = clip.state_dict_for_saving()
+        metadata.update(clip.tokenizer_metadata)
 
         for prefix in ["clip_l.", "clip_g.", "clip_h.", "t5xxl.", "pile_t5xl.", "mt5xl.", "umt5xxl.", "t5base.", "gemma2_2b.", "llama.", "hydit_clip.", ""]:
             k = list(filter(lambda a: a.startswith(prefix), clip_sd.keys()))
