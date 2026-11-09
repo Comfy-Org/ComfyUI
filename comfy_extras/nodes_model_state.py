@@ -37,7 +37,7 @@ class OpenModelState(io.ComfyNode):
         if create == "always":
             return float("NaN")
         path = state_path(filename)
-        return os.stat(path).st_mtime_ns if os.path.exists(path) else None
+        return comfy.model_state.ModelState.fingerprint(path)
 
     @classmethod
     def execute(cls, filename, create) -> io.NodeOutput:
@@ -56,13 +56,14 @@ class SaveModelState(io.ComfyNode):
             inputs=[
                 io.ModelState.Input("state"),
                 io.String.Input("filename", default="model_states/ComfyUI.safetensors"),
+                io.Boolean.Input("writethrough", default=True, optional=True, tooltip="Write the file now. When disabled, keep the saved state resident and write it when its model is evicted from RAM."),
             ],
             outputs=[io.ModelState.Output(display_name="state", tooltip="The saved state, for chaining or ending a loop.")],
         )
 
     @classmethod
-    def execute(cls, state, filename) -> io.NodeOutput:
-        state.save(state_path(filename))
+    def execute(cls, state, filename, writethrough=True) -> io.NodeOutput:
+        state.save(state_path(filename), writethrough=writethrough)
         return io.NodeOutput(state)
 
 

@@ -2,6 +2,7 @@ from comfy_api.latest import ComfyExtension, io
 from typing_extensions import override
 
 import comfy.model_state
+import comfy.model_management
 
 VIDEO_TOOLTIP = "Video frames as image batch. Assumed to be 24 FPS; subsampled to the model's frame rate internally."
 
@@ -68,6 +69,9 @@ class TextGenerateV2(io.ComfyNode):
         if not use_default_template or (state is not None and state.metadata):
             system_prompt = ""
         state = comfy.model_state.ModelState() if state is None else state.copy()
+        dynprompt = cls.hidden.dynprompt
+        if not any(value == [cls.hidden.unique_id, 2] for node_id in dynprompt.all_node_ids() for value in dynprompt.get_node(node_id)["inputs"].values()):
+            comfy.model_management.register_ephemeral_model(state)
         tokens = clip.tokenize(prompt, image=image, images=images, skip_template=not use_default_template, min_length=1, thinking=thinking, video=video, videos=videos, audio=audio, audios=audios, system_prompt=system_prompt)
 
         # Get sampling parameters from dynamic combo
@@ -94,11 +98,6 @@ class TextGenerateV2(io.ComfyNode):
             mtp=mtp,
             state=state,
         )
-        # the output is written back only when something consumes it; otherwise it is released after the node
-        dynprompt = cls.hidden.dynprompt
-        if any(value == [cls.hidden.unique_id, 2] for node_id in dynprompt.all_node_ids() for value in dynprompt.get_node(node_id)["inputs"].values()):
-            state.flush()
-
         generated_text = clip.decode(generated_ids)
 
         # </think> ends reasoning; without one, reasoning opened by the output or prompt was cut off by max_length
