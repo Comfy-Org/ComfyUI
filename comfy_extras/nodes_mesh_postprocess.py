@@ -1946,9 +1946,13 @@ class RenderMesh(IO.ComfyNode):
         # Camera from a Load3D / Preview3D viewer (three.js Y-up, same frame as the mesh), else auto-framed front view.
         cameras = _mesh_view_cameras(camera_info, lv)
         if resolved == "world normal":
-            r = _mesh_view_camera(cameras[0], dev)[2]
-            y = r.new_tensor([0.0, 1.0, 0.0])
-            render_normal = torch.stack([r, y, torch.cross(r, y, dim=-1)])
+            # World axes turned by the first camera's yaw. Its right vector tilts when a near-vertical view falls back
+            # to +Z up, so take the horizontal right of its forward and keep the basis vector only when that is degenerate.
+            f, r = _mesh_view_camera(cameras[0], dev)[1:3]
+            y = f.new_tensor([0.0, 1.0, 0.0])
+            x = torch.cross(f, y, dim=-1)
+            x = torch.nn.functional.normalize(x, dim=-1, eps=1e-6) if float(x.norm()) > 1e-6 else r
+            render_normal = torch.stack([x, y, torch.cross(x, y, dim=-1)])
 
         H, W = int(height), int(width)
         bg = background.lstrip("#")
