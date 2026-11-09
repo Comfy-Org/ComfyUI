@@ -10,7 +10,7 @@ import nodes
 import node_helpers
 import comfy.model_management
 import comfy.utils
-from comfy_api.latest import ComfyExtension, io
+from comfy_api.index import ComfyExtension, io
 from comfy.ldm.sam3.tracker import unpack_masks
 
 SAM3TrackData = io.Custom("SAM3_TRACK_DATA")

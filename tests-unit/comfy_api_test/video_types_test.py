@@ -7,10 +7,10 @@ import av
 import io
 import numpy as np
 from fractions import Fraction
-from comfy_api.input_impl.video_types import VideoFromFile, VideoFromComponents
-from comfy_api.latest._util.video_types import normalize_crop_rect
-from comfy_api.util.video_types import VideoComponents, VideoContainer, VideoCodec
-from comfy_api.input.basic_types import AudioInput
+from comfy_api._impl._input_impl.video_types import VideoFromFile, VideoFromComponents
+from comfy_api._impl._types.video_types import normalize_crop_rect
+from comfy_api._impl._types.video_types import VideoComponents, VideoContainer, VideoCodec
+from comfy_api._impl._input.basic_types import AudioInput
 from av.error import InvalidDataError
 from av.video.reformatter import ColorPrimaries, ColorRange, ColorTrc
 
@@ -1584,7 +1584,7 @@ def test_as_cropped_components_releases_uncropped_storage():
 
 
 def test_video_encoder_options_applies_h264_preset():
-    from comfy_api.latest._input_impl.video_types import video_encoder_options
+    from comfy_api._impl._input_impl.video_types import video_encoder_options
 
     assert video_encoder_options(VideoCodec.H264, None, "ultrafast") == {
         "preset": "ultrafast",

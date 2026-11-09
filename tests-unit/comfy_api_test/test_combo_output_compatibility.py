@@ -4,7 +4,7 @@ import pytest
 
 import execution
 import nodes
-from comfy_api.latest import io
+from comfy_api.index import io
 
 
 def selector(options):

@@ -2,7 +2,7 @@ from typing_extensions import override
 import torch
 import comfy.model_management
 import nodes
-from comfy_api.latest import ComfyExtension, io
+from comfy_api.index import ComfyExtension, io
 
 
 class EmptyMochiLatentVideo(io.ComfyNode):

@@ -6,7 +6,7 @@ from comfy.cli_args import get_console_log_level, get_file_log_outputs
 
 if args.list_feature_flags:
     import json
-    from comfy_api.feature_flags import CLI_FEATURE_FLAG_REGISTRY
+    from comfy_api._impl.feature_flags import CLI_FEATURE_FLAG_REGISTRY
     print(json.dumps(CLI_FEATURE_FLAG_REGISTRY, indent=2))  # noqa: T201
     raise SystemExit(0)
 
@@ -37,7 +37,7 @@ import signal
 import sys
 from comfy_execution.progress import get_progress_state
 from comfy_execution.utils import get_executing_context
-from comfy_api import feature_flags
+from comfy_api._impl import feature_flags
 import app.agent_host
 
 if __name__ == "__main__":
@@ -184,6 +184,9 @@ def apply_custom_paths():
 
 def execute_prestartup_script():
     if args.disable_all_custom_nodes and len(args.whitelist_custom_nodes) == 0:
+        return
+    from comfy_api._impl import isolation
+    if isolation.enabled():  # packs run in their own processes; none of their code runs here
         return
 
     def execute_script(script_path):
@@ -622,21 +625,13 @@ def start_comfyui(asyncio_loop=None):
     if args.enable_manager and not args.disable_manager_ui:
         comfyui_manager.start()
 
-    from comfy_api.latest import sdk
-    sdk.providers
-    from comfy_api.latest._sdk import (
-        load_overlay,
-        should_load_legacy_custom_nodes,
-    )
-    secure_custom_nodes = load_overlay()
+    from comfy_api._impl import _runtime
+    _runtime.load_execution_provider()
 
     hook_breaker_ac10a0.save_functions()
     asyncio_loop.run_until_complete(nodes.init_extra_nodes(
-        init_custom_nodes=should_load_legacy_custom_nodes(
-            secure_mode=secure_custom_nodes,
-            disabled=args.disable_all_custom_nodes,
-            has_whitelist=len(args.whitelist_custom_nodes) > 0,
-        ),
+        init_custom_nodes=_runtime.providers.load_custom_nodes and (
+            (not args.disable_all_custom_nodes) or len(args.whitelist_custom_nodes) > 0),
         init_api_nodes=not args.disable_partner_nodes
     ))
     disabled_nodes = governance.load_disabled_nodes(args.disabled_nodes_config) if args.disabled_nodes_config else set()

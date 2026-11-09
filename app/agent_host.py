@@ -23,7 +23,7 @@ import logging
 import os
 
 import folder_paths
-from comfy_api import feature_flags
+from comfy_api._impl import feature_flags
 
 ENTRY_POINT_GROUP = "comfyui.agent"
 PROTOCOL = "v1"

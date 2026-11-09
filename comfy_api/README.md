@@ -1,44 +1,125 @@
-# Custom-node resource SDK
+# The ComfyUI V2.1 custom node API
 
-Import the public facade with `from comfy_api.latest import sdk` and the node
-declarations with `from comfy_api.latest import io`. The `latest` API is an
-evolving contract. Private modules and the provider registry's implementation
-classes are not an extension compatibility contract.
+```py
+from comfy_api.index import ComfyExtension, eng, io, ui, util
+```
 
-Nodes opt into resource handles with `SDK_REFS = True`. Their image, model and
-other resource inputs become typed refs during execution; output refs resolve
-back to native values for downstream nodes. Ordinary ComfyUI executes these
-nodes in its own process. Installing this SDK alone does not isolate custom
-Python code or grant it fewer operating-system permissions.
+`comfy_api/index.py` is the whole public API. Its types and documentation are in `index.pyi` (one
+generated stub), and the full reference is [`docs/reference.md`](docs/reference.md). Everything else
+in `comfy_api` is internal.
 
-Use `sdk.ctx()` during node execution for supported host services. Retain
-plain data between runs; refs belong to their execution runtime. Await SDK
-operations and handle exceptions. A declared method is not proof that the
-active provider implements it.
+## A node
 
-## Availability in ordinary ComfyUI
+```py
+from comfy_api.index import eng, io
 
-Resource operations, progress, output, graph access, model services and several
-other domains have native implementations. Individual operations can still
-require a configured provider, dependency, device, model or user interaction.
-`OpNotSupported` reports an unavailable resource operation.
 
-The default context currently raises `NotImplementedError` for every operation
-in these domains:
+class SoftenCFG(io.ComfyNode):
+    ENGINE_API = True
 
-- `storage`
-- `interact`
-- `sample`
-- `unsample`
-- `serve`
-- `secrets`
-- `net`
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="SoftenCFG", category="example",
+            inputs=[io.Model.Input("model"), io.Float.Input("amount", default=0.9)],
+            outputs=[io.Model.Output()])
 
-The generic `integrations.web` domain is also unavailable by default. An
-optional host may supply these services; check that host's documented support.
-Python `ctx.storage` does not currently provide persistent storage in ordinary
-ComfyUI. Frontend `comfy.storage` is a separate API, and shared JavaScript/Python
-storage is not established by either declaration.
+    @classmethod
+    async def execute(cls, model, amount):
+        def soften(args):  # runs during sampling
+            return args["uncond"] + (args["cond"] - args["uncond"]) * args["cond_scale"] * amount
+        return io.NodeOutput(await eng.model.set_cfg(model, soften))
+```
 
-When an optional service is essential, report its absence clearly to the user.
-Do not silently claim success or fall back to private implementation imports.
+## What a node gets and returns
+- **Values as they are:** IMAGE and MASK tensors, LATENT dicts, CONDITIONING lists, plain values, and the
+  engine's MODEL, CLIP and VAE objects. Return the same kinds of values.
+- **Tensor work is plain torch** in the node. For ComfyUI's own helpers (`common_upscale`, `prepare_noise`,
+  conditioning helpers, sampler and scheduler names) use `util`, which behaves the same wherever a node runs.
+- **Engine objects are passed to `eng`,** never reached into: `await eng.model.clone(model)`,
+  `await eng.vae.decode(vae, samples)`, `await eng.clip.tokenize(clip, text)`.
+- **ComfyUI's own nodes** run with `await eng.node.run("KSampler", {...})`, and output or preview nodes
+  with `eng.node.run_output`.
+- **Model-file dropdowns:** `io.Combo.Input("lora", options=io.ModelFolder("loras"))`.
+
+## `eng`
+One async method per supported call, grouped: `eng.model`, `eng.clip`, `eng.vae`, `eng.models` (model
+folders and loaders), `eng.node`, `eng.output` and `eng.files` (ComfyUI's folders), `eng.progress`,
+`eng.ui`, `eng.device`, `eng.memory`, `eng.settings`, `eng.sampler`, `eng.execution`. Facts about an
+engine object are per type: `eng.model.info`, `eng.vae.info`, `eng.clip.info`, `eng.model.weight_keys`.
+Functions given to `eng.model.set_*` run during sampling, see only tensors and plain data, and can't
+make `eng` calls.
+
+## Functions that call back into the engine
+Some functions a pack hands the engine call back into it while sampling runs:
+- `eng.model.add_wrapper(model, kind, fn)`: `fn(executor, *args, **kwargs)` runs around one stage of
+  sampling (`"outer_sample"`, `"sampler_sample"`, `"predict_noise"`, `"calc_cond_batch"`,
+  `"apply_model"`, `"diffusion_model"`...).
+- `eng.model.set_unet_wrapper(model, fn)`: `fn(apply_model, args)` runs around every model call. A
+  wrapper already on the model runs inside it.
+- `eng.sampler.custom(fn, options)`: a SAMPLER whose loop is `fn(model, x, sigmas, extra_args, callback)`.
+
+What the engine hands `fn` to call (`executor`, `apply_model`, `model`, `callback`, a SAMPLER in
+`options`) is an engine function: call it. Engine objects in its arguments are opaque values: pass
+them on. Tensors, numpy arrays and plain data are themselves.
+
+## Samplers, schedulers, model folders and node replacements
+Declared on the pack's `ComfyExtension`, so they're in ComfyUI's lists before the pack runs:
+`get_samplers()`, `get_schedulers()`, `get_model_folders()`, `get_node_replacements()`.
+
+## Keeping values between runs
+- `eng.store`: small plain-data values that persist, for the pack, a workflow or a node
+  (`await eng.store.set("presets", presets)`). Don't write files next to the pack's code.
+- `eng.cache`: large values (tensors, a model the pack loaded) kept in ComfyUI's memory, least recently
+  used first out, optionally for a time (`ttl`). Don't keep module-level caches.
+
+## Asking the user mid-run
+`await eng.ui.interact(kind, payload)` (`"image-choice"`, `"prompt-await"` or `"mask-edit"`) waits for the
+user's answer. ComfyUI sends the client that queued the prompt a `secure-node-interaction` event with
+`request_id`, `kind`, `node_id` and `payload`; the pack's frontend extension shows it and posts
+`{"request_id", "response"}` to `/secure-nodes/interactions/respond`. (The names come from the secure
+overlay, so converted packs' frontends work unchanged.)
+
+## Other packs, and a pack's own types
+- `await eng.node.run("OtherPacksNode", {...})` runs another pack's node, in its process if it's isolated.
+  Declare the pack in `depends_on` in the manifest.
+- A node output that isn't data (a pack's own class, such as a namedtuple of detections) stays in the
+  pack's process, and the pack's next node gets it back. Only that pack's nodes can use it.
+
+## Engine extensions
+Code that has to touch engine internals beyond these calls ships as one file per feature,
+`v2/engine/<name>.py`, defining `class EngineOps`, and is called as
+`await eng.ext.<name>.<method>(...)`. Extensions run next to the engine, are allowed by
+file hash, and may import only the standard library, ComfyUI and ComfyUI's own requirements. ComfyUI
+implements its own calls the same way, in `_impl/engine/`. **Common extensions** (`_impl/engine/common/`)
+are reviewed with ComfyUI and any pack can call them without shipping them; one may need a kernel
+package it declares (`eng.ext.vae_triton` needs triton).
+
+## `ui`
+What a node shows: `ui.PreviewImage(image, cls=cls)`, `ui.PreviewMask`, `ui.PreviewAudio`, `ui.PreviewText`,
+and the savers `ui.ImageSaveHelper` and `ui.AudioSaveHelper`. Return them as `io.NodeOutput(ui=...)`. The
+savers write through `eng.output.write`, with ComfyUI's file naming, so they work the same in every mode;
+outside ComfyUI's process the files are written when `execute` returns.
+
+## Where a node runs
+The same node code runs in ComfyUI's process, in its own pack process (pack isolation,
+`COMFY_PACK_ISOLATION=true`), and in a sandbox. A node is validated when it works in both ComfyUI's process and the sandbox. In a sandbox:
+- write files only with `ui` savers or `eng.output.write`, and read them with `eng.files.*` and `eng.models.*`;
+- don't expect files a node wrote to still be there later;
+- there's no network and no subprocesses;
+- module-level state may not survive between prompts.
+
+## Layout
+| Path | What |
+|---|---|
+| `index.py` | The public API |
+| `index.pyi` | Its one stub, generated |
+| `docs/reference.md` | The full reference, generated |
+| `docs/pack-manifest.md` | `comfy-pack.json`, the file that describes a V2 pack without running it |
+| `generate_engine_stubs.py` | Regenerates both; `--check` fails if they're stale |
+| `_impl/` | The implementation; nothing in it is public |
+| `_impl/_engine.py` | The `eng` table, dispatcher and extension loading |
+| `_impl/engine/` | ComfyUI's own engine extensions: every `eng` call's implementation |
+| `_impl/_io.py`, `_ui.py`, `_api.py` | `io`, `ui`, `ComfyExtension` and the value types |
+| `_impl/isolation/` | Pack isolation (`COMFY_PACK_ISOLATION`): each pack in its own process, started when it's used ([README](_impl/isolation/README.md)) |
+| `_impl/legacy_imports.py` | Serves old import names (`comfy_api.latest`, `v0_0_x`...) to existing packs |

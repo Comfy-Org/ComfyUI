@@ -10,9 +10,9 @@ import kornia
 
 import comfy.utils
 import comfy.model_management
-from comfy_extras.nodes_latent import reshape_latent_to
+import comfy_extras.nodes_latent  # a module import: nodes_latent imports this module too
 import node_helpers
-from comfy_api.latest import ComfyExtension, io
+from comfy_api.index import ComfyExtension, io
 from nodes import MAX_RESOLUTION
 
 class Blend(io.ComfyNode):
@@ -564,7 +564,7 @@ def batch_latents(latents: list[dict[str, torch.Tensor]]) -> dict[str, torch.Ten
     tensors: list[torch.Tensor] = []
     for latent in latents:
         # first, deal with latent tensors
-        tensors.append(reshape_latent_to(first_samples.shape, latent["samples"], repeat_batch=False))
+        tensors.append(comfy_extras.nodes_latent.reshape_latent_to(first_samples.shape, latent["samples"], repeat_batch=False))
         # next, deal with batch_index
         samples_out["batch_index"].extend(latent.get("batch_index", [x for x in range(0, latent["samples"].shape[0])]))
     samples_out["samples"] = torch.cat(tensors, dim=0)

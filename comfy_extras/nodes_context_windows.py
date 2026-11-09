@@ -1,4 +1,4 @@
-from comfy_api.latest import ComfyExtension, io
+from comfy_api.index import ComfyExtension, io
 import comfy.context_windows
 import nodes
 from comfy_extras.nodes_minimax_h3 import video_latent_t

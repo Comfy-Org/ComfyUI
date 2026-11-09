@@ -3,7 +3,7 @@
 from typing_extensions import override
 import torch
 
-from comfy_api.latest import ComfyExtension, io
+from comfy_api.index import ComfyExtension, io
 
 
 def score_tangential_damping(cond_score: torch.Tensor, uncond_score: torch.Tensor) -> torch.Tensor:

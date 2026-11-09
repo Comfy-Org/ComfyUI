@@ -9,7 +9,7 @@ from comfy.cli_args import args
 if not torch.cuda.is_available():
     args.cpu = True
 
-from comfy_api.latest._io import build_nested_inputs, create_input_dict_v1, get_finalized_class_inputs
+from comfy_api._impl._io import build_nested_inputs, create_input_dict_v1, get_finalized_class_inputs
 from comfy_extras import nodes_lora_stack
 
 

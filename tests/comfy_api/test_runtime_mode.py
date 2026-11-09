@@ -4,10 +4,10 @@ import textwrap
 
 import pytest
 
-from comfy_api.latest import _sdk
+from comfy_api._impl import _runtime
 
 
-def test_versioned_v2_api_imports_without_private_comfy_modules() -> None:
+def test_the_api_and_its_old_names_import_without_private_comfy_modules() -> None:
     script = textwrap.dedent(
         """
         import builtins
@@ -21,89 +21,41 @@ def test_versioned_v2_api_imports_without_private_comfy_modules() -> None:
             return original_import(name, *args, **kwargs)
 
         builtins.__import__ = guarded_import
+        import comfy_api.index
+        from comfy_api._impl import legacy_imports
+        legacy_imports.install()
         import comfy_api.v0_0_3
+        from comfy_api.latest import io
+        assert io is comfy_api.index.io
         """
     )
 
     subprocess.run([sys.executable, "-c", script], check=True)
 
 
-def test_local_mode_allows_legacy_custom_nodes() -> None:
-    assert _sdk.should_load_legacy_custom_nodes(
-        secure_mode=False,
-        disabled=False,
-        has_whitelist=False,
-    )
+def test_no_provider_configured_is_a_no_op(monkeypatch) -> None:
+    monkeypatch.delenv(_runtime.PROVIDER_ENV, raising=False)
+    monkeypatch.delenv("COMFY_PACK_ISOLATION", raising=False)  # the built-in pack-isolation provider
+    monkeypatch.delenv("OOP_CUSTOM_NODES", raising=False)
+    assert not _runtime.load_execution_provider()
+    assert _runtime.providers.load_custom_nodes
 
 
-def test_local_mode_honors_legacy_custom_node_controls() -> None:
-    assert not _sdk.should_load_legacy_custom_nodes(
-        secure_mode=False,
-        disabled=True,
-        has_whitelist=False,
-    )
-    assert _sdk.should_load_legacy_custom_nodes(
-        secure_mode=False,
-        disabled=True,
-        has_whitelist=True,
-    )
+def test_provider_without_entrypoint_fails(tmp_path) -> None:
+    provider = tmp_path / "provider.py"
+    provider.write_text("value = 1\n")
+    with pytest.raises(RuntimeError, match="register"):
+        _runtime.load_execution_provider(str(provider))
 
 
-@pytest.mark.parametrize("has_whitelist", [False, True])
-def test_secure_mode_never_loads_legacy_custom_nodes(
-    has_whitelist: bool,
-) -> None:
-    assert not _sdk.should_load_legacy_custom_nodes(
-        secure_mode=True,
-        disabled=False,
-        has_whitelist=has_whitelist,
-    )
+def test_provider_can_replace_dispatch(monkeypatch, tmp_path) -> None:
+    provider = tmp_path / "provider.py"
+    provider.write_text("def register(providers):\n    providers.load_custom_nodes = False\n")
+    registry = _runtime.Providers()
+    monkeypatch.setattr(_runtime, "providers", registry)
+    assert _runtime.load_execution_provider(str(provider))
+    assert not registry.load_custom_nodes
 
 
-def test_unconfigured_overlay_preserves_local_mode(monkeypatch) -> None:
-    monkeypatch.delenv(_sdk.OVERLAY_ENV, raising=False)
-
-    assert not _sdk.load_overlay()
-
-
-def test_configured_overlay_without_entrypoint_fails_closed(tmp_path) -> None:
-    overlay = tmp_path / "broken_overlay.py"
-    overlay.write_text("VALUE = 1\n")
-
-    with pytest.raises(RuntimeError, match="register\\(providers\\)"):
-        _sdk.load_overlay(str(overlay))
-
-
-def test_configured_overlay_registers_secure_providers(
-    tmp_path,
-    monkeypatch,
-) -> None:
-    overlay = tmp_path / "working_overlay.py"
-    overlay.write_text(
-        textwrap.dedent(
-            """
-            def register(providers):
-                providers.registered_by_test = True
-            """
-        )
-    )
-    providers = _sdk.Providers()
-    monkeypatch.setattr(_sdk, "providers", providers)
-
-    assert _sdk.load_overlay(str(overlay))
-    assert providers.overlay_active
-    assert providers.registered_by_test
-
-
-def test_extension_host_configuration_is_absent_in_local_mode() -> None:
-    assert _sdk.Providers().frontend_runtime_config == {}
-
-
-def test_overlay_can_publish_its_frontend_host_module() -> None:
-    providers = _sdk.Providers()
-
-    providers.register_extension_host("/isolated-host/entry.mjs")
-
-    assert providers.frontend_runtime_config == {
-        "extension_host": {"module_url": "/isolated-host/entry.mjs"}
-    }
+def test_frontend_config_is_empty_by_default() -> None:
+    assert _runtime.Providers().frontend_runtime_config == {}

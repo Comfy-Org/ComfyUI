@@ -7,7 +7,7 @@ import comfy.ldm.modules.attention
 import nodes
 import torch
 import node_helpers
-from comfy_api.latest import io
+from comfy_api.index import io
 
 
 class LCM(comfy.model_sampling.EPS):

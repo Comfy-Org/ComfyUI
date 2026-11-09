@@ -4,7 +4,7 @@ from typing_extensions import override
 import comfy.model_management
 from comfy.ldm.minimax_music.ar import AUDIO_FRAMES_PER_SECOND, CFG_SCALE, CFG_TOP_K, C0_VOCAB_SIZE, MAX_AUDIO_FRAMES
 from comfy.ldm.minimax_music.dit import latent_length
-from comfy_api.latest import ComfyExtension, io
+from comfy_api.index import ComfyExtension, io
 
 
 class MiniMaxMusic3TextEncode(io.ComfyNode):

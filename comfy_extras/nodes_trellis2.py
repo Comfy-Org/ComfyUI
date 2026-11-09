@@ -1,5 +1,5 @@
 from typing_extensions import override
-from comfy_api.latest import ComfyExtension, IO, Types, io
+from comfy_api.index import ComfyExtension, io as IO, Types, io
 from comfy.ldm.trellis2.vae import SparseTensor
 from comfy.ldm.trellis2.model import build_proj_transform_matrix, compute_stage_proj_feats
 

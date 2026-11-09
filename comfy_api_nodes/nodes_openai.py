@@ -10,7 +10,7 @@ from typing_extensions import override
 
 import folder_paths
 from comfy.utils import common_upscale
-from comfy_api.latest import IO, ComfyExtension, Input
+from comfy_api.index import io as IO, ComfyExtension, Input
 from comfy_extras.nodes_images import SVG
 from comfy_api_nodes.apis.openai import (
     InputFileContent,

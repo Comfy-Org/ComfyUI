@@ -2,7 +2,8 @@ import torch
 from pydantic import BaseModel
 from typing_extensions import override
 
-from comfy_api.latest import IO, ComfyExtension, Input, Types, VideoFromComponents
+from comfy_api.index import io as IO, ComfyExtension, Input, Types
+from comfy_api._impl._input_impl import VideoFromComponents
 from comfy_api_nodes.apis.bria import (
     BriaAddObjectRequest,
     BriaEditImageRequest,

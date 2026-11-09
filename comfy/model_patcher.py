@@ -568,7 +568,7 @@ class ModelPatcher:
                 n.hook_backup = mm.hook_backup
                 n.is_multigpu_base_clone = mm.is_multigpu_base_clone
                 if "torch_compile_kwargs" in n.model_options:
-                    from comfy_api.torch_helpers.torch_compile import (
+                    from comfy_api._impl.torch_helpers.torch_compile import (
                         refresh_torch_compile_wrapper,
                     )
                     refresh_torch_compile_wrapper(n)

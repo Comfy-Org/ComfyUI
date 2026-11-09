@@ -2,7 +2,7 @@ from typing import TypedDict
 
 from pydantic import BaseModel, Field
 
-from comfy_api.latest import Input
+from comfy_api.index import Input
 
 
 class InputShouldRemesh(TypedDict):

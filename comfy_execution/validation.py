@@ -1,4 +1,4 @@
-from comfy_api.latest import IO
+from comfy_api.index import io as IO
 from comfy_execution.graph_utils import is_link
 
 

@@ -27,7 +27,7 @@ def NodeReplaceManager(monkeypatch):
 
 
 class FakeNodeReplace:
-    """Lightweight stand-in for comfy_api.latest._io.NodeReplace."""
+    """Lightweight stand-in for comfy_api._impl._io.NodeReplace."""
     def __init__(self, new_node_id, old_node_id, old_widget_ids=None,
                  input_mapping=None, output_mapping=None):
         self.new_node_id = new_node_id

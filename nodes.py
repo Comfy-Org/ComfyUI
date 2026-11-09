@@ -28,9 +28,10 @@ import comfy.utils
 import comfy.latent_formats
 import comfy.controlnet
 from comfy.comfy_types import IO, ComfyNodeABC, InputTypeDict, FileLocator
-from comfy_api.internal import register_versions, ComfyAPIWithVersion
-from comfy_api.version_list import supported_versions
-from comfy_api.latest import io, ComfyExtension, InputImpl
+from comfy_api.index import io, ComfyExtension, InputImpl
+from comfy_api._impl import legacy_imports
+
+legacy_imports.install()  # old comfy_api.latest / v0_0_x imports in custom nodes
 
 import comfy.clip_vision
 
@@ -2282,6 +2283,10 @@ async def load_custom_node(
             module_spec = spec_from_file_location(sys_module_name, os.path.join(module_path, "__init__.py"))
             module_dir = module_path
 
+        if os.path.isdir(module_path):
+            from comfy_api._impl import _engine
+            _engine.load_pack_extensions(sys_module_name, module_dir)
+
         module = importlib.util.module_from_spec(module_spec)
         sys.modules[sys_module_name] = module
         module_spec.loader.exec_module(module)
@@ -2350,6 +2355,8 @@ async def load_custom_node(
                         node_cls.RELATIVE_PYTHON_MODULE = "{}.{}".format(module_parent, registration_name)
                         if schema.display_name is not None:
                             NODE_DISPLAY_NAME_MAPPINGS[schema.node_id] = schema.display_name
+                from comfy_api._impl import registration
+                registration.install(*registration.from_extension(await registration.collect(extension)), registration_name)
                 return True
             except Exception as e:
                 logging.warning(f"Error while calling comfy_entrypoint in {module_path}: {e}")
@@ -2404,7 +2411,7 @@ async def init_external_custom_nodes():
                 continue
 
             v2_path = os.path.join(module_path, "v2")
-            entrypoint_path = v2_path if os.path.isdir(v2_path) else module_path
+            entrypoint_path = v2_path if os.path.isfile(os.path.join(v2_path, "__init__.py")) else module_path
             time_before = time.perf_counter()
             success = await load_custom_node(
                 entrypoint_path,
@@ -2603,17 +2610,13 @@ async def init_builtin_api_nodes():
 
     return import_failed
 
-async def init_public_apis():
-    register_versions([
-        ComfyAPIWithVersion(
-            version=getattr(v, "VERSION"),
-            api_class=v
-        ) for v in supported_versions
-    ])
-
 async def init_extra_nodes(init_custom_nodes=True, init_api_nodes=True):
-    await init_public_apis()
-
+    try:  # eng.ui.interact's response route, before the app starts
+        from server import PromptServer
+        from comfy_api._impl import interactions
+        interactions.register_routes(PromptServer.instance)
+    except Exception as e:
+        logging.debug(f"interaction route not registered: {e}")
     import_failed = await init_builtin_extra_nodes()
 
     import_failed_api = []
@@ -2621,7 +2624,13 @@ async def init_extra_nodes(init_custom_nodes=True, init_api_nodes=True):
         import_failed_api = await init_builtin_api_nodes()
 
     if init_custom_nodes:
-        await init_external_custom_nodes()
+        from comfy_api._impl import _runtime
+        backend = _runtime.providers.execution_backend
+        if hasattr(backend, "setup_packs"):  # the backend runs packs itself (pack isolation)
+            import asyncio
+            await asyncio.to_thread(backend.setup_packs)
+        else:
+            await init_external_custom_nodes()
     else:
         logging.info("Skipping loading of custom nodes")
 

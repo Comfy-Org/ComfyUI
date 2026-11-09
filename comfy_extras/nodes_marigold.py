@@ -3,7 +3,7 @@ from typing_extensions import override
 import torch
 import torch.nn.functional as F
 
-from comfy_api.latest import ComfyExtension, io
+from comfy_api.index import ComfyExtension, io
 
 
 class MarigoldV2PostProcess(io.ComfyNode):

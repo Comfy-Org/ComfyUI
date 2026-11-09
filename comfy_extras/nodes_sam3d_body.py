@@ -14,7 +14,7 @@ import comfy.model_patcher
 import comfy.storage
 import comfy.ops
 import comfy.utils
-from comfy_api.latest import io, ComfyExtension, Types
+from comfy_api.index import io, ComfyExtension, Types
 from typing_extensions import override
 import folder_paths
 

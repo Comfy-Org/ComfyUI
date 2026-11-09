@@ -15,7 +15,7 @@ if not torch.cuda.is_available():
 import execution
 import nodes
 from app.node_replace_manager import NodeReplaceManager
-from comfy_api.latest import io
+from comfy_api.index import io
 
 
 class TestNode:

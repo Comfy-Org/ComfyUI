@@ -9,7 +9,7 @@ if TYPE_CHECKING:
     from comfy_execution.graph import DynamicPrompt
     from comfy_execution.server_protocol import ExecutionServer
 from protocol import BinaryEventTypes
-from comfy_api import feature_flags
+from comfy_api._impl import feature_flags
 
 PreviewImageTuple = Tuple[str, Image.Image, Optional[int]]
 

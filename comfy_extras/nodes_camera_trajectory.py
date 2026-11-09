@@ -5,7 +5,7 @@ from einops import rearrange
 from typing_extensions import override
 import comfy.model_management
 
-from comfy_api.latest import ComfyExtension, io
+from comfy_api.index import ComfyExtension, io
 
 
 CAMERA_DICT = {

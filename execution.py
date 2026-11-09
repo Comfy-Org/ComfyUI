@@ -45,9 +45,10 @@ from comfy_execution.progress import get_progress_state, reset_progress_state, a
 from comfy_execution.utils import CurrentNodeContext
 from comfy_execution.asset_enrichment import register_executed_outputs, emit_cached_output, take_asset_previews
 from comfy_execution.media_enrichment import enrich_output_with_media_metadata
-from comfy_api.internal import _ComfyNodeInternal, _NodeOutputInternal, first_real_override, is_class, make_locked_method_func
-from comfy_api.latest import io, _io
-from comfy_api.latest import _execution_metadata
+from comfy_api._impl.internal import _ComfyNodeInternal, _NodeOutputInternal, first_real_override, is_class, make_locked_method_func
+from comfy_api.index import io
+from comfy_api._impl import _io
+from comfy_api._impl import _execution_metadata
 from comfy_execution import upstream_variants as _upstream_variants
 from comfy_execution.cache_provider import _has_cache_providers, _get_cache_providers, _logger as _cache_logger
 from app.assets.manager import AssetManager, NoAssets
@@ -78,8 +79,8 @@ class IsChangedCache:
         node = self.dynprompt.get_node(node_id)
         class_type = node["class_type"]
         class_def = nodes.NODE_CLASS_MAPPINGS[class_type]
-        if {"graph.metadata", "graph.expand.upstream"}.intersection(
-                getattr(class_def, "SDK_PERMISSIONS", ()) or ()):
+        from comfy_api._impl import _runtime
+        if _runtime.providers.always_changed(class_def):
             self.is_changed[node_id] = float("nan")
             return self.is_changed[node_id]
         has_is_changed = False
@@ -176,7 +177,6 @@ class CacheSet:
 SENSITIVE_EXTRA_DATA_KEYS = (
     "auth_token_comfy_org",
     "api_key_comfy_org",
-    "comfy_secure_tenant_id",
 )
 
 
@@ -185,9 +185,9 @@ async def _notify_execution_backend_lifecycle(
     prompt_id: str,
     extra_data: dict,
 ) -> None:
-    from comfy_api.latest import _sdk as _comfy_sdk
+    from comfy_api._impl import _runtime
 
-    backend = _comfy_sdk.providers.execution_backend
+    backend = _runtime.providers.execution_backend
     hook = getattr(backend, f"on_prompt_{event}", None)
     if hook is None and event == "abort":
         hook = getattr(backend, "on_prompt_end", None)
@@ -196,26 +196,26 @@ async def _notify_execution_backend_lifecycle(
 
 
 async def _shutdown_execution_backend() -> None:
-    from comfy_api.latest import _sdk as _comfy_sdk
+    from comfy_api._impl import _runtime
 
-    hook = getattr(_comfy_sdk.providers.execution_backend, "shutdown", None)
+    hook = getattr(_runtime.providers.execution_backend, "shutdown", None)
     if hook is not None:
         await hook()
 
 
 async def _maintain_execution_backend() -> None:
-    from comfy_api.latest import _sdk as _comfy_sdk
+    from comfy_api._impl import _runtime
 
-    hook = getattr(_comfy_sdk.providers.execution_backend, "maintenance", None)
+    hook = getattr(_runtime.providers.execution_backend, "maintenance", None)
     if hook is not None:
         await hook()
 
 
 def _execution_backend_maintenance_interval() -> float | None:
-    from comfy_api.latest import _sdk as _comfy_sdk
+    from comfy_api._impl import _runtime
 
     value = getattr(
-        _comfy_sdk.providers.execution_backend,
+        _runtime.providers.execution_backend,
         "maintenance_interval_seconds",
         None,
     )
@@ -225,7 +225,7 @@ def _execution_backend_maintenance_interval() -> float | None:
         raise ValueError("execution backend maintenance interval must be positive")
     return float(value)
 
-_LEGACY_SDK_METHODS = {
+_LEGACY_NODE_METHODS = {
     "execute": "execute",
     "VALIDATE_INPUTS": "validate_inputs",
     "IS_CHANGED": "fingerprint_inputs",
@@ -259,18 +259,10 @@ class _PersistentLoopRunner:
 _AsyncRunner = getattr(asyncio, "Runner", _PersistentLoopRunner)
 
 
-def _sdk_seam_engaged(type_obj) -> bool:
-    """Whether this node's invocation has to go through the custom-node SDK.
-
-    False on a stock install — no overlay is registered and no node declares
-    SDK intent — which leaves the original call path untouched.
-    """
-    if (getattr(type_obj, "SDK_REFS", False)
-            or getattr(type_obj, "SDK_PERMISSIONS", ())
-            or getattr(type_obj, "SDK_REQUIRED_WEIGHTS", ())):
-        return True
-    from comfy_api.latest import _sdk as _comfy_sdk
-    return _comfy_sdk.providers.engaged
+def _engine_api_engaged(type_obj) -> bool:
+    """Whether this node runs through the engine API's dispatch."""
+    from comfy_api._impl import _runtime
+    return _runtime.providers.node_engaged(type_obj)
 
 
 def get_input_data(inputs, class_def, unique_id, execution_list=None, dynprompt=None, extra_data={}):
@@ -395,8 +387,8 @@ async def _async_map_node_over_list(prompt_id, unique_id, obj, input_data_all, f
             if pre_execute_cb is not None and index is not None:
                 pre_execute_cb(index)
             # V3
-            _sdk_plan = None
-            _sdk_runtime = None
+            _engine_plan = None
+            _engine_scope = None
             if isinstance(obj, _ComfyNodeInternal) or (is_class(obj) and issubclass(obj, _ComfyNodeInternal)):
                 # if is just a class, then assign no state, just create clone
                 if is_class(obj):
@@ -412,89 +404,37 @@ async def _async_map_node_over_list(prompt_id, unique_id, obj, input_data_all, f
                 # in case of dynamic inputs, restructure inputs to expected nested dict
                 if v3_data is not None:
                     inputs = _io.build_nested_inputs(inputs, v3_data, input_is_list=input_is_list)
-                # Custom-node SDK seam: build a per-node ExecutionPlan + bind a
-                # ctx and ref resolver from the active providers. Default
-                # providers are in-process (behavior-preserving); the overlay
-                # swaps them for the isolated engine. Binding happens inside the
-                # invocation scope below so it is correct for the concurrent
-                # async-task path too.
-                if _sdk_seam_engaged(type_obj):
-                    from comfy_api.latest import _sdk as _comfy_sdk
-                    # A node declares the host capabilities it needs; the backend
-                    # decides whether to grant them. Declaring is not granting — an
-                    # out-of-process backend still gates each one at the wire, and a
-                    # registry manifest can narrow the set further. Nodes that
-                    # declare nothing (the overwhelming majority) get nothing.
-                    _sdk_perms = getattr(type_obj, "SDK_PERMISSIONS", ()) or ()
-                    _sdk_required_weights = getattr(
-                        type_obj, "SDK_REQUIRED_WEIGHTS", ()) or ()
-                    _sdk_refs_mode = bool(getattr(type_obj, "SDK_REFS", False))
-                    _sdk_plan = _comfy_sdk.ExecutionPlan(
-                        prompt_id=str(prompt_id),
-                        node_id=str(unique_id),
-                        node_type=getattr(type_obj, "__name__", "node"),
-                        node_module=getattr(type_obj, "__module__", "") or "",
-                        inputs=inputs,
-                        input_mode="refs" if _sdk_refs_mode else "values",
-                        method=func,
-                        permissions=tuple(_sdk_perms),
-                        required_weights=tuple(_sdk_required_weights),
-                        prompt=getattr(class_clone.hidden, "prompt", None),
-                        extra_pnginfo=getattr(
-                            class_clone.hidden, "extra_pnginfo", None),
-                        dynamic_prompt=getattr(
-                            class_clone.hidden, "dynprompt", None),
-                        execution_metadata=_execution_metadata.current(prompt_id),
+                # Engine-API nodes get a plan, a handle table and a bound runtime.
+                if _engine_api_engaged(type_obj):
+                    from comfy_api._impl import _runtime as _engine_runtime
+                    _engine_plan, _engine_refs, _engine_scope, inputs = await _engine_runtime.begin_node(
+                        type_obj, inputs, method=func, prompt_id=prompt_id, node_id=unique_id,
+                        handles=_engine_runtime.providers.uses_handles(type_obj),
+                        hidden=class_clone.hidden,
+                        metadata=_execution_metadata.current(prompt_id),
                     )
-                    _sdk_refs = _comfy_sdk.providers.ref_resolver_factory()
-                    _sdk_runtime = _comfy_sdk.bind_runtime(
-                        _sdk_refs,
-                        _comfy_sdk.providers.ctx_provider.build(_sdk_plan),
-                        _comfy_sdk.providers.ops_provider,
-                    )
-                    # SDK nodes see assets (refs), not buffers: wrap heavy inputs.
-                    if _sdk_refs_mode:
-                        inputs = await _comfy_sdk.wrap_inputs(_sdk_refs, inputs)
-                        # Ship the work unit on the plan so an out-of-process
-                        # backend can execute without local_call.
-                        _sdk_plan.inputs = inputs
             # V1
             else:
                 f = getattr(obj, func)
                 type_obj = obj if is_class(obj) else type(obj)
-                if _sdk_seam_engaged(type_obj):
-                    _legacy_method = _LEGACY_SDK_METHODS.get(
+                if _engine_api_engaged(type_obj):
+                    _legacy_method = _LEGACY_NODE_METHODS.get(
                         "execute" if func == getattr(type_obj, "FUNCTION", None)
                         else func)
                     if _legacy_method is None:
                         raise ValueError(
-                            f"legacy node method {func!r} has no sandbox mapping")
+                            f"legacy node method {func!r} has no dispatch mapping")
 
-                    from comfy_api.latest import _sdk as _comfy_sdk
-                    _sdk_plan = _comfy_sdk.ExecutionPlan(
-                        prompt_id=str(prompt_id),
-                        node_id=str(unique_id),
-                        node_type=getattr(type_obj, "__name__", "node"),
-                        node_module=getattr(type_obj, "__module__", "") or "",
-                        inputs=inputs,
-                        input_mode="values",
-                        method=_legacy_method,
-                        permissions=tuple(
-                            getattr(type_obj, "SDK_PERMISSIONS", ()) or ()),
-                        required_weights=tuple(getattr(
-                            type_obj, "SDK_REQUIRED_WEIGHTS", ()) or ()),
-                        execution_metadata=_execution_metadata.current(prompt_id),
-                    )
-                    _sdk_refs = _comfy_sdk.providers.ref_resolver_factory()
-                    _sdk_runtime = _comfy_sdk.bind_runtime(
-                        _sdk_refs,
-                        _comfy_sdk.providers.ctx_provider.build(_sdk_plan),
-                        _comfy_sdk.providers.ops_provider,
+                    from comfy_api._impl import _runtime as _engine_runtime
+                    _engine_plan, _engine_refs, _engine_scope, inputs = await _engine_runtime.begin_node(
+                        type_obj, inputs, method=_legacy_method, prompt_id=prompt_id, node_id=unique_id,
+                        handles=False,
+                        metadata=_execution_metadata.current(prompt_id),
                     )
 
             def _invoke_scope():
                 import contextlib
-                return _sdk_runtime if _sdk_runtime is not None else contextlib.nullcontext()
+                return _engine_scope if _engine_scope is not None else contextlib.nullcontext()
 
             async def local_call():
                 if inspect.iscoroutinefunction(f):
@@ -515,27 +455,22 @@ async def _async_map_node_over_list(prompt_id, unique_id, obj, input_data_all, f
                             invocation_guard()
                         return f(**inputs)
 
-            if _sdk_plan is not None:
+            local_call.is_sync = not inspect.iscoroutinefunction(f)
+            if _engine_plan is not None:
                 try:
                     if invocation_guard is not None:
                         invocation_guard()
-                    result = await _comfy_sdk.providers.execution_backend.dispatch(
-                        _sdk_plan, local_call, _sdk_runtime.runtime
+                    result = await _engine_runtime.providers.execution_backend.dispatch(
+                        _engine_plan, local_call, _engine_scope.runtime
                     )
-                    # A sandbox backend returns refs in both modes: explicit-ref
-                    # nodes create them directly, while compatibility-mode V2
-                    # nodes have their ordinary outputs wrapped by the guest.
                     if isinstance(result, asyncio.Task):
                         result = await result
-                    result = await _comfy_sdk.unwrap_outputs(_sdk_refs, result)
+                    result = await _engine_runtime.unwrap_outputs(_engine_refs, result)
                 finally:
                     # The table holds this node's inputs and every intermediate
-                    # it created — for image or latent work, the largest
-                    # allocation in the process. Released here rather than left
-                    # to collection, and in `finally` because the path that most
-                    # needs it is the one where the node raised or its guest
-                    # died: that is exactly when nothing else is going to run.
-                    _sdk_refs.clear()
+                    # it created, often the largest allocation in the process.
+                    # Released here because a raising node leaves nothing else to do it.
+                    _engine_refs.clear()
             else:
                 result = await local_call()
             results.append(result)
@@ -1083,6 +1018,7 @@ class PromptExecutor:
                 logging.exception("execution backend maintenance failed")
 
     async def execute_async(self, prompt, prompt_id, extra_data={}, execute_outputs=[]):
+        await ensure_node_types(prompt)
         set_preview_method(extra_data.get("preview_method"))
 
         nodes.interrupt_processing(False)
@@ -1112,10 +1048,10 @@ class PromptExecutor:
             comfy.memory_management.set_ram_cache_release_state(ram_release_callback, ram_headroom)
             with torch.inference_mode():
                 dynamic_prompt = DynamicPrompt(prompt)
+                from comfy_api._impl import _runtime
                 metadata_scope = _execution_metadata.ExecutionMetadataScope(
                     prompt_id, dynamic_prompt, extra_data.get("extra_pnginfo"),
-                    observe=any("graph.metadata" in (
-                        getattr(nodes.NODE_CLASS_MAPPINGS[node["class_type"]], "SDK_PERMISSIONS", ()) or ())
+                    observe=any(_runtime.providers.observes_execution(nodes.NODE_CLASS_MAPPINGS[node["class_type"]])
                         for node in prompt.values()))
                 metadata_scope.__enter__()
                 variant_owner = _upstream_variants.CoreVariantExecutionOwner(
@@ -1550,7 +1486,21 @@ def full_type_name(klass):
         return klass.__qualname__
     return module + '.' + klass.__qualname__
 
+async def ensure_node_types(prompt) -> None:
+    """Tell the execution backend which node types a prompt uses, before it's validated or run
+    (pack isolation starts the packs they come from and registers their nodes)."""
+    from comfy_api._impl import _runtime
+    ensure = getattr(_runtime.providers.execution_backend, "ensure_node_types", None)
+    if ensure is None:
+        return
+    used = {node.get("class_type") for node in prompt.values() if isinstance(node, dict)}
+    used.discard(None)
+    if used:
+        await ensure(used)
+
+
 async def validate_prompt(prompt_id, prompt, partial_execution_list: Union[list[str], None]):
+    await ensure_node_types(prompt)
     outputs = set()
     for x in prompt:
         if 'class_type' not in prompt[x]:

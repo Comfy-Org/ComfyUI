@@ -4,7 +4,7 @@ import re
 import torch
 from typing_extensions import override
 
-from comfy_api.latest import IO, ComfyExtension
+from comfy_api.index import io as IO, ComfyExtension
 from comfy_api_nodes.apis.qwen import (
     QwenImageContentItem,
     QwenImageGenerationRequest,

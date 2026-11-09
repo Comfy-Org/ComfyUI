@@ -5,7 +5,7 @@ import pytest
 import nodes
 
 import comfy_extras.nodes_loop as nodes_loop
-from comfy_api.latest import io
+from comfy_api.index import io
 from comfy_execution.graph_utils import GraphBuilder
 from comfy_execution.validation import validate_loops
 from execution import PromptExecutor

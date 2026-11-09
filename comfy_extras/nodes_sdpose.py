@@ -4,7 +4,7 @@ import comfy.model_management
 import numpy as np
 from tqdm import tqdm
 from typing_extensions import override
-from comfy_api.latest import ComfyExtension, io
+from comfy_api.index import ComfyExtension, io
 from comfy_extras.pose.keypoint_draw import KeypointDraw
 from comfy_extras.nodes_lotus import LotusConditioning
 

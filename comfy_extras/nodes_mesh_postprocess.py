@@ -2,7 +2,7 @@ import torch
 import numpy as np
 import math
 from typing_extensions import override
-from comfy_api.latest import ComfyExtension, IO, Types
+from comfy_api.index import ComfyExtension, io as IO, Types
 import copy
 import comfy.utils
 import comfy.model_management

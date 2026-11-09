@@ -7,7 +7,7 @@ from typing_extensions import override
 from einops import rearrange, repeat
 from comfy.ldm.modules.attention import optimized_attention
 import comfy.samplers
-from comfy_api.latest import ComfyExtension, io
+from comfy_api.index import ComfyExtension, io
 
 
 # from comfy/ldm/modules/attention.py

@@ -5,7 +5,7 @@ import av
 import torch
 
 import folder_paths
-from comfy_api.input_impl.video_types import VideoFromFile
+from comfy_api._impl._input_impl.video_types import VideoFromFile
 from comfy_extras import nodes_video
 
 

@@ -2,7 +2,7 @@
 
 import pytest
 
-from comfy_api.feature_flags import (
+from comfy_api._impl.feature_flags import (
     get_connection_feature,
     supports_feature,
     get_server_features,
@@ -157,23 +157,23 @@ class TestParseCliFeatureFlags:
     """Test suite for _parse_cli_feature_flags."""
 
     def test_single_flag(self, monkeypatch):
-        monkeypatch.setattr("comfy_api.feature_flags.args", type("Args", (), {"feature_flag": ["show_signin_button=true"]})())
+        monkeypatch.setattr("comfy_api._impl.feature_flags.args", type("Args", (), {"feature_flag": ["show_signin_button=true"]})())
         result = _parse_cli_feature_flags()
         assert result == {"show_signin_button": True}
 
     @pytest.mark.parametrize("key", ["partner_node_token", "local_web_sso"])
     def test_frontend_strict_bool_flags_parse_to_bool(self, monkeypatch, key):
-        monkeypatch.setattr("comfy_api.feature_flags.args", type("Args", (), {"feature_flag": [f"{key}=true"]})())
+        monkeypatch.setattr("comfy_api._impl.feature_flags.args", type("Args", (), {"feature_flag": [f"{key}=true"]})())
         assert _parse_cli_feature_flags()[key] is True
 
     def test_missing_equals_defaults_to_true(self, monkeypatch):
         """Bare flag without '=' is treated as the string 'true' (and coerced if registered)."""
-        monkeypatch.setattr("comfy_api.feature_flags.args", type("Args", (), {"feature_flag": ["show_signin_button", "valid=1"]})())
+        monkeypatch.setattr("comfy_api._impl.feature_flags.args", type("Args", (), {"feature_flag": ["show_signin_button", "valid=1"]})())
         result = _parse_cli_feature_flags()
         assert result == {"show_signin_button": True, "valid": "1"}
 
     def test_empty_key_skipped(self, monkeypatch):
-        monkeypatch.setattr("comfy_api.feature_flags.args", type("Args", (), {"feature_flag": ["=value", "valid=1"]})())
+        monkeypatch.setattr("comfy_api._impl.feature_flags.args", type("Args", (), {"feature_flag": ["=value", "valid=1"]})())
         result = _parse_cli_feature_flags()
         assert result == {"valid": "1"}
 
@@ -181,7 +181,7 @@ class TestParseCliFeatureFlags:
         """A typo'd bool value must be dropped entirely, not silently set to False
         and not stored as a raw string. A warning must be logged."""
         monkeypatch.setattr(
-            "comfy_api.feature_flags.args",
+            "comfy_api._impl.feature_flags.args",
             type("Args", (), {"feature_flag": ["show_signin_button=ture", "valid=1"]})(),
         )
         with caplog.at_level("WARNING"):

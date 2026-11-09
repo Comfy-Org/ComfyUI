@@ -14,7 +14,7 @@ import pytest
 
 import folder_paths
 from app import agent_host
-from comfy_api import feature_flags
+from comfy_api._impl import feature_flags
 
 
 class FakeHost:

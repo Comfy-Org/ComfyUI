@@ -38,13 +38,13 @@ import mimetypes
 from comfy.cli_args import args
 import comfy.utils
 import comfy.model_management
-from comfy_api import feature_flags
+from comfy_api._impl import feature_flags
 from app.comfy_api_env import get_environment_overrides
 from app.deploy_environment import get_deploy_environment
 import node_helpers
 from comfyui_version import __version__
 from app.frontend_management import FrontendManager, parse_version
-from comfy_api.internal import _ComfyNodeInternal
+from comfy_api._impl.internal import _ComfyNodeInternal
 from app.assets.event_log import emit
 from app.database.db import dependencies_available
 
@@ -908,8 +908,8 @@ class PromptServer():
             overrides = get_environment_overrides()
             if overrides:
                 features.update(overrides)
-            from comfy_api.latest import sdk
-            features.update(sdk.providers.frontend_runtime_config)
+            from comfy_api._impl import _runtime
+            features.update(_runtime.providers.frontend_runtime_config)
             return web.json_response(features)
 
         @routes.get("/default_workflow")

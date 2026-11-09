@@ -8,7 +8,7 @@ from PIL import UnidentifiedImageError
 from typing_extensions import override
 
 from comfy.utils import ProgressBar
-from comfy_api.latest import IO, ComfyExtension
+from comfy_api.index import io as IO, ComfyExtension
 from comfy_api_nodes.apis.recraft import (
     RECRAFT_STYLE_MATCH_OPTIONS,
     RECRAFT_STYLE_REFERENCES_MAX,

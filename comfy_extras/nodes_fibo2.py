@@ -8,7 +8,7 @@ import comfy.text_encoders.fibo2
 import comfy.utils
 import node_helpers
 import nodes
-from comfy_api.latest import ComfyExtension, io
+from comfy_api.index import ComfyExtension, io
 
 # sigma 0.9 at the default shift 1.15: a generation shows Qwen3-VL the images of its caption's text from there on
 TEXT_IMAGES_START = math.exp(1.15) / (9 + math.exp(1.15))

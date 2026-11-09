@@ -2,7 +2,7 @@ from typing_extensions import override
 
 import torch
 import comfy.utils
-from comfy_api.latest import ComfyExtension, io
+from comfy_api.index import ComfyExtension, io
 
 class SD_4XUpscale_Conditioning(io.ComfyNode):
     @classmethod

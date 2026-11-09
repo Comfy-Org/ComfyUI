@@ -6,7 +6,7 @@ import threading
 import pytest
 
 import execution
-from comfy_api.latest import _sdk
+from comfy_api._impl import _runtime as _sdk
 
 
 class _Server:

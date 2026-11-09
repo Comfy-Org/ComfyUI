@@ -1,5 +1,5 @@
 """Simplified tests for WebSocket feature flags functionality."""
-from comfy_api import feature_flags
+from comfy_api._impl import feature_flags
 
 
 class TestWebSocketFeatureFlags:

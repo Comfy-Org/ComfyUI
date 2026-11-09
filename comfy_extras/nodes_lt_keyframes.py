@@ -4,7 +4,7 @@ import re
 import node_helpers
 import torch
 from comfy.ldm.lightricks.symmetric_patchifier import SymmetricPatchifier, latent_to_pixel_coords
-from comfy_api.latest import ComfyExtension, io
+from comfy_api.index import ComfyExtension, io
 from comfy_extras.nodes_lt import (
     LTXVAddGuide,
     _append_guide_attention_entry,

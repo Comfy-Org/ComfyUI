@@ -7,7 +7,7 @@ import weakref
 from typing import Optional
 from typing_extensions import override
 from fractions import Fraction
-from comfy_api.latest import ComfyExtension, io, ui, Input, InputImpl, Types
+from comfy_api.index import ComfyExtension, io, ui, Input, InputImpl, Types
 from comfy.cli_args import args
 
 class SaveWEBM(io.ComfyNode):

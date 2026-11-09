@@ -5,7 +5,7 @@ import torch
 import comfy.utils
 import folder_paths
 from typing_extensions import override
-from comfy_api.latest import ComfyExtension, io
+from comfy_api.index import ComfyExtension, io
 import comfy.model_management
 import comfy.model_patcher
 import comfy.storage

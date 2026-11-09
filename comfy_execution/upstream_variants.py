@@ -1,7 +1,7 @@
 """Job-owned serial execution of admitted upstream variants.
 
 The graph RPC only creates native continuation controls. Node bodies run from
-the ordinary executor after the requesting guest dispatch has returned.
+the ordinary executor after the requesting dispatch has returned.
 """
 import asyncio
 import contextvars

@@ -6,7 +6,7 @@ import comfy.model_patcher
 import comfy.storage
 import comfy.ops
 from typing_extensions import override
-from comfy_api.latest import ComfyExtension, io
+from comfy_api.index import ComfyExtension, io
 from comfy.ldm.hunyuan_video.upsampler import HunyuanVideo15SRModel
 from comfy.ldm.lightricks.latent_upsampler import LatentUpsampler
 from comfy.ldm.minimax.latent_upscaler import MiniMaxH3LatentUpscaler

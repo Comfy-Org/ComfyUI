@@ -1,4 +1,4 @@
-from comfy_api.latest._io import Combo, MultiCombo
+from comfy_api._impl._io import Combo, MultiCombo
 
 
 def test_multicombo_serializes_multi_select_as_object():

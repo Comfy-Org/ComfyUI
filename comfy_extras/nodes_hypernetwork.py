@@ -2,7 +2,7 @@ import comfy.utils
 import folder_paths
 import torch
 import logging
-from comfy_api.latest import IO, ComfyExtension
+from comfy_api.index import io as IO, ComfyExtension
 from typing_extensions import override
 
 

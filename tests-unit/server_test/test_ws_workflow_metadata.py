@@ -6,7 +6,7 @@ import pytest
 
 import protocol
 import server
-from comfy_api.feature_flags import SERVER_FEATURE_FLAGS  # noqa: F401
+from comfy_api._impl.feature_flags import SERVER_FEATURE_FLAGS  # noqa: F401
 
 
 class FakeLoop:

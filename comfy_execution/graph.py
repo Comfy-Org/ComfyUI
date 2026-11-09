@@ -6,8 +6,8 @@ import inspect
 from comfy_execution.graph_utils import is_link, ExecutionBlocker
 from comfy_execution.upstream_variants import assert_node_current
 from comfy.comfy_types.node_typing import ComfyNodeABC, InputTypeDict, InputTypeOptions
-from comfy_api.internal import _ComfyNodeInternal
-from comfy_api.latest import _io
+from comfy_api._impl.internal import _ComfyNodeInternal
+from comfy_api._impl import _io
 
 # NOTE: ExecutionBlocker code got moved to graph_utils.py to prevent torch being imported too soon during unit tests
 ExecutionBlocker = ExecutionBlocker

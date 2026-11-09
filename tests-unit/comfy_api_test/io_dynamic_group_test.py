@@ -1,8 +1,8 @@
 import pytest
 
-from comfy_api.latest import io
-from comfy_api.latest._io import DynamicSlot, _DynamicGroup, build_nested_inputs, create_input_dict_v1, get_finalized_class_inputs
-from comfy_api.v0_0_2 import IO as versioned_io
+from comfy_api.index import io
+from comfy_api._impl._io import DynamicSlot, _DynamicGroup, build_nested_inputs, create_input_dict_v1, get_finalized_class_inputs
+from comfy_api.index import io as versioned_io
 
 
 @pytest.mark.parametrize("public_io", [io, versioned_io], ids=["latest", "v0_0_2"])

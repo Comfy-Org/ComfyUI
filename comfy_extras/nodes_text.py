@@ -1,7 +1,7 @@
 import os
 import json
 from typing_extensions import override
-from comfy_api.latest import io, ComfyExtension, ui
+from comfy_api.index import io, ComfyExtension, ui
 import folder_paths
 
 

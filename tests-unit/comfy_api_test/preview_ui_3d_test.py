@@ -6,7 +6,7 @@ from unittest.mock import patch
 import pytest
 
 import folder_paths
-from comfy_api.latest import IO, UI, Types
+from comfy_api.index import io as IO, ui as UI, Types
 from comfy_extras.nodes_load_3d import Preview3DAdvanced, PreviewGaussianSplat, PreviewPointCloud
 from comfy_extras.nodes_save_3d import Save3DAdvanced, SaveGaussianSplat, SaveGLB, SavePointCloud
 

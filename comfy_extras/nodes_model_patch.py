@@ -19,7 +19,7 @@ import comfy.ldm.qwen_image21.model
 import comfy.ldm.wan.uni3c
 import comfy.ldm.lightricks.duration_head
 from comfy.ldm.wan.model_multitalk import WanMultiTalkAttentionBlock, MultiTalkAudioProjModel
-from comfy_api.latest import io
+from comfy_api.index import io
 from comfy.ldm.supir.supir_patch import SUPIRPatch
 
 
