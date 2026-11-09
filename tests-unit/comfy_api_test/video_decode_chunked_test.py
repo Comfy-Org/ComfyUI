@@ -484,3 +484,16 @@ def test_default_chunks_split_rgba_and_shape_alpha():
     mask = torch.rand(5, 4, 6)
     flat = VideoFromComponents(VideoComponents(images=torch.rand(5, 4, 6, 3), frame_rate=Fraction(24), alpha=mask))
     assert torch.equal(torch.cat([c.alpha for c in flat.decode_chunked(chunk_frames=2)]), mask.unsqueeze(-1))
+
+
+def test_default_chunks_are_contiguous_and_chunk_sized_for_any_layout():
+    rgba = torch.rand(5, 4, 6, 4)
+    channels_first = torch.rand(5, 3, 4, 6).permute(0, 2, 3, 1)
+    for images in (rgba, channels_first):
+        video = VideoFromComponents(VideoComponents(images=images, frame_rate=Fraction(24)))
+        for dtype in (torch.float32, torch.uint8):
+            for c in video.decode_chunked(chunk_frames=2, dtype=dtype):
+                for t in (c.images, c.alpha) if c.alpha is not None else (c.images,):
+                    assert t.is_contiguous(), f"{dtype} chunk from shape {tuple(images.shape)} is not contiguous"
+                    assert t.untyped_storage().nbytes() == t.nbytes, "a chunk must hold only its own frames"
+        assert torch.equal(torch.cat([c.images for c in video.decode_chunked(chunk_frames=2)]), images[..., :3])

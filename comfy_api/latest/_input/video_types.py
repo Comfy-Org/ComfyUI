@@ -28,7 +28,7 @@ def frames_as(frames: torch.Tensor, dtype: torch.dtype) -> torch.Tensor:
 
 def owned_chunk(frames: torch.Tensor, dtype: torch.dtype) -> torch.Tensor:
     out = frames_as(frames, dtype)
-    return out.clone() if out is frames else out
+    return out.clone(memory_format=torch.contiguous_format) if out is frames else out.contiguous()
 
 
 class VideoInput(ABC):
@@ -62,7 +62,7 @@ class VideoInput(ABC):
         components = self.get_components()
         images, alpha = components.images, components.alpha
         if images.shape[-1] == 4:  # RGBA frames, as Create Video accepts: the fourth channel is the alpha
-            images, alpha = images[..., :3].contiguous(), (images[..., 3:].contiguous() if alpha is None else alpha)
+            images, alpha = images[..., :3], (images[..., 3:] if alpha is None else alpha)
         if alpha is not None and alpha.ndim == 3:
             alpha = alpha.unsqueeze(-1)
         for start in range(0, images.shape[0], chunk_frames):
