@@ -6,8 +6,8 @@ import io
 import json
 from fractions import Fraction
 from types import SimpleNamespace
-from comfy_api.latest._input_impl.video_types import VideoFromFile, VideoFromComponents, VideoFromList
-from comfy_api.latest._util.video_types import VideoComponents
+from comfy_api._impl._input_impl.video_types import VideoFromFile, VideoFromComponents, VideoFromList
+from comfy_api._impl._types.video_types import VideoComponents
 from comfy_extras.nodes_video import CreateVideo, LoadVideo, SaveVideo
 
 

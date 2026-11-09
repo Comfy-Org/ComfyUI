@@ -5,7 +5,7 @@ import comfy.utils
 import comfy.model_management
 import node_helpers
 from typing_extensions import override
-from comfy_api.latest import ComfyExtension, IO, UI
+from comfy_api.index import ComfyExtension, io as IO, ui as UI
 
 import nodes
 

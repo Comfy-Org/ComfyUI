@@ -22,7 +22,7 @@ import folder_paths
 import node_helpers
 from comfy.weight_adapter import adapters, adapter_maps
 from comfy.weight_adapter.bypass import BypassInjectionManager
-from comfy_api.latest import ComfyExtension, io, ui
+from comfy_api.index import ComfyExtension, io, ui
 from comfy.utils import ProgressBar
 
 

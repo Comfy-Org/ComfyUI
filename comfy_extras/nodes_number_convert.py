@@ -9,7 +9,7 @@ import math
 
 from typing_extensions import override
 
-from comfy_api.latest import ComfyExtension, io
+from comfy_api.index import ComfyExtension, io
 
 
 class NumberConvertNode(io.ComfyNode):

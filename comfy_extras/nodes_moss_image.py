@@ -8,7 +8,7 @@ from typing_extensions import override
 import comfy.text_encoders.qwen_vl
 import comfy.utils
 import node_helpers
-from comfy_api.latest import ComfyExtension, io
+from comfy_api.index import ComfyExtension, io
 
 
 class MOSSImageLayoutPrompt(io.ComfyNode):

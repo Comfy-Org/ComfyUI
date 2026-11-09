@@ -7,7 +7,7 @@ from typing_extensions import override
 
 import comfy.model_management
 import comfy.ops
-from comfy_api.latest import ComfyExtension, io
+from comfy_api.index import ComfyExtension, io
 from comfy_extras.nodes_rtdetr import bboxes_per_frame
 
 TASKS = ["segmentation", "detection", "referring", "point", "count_box", "count_point", "ocr", "ocr_grounding", "visual_prompt", "freeform"]

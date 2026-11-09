@@ -3,7 +3,7 @@ import re
 import torch
 from typing_extensions import override
 
-from comfy_api.latest import IO, ComfyExtension, Input
+from comfy_api.index import io as IO, ComfyExtension, Input
 from comfy_api_nodes.apis.grok import (
     ImageEditRequest,
     ImageGenerationRequest,

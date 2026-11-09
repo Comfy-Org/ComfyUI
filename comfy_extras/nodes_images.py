@@ -25,7 +25,7 @@ from typing import TypedDict
 from PIL.Image import Exif
 
 from server import PromptServer
-from comfy_api.latest import ComfyExtension, IO, UI
+from comfy_api.index import ComfyExtension, io as IO, ui as UI
 from comfy_execution.preview_tonemap import linear_to_preview
 from comfy_extras.color_util import hex_to_rgb
 from comfy.cli_args import args

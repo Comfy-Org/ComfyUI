@@ -1,7 +1,7 @@
 import asyncio
 import time
 from comfy.comfy_types import IO, ComfyNodeABC, InputTypeDict
-from comfy_api.v0_0_2 import ComfyAPI, ComfyAPISync
+from comfy_api._impl._api import ComfyAPI, ComfyAPISync
 
 api = ComfyAPI()
 api_sync = ComfyAPISync()

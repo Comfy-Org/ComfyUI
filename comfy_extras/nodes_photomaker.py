@@ -5,7 +5,7 @@ import comfy.clip_model
 import comfy.clip_vision
 import comfy.ops
 from typing_extensions import override
-from comfy_api.latest import ComfyExtension, io
+from comfy_api.index import ComfyExtension, io
 
 # code for model from: https://github.com/TencentARC/PhotoMaker/blob/main/photomaker/model.py under Apache License Version 2.0
 VISION_CONFIG_DICT = {

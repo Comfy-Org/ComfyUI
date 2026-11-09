@@ -1,10 +1,10 @@
 import io
-from comfy_api.input_impl.video_types import (
+from comfy_api._impl._input_impl.video_types import (
     container_to_output_format,
     get_open_write_kwargs,
     video_encoder_options,
 )
-from comfy_api.util import VideoCodec, VideoContainer
+from comfy_api._impl._types import VideoCodec, VideoContainer
 
 
 def test_container_to_output_format_empty_string():

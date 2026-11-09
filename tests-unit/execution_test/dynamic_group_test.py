@@ -8,8 +8,8 @@ if not torch.cuda.is_available():
 
 import execution
 import nodes
-from comfy_api.latest import io
-from comfy_api.latest._io import _DynamicGroup
+from comfy_api.index import io
+from comfy_api._impl._io import _DynamicGroup
 
 
 pytestmark = pytest.mark.asyncio

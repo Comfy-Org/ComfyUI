@@ -1,7 +1,7 @@
 import math
 from types import SimpleNamespace
 
-from comfy_api.latest import io
+from comfy_api.index import io
 from comfy_extras.nodes_loop import EndLoop, LoopIteration, LoopProgress, LoopResult, StartLoop
 
 

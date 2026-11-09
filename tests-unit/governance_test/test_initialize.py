@@ -65,7 +65,7 @@ def _run_governed(
         "stub('utils.mime_types', init_mime_types=noop)",
         "stub('comfy_execution.progress', get_progress_state=noop)",
         "stub('comfy_execution.utils', get_executing_context=noop)",
-        "stub('comfy_api', feature_flags=types.SimpleNamespace())",
+        "stub('comfy_api', _impl=stub('comfy_api._impl', feature_flags=types.SimpleNamespace()))",
         "stub('app.database.db', init_db=noop, dependencies_available=lambda: False, lock_holder_db_path=lambda: None, get_database_url=noop, get_db_path=noop, missing_dependencies=list)",
         "control = stub('comfy_aimdo.control', init=noop)",
         "stub('comfy_aimdo', control=control)",

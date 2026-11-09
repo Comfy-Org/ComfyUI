@@ -1,6 +1,6 @@
 from typing_extensions import override
-from comfy_api.latest import ComfyExtension, io
-from comfy_api.torch_helpers import set_torch_compile_wrapper
+from comfy_api.index import ComfyExtension, io
+from comfy_api._impl.torch_helpers import set_torch_compile_wrapper
 
 def skip_torch_compile_dict(guard_entries):
     return [("transformer_options" not in entry.name) for entry in guard_entries]

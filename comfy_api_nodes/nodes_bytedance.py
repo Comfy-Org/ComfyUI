@@ -10,7 +10,7 @@ import torch
 from typing_extensions import override
 
 from comfy.utils import common_upscale
-from comfy_api.latest import IO, ComfyExtension, Input, Types
+from comfy_api.index import io as IO, ComfyExtension, Input, Types
 from comfy_api_nodes.apis.bytedance import (
     RECOMMENDED_PRESETS_SEEDREAM_4,
     RECOMMENDED_PRESETS_SEEDREAM_4_0,

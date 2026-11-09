@@ -2,7 +2,7 @@ import folder_paths
 import comfy.audio_encoders.audio_encoders
 import comfy.utils
 from typing_extensions import override
-from comfy_api.latest import ComfyExtension, io
+from comfy_api.index import ComfyExtension, io
 
 
 class AudioEncoderLoader(io.ComfyNode):

@@ -6,7 +6,7 @@ from PIL import Image, ImageDraw, ImageEnhance, ImageFont
 from typing_extensions import override
 
 import nodes
-from comfy_api.latest import ComfyExtension, io
+from comfy_api.index import ComfyExtension, io
 from comfy_extras.color_util import hex_to_rgb, normalize_palette, readable_color
 
 _PREVIEW_LONG_EDGE = 1024

@@ -1,0 +1,83 @@
+"""Core engine extension: the ``eng.node`` rows, running ComfyUI's own nodes from pack code."""
+import asyncio
+import inspect
+
+from comfy_api._impl import _runtime
+
+
+def _hidden_values():
+    """What a node's hidden inputs would hold if the prompt ran it directly."""
+    rt = _runtime._active_runtime.get()
+    plan = rt.plan if rt is not None else None
+    dynprompt = getattr(plan, "dynamic_prompt", None)
+    prompt = getattr(plan, "prompt", None)
+    if prompt is None and dynprompt is not None:
+        prompt = dynprompt.get_original_prompt()
+    return {"PROMPT": prompt, "DYNPROMPT": dynprompt, "UNIQUE_ID": getattr(plan, "node_id", None),
+            "EXTRA_PNGINFO": getattr(plan, "extra_pnginfo", None)}
+
+
+def _in_same_mode(fn):
+    """Inference mode is per thread, and a worker has to match the prompt's."""
+    import torch
+
+    inference = torch.is_inference_mode_enabled()
+
+    def call(**inputs):
+        with torch.inference_mode(inference):
+            return fn(**inputs)
+    return call
+
+
+async def _call_node(node, inputs):
+    import nodes
+
+    cls = nodes.NODE_CLASS_MAPPINGS.get(node)
+    if cls is None:
+        raise _runtime.CallNotSupported(f"no node named {node!r}")
+    hidden = _hidden_values()
+    if getattr(cls, "ISOLATED_NODE", None) is not None:  # another pack's node: run in that pack's process
+        return await _call_isolated(node, cls, inputs, hidden)
+    if hasattr(cls, "FUNCTION") and not hasattr(cls, "GET_SCHEMA"):
+        declared = getattr(cls, "INPUT_TYPES", dict)().get("hidden", {})
+        inputs = {**{k: hidden.get(v) for k, v in declared.items() if not isinstance(v, (list, tuple))}, **inputs}
+        fn = getattr(cls(), cls.FUNCTION)
+    else:
+        from comfy_api._impl import _io
+        fields = {_io.Hidden.prompt: hidden["PROMPT"], _io.Hidden.dynprompt: hidden["DYNPROMPT"],
+                  _io.Hidden.unique_id: hidden["UNIQUE_ID"], _io.Hidden.extra_pnginfo: hidden["EXTRA_PNGINFO"]}
+        fn = cls.PREPARE_CLASS_CLONE({"hidden_inputs": fields}).execute
+    if inspect.iscoroutinefunction(fn):
+        return await fn(**inputs)
+    return await asyncio.to_thread(_in_same_mode(fn), **inputs)
+
+
+async def _call_isolated(node, cls, inputs, hidden):
+    backend = _runtime.providers.execution_backend
+    if getattr(backend, "packs", None) is None:
+        raise _runtime.CallNotSupported(f"{node!r} runs in its pack's process, and pack isolation isn't running")
+    rt = _runtime.current_runtime()
+    plan = _runtime.ExecutionPlan(prompt_id=getattr(rt.plan, "prompt_id", None) or "node.run",
+                                  node_id=str(hidden["UNIQUE_ID"] or "node.run"), node_type=node,
+                                  node_module=cls.__module__, inputs=dict(inputs), prompt=hidden["PROMPT"],
+                                  extra_pnginfo=hidden["EXTRA_PNGINFO"])
+    runtime = _runtime.Runtime(refs=rt.refs, ctx=rt.ctx, ops=_runtime.EngineCalls(), pack=cls.__module__, plan=plan)
+    return await backend.dispatch(plan, None, runtime)
+
+
+def _node_result(output):
+    if isinstance(output, dict):
+        return tuple(output.get("result") or ())
+    return tuple(getattr(output, "result", output) or ())
+
+
+class EngineOps:
+    async def run(self, node, inputs):
+        """Run a registered node and return its outputs as a tuple."""
+        return _node_result(await _call_node(node, inputs))
+
+    async def run_output(self, node, inputs):
+        """Run a registered node and return ``{"result": tuple, "ui": dict or None}``."""
+        output = await _call_node(node, inputs)
+        ui = output.get("ui") if isinstance(output, dict) else getattr(output, "ui", None)
+        return {"result": _node_result(output), "ui": ui.as_dict() if hasattr(ui, "as_dict") else ui}

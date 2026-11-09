@@ -6,7 +6,7 @@ Provides normalization and helper functions for job status tracking.
 import uuid
 from typing import Callable, Optional
 
-from comfy_api.internal import prune_dict
+from comfy_api._impl.internal import prune_dict
 
 
 # Result of classifying a job for cancellation.

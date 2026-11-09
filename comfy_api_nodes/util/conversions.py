@@ -12,7 +12,7 @@ from av.codec import CodecContext
 from PIL import Image
 
 from comfy.utils import common_upscale
-from comfy_api.latest import Input, InputImpl, Types
+from comfy_api.index import Input, InputImpl, Types
 
 from ._helpers import mimetype_to_extension
 

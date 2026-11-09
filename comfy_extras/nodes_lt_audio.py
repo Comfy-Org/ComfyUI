@@ -3,7 +3,7 @@ import comfy.utils
 import comfy.model_management
 import torch
 
-from comfy_api.latest import ComfyExtension, io
+from comfy_api.index import ComfyExtension, io
 from comfy_extras.nodes_audio import VAEEncodeAudio
 
 class LTXVAudioVAELoader(io.ComfyNode):

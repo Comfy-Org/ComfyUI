@@ -1,7 +1,7 @@
 import torch
 import comfy.model_management
 from typing_extensions import override
-from comfy_api.latest import ComfyExtension, io
+from comfy_api.index import ComfyExtension, io
 
 from kornia.morphology import dilation, erosion, opening, closing, gradient, top_hat, bottom_hat
 import kornia.color

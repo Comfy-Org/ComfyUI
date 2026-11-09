@@ -28,9 +28,10 @@ import comfy.utils
 import comfy.latent_formats
 import comfy.controlnet
 from comfy.comfy_types import IO, ComfyNodeABC, InputTypeDict, FileLocator
-from comfy_api.internal import register_versions, ComfyAPIWithVersion
-from comfy_api.version_list import supported_versions
-from comfy_api.latest import io, ComfyExtension, InputImpl
+from comfy_api.index import io, ComfyExtension, InputImpl
+from comfy_api._impl import legacy_imports
+
+legacy_imports.install()  # old comfy_api.latest / v0_0_x imports in custom nodes
 
 import comfy.clip_vision
 
@@ -840,17 +841,17 @@ class VAELoader:
 
     CATEGORY = "model/loaders"
 
-    #TODO: scale factor?
-    def load_vae(self, vae_name):
+    @classmethod
+    def load_vae_state_dict(cls, vae_name):
         metadata = None
         vae_path = None
         if vae_name == "pixel_space":
             sd = {}
             sd["pixel_space_vae"] = torch.tensor(1.0)
-        elif vae_name in self.image_taes:
-            sd = self.load_taesd(vae_name)
+        elif vae_name in cls.image_taes:
+            sd = cls.load_taesd(vae_name)
         else:
-            if os.path.splitext(vae_name)[0] in self.video_taes:
+            if os.path.splitext(vae_name)[0] in cls.video_taes:
                 vae_path = folder_paths.get_full_path_or_raise("vae_approx", vae_name)
             else:
                 vae_path = folder_paths.get_full_path_or_raise("vae", vae_name)
@@ -860,6 +861,11 @@ class VAELoader:
                 metadata = {"tae_latent_channels": 128}
             else:
                 metadata["tae_latent_channels"] = 128
+        return sd, metadata, vae_path
+
+    #TODO: scale factor?
+    def load_vae(self, vae_name):
+        sd, metadata, vae_path = self.load_vae_state_dict(vae_name)
         vae = comfy.sd.VAE(sd=sd, metadata=metadata)
         vae.throw_exception_if_invalid()
         # Register a reload factory on the patcher so multigpu deepclones
@@ -2252,14 +2258,20 @@ def get_module_name(module_path: str) -> str:
     return base_path
 
 
-async def load_custom_node(module_path: str, ignore=set(), module_parent="custom_nodes") -> bool:
-    module_name = get_module_name(module_path)
+async def load_custom_node(
+    module_path: str,
+    ignore=set(),
+    module_parent="custom_nodes",
+    module_name: str | None = None,
+) -> bool:
+    loaded_module_name = get_module_name(module_path)
     if os.path.isfile(module_path):
         sp = os.path.splitext(module_path)
-        module_name = sp[0]
-        sys_module_name = module_name
+        loaded_module_name = sp[0]
+        sys_module_name = loaded_module_name
     elif os.path.isdir(module_path):
         sys_module_name = module_path.replace(".", "_x_")
+    registration_name = module_name or loaded_module_name
 
     try:
         logging.debug("Trying to load custom node {}".format(module_path))
@@ -2271,11 +2283,15 @@ async def load_custom_node(module_path: str, ignore=set(), module_parent="custom
             module_spec = spec_from_file_location(sys_module_name, os.path.join(module_path, "__init__.py"))
             module_dir = module_path
 
+        if os.path.isdir(module_path):
+            from comfy_api._impl import _engine
+            _engine.load_pack_extensions(sys_module_name, module_dir)
+
         module = importlib.util.module_from_spec(module_spec)
         sys.modules[sys_module_name] = module
         module_spec.loader.exec_module(module)
 
-        LOADED_MODULE_DIRS[module_name] = os.path.abspath(module_dir)
+        LOADED_MODULE_DIRS[registration_name] = os.path.abspath(module_dir)
 
         try:
             from comfy_config import config_parser
@@ -2299,14 +2315,14 @@ async def load_custom_node(module_path: str, ignore=set(), module_parent="custom
         if hasattr(module, "WEB_DIRECTORY") and getattr(module, "WEB_DIRECTORY") is not None:
             web_dir = os.path.abspath(os.path.join(module_dir, getattr(module, "WEB_DIRECTORY")))
             if os.path.isdir(web_dir):
-                EXTENSION_WEB_DIRS[module_name] = web_dir
+                EXTENSION_WEB_DIRS[registration_name] = web_dir
 
         # V1 node definition
         if hasattr(module, "NODE_CLASS_MAPPINGS") and getattr(module, "NODE_CLASS_MAPPINGS") is not None:
             for name, node_cls in module.NODE_CLASS_MAPPINGS.items():
                 if name not in ignore:
                     NODE_CLASS_MAPPINGS[name] = node_cls
-                    node_cls.RELATIVE_PYTHON_MODULE = "{}.{}".format(module_parent, get_module_name(module_path))
+                    node_cls.RELATIVE_PYTHON_MODULE = "{}.{}".format(module_parent, registration_name)
             if hasattr(module, "NODE_DISPLAY_NAME_MAPPINGS") and getattr(module, "NODE_DISPLAY_NAME_MAPPINGS") is not None:
                 for name, display_name in module.NODE_DISPLAY_NAME_MAPPINGS.items():
                     if name not in ignore:
@@ -2336,9 +2352,11 @@ async def load_custom_node(module_path: str, ignore=set(), module_parent="custom
                     schema = node_cls.GET_SCHEMA()
                     if schema.node_id not in ignore:
                         NODE_CLASS_MAPPINGS[schema.node_id] = node_cls
-                        node_cls.RELATIVE_PYTHON_MODULE = "{}.{}".format(module_parent, get_module_name(module_path))
+                        node_cls.RELATIVE_PYTHON_MODULE = "{}.{}".format(module_parent, registration_name)
                         if schema.display_name is not None:
                             NODE_DISPLAY_NAME_MAPPINGS[schema.node_id] = schema.display_name
+                from comfy_api._impl import registration
+                registration.install(*registration.from_extension(await registration.collect(extension)), registration_name)
                 return True
             except Exception as e:
                 logging.warning(f"Error while calling comfy_entrypoint in {module_path}: {e}")
@@ -2350,6 +2368,22 @@ async def load_custom_node(module_path: str, ignore=set(), module_parent="custom
         logging.warning(traceback.format_exc())
         logging.warning(f"Cannot import {module_path} module for custom nodes: {e}")
         return False
+
+def custom_node_allowed(module_path):
+    """Apply the custom-node admission policy to an outer pack path."""
+    name = os.path.basename(os.path.normpath(module_path))
+    if args.disable_all_custom_nodes and name not in args.whitelist_custom_nodes:
+        logging.info(f"Skipping {name} due to disable_all_custom_nodes and whitelist_custom_nodes")
+        return False
+    if args.enable_manager and comfyui_manager.should_be_disabled(module_path):
+        logging.info(f"Blocked by policy: {module_path}")
+        return False
+    refusal = governance.pack_refusal(module_path)
+    if refusal is not None:
+        logging.warning(refusal)
+        return False
+    return True
+
 
 async def init_external_custom_nodes():
     """
@@ -2378,22 +2412,18 @@ async def init_external_custom_nodes():
                 continue
             if module_path.endswith(".disabled"):
                 continue
-            if args.disable_all_custom_nodes and possible_module not in args.whitelist_custom_nodes:
-                logging.info(f"Skipping {possible_module} due to disable_all_custom_nodes and whitelist_custom_nodes")
+            if not custom_node_allowed(module_path):
                 continue
 
-            if args.enable_manager:
-                if comfyui_manager.should_be_disabled(module_path):
-                    logging.info(f"Blocked by policy: {module_path}")
-                    continue
-
-            refusal = governance.pack_refusal(module_path)
-            if refusal is not None:
-                logging.warning(refusal)
-                continue
-
+            v2_path = os.path.join(module_path, "v2")
+            entrypoint_path = v2_path if os.path.isfile(os.path.join(v2_path, "__init__.py")) else module_path
             time_before = time.perf_counter()
-            success = await load_custom_node(module_path, base_node_names, module_parent="custom_nodes")
+            success = await load_custom_node(
+                entrypoint_path,
+                base_node_names,
+                module_parent="custom_nodes",
+                module_name=possible_module,
+            )
             node_import_times.append((time.perf_counter() - time_before, module_path, success))
 
     if len(node_import_times) > 0:
@@ -2585,17 +2615,14 @@ async def init_builtin_api_nodes():
 
     return import_failed
 
-async def init_public_apis():
-    register_versions([
-        ComfyAPIWithVersion(
-            version=getattr(v, "VERSION"),
-            api_class=v
-        ) for v in supported_versions
-    ])
-
 async def init_extra_nodes(init_custom_nodes=True, init_api_nodes=True):
-    await init_public_apis()
-
+    from comfy_api._impl import _runtime
+    backend = _runtime.providers.execution_backend
+    if hasattr(backend, "setup_routes"):
+        from server import PromptServer
+        instance = getattr(PromptServer, "instance", None)
+        if instance is not None:
+            backend.setup_routes(instance)
     import_failed = await init_builtin_extra_nodes()
 
     import_failed_api = []
@@ -2603,7 +2630,11 @@ async def init_extra_nodes(init_custom_nodes=True, init_api_nodes=True):
         import_failed_api = await init_builtin_api_nodes()
 
     if init_custom_nodes:
-        await init_external_custom_nodes()
+        if hasattr(backend, "setup_packs"):
+            import asyncio
+            await asyncio.to_thread(backend.setup_packs)
+        elif _runtime.providers.load_custom_nodes:
+            await init_external_custom_nodes()
     else:
         logging.info("Skipping loading of custom nodes")
 

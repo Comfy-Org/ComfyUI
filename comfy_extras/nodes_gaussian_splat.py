@@ -15,7 +15,7 @@ from scipy.sparse.csgraph import connected_components
 
 import comfy.model_management
 import comfy.utils
-from comfy_api.latest import ComfyExtension, IO, Types
+from comfy_api.index import ComfyExtension, io as IO, Types
 from comfy_extras.mesh3d.postprocess.qem_decimate import _compute_vertex_normals
 from comfy_extras.mesh3d.postprocess.remesh import remesh_narrow_band_dc
 from comfy_extras.nodes_mesh_postprocess import _build_triangle_bvh, _closest_points_on_mesh_bvh, _prepare_gpu_mesh_processing

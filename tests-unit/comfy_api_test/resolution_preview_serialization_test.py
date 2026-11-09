@@ -1,4 +1,4 @@
-from comfy_api.latest._io import ResolutionPreview
+from comfy_api._impl._io import ResolutionPreview
 from comfy_extras.nodes_resolution import ResolutionSelector
 
 

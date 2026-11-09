@@ -5,7 +5,7 @@ import comfy.model_management
 import comfy.utils
 import comfy.latent_formats
 
-from comfy_api.latest import ComfyExtension, io
+from comfy_api.index import ComfyExtension, io
 
 
 class EmptyCosmosLatentVideo(io.ComfyNode):

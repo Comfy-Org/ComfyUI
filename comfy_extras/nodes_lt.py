@@ -15,7 +15,7 @@ import av
 from io import BytesIO
 from typing_extensions import override
 from comfy.ldm.lightricks.symmetric_patchifier import SymmetricPatchifier, latent_to_pixel_coords
-from comfy_api.latest import ComfyExtension, io
+from comfy_api.index import ComfyExtension, io
 
 ICLoRAParameters = io.Custom("IC_LORA_PARAMETERS")
 

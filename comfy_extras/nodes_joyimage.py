@@ -2,7 +2,7 @@ from typing_extensions import override
 
 import comfy.utils
 import node_helpers
-from comfy_api.latest import ComfyExtension, io
+from comfy_api.index import ComfyExtension, io
 
 
 # fmt: off

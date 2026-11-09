@@ -59,7 +59,7 @@ def test_mark_swallows_os_error_and_warns_once(user_dir, monkeypatch, caplog):
 def test_cli_feature_flag_cannot_claim_server_reserved_flags(tmp_path):
     code = (
         "import sys, comfy.options; comfy.options.enable_args_parsing(); "
-        "from comfy_api.feature_flags import get_server_features; f = get_server_features(); "
+        "from comfy_api._impl.feature_flags import get_server_features; f = get_server_features(); "
         "print('deploy_to_cloud' in f, f.get('show_signin_button'), 'app.deploy_to_cloud' in sys.modules)"
     )
     out = subprocess.run(

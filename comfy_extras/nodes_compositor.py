@@ -6,7 +6,7 @@ import numpy as np
 import torch
 from PIL import Image
 
-from comfy_api.latest import ComfyExtension, io, UI
+from comfy_api.index import ComfyExtension, io, ui as UI
 from comfy_extras.compositor_blend import (
     _LAYER_MODES,
     blend_composite,

@@ -20,7 +20,7 @@ import comfy.sd
 import folder_paths
 from comfy.ldm.colormap import turbo as _turbo
 from comfy.ldm.depth_anything_3 import preprocess as da3_preprocess
-from comfy_api.latest import ComfyExtension, Types, io
+from comfy_api.index import ComfyExtension, Types, io
 from comfy.ldm.moge.geometry import triangulate_grid_mesh
 
 DA3ModelType = io.Custom("DA3_MODEL")

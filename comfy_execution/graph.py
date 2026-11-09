@@ -4,9 +4,10 @@ import nodes
 import asyncio
 import inspect
 from comfy_execution.graph_utils import is_link, ExecutionBlocker
+from comfy_execution.upstream_variants import assert_node_current
 from comfy.comfy_types.node_typing import ComfyNodeABC, InputTypeDict, InputTypeOptions
-from comfy_api.internal import _ComfyNodeInternal
-from comfy_api.latest import _io
+from comfy_api._impl.internal import _ComfyNodeInternal
+from comfy_api._impl import _io
 
 # NOTE: ExecutionBlocker code got moved to graph_utils.py to prevent torch being imported too soon during unit tests
 ExecutionBlocker = ExecutionBlocker
@@ -125,6 +126,7 @@ class TopologicalSort:
         self.unblockedEvent = asyncio.Event()
 
     def get_input_info(self, unique_id, input_name):
+        assert_node_current(self.dynprompt, unique_id)
         node = self.dynprompt.get_node(unique_id)
         class_def = nodes.NODE_CLASS_MAPPINGS[node["class_type"]]
         valid_inputs = class_def.INPUT_TYPES()
