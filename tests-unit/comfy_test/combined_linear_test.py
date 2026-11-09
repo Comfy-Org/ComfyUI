@@ -78,6 +78,49 @@ def test_combined_linear_follows_members_full_precision():
     assert torch.equal(out, torch.nn.functional.linear(x, combined._v_weight.to(dtype=torch.float32).dequantize()))
 
 
+def test_combined_linear_declines_unprefetched_vbar():
+    ops = comfy.ops.mixed_precision_ops(full_precision_mm=True)
+    linears = (ops.Linear(512, 128, bias=False), ops.Linear(512, 256, bias=False))
+    combined = comfy.ops.CombinedLinear(linears)
+    _, views, gathered = _gathered("AsymW4A8Int8Layout", (128, 256), 512)
+    combined._v = (None, 0, gathered.numel())
+    combined._v_weight = comfy.memory_management.cat_gathered(views, gathered)
+    x = torch.randn(3, 512)
+    assert combined.forward(x) is NotImplemented
+    for s in linears:
+        s._prefetch = {"signature": None, "resident": True}
+    assert torch.equal(combined.forward(x), torch.nn.functional.linear(x, combined._v_weight.dequantize()))
+
+
+def test_single_module_cast_reloads_combined_members(monkeypatch):
+    ops = comfy.ops.mixed_precision_ops()
+    linears = (ops.Linear(512, 128, bias=False), ops.Linear(512, 256, bias=False))
+    combined = comfy.ops.CombinedLinear(linears)
+    weights, views, gathered = _gathered("TensorWiseINT8Layout", (128, 256), 512, per_channel=True)
+    for index, (s, weight) in enumerate(zip(linears, weights)):
+        s.weight = torch.nn.Parameter(weight, requires_grad=False)
+        s._v = (None, index, 0)
+        s._v_signature = object()
+        s._pin_state = {"fast_disk": False}
+    combined._v_weight = comfy.memory_management.cat_gathered(views, gathered)
+    for s in linears:
+        s._v_weight = None
+    faults = []
+    monkeypatch.setattr(comfy.ops.comfy_aimdo.model_vbar, "vbar_fault", lambda v: faults.append(v))
+    monkeypatch.setattr(comfy.ops.comfy_aimdo.model_vbar, "vbar_signature_compare", lambda *args: False)
+    monkeypatch.setattr(comfy.pinned_memory, "get_pin", lambda *args, **kwargs: None)
+    monkeypatch.setattr(comfy.pinned_memory, "pin_memory", lambda *args, **kwargs: None)
+    monkeypatch.setattr(comfy.model_management, "get_offload_stream", lambda device: None)
+    for s, weight in zip(linears, weights):
+        comfy.ops.cast_modules_with_vbar([s], None, torch.device("cpu"), None, False)
+        assert combined._v_weight is None
+        assert all(m._v_signature is None for m in linears)
+        actual, _ = comfy.ops.resolve_cast_module_with_vbar(s, torch.float32, torch.device("cpu"), None, None, False)
+        assert torch.equal(actual.dequantize(), weight.dequantize())
+        del s._prefetch
+    assert faults == [s._v for s in linears]
+
+
 def test_cat_gathered_declines_incompatible_weights():
     torch.manual_seed(7)
     # A tensor-wise scale cannot be shared across rows.
@@ -166,6 +209,10 @@ def test_int8_combined_on_hit_reloaded_on_partial_miss_including_lora():
         assert_unpinned()
         # The first pin after a load misses, resolves and combines in the same pin.
         results = [split, step(True, canonical), step(True, canonical)]
+        results += [model(x)]
+        assert model.combined._v_weight is None
+        assert_unpinned()
+        results += [step(True, canonical)]
         # A member missing from a combined group reloads the group's canonical bytes and recombines.
         model.b._v_signature = None
         results += [step(True, canonical)]
