@@ -110,14 +110,14 @@ class WeVisOneDetect(io.ComfyNode):
             all_boxes.append(boxes)
             all_points.extend({**p, "frame": b} for p in points)
 
-            masks = torch.zeros((len(boxes), H, W), device=idev)
+            masks = torch.zeros((len(boxes) if individual_masks or len(objects) > 0 else 1, H, W), device=idev)
             if len(objects) > 0:
                 device = clip.patcher.load_device
                 with comfy.model_management.cuda_device_context(device), comfy.ops.use_quantized_matmul(clip.cond_stage_model, device):
                     logits = clip.cond_stage_model.decode_masks(tokens, ids, frame, device, list(objects.values()))
                 masks[list(objects)] = F.interpolate(logits.sigmoid()[None], size=(H, W), mode="bilinear", align_corners=False)[0].to(idev)
             if not individual_masks:
-                masks = masks.amax(dim=0, keepdim=True) if len(masks) > 0 else torch.zeros((1, H, W), device=idev)
+                masks = masks.amax(dim=0, keepdim=True)
             all_masks.append(masks)
 
         masks = torch.cat(all_masks)

@@ -9,14 +9,16 @@ from torchvision.transforms import ToPILImage, ToTensor
 from PIL import ImageDraw, ImageFont
 
 
-def bboxes_per_frame(bboxes, B):
-    # one detection list per image: a dict or a flat list applies to every image, a short per-image list pads with empty ones
+def bboxes_per_frame(bboxes, B=None):
+    # one detection list per image: a dict or a flat list applies to every image, a short per-image list pads with empty ones; B=None keeps the given frames
     if isinstance(bboxes, dict):
         bboxes = [[bboxes]]
     elif not isinstance(bboxes, list) or not bboxes:
         bboxes = [[]]
     elif isinstance(bboxes[0], dict):
         bboxes = [bboxes]
+    if B is None:
+        return bboxes
     if len(bboxes) == 1:
         bboxes = bboxes * B
     return (bboxes + [[]] * B)[:B]
@@ -97,11 +99,10 @@ class DrawBBoxes(io.ComfyNode):
 
     @classmethod
     def execute(cls, bboxes, image=None) -> io.NodeOutput:
-        B = image.shape[0] if image is not None else 1
-        bboxes = bboxes_per_frame(bboxes, B)
+        bboxes = bboxes_per_frame(bboxes, image.shape[0] if image is not None else None)
+        B = len(bboxes)
 
         if image is None:
-            B = len(bboxes)
             max_w = max((int(d["x"] + d["width"])  for frame in bboxes for d in frame), default=640)
             max_h = max((int(d["y"] + d["height"]) for frame in bboxes for d in frame), default=640)
             image = torch.zeros((B, max_h, max_w, 3), dtype=torch.float32)
