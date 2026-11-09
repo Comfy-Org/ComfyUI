@@ -1,13 +1,12 @@
 """Rows implemented by ComfyUI's own engine extensions (comfy_api/latest/engine/), in every mode."""
 import asyncio
-import io as _bytesio
 import os
 
 import pytest
 import torch
 
 from comfy_api.index import eng, io
-from comfy_api._impl import _engine, _runtime
+from comfy_api._impl import _engine
 
 import engine_loopback as loopback
 

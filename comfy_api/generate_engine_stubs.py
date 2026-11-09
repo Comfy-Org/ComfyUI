@@ -404,7 +404,7 @@ def main() -> int:
                 if file.read() != output:
                     stale.append(os.path.relpath(path, os.path.dirname(here)))
         if stale:
-            print(f"out of date: {', '.join(stale)}", file=sys.stderr)
+            sys.stderr.write(f"out of date: {', '.join(stale)}\n")
             return 1
         return 0
     for path, output in outputs.items():

@@ -176,7 +176,7 @@ async def comfy_entrypoint():
 
 def test_registrations_from_a_manifest_run_in_the_packs_process(tiny, clean_lists, tmp_path, monkeypatch):
     import comfy.samplers
-    from comfy_api._impl import _engine, _runtime, manifest
+    from comfy_api._impl import _runtime, manifest
     from comfy_api._impl import isolation
     from comfy_api._impl.isolation import packs, server
 

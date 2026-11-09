@@ -19,7 +19,7 @@ from typing import Any, Dict, List, Optional
 import pytest
 import torch
 
-from comfy_api._impl import _engine, _runtime, manifest, registration
+from comfy_api._impl import _engine, _runtime, manifest
 from comfy_api._impl import isolation
 from comfy_api._impl.isolation import packs, server
 
@@ -357,7 +357,6 @@ def test_a_packs_own_types_stay_in_its_process_between_its_nodes(isolated):
 
 def test_one_packs_node_runs_another_packs_node_in_its_process(isolated):
     import folder_paths
-    import nodes
 
     backend, root = isolated
     _pack(root, "pack_b", B_PACK)
@@ -367,7 +366,6 @@ def test_one_packs_node_runs_another_packs_node_in_its_process(isolated):
     assert "luts" in folder_paths.folder_names_and_paths  # pack_b's model folder, from its manifest
     assert ".cube" in folder_paths.folder_names_and_paths["luts"][1]
 
-    image = torch.full((1, 4, 4, 3), 0.25)
     prompt = {"1": {"class_type": "EmptyImage", "inputs": {"width": 4, "height": 4, "batch_size": 1, "color": 0x404040}},
               "2": {"class_type": "ACallsB", "inputs": {"image": ["1", 0]}}}
     executor = _run_prompt(prompt, ["2"])

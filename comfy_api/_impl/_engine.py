@@ -23,7 +23,6 @@ Every call is async, including ones that return immediately.
 """
 from __future__ import annotations
 
-import asyncio
 import functools
 import hashlib
 import importlib
@@ -879,7 +878,7 @@ def check_extension_imports(file_name: str, source: bytes, path: str, extra: Any
 def _instantiate(key: tuple[str, str], path: str, source: bytes) -> Any:
     module = types.ModuleType(f"comfy_engine_extension_{key[0][:-3]}_{key[1][7:19]}")
     module.__file__ = path
-    exec(compile(source, path, "exec"), module.__dict__)
+    exec(compile(source, path, "exec"), module.__dict__)  # noqa: S102
     ops = module.__dict__.get("EngineOps")
     if not inspect.isclass(ops):
         raise ExtensionNotAllowed(f"{key[0]} has no EngineOps class")

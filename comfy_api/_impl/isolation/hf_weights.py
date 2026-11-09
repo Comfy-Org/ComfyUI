@@ -173,8 +173,6 @@ class _InProcessModels:
 
     @staticmethod
     def _hf_repo_id(repo_id: str) -> str:
-        import re
-
         if not isinstance(repo_id, str):
             raise TypeError("Hugging Face repo_id must be a string")
         if len(repo_id) > 96 or repo_id.startswith(("http:", "https:")):
@@ -191,8 +189,6 @@ class _InProcessModels:
 
     @classmethod
     def _hf_weight_filename(cls, filename: str) -> tuple[str, str]:
-        import re
-
         if not isinstance(filename, str):
             raise TypeError("Hugging Face weight filename must be a string")
         logical = filename.replace("\\", "/")
@@ -213,8 +209,6 @@ class _InProcessModels:
 
     @staticmethod
     def _hf_revision(revision: str) -> str:
-        import re
-
         if not isinstance(revision, str):
             raise TypeError("Hugging Face revision must be a string")
         if (not revision or len(revision) > 200
@@ -227,8 +221,6 @@ class _InProcessModels:
 
     @staticmethod
     def _hf_sha256(sha256: Optional[str]) -> Optional[str]:
-        import re
-
         if sha256 is None:
             return None
         if not isinstance(sha256, str) or not re.fullmatch(
@@ -341,8 +333,6 @@ class _InProcessModels:
 
     @staticmethod
     def _file_sha256(path: str) -> str:
-        import hashlib
-
         digest = hashlib.sha256()
         with open(path, "rb") as file:
             for chunk in iter(lambda: file.read(8 * 1024 * 1024), b""):

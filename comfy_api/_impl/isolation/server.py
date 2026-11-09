@@ -633,16 +633,16 @@ def main(argv: Optional[list[str]] = None) -> int:
     from .packs import entry_for
     if args.command == "start":
         info = PackServer.start(entry_for(args.pack), args.port, args.host, args.token_file)
-        print(f"started {info['pack']} on {info['host']}:{info['port']} (pid {info['pid']})")
+        sys.stdout.write(f"started {info['pack']} on {info['host']}:{info['port']} (pid {info['pid']})\n")
         return 0
     if args.command == "stop":
         if PackServer.stop(args.port):
-            print(f"stopped the pack server on port {args.port}")
+            sys.stdout.write(f"stopped the pack server on port {args.port}\n")
             return 0
-        print(f"no pack server on port {args.port}", file=sys.stderr)
+        sys.stderr.write(f"no pack server on port {args.port}\n")
         return 1
     if args.command == "describe":
-        print(json.dumps(PackServer.describe(entry_for(args.pack)), indent=2))
+        sys.stdout.write(json.dumps(PackServer.describe(entry_for(args.pack)), indent=2) + "\n")
         return 0
     if args.command == "manifest":
         from comfy_api._impl import manifest as _manifest
@@ -651,11 +651,11 @@ def main(argv: Optional[list[str]] = None) -> int:
         data = PackServer.manifest(entry, python=envs.python_for(entry))
         text = json.dumps(data, indent=2) + "\n"
         if args.print:
-            print(text, end="")
+            sys.stdout.write(text)
         else:
             with open(os.path.join(entry, _manifest.FILE), "w", encoding="utf-8") as file:
                 file.write(text)
-            print(f"wrote {os.path.join(entry, _manifest.FILE)}: {len(data['nodes'])} nodes")
+            sys.stdout.write(f"wrote {os.path.join(entry, _manifest.FILE)}: {len(data['nodes'])} nodes\n")
         return 0
     if args.command == "install":
         from comfy_api._impl import manifest as _manifest
@@ -663,15 +663,15 @@ def main(argv: Optional[list[str]] = None) -> int:
         entry = entry_for(args.pack)
         data = _manifest.read(entry)
         if data is None:
-            print(f"{entry} has no {_manifest.FILE}; run: pack.sh manifest {args.pack}", file=sys.stderr)
+            sys.stderr.write(f"{entry} has no {_manifest.FILE}; run: pack.sh manifest {args.pack}\n")
             return 1
         python = envs.python_for(entry, data.get("requirements", []))
         paths = weights.ensure(data["name"], data.get("weights", []))
-        print(f"{data['name']} {data['version']}: python {python}; {len(paths)} weights ready")
+        sys.stdout.write(f"{data['name']} {data['version']}: python {python}; {len(paths)} weights ready\n")
         return 0
     for server in PackServer.status():
         state = "running" if server["alive"] else "dead"
-        print(f"{server['port']:>6}  {state:<8} pid {server['pid']:<8} {server['pack']}")
+        sys.stdout.write(f"{server['port']:>6}  {state:<8} pid {server['pid']:<8} {server['pack']}\n")
     return 0
 
 
@@ -679,5 +679,5 @@ if __name__ == "__main__":
     try:
         sys.exit(main())
     except (RuntimeError, OSError, TimeoutError) as error:
-        print(f"pack.sh: {error}", file=sys.stderr)
+        sys.stderr.write(f"pack.sh: {error}\n")
         sys.exit(1)

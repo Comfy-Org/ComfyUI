@@ -2,7 +2,6 @@
 sampler.custom, on a real (tiny) Wan model, in every mode. Each must sample exactly what the same
 function gives when attached with ComfyUI's own API."""
 import asyncio
-import os
 import pathlib
 import sys
 
@@ -135,7 +134,6 @@ def test_a_pack_sampler_samples_as_comfyuis_own_sampler_does(run, tiny):
 
     model = tiny.load_model()
     sampler = run(PackEuler).result[0]
-    previews = []
     import comfy.sample
     expected = _sample(model, comfy.samplers.ksampler("euler"))
     got = _sample(model, sampler)

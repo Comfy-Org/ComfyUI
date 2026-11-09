@@ -25,5 +25,5 @@ def original(path: str, names: list, namespace: dict) -> dict:
               if isinstance(node, (ast.FunctionDef, ast.ClassDef, ast.Assign)) and
               (getattr(node, "name", None) in names or
                (isinstance(node, ast.Assign) and any(getattr(t, "id", None) in names for t in node.targets)))]
-    exec(compile(ast.Module(body=wanted, type_ignores=[]), path, "exec"), namespace)
+    exec(compile(ast.Module(body=wanted, type_ignores=[]), path, "exec"), namespace)  # noqa: S102
     return namespace

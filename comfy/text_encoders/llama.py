@@ -399,15 +399,6 @@ class Qwen3VL_8BConfig(Qwen3_8BConfig):
     prefetch_dynamic_vbars = True
 
 @dataclass
-class Qwen3VL_2BConfig(Qwen3VL_8BConfig):
-    hidden_size: int = 2048
-    intermediate_size: int = 6144
-    num_hidden_layers: int = 28
-    num_attention_heads: int = 16
-    num_key_value_heads: int = 8
-    lm_head: bool = False
-
-@dataclass
 class Qwen3VL_4BConfig(Qwen3VL_8BConfig):
     hidden_size: int = 2560
     intermediate_size: int = 9728

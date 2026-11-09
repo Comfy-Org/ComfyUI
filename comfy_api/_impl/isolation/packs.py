@@ -430,7 +430,6 @@ class PackManager:
         own = {path for _, path in self.descriptions[name].get("routes", ())}
 
         async def forward(request: Any) -> Any:
-            from aiohttp import web
             with self.using(name):
                 return await forward_in_use(request)
 
