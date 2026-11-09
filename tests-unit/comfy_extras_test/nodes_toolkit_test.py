@@ -23,4 +23,4 @@ def test_get_item_from_list_uses_integer_index():
 def test_list_length_passes_list_through_and_counts_items():
     assert ListLength.OUTPUT_IS_LIST == [True, False]
     items = [["image 1", "image 2", "image 3"], "text"]
-    assert ListLength.execute(items).result == (items, 2)
+    assert ListLength.PREPARE_CLASS_CLONE(None).execute(items).result == (items, 2)

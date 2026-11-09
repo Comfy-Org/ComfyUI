@@ -1,5 +1,6 @@
 from typing_extensions import override
 from comfy_api.latest import ComfyExtension, io
+from server import PromptServer
 
 
 class CreateList(io.ComfyNode):
@@ -67,11 +68,15 @@ class ListLength(io.ComfyNode):
                 io.MatchType.Output(template=template, is_output_list=True, display_name="list"),
                 io.Int.Output(display_name="length"),
             ],
+            hidden=[io.Hidden.unique_id],
         )
 
     @classmethod
     def execute(cls, list) -> io.NodeOutput:
-        return io.NodeOutput(list, len(list))
+        length = len(list)
+        if cls.hidden.unique_id:
+            PromptServer.instance.send_progress_text(f"length: {length}", cls.hidden.unique_id)
+        return io.NodeOutput(list, length)
 
 
 class ToolkitExtension(ComfyExtension):
