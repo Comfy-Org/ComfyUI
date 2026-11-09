@@ -103,7 +103,8 @@ class WeVisOneDetect(io.ComfyNode):
             frame = image[b:b + 1]
             prompt = build_prompt(task, query, bboxes[b], W, H)
             tokens = clip.tokenize(prompt, image=frame)
-            ids = clip.generate(tokens, do_sample=False, max_length=max_length, repetition_penalty=1.05)
+            # top_k=1 sampling is greedy decoding with the reference's repetition penalty
+            ids = clip.generate(tokens, do_sample=True, max_length=max_length, top_k=1, repetition_penalty=1.05, seed=0)
             text = clip.decode(ids).strip()
             texts.append(text)
             boxes, points, objects = parse_shapes(text, W, H)
