@@ -1131,6 +1131,9 @@ class CombinedLinear:
             if (not isinstance(s, MixedPrecisionOp) or not isinstance(s._v_weight, QuantizedTensor)
                     or s._full_precision_mm or s.comfy_force_forward or s.bias is not None):
                 return
+            # Other formats may concatenate but cannot run the combined linear_input_act path.
+            if s.quant_format not in ("int8_tensorwise", "asym_w4a8_int8", "w6a8_int8"):
+                return
             weights.append(s._v_weight)
         # Members are loaded back to back, so their VBAR allocations are consecutive in member order.
         v = (self.linears[0]._v[0], min(s._v[1] for s in self.linears), sum(s._v[2] for s in self.linears))
