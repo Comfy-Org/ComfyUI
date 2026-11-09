@@ -1,0 +1,86 @@
+{
+  "1": {
+    "class_type": "CLIPLoader",
+    "inputs": {
+      "clip_name": "CHOOSE_MOSS_TEXT_ENCODER.safetensors",
+      "type": "moss_image",
+      "device": "default"
+    }
+  },
+  "2": {
+    "class_type": "CLIPTextEncode",
+    "inputs": {
+      "clip": [
+        "1",
+        0
+      ],
+      "text": "A quiet coastal village at dawn, soft mist over the harbor, warm light in the windows, detailed natural photography."
+    }
+  },
+  "3": {
+    "class_type": "CLIPTextEncode",
+    "inputs": {
+      "clip": [
+        "1",
+        0
+      ],
+      "text": "blurry, distorted, low quality"
+    }
+  },
+  "4": {
+    "class_type": "TensorFoldMOSSImage",
+    "inputs": {
+      "checkpoint_name": "CHOOSE_PREPARED_MOSS_BF16.safetensors",
+      "positive": [
+        "2",
+        0
+      ],
+      "negative": [
+        "3",
+        0
+      ],
+      "width": 1024,
+      "height": 1024,
+      "steps": 50,
+      "seed": 42
+    }
+  },
+  "5": {
+    "class_type": "VAELoader",
+    "inputs": {
+      "vae_name": "CHOOSE_MOSS_VAE.safetensors"
+    }
+  },
+  "6": {
+    "class_type": "VAEDecode",
+    "inputs": {
+      "samples": [
+        "4",
+        0
+      ],
+      "vae": [
+        "5",
+        0
+      ]
+    }
+  },
+  "7": {
+    "class_type": "SaveImage",
+    "inputs": {
+      "images": [
+        "6",
+        0
+      ],
+      "filename_prefix": "TensorFold/MOSS"
+    }
+  },
+  "8": {
+    "class_type": "PreviewAny",
+    "inputs": {
+      "source": [
+        "4",
+        1
+      ]
+    }
+  }
+}
