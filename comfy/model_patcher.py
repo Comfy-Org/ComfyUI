@@ -962,6 +962,8 @@ class ModelPatcher:
             self.pinned.remove(key)
 
     def unpin_all_weights(self):
+        for callback in self.get_all_callbacks(CallbacksMP.ON_UNLOAD_RAM):
+            callback(self)
         for key in list(self.pinned):
             self.unpin_weight(key)
 
@@ -1890,6 +1892,7 @@ class ModelPatcherDynamic(ModelPatcher):
         raise RuntimeError("unpin_weight invalid for dymamic weight loading")
 
     def unpin_all_weights(self):
+        super().unpin_all_weights()
         self.partially_unload_ram(1e32)
 
     def __del__(self):
@@ -2178,8 +2181,11 @@ class ModelPatcherDynamic(ModelPatcher):
         return freed
 
     def partially_unload_ram(self, ram_to_unload, subsets=[ "weights-fast", "patches-fast", "weights-loaded", "patches-loaded", "weights", "patches" ]):
-        freed = 0
         pin_state = self.model.dynamic_pins[self.load_device]
+        if ram_to_unload > 0 and any(pin_state[subset][1] for subset in subsets):
+            for callback in self.get_all_callbacks(CallbacksMP.ON_UNLOAD_RAM):
+                callback(self)
+        freed = 0
         for subset in subsets:
             hostbuf, stack, stack_split, pinned_size, *_ = pin_state[subset]
             while len(stack) > 0:
