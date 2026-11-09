@@ -61,7 +61,7 @@ class CreateCameraInfo(IO.ComfyNode):
                 IO.Float.Input("zoom", default=1.0, min=0.01, max=100.0, step=0.01,
                                tooltip="Digital zoom (focal-length multiplier). >1 zooms in without moving the camera."),
                 IO.Combo.Input("camera_type", options=["perspective", "orthographic"],
-                               tooltip="Projection used by Render Splat: perspective (foreshortening) or orthographic (parallel)."),
+                               tooltip="Projection used by Render Splat and Render Mesh: perspective (foreshortening) or orthographic (parallel)."),
                 IO.CameraInfoState.Input("camera_info_state", optional=True),
             ],
             outputs=[IO.Load3DCamera.Output(display_name="camera_info")],
@@ -94,22 +94,21 @@ class CreateCameraOrbit(IO.ComfyNode):
             display_name="Create Camera Orbit",
             search_aliases=["camera rig", "multiview cameras", "turntable cameras", "spiral cameras", "camera views"],
             category="3d",
-            description="Expand a camera_info into several cameras around its target, swept in yaw and pitch from the camera "
-                        "(by default a turntable), then optional views straight down and up. Render Mesh renders one view per "
-                        "camera and Bake Texture From Views projects them back.",
+            description="Several cameras around the first camera's target: a turntable by default, tilted if wanted, plus "
+                        "views straight down and up. Render Mesh renders one image per camera; Bake Texture From Views "
+                        "projects them back.",
             inputs=[
-                IO.Load3DCamera.Input("camera_info", tooltip="First camera of the orbit. The cameras of another Create Camera Orbit "
-                                                             "are each expanded."),
+                IO.Load3DCamera.Input("camera_info", tooltip="First camera of the orbit. A camera list orbits every camera in it."),
                 IO.Int.Input("count", default=4, min=1, max=64, tooltip="Cameras evenly spaced along the sweep."),
                 IO.Float.Input("yaw", default=360.0, min=-720.0, max=720.0, step=1.0,
-                               tooltip="Total turn about world +Y around the camera target, in Create Camera Info's yaw "
-                                       "direction. Whole turns end one step short so they loop; other sweeps end on the last camera."),
+                               tooltip="Total turn around the target, in Create Camera Info's yaw direction. Whole turns stop "
+                                       "one step short of the first camera; other sweeps end on the last camera."),
                 IO.Float.Input("pitch", default=0.0, min=-720.0, max=720.0, step=1.0,
-                               tooltip="Total tilt about the camera's horizontal axis through the target; positive rises like "
-                                       "Create Camera Info's pitch and goes over the top past 90. Whole turns loop like yaw."),
+                               tooltip="Total tilt over the target, positive rising like Create Camera Info's pitch; past 90 "
+                                       "the cameras pass over the top. Whole turns loop like yaw."),
                 IO.Combo.Input("poles", options=["none", "top", "bottom", "top and bottom"],
-                               tooltip="Views straight down and/or up onto the target after the orbit, with the first "
-                                       "camera's back at the image top."),
+                               tooltip="Views straight down and/or up at the target, added after the orbit. Their image top "
+                                       "points away from the first camera."),
             ],
             outputs=[IO.Load3DCamera.Output(display_name="camera_info")],
         )
@@ -153,7 +152,7 @@ class BatchCameras(IO.ComfyNode):
             display_name="Batch Cameras",
             search_aliases=["combine cameras", "merge cameras", "join camera rigs", "camera list"],
             category="3d",
-            description="Join cameras and camera rigs into one camera_info, in input order",
+            description="Join cameras and orbits into one camera list, in input order.",
             inputs=[
                 IO.Autogrow.Input("cameras", template=IO.Autogrow.TemplatePrefix(
                     IO.Load3DCamera.Input("camera_info"), prefix="camera_info", min=1, max=50)),

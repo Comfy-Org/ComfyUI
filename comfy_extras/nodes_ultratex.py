@@ -22,14 +22,15 @@ class UltraTexConditioning(io.ComfyNode):
             display_name="UltraTex Conditioning",
             category="3d/texturing",
             description=(
-                "Conditioning for texturing a mesh with FLUX.2 Klein base 9B and the UltraTex LoRA, from Render Mesh's six views and a reference image of the textured object. "
-                "Extra views add images of the object from the other canonical views as further references."),
+                "Conditioning for FLUX.2 Klein 9B with the UltraTex LoRA: paints a reference image's look onto a mesh, as one "
+                "image per view. Views come from Render Mesh (world normal) with a Create Camera Orbit of 4 plus top and "
+                "bottom; bake the result with Bake Texture From Views."),
             inputs=[
                 io.Conditioning.Input("conditioning", tooltip="Text conditioning; UltraTex was trained with an empty prompt."),
                 io.Vae.Input("vae"),
-                io.Image.Input("normals", tooltip="Render Mesh world normal images"),
-                io.Mask.Input("masks", tooltip="Render Mesh object masks of the same views."),
-                io.Image.Input("reference", tooltip="Image of the object with the look to texture it with"),
+                io.Image.Input("normals", tooltip="Render Mesh 'world normal' renders: the 6 canonical views, or the 4 side views."),
+                io.Mask.Input("masks", tooltip="Render Mesh masks of the same views."),
+                io.Image.Input("reference", tooltip="The object as it should look, seen from the front camera's side."),
                 io.Mask.Input("reference_mask", optional=True,
                               tooltip="Object mask of the reference (white = object)"),
                 io.DynamicCombo.Input("extra_views", options=[
@@ -38,7 +39,7 @@ class UltraTexConditioning(io.ComfyNode):
                         io.Image.Input(name, optional=True, tooltip=f"The object seen from the {name} view")
                         for name in VIEW_NAMES[1:]
                     ]),
-                ], tooltip="Further references, each masked by its view's silhouette and placed over its tile, like the reference over the front."),
+                ], tooltip="More references: the object seen from the other views, each tied to its view as the reference is to the front."),
             ],
             outputs=[io.Conditioning.Output()],
         )
@@ -48,7 +49,7 @@ class UltraTexConditioning(io.ComfyNode):
         if normals.shape[0] not in (4, len(VIEW_GRID)) or masks.shape[0] != normals.shape[0]:
             raise ValueError(f"UltraTex needs the {len(VIEW_GRID)} canonical views (Create Camera Orbit count 4, top and bottom) or the "
                              f"4 side views, got {normals.shape[0]} normal images and {masks.shape[0]} masks.")
-        # without poles their tiles stay empty and are dropped like background
+        # 4 side views: the top and bottom tiles stay empty and drop out with the background
         grid = VIEW_GRID[:normals.shape[0]]
         h, w = normals.shape[1:3]
         masks = comfy.utils.common_upscale(masks.to(normals)[:, None], w, h, "bilinear", "disabled")[:, 0]
@@ -64,7 +65,7 @@ class UltraTexConditioning(io.ComfyNode):
             reference_mask = comfy.utils.common_upscale(reference_mask[:1].to(reference)[:, None], reference.shape[2], reference.shape[1], "bilinear", "disabled")[:, 0]
         ref_latents = [normal_atlas, vae.encode(_on_white(reference, reference_mask))]
         ref_masks = [views_to_grid(masks[:, None], grid)[:, 0], reference_mask]
-        # the reference is the front view's: it shares positions with the front tile
+        # the reference shares the front tile's positions; the normal atlas has none
         ref_views = [None, 0]
         for view_index, name in enumerate(VIEW_NAMES[1:len(grid)], 1):
             image = extra_views.get(name)

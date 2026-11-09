@@ -1873,8 +1873,8 @@ class RenderMesh(IO.ComfyNode):
             search_aliases=["mesh to image", "render mesh", "preview textured mesh", "multiview render"],
             category="3d/mesh",
             description=(
-                "Ray-casts views of a mesh, one per camera. The camera and optional model transform can come "
-                "from a Load3D / Preview3D viewer; Create Camera Orbit gives several views at once."
+                "Renders a mesh, one image per camera. Cameras come from a Load3D / Preview3D viewer (with its "
+                "model transform), Create Camera Info or Create Camera Orbit; without one, an auto-framed front view."
             ),
             inputs=[
                 IO.Mesh.Input("mesh"),
@@ -1889,11 +1889,11 @@ class RenderMesh(IO.ComfyNode):
                                          tooltip="Model transform from the same Load3D / Preview3D viewer. "
                                                  "Connect it with camera_info to match the viewer framing."),
                 IO.Load3DCamera.Input("camera_info", optional=True,
-                                      tooltip="Camera from a Load3D / Preview3D viewer or a Create Camera Info node, or the "
-                                              "cameras of a Create Camera Orbit. If none is connected, a default front view is "
-                                              "auto-framed."),
+                                      tooltip="One camera, or a list from Create Camera Orbit / Batch Cameras. "
+                                              "None: an auto-framed front view."),
                 IO.Image.Input("texture", optional=True,
-                               tooltip="Rendered in place of the mesh's own texture"),
+                               tooltip="Shown instead of the mesh's own texture, e.g. a Bake Texture From Views output "
+                                       "without Apply Texture to Mesh."),
             ],
             outputs=[IO.Image.Output(display_name="image"), IO.Mask.Output(display_name="mask")],
         )
@@ -2246,22 +2246,18 @@ class BakeTextureFromViews(IO.ComfyNode):
             search_aliases=["project texture", "reproject views", "multiview bake", "texture projection", "rebake texture"],
             category="3d/texturing",
             description=(
-                "Projects (edited) renders back onto the mesh's UV layout. Render the mesh with Render Mesh, "
-                "edit the images, then connect them here with the same mesh and Render Mesh's camera_info. Areas "
-                "no view covers, or outside the mask, keep the mesh's texture (else vertex colours). Outputs a "
-                "base_color IMAGE for Apply Texture to Mesh and a confidence MASK of how well the views saw each texel. "
-                "Renders made with a viewer model transform (Render Mesh's model_3d_info) do not line up."
+                "Projects images back onto the mesh's UV layout: render with Render Mesh, edit or regenerate the "
+                "images, then bake them with the same mesh and cameras. Texels no view covers keep the mesh's own "
+                "texture (or vertex colours). Outputs the base_color for Apply Texture to Mesh and a confidence mask "
+                "of how well the views saw each texel. Renders made with a viewer model transform do not line up."
             ),
             inputs=[
                 IO.Mesh.Input("mesh", tooltip="The UV-unwrapped mesh that was rendered."),
-                IO.Image.Input("images", tooltip="One image per camera, in camera order, camera inputs one after "
-                                                 "another (Batch Images). Any resolution with the render's aspect "
-                                                 "ratio; higher gives a sharper bake."),
-                IO.Autogrow.Input("cameras", optional=True, template=IO.Autogrow.TemplatePrefix(
-                    IO.Load3DCamera.Input("camera_info", tooltip="The camera_info a Render Mesh rendered images with. Several "
-                                                                 "(e.g. a second rig turned 45 degrees) bake together. None "
-                                                                 "is Render Mesh's auto-framed front view."),
-                    prefix="camera_info", min=0, max=50)),
+                IO.Image.Input("images", tooltip="One image per camera, in camera order (Batch Images). Any resolution "
+                                                 "with the render's aspect ratio; higher gives a sharper bake."),
+                IO.Load3DCamera.Input("camera_info", optional=True,
+                                      tooltip="The cameras the images were rendered with, as connected to Render Mesh. "
+                                              "Join rigs with Batch Cameras. None: Render Mesh's auto-framed front view."),
                 IO.Int.Input("resolution", default=0, min=0, max=8192, step=64,
                              tooltip="Square texture resolution. 0 = the mesh's current texture size (2048 if it "
                                      "has none); otherwise the current texture is resampled to it."),
@@ -2269,10 +2265,8 @@ class BakeTextureFromViews(IO.ComfyNode):
                                tooltip="Views are weighted by cos(view angle)^exponent. Higher favours the most "
                                        "head-on view (sharper, harder seams); lower averages more views (softer)."),
                 IO.Boolean.Input("fill_unseen", default=False,
-                                 tooltip="Ignore the mesh's own texture and vertex colours: areas no view sees get "
-                                         "colour grown from the seen surface. For views that replace the whole "
-                                         "texture (multi-view texturing), where the old texture would show "
-                                         "through in occluded areas."),
+                                 tooltip="Texels no view sees take colour grown from the seen surface instead of the "
+                                         "mesh's own texture or vertex colours. For views that replace the whole texture."),
                 IO.Mask.Input("mask", optional=True,
                               tooltip="Edited areas per view; only masked pixels are projected. A single mask "
                                       "applies to every view."),
@@ -2280,14 +2274,13 @@ class BakeTextureFromViews(IO.ComfyNode):
             outputs=[
                 IO.Image.Output(display_name="base_color"),
                 IO.Mask.Output(display_name="confidence",
-                               tooltip="Per texel, cos(view angle) of the best view that saw it clear of edges (0 = "
-                                       "unseen). Applied as a texture and rendered from another camera set, it marks "
-                                       "what these views already cover well."),
+                               tooltip="Per texel, how head-on the best view saw it, 0 = unseen. Render it as the "
+                                       "texture from another rig to see what those views still need to cover."),
             ],
         )
 
     @classmethod
-    def execute(cls, mesh, images, resolution, blend_exponent, fill_unseen=False, cameras=None, mask=None):
+    def execute(cls, mesh, images, resolution, blend_exponent, fill_unseen=False, camera_info=None, mask=None):
         if mesh.uvs is None:
             raise ValueError("BakeTextureFromViews: mesh has no UVs. Connect the UV-unwrapped mesh that was rendered.")
         if int(mesh.vertices.shape[0]) > 1:
@@ -2299,7 +2292,6 @@ class BakeTextureFromViews(IO.ComfyNode):
         dev = comfy.model_management.get_torch_device()
         _prepare_gpu_mesh_processing(dev, max(resolution * resolution * 256, int(f_i.shape[0]) * 512))  # measured 140-200 B/texel
         lv, lf = v_i.to(dev).float(), f_i.to(dev).long()
-        camera_info = [cam for c in cameras.values() for cam in camera_list(c)] if cameras else None
         views = _mesh_view_cameras(camera_info, lv)
         if int(images.shape[0]) != len(views):
             raise ValueError(f"BakeTextureFromViews: {int(images.shape[0])} images for {len(views)} cameras; "
