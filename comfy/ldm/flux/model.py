@@ -423,7 +423,9 @@ class Flux(nn.Module):
             reference_views = kwargs.get("reference_views", None)
             view_index = None
             for i, ref in enumerate(ref_latents):
-                view = reference_views[i] if reference_views is not None else None
+                # references appended after UltraTex Conditioning have no view or mask entry
+                view = reference_views[i] if reference_views is not None and i < len(reference_views) else None
+                ref_keep = token_keep["refs"][i] if token_keep is not None and i < len(token_keep["refs"]) else None
                 if ref_latents_method in ("index", "index_timestep_zero"):
                     if view is None or view_index is None:    # view references are the tiles of one reference: one index
                         index += self.params.ref_index_scale
@@ -450,8 +452,8 @@ class Flux(nn.Module):
                     view_index = index
                     h_offset, w_offset = view_grid[view][0] * h_tile, view_grid[view][1] * w_tile
                 kontext, kontext_ids = self.process_img(ref, index=index, h_offset=h_offset, w_offset=w_offset, transformer_options=transformer_options)
-                if token_keep is not None and token_keep["refs"][i] is not None:
-                    kontext, kontext_ids = kontext[:, token_keep["refs"][i]], kontext_ids[:, token_keep["refs"][i]]
+                if ref_keep is not None:
+                    kontext, kontext_ids = kontext[:, ref_keep], kontext_ids[:, ref_keep]
                 img = torch.cat([img, kontext], dim=1)
                 img_ids = torch.cat([img_ids, kontext_ids], dim=1)
                 ref_num_tokens.append(kontext.shape[1])

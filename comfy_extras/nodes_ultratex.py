@@ -60,7 +60,7 @@ class UltraTexConditioning(io.ComfyNode):
 
         reference = reference[:1]
         if reference_mask is None:
-            reference_mask = torch.ones(reference.shape[:3])
+            reference_mask = torch.ones_like(reference[..., 0])
         else:
             reference_mask = comfy.utils.common_upscale(reference_mask[:1].to(reference)[:, None], reference.shape[2], reference.shape[1], "bilinear", "disabled")[:, 0]
         ref_latents = [normal_atlas, vae.encode(_on_white(reference, reference_mask))]

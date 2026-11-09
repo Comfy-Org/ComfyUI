@@ -10,8 +10,7 @@ from server import PromptServer
 from comfy_extras.mesh3d.postprocess.qem_decimate import QEMConfig, qem_simplify, qem_cluster_decimate, _compute_vertex_normals, _connected_labels, _kitchen_op
 from comfy_extras.mesh3d.postprocess.remesh import remesh_narrow_band_dc, _point_tri_closest
 from comfy_extras.nodes_save_3d import get_mesh_batch_item, pack_variable_mesh_batch
-from comfy_extras.nodes_camera import camera_list
-from comfy_extras.nodes_gaussian_splat import _xyz
+from comfy_extras.nodes_camera import camera_list, _xyz
 from comfy_extras.mesh3d.uv_unwrap import mesh as _uv_mesh
 from comfy_extras.mesh3d.uv_unwrap import segment as _uv_seg
 from comfy_extras.mesh3d.uv_unwrap import parameterize as _uv_param
@@ -2232,6 +2231,7 @@ def _bake_texture_from_views(lv, lf, uv, normals, base_texture, base_vcol, image
     tex = torch.zeros((resolution, resolution, 4), device=dev)
     tex[cov] = torch.cat([out.clamp(0.0, 1.0), conf[:Kt, None]], dim=-1)
     tex = _jfa_fill(tex, fill)                        # UV gutter: nearest texel, so seams don't pull in black
+    tex[..., 3][cov] = conf[:Kt]                      # the fill grows colour only: unseen islands keep confidence 0
     tick("fill")
     tq.close()
     return tex[..., :3].contiguous(), tex[..., 3].contiguous()

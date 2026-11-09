@@ -1,10 +1,127 @@
 import math
 
+import torch
 from typing_extensions import override
 
 import comfy.model_management
 from comfy_api.latest import ComfyExtension, IO
-from comfy_extras.nodes_gaussian_splat import _lookat_camera_info, _quat_camera_info, _rotate_camera_info, _xyz
+
+
+def _quat_to_mat(q):
+    # q: (N, 4) wxyz, normalized -> (N, 3, 3)
+    q = q / q.norm(dim=-1, keepdim=True).clamp_min(1e-12)
+    w, x, y, z = q.unbind(-1)
+    return torch.stack([
+        1 - 2 * (y * y + z * z), 2 * (x * y - w * z), 2 * (x * z + w * y),
+        2 * (x * y + w * z), 1 - 2 * (x * x + z * z), 2 * (y * z - w * x),
+        2 * (x * z - w * y), 2 * (y * z + w * x), 1 - 2 * (x * x + y * y),
+    ], dim=-1).reshape(-1, 3, 3)
+
+
+def _quat_mul(a, b):
+    # Hamilton product a (x) b, wxyz.
+    aw, ax, ay, az = a.unbind(-1)
+    bw, bx, by, bz = b.unbind(-1)
+    return torch.stack([
+        aw * bw - ax * bx - ay * by - az * bz,
+        aw * bx + ax * bw + ay * bz - az * by,
+        aw * by - ax * bz + ay * bw + az * bx,
+        aw * bz + ax * by - ay * bx + az * bw,
+    ], dim=-1)
+
+
+def _mat_to_quat(m):
+    # Rotation matrix (..., 3, 3) -> quaternion (..., 4) wxyz. Batched; builds the four candidate quaternions
+    # and keeps the one with the largest component (numerically stable across all rotations).
+    m00, m11, m22 = m[..., 0, 0], m[..., 1, 1], m[..., 2, 2]
+    m21, m12 = m[..., 2, 1], m[..., 1, 2]
+    m02, m20 = m[..., 0, 2], m[..., 2, 0]
+    m10, m01 = m[..., 1, 0], m[..., 0, 1]
+    q2 = torch.stack([1 + m00 + m11 + m22, 1 + m00 - m11 - m22,
+                      1 - m00 + m11 - m22, 1 - m00 - m11 + m22], -1)   # 4 * (w^2, x^2, y^2, z^2)
+    cand = torch.stack([
+        torch.stack([q2[..., 0], m21 - m12, m02 - m20, m10 - m01], -1),
+        torch.stack([m21 - m12, q2[..., 1], m10 + m01, m02 + m20], -1),
+        torch.stack([m02 - m20, m10 + m01, q2[..., 2], m12 + m21], -1),
+        torch.stack([m10 - m01, m02 + m20, m12 + m21, q2[..., 3]], -1),
+    ], -2)                                                            # (...,4,4) candidates, rows = wxyz
+    sel = q2.argmax(-1)
+    q = torch.gather(cand, -2, sel[..., None, None].expand(sel.shape + (1, 4)))[..., 0, :]
+    return q / q.norm(dim=-1, keepdim=True).clamp_min(1e-12)
+
+
+def _lookat_quat_wxyz(position, target, dev):
+    # three.js lookAt in world frame: camera local +Z = (eye - target), up = world +Y. Returns wxyz.
+    z = position - target
+    z = z / z.norm().clamp_min(1e-8)
+    up0 = torch.tensor([0.0, 1.0, 0.0], device=dev)
+    if z.dot(up0).abs() > 0.999:                                # looking straight up/down
+        up0 = torch.tensor([0.0, 0.0, 1.0], device=dev)
+    x = torch.linalg.cross(up0, z)
+    x = x / x.norm().clamp_min(1e-8)
+    y = torch.linalg.cross(z, x)
+    R = torch.stack([x, y, z], dim=1)                           # columns = camera world axes
+    return _mat_to_quat(R[None])[0]
+
+
+def _lookat_camera_info(position, target, fov, dev, zoom=1.0, camera_type="perspective", roll=0.0):
+    # Build a camera_info from a world-space (right-handed, Y-up) eye + look-at target; up = world +Y.
+    pos = torch.as_tensor(position, dtype=torch.float32, device=dev)
+    tgt = torch.as_tensor(target, dtype=torch.float32, device=dev)
+    q = _lookat_quat_wxyz(pos, tgt, dev)
+    if roll:                                                    # roll about the view axis (camera local Z)
+        a = math.radians(roll)
+        qz = torch.tensor([math.cos(a / 2), 0.0, 0.0, math.sin(a / 2)], device=dev)
+        q = _quat_mul(q[None], qz[None])[0]
+    xyz = lambda v: {"x": float(v[0]), "y": float(v[1]), "z": float(v[2])}
+    return {"position": xyz(pos), "target": xyz(tgt),
+            "quaternion": {"x": float(q[1]), "y": float(q[2]), "z": float(q[3]), "w": float(q[0])},
+            **({"useCustomUp": True} if roll else {}),
+            "fov": float(fov), "cameraType": str(camera_type), "zoom": float(zoom)}
+
+
+def _quat_camera_info(position, quat_xyzw, fov, dev, zoom=1.0, camera_type="perspective"):
+    # camera_info from an explicit world position + camera-rotation quaternion (three.js: looks down local -Z).
+    pos = torch.as_tensor(position, dtype=torch.float32, device=dev)
+    qx, qy, qz, qw = (float(c) for c in quat_xyzw)
+    qwxyz = torch.tensor([qw, qx, qy, qz], dtype=torch.float32, device=dev)
+    qwxyz = qwxyz / qwxyz.norm().clamp_min(1e-8)
+    R = _quat_to_mat(qwxyz[None])[0]
+    tgt = pos - R[:, 2]                                         # look one unit down local -Z
+    xyz = lambda v: {"x": float(v[0]), "y": float(v[1]), "z": float(v[2])}
+    return {"position": xyz(pos), "target": xyz(tgt),
+            "quaternion": {"x": float(qwxyz[1]), "y": float(qwxyz[2]), "z": float(qwxyz[3]), "w": float(qwxyz[0])},
+            "useCustomUp": True,
+            "fov": float(fov), "cameraType": str(camera_type), "zoom": float(zoom)}
+
+
+def _xyz(d):
+    return [float(d.get(k, 0.0)) for k in "xyz"]
+
+
+def _rotate_camera_info(camera_info, axis, angle_deg):
+    # Rigidly rotate a camera_info about the unit world `axis` through its target: position, up and quaternion
+    # turn together, so a turntable or a sweep over the top keeps the camera's orientation continuous.
+    a = math.radians(angle_deg)
+    c, s = math.cos(a), math.sin(a)
+    kx, ky, kz = axis
+
+    def rot(v):
+        d = (kx * v[0] + ky * v[1] + kz * v[2]) * (1.0 - c)
+        return [v[0] * c + (ky * v[2] - kz * v[1]) * s + kx * d,
+                v[1] * c + (kz * v[0] - kx * v[2]) * s + ky * d,
+                v[2] * c + (kx * v[1] - ky * v[0]) * s + kz * d]
+    tgt = _xyz(camera_info.get("target", {}))
+    rel = rot([p - t for p, t in zip(_xyz(camera_info.get("position", {})), tgt)])
+    up = rot(_xyz(camera_info.get("up", {"y": 1.0})))
+    out = {**camera_info, "position": dict(zip("xyz", (r + t for r, t in zip(rel, tgt)))), "up": dict(zip("xyz", up))}
+    q = camera_info.get("quaternion")
+    if q:                                         # world-frame rotation (cos a/2, axis sin a/2) applied first
+        aw, ax, ay, az = math.cos(a / 2), kx * math.sin(a / 2), ky * math.sin(a / 2), kz * math.sin(a / 2)
+        bw, bx, by, bz = (float(q.get(k, 1.0 if k == "w" else 0.0)) for k in "wxyz")
+        out["quaternion"] = {"x": aw * bx + ax * bw + ay * bz - az * by, "y": aw * by - ax * bz + ay * bw + az * bx,
+                             "z": aw * bz + ax * by - ay * bx + az * bw, "w": aw * bw - ax * bx - ay * by - az * bz}
+    return out
 
 
 def camera_list(camera_info):
