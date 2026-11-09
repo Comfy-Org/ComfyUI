@@ -200,6 +200,13 @@ class KVCacheModel(nn.Module):
     def get_dynamic_vram__units(self):
         return self.layers, []
 
+    def load(self, state, device):
+        model = state.load(self, device)
+        model.caches, model.extra_caches = self.caches, self.extra_caches
+        for cache, layer in zip(model.caches + model.extra_caches, model.layers, strict=True):
+            cache.storage = layer
+        return model
+
     def checkpoint_state(self):
         return [cache.checkpoint_state() for cache in self.caches + self.extra_caches]
 
@@ -1311,7 +1318,7 @@ class BaseGenerate:
         generator = torch.Generator(device=device).manual_seed(seed) if do_sample else None
         cache = past_key_values = self.init_kv_cache(embeds.shape[0], max_cache_len, device, execution_dtype)
         if isinstance(cache, KVCacheModel):
-            cache = model_state.load(cache, device)
+            cache = cache.load(model_state, device)
             self.restore_generation_state(state, cache, generator)
             past_key_values = cache.caches
 

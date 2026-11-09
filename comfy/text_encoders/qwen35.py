@@ -978,7 +978,7 @@ class Qwen35(BaseLlama, BaseGenerate, torch.nn.Module):
         past_length = state.get("length", 0)
         cap = self.cache_capacity(past_length + embeds.shape[1] + max_length + 7, state)
         generator = torch.Generator(device=device).manual_seed(sampling["seed"]) if sampling is not None else None
-        cache = model_state.load(self.init_kv_cache(embeds.shape[0], cap, device, dt, mtp=True), device)
+        cache = self.init_kv_cache(embeds.shape[0], cap, device, dt, mtp=True).load(model_state, device)
         self.restore_generation_state(state, cache, generator)
         pkv = cache.caches
         # repair window: drafting ahead plus a near-full rollback

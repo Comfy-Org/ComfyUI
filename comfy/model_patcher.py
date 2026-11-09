@@ -1823,7 +1823,10 @@ class ModelPatcherDynamic(ModelPatcher):
         return True
 
     def discard_writes(self):
-        """Forget pinned writes so unpinning does not flush them to the backing file."""
+        """Forget resident and pinned writes without flushing them to the backing file."""
+        for module in self.model.modules():
+            if hasattr(module, "_v_signature"):
+                module._v_signature = None
         pin_state = self.model.dynamic_pins[self.load_device]
         for subset in ("weights", "weights-loaded", "weights-fast"):
             for module, _ in pin_state[subset][1]:

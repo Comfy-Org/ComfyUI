@@ -1,9 +1,9 @@
 import copy
 import json
 import os
+import tempfile
 
 import safetensors
-import safetensors.torch
 import torch
 
 import comfy.memory_management
@@ -14,6 +14,33 @@ import comfy.storage
 import comfy.utils
 
 METADATA_KEY = "comfy_model_state"
+
+
+def _save_tensors(tensors, path, metadata):
+    fd, temporary = tempfile.mkstemp(dir=os.path.dirname(path) or ".", prefix=".model-state-")
+    os.close(fd)
+    try:
+        comfy.utils.save_torch_file(tensors, temporary, {METADATA_KEY: metadata})
+        os.replace(temporary, path)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+
+
+def _read_tensors(patcher):
+    # The last forward may still be using the allocation graph's pages.
+    comfy.model_management.synchronize()
+    comfy.model_prefetch.cleanup_prefetch_queues()
+    state_dict = patcher.model.state_dict()
+    if patcher.is_dynamic():
+        patcher.flush_writes()
+        tensors = {name: torch.empty(value.shape, dtype=value.dtype) for name, value in state_dict.items()}
+        for name, value in state_dict.items():
+            if not comfy.memory_management.read_tensor_file_slice_into(value, tensors[name]):
+                raise RuntimeError(f"Could not read model state tensor {name}")
+    else:
+        tensors = {name: value.cpu() for name, value in state_dict.items()}
+    return tensors
 
 
 class ModelState:
@@ -46,7 +73,7 @@ class ModelState:
     def save(self, path):
         if self.tensors is None:
             raise RuntimeError("The model state was released without being written back; rerun the node that produced it")
-        safetensors.torch.save_file(self.tensors, path, {METADATA_KEY: json.dumps(self.metadata)})
+        _save_tensors(self.tensors, path, json.dumps(self.metadata))
 
     def copy(self):
         if self.tensors is None:
@@ -79,18 +106,7 @@ class ModelState:
         """Take the loaded model's values and drop it."""
         if self.patcher is None:
             return
-        # The last forward may still be using the allocation graph's pages.
-        comfy.model_management.synchronize()
-        comfy.model_prefetch.cleanup_prefetch_queues()
-        state_dict = self.patcher.model.state_dict()
-        if self.patcher.is_dynamic():
-            self.patcher.flush_writes()
-            self.tensors = {name: torch.empty(value.shape, dtype=value.dtype) for name, value in state_dict.items()}
-            for name, value in state_dict.items():
-                if not comfy.memory_management.read_tensor_file_slice_into(value, self.tensors[name]):
-                    raise RuntimeError(f"Could not read model state tensor {name}")
-        else:
-            self.tensors = {name: value.cpu() for name, value in state_dict.items()}
+        self.tensors = _read_tensors(self.patcher)
         self.patcher = None
 
     def release(self):
