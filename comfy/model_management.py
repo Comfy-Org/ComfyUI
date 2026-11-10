@@ -1929,7 +1929,7 @@ def get_memory_without_allocator_lock(dev):
         return get_total_memory(dev, torch_total_too=True) + get_free_memory(dev, torch_free_too=True)
     free, total = torch.cuda.mem_get_info(dev)
     reserved, free_torch = last_torch_cuda_memory.get(str(dev), (0, 0))
-    return total, reserved, free + free_torch, free_torch
+    return total, reserved, min(total, free + free_torch), free_torch
 
 def cpu_mode():
     global cpu_state

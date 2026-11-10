@@ -45,6 +45,8 @@ def test_cuda_memory_without_allocator_lock_reuses_the_last_torch_figures(monkey
     set_memory_stats(monkeypatch, allocator_locked)
     assert comfy.model_management.get_memory_without_allocator_lock(CUDA0) == (100, 6, 5, 4), \
         "driver free and total are current, torch reserved and free are from the last read"
+    cuda_memory[str(CUDA0)].update(free=99)
+    assert comfy.model_management.get_memory_without_allocator_lock(CUDA0)[2] == 100, "free never passes total"
 
 
 def test_soft_empty_cache_refreshes_the_torch_figures_of_every_device(monkeypatch, cuda_memory):
