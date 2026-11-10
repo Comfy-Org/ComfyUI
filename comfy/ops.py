@@ -77,7 +77,7 @@ try:
             SDPA_CONTIGUOUS_KV_L2_SIZE = 0
             if comfy.model_management.is_amd():
                 props = torch.cuda.get_device_properties(comfy.model_management.get_torch_device())
-                if props.gcnArchName.split(':')[0] == "gfx1151":  # aotriton gets a lot slower once one head of the strided k/v doesn't fit in L2
+                if props.gcnArchName.split(':')[0] in ("gfx1100", "gfx1151"):  # aotriton gets a lot slower once one head of the strided k/v doesn't fit in L2
                     SDPA_CONTIGUOUS_KV_L2_SIZE = props.L2_cache_size
 
             def scaled_dot_product_attention(q, k, v, *args, **kwargs):
