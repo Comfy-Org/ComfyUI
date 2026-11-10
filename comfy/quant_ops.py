@@ -1,3 +1,4 @@
+import importlib.util
 import torch
 import logging
 
@@ -53,6 +54,15 @@ try:
             return ck.registry.get_capable_backend("int8_linear") != "eager"
         except ck.exceptions.NoCapableBackendError:
             return False
+
+    def int8_linear_needs_triton_opt_in():
+        """Whether the INT8 GEMM exists but is unavailable because the opt-in flag is off.
+
+        Lets the caller point at --enable-triton-backend instead of silently dequantizing.
+        """
+        if args.disable_triton_backend or ck.registry.is_available("triton"):
+            return False
+        return importlib.util.find_spec("triton") is not None
 except ImportError as e:
     logging.error(f"Failed to import comfy_kitchen, Error: {e}, fp8 and fp4 support will not be available.")
     _CK_AVAILABLE = False
@@ -82,6 +92,9 @@ except ImportError as e:
         return None
 
     def int8_linear_available():
+        return False
+
+    def int8_linear_needs_triton_opt_in():
         return False
 
 _CK_MXFP8_AVAILABLE = False
