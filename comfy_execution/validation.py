@@ -227,6 +227,14 @@ def validate_node_input(
     if isinstance(received_type, list) and input_type == IO.Combo.io_type:
         return True
 
+    # comfy_engine (custom node API): a declared combo output's option list is its type. Independently
+    # extended combo lists are compatible when they share at least one value, just as non-strict
+    # union-string types are compatible when they overlap. Strict validation keeps the subset rule.
+    if isinstance(received_type, list) and isinstance(input_type, list):
+        if strict:
+            return all(value in input_type for value in received_type)
+        return any(value in input_type for value in received_type)
+
     # Not equal, and not strings
     if not isinstance(received_type, str) or not isinstance(input_type, str):
         return False
