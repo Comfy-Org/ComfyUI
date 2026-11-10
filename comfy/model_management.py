@@ -1914,7 +1914,7 @@ def get_free_memory(dev=None, torch_free_too=False):
             mem_free_cuda, _ = torch.cuda.mem_get_info(dev)
             mem_free_torch = mem_reserved - mem_active
             mem_free_total = mem_free_cuda + mem_free_torch
-            last_torch_cuda_memory[str(dev)] = (mem_reserved, mem_free_torch)
+            last_torch_cuda_memory[dev] = (mem_reserved, mem_free_torch)
 
     if torch_free_too:
         return (mem_free_total, mem_free_torch)
@@ -1928,7 +1928,7 @@ def get_memory_without_allocator_lock(dev):
     if getattr(dev, 'type', None) != 'cuda':
         return get_total_memory(dev, torch_total_too=True) + get_free_memory(dev, torch_free_too=True)
     free, total = torch.cuda.mem_get_info(dev)
-    reserved, free_torch = last_torch_cuda_memory.get(str(dev), (0, 0))
+    reserved, free_torch = last_torch_cuda_memory.get(dev, (0, 0))
     return total, reserved, min(total, free + free_torch), free_torch
 
 def cpu_mode():
@@ -2235,7 +2235,7 @@ def soft_empty_cache(force=False):
         torch.cuda.empty_cache()
         torch.cuda.ipc_collect()
         for dev in list(last_torch_cuda_memory):
-            get_free_memory(torch.device(dev))
+            get_free_memory(dev)
 
 def unload_all_models():
     for device in get_all_torch_devices():
