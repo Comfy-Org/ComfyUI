@@ -273,8 +273,6 @@ class PromptServer():
         self.prompt_queue = execution.PromptQueue(self)
         self.loop = loop
         self.messages = asyncio.Queue()
-        self.device_memory = {}
-        self.read_device_memory_unless_a_prompt_runs([comfy.model_management.get_torch_device()] + list(comfy.model_management.get_all_torch_devices()))
         self.client_session:Optional[aiohttp.ClientSession] = None
         self.number = 0
 
@@ -792,11 +790,9 @@ class PromptServer():
             else:
                 torch_devices = [primary_device] + list(torch_devices)
 
-            self.read_device_memory_unless_a_prompt_runs(torch_devices)
-
             device_entries = []
             for d in torch_devices:
-                vram_total, torch_vram_total, vram_free, torch_vram_free = self.device_memory[str(d)]
+                vram_total, torch_vram_total, vram_free, torch_vram_free = comfy.model_management.get_memory_without_allocator_lock(d)
                 device_entries.append({
                     "name": comfy.model_management.get_torch_device_name(d),
                     "type": d.type,
@@ -1321,16 +1317,6 @@ class PromptServer():
     async def setup(self):
         timeout = aiohttp.ClientTimeout(total=None) # no timeout
         self.client_session = aiohttp.ClientSession(timeout=timeout)
-
-    def read_device_memory_unless_a_prompt_runs(self, devices):
-        if not comfy.model_management.model_execution_lock.acquire(blocking=False):
-            return
-        try:
-            for d in devices:
-                self.device_memory[str(d)] = (comfy.model_management.get_total_memory(d, torch_total_too=True)
-                                              + comfy.model_management.get_free_memory(d, torch_free_too=True))
-        finally:
-            comfy.model_management.model_execution_lock.release()
 
     def add_routes(self):
         # The comfy-agent host mounts its own /api/agent and /api/workflows

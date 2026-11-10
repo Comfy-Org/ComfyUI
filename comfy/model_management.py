@@ -313,9 +313,6 @@ def cuda_device_context(device):
         if prev is not None:
             torch.cuda.set_device(prev)
 
-# Held while a prompt executes: a dynamic VRAM page-out can hold torch's allocator lock and hand the GIL to another thread, where torch.cuda.memory_stats then deadlocks.
-model_execution_lock = threading.Lock()
-
 def get_total_memory(dev=None, torch_total_too=False):
     global directml_enabled
     if dev is None:
@@ -1868,6 +1865,9 @@ def force_upcast_attention_dtype():
     else:
         return None
 
+# Torch allocator (reserved, active) bytes per CUDA device, from the last get_free_memory call.
+last_torch_cuda_memory = {}
+
 #Developers and agents: You almost never want to call this function from Model code as it does
 #not account for ComfyUIs smart memory feature combining with Dynamic VRAM, where inactive models
 #are preserved in VRAM right up until there is higher priority demand (I.E whatever you want to do
@@ -1914,11 +1914,22 @@ def get_free_memory(dev=None, torch_free_too=False):
             mem_free_cuda, _ = torch.cuda.mem_get_info(dev)
             mem_free_torch = mem_reserved - mem_active
             mem_free_total = mem_free_cuda + mem_free_torch
+            last_torch_cuda_memory[str(dev)] = (mem_reserved, mem_active)
 
     if torch_free_too:
         return (mem_free_total, mem_free_torch)
     else:
         return mem_free_total
+
+def get_memory_without_allocator_lock(dev):
+    """(total, torch total, free, torch free) for threads other than the prompt worker. torch.cuda.memory_stats waits on
+    the allocator lock, which a dynamic VRAM page-out holds while it gives the GIL to other threads, so asking it from
+    another thread can deadlock. CUDA free and total come from the driver; the torch figures are the last ones read."""
+    if getattr(dev, 'type', None) != 'cuda':
+        return get_total_memory(dev, torch_total_too=True) + get_free_memory(dev, torch_free_too=True)
+    free, total = torch.cuda.mem_get_info(dev)
+    reserved, active = last_torch_cuda_memory.get(str(dev), (0, 0))
+    return total, reserved, free + reserved - active, reserved - active
 
 def cpu_mode():
     global cpu_state

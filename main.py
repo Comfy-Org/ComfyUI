@@ -381,8 +381,7 @@ def prompt_worker(q, server_instance, asset_manager):
 
                 asset_manager.pause_background_scan()
                 background_scan_paused = True
-                with comfy.model_management.model_execution_lock:
-                    e.execute(item[2], prompt_id, extra_data, item[4])
+                e.execute(item[2], prompt_id, extra_data, item[4])
 
                 need_gc = True
 
