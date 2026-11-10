@@ -35,17 +35,20 @@ def test_tile_merge_preserves_fp16_intermediate_image(monkeypatch):
     torch.testing.assert_close(result, image)
 
 
-def test_tile_merge_feathers_different_fp16_tiles():
+@pytest.mark.parametrize("vertical", [False, True])
+def test_tile_merge_feathers_different_fp16_tiles(vertical):
     red = torch.zeros((1, 65, 65, 3), dtype=torch.float16)
     red[..., 0] = 1
     blue = torch.zeros_like(red)
     blue[..., 2] = 1
     before = [red.clone(), blue.clone()]
 
-    result = ImageMergeTileList.execute([red, blue], [97], [65], [33])[0]
+    width, height = (65, 97) if vertical else (97, 65)
+    result = ImageMergeTileList.execute([red, blue], [width], [height], [33])[0]
 
     expected = torch.tensor([[0.5, 0, 0.5], [2 ** -0.5, 0, 1 - 2 ** -0.5]], dtype=red.dtype)
-    torch.testing.assert_close(result[0, 32, [48, 40]], expected)
-    assert result.shape == (1, 65, 97, 3)
+    blended = result[0, [48, 40], 32] if vertical else result[0, 32, [48, 40]]
+    torch.testing.assert_close(blended, expected)
+    assert result.shape == (1, height, width, 3)
     assert result.dtype == red.dtype and result.device == red.device
     assert torch.equal(red, before[0]) and torch.equal(blue, before[1])
