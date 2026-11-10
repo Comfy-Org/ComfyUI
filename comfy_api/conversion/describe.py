@@ -1,6 +1,6 @@
-"""Run inside a fresh process with ComfyUI on the path: import one V1 pack with a stand-in server
-(``packload.LoadedPack``) and write what ComfyUI would list for each of its nodes, plus the static
-hints the converter needs.
+"""Run inside a fresh process with ComfyUI on the path: import one V1 pack the way pack isolation
+does (``packload.LoadedPack``: a stand-in server) and write what ComfyUI would list for each
+of its nodes, plus the static hints the converter needs.
 
     python describe.py <pack dir> <out.json>
 """

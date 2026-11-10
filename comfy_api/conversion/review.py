@@ -479,7 +479,7 @@ def worklist(pack, result, triage=None):
     if test:
         out += ["## Test", ""] + [item(f) for f in test] + [""]
     out += ["## Done by the converter", "",
-            "Node schemas, the declarations, pure helpers (`util`), folders (`util.folders`), devices, progress, "
+            "Node schemas, the manifest, pure helpers (`util`), folders (`util.folders`), devices, progress, "
             "interrupts and UI events were converted mechanically and checked; they need no review.", ""]
     return "\n".join(out)
 

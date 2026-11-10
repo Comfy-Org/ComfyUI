@@ -205,7 +205,8 @@ def test_v3_nodes_inputs_are_typed(tmp_path):
     conversion = convert.generate(str(pack), describe, str(tmp_path / "out"))
     code = open(tmp_path / "out" / "pack" / "v2" / "__init__.py").read()
     assert "eng.model.clone(model)" in code and "eng.vae.encode(vae, pixels)" in code
-    assert "MODEL.get_model_object" in {n for v in conversion["leftovers"].values() for n in v}
+    assert "_v2e.ModelSampling(model)" in code
+    assert not conversion["leftovers"]
 
 
 
@@ -224,14 +225,18 @@ def test_core_node_calls_bind_in_the_methods_order():
 
 def test_core_node_stand_in_names_positional_arguments_by_the_method():
     source = convert.ENGINE_SHIM
-    start = source.index("class CoreNode:")
-    end = source.index("\n\n\n", start)
+    start = source.index("class _Outputs(")
+    end = source.index("\n\n\n", source.index("class CoreNode:"))
     calls = []
+    def run(node_id, inputs):
+        calls.append((node_id, inputs))
+        return ("output",)
     namespace = {"sync": lambda result: result,
-                 "eng": type("E", (), {"node": type("N", (), {"run": staticmethod(lambda i, a: calls.append((i, a)))})})}
+                 "eng": type("E", (), {"node": type("N", (), {"run": staticmethod(run)})})}
     exec(source[start:end], namespace)  # noqa: S102
     core = namespace["CoreNode"]
-    core("VAEEncode", ["pixels", "vae"], "encode", ["vae", "pixels"])().encode("V", "P")
+    outputs = core("VAEEncode", ["pixels", "vae"], "encode", ["vae", "pixels"])().encode("V", "P")
+    assert isinstance(outputs, tuple) and outputs == ("output",) and outputs.result == ("output",)
     core("VAEDecode", ["samples", "vae"], "decode")().decode("S", "V")
     core("SaveAudio", ["audio", "filename_prefix"], "save", ["audio", "filename_prefix", "format"])().save("A", "p", "flac")
     assert calls == [("VAEEncode", {"vae": "V", "pixels": "P"}), ("VAEDecode", {"samples": "S", "vae": "V"}),
@@ -260,7 +265,9 @@ def test_types_follow_into_the_modules_own_helpers():
     assert "_v2e.sync(eng.clip.encode_from_tokens(clip, tokens, return_pooled=True))" in new
     assert 'return clip.tokenize("x")' in new  # reassigned in the helper: not followed
     assert "model = _v2e.sync(eng.model.clone(model))" in new  # a clone keeps the type
-    assert "MODEL.get_model_object" in left
+    assert "return _v2e.ModelSampling(model)" in new
+    assert "CLIP.tokenize" in left  # the reassigned, untyped clip remains flagged
+    assert not any(n.startswith("MODEL.get_model_object") for n in left)
 
 
 def test_nested_engine_calls_are_all_rewritten():
@@ -353,16 +360,17 @@ def test_v3_sync_execute_runs_with_engine_calls_routed():
 def test_core_node_stand_in_methods_have_the_methods_parameters():
     import inspect
     source = convert.ENGINE_SHIM
-    start = source.index("class CoreNode:")
-    end = source.index("\n\n\n", start)
+    start = source.index("class _Outputs(")
+    end = source.index("\n\n\n", source.index("class CoreNode:"))
     namespace = {"sync": lambda result: result,
-                 "eng": type("E", (), {"node": type("N", (), {"run": staticmethod(lambda i, a: (i, a))})})}
+                 "eng": type("E", (), {"node": type("N", (), {"run": staticmethod(lambda i, a: ((i, a),))})})}
     exec(source[start:end], namespace)  # noqa: S102
     encoder = namespace["CoreNode"]("VAEEncodeTiled", ["pixels", "vae", "tile_size", "overlap"], "encode",
                                     ["vae", "pixels", "tile_size", "overlap"])()
     assert "overlap" in inspect.signature(encoder.encode).parameters  # Impact's ReencodeLatent checks this
-    assert encoder.encode("V", "P", 512, overlap=32) == ("VAEEncodeTiled", {"vae": "V", "pixels": "P",
-                                                                            "tile_size": 512, "overlap": 32})
+    outputs = encoder.encode("V", "P", 512, overlap=32)
+    expected = (("VAEEncodeTiled", {"vae": "V", "pixels": "P", "tile_size": 512, "overlap": 32}),)
+    assert isinstance(outputs, tuple) and outputs == expected and outputs.result == expected
 
 
 def test_v1_classes_listed_only_through_a_v3_entry_are_found(tmp_path):
@@ -466,7 +474,7 @@ def test_attributes_of_every_engine_object_type_are_flagged():
                 scale = upscale_model.scale
                 return (control_net.copy(), image)
     ''', typed={"Up": ("run", {"upscale_model": "UPSCALE_MODEL", "image": "IMAGE", "control_net": "CONTROL_NET"})})
-    assert "UPSCALE_MODEL.to" in left and "UPSCALE_MODEL.scale" in left and "CONTROL_NET.copy" in left
+    assert "UPSCALE_MODEL.to()" in left and "UPSCALE_MODEL.scale" in left and "CONTROL_NET.copy()" in left
     assert not any(n.startswith("IMAGE.") for n in left)  # plain data types aren't engine objects
 
 
@@ -572,12 +580,12 @@ def test_the_shims_savers_write_metadata_and_use_their_folder(monkeypatch):
     assert calls[-1][1] == FolderType.temp
 
 
-def test_hasattr_on_an_engine_object_is_flagged():
+def test_mapped_hasattr_is_true_and_unknown_engine_probes_are_flagged():
     # AK-XZ-Axis Batch Prompts (Danny r3, agent edit): hasattr(clip, "tokenize") is always False on a V2.1 handle
-    _new, _done, left = _rewrite('''
+    new, done, left = _rewrite('''
         def _encode(clip, text):
             if hasattr(clip, "tokenize") and hasattr(clip, "encode_from_tokens"):
-                return 1
+                return clip.encode_from_tokens(clip.tokenize(text))
             return getattr(clip, "cond_stage_model", None)
         def _other(model, x):  # a param named like an engine object, but not passed one: not flagged
             return hasattr(model, "generate")
@@ -586,7 +594,11 @@ def test_hasattr_on_an_engine_object_is_flagged():
                 if hasattr(model, "model_sampling") and hasattr(text, "upper"):
                     return (model, _encode(clip, text))
     ''', typed={"Node": ("run", {"model": "MODEL", "clip": "CLIP", "text": "STRING", "width": "INT"})})
-    assert "CLIP.tokenize (hasattr on a V2.1 handle)" in left
+    assert "if True and True:" in new
+    assert "eng.clip.tokenize(clip, text)" in new
+    assert "eng.clip.encode_from_tokens(clip," in new
+    assert "CLIP.tokenize (hasattr)" in done and "CLIP.encode_from_tokens (hasattr)" in done
+    assert not any(n.startswith("CLIP.tokenize (hasattr") for n in left)
     assert "CLIP.cond_stage_model (getattr on a V2.1 handle)" in left
     assert "MODEL.model_sampling (hasattr on a V2.1 handle)" in left
     assert not any(n.startswith("STRING.") for n in left)
@@ -899,7 +911,7 @@ def test_other_model_objects_are_not_mistaken_for_the_sigma_schedule():
                 return comfy.samplers.calculate_sigmas(model.get_model_object("diffusion_model"), "normal", 20)
     ''', {"Node": ("execute", {"model": "MODEL"})})
     assert "BasicScheduler" not in new
-    assert "MODEL.get_model_object" in left
+    assert "MODEL.get_model_object('diffusion_model')" in left
 
 
 def test_named_sampler_alias_and_keyword_keep_special_sampler_names():
