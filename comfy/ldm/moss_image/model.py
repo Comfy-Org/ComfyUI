@@ -59,7 +59,7 @@ def rope_split_half(x, pe):
     return (pe[..., 0] * x_[..., 0] + pe[..., 1] * x_[..., 1]).movedim(-1, -2).flatten(-2).type_as(x)
 
 
-def attention(q, k, v, q_norm, k_norm, pe, heads, comfy_attention, transformer_options, ref_kv=None, kv_out=None):
+def attention(q, k, v, q_norm, k_norm, pe, heads, comfy_attention, transformer_options, ref_kv=None, kv_out=None, mask=None):
     B, N, _ = q.shape
     q = q.view(B, N, heads, -1)
     k = k.view(B, N, heads, -1)
@@ -79,7 +79,7 @@ def attention(q, k, v, q_norm, k_norm, pe, heads, comfy_attention, transformer_o
         # the references' keys and values, computed once
         k, v = torch.cat((k, ref_kv[:, 0]), dim=1), torch.cat((v, ref_kv[:, 1]), dim=1)
     q, k, v = AttentionTensorContainer(q), AttentionTensorContainer(k), AttentionTensorContainer(v)
-    return optimized_attention(q, k, v, heads, transformer_options=transformer_options, preferred_attention=comfy_attention)
+    return optimized_attention(q, k, v, heads, mask=mask, transformer_options=transformer_options, preferred_attention=comfy_attention)
 
 
 class TextBlock(nn.Module):
@@ -97,9 +97,10 @@ class TextBlock(nn.Module):
         self.ffn_up = operations.Linear(dim, ffn_dim, dtype=dtype, device=device)
         self.ffn_down = operations.Linear(ffn_dim, dim, dtype=dtype, device=device)
 
-    def forward(self, x, pe, transformer_options={}):
+    def forward(self, x, pe, transformer_options={}, mask=None):
         q, k, v = self.qkv(self.norm1(x)).chunk(3, dim=-1)
-        x = x + self.proj(attention(q, k, v, self.q_norm, self.k_norm, pe, self.num_heads, self.comfy_attention, transformer_options))
+        x = x + self.proj(attention(q, k, v, self.q_norm, self.k_norm, pe, self.num_heads, self.comfy_attention, transformer_options, mask=mask))
+        del q, k, v
         y = self.norm2(x)
         return x + self.ffn_down(situ(self.ffn_up(y), self.ffn_gate(y)))
 
@@ -110,12 +111,12 @@ class TextEmbedder(nn.Module):
         self.proj = operations.Linear(text_dim, dim, dtype=dtype, device=device)
         self.blocks = nn.ModuleList([TextBlock(dim, ffn_dim, num_heads, dtype=dtype, device=device, operations=operations) for _ in range(2)])
 
-    def forward(self, x, pe, transformer_options={}):
+    def forward(self, x, pe, transformer_options={}, mask=None):
         x = self.proj(x)
         prefetch_queue = comfy.model_prefetch.make_prefetch_queue(list(self.blocks), x.device, transformer_options)
         for block in self.blocks:
             comfy.model_prefetch.prefetch_queue_pop(prefetch_queue, x.device, block, x.dtype)
-            x = block(x, pe, transformer_options)
+            x = block(x, pe, transformer_options, mask)
         comfy.model_prefetch.prefetch_queue_pop(prefetch_queue, x.device, None)
         return x
 
@@ -136,18 +137,22 @@ class Block(nn.Module):
         self.proj["ffn_up_gate"] = operations.Linear(dim, 2 * ffn_dim, bias=False, dtype=dtype, device=device)
         self.proj["ffn_down"] = operations.Linear(ffn_dim, dim, bias=False, dtype=dtype, device=device)
 
-    def forward(self, x, mod, pe, transformer_options={}, ref=None, ref_kv=None, kv_out=None):
+    def forward(self, x, mod, pe, transformer_options={}, ref=None, ref_kv=None, kv_out=None, mask=None):
         # ref: (first reference token, their t=0 modulation) when the references are in the sequence
         y = modulate(x, self.norm1, mod, 0, ref)
         if self.fused_qkv:
             q, k, v = self.proj["qkv"](y).chunk(3, dim=-1)
         else:
             q, k, v = self.proj["q"](y), self.proj["k"](y), self.proj["v"](y)
-        out = attention(q, k, v, self.q_norm, self.k_norm, pe, self.num_heads, self.comfy_attention, transformer_options, ref_kv, kv_out)
+        del y
+        out = attention(q, k, v, self.q_norm, self.k_norm, pe, self.num_heads, self.comfy_attention, transformer_options, ref_kv, kv_out, mask)
+        del q, k, v
         x = residual(x, self.proj["o"](out), mod, 2, ref)
+        del out
         y = modulate(x, self.norm2, mod, 3, ref)
+        y = self.proj["ffn_up_gate"](y)
         # situ on the [hidden | gate] halves; int8 weights fold it into the activation quantization
-        return residual(x, comfy.ops.linear_input_act(self.proj["ffn_down"], self.proj["ffn_up_gate"](y), "situ"), mod, 5, ref)
+        return residual(x, comfy.ops.linear_input_act(self.proj["ffn_down"], y, "situ"), mod, 5, ref)
 
 
 class MOSSImage(nn.Module):
@@ -212,7 +217,7 @@ class MOSSImage(nn.Module):
             comfy.patcher_extension.get_all_wrappers(comfy.patcher_extension.WrappersMP.DIFFUSION_MODEL, transformer_options)
         ).execute(x, timestep, context, transformer_options, **kwargs)
 
-    def _forward(self, x, timestep, context, transformer_options={}, ref_latents=[], ref_latents_method=None, ref_kv=None, **kwargs):
+    def _forward(self, x, timestep, context, transformer_options={}, ref_latents=[], ref_latents_method=None, ref_kv=None, context_attention_bias=None, **kwargs):
         B, _, H, W = x.shape
         dtype, device = x.dtype, x.device
         transformer_options = transformer_options.copy()
@@ -237,7 +242,13 @@ class MOSSImage(nn.Module):
             ref_vec = self.time_embedding(timestep_embedding(torch.zeros_like(timestep), 256).to(dtype))
             ref = (H * W + text_len, self.shared_block_modulation(ref_vec).unflatten(-1, (6, -1)).unsqueeze(2).unbind(1))
 
-        txt = self.text_embedder(context, pe[:, H * W:H * W + text_len], transformer_options)
+        mask = text_mask = None
+        if context_attention_bias is not None:
+            # additive attention logit bias on the text tokens (prompt or image weights), image and reference keys stay unbiased
+            text_mask = context_attention_bias[:, None, None]
+            mask = torch.nn.functional.pad(context_attention_bias, (H * W, sum(r.shape[-2] * r.shape[-1] for r in refs) + (0 if ref_kv is None else ref_kv.shape[3])))[:, None, None]
+
+        txt = self.text_embedder(context, pe[:, H * W:H * W + text_len], transformer_options, text_mask)
         # allocated outside the memory compiler region, the blocks update it in place
         x = torch.cat([self.video_embedder(x.flatten(2).transpose(1, 2)), txt] + [self.video_embedder(r.flatten(2).transpose(1, 2)) for r in refs], dim=1)
         del txt, refs
@@ -252,10 +263,10 @@ class MOSSImage(nn.Module):
             transformer_options["block_index"] = i
             if ("single_block", i) in blocks_replace:
                 def block_wrap(args):
-                    return {"img": block(args["img"], args["mod"], args["pe"], args["transformer_options"], ref, None if ref_kv is None else ref_kv[:, i])}
+                    return {"img": block(args["img"], args["mod"], args["pe"], args["transformer_options"], ref, None if ref_kv is None else ref_kv[:, i], mask=mask)}
                 x = blocks_replace[("single_block", i)]({"img": x, "vec": vec, "mod": mod, "pe": pe, "transformer_options": transformer_options}, {"original_block": block_wrap})["img"]
             else:
-                x = block(x, mod, pe, transformer_options, ref, None if ref_kv is None else ref_kv[:, i])
+                x = block(x, mod, pe, transformer_options, ref, None if ref_kv is None else ref_kv[:, i], mask=mask)
         comfy.model_prefetch.prefetch_queue_pop(prefetch_queue, device, None, malloc_scope="block")
         comfy.model_prefetch.malloc_graph_end()
 

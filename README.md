@@ -31,7 +31,7 @@ ComfyUI is the AI creation engine for visual professionals who demand control ov
 - A visual node graph for building and reusing image, video, audio, 3D, and text workflows without code.
 - Broad native model support. This is a representative list; browse the [workflow library](https://comfy.org/workflows/) for maintained, ready-to-run templates.
   - [Image generation](https://comfy.org/workflows/tag/text-to-image/): Stable Diffusion 1.5, SDXL, SD3.5, Flux.1, Flux.2, Qwen Image, Z-Image, Hunyuan Image 2.1, HiDream, Lumina Image 2.0, Chroma, Anima, LongCat Image, Ideogram 4, Krea 2, MageFlow, Microsoft Lens, PixelDiT, Kandinsky 5, Ernie Image and Moss Image.
-  - [Image editing](https://comfy.org/workflows/tag/image-edit/): Flux Kontext, Flux.2 Klein, Qwen Image Edit, HiDream E1.1 and O1, OmniGen2, Boogu, JoyImage Edit, MageFlow Edit, and LongCat Image Edit.
+  - [Image editing](https://comfy.org/workflows/tag/image-edit/): Flux Kontext, Flux.2 Klein, Qwen Image Edit, HiDream E1.1 and O1, OmniGen2, Boogu, JoyImage Edit, MageFlow Edit, LongCat Image Edit, Fibo 2.0, Flux 3 image klein.
   - [Video generation](https://comfy.org/workflows/tag/video-generation/): Wan 2.1 and 2.2, LTX-Video 2 and 2.3, HunyuanVideo 1.5, Kandinsky 5 Video, CogVideoX, Cosmos Predict2, Bernini-R, SCAIL 2, and Mochi.
   - [Audio and video generation](https://comfy.org/workflows/): MiniMax H3 and LTX-AV.
   - [Audio generation](https://comfy.org/workflows/tag/text-to-audio/): ACE-Step 1.5, Stable Audio 3, MiniMax Music 3 and Yue 2.
@@ -90,7 +90,7 @@ series and above; if your pytorch is more than 6 months old, please update it.
 Put your checkpoints in `models/checkpoints` and your VAE in `models/vae`.
 
 **[docs/installation.md](docs/installation.md) has the full detail:** PyTorch commands
-for NVIDIA, AMD ROCm on Linux and Windows, Intel Arc, Apple Silicon, Ascend NPU,
+for NVIDIA, AMD ROCm on Linux and Windows, Intel Arc, Apple Silicon, Huawei Ascend NPU,
 Cambricon MLU and Iluvatar Corex, plus ComfyUI-Manager setup, portable builds, previews
 and TLS.
 

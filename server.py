@@ -64,6 +64,7 @@ from app.user_manager import UserManager
 from app.model_manager import ModelFileManager
 from app.custom_node_manager import CustomNodeManager
 from app.subgraph_manager import SubgraphManager
+from app import deploy_to_cloud
 from app.node_replace_manager import NodeReplaceManager
 from typing import TYPE_CHECKING, Optional, Union
 from api_server.routes.internal.internal_routes import InternalRoutes
@@ -267,6 +268,7 @@ class PromptServer():
         self.subgraph_manager = SubgraphManager()
         self.node_replace_manager = NodeReplaceManager()
         self.internal_routes = InternalRoutes(self)
+        self.deploy_to_cloud_routes = deploy_to_cloud.DeployToCloudRoutes(self)
         self.supports = ["custom_nodes_from_web"]
         self.prompt_queue = execution.PromptQueue(self)
         self.loop = loop
@@ -1226,6 +1228,9 @@ class PromptServer():
                             sensitive[sensitive_val] = extra_data.pop(sensitive_val)
                     extra_data["create_time"] = int(time.time() * 1000)  # timestamp in milliseconds
                     self.prompt_queue.put((number, prompt_id, prompt, extra_data, outputs_to_execute, sensitive))
+                    # The frontend can queue with an empty client_id before its socket id arrives.
+                    if not json_data.get("client_id") and extra_data.get("comfy_usage_source") != "comfyui-frontend":
+                        deploy_to_cloud.mark_used_headlessly()
                     response = {"prompt_id": prompt_id, "number": number, "node_errors": valid[3]}
                     return web.json_response(response)
                 else:
@@ -1341,6 +1346,8 @@ class PromptServer():
                 api_routes.route(route.method, "/api" + route.path)(route.handler, **route.kwargs)
         self.app.add_routes(api_routes)
         self.app.add_routes(self.routes)
+        # Registered after the /api duplication above, so these exist only under /api.
+        self.deploy_to_cloud_routes.add_routes(self.app)
 
         # Add routes from web extensions.
         for name, dir in nodes.EXTENSION_WEB_DIRS.items():

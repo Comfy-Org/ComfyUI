@@ -255,6 +255,29 @@ components:
                 - base_version
                 - workflow_json
             type: object
+        DeployToCloudError:
+            description: Error body of local ComfyUI's /api/deploy/* routes. Branch on `error`, never on `message`.
+            properties:
+                error:
+                    enum:
+                        - offline
+                        - multiple_credentials
+                        - invalid_api_key_format
+                        - invalid_body
+                        - missing_credentials
+                        - unauthorized
+                        - too_large
+                        - too_many_bundles
+                        - builder_rejected
+                        - builder_unavailable
+                        - builder_busy
+                    type: string
+                message:
+                    description: Human-readable detail, present for invalid_body and builder_rejected.
+                    type: string
+            required:
+                - error
+            type: object
         ErrorResponse:
             description: Standard error response with a machine-readable code and human-readable message.
             properties:
@@ -2646,6 +2669,135 @@ paths:
             summary: Get the default workflow
             tags:
                 - workflow
+    /api/deploy/bundle:
+        post:
+            description: On explicit user action, collects this installation's snapshot (comfyui-desktop-2-snapshot) and installed model list, sends them with the optional workflow and name to comfy-builder's POST /v1/import-bundles, and returns the Create a Build wizard link that opens it. The caller's credential is forwarded verbatim and never stored; exactly one of a Bearer Authorization header or an X-API-Key header must be sent. Never available under --offline.
+            operationId: createDeployBundle
+            requestBody:
+                content:
+                    application/json:
+                        schema:
+                            description: A JSON object; `{}` is valid. Null members count as absent.
+                            properties:
+                                name:
+                                    description: Optional label for the bundle.
+                                    maxLength: 200
+                                    nullable: true
+                                    type: string
+                                workflow:
+                                    additionalProperties: true
+                                    description: The workflow open in ComfyUI, sent as is.
+                                    nullable: true
+                                    type: object
+                            type: object
+                required: true
+            responses:
+                "200":
+                    content:
+                        application/json:
+                            schema:
+                                properties:
+                                    bundle_id:
+                                        format: uuid
+                                        type: string
+                                    expires_at:
+                                        description: When the bundle stops being readable (24 hours after creation).
+                                        format: date-time
+                                        type: string
+                                    url:
+                                        description: The Create a Build wizard link that opens the bundle (/profile/builds/new?step=import&bundle=&workspace=&bundle_workspace=).
+                                        format: uri
+                                        type: string
+                                    workspace_id:
+                                        description: The workspace the bundle belongs to (the credential's).
+                                        type: string
+                                required:
+                                    - url
+                                    - bundle_id
+                                    - workspace_id
+                                    - expires_at
+                                type: object
+                    description: Bundle stored on comfy-builder
+                "400":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/DeployToCloudError'
+                    description: 'Rejected before upload: `multiple_credentials` (both headers sent), `invalid_api_key_format` (X-API-Key is not comfyui- followed by 64 hex characters) or `invalid_body` (not a JSON object, or a bad workflow or name).'
+                "401":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/DeployToCloudError'
+                    description: '`missing_credentials` (no credential sent) or `unauthorized` (the builder refused the credential).'
+                "403":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/DeployToCloudError'
+                    description: '`offline` (the server runs with --offline) or `unauthorized` (the builder refused the credential).'
+                "413":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/DeployToCloudError'
+                    description: The bundle exceeds the builder's size cap (`too_large`).
+                "429":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/DeployToCloudError'
+                    description: The user already holds the builder's limit of unexpired bundles in this workspace (`too_many_bundles`); clears as older bundles expire.
+                "502":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/DeployToCloudError'
+                    description: '`builder_rejected` (the builder refused the bundle as invalid; `message` carries its reason, at most 500 characters) or `builder_unavailable` (the builder could not be reached or answered unexpectedly).'
+                "503":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/DeployToCloudError'
+                    description: The builder is busy (`builder_busy`); retry after Retry-After seconds when present.
+                    headers:
+                        Retry-After:
+                            description: Seconds to wait, when the builder sent one.
+                            schema:
+                                type: integer
+            security:
+                - BearerAuth: []
+                - ApiKeyAuth: []
+            summary: Upload this installation to Cloud as an import bundle
+    /api/deploy/summary:
+        get:
+            description: Counts the custom nodes and model files this local installation would send in an import bundle, so the UI can describe the upload before the user confirms it. Local reads only; makes no network request.
+            operationId: getDeploySummary
+            responses:
+                "200":
+                    content:
+                        application/json:
+                            schema:
+                                properties:
+                                    custom_nodes:
+                                        description: Custom node packages found in the custom_nodes folders
+                                        type: integer
+                                    models:
+                                        description: Model files found across the model folders
+                                        type: integer
+                                required:
+                                    - custom_nodes
+                                    - models
+                                type: object
+                    description: Counts of what the bundle would include
+                "403":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/DeployToCloudError'
+                    description: The server runs with --offline (error `offline`)
+            security: []
+            summary: Count what a Deploy to Cloud bundle would carry
     /api/embeddings:
         get:
             description: Returns the list of text-encoder embeddings available on disk.
@@ -2771,6 +2923,11 @@ paths:
                             schema:
                                 additionalProperties: true
                                 properties:
+                                    deploy_to_cloud:
+                                        description: 'Local ComfyUI only: whether the UI should offer Deploy to Cloud. True when the server is not --offline and this installation has ever had a prompt queued by a non-browser client (a persistent marker in the user directory). A discovery hint only: it grants nothing, and the /api/deploy/* routes do not check it. Not settable with --feature-flag.'
+                                        type: boolean
+                                        x-runtime:
+                                            - local
                                     free_tier_balance:
                                         description: Free-tier job allowance for an authenticated non-paid (FREE-tier) user in the rollout. Absent for paid users and unauthenticated requests. Synthesized from config before a grant row exists so a brand-new user still sees their full allowance.
                                         properties:

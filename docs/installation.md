@@ -18,7 +18,7 @@ material with navigation and translations.
   - [AMD GPUs (Windows, ROCm 10.0)](#amd-gpus-windows-rocm-100)
   - [Intel GPUs (Windows and Linux)](#intel-gpus-windows-and-linux)
   - [Apple Mac silicon](#apple-mac-silicon)
-  - [Ascend NPUs](#ascend-npus)
+  - [Huawei Ascend NPUs](#huawei-ascend-npus)
   - [Cambricon MLUs](#cambricon-mlus)
   - [Iluvatar Corex](#iluvatar-corex)
   - [Dependencies](#dependencies)
@@ -165,9 +165,9 @@ version.
 > **Note**: Remember to add your models, VAE, LoRAs etc. to the corresponding Comfy
 > folders, as discussed in [manual installation](#manual-install-windows-linux).
 
-### Ascend NPUs
+### Huawei Ascend NPUs
 
-For models compatible with Ascend Extension for PyTorch (torch_npu). To get started,
+For models compatible with Huawei Ascend Extension for PyTorch (torch_npu). To get started,
 ensure your environment meets the prerequisites outlined on the
 [installation](https://ascend.github.io/docs/sources/ascend/quick_install.html) page.
 Here's a step-by-step guide tailored to your platform and installation method:
