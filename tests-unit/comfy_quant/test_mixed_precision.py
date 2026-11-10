@@ -419,6 +419,26 @@ class TestMixedPrecisionOps(unittest.TestCase):
             torch.cuda.get_device_properties = orig_props
             qops.int8_linear_available = orig_probe
 
+    def test_int8_linear_available_follows_the_registered_backend(self):
+        """The probe is what tells supports_int8_compute whether INT8 GEMMs exist without
+        torch._int_mm. Only a non-eager backend counts as usable, and no capable backend
+        at all must report False rather than raise."""
+        if not qops._CK_AVAILABLE:
+            self.skipTest("comfy_kitchen is not installed")
+
+        registry = qops.ck.registry
+        with unittest.mock.patch.object(registry, "get_capable_backend", return_value="triton"):
+            self.assertTrue(qops.int8_linear_available())
+
+        with unittest.mock.patch.object(registry, "get_capable_backend", return_value="eager"):
+            self.assertFalse(qops.int8_linear_available())
+
+        with unittest.mock.patch.object(
+            registry, "get_capable_backend",
+            side_effect=qops.ck.exceptions.NoCapableBackendError("int8_linear", {}),
+        ):
+            self.assertFalse(qops.int8_linear_available())
+
     def test_convrot_w4a4_loads_into_params(self):
         """ConvRot W4A4 checkpoints must load as the dedicated kitchen layout."""
         if "convrot_w4a4" not in QUANT_ALGOS:
