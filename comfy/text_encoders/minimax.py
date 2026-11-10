@@ -5,6 +5,7 @@ The H3 presentation is NOT chat-templated: token ids are raw prompt/label text
 
   t2va:   <prompt>
   fl2va:  "<Picture 1>: " <vision block> ["<Picture 2>: " <vision block>] <prompt>
+  image:  "Picture 1: " <vision block> ["Picture 2: " <vision block> ...] <prompt>  (MiniMax-H3-Image edits)
   ref2va: per condition in request order (1-based ordinals per type):
             image -> "<Picture i>: " <vision block>
             audio -> "<Audio j>: "              (audio never enters Qwen)
@@ -184,7 +185,7 @@ class MiniMaxH3Tokenizer(comfy.sd1_clip.SD1Tokenizer):
         return emb
 
     def tokenize_with_weights(self, text, return_word_ids=False, images=[],
-                              minimax_ref_items=None, **kwargs):
+                              minimax_ref_items=None, picture_label="<Picture %d>: ", **kwargs):
         entries = []
 
         def add_text(s):
@@ -229,7 +230,7 @@ class MiniMaxH3Tokenizer(comfy.sd1_clip.SD1Tokenizer):
                         add_vision(frames[i:i + 2], video_block=True)
         else:
             for i, img in enumerate(images):
-                add_text("<Picture %d>: " % (i + 1))
+                add_text(picture_label % (i + 1))
                 add_vision(img)
 
         add_text(text)
