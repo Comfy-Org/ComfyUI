@@ -1993,9 +1993,11 @@ def pick_operations(weight_dtype, compute_dtype, load_device=None, disable_fast_
         logging.info("Using mixed precision operations")
         disabled = get_disabled_quant_formats(load_device)
         logging.info("Native ops: {} {}".format(", ".join(QUANT_ALGOS.keys() - disabled), ", emulated ops: {}".format(", ".join(disabled)) if len(disabled) > 0 else ""))
-        # Only point at the flag where it can actually enable INT8: Triton has no CPU or
-        # MPS kernels, so those devices would dequantize either way.
+        # Only point at the flag where it can actually enable INT8. Triton has no CPU or
+        # MPS kernels, and supports_int8_compute() stays False for XPU whatever backend
+        # runs the GEMM, so the flag cannot help there either.
         triton_hint = (quant_ops.int8_linear_needs_triton_opt_in()
+                       and not comfy.model_management.is_intel_xpu()
                        and not comfy.model_management.cpu_mode()
                        and not comfy.model_management.mps_mode())
         if load_device is not None:
