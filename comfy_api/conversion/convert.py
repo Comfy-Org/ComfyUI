@@ -22,6 +22,9 @@ import re
 import shutil
 import sys
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import normalize  # noqa: E402
+
 ENGINE_ROOTS = {"comfy", "folder_paths", "nodes", "server", "node_helpers", "comfy_extras", "latent_preview",
                 "execution", "comfy_execution", "comfy_api_nodes", "app", "comfy_config"}
 
@@ -103,6 +106,12 @@ REWRITES = {
     "comfy.model_management.cleanup_models_gc": "_v2e.cleanup_models",
     # ComfyUI's KSampler, as nodes.py's helper
     "nodes.common_ksampler": "_v2e.common_ksampler",
+    # ComfyUI's samplers called as its own nodes call them: run as those nodes (KSampler, SamplerCustom)
+    "comfy.sample.sample": "_v2e.sample",
+    "comfy.sample.sample_custom": "_v2e.sample_custom",
+    "comfy.sample.fix_empty_latent_channels": "_v2e.fix_empty_latent_channels",
+    "comfy.sample.prepare_empty_noise": "_v2e.prepare_empty_noise",
+    "latent_preview.prepare_callback": "_v2e.prepare_callback",
     "comfy_execution.graph.ExecutionBlocker": "_v2io.ExecutionBlocker",
     "comfy_execution.graph_utils.ExecutionBlocker": "_v2io.ExecutionBlocker",
     # the pack's own HTTP routes: its table, registered through ComfyExtension.get_routes
@@ -122,19 +131,61 @@ REWRITES = {
 # what the shim's PromptServer.instance stand-in has (a file that asks it for more keeps its leftover)
 PROMPT_SERVER_FACADE = {"routes", "app", "send_sync", "send", "send_json", "send_progress_text", "client_id",
                         "last_node_id", "last_prompt_id"}
+# ...and how far below each a chain may go: None is "anything" (an aiohttp RouteTableDef, a plain value)
+PROMPT_SERVER_CHAINS = {
+    "routes": None, "client_id": None, "last_node_id": None, "last_prompt_id": None,
+    "send_sync": {}, "send": {}, "send_json": {}, "send_progress_text": {},
+    "app": {"add_routes": {}, "frozen": {}, "on_startup": None, "on_shutdown": None, "on_cleanup": None, "middlewares": None,
+            "router": {"add_route": {}, "add_get": {}, "add_post": {}, "add_put": {}, "add_delete": {}, "add_static": {},
+                       "add_routes": {}}},
+}
+
+
+def _facade_has(parts):
+    """Whether the shim's server stand-in has the attribute chain ``parts`` (below ``PromptServer.instance``)."""
+    level = PROMPT_SERVER_CHAINS
+    for part in parts:
+        if level is None:
+            return True
+        if part not in level:
+            return False
+        level = level[part]
+    return True
 # ComfyUI's own model folders, read from its folder_paths.py (a pack's others are reported to ComfyUI)
 _COMFY_ROOT = os.environ.get("COMFY_ROOT") or os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 COMFY_FOLDERS = sorted(set(re.findall(r'^folder_names_and_paths\["([^"]+)"\]\s*=', open(os.path.join(_COMFY_ROOT, "folder_paths.py")).read(), re.M)))
 # ComfyUI's own nodes: "module.Class" -> {"id", "inputs", "function"} (core_nodes.py makes the table)
 _CORE_PATH = os.environ.get("CONVERTER_CORE_NODES") or os.path.join(os.path.dirname(os.path.abspath(__file__)), "core_nodes.json")
 CORE_NODES = json.load(open(_CORE_PATH)) if os.path.exists(_CORE_PATH) else {}
+# ComfyUI loads comfy_extras' files by path, so a class there reports its file as its module
+# ("/…/ComfyUI/comfy_extras/nodes_mask.GrowMask"): keyed here as packs import it (comfy_extras.nodes_mask.GrowMask)
+for _key in [k for k in CORE_NODES if os.sep in k or "/" in k]:
+    _module_path, _, _class = _key.rpartition(".")
+    _parts = _module_path.replace(os.sep, "/").split("/")
+    for _root in ("comfy_extras", "comfy_api_nodes"):
+        if _root in _parts:
+            CORE_NODES.setdefault(".".join(_parts[len(_parts) - 1 - _parts[::-1].index(_root):] + [_class]), CORE_NODES[_key])
+CORE_NODE_IDS = {entry["id"]: entry for entry in CORE_NODES.values()}
+COMFY_INDEX = normalize.ComfyIndex(_COMFY_ROOT)  # what this ComfyUI's modules define, for the pack's probes of it
+# a text encoder loaded from files in ComfyUI's text_encoders folder, as ComfyUI's CLIPLoader nodes load it
+REWRITES["comfy.sd.load_clip"] = "_v2e.load_clip"
+for _name in COMFY_INDEX.class_values("comfy.sd.CLIPType"):
+    REWRITES[f"comfy.sd.CLIPType.{_name}"] = f"_v2e.CLIPType.{_name}"
+
+
+def _core_node(core):
+    """The shim expression that stands for one of ComfyUI's node classes."""
+    return f"_v2e.CoreNode({core['id']!r}, {core['inputs']!r}, {core['function']!r}" + \
+        (f", {core['params']!r})" if core.get("params") else ")")
 
 # ComfyUI's pure helpers, copied verbatim from the running ComfyUI's source into each converted pack's
 # shim: a module-level function qualifies when every global it reads is a builtin, one of these modules,
 # or another qualifying function of the same file (so it can't reach ComfyUI's state or the engine).
-_PURE_MODULES = {"torch", "math", "logging", "itertools", "struct", "np", "numpy"}
+_PURE_MODULES = {"torch", "math", "logging", "itertools", "struct", "np", "numpy", "av"}
 _NOT_COPIED = {"use_more_memory", "offloaded_memory"}  # take ComfyUI's loaded-model list, which a pack process lacks
-_PURE_HEADER = "import torch, math, logging, itertools, struct\nimport numpy as np\nimport numpy\n"
+_PURE_HEADER = ("import torch, math, logging, itertools, struct\nimport numpy as np\nimport numpy\n"
+                "try:\n    import av  # ComfyUI's own requirement, for its audio and video file helpers\n"
+                "except ImportError:\n    av = None\n")
 
 
 def _pure_functions(path):
@@ -182,6 +233,35 @@ for _module, _namespace, _file in (("comfy.utils", "comfy_utils", "comfy/utils.p
         PURE_COPIES[_module] = (_namespace, _pure_functions(os.path.join(_COMFY_ROOT, _file)))
     except (OSError, SyntaxError):
         PURE_COPIES[_module] = (_namespace, {})
+# More of ComfyUI's helpers that compute on tensors and plain data only, named one by one: a function that
+# takes one of ComfyUI's objects (a model, its sampling) reads no global either, so the test above can't tell
+PURE_NAMED = {
+    "comfy.ldm.common_dit": ("comfy_common_dit", "comfy/ldm/common_dit.py", {"pad_to_patch_size"}),
+    "comfy_execution.graph_utils": ("comfy_graph_utils", "comfy_execution/graph_utils.py", {"is_link", "add_graph_prefix"}),
+    "execution": ("comfy_execution_", "comfy_execution/graph_utils.py", {"is_link"}),  # re-exported there
+    "comfy.k_diffusion.sampling": ("comfy_k_sampling", "comfy/k_diffusion/sampling.py",
+                                   {"append_zero", "default_noise_sampler", "get_ancestral_step", "get_sigmas_exponential",
+                                    "get_sigmas_karras", "get_sigmas_laplace", "get_sigmas_polyexponential", "get_sigmas_vp"}),
+    "comfy.k_diffusion.utils": ("comfy_k_utils", "comfy/k_diffusion/utils.py", {"append_dims"}),
+    "comfy.model_sampling": ("comfy_model_sampling", "comfy/model_sampling.py",
+                             {"flux_time_shift", "time_snr_shift", "rescale_zero_terminal_snr_sigmas"}),
+    "comfy.samplers": ("comfy_samplers", "comfy/samplers.py", {"kl_optimal_scheduler"}),
+    "node_helpers": ("comfy_node_helpers", "node_helpers.py", {"image_alpha_fix", "string_to_torch_dtype"}),
+    "comfy.ldm.modules.diffusionmodules.util": ("comfy_dm_util", "comfy/ldm/modules/diffusionmodules/util.py",
+                                                {"betas_for_alpha_bar", "extract_into_tensor", "make_beta_schedule",
+                                                 "make_ddim_sampling_parameters", "make_ddim_timesteps", "mean_flat",
+                                                 "noise_like", "zero_module", "scale_module"}),
+    "comfy.ldm.modules.attention": ("comfy_attention", "comfy/ldm/modules/attention.py", {"default", "exists"}),
+    "comfy.ldm.util": ("comfy_ldm_util", "comfy/ldm/util.py", {"exists", "mean_flat", "count_params"}),
+    "comfy.lora": ("comfy_lora", "comfy/lora.py", {"pad_tensor_to_shape"}),
+    "comfy_extras.nodes_audio": ("comfy_nodes_audio", "comfy_extras/nodes_audio.py", {"load", "f32_pcm"}),
+}
+for _module, (_namespace, _file, _names) in PURE_NAMED.items():
+    try:
+        _found = _pure_functions(os.path.join(_COMFY_ROOT, _file))
+    except (OSError, SyntaxError):
+        _found = {}
+    PURE_COPIES[_module] = (_namespace, {n: src for n, src in _found.items() if n in _names})
 for _module, (_namespace, _functions) in PURE_COPIES.items():
     for _name in _functions:
         REWRITES.setdefault(f"{_module}.{_name}", f"_v2e.{_namespace}.{_name}")  # existing util.* rows win
@@ -235,6 +315,15 @@ METHODS = {
             "encode_tiled": "vae.encode_tiled"},
     "MODEL": {"clone": "model.clone"},
 }
+# comfy.patcher_extension.WrappersMP members -> eng.model.add_wrapper kinds
+WRAPPER_KINDS = {"OUTER_SAMPLE": "outer_sample", "PREPARE_SAMPLING": "prepare_sampling", "SAMPLER_SAMPLE": "sampler_sample",
+                 "PREDICT_NOISE": "predict_noise", "CALC_COND_BATCH": "calc_cond_batch", "APPLY_MODEL": "apply_model",
+                 "DIFFUSION_MODEL": "diffusion_model"}
+# model_options keys that hold functions: set through their own eng rows (set_cfg, add_wrapper...), not set_option
+FUNCTION_OPTIONS = {"patches", "patches_replace", "wrappers", "callbacks", "sampler_cfg_function", "sampler_post_cfg_function",
+                    "sampler_pre_cfg_function", "model_function_wrapper", "denoise_mask_function", "sampler_calc_cond_batch_function"}
+# what the shim's stand-in for a model's sampling object has (``model.get_model_object("model_sampling")``)
+FACADES = {"MODEL_SAMPLING": {"percent_to_sigma", "timestep", "sigma", "sigma_min", "sigma_max"}}
 MODEL_SETTERS = {
     "set_model_sampler_cfg_function": "model.set_cfg", "set_model_sampler_post_cfg_function": "model.set_post_cfg",
     "set_model_sampler_pre_cfg_function": "model.set_pre_cfg", "set_model_unet_function_wrapper": "model.set_unet_wrapper",
@@ -434,18 +523,25 @@ class _Module:
             self.offsets.append(self.offsets[-1] + len(line))
         self.aliases = {}  # local name -> dotted engine name
         self.imports = []  # (node, engine?) for engine imports
+        # A name ComfyUI doesn't have isn't ComfyUI's: ``from nodes.batch_filename import BatchFilename`` is the
+        # pack's own ``nodes`` package, imported by its top-level name in a script or behind a fallback.
+        def comfys(dotted):
+            return COMFY_INDEX.kind(dotted) != normalize.ABSENT
+
         for node in ast.walk(self.tree):
             if isinstance(node, ast.Import):
                 for alias in node.names:
-                    if alias.name.split(".")[0] in ENGINE_ROOTS:
+                    if alias.name.split(".")[0] in ENGINE_ROOTS and comfys(alias.name):
                         local = alias.asname or alias.name.split(".")[0]
                         self.aliases[local] = alias.name if alias.asname else alias.name.split(".")[0]
                         self.imports.append(node)
             elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module \
-                    and node.module.split(".")[0] in ENGINE_ROOTS:
-                for alias in node.names:
+                    and node.module.split(".")[0] in ENGINE_ROOTS and comfys(node.module):
+                names = [a for a in node.names if a.name == "*" or comfys(f"{node.module}.{a.name}")]
+                for alias in names:
                     self.aliases[alias.asname or alias.name] = f"{node.module}.{alias.name}"
-                self.imports.append(node)
+                if names:
+                    self.imports.append(node)
         self.shadowed = _shadowed_loads(self.tree)  # ids of Name loads bound by an enclosing function
 
     def pos(self, line, col):
@@ -651,16 +747,145 @@ def _apply_within(source, start, end, edits):
     return "".join(out)
 
 
+# typed_functions may carry, under this key, types that reach this module's functions from the pack's other
+# modules: {"function": {param: TYPE}, "Class.method": {param: TYPE}} (see _pack_types)
+HELPER_TYPES_KEY = " helper types"
+
+
+def _method(cls, name, classes, depth=0):
+    """The class's method ``name``: its own, or the one it inherits from a base class of the same module."""
+    for item in cls.body:
+        if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)) and item.name == name:
+            return item
+    for base in cls.bases if depth < 4 else ():
+        if isinstance(base, ast.Name) and base.id in classes and classes[base.id] is not cls:
+            found = _method(classes[base.id], name, classes, depth + 1)
+            if found is not None:
+                return found
+    return None
+
+
 def _typed_params(tree, typed_functions):
     """``{function node: {param: TYPE}}`` for node methods whose params have engine-object types."""
-    found = {}
+    found, conflicts = {}, set()
+    classes = {}
     for node in ast.walk(tree):
-        if isinstance(node, ast.ClassDef) and node.name in typed_functions:
+        if isinstance(node, ast.ClassDef):
+            classes.setdefault(node.name, node)
+
+    def add(function, types):
+        accepted = {x.arg for x in function.args.posonlyargs + function.args.args + function.args.kwonlyargs}
+        for param, kind in types.items():
+            if param not in accepted or not (kind in METHODS or kind in ENGINE_KINDS):
+                continue
+            if found.setdefault(function, {}).setdefault(param, kind) != kind:
+                conflicts.add((id(function), param))  # two nodes share the method with different types
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ClassDef) and node.name in typed_functions and node.name != HELPER_TYPES_KEY:
             fname, types = typed_functions[node.name]
-            for item in node.body:
-                if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)) and item.name == fname:
-                    found[item] = {p: t for p, t in types.items() if t in METHODS or t in ENGINE_KINDS}
+            method = _method(node, fname, classes) if fname else None
+            if method is not None:
+                add(method, types)
+    handed = typed_functions.get(HELPER_TYPES_KEY, (None, {}))[1] if isinstance(typed_functions, dict) else {}
+    module_level = {n.name: n for n in tree.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
+    for name, types in handed.items():
+        owner, _, method = name.rpartition(".")
+        function = _method(classes[owner], method, classes) if owner in classes else module_level.get(method) if not owner else None
+        if function is not None:
+            add(function, types)
+    found = {f: {p: t for p, t in params.items() if (id(f), p) not in conflicts} for f, params in found.items()}
     return _through_helpers(tree, {f: p for f, p in found.items() if p})
+
+
+def _pack_types(trees, typed, target):
+    """Engine-object types followed across the pack's modules: a node method that hands its ``clip`` to
+    ``encode(clip, text)`` imported from another file makes that function's ``clip`` a CLIP; a node class
+    whose method is its imported base class's types that method. ``{rel: {name: {param: TYPE}}}``."""
+    functions = (ast.FunctionDef, ast.AsyncFunctionDef)
+    handed = {rel: {} for rel in trees}
+    module_level = {rel: {n.name: n for n in tree.body if isinstance(n, functions)} for rel, tree in trees.items()}
+    class_names = {rel: {n.name for n in tree.body if isinstance(n, ast.ClassDef)} for rel, tree in trees.items()}
+    imports = {}
+    for rel, tree in trees.items():
+        table = {}  # local name -> (module file, name in it; None: the module itself)
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom):
+                for alias in node.names:
+                    if alias.name == "*":
+                        continue
+                    as_module = target(rel, node.level, ".".join(x for x in (node.module, alias.name) if x))
+                    if as_module:
+                        table[alias.asname or alias.name] = (as_module, None)
+                    elif node.module or node.level:
+                        source = target(rel, node.level, node.module or "")
+                        if source and source != rel:
+                            table[alias.asname or alias.name] = (source, alias.name)
+            elif isinstance(node, ast.Import):
+                for alias in node.names:
+                    source = target(rel, 0, alias.name)
+                    if source and (alias.asname or "." not in alias.name):
+                        table[alias.asname or alias.name] = (source, None)
+        imports[rel] = table
+
+    def give(rel, name, param, kind):
+        if handed[rel].setdefault(name, {}).get(param) is None:
+            handed[rel][name][param] = kind
+            return True
+        return False
+
+    for _round in range(4):
+        grew = False
+        for rel, tree in trees.items():
+            table = imports[rel]
+            if not table:
+                continue
+            found = _typed_params(tree, {**typed, HELPER_TYPES_KEY: (None, handed[rel])})
+            for function, params in found.items():
+                local = dict(params)
+                for node in ast.walk(function):  # ``m = model.clone()``: the same type
+                    if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name) \
+                            and isinstance(node.value, ast.Call) and isinstance(node.value.func, ast.Attribute) \
+                            and isinstance(node.value.func.value, ast.Name) and node.value.func.value.id in local \
+                            and node.value.func.attr == "clone":
+                        local.setdefault(node.targets[0].id, local[node.value.func.value.id])
+                for call in ast.walk(function):
+                    if not isinstance(call, ast.Call) or any(isinstance(a, ast.Starred) for a in call.args):
+                        continue
+                    f, dest = call.func, None
+                    if isinstance(f, ast.Name) and table.get(f.id, (None, None))[1]:
+                        dest = table[f.id]
+                    elif isinstance(f, ast.Attribute) and isinstance(f.value, ast.Name) and f.value.id in table \
+                            and table[f.value.id][1] is None:
+                        dest = (table[f.value.id][0], f.attr)
+                    callee = module_level.get(dest[0], {}).get(dest[1]) if dest else None
+                    if callee is None:
+                        continue
+                    positional = [x.arg for x in callee.args.posonlyargs + callee.args.args]
+                    named = set(positional) | {x.arg for x in callee.args.kwonlyargs}
+                    taken = {n.id for n in ast.walk(callee) if isinstance(n, ast.Name) and isinstance(n.ctx, (ast.Store, ast.Del))}
+                    passed = list(zip(positional, call.args)) + [(k.arg, k.value) for k in call.keywords if k.arg in named]
+                    for param, value in passed:
+                        kind = local.get(value.id) if isinstance(value, ast.Name) else None
+                        if kind and param not in taken:
+                            grew = give(dest[0], dest[1], param, kind) or grew
+            # a node class whose method is its imported base class's
+            classes = {n.name: n for n in ast.walk(tree) if isinstance(n, ast.ClassDef)}
+            for cls in classes.values():
+                if cls.name not in typed or cls.name == HELPER_TYPES_KEY or not typed[cls.name][0]:
+                    continue
+                fname, types = typed[cls.name]
+                if _method(cls, fname, classes) is not None:
+                    continue
+                for base in cls.bases:
+                    source, name = table.get(base.id, (None, None)) if isinstance(base, ast.Name) else (None, None)
+                    if source and name and name in class_names.get(source, ()):
+                        for param, kind in types.items():
+                            if kind in METHODS or kind in ENGINE_KINDS:
+                                grew = give(source, f"{name}.{fname}", param, kind) or grew
+        if not grew:
+            break
+    return {rel: names for rel, names in handed.items() if names}
 
 
 def _through_helpers(tree, found):
@@ -883,6 +1108,119 @@ def _safe_optional_alias(tree, import_node, name, guard_only=False):
     return bool(fallbacks)
 
 
+def _node_class_only_run(node, parents):
+    """Whether a node class looked up in ComfyUI's table is only instantiated and run: the shim's stand-in
+    runs the node, it can't answer ``INPUT_TYPES()`` or ``define_schema()`` or be subclassed."""
+    def run_use(use):
+        owner = parents.get(id(use))
+        if isinstance(owner, ast.Call) and owner.func is use:
+            return run_use(owner) or True  # cls(): the instance; then its method
+        if isinstance(owner, ast.Attribute) and owner.value is use:
+            return owner.attr == "FUNCTION" or (owner.attr[:1].islower() and not owner.attr.startswith("define_")
+                                                and owner.attr not in ("mro",))
+        if isinstance(owner, ast.Compare) and len(owner.ops) == 1 and isinstance(owner.ops[0], (ast.Is, ast.IsNot)):
+            return True
+        if isinstance(owner, (ast.If, ast.While, ast.IfExp)) and owner.test is use:
+            return True
+        if isinstance(owner, ast.UnaryOp) and isinstance(owner.op, ast.Not):
+            return True
+        if isinstance(owner, ast.Call) and isinstance(owner.func, ast.Name) and owner.func.id == "getattr" \
+                and owner.args and owner.args[0] is use:
+            return True  # getattr(obj, cls.FUNCTION)
+        return None
+
+    owner = parents.get(id(node))
+    if isinstance(owner, ast.Assign) and len(owner.targets) == 1 and isinstance(owner.targets[0], ast.Name):
+        name, scope = owner.targets[0].id, owner
+        while id(scope) in parents and not isinstance(scope, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Module)):
+            scope = parents[id(scope)]
+        if not isinstance(scope, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            return False  # a module-level name: other code may read the class
+        reads = [n for n in ast.walk(scope) if isinstance(n, ast.Name) and n.id == name and isinstance(n.ctx, ast.Load)]
+        writes = [n for n in ast.walk(scope) if isinstance(n, ast.Name) and n.id == name and not isinstance(n.ctx, ast.Load)]
+        # an instance made from it (``obj = cls()``) is followed one step, by the same rule
+        return len(writes) == 1 and bool(reads) and all(run_use(r) for r in reads)
+    return bool(run_use(node))
+
+
+def _chain(node, parents):
+    """The whole attribute chain an engine-object attribute starts, as the worklist names it:
+    ``model.model.model_sampling.percent_to_sigma(x)`` is ``model.model_sampling.percent_to_sigma()``."""
+    parts = [node.attr]
+    while True:
+        owner = parents.get(id(node))
+        if isinstance(owner, ast.Attribute) and owner.value is node:
+            parts.append(owner.attr)
+            node = owner
+        elif isinstance(owner, ast.Call) and owner.func is node:
+            key = owner.args[0].value if len(owner.args) == 1 and isinstance(owner.args[0], ast.Constant) \
+                and isinstance(owner.args[0].value, str) and parts[-1] in ("get_model_object", "get_attachment") else None
+            parts[-1] += f"({key!r})" if key is not None else "()"
+            node = owner
+            if key is None:
+                break
+        elif isinstance(owner, ast.Subscript) and owner.value is node and isinstance(owner.slice, ast.Constant) \
+                and isinstance(owner.slice.value, str):
+            parts[-1] += f"[{owner.slice.value!r}]"
+            node = owner
+        else:
+            break
+    return ".".join(parts)
+
+
+def _calls_model_only(function):
+    """Whether a sampling loop uses its model (its first parameter) only by calling it: eng.sampler.custom
+    hands the loop a function, so ``model.inner_model`` or passing the model on wouldn't work."""
+    a = function.args
+    params = a.posonlyargs + a.args
+    if params and params[0].arg in ("self", "cls"):
+        params = params[1:]
+    if not params or a.vararg is not None:
+        return False
+    model = params[0].arg
+    parents = {id(child): node for node in ast.walk(function) for child in ast.iter_child_nodes(node)}
+    for node in ast.walk(function):
+        if isinstance(node, ast.Name) and node.id == model:
+            owner = parents.get(id(node))
+            if not (isinstance(node.ctx, ast.Load) and isinstance(owner, ast.Call) and owner.func is node):
+                return False
+    return True
+
+
+def _weights_file(module, scope, sd, metadata, use):
+    """The source text of the file path when ``sd`` and ``metadata`` are exactly what one
+    ``load_torch_file(path, return_metadata=True)`` gave, unchanged up to ``use``; else None."""
+    if not (isinstance(sd, ast.Name) and isinstance(metadata, ast.Name)):
+        return None
+    names = {sd.id, metadata.id}
+    stores = [n for n in ast.walk(scope) if isinstance(n, ast.Name) and n.id in names and isinstance(n.ctx, (ast.Store, ast.Del))]
+    loaded = [n for n in ast.walk(scope) if isinstance(n, ast.Assign) and len(n.targets) == 1
+              and isinstance(n.targets[0], ast.Tuple) and [getattr(e, "id", None) for e in n.targets[0].elts] == [sd.id, metadata.id]
+              and isinstance(n.value, ast.Call) and module.resolve(n.value.func) == "comfy.utils.load_torch_file"]
+    if len(loaded) != 1 or len(stores) != 2 or loaded[0].lineno >= use.lineno:
+        return None
+    call = loaded[0].value
+    flags = {k.arg: k.value for k in call.keywords}
+    if len(call.args) != 1 or not isinstance(call.args[0], ast.Name) or set(flags) - {"return_metadata", "safe_load"} \
+            or not (isinstance(flags.get("return_metadata"), ast.Constant) and flags["return_metadata"].value is True):
+        return None
+    path = call.args[0].id
+    if sum(1 for n in ast.walk(scope) if isinstance(n, ast.Name) and n.id == path and isinstance(n.ctx, (ast.Store, ast.Del))) > 1:
+        return None
+    parents = {id(child): node for node in ast.walk(scope) for child in ast.iter_child_nodes(node)}
+    for read in ast.walk(scope):  # the weights must reach the VAE as the file had them
+        if isinstance(read, ast.Name) and read.id == sd.id and isinstance(read.ctx, ast.Load) and read is not sd:
+            owner = parents.get(id(read))
+            if isinstance(owner, ast.Subscript) and isinstance(owner.ctx, ast.Load):
+                continue
+            if isinstance(owner, ast.Compare) or (isinstance(owner, ast.Attribute) and owner.attr in ("keys", "get", "items", "values")):
+                continue
+            if isinstance(owner, ast.Call) and isinstance(owner.func, ast.Name) and owner.func.id == "len":
+                continue
+            return None
+    return path
+
+
 def rewrite(source, path, typed_functions, star_aliases=None, keep=frozenset(), facade_exports=frozenset()):
     """``star_aliases``: engine names this module gets from the pack's own modules by ``import *``;
     ``keep``: engine names another module gets from this one that way and still uses (not removed)."""
@@ -932,7 +1270,8 @@ def rewrite(source, path, typed_functions, star_aliases=None, keep=frozenset(), 
         if isinstance(n, ast.Call):
             if isinstance(n.func, (ast.Attribute, ast.Name)):
                 core_calls.add(id(n.func))
-            if isinstance(n.func, ast.Attribute) and n.func.attr[:1].islower():
+            # a method that runs the node; ``X.define_schema()`` reads the class, which the stand-in can't answer
+            if isinstance(n.func, ast.Attribute) and n.func.attr[:1].islower() and not n.func.attr.startswith("define_"):
                 core_calls.add(id(n.func.value))
     parents = {id(child): node for node in ast.walk(module.tree) for child in ast.iter_child_nodes(node)}
     server_vars = {t.id for n in ast.walk(module.tree) if isinstance(n, ast.Assign) and module.resolve(n.value) == "server.PromptServer.instance"
@@ -940,6 +1279,14 @@ def rewrite(source, path, typed_functions, star_aliases=None, keep=frozenset(), 
     server_attrs = {n.attr for n in ast.walk(module.tree) if isinstance(n, ast.Attribute) and isinstance(n.value, ast.Name)
                     and n.value.id in server_vars}
     facade_ok = server_attrs <= PROMPT_SERVER_FACADE
+    # a module that also uses a part of the server the stand-in lacks (its queue, say) keeps the server itself
+    # flagged: handing the stand-in on would fail where that part is read
+    for n in ast.walk(module.tree):
+        if isinstance(n, ast.Attribute) and not isinstance(parents.get(id(n)), ast.Attribute):
+            chain = module.resolve(n) or ""
+            if chain.startswith("server.PromptServer.instance.") and not chain.split(".")[3].startswith("_") \
+                    and not _facade_has(chain.split(".")[3:]):
+                facade_ok = False
     # Stock server-instance lookup: use only the existing bounded pack facade.
     # A raw instance must not escape, and unknown attributes keep their blocker.
     if not _binds_name(module.tree, "getattr"):
@@ -1003,21 +1350,55 @@ def rewrite(source, path, typed_functions, star_aliases=None, keep=frozenset(), 
                 edits.append((start, end, "_v2e.prompt_server"))
                 done.append("server.PromptServer.instance (stock getattr)")
     own_util = _binds_name(module.tree, "util")
+    # ComfyUI's node table read for one of ComfyUI's own nodes, by a constant id:
+    # ``nodes.NODE_CLASS_MAPPINGS["KSamplerSelect"]``, ``.get("VAEDecode")``, ``"VAEDecode" in ...``
+    for node in ast.walk(module.tree):
+        key = table = None
+        if isinstance(node, ast.Subscript) and isinstance(node.ctx, ast.Load):
+            key, table = node.slice, node.value
+        elif isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "get" \
+                and len(node.args) in (1, 2) and not node.keywords:
+            key, table = node.args[0], node.func.value
+        elif isinstance(node, ast.Compare) and len(node.ops) == 1 and isinstance(node.ops[0], (ast.In, ast.NotIn)):
+            key, table = node.left, node.comparators[0]
+        if not (isinstance(key, ast.Constant) and isinstance(key.value, str) and key.value in CORE_NODE_IDS
+                and isinstance(table, (ast.Name, ast.Attribute)) and module.resolve(table) == "nodes.NODE_CLASS_MAPPINGS"):
+            continue
+        if isinstance(node, ast.Compare):
+            replacement = "True" if isinstance(node.ops[0], ast.In) else "False"
+        elif not _node_class_only_run(node, parents):
+            continue
+        else:
+            replacement = _core_node(CORE_NODE_IDS[key.value])
+        edits.append((*module.span(node), replacement))
+        done.append("nodes.NODE_CLASS_MAPPINGS (one of ComfyUI's nodes)")
     for node in ast.walk(module.tree):
         if isinstance(node, (ast.Attribute, ast.Name)) and isinstance(getattr(node, "ctx", None), ast.Load):
             full = module.resolve(node)
             replacement = REWRITES.get(full)
+            # the server's attributes the shim's stand-in has, read straight off the instance
+            top = node
+            while isinstance(parents.get(id(top)), ast.Attribute) and parents[id(top)].value is top:
+                top = parents[id(top)]
+            if replacement is None and full and full.startswith("server.PromptServer.instance.") \
+                    and not any(".".join(full.split(".")[:i]) in REWRITES for i in range(4, full.count(".") + 2)) \
+                    and _facade_has((module.resolve(top) or full).split(".")[3:]):
+                replacement = "_v2e.prompt_server" + full[len("server.PromptServer.instance"):]
             if full == "server.PromptServer.instance" and replacement is None and facade_ok \
                     and not isinstance(parents.get(id(node)), ast.Attribute):
+                replacement = "_v2e.prompt_server"
+            # a pack's own mark on the server (``PromptServer.instance._my_routes_registered = True``, read back
+            # with getattr): kept on the stand-in. A public attribute set there patches ComfyUI, and stays flagged.
+            owner = parents.get(id(node))
+            if full == "server.PromptServer.instance" and replacement is None and isinstance(owner, ast.Attribute) \
+                    and owner.attr.startswith("_") and not owner.attr.startswith("__"):
                 replacement = "_v2e.prompt_server"
             if replacement is None and full and (full == "folder_paths" or full.startswith("folder_paths.")):
                 replacement = "util.folders" + full[len("folder_paths"):]  # folder_paths' names, as util.folders
             if replacement is not None and own_util and replacement.startswith("util."):
                 replacement = "_v2" + replacement  # the module's own ``util`` would hide V2's (D2: all 71 nodes dead)
             if replacement is None and full in CORE_NODES and id(node) in core_calls:
-                core = CORE_NODES[full]
-                replacement = f"_v2e.CoreNode({core['id']!r}, {core['inputs']!r}, {core['function']!r}" + \
-                    (f", {core['params']!r})" if core.get("params") else ")")
+                replacement = _core_node(CORE_NODES[full])
             if replacement is not None:
                 start, end = module.span(node)
                 if not any(s <= start and end <= e for s, e, _ in edits):
@@ -1050,10 +1431,92 @@ def rewrite(source, path, typed_functions, star_aliases=None, keep=frozenset(), 
         edits[:] = [(s, e, t) for s, e, t in edits if not (start <= s and e <= end)]
         edits.append((start, end, replacement))
         done.append("comfy.samplers.sampler_object")
+    # a VAE built from weights (``comfy.sd.VAE(sd=sd)``) is eng.vae.from_state_dict; built from a file's weights
+    # and metadata as ComfyUI's VAELoader does, it's that file's VAE (eng.models.load_vae)
+    built_vaes = {}  # id(the call) -> True
+    for node in sorted((n for n in ast.walk(module.tree) if isinstance(n, ast.Call)), key=module.length):
+        if module.resolve(node.func) != "comfy.sd.VAE" or len(node.args) > 1 \
+                or any(isinstance(a, ast.Starred) for a in node.args) or any(k.arg is None for k in node.keywords):
+            continue
+        given = {k.arg: k.value for k in node.keywords}
+        if node.args:
+            if "sd" in given:
+                continue
+            given["sd"] = node.args[0]
+        start, end = module.span(node)
+        if any(s <= start and end <= e for s, e, _ in edits):
+            continue
+        owner = parents.get(id(node))
+        while owner is not None and not isinstance(owner, _FUNCTIONS):
+            owner = parents.get(id(owner))
+        if set(given) == {"sd"}:
+            call = f"eng.vae.from_state_dict({_apply_within(source, *module.span(given['sd']), edits)})"
+        elif set(given) == {"sd", "metadata"}:
+            weights_path = _weights_file(module, owner or module.tree, given["sd"], given["metadata"], node)
+            if weights_path is None:
+                continue
+            call = f"eng.models.load_vae(_v2e.model_file('vae', {weights_path}))"
+        else:
+            continue
+        replacement = f"(await {call})" if isinstance(owner, ast.AsyncFunctionDef) else f"_v2e.sync({call})"
+        edits[:] = [(s, e, t) for s, e, t in edits if not (start <= s and e <= end)]
+        edits.append((start, end, replacement))
+        done.append("comfy.sd.VAE")
+        built_vaes[id(node)] = True
+    # samplers: ``comfy.samplers.ksampler(name, options)`` is eng.sampler.named; ``KSAMPLER(fn, extra_options)``
+    # around the pack's own sampling loop is eng.sampler.custom, when the loop only calls its model
+    definitions = {}
+    for n in ast.walk(module.tree):
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            definitions.setdefault(n.name, []).append(n)
+    for node in sorted((n for n in ast.walk(module.tree) if isinstance(n, ast.Call)), key=module.length):
+        full = module.resolve(node.func)
+        if full not in ("comfy.samplers.ksampler", "comfy.samplers.KSAMPLER") \
+                or any(isinstance(a, ast.Starred) for a in node.args) or any(k.arg is None for k in node.keywords):
+            continue
+        names = ("sampler_name" if full.endswith("ksampler") else "sampler_function", "extra_options", "inpaint_options")
+        given = dict(zip(names, node.args))
+        if len(node.args) > 3 or any(k.arg in given or k.arg not in names for k in node.keywords):
+            continue
+        given.update({k.arg: k.value for k in node.keywords})
+        if names[0] not in given or "inpaint_options" in given:
+            continue
+        start, end = module.span(node)
+        if any(s <= start and end <= e for s, e, _ in edits):
+            continue
+        if full.endswith("KSAMPLER"):
+            fn = given[names[0]]
+            found = definitions.get(fn.id, []) if isinstance(fn, ast.Name) and id(fn) not in module.shadowed else []
+            if len(found) != 1 or not _calls_model_only(found[0]):
+                continue
+        arguments = [_apply_within(source, *module.span(given[names[0]]), edits)]
+        if "extra_options" in given:
+            arguments.append(_apply_within(source, *module.span(given["extra_options"]), edits))
+        call = f"eng.sampler.{'named' if full.endswith('ksampler') else 'custom'}({', '.join(arguments)})"
+        owner = parents.get(id(node))
+        while owner is not None and not isinstance(owner, _FUNCTIONS):
+            owner = parents.get(id(owner))
+        edits[:] = [(s, e, t) for s, e, t in edits if not (start <= s and e <= end)]
+        edits.append((start, end, f"(await {call})" if isinstance(owner, ast.AsyncFunctionDef) else f"_v2e.sync({call})"))
+        done.append(full)
     # engine-object methods on typed node inputs (and on what their clone() returns)
     # The AST is unchanged while edits are collected. Reuse this analysis in
     # the rewrite and both later detector passes, especially for large packs.
     typed_params = _typed_params(module.tree, typed_functions)
+    # a variable that holds a VAE built above is a VAE for the rest of its function
+    built_names = {}
+    for function in ast.walk(module.tree):
+        if not isinstance(function, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        for node in ast.walk(function):
+            if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name) \
+                    and id(node.value) in built_vaes:
+                name = node.targets[0].id
+                stores = sum(1 for n in ast.walk(function) if isinstance(n, ast.Name) and n.id == name
+                             and isinstance(n.ctx, (ast.Store, ast.Del)))
+                if stores == 1 and not any(a.arg == name for a in ast.walk(function) if isinstance(a, ast.arg)):
+                    typed_params.setdefault(function, {})[name] = "VAE"
+                    built_names.setdefault(id(function), set()).add(name)
     for function, params in typed_params.items():
         typed = dict(params)
         for node in ast.walk(function):
@@ -1078,12 +1541,148 @@ def rewrite(source, path, typed_functions, star_aliases=None, keep=frozenset(), 
         def engine_call(node, call):
             return f"(await {call})" if id(node) in awaited else f"_v2e.sync({call})"
 
+        def model_name(node):
+            """The typed MODEL variable ``node`` is, or None."""
+            return node.id if isinstance(node, ast.Name) and typed.get(node.id) == "MODEL" else None
+
+        def model_object(node, key):
+            """The MODEL whose ``get_model_object(key)`` / ``.model.<key>`` this expression is, or None."""
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "get_model_object" \
+                    and len(node.args) == 1 and not node.keywords and isinstance(node.args[0], ast.Constant) \
+                    and node.args[0].value == key:
+                return model_name(node.func.value)
+            if isinstance(node, ast.Attribute) and node.attr == key and isinstance(node.value, ast.Attribute) \
+                    and node.value.attr == "model":
+                return model_name(node.value.value)
+            return None
+
+        # ``m.model_options[...][...] = value``: eng.model.set_option (a copy with the option set)
+        for node in ast.walk(function):
+            if not (isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Subscript)):
+                continue
+            keys, target = [], node.targets[0]
+            while isinstance(target, ast.Subscript):
+                keys.append(target.slice)
+                target = target.value
+            if isinstance(target, ast.Attribute) and target.attr == "model_options" and model_name(target.value) \
+                    and all(isinstance(k, ast.Constant) and isinstance(k.value, str) for k in keys) \
+                    and not {k.value for k in keys} & FUNCTION_OPTIONS and not isinstance(node.value, ast.Lambda):
+                receiver = target.value.id
+                path = ", ".join(repr(k.value) for k in reversed(keys))
+                replace(*module.span(node), f"{receiver} = " + engine_call(
+                    node, f"eng.model.set_option({receiver}, [{path}], {text(node.value)})"))
+                done.append("MODEL.model_options (set)")
+        # ``m.model_options`` read (``.get("transformer_options", {})``, ``["x"]``, ``"x" in``): eng.model.options, a
+        # copy. Only where nothing could be written through it: not kept in a variable, not handed on.
+        for node in ast.walk(function):
+            if not (isinstance(node, ast.Attribute) and node.attr == "model_options" and isinstance(node.ctx, ast.Load)
+                    and model_name(node.value)):
+                continue
+            top, read_only = node, True
+            while True:
+                owner = parents.get(id(top))
+                if isinstance(owner, ast.Subscript) and owner.value is top and isinstance(owner.ctx, ast.Load):
+                    top = owner
+                elif isinstance(owner, ast.Attribute) and owner.value is top and owner.attr in ("get", "keys", "items", "values") \
+                        and isinstance(parents.get(id(owner)), ast.Call) and parents[id(owner)].func is owner:
+                    top = parents[id(owner)]
+                else:
+                    break
+            owner = parents.get(id(top))
+            if isinstance(owner, ast.Compare) and top in owner.comparators and isinstance(owner.ops[0], (ast.In, ast.NotIn)):
+                pass
+            elif isinstance(owner, (ast.If, ast.While, ast.IfExp, ast.BoolOp, ast.UnaryOp, ast.Compare, ast.JoinedStr, ast.FormattedValue)):
+                pass
+            elif isinstance(owner, (ast.For, ast.comprehension)) and owner.iter is top:
+                pass
+            elif top is node:
+                read_only = False  # the options themselves, kept or handed on
+            elif isinstance(owner, (ast.Assign, ast.AnnAssign, ast.Return, ast.Call, ast.keyword, ast.Tuple, ast.List, ast.Dict,
+                                    ast.Attribute, ast.Subscript, ast.Starred, ast.NamedExpr, ast.AugAssign, ast.Delete, ast.Yield)):
+                read_only = False  # a dict or list from inside them may be changed where it lands
+            if read_only:
+                replace(*module.span(node), engine_call(node, f"eng.model.options({node.value.id})"))
+                done.append("MODEL.model_options (read)")
+        # a model's sampling object: the shim's stand-in, which answers through eng.model
+        sampling_ids = set()
+        for node in ast.walk(function):
+            name = model_object(node, "model_sampling") if isinstance(getattr(node, "ctx", ast.Load()), ast.Load) else None
+            if name is None:
+                continue
+            replace(*module.span(node), f"_v2e.ModelSampling({name})")
+            done.append("MODEL.model_sampling")
+            sampling_ids.add(id(node))
+            owner = parents.get(id(node))
+            if isinstance(owner, ast.Attribute) and owner.value is node and owner.attr not in FACADES["MODEL_SAMPLING"]:
+                left.append(f"MODEL_SAMPLING.{_chain(owner, parents)}")
+            elif isinstance(owner, ast.Assign) and len(owner.targets) == 1 and isinstance(owner.targets[0], ast.Name):
+                bound = owner.targets[0].id
+                if bound not in typed and sum(1 for n in ast.walk(function) if isinstance(n, ast.Name) and n.id == bound
+                                              and isinstance(n.ctx, (ast.Store, ast.Del))) == 1:
+                    typed[bound] = "MODEL_SAMPLING"
+        for node in ast.walk(function):
+            if not isinstance(node, ast.Call):
+                continue
+            # the model's latent scaling and dtype
+            if isinstance(node.func, ast.Attribute) and len(node.args) == 1 and not node.keywords:
+                receiver, name, row = node.func.value, None, None
+                if node.func.attr in ("process_latent_in", "process_latent_out") and isinstance(receiver, ast.Attribute) \
+                        and receiver.attr == "model":
+                    name, row = model_name(receiver.value), "latent_" + node.func.attr.replace("_latent", "")
+                elif node.func.attr in ("process_in", "process_out"):
+                    name, row = model_object(receiver, "latent_format"), "latent_" + node.func.attr
+                if name is not None:
+                    replace(*module.span(node), engine_call(node, f"eng.model.{row}({name}, {text(node.args[0])})"))
+                    done.append(f"MODEL.{row}")
+                    continue
+            if isinstance(node.func, ast.Attribute) and node.func.attr == "model_dtype" and not node.args \
+                    and not node.keywords and model_name(node.func.value):
+                replace(*module.span(node), f"_v2e.model_dtype({node.func.value.id})")
+                done.append("MODEL.model_dtype")
+                continue
+            # sigmas for a scheduler, from a model's sampling object
+            if module.resolve(node.func) == "comfy.samplers.calculate_sigmas" and len(node.args) == 3 and not node.keywords \
+                    and (id(node.args[0]) in sampling_ids or (isinstance(node.args[0], ast.Name)
+                                                              and typed.get(node.args[0].id) == "MODEL_SAMPLING")):
+                replace(*module.span(node.func), "_v2e.calculate_sigmas")
+                done.append("comfy.samplers.calculate_sigmas")
+
         # a stable sort by length: an inner call comes before the call it's in; a statement before its own call
         candidates = sorted((n for n in ast.walk(function) if isinstance(n, (ast.Expr, ast.Call))),
                             key=module.length)
         for node in candidates:
             if isinstance(node, ast.Expr):
                 call = node.value
+                if isinstance(call, ast.Call) and isinstance(call.func, ast.Attribute) \
+                        and isinstance(call.func.value, ast.Name) and call.func.attr == "throw_exception_if_invalid" \
+                        and call.func.value.id in built_names.get(id(function), ()) and not call.args and not call.keywords:
+                    replace(*module.span(node), "pass  # V2: the engine checks a VAE it builds")
+                    continue
+                # ``m.add_wrapper_with_key(WrappersMP.DIFFUSION_MODEL, "key", fn)``: eng.model.add_wrapper (ComfyUI
+                # keeps a list per key, so a key only matters to code that removes by it, which stays flagged)
+                if isinstance(call, ast.Call) and isinstance(call.func, ast.Attribute) \
+                        and call.func.attr in ("add_wrapper", "add_wrapper_with_key") \
+                        and isinstance(call.func.value, ast.Name) and typed.get(call.func.value.id) == "MODEL" \
+                        and not call.keywords and len(call.args) == (2 if call.func.attr == "add_wrapper" else 3) \
+                        and not any(isinstance(a, ast.Starred) for a in call.args):
+                    kind = (module.resolve(call.args[0]) or "") if isinstance(call.args[0], (ast.Name, ast.Attribute)) else ""
+                    kind = WRAPPER_KINDS.get(kind.rpartition(".")[2]) if kind.startswith("comfy.patcher_extension.WrappersMP.") else None
+                    if kind:
+                        receiver = call.func.value.id
+                        replace(*module.span(node), f"{receiver} = " + engine_call(
+                            node, f"eng.model.add_wrapper({receiver}, {kind!r}, {text(call.args[-1])})"))
+                        done.append(f"MODEL.{call.func.attr}")
+                        continue
+                # ``m.add_patches(patches, strength)`` changes m; the engine row returns the patched copy
+                if isinstance(call, ast.Call) and isinstance(call.func, ast.Attribute) and call.func.attr == "add_patches" \
+                        and isinstance(call.func.value, ast.Name) and typed.get(call.func.value.id) in ("MODEL", "CLIP") \
+                        and not any(isinstance(a, ast.Starred) for a in call.args) and not any(k.arg is None for k in call.keywords):
+                    receiver = call.func.value.id
+                    row = "model" if typed[receiver] == "MODEL" else "clip"
+                    arguments = [receiver] + [text(a) for a in call.args] + [text(k) for k in call.keywords]
+                    replace(*module.span(node), f"{receiver} = " + engine_call(node, f"eng.{row}.add_patches({', '.join(arguments)})"))
+                    done.append(f"{typed[receiver]}.add_patches")
+                    continue
                 if isinstance(call, ast.Call) and isinstance(call.func, ast.Attribute) \
                         and isinstance(call.func.value, ast.Name) and typed.get(call.func.value.id) == "MODEL" \
                         and call.func.attr in MODEL_SETTERS:
@@ -1155,9 +1754,9 @@ def rewrite(source, path, typed_functions, star_aliases=None, keep=frozenset(), 
                 if kind == "MODEL" and node.attr in MODEL_SETTERS:
                     left.append(f"MODEL.{node.attr} (unsupported arguments or call context)")
                     continue
-                if node.attr in METHODS.get(kind, {}) or node.attr.startswith("__"):
+                if node.attr in METHODS.get(kind, {}) or node.attr in FACADES.get(kind, ()) or node.attr.startswith("__"):
                     continue
-                left.append(f"{kind}.{node.attr}")
+                left.append(f"{kind}.{_chain(node, parents)}")
         # a sampling function handed to a MODEL setter sees tensors and plain data only (the API's hook_view), so
         # its ``args["model"]`` / ``args.get("model")`` isn't there (sd-perturbed-attention's post_cfg_function)
         local_defs = {n.name: n for n in ast.walk(module.tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
@@ -1226,6 +1825,15 @@ def rewrite(source, path, typed_functions, star_aliases=None, keep=frozenset(), 
             if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in ("hasattr", "getattr") \
                     and len(node.args) >= 2 and isinstance(node.args[0], ast.Name) and node.args[0].id in kinds \
                     and isinstance(node.args[1], ast.Constant) and isinstance(node.args[1].value, str):
+                kind = kinds[node.args[0].id]
+                if node.func.id == "hasattr" and (node.args[1].value in METHODS.get(kind, {})
+                                                  or (kind == "MODEL" and node.args[1].value in MODEL_SETTERS)):
+                    # a method the converter calls through eng for this object: ComfyUI's object has it
+                    start, end = module.span(node)
+                    if not any(s <= start and end <= e for s, e, _ in edits):
+                        edits.append((start, end, "True"))
+                        done.append(f"{kind}.{node.args[1].value} (hasattr)")
+                    continue
                 left.append(f"{kinds[node.args[0].id]}.{node.args[1].value} ({node.func.id} on a V2.1 handle)")
     # PyTorch's process-wide numeric settings changed by the pack (``torch.backends.cuda.matmul.allow_tf32 = True``,
     # ``torch.set_float32_matmul_precision(...)``): in ComfyUI that changed how every node computes; an isolated
@@ -1364,6 +1972,11 @@ def rewrite(source, path, typed_functions, star_aliases=None, keep=frozenset(), 
             continue
         seen_imports.add(id(node))
         bound = [a.asname or (a.name if isinstance(node, ast.ImportFrom) else a.name.split(".")[0]) for a in node.names]
+        # ``from comfy.samplers import *``: which of the module's names the file uses can't be told from the
+        # import (LCMSampler takes ``torch`` and ``Sampler`` from it), so it stays, and is reported
+        if isinstance(node, ast.ImportFrom) and any(a.name == "*" for a in node.names):
+            left.append(f"{node.module}.* (imported with *)")
+            continue
         # A pack module may expose this already-supported metadata namespace to
         # another pack module. Keep the bounded facade, never the Core class.
         if (isinstance(node, ast.ImportFrom) and node.level == 0 and node.module == 'comfy.comfy_types'
@@ -1825,6 +2438,12 @@ def add_routes(definitions):
             routes.static(item.prefix, item.path, **dict(getattr(item, "kwargs", {}) or {}))
 
 
+class _Outputs(tuple):
+    """A node's outputs: a tuple, as a V1 node returns, that also reads as a V3 node's ``NodeOutput``."""
+    result = args = property(lambda self: tuple(self))
+    ui = None
+
+
 class CoreNode:
     """One of ComfyUI's nodes, as V1 code calls it (``nodes.LoraLoader().load_lora(model, clip, ...)``):
     the call runs the node with ``eng.node.run``, positional arguments named in the order of the node's
@@ -1839,7 +2458,9 @@ class CoreNode:
         return self  # nodes.X(): the instance the method is called on
 
     def __getattr__(self, name):
-        if name.startswith("_") or name.isupper() or name in ("INPUT_TYPES", "RETURN_TYPES", "FUNCTION", "define_schema"):
+        if name == "FUNCTION":
+            return self._function
+        if name.startswith("_") or name.isupper() or name in ("INPUT_TYPES", "RETURN_TYPES", "define_schema"):
             raise AttributeError(f"{self._node_id}.{name}: the converter runs ComfyUI's nodes, it doesn't read them")
 
         def run(*args, **kwargs):
@@ -1848,7 +2469,7 @@ class CoreNode:
             # a method parameter that isn't one of the node's inputs (SaveAudio's ``format``) isn't the node's
             inputs = {k: v for k, v in zip(self._inputs, args) if k in self._known}
             inputs.update(kwargs)
-            return sync(eng.node.run(self._node_id, inputs))
+            return _Outputs(sync(eng.node.run(self._node_id, inputs)))
         run.__name__ = name
         # the method's parameters, for packs that read them (Impact: ``'overlap' in inspect.signature(...)``)
         import inspect
@@ -1895,6 +2516,9 @@ class _Router:
     def add_static(self, prefix, path, **kwargs):
         routes.static(prefix, path, **kwargs)
 
+    def add_routes(self, definitions):
+        add_routes(definitions)
+
 
 class _App(dict):
     """``PromptServer.instance.app``: routes, and the aiohttp app's hook lists (a pack process has no
@@ -1904,6 +2528,7 @@ class _App(dict):
         super().__init__()
         self.router = _Router()
         self.on_startup, self.on_shutdown, self.on_cleanup, self.middlewares = [], [], [], []
+        self.frozen = False  # routes can always be added: they're the pack's own table
 
     def add_routes(self, definitions):
         add_routes(definitions)
@@ -1913,7 +2538,12 @@ class _PromptServer:
     """``PromptServer.instance`` for converted code: the pack's routes and UI events, through the API."""
     routes = routes
     app = _App()
-    client_id = last_node_id = last_prompt_id = None
+    last_node_id = last_prompt_id = None
+
+    @property
+    def client_id(self):
+        """Set while a prompt runs, as ComfyUI's is: events go to the client that queued it, whatever this says."""
+        return "v2-client" if running() else None
 
     def send_sync(self, event, data, sid=None):
         send_sync(event, data, sid)
@@ -1964,7 +2594,7 @@ def _contained(path, bases):
     return None
 
 
-def _model_file(folder, path):
+def model_file(folder, path):
     """The name in ComfyUI's ``folder`` of a file the pack has by path (as util.folders.get_full_path gave it).
     The engine resolves the name in its own model folders: that, not this, is where access is decided."""
     from comfy_api.v4 import util
@@ -1982,7 +2612,7 @@ def load_checkpoint_guess_config(ckpt_path, output_vae=True, output_clip=True, o
     Returns ComfyUI's 4-tuple (model, clip, vae, clipvision); a CLIP vision model isn't loaded here."""
     if output_clipvision or model_options or te_model_options:
         raise NotImplementedError("load_checkpoint_guess_config with a CLIP vision output or model options")
-    model, clip, vae = sync(eng.models.load_checkpoint(_model_file("checkpoints", ckpt_path)))
+    model, clip, vae = sync(eng.models.load_checkpoint(model_file("checkpoints", ckpt_path)))
     return (model if output_model else None, clip if output_clip else None, vae if output_vae else None, None)
 
 
@@ -1991,7 +2621,7 @@ def load_diffusion_model(unet_path, model_options={}, **kwargs):
     options = dict(model_options or {})
     if "dtype" in options and options["dtype"] is not None:
         options["dtype"] = str(options["dtype"]).removeprefix("torch.")
-    return sync(eng.models.load_diffusion_model(_model_file("diffusion_models", unet_path), options or None))
+    return sync(eng.models.load_diffusion_model(model_file("diffusion_models", unet_path), options or None))
 
 
 def load_unet(unet_path, dtype=None):
@@ -2020,6 +2650,156 @@ def common_ksampler(model, seed, steps, cfg, sampler_name, scheduler, positive, 
         **common, "add_noise": "disable" if disable_noise else "enable", "noise_seed": seed,
         "start_at_step": start_step or 0, "end_at_step": 10000 if last_step is None else last_step,
         "return_with_leftover_noise": "disable" if force_full_denoise else "enable"}))
+
+
+class ModelSampling:
+    """A model's sampling object (``model.get_model_object("model_sampling")``), as far as the API has it."""
+
+    def __init__(self, model):
+        self._model = model
+
+    def percent_to_sigma(self, percent):
+        return sync(eng.model.percent_to_sigma(self._model, percent))
+
+    def timestep(self, sigma):
+        return sync(eng.model.timestep(self._model, sigma))
+
+    def sigma(self, timestep):
+        return sync(eng.model.sigma(self._model, timestep))
+
+    def _fact(self, name):
+        import torch
+        return torch.tensor(sync(eng.model.info(self._model))[name])
+
+    sigma_min = property(lambda self: self._fact("sigma_min"))
+    sigma_max = property(lambda self: self._fact("sigma_max"))
+
+
+def calculate_sigmas(model_sampling, scheduler_name, steps):
+    """``comfy.samplers.calculate_sigmas``: ComfyUI's BasicScheduler for the model."""
+    return sync(eng.node.run("BasicScheduler", {"model": model_sampling._model, "scheduler": scheduler_name,
+                                                "steps": steps, "denoise": 1.0}))[0]
+
+
+def model_dtype(model):
+    import torch
+    return getattr(torch, sync(eng.model.info(model))["dtype"])
+
+
+class _ClipTypes:
+    """``comfy.sd.CLIPType``: the names, which is what ComfyUI's CLIP loader nodes take."""
+
+    def __getattr__(self, name):
+        if name.isupper():
+            return name
+        raise AttributeError(name)
+
+
+CLIPType = _ClipTypes()
+
+
+def load_clip(ckpt_paths, embedding_directory=None, clip_type="STABLE_DIFFUSION", model_options={}, **kwargs):
+    """``comfy.sd.load_clip`` for files in ComfyUI's text_encoders folder: ComfyUI's CLIPLoader / DualCLIPLoader."""
+    if model_options or kwargs:
+        raise NotImplementedError("comfy.sd.load_clip with model options")
+    names = [model_file("text_encoders", path) for path in ckpt_paths]
+    kind = str(clip_type).rsplit(".", 1)[-1].lower()
+    if len(names) == 1:
+        return sync(eng.node.run("CLIPLoader", {"clip_name": names[0], "type": kind}))[0]
+    if len(names) == 2:  # the dual loader's name for the default type
+        return sync(eng.node.run("DualCLIPLoader", {"clip_name1": names[0], "clip_name2": names[1],
+                                                    "type": "sdxl" if kind == "stable_diffusion" else kind}))[0]
+    raise NotImplementedError(f"comfy.sd.load_clip with {len(names)} files")
+
+
+def _noise_added(noise, latent_image, seed):
+    """Whether ``noise`` is what ComfyUI's sampler nodes add for ``seed`` (True) or none (False). The nodes
+    make their own noise, so any other noise can't be sampled through them."""
+    import torch
+    from comfy_api.v4 import util
+    if getattr(noise, "is_nested", False) or getattr(latent_image, "is_nested", False):
+        raise NotImplementedError("sampling a nested (video + audio) latent through ComfyUI's sampler nodes")
+    if torch.count_nonzero(noise) == 0:
+        return False
+    if seed is not None and noise.shape == latent_image.shape \
+            and torch.equal(noise.cpu(), util.prepare_noise(latent_image, seed).to(noise.dtype)):
+        return True
+    raise NotImplementedError("sampling with noise that isn't ComfyUI's for the seed (prepare_noise(latent, seed)) "
+                              "or zeros: ComfyUI's sampler nodes make their own noise")
+
+
+def _node_callback(callback):
+    """A sampler node reports progress and previews itself; a pack's own callback would never be called."""
+    if callback is not None and not hasattr(callback, "x0_output"):
+        raise NotImplementedError("sampling through ComfyUI's sampler nodes with the pack's own step callback")
+
+
+def sample(model, noise, steps, cfg, sampler_name, scheduler, positive, negative, latent_image, denoise=1.0,
+           disable_noise=False, start_step=None, last_step=None, force_full_denoise=False, noise_mask=None,
+           sigmas=None, callback=None, disable_pbar=False, seed=None):
+    """``comfy.sample.sample``, as ComfyUI's KSampler nodes call it: run as that node, which reports progress
+    and previews itself (``callback`` isn't called)."""
+    if sigmas is not None:
+        raise NotImplementedError("comfy.sample.sample with its own sigmas")
+    latent = {"samples": latent_image}
+    if noise_mask is not None:
+        latent["noise_mask"] = noise_mask
+    added = _noise_added(noise, latent_image, seed)
+    _node_callback(callback)
+    return common_ksampler(model, seed if seed is not None else 0, steps, cfg, sampler_name, scheduler, positive,
+                           negative, latent, denoise=denoise, disable_noise=not added, start_step=start_step,
+                           last_step=last_step, force_full_denoise=force_full_denoise)[0]["samples"]
+
+
+def sample_custom(model, noise, cfg, sampler, sigmas, positive, negative, latent_image, noise_mask=None,
+                  callback=None, disable_pbar=False, seed=None):
+    """``comfy.sample.sample_custom``, as ComfyUI's SamplerCustom calls it: run as that node. A callback from
+    ``prepare_callback(model, steps, x0_output)`` gets its ``x0_output["x0"]``, as the node's does."""
+    latent = {"samples": latent_image}
+    if noise_mask is not None:
+        latent["noise_mask"] = noise_mask
+    added = _noise_added(noise, latent_image, seed)
+    _node_callback(callback)
+    output, denoised = sync(eng.node.run("SamplerCustom", {
+        "model": model, "add_noise": added, "noise_seed": seed if seed is not None else 0, "cfg": cfg,
+        "positive": positive, "negative": negative, "sampler": sampler, "sigmas": sigmas, "latent_image": latent}))
+    x0_output = getattr(callback, "x0_output", None)
+    if x0_output is not None and denoised is not output:
+        x0_output["x0"] = sync(eng.model.latent_process_in(model, denoised["samples"]))
+    return output["samples"]
+
+
+def fix_empty_latent_channels(model, latent_image, downscale_ratio_spacial=None, downscale_ratio_temporal=None):
+    """``comfy.sample.fix_empty_latent_channels``: an empty latent takes the model's channel count. ComfyUI's
+    sampler nodes do this again, and the rest of it (a video model's extra dimension), when they run."""
+    import torch
+    if getattr(latent_image, "is_nested", False) or torch.count_nonzero(latent_image) != 0:
+        return latent_image
+    if downscale_ratio_spacial is not None or downscale_ratio_temporal is not None:
+        raise NotImplementedError("fix_empty_latent_channels with a downscale ratio")
+    channels = sync(eng.model.info(model)).get("latent_channels")
+    if channels is not None and channels != latent_image.shape[1]:
+        latent_image = comfy_utils.repeat_to_batch_size(latent_image, channels, dim=1)
+    return latent_image
+
+
+def prepare_empty_noise(latent_image):
+    import torch
+    if getattr(latent_image, "is_nested", False):
+        raise NotImplementedError("empty noise for a nested (video + audio) latent")
+    return torch.zeros_like(latent_image, device="cpu")
+
+
+def prepare_callback(model, steps, x0_output_dict=None):
+    """``latent_preview.prepare_callback``: the sampling callback. Called by the pack's own loop it reports
+    progress; handed to ``sample`` / ``sample_custom`` above, the node that runs reports progress and previews."""
+    def callback(step, x0, x, total_steps):
+        if x0_output_dict is not None:
+            x0_output_dict["x0"] = x0
+        if running():
+            sync(eng.progress.update(step + 1, total_steps))
+    callback.x0_output = x0_output_dict
+    return callback
 
 
 def soft_empty_cache(*args, **kwargs):
@@ -2216,7 +2996,7 @@ async def run_v3(execute, cls, *args, **kwargs):
 ROUTES_MODULE = """\"\"\"Generated by the V2 converter: the pack's endpoints as V2 routes.
 
 The pack's code registers aiohttp handlers (on the table that was PromptServer.instance.routes);
-ComfyUI serves them at /ext/<namespace>/<path> (pyproject.toml declares them), and ``handle`` answers
+ComfyUI serves them at /ext/<namespace>/<path> (comfy-pack.json lists them), and ``handle`` answers
 each request with the handler the pack registered for its path. V2 routes take and give JSON or text.
 \"\"\"
 import asyncio
@@ -2482,6 +3262,68 @@ def entry_updated(text):
     return text
 
 
+# files a pack ships beside its nodes: its tests, its install and example scripts
+_SCRIPT_FILE = re.compile(r"(^|/)(test_[^/]*|[^/]*_test|conftest|setup|install|uninstall|benchmark[^/]*|example[^/]*|demo[^/]*)\.py$"
+                          r"|(^|/)(tests?|examples?|scripts?|tools|docs|benchmarks?|standalone|dev|demo)/")
+_DYNAMIC_IMPORTS = {"import_module", "__import__", "spec_from_file_location", "exec_module", "load_module",
+                    "walk_packages", "iter_modules"}
+
+
+def _not_loaded(sources, describe):
+    """The pack's files its nodes never load: scripts and tests that nothing reachable from ``__init__.py``,
+    ``prestartup_script.py`` or a node class's module imports. They stay as the pack has them (ComfyUI never
+    runs them), and aren't engine use to convert. A pack that imports by computed name gets no such list:
+    what it loads can't be told from its source."""
+    def module_file(parts):
+        stem = "/".join(parts)
+        for candidate in (stem + "/__init__.py", stem + ".py"):
+            if candidate in sources:
+                return candidate
+        return None
+
+    roots = {r for r in ("__init__.py", "prestartup_script.py") if r in sources}
+    for entry in (describe.get("nodes") or {}).values():
+        # where describe found the node's class: "/pack.sub.module" (the pack is imported as /pack)
+        parts = [x for x in (entry.get("module") or "").split(".")[1:] if x]
+        found = module_file(parts) if parts else "__init__.py"
+        if found is None:
+            return set()  # a node defined where this can't follow (a generated module): nothing is left out
+        roots.add(found)
+    seen, todo = set(), list(roots)
+    while todo:
+        rel = todo.pop()
+        if rel in seen:
+            continue
+        seen.add(rel)
+        try:
+            tree = ast.parse(sources[rel], rel)
+        except SyntaxError:
+            return set()
+        base = [x for x in os.path.dirname(rel).split("/") if x]
+        for node in ast.walk(tree):
+            targets = []
+            if isinstance(node, ast.ImportFrom):
+                module = node.module.split(".") if node.module else []
+                starts = [base[:len(base) - (node.level - 1)]] if node.level else [[], base]
+                for start in starts:
+                    targets += [start + module] + [start + module + [a.name] for a in node.names]
+            elif isinstance(node, ast.Import):
+                for alias in node.names:
+                    targets += [alias.name.split("."), base + alias.name.split(".")]
+            elif isinstance(node, ast.Call):
+                name = node.func.attr if isinstance(node.func, ast.Attribute) else getattr(node.func, "id", "")
+                if name in _DYNAMIC_IMPORTS:
+                    return set()
+            for parts in targets:
+                for end in range(len(parts), 0, -1):
+                    found = module_file(parts[:end])
+                    if found:
+                        todo += [found] + [f for f in (module_file(parts[:i]) for i in range(1, end)) if f]
+                        break
+    return {rel for rel, source in sources.items()
+            if rel not in seen and (_SCRIPT_FILE.search(rel) or re.search(r"^if __name__ == ['\"]__main__['\"]", source, re.M))}
+
+
 def generate(pack_dir, describe, out_root, *, code_only=False):
     """Convert a captured pack without executing its code.
 
@@ -2526,6 +3368,11 @@ def generate(pack_dir, describe, out_root, *, code_only=False):
                     sources[relative] = open(os.path.join(root, file_name), encoding="utf-8-sig").read()  # Python accepts a BOM
                 except (UnicodeDecodeError, OSError) as error:
                     report["errors"].append(f"{relative}: can't read: {error}")
+    # scripts and tests the nodes never load stay as they are
+    not_loaded = _not_loaded(sources, describe)
+    if not_loaded:
+        report["not_loaded"] = sorted(not_loaded)
+        sources = {rel: src for rel, src in sources.items() if rel not in not_loaded}
     # ``from X import *`` between the pack's own modules hands engine names on: follow it
     exported = {rel: module_engine_aliases(src, rel) for rel, src in sources.items()}
     named_exported = {rel: module_engine_aliases(src, rel, include_private=True) for rel, src in sources.items()}
@@ -2690,10 +3537,33 @@ def generate(pack_dir, describe, out_root, *, code_only=False):
                     named_from.setdefault(rel, []).append((t, handed))
                     for name in handed:
                         star_aliases.setdefault(rel, {}).setdefault(name, named_exported[t][name])
+    # the pack's probes of ComfyUI, and its variables that hold ComfyUI's modules, resolved for this ComfyUI
+    # (normalize.py). A module-level variable another module of the pack may read stays as it is.
+    read_elsewhere = {a.name for tree in trees.values() for n in ast.walk(tree) if isinstance(n, ast.ImportFrom) for a in n.names} \
+        | {n.attr for tree in trees.values() for n in ast.walk(tree) if isinstance(n, ast.Attribute)}
+    star_targets = {t for targets in star_from.values() for t in targets}
+    originals, probes = dict(sources), {}
+    for rel in list(sources):
+        if rel in trees:
+            sources[rel], probes[rel] = normalize.resolve_probes(
+                sources[rel], rel, COMFY_INDEX, _Module, star_aliases.get(rel),
+                None if rel in star_targets else frozenset(read_elsewhere))
+    # engine-object types that reach a module's functions from the pack's other modules
+    resolved_trees = {}
+    for rel, src in sources.items():
+        try:
+            resolved_trees[rel] = ast.parse(src, rel)
+        except SyntaxError:
+            pass
+    handed = _pack_types(resolved_trees, typed, target)
+
+    def typed_for(rel):
+        return {**typed, HELPER_TYPES_KEY: (None, handed[rel])} if rel in handed else typed
+
     results, keep = {}, {}
     for rel, src in sources.items():
         try:
-            results[rel] = rewrite(src, rel, typed, star_aliases.get(rel), facade_exports=frozenset(facade_exports.get(rel, ())))
+            results[rel] = rewrite(src, rel, typed_for(rel), star_aliases.get(rel), facade_exports=frozenset(facade_exports.get(rel, ())))
             if rel in io_blockers:
                 new, done, left = results[rel]
                 results[rel] = new, done, sorted(set(left) | io_blockers[rel])
@@ -2725,7 +3595,7 @@ def generate(pack_dir, describe, out_root, *, code_only=False):
             keep.setdefault(t, set()).update(loaded & set(exported.get(t, {})))
     for rel, names in keep.items():
         if names and rel in results:
-            results[rel] = rewrite(sources[rel], rel, typed, star_aliases.get(rel), frozenset(names), frozenset(facade_exports.get(rel, ())))
+            results[rel] = rewrite(sources[rel], rel, typed_for(rel), star_aliases.get(rel), frozenset(names), frozenset(facade_exports.get(rel, ())))
             if rel in io_blockers:
                 new, done, left = results[rel]
                 results[rel] = new, done, sorted(set(left) | io_blockers[rel])
@@ -2734,7 +3604,8 @@ def generate(pack_dir, describe, out_root, *, code_only=False):
             new, done, left = results[rel]
             results[rel] = (_explicit_submodules(new, rel), done, left)
     for rel, (new, done, left) in results.items():
-        if new != sources[rel]:
+        done = sorted(set(done) | set(probes.get(rel, ())))
+        if new != originals[rel]:
             open(os.path.join(v2, rel), "w", encoding="utf-8").write(new)
         if done:
             report["rewritten"][rel] = done

@@ -12,6 +12,29 @@ def module_name_for(entry: str) -> str:
     return entry.replace(".", "_x_")
 
 
+class _Inert:
+    """A part of ComfyUI's server a pack reaches for while it loads (its queue, its user manager). There is
+    none while a pack is described: every call does nothing and answers None, so the pack's nodes can be
+    listed. What the pack does with it when a node runs is the converter's to report."""
+
+    def __init__(self, name: str) -> None:
+        self._name = name
+
+    def __getattr__(self, attribute: str) -> "_Inert":
+        if attribute.startswith("__"):
+            raise AttributeError(attribute)
+        return _Inert(f"{self._name}.{attribute}")
+
+    def __call__(self, *args: Any, **kwargs: Any) -> None:
+        return None
+
+    def __iter__(self):
+        return iter(())
+
+    def __repr__(self) -> str:
+        return f"<{self._name}: not there while a pack is described>"
+
+
 class _PromptServerStandIn:
     """``server.PromptServer.instance`` for pack code while it's described: collects routes, drops UI events."""
 
@@ -27,6 +50,10 @@ class _PromptServerStandIn:
         self.loop = None
         self.number = 0
         self.on_prompt_handlers: list = []
+        self.prompt_queue = _Inert("PromptServer.instance.prompt_queue")
+        self.node_replace_manager = _Inert("PromptServer.instance.node_replace_manager")
+        self.user_manager = _Inert("PromptServer.instance.user_manager")
+        self.internal_routes = _Inert("PromptServer.instance.internal_routes")
 
     def send_sync(self, event: str, data: Any, sid: Any = None) -> None:
         pass
@@ -35,6 +62,12 @@ class _PromptServerStandIn:
         pass
 
     def send_progress_text(self, text: str, node_id: Any, sid: Any = None) -> None:
+        pass
+
+    async def send_json(self, event: str, data: Any, sid: Any = None) -> None:
+        pass
+
+    def queue_updated(self) -> None:
         pass
 
     def add_on_prompt_handler(self, handler: Any) -> None:
@@ -46,7 +79,10 @@ def install_server_stand_in() -> _PromptServerStandIn:
     module = types.ModuleType("server", "Stand-in for ComfyUI's server module while a pack is described.")
     from protocol import BinaryEventTypes
 
+    from aiohttp import web
+
     module.BinaryEventTypes = BinaryEventTypes
+    module.web = web  # ComfyUI's server module has aiohttp's ``web`` (packs use ``server.web.json_response``)
     module.PromptServer = type("PromptServer", (), {"instance": instance})
     sys.modules["server"] = module
     return instance

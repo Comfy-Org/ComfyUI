@@ -226,7 +226,20 @@ def _schema_diff(original, converted):
             # V3 lists a choice output as COMBO; V1 as its (possibly empty) list of choices
             same = all(p == q or (isinstance(p, list) and q == "COMBO") or (p == "COMBO" and isinstance(q, list))
                        for p, q in zip(x, y))
-        elif key in ("search_aliases", "output_tooltips"):  # absent, [] and [None, ...] list the same
+        elif key in ("output_name", "output_tooltips", "output_is_list") and isinstance(a.get("output"), list) \
+                and isinstance(x, (list, tuple, type(None))) and isinstance(y, (list, tuple, type(None))):
+            # one entry per output: more than that is never read (a V1 node with RETURN_NAMES longer than
+            # RETURN_TYPES), a missing tooltip is None, a missing list flag False, a missing name the type's
+            outputs = a["output"]
+            fill = {"output_name": None, "output_tooltips": None, "output_is_list": False}[key]
+
+            def per_output(values):
+                values = (list(values or []) + [fill] * len(outputs))[:len(outputs)]
+                if key == "output_name":
+                    values = [v if v is not None else t for v, t in zip(values, outputs)]
+                return values
+            same = per_output(x) == per_output(y)
+        elif key == "search_aliases":  # absent, [] and [None, ...] list the same
             same = not any(x or []) and not any(y or []) or x == y
         elif key == "input_order":
             same = {k: v for k, v in (x or {}).items() if k != "hidden" and v} == \
