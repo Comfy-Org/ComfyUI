@@ -1068,6 +1068,22 @@ class Flux(BaseModel):
             ref_latents_method = kwargs.get("reference_latents_method", None)
             if ref_latents_method is not None:
                 out['ref_latents_method'] = comfy.conds.CONDConstant(ref_latents_method)
+
+        # Multi-view (UltraTex): batch items as tiles of one image, and background token dropping.
+        view_grid = kwargs.get("view_grid", None)
+        if view_grid is not None:
+            out['view_grid'] = comfy.conds.CONDConstant(view_grid)
+        token_masks = kwargs.get("token_masks", None)
+        if token_masks is not None:
+            # the kept token indices depend on the conditioning alone: compute them once, not every step
+            device = kwargs["device"]
+            masks = {"target": token_masks["target"].to(device), "refs": [None if m is None else m.to(device) for m in token_masks["refs"]]}
+            background = self.process_latent_in(kwargs["background_latent"]).to(device=device, dtype=self.get_dtype_inference())
+            out['token_keep'] = comfy.conds.CONDConstant(self.diffusion_model.preprocess_token_masks(
+                masks, view_grid, kwargs["noise"].shape, [lat.shape for lat in ref_latents], background))
+        reference_views = kwargs.get("reference_views", None)
+        if reference_views is not None:
+            out['reference_views'] = comfy.conds.CONDConstant(reference_views)
         return out
 
     def extra_conds_shapes(self, **kwargs):
