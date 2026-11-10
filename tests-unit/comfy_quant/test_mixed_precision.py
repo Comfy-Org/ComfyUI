@@ -391,6 +391,35 @@ class TestMixedPrecisionOps(unittest.TestCase):
         finally:
             mm.cpu_state = orig_cpu_state
 
+    def test_supports_int8_compute_on_rdna2_follows_native_backend(self):
+        """hipBLASLt ships no int8 Tensile kernels for RDNA2 and older, so the eager
+        backend's _int_mm fails there. That must not mask a native backend that runs
+        the same GEMM without hipBLASLt: report int8 as usable exactly when one is
+        registered, so the Triton INT8 GEMM is reachable instead of every layer
+        silently dequantizing."""
+        import comfy.model_management as mm
+        import comfy.quant_ops as qops
+
+        orig_amd = mm.is_amd
+        orig_props = torch.cuda.get_device_properties
+        orig_probe = qops.int8_linear_available
+        mm.is_amd = lambda *args, **kwargs: True
+        torch.cuda.get_device_properties = lambda device=None: SimpleNamespace(gcnArchName="gfx1030")
+        try:
+            qops.int8_linear_available = lambda: True
+            self.assertTrue(mm.supports_int8_compute("cuda:0"))
+
+            qops.int8_linear_available = lambda: False
+            self.assertFalse(mm.supports_int8_compute("cuda:0"))
+
+            # A newer AMD arch has int8 hipBLASLt kernels and is not gated by the probe.
+            torch.cuda.get_device_properties = lambda device=None: SimpleNamespace(gcnArchName="gfx1100")
+            self.assertTrue(mm.supports_int8_compute("cuda:0"))
+        finally:
+            mm.is_amd = orig_amd
+            torch.cuda.get_device_properties = orig_props
+            qops.int8_linear_available = orig_probe
+
     def test_convrot_w4a4_loads_into_params(self):
         """ConvRot W4A4 checkpoints must load as the dedicated kitchen layout."""
         if "convrot_w4a4" not in QUANT_ALGOS:
