@@ -3150,6 +3150,10 @@ def convert_routes(pack_dir, pack_out, v2, describe, report):
     if text:
         with open(os.path.join(pack_out, "pyproject.toml"), "w", encoding="utf-8") as file:
             file.write(text)
+        if declared:
+            # Registration reads v2/ first; the parent copy is retained for existing consumers.
+            with open(os.path.join(v2, "pyproject.toml"), "w", encoding="utf-8") as file:
+                file.write(text)
     # the frontend calls them at /ext/<namespace>/<path> now
     paths = sorted({p for _, p in declared}, key=len, reverse=True)
     found = {p: 0 for p in paths}

@@ -499,10 +499,21 @@ def run_declarations(converted_dir, out_path):
                 if not isinstance(route.get(key), str) or not route[key]:
                     raise ValueError(f"route {route!r} lacks {key}")
         report = {"valid": True, "name": name, "namespace": registration.pack_namespace(name),
-                  "requirements": list(declared["project"].get("dependencies") or []), "routes": len(routes)}
+                  "requirements": list(declared["project"].get("dependencies") or []),
+                  "declared_routes": routes, "routes": {}}
     except BaseException as error:
         report = {"valid": False, "error": f"{type(error).__name__}: {error}"[:1500], "trace": traceback.format_exc()[-2500:]}
     json.dump(report, open(out_path, "w"))
+
+
+def missing_generated_routes(describe, declared):
+    """Literal routes the converter should have exposed through its generated handler."""
+    expected = {(method.lower(), path) for method, path in describe.get("routes") or []
+                if method.lower() in ("get", "post", "put", "patch", "delete")
+                and path.startswith("/") and not any(c in path for c in "{}?#")}
+    actual = {(route["method"].lower(), route["path"]) for route in declared
+              if route.get("module") == "_v2_routes" and route.get("handler") == "handle"}
+    return [f"{method.upper()} {path}" for method, path in sorted(expected - actual)]
 
 
 def run_original(original_dir, describe_path, out_path):
@@ -632,6 +643,12 @@ def main(original_dir, converted_dir, describe_path, out_path):
         report = {"valid": False, "error": f"declarations exited {code}: {log}"}
     report["nodes"] = {}
     if not report["valid"]:
+        json.dump(report, open(out_path, "w"))
+        return
+    missing = missing_generated_routes(describe, report.get("declared_routes") or [])
+    if missing:
+        report.update(valid=False, error="generated route declarations missing: " + ", ".join(missing),
+                      missing_declared_routes=missing)
         json.dump(report, open(out_path, "w"))
         return
     code, log = _child(["--original", original_dir, describe_path, _scratch("expected.pickle")], 420)
