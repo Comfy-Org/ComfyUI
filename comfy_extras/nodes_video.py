@@ -236,7 +236,7 @@ class CreateVideo(io.ComfyNode):
                 ),
                 io.Combo.Input(
                     "chroma_subsampling",
-                    options=["auto", "444", "422", "420"],
+                    options=["auto", "444", "422", "420", "none"],
                     default="auto",
                     optional=True,
                     tooltip="444 keeps full color resolution, 422 halves horizontal color resolution, and 420 halves both axes. Auto uses the codec default. Unsupported choices use the closest supported mode and print a console warning.",
