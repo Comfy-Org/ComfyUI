@@ -233,7 +233,7 @@ class CausalMemoryCache:
         """The one stream this cache copies on, so copies reusing a host buffer stay ordered;
         it starts after the compute queued so far. None copies on the compute stream."""
         if self._stream is None:
-            self._stream = comfy.model_management.get_offload_stream(device)
+            self._stream = comfy.model_management.get_data_stream(device)
         if self._stream is not None:
             self._stream.wait_stream(comfy.model_management.current_stream(device))
         return self._stream
