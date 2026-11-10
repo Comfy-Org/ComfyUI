@@ -380,14 +380,26 @@ def attention_sub_quad(query, key, value, heads, mask=None, attn_precision=None,
     kv_chunk_size = None
     query_chunk_size = None
 
-    for x in [4096, 2048, 1024, 512, 256]:
-        count = mem_free_total / (batch_x_heads * bytes_per_token * x * 4.0)
-        if count >= k_tokens:
-            kv_chunk_size = k_tokens
-            query_chunk_size = x
-            break
+    # The contiguous key copy is allocated before the attention workspace, so the chunk
+    # selection budgets for it. When the copy is what pushes the workspace out of budget,
+    # keep the strided key rather than risk an OOM.
+    key_bytes = 0
+    if _sub_quad_needs_contiguous_key(query.device) and not key.is_contiguous():
+        key_bytes = key.numel() * key.element_size()
 
-    if query_chunk_size is None:
+    def select_query_chunk(free_bytes):
+        for x in (4096, 2048, 1024, 512, 256):
+            if free_bytes / (batch_x_heads * bytes_per_token * x * 4.0) >= k_tokens:
+                return x
+        return None
+
+    query_chunk_size = select_query_chunk(mem_free_total - key_bytes)
+    if query_chunk_size is None and key_bytes:
+        key_bytes = 0
+        query_chunk_size = select_query_chunk(mem_free_total)
+    if query_chunk_size is not None:
+        kv_chunk_size = k_tokens
+    else:
         query_chunk_size = 512
 
     if mask is not None:
@@ -397,7 +409,7 @@ def attention_sub_quad(query, key, value, heads, mask=None, attn_precision=None,
             bs = mask.shape[0]
         mask = mask.reshape(bs, -1, mask.shape[-2], mask.shape[-1]).expand(b, heads, -1, -1).reshape(-1, mask.shape[-2], mask.shape[-1])
 
-    if _sub_quad_needs_contiguous_key(query.device) and not key.is_contiguous():
+    if key_bytes:
         key = key.contiguous()
 
     hidden_states = efficient_dot_product_attention(
