@@ -4,7 +4,7 @@
 
 ## Setup
 
-The first MOSS-only PR covers experimental BF16 generation on Linux aarch64 with NVIDIA GB10, SM121. Install the separate TensorFold MOSS runtime before opening the workflow. It needs Git, Zig 0.17.0, the CUDA 13 toolkit and cuBLASLt 13. The companion must be available before this PR is submitted upstream.
+The first MOSS-only PR covers experimental BF16 generation on Linux aarch64 with NVIDIA GB10, SM121. Install the separate TensorFold MOSS runtime before opening the workflow. It needs Git, Zig 0.17.0, the CUDA 13 toolkit and cuBLASLt 13. The installer and preparation tool are in the [pinned TensorFold companion](https://github.com/ashhart/TensorFold/tree/094fa078a2ec0388aa54302f3a095211bd468abd/tools/comfyui_runtime). The [GB10 scope and validation summary](https://github.com/ashhart/TensorFold/issues/2736) records the tested setup and limits.
 
 SM120 is unvalidated and outside this first PR's generation support scope. The worker still compiles and admits SM120/SM121. Linux x86_64 has software, native-build and install checks only; no SM120 image workflow, numerical comparison or live kernel-contract check has run.
 
