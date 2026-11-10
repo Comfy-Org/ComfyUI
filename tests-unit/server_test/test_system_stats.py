@@ -54,11 +54,13 @@ def test_cuda_memory_without_allocator_lock_reuses_the_last_torch_figures(monkey
 def test_soft_empty_cache_refreshes_the_torch_figures_of_devices_already_read(monkeypatch, cuda_memory):
     comfy.model_management.get_free_memory(CUDA0)
     comfy.model_management.get_free_memory(CUDA1)
-    cuda_memory["0"] = cuda_memory[str(CUDA0)]
+    cuda_memory["0"] = {"reserved": 8, "active": 2, "free": 10, "total": 100}
     comfy.model_management.get_free_memory(0)  # custom nodes may pass a bare index
     cuda_memory[str(CUDA0)].update(reserved=2, free=11)
     cuda_memory[str(CUDA1)].update(reserved=20, free=51)
+    cuda_memory["0"].update(reserved=3)
     cuda_memory["cuda:2"] = {}  # never read: refreshing it would create a CUDA context on that GPU
+    monkeypatch.setattr(comfy.model_management, "get_all_torch_devices", lambda: [CUDA0, CUDA1, torch.device("cuda", 2)])
     monkeypatch.setattr(comfy.model_management, "cpu_mode", lambda: False)
     monkeypatch.setattr(comfy.model_management, "cpu_state", comfy.model_management.CPUState.GPU)
     for name in ("is_available", "synchronize", "empty_cache", "ipc_collect"):
@@ -69,6 +71,7 @@ def test_soft_empty_cache_refreshes_the_torch_figures_of_devices_already_read(mo
     set_memory_stats(monkeypatch, allocator_locked)
     assert comfy.model_management.get_memory_without_allocator_lock(CUDA0) == (100, 2, 11, 0)
     assert comfy.model_management.get_memory_without_allocator_lock(CUDA1) == (200, 20, 51, 0)
+    assert comfy.model_management.last_torch_cuda_memory[0] == (3, 1)
     assert torch.device("cuda", 2) not in comfy.model_management.last_torch_cuda_memory
 
 
