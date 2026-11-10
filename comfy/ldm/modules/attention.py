@@ -317,6 +317,27 @@ def attention_basic(q, k, v, heads, mask=None, attn_precision=None, skip_reshape
         )
     return out
 
+_SUB_QUAD_CONTIGUOUS_KEY = {}
+
+
+def _sub_quad_needs_contiguous_key(device):
+    """Whether the strided key makes the chunked baddbmm lose its fast path here.
+
+    attention_sub_quad always builds the key as a strided view. RDNA2 and older have no
+    Aotriton kernels, so sub-quadratic attention is what those devices fall back to, and
+    a non-contiguous key sends that baddbmm down a much slower GEMM path. Other backends
+    remap the operand for free, so the copy is pure cost there. See Comfy-Org/ComfyUI#17500.
+    """
+    needed = _SUB_QUAD_CONTIGUOUS_KEY.get(device)
+    if needed is None:
+        needed = False
+        if device.type == "cuda" and comfy.model_management.is_amd():
+            arch = torch.cuda.get_device_properties(device).gcnArchName
+            needed = any((a in arch) for a in comfy.model_management.AMD_RDNA2_AND_OLDER_ARCH)
+        _SUB_QUAD_CONTIGUOUS_KEY[device] = needed
+    return needed
+
+
 @wrap_attn
 def attention_sub_quad(query, key, value, heads, mask=None, attn_precision=None, skip_reshape=False, skip_output_reshape=False, **kwargs):
     attn_precision = get_attn_precision(attn_precision, query.dtype)
@@ -375,6 +396,9 @@ def attention_sub_quad(query, key, value, heads, mask=None, attn_precision=None,
         else:
             bs = mask.shape[0]
         mask = mask.reshape(bs, -1, mask.shape[-2], mask.shape[-1]).expand(b, heads, -1, -1).reshape(-1, mask.shape[-2], mask.shape[-1])
+
+    if _sub_quad_needs_contiguous_key(query.device) and not key.is_contiguous():
+        key = key.contiguous()
 
     hidden_states = efficient_dot_product_attention(
         query,
