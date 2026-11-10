@@ -317,43 +317,46 @@ def attention_basic(q, k, v, heads, mask=None, attn_precision=None, skip_reshape
         )
     return out
 
-_SUB_QUAD_CONTIGUOUS_KEY = {}
+_SUB_QUAD_CONTIGUOUS_OPERANDS = {}
 
 
-def _sub_quad_needs_contiguous_key(device):
-    """Whether the strided key makes the chunked baddbmm lose its fast path here.
+def _sub_quad_needs_contiguous_operands(device):
+    """Whether the head-interleaved operands cost the chunked GEMMs their fast path here.
 
-    attention_sub_quad always builds the key as a strided view. RDNA2 and older have no
-    Aotriton kernels, so sub-quadratic attention is what those devices fall back to, and
-    a non-contiguous key sends that baddbmm down a much slower GEMM path. Other backends
-    remap the operand for free, so the copy is pure cost there. See Comfy-Org/ComfyUI#17500.
+    attention_sub_quad builds both the query and the key as views of the [b, s, h, d]
+    projection, so their batch stride is dim_head rather than the token stride. RDNA2 and
+    older have no Aotriton kernels, so sub-quadratic attention is what those devices fall
+    back to, and baddbmm over those layouts picks a much slower path: the key path costs
+    10x and the query 2.4x. Other backends remap the operand for free, so the copies are
+    pure cost there. See Comfy-Org/ComfyUI#17500.
     """
-    needed = _SUB_QUAD_CONTIGUOUS_KEY.get(device)
+    needed = _SUB_QUAD_CONTIGUOUS_OPERANDS.get(device)
     if needed is None:
         needed = False
         if device.type == "cuda" and comfy.model_management.is_amd():
             arch = torch.cuda.get_device_properties(device).gcnArchName
             needed = any((a in arch) for a in comfy.model_management.AMD_RDNA2_AND_OLDER_ARCH)
-        _SUB_QUAD_CONTIGUOUS_KEY[device] = needed
+        _SUB_QUAD_CONTIGUOUS_OPERANDS[device] = needed
     return needed
 
 
-def _contiguous_sub_quad_key(key):
-    """Return a contiguous [b*h, d, s] copy of the transposed sub-quadratic key.
+def _contiguous_sub_quad_operand(tensor, identity_left):
+    """Return a contiguous copy of a head-interleaved sub-quadratic GEMM operand.
 
-    attention_sub_quad builds that key as a view of the [b, s, h, d] projection, so the
-    innermost destination dimension is the outermost source one and .contiguous() becomes
-    a byte gather: 13.1 ms for the 4,608-token key on gfx1030, against 15.4 ms for the
-    baddbmm it feeds. bmm reads the same bytes through its GEMM tiling instead, and an
-    identity matrix keeps it a copy: 1.6 ms for the same tensor, exact in every dtype.
+    A plain .contiguous() cannot vectorize across the interleaved batch: it copies the
+    4,608-token key at 5.8 GB/s (13.1 ms) and the query at 25 GB/s (2.6 ms). bmm reads the
+    same bytes through its GEMM tiling, and multiplying by an identity matrix keeps it a
+    copy, so the key takes 1.6 ms and the query 1.1 ms. `identity_left` picks the side
+    where the contraction is dim_head, which is the key's because it is transposed.
 
-    Autocast is disabled around the bmm so the copy keeps the key's dtype, which
+    Autocast is disabled around the bmm so the copy keeps the operand's dtype, which
     .contiguous() would.
     """
-    bh, dim = key.shape[:2]
-    identity = torch.eye(dim, dtype=key.dtype, device=key.device).expand(bh, dim, dim)
+    bh = tensor.shape[0]
+    dim = tensor.shape[1] if identity_left else tensor.shape[2]
+    identity = torch.eye(dim, dtype=tensor.dtype, device=tensor.device).expand(bh, dim, dim)
     with torch.autocast(enabled=False, device_type='cuda'):
-        return torch.bmm(identity, key)
+        return torch.bmm(identity, tensor) if identity_left else torch.bmm(tensor, identity)
 
 
 @wrap_attn
@@ -398,12 +401,14 @@ def attention_sub_quad(query, key, value, heads, mask=None, attn_precision=None,
     kv_chunk_size = None
     query_chunk_size = None
 
-    # The contiguous key copy is allocated before the attention workspace, so the chunk
-    # selection budgets for it. When the copy is what pushes the workspace out of budget,
-    # keep the strided key rather than risk an OOM.
-    key_bytes = 0
-    if _sub_quad_needs_contiguous_key(query.device) and not key.is_contiguous():
-        key_bytes = key.numel() * key.element_size()
+    # The contiguous operand copies are allocated before the attention workspace, so the
+    # chunk selection budgets for them. When the copies are what push the workspace out of
+    # budget, keep the strided operands rather than risk an OOM.
+    operand_bytes = 0
+    if _sub_quad_needs_contiguous_operands(query.device):
+        for tensor in (query, key):
+            if not tensor.is_contiguous():
+                operand_bytes += tensor.numel() * tensor.element_size()
 
     def select_query_chunk(free_bytes):
         for x in (4096, 2048, 1024, 512, 256):
@@ -411,9 +416,9 @@ def attention_sub_quad(query, key, value, heads, mask=None, attn_precision=None,
                 return x
         return None
 
-    query_chunk_size = select_query_chunk(mem_free_total - key_bytes)
-    if query_chunk_size is None and key_bytes:
-        key_bytes = 0
+    query_chunk_size = select_query_chunk(mem_free_total - operand_bytes)
+    if query_chunk_size is None and operand_bytes:
+        operand_bytes = 0
         query_chunk_size = select_query_chunk(mem_free_total)
     if query_chunk_size is not None:
         kv_chunk_size = k_tokens
@@ -427,8 +432,11 @@ def attention_sub_quad(query, key, value, heads, mask=None, attn_precision=None,
             bs = mask.shape[0]
         mask = mask.reshape(bs, -1, mask.shape[-2], mask.shape[-1]).expand(b, heads, -1, -1).reshape(-1, mask.shape[-2], mask.shape[-1])
 
-    if key_bytes:
-        key = _contiguous_sub_quad_key(key)
+    if operand_bytes:
+        if not query.is_contiguous():
+            query = _contiguous_sub_quad_operand(query, identity_left=False)
+        if not key.is_contiguous():
+            key = _contiguous_sub_quad_operand(key, identity_left=True)
 
     hidden_states = efficient_dot_product_attention(
         query,
