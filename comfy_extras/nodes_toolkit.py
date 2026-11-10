@@ -56,18 +56,14 @@ class GetItemFromList(io.ComfyNode):
 class ListLength(io.ComfyNode):
     @classmethod
     def define_schema(cls):
-        template = io.MatchType.Template("type")
         return io.Schema(
             node_id="ListLength",
             display_name="List Length",
             category="utilities",
             is_input_list=True,
             search_aliases=["Count", "Size", "len"],
-            inputs=[io.MatchType.Input("list", template=template)],
-            outputs=[
-                io.MatchType.Output(template=template, is_output_list=True, display_name="list"),
-                io.Int.Output(display_name="length"),
-            ],
+            inputs=[io.AnyType.Input("list")],
+            outputs=[io.Int.Output(display_name="length")],
             hidden=[io.Hidden.unique_id],
         )
 
@@ -76,7 +72,7 @@ class ListLength(io.ComfyNode):
         length = len(list)
         if cls.hidden.unique_id:
             PromptServer.instance.send_progress_text(f"length: {length}", cls.hidden.unique_id)
-        return io.NodeOutput(list, length)
+        return io.NodeOutput(length)
 
 
 class ToolkitExtension(ComfyExtension):
