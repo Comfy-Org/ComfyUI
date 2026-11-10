@@ -35,16 +35,17 @@ class CreateList(io.ComfyNode):
 class GetItemFromList(io.ComfyNode):
     @classmethod
     def define_schema(cls):
+        template = io.MatchType.Template("type")
         return io.Schema(
             node_id="GetItemFromList",
             display_name="Get Item From List",
             category="utilities",
             is_input_list=True,
             inputs=[
-                io.AnyType.Input("list"),
+                io.MatchType.Input("list", template=template),
                 io.Int.Input("index", default=0),
             ],
-            outputs=[io.AnyType.Output()],
+            outputs=[io.MatchType.Output(template=template, display_name="item")],
         )
 
     @classmethod
