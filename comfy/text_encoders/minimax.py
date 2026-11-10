@@ -5,6 +5,7 @@ The H3 presentation is NOT chat-templated: token ids are raw prompt/label text
 
   t2va:   <prompt>
   fl2va:  "<Picture 1>: " <vision block> ["<Picture 2>: " <vision block>] <prompt>
+  image:  "Picture 1: " <vision block> ["Picture 2: " <vision block> ...] <prompt>  (MiniMax-H3-Image edits)
   ref2va: per condition in request order (1-based ordinals per type):
             image -> "<Picture i>: " <vision block>
             audio -> "<Audio j>: "              (audio never enters Qwen)
@@ -19,13 +20,12 @@ output with no final norm). Vision-pad positions carry adaLN token tag 0
 returned alongside the embeddings as "minimax_token_tags".
 """
 
-import math
-
 import torch
 import torch.nn.functional as F
 import comfy.ops
 import comfy.sd1_clip
 from .qwen3vl import Qwen3VL, Qwen3VLSDTokenizer
+from .qwen_vl import smart_resize
 
 VISION_START = 151652
 VISION_END = 151653
@@ -49,17 +49,7 @@ def process_video_block(frames, patch_size=16, temporal_patch_size=2, merge_size
     """
     t, height, width, _ = frames.shape
     imgs = frames.permute(0, 3, 1, 2)
-    factor = patch_size * merge_size
-    h_bar = round(height / factor) * factor
-    w_bar = round(width / factor) * factor
-    if h_bar * w_bar > max_pixels:
-        beta = math.sqrt((height * width) / max_pixels)
-        h_bar = max(factor, math.floor(height / beta / factor) * factor)
-        w_bar = max(factor, math.floor(width / beta / factor) * factor)
-    elif h_bar * w_bar < min_pixels:
-        beta = math.sqrt(min_pixels / (height * width))
-        h_bar = math.ceil(height * beta / factor) * factor
-        w_bar = math.ceil(width * beta / factor) * factor
+    h_bar, w_bar = smart_resize(height, width, patch_size * merge_size, min_pixels, max_pixels)
 
     imgs = F.interpolate(imgs, size=(h_bar, w_bar), mode="bilinear", align_corners=False)
     mean = torch.tensor(QWEN_IMAGE_MEAN, device=imgs.device).view(1, 3, 1, 1)
@@ -195,7 +185,7 @@ class MiniMaxH3Tokenizer(comfy.sd1_clip.SD1Tokenizer):
         return emb
 
     def tokenize_with_weights(self, text, return_word_ids=False, images=[],
-                              minimax_ref_items=None, **kwargs):
+                              minimax_ref_items=None, picture_label="<Picture %d>: ", **kwargs):
         entries = []
 
         def add_text(s):
@@ -240,7 +230,7 @@ class MiniMaxH3Tokenizer(comfy.sd1_clip.SD1Tokenizer):
                         add_vision(frames[i:i + 2], video_block=True)
         else:
             for i, img in enumerate(images):
-                add_text("<Picture %d>: " % (i + 1))
+                add_text(picture_label % (i + 1))
                 add_vision(img)
 
         add_text(text)
