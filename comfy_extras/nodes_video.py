@@ -235,19 +235,19 @@ class CreateVideo(io.ComfyNode):
                     tooltip="Colorspace of the input images. HDR selects BT.2020/HLG and HDR PQ selects BT.2020/PQ.",
                 ),
                 io.Combo.Input(
-                    "chroma_subsampling",
-                    options=["auto", "444", "422", "420"],
-                    default="auto",
-                    optional=True,
-                    tooltip="444 keeps full color resolution, 422 halves horizontal color resolution, and 420 halves both axes. Auto uses the codec default. Unsupported choices use the closest supported mode and print a console warning.",
-                ),
-                io.Combo.Input(
                     "codec",
                     options=["none", *Types.VideoCodec.as_input()],
                     default="none",
                     advanced=True,
                     optional=True,
                     tooltip="Optionally encode the video immediately. None keeps the images in tensor form; Auto uses H.264.",
+                ),
+                io.Combo.Input(
+                    "chroma_subsampling",
+                    options=["auto", "444", "422", "420"],
+                    default="auto",
+                    optional=True,
+                    tooltip="444 keeps full color resolution, 422 halves horizontal color resolution, and 420 halves both axes. Auto uses the codec default. Unsupported choices use the closest supported mode and print a console warning.",
                 ),
             ],
             outputs=[
