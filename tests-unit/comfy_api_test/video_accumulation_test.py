@@ -286,3 +286,34 @@ def test_accumulated_video_trim_slices_complete_audio():
     trimmed = video.as_trimmed(0.25, 0.5)
 
     assert torch.equal(trimmed.complete_audio["waveform"], torch.arange(2000, 6000).reshape(1, 1, -1))
+
+
+def _trimmed_chunks(directory, frame_counts):
+    source = os.path.join(directory, "source.mp4")
+    VideoFromComponents(
+        VideoComponents(
+            images=torch.linspace(0, 1, 16).reshape(-1, 1, 1, 1).expand(-1, 16, 16, 3),
+            frame_rate=Fraction(8),
+        )
+    ).save_to(source)
+    video = VideoFromFile(source)
+    return [video.as_trimmed(start / 8, count / 8) for start, count in zip((1, 8), frame_counts)]
+
+
+def test_accumulated_video_joins_chunks_with_different_reorder_delay():
+    with tempfile.TemporaryDirectory() as directory:
+        output = os.path.join(directory, "output.mp4")
+        VideoFromList(_trimmed_chunks(directory, (2, 6))).save_to(output)
+
+        with av.open(output) as container:
+            assert sum(1 for _ in container.decode(video=0)) == 8
+
+
+def test_accumulated_video_keeps_single_frame_chunk_duration():
+    with tempfile.TemporaryDirectory() as directory:
+        output = os.path.join(directory, "output.mp4")
+        VideoFromList(_trimmed_chunks(directory, (1, 2))).save_to(output)
+
+        with av.open(output) as container:
+            stream = container.streams.video[0]
+            assert stream.duration * stream.time_base == Fraction(3, 8)
