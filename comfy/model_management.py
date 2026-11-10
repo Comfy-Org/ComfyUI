@@ -1865,7 +1865,7 @@ def force_upcast_attention_dtype():
     else:
         return None
 
-# Torch allocator (reserved, reserved but unused) bytes per CUDA device, from the last get_free_memory call.
+# Torch allocator (reserved, reserved but unused) bytes per CUDA/ROCm device, from the last get_free_memory call.
 last_torch_cuda_memory = {}
 
 #Developers and agents: You almost never want to call this function from Model code as it does
@@ -2234,8 +2234,8 @@ def soft_empty_cache(force=False):
         torch.cuda.synchronize()
         torch.cuda.empty_cache()
         torch.cuda.ipc_collect()
-        for dev in get_all_torch_devices():
-            get_free_memory(dev)
+        for dev in list(last_torch_cuda_memory):
+            get_free_memory(torch.device(dev))
 
 def unload_all_models():
     for device in get_all_torch_devices():
