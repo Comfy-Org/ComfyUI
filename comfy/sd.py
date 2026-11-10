@@ -1065,10 +1065,15 @@ class VAE:
                     still_frame = int(metadata.get("h3_t1_output_slice", 3))
                 # LightVAE Lite encoders prune resnet blocks down to their shortcut
                 minimax_kept = {(int(k.split(".")[2]), int(k.split(".")[4])) for k in sd if k.startswith("encoder.down.") and k.endswith(".conv1.weight")}
-                if "decoder.proj_out.weight" in sd and sd["decoder.proj_out.weight"].shape[0] == 768:  # p-h3-image: single-frame decoder
+                if "decoder.proj_out.weight" in sd and sd["decoder.proj_out.weight"].shape[0] == 768:  # single-frame image decoders
                     still_frame = 0
                     self.not_video = True
-                    self.first_stage_model = comfy.ldm.minimax.vae.PH3ImageVAE(operations=minimax_ops, num_layers=minimax_layers)
+                    if sd["decoder.x_embedder.weight"].shape[0] == 1024:  # MiniMax-H3-Image: 16-head 2D ViT decoder (p-h3-image has 32), loaded from the release file (no latent statistics)
+                        sd.setdefault("latents_mean", torch.tensor(comfy.ldm.minimax.vae.LATENTS_MEAN))
+                        sd.setdefault("latents_std", torch.tensor(comfy.ldm.minimax.vae.LATENTS_STD))
+                        self.first_stage_model = comfy.ldm.minimax.vae.MiniMaxH3ImageVAE(operations=minimax_ops, num_layers=minimax_layers)
+                    else:  # p-h3-image
+                        self.first_stage_model = comfy.ldm.minimax.vae.PH3ImageVAE(operations=minimax_ops, num_layers=minimax_layers)
                 else:
                     self.first_stage_model = comfy.ldm.minimax.vae.MiniMaxH3VideoVAE(operations=minimax_ops, num_layers=minimax_layers, still_frame=still_frame, encoder_kept_blocks=minimax_kept, encoder="encoder.conv_in.weight" in sd, decoder=minimax_layers > 0, noncausal_decoder=noncausal)
                 self.latent_channels = 24
