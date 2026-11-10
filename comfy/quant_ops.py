@@ -1,4 +1,3 @@
-import importlib.util
 import torch
 import logging
 
@@ -62,7 +61,7 @@ try:
         """
         if args.disable_triton_backend or ck.registry.is_available("triton"):
             return False
-        return importlib.util.find_spec("triton") is not None
+        return ck.list_backends().get("triton", {}).get("available", False)
 except ImportError as e:
     logging.error(f"Failed to import comfy_kitchen, Error: {e}, fp8 and fp4 support will not be available.")
     _CK_AVAILABLE = False

@@ -1986,7 +1986,15 @@ def pick_operations(weight_dtype, compute_dtype, load_device=None, disable_fast_
         logging.info("Using mixed precision operations")
         disabled = get_disabled_quant_formats(load_device)
         logging.info("Native ops: {} {}".format(", ".join(QUANT_ALGOS.keys() - disabled), ", emulated ops: {}".format(", ".join(disabled)) if len(disabled) > 0 else ""))
-        if "int8_tensorwise" in disabled and quant_ops.int8_linear_needs_triton_opt_in():
+        # Only point at the flag where it can actually enable INT8: Triton has no CPU or
+        # MPS kernels, so those devices would dequantize either way.
+        triton_hint = (quant_ops.int8_linear_needs_triton_opt_in()
+                       and not comfy.model_management.cpu_mode()
+                       and not comfy.model_management.mps_mode())
+        if load_device is not None:
+            triton_hint = triton_hint and not comfy.model_management.is_device_cpu(load_device) \
+                and not comfy.model_management.is_device_mps(load_device)
+        if "int8_tensorwise" in disabled and triton_hint:
             logging.warning("This device has no native INT8 matmul, so INT8 weights dequantize. Start ComfyUI with --enable-triton-backend to use the comfy-kitchen Triton INT8 GEMM.")
         return mixed_precision_ops(model_config.quant_config, compute_dtype, disabled=disabled)
 

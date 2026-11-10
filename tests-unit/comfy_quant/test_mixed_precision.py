@@ -18,6 +18,8 @@ if not has_gpu():
 
 from comfy import ops
 from comfy.quant_ops import QUANT_ALGOS, QuantizedTensor
+import comfy.model_management as mm
+import comfy.quant_ops as qops
 import comfy.utils
 
 
@@ -397,9 +399,6 @@ class TestMixedPrecisionOps(unittest.TestCase):
         the same GEMM without hipBLASLt: report int8 as usable exactly when one is
         registered, so the Triton INT8 GEMM is reachable instead of every layer
         silently dequantizing."""
-        import comfy.model_management as mm
-        import comfy.quant_ops as qops
-
         orig_amd = mm.is_amd
         orig_props = torch.cuda.get_device_properties
         orig_probe = qops.int8_linear_available
