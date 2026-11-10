@@ -432,8 +432,6 @@ def detect_unet_config(state_dict, key_prefix, metadata=None):
         dit_config["gate_compress"] = '{}blocks.0.attn.to_gate_compress.weight'.format(key_prefix) in state_dict_keys  # VSA-trained
         if metadata is not None and "config" in metadata:
             dit_config.update(json.loads(metadata["config"]).get("transformer", {}))
-        if not audio and "pdd_sigmas" not in dit_config:
-            raise RuntimeError("MiniMax-H3-Image needs its PDD fused heads and sigma grid; repack the release with tools/convert_minimax_h3_image.py")
         return dit_config
 
     if '{}adaln_single.emb.timestep_embedder.linear_1.bias'.format(key_prefix) in state_dict_keys: #Lightricks ltxv
