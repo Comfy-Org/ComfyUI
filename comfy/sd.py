@@ -82,6 +82,7 @@ import comfy.text_encoders.ace15
 import comfy.text_encoders.longcat_image
 import comfy.text_encoders.qwen35
 import comfy.text_encoders.qwen3vl
+import comfy.text_encoders.wevisone
 import comfy.text_encoders.minimax
 import comfy.text_encoders.minimax_music
 import comfy.text_encoders.yue2
@@ -1759,6 +1760,9 @@ class TEModel(Enum):
     GEMMA_4_12B = 36
     QWEN3VL_32B = 37
     MING_IMAGE = 38
+    WEVISONE_2B = 39
+    WEVISONE_4B = 40
+    QWEN3VL_2B = 41
 
 
 def detect_te_model(sd):
@@ -1825,8 +1829,10 @@ def detect_te_model(sd):
         if weight.shape[0] == 5120:
             return TEModel.QWEN35_27B
         return TEModel.QWEN35_2B
+    if "mask_decoder.query_builder.content_proj.weight" in sd and "model.visual.merger.linear_fc2.weight" in sd:  # WeVisOne-VL: Qwen3-VL with its alpha-matte decoder
+        return TEModel.WEVISONE_4B if sd["model.visual.merger.linear_fc2.weight"].shape[0] == 2560 else TEModel.WEVISONE_2B
     if "model.visual.deepstack_merger_list.0.norm.weight" in sd:  # DeepStack is unique to Qwen3-VL
-        return TEModel.QWEN3VL_4B if sd["model.visual.merger.linear_fc2.weight"].shape[0] == 2560 else TEModel.QWEN3VL_8B
+        return {2048: TEModel.QWEN3VL_2B, 2560: TEModel.QWEN3VL_4B}.get(sd["model.visual.merger.linear_fc2.weight"].shape[0], TEModel.QWEN3VL_8B)
     if "visual.deepstack_merger_list.0.norm.weight" in sd and "model.layers.49.self_attn.q_proj.weight" in sd:
         # MiniMax H3 conditioning encoder: Qwen3-VL-32B, truncated to 50 layers
         return TEModel.QWEN3VL_32B
@@ -2061,7 +2067,7 @@ def load_text_encoder_state_dicts(state_dicts=[], embedding_directory=None, clip
                 qwen35_type = {TEModel.QWEN35_08B: "qwen35_08b", TEModel.QWEN35_2B: "qwen35_2b", TEModel.QWEN35_4B: "qwen35_4b", TEModel.QWEN35_9B: "qwen35_9b", TEModel.QWEN35_27B: "qwen35_27b"}[te_model]
                 clip_target.clip = comfy.text_encoders.qwen35.te(**llama_detect(clip_data), model_type=qwen35_type, mtp="mtp.fc.weight" in clip_data[0])
                 clip_target.tokenizer = comfy.text_encoders.qwen35.tokenizer(model_type=qwen35_type)
-        elif te_model in (TEModel.QWEN3VL_4B, TEModel.QWEN3VL_8B):
+        elif te_model in (TEModel.QWEN3VL_2B, TEModel.QWEN3VL_4B, TEModel.QWEN3VL_8B):
             if clip_type == CLIPType.IDEOGRAM4 and te_model == TEModel.QWEN3VL_8B:  # Ideogram4 reuses the full Qwen3-VL-8B (13-layer tap for conditioning + multimodal generate).
                 clip_data[0] = comfy.utils.state_dict_prefix_replace(clip_data[0], {"model.language_model.": "model.", "model.visual.": "visual.", "lm_head.": "model.lm_head."})
                 clip_target.clip = comfy.text_encoders.ideogram4.te_qwen3vl(**llama_detect(clip_data))
@@ -2104,9 +2110,14 @@ def load_text_encoder_state_dicts(state_dicts=[], embedding_directory=None, clip
                 clip_target.tokenizer = comfy.text_encoders.flux.KleinTokenizer8B if te_model == TEModel.QWEN3VL_8B else comfy.text_encoders.flux.KleinTokenizer
             else:
                 clip_data[0] = comfy.utils.state_dict_prefix_replace(clip_data[0], {"model.language_model.": "model.", "model.visual.": "visual.", "lm_head.": "model.lm_head."})
-                qwen3vl_type = {TEModel.QWEN3VL_4B: "qwen3vl_4b", TEModel.QWEN3VL_8B: "qwen3vl_8b"}[te_model]
+                qwen3vl_type = {TEModel.QWEN3VL_2B: "qwen3vl_2b", TEModel.QWEN3VL_4B: "qwen3vl_4b", TEModel.QWEN3VL_8B: "qwen3vl_8b"}[te_model]
                 clip_target.clip = comfy.text_encoders.qwen3vl.te(**llama_detect(clip_data), model_type=qwen3vl_type)
                 clip_target.tokenizer = comfy.text_encoders.qwen3vl.tokenizer(model_type=qwen3vl_type)
+        elif te_model in (TEModel.WEVISONE_2B, TEModel.WEVISONE_4B):
+            clip_data[0] = comfy.utils.state_dict_prefix_replace(clip_data[0], {"model.language_model.": "model.", "model.visual.": "visual.", "lm_head.": "model.lm_head."})
+            qwen3vl_type = "qwen3vl_4b" if te_model == TEModel.WEVISONE_4B else "qwen3vl_2b"
+            clip_target.clip = comfy.text_encoders.qwen3vl.te(**llama_detect(clip_data), model_type=qwen3vl_type, base=comfy.text_encoders.wevisone.WeVisOneTEModel)
+            clip_target.tokenizer = comfy.text_encoders.qwen3vl.tokenizer(model_type=qwen3vl_type, base=comfy.text_encoders.wevisone.WeVisOneTokenizer)
         elif te_model == TEModel.QWEN3VL_32B:
             clip_target.clip = comfy.text_encoders.minimax.te(**llama_detect(clip_data))
             clip_target.tokenizer = comfy.text_encoders.minimax.MiniMaxH3Tokenizer
