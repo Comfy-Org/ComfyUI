@@ -830,6 +830,9 @@ class PromptServer():
             overrides = get_environment_overrides()
             if overrides:
                 features.update(overrides)
+            # custom node API (comfy_api.v4): what the execution provider tells the frontend
+            from comfy_api.latest import _runtime
+            features.update(_runtime.providers.frontend_runtime_config)
             return web.json_response(features)
 
         @routes.get("/default_workflow")

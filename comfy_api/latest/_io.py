@@ -27,8 +27,20 @@ if TYPE_CHECKING:
     from comfy_api.input import VideoInput, CurveInput as CurveInput_
 from comfy_api.internal import (_ComfyNodeInternal, _NodeOutputInternal, classproperty, copy_class, first_real_override, is_class,
     prune_dict, shallow_clone_class)
-from comfy_execution.graph_utils import ExecutionBlocker
 from ._util import MESH, VOXEL, SPLAT, SVG as _SVG, File3D
+
+
+from comfy_execution.graph_utils import ExecutionBlocker  # noqa: E402  plain Python: a value a node returns
+# ``io.ExecutionBlocker(message)``: return it for an output and the nodes that use it don't run
+# (with the message as their error, or silently for None).
+
+
+def _is_execution_blocker(value: Any) -> bool:
+    try:
+        from comfy_execution.graph_utils import ExecutionBlocker
+    except ImportError:
+        return False
+    return isinstance(value, ExecutionBlocker)
 
 
 class FolderType(str, Enum):
@@ -341,6 +353,34 @@ class String(ComfyTypeIO):
                 "dynamicPrompts": self.dynamic_prompts,
             })
 
+class ModelFolder:
+    """Combo options that are the files in one of ComfyUI's model folders.
+
+        io.Combo.Input("lora_name", options=io.ModelFolder("loras"))
+
+    ComfyUI lists the folder each time it builds the node's schema, so new files appear
+    without the pack reading folders itself. Where ComfyUI's folders aren't available the
+    list is empty.
+    """
+
+    def __init__(self, folder: str, extensions: list[str] | None = None):
+        self.folder = folder
+        self.extensions = [e.lower().lstrip(".") for e in extensions] if extensions else None
+
+    def resolve(self) -> list[str]:
+        try:
+            import folder_paths
+            names = folder_paths.get_filename_list(self.folder)
+        except Exception:
+            return []
+        if self.extensions:
+            names = [n for n in names if n.rsplit(".", 1)[-1].lower() in self.extensions]
+        return list(names)
+
+    def __repr__(self) -> str:
+        return f"ModelFolder({self.folder!r})"
+
+
 @comfytype(io_type="COMBO")
 class Combo(ComfyTypeIO):
     Type = str
@@ -371,12 +411,21 @@ class Combo(ComfyTypeIO):
                 default = default.value
             super().__init__(id, display_name, optional, tooltip, lazy, default, socketless, None, None, extra_dict, raw_link, advanced)
             self.multiselect = False
-            self.options = options
+            self.options = options  # a list, or a ModelFolder ComfyUI lists when it reads the schema
             self.control_after_generate = control_after_generate
             self.upload = upload
             self.image_folder = image_folder
             self.remote = remote
             self.default: str
+
+        @property
+        def options(self):
+            options = self.__dict__.get("_options")
+            return options.resolve() if isinstance(options, ModelFolder) else options
+
+        @options.setter
+        def options(self, value):
+            self.__dict__["_options"] = value
 
         def as_dict(self):
             return super().as_dict() | prune_dict({
@@ -392,6 +441,9 @@ class Combo(ComfyTypeIO):
         def __init__(self, id: str=None, display_name: str=None, options: list[str]=None, tooltip: str=None, is_output_list=False):
             super().__init__(id, display_name, tooltip, is_output_list)
             self.options = options if options is not None else []
+
+        def get_io_type(self):
+            return self.options if self.options else super().get_io_type()
 
 @comfytype(io_type="COMBO")
 class MultiCombo(ComfyTypeI):
@@ -1749,7 +1801,7 @@ class NodeInfoV1:
     input: dict=None
     input_order: dict[str, list[str]]=None
     is_input_list: bool=None
-    output: list[str]=None
+    output: list[str | list[str]]=None
     output_is_list: list[bool]=None
     output_name: list[str]=None
     output_tooltips: list[str]=None
@@ -1978,7 +2030,7 @@ class Schema:
         any_matchtypes = False
         if self.outputs:
             for o in self.outputs:
-                output.append(o.io_type)
+                output.append(o.get_io_type())
                 output_is_list.append(o.is_output_list)
                 output_name.append(o.display_name if o.display_name else o.io_type)
                 output_tooltips.append(o.tooltip if o.tooltip else None)
@@ -2225,7 +2277,7 @@ class _ComfyNodeBaseInternal(_ComfyNodeInternal):
             to_return = NodeOutput(*to_return)
         elif isinstance(to_return, dict):
             to_return = NodeOutput.from_dict(to_return)
-        elif isinstance(to_return, ExecutionBlocker):
+        elif _is_execution_blocker(to_return):
             to_return = NodeOutput(block_execution=to_return.message)
         else:
             raise Exception(f"Invalid return type from node: {type(to_return)}")
@@ -2245,7 +2297,7 @@ class _ComfyNodeBaseInternal(_ComfyNodeInternal):
             to_return = NodeOutput(*to_return)
         elif isinstance(to_return, dict):
             to_return = NodeOutput.from_dict(to_return)
-        elif isinstance(to_return, ExecutionBlocker):
+        elif _is_execution_blocker(to_return):
             to_return = NodeOutput(block_execution=to_return.message)
         else:
             raise Exception(f"Invalid return type from node: {type(to_return)}")
@@ -2444,7 +2496,7 @@ class _ComfyNodeBaseInternal(_ComfyNodeInternal):
             output_tooltips = []
             if schema.outputs:
                 for o in schema.outputs:
-                    output.append(o.io_type)
+                    output.append(o.get_io_type())
                     output_name.append(o.display_name if o.display_name else o.io_type)
                     output_is_list.append(o.is_output_list)
                     output_tooltips.append(o.tooltip if o.tooltip else None)
@@ -2528,7 +2580,7 @@ class NodeOutput(_NodeOutputInternal):
         expand = None
         if "result" in data:
             result = data["result"]
-            if isinstance(result, ExecutionBlocker):
+            if _is_execution_blocker(result):
                 return cls(block_execution=result.message)
             args = result
         if "ui" in data:
@@ -2611,10 +2663,19 @@ class NodeReplace:
         }
 
 
+# The canvas ceiling `nodes.py` has always published. Republished here because
+# schema code is where it is used (input min/max bounds), and so a schema doesn't
+# need to import `nodes`. Same value by definition, not by sync: 16384 is frozen
+# into every workflow that ever serialized a bound.
+MAX_RESOLUTION = 16384
+
+
 __all__ = [
+    "MAX_RESOLUTION",
     "FolderType",
     "UploadType",
     "RemoteOptions",
+    "ModelFolder",
     "NumberDisplay",
     "ControlAfterGenerate",
 
@@ -2726,4 +2787,5 @@ __all__ = [
     "VideoEdit",
     "ResolutionPreview",
     "NodeReplace",
+    "ExecutionBlocker",
 ]

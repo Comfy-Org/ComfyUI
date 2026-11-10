@@ -14,8 +14,6 @@ import math
 import os
 import torch
 from .._util import VideoContainer, VideoCodec, VideoComponents, normalize_crop_rect
-import comfy.memory_management
-import comfy.utils
 import comfy_aimdo.host_buffer
 import comfy_aimdo.torch
 import ctypes
@@ -172,6 +170,7 @@ class HostFrames:
 
 
 def host_frames() -> HostFrames | None:
+    import comfy.memory_management
     if not comfy.memory_management.aimdo_enabled:
         return None
     try:
@@ -967,6 +966,7 @@ class VideoFromFile(VideoInput):
             except ValueError:
                 window_seconds = 0.0
         progress_total = max(1, int(round(window_seconds * float(rate))))
+        import comfy.utils
         pbar = comfy.utils.ProgressBar(progress_total)
 
         streams = [video_stream] if audio_stream is None else [video_stream, audio_stream]
