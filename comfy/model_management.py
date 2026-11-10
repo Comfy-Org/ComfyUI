@@ -2161,6 +2161,14 @@ def supports_int8_compute(device=None):
     if (device is not None and is_device_mps(device)) or mps_mode():
         return False
 
+    # PyTorch ROCm wheels ship hipBLASLt without int8 Tensile kernels for RDNA2 and
+    # older, where the eager backend's _int_mm fails with HIPBLAS_STATUS_INVALID_VALUE.
+    # A native comfy_kitchen backend runs the same GEMM without hipBLASLt.
+    if is_amd():
+        arch = torch.cuda.get_device_properties(device).gcnArchName
+        if any((a in arch) for a in AMD_RDNA2_AND_OLDER_ARCH):
+            return comfy.quant_ops.int8_linear_available()
+
     if is_intel_xpu():
         return False
 
