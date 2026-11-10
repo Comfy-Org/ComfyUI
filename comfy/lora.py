@@ -425,7 +425,7 @@ def model_lora_keys_unet(model, key_map={}):
                 key_map[key_lora] = k
         pdd_steps = model.model_config.unet_config.get("pdd_steps", 1)
         if pdd_steps > 1:  # baked PDD bank: single-head LoRAs patch head 0, the base of every interval head
-            heads = {k: (k, (0, 0, sd[k].shape[0] // pdd_steps)) for k in ("diffusion_model.final_layer.video_out.weight", "diffusion_model.final_layer.audio_out.weight")}
+            heads = {k: (k, (0, 0, sd[k].shape[0] // pdd_steps)) for k in ("diffusion_model.final_layer.video_out.weight", "diffusion_model.final_layer.audio_out.weight") if k in sd}
             key_map.update({key_lora: heads[k] for key_lora, k in key_map.items() if k in heads})
 
     return key_map
