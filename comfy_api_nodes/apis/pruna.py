@@ -20,6 +20,17 @@ class PrunaPredictionRequest(BaseModel):
     input: PrunaVideoInput = Field(...)
 
 
+class PrunaUpscaleInput(BaseModel):
+    video: str = Field(...)
+    target: str = Field(...)
+    fps: int | None = Field(None)
+    turbo: bool = Field(...)
+
+
+class PrunaUpscaleRequest(BaseModel):
+    input: PrunaUpscaleInput = Field(...)
+
+
 class PrunaPredictionResponse(BaseModel):
     id: str = Field(...)
     model: str | None = Field(None)

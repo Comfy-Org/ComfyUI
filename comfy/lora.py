@@ -286,6 +286,8 @@ def model_lora_keys_unet(model, key_map={}):
             hidden_size = model.model_config.unet_config.get("hidden_size", 0)
             if k.endswith(".weight") and ".linear1." in k:
                 key_map["{}".format(k.replace(".linear1.weight", ".linear1_qkv"))] = (k, (0, 0, hidden_size * 3))
+            if k.startswith("diffusion_model.") and k.endswith(".weight"):
+                key_map["base_model.model.{}".format(k[len("diffusion_model."):-len(".weight")])] = k  # PEFT on the original BFL modules
 
     if isinstance(model, comfy.model_base.GenmoMochi):
         for k in sdk:
@@ -358,11 +360,14 @@ def model_lora_keys_unet(model, key_map={}):
 
     if isinstance(model, comfy.model_base.MOSSImage):
         for k in sdk:
+            if k.startswith("diffusion_model.") and k.endswith(".weight"):
+                key_map[k[len("diffusion_model."):-len(".weight")]] = k  # bare module paths
             if k.endswith(".proj.qkv.weight"):  # fused q/k/v files; LoRAs address the separate projections
                 third = sd[k].shape[0] // 3
                 for i, proj in enumerate(("q", "k", "v")):
                     key_lora = "{}.{}".format(k[:-len(".qkv.weight")], proj)
                     key_map[key_lora] = (k, (0, i * third, third))
+                    key_map[key_lora[len("diffusion_model."):]] = (k, (0, i * third, third))
                     key_map["lora_unet_{}".format(key_lora[len("diffusion_model."):].replace(".", "_"))] = (k, (0, i * third, third))
 
     if isinstance(model, comfy.model_base.Krea2):
@@ -420,7 +425,7 @@ def model_lora_keys_unet(model, key_map={}):
                 key_map[key_lora] = k
         pdd_steps = model.model_config.unet_config.get("pdd_steps", 1)
         if pdd_steps > 1:  # baked PDD bank: single-head LoRAs patch head 0, the base of every interval head
-            heads = {k: (k, (0, 0, sd[k].shape[0] // pdd_steps)) for k in ("diffusion_model.final_layer.video_out.weight", "diffusion_model.final_layer.audio_out.weight")}
+            heads = {k: (k, (0, 0, sd[k].shape[0] // pdd_steps)) for k in ("diffusion_model.final_layer.video_out.weight", "diffusion_model.final_layer.audio_out.weight") if k in sd}
             key_map.update({key_lora: heads[k] for key_lora, k in key_map.items() if k in heads})
 
     return key_map

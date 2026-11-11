@@ -4,9 +4,14 @@ from typing_extensions import override
 
 from comfy_api.latest import IO, ComfyExtension, Input
 from comfy_api_nodes.apis.veed import (
+    VEED_DUBBING_ACCENTS,
+    VEED_DUBBING_LANGUAGES,
+    VEED_DUBBING_PRO_ONLY,
+    VEED_DUBBING_STANDARD_ONLY,
     VeedBackgroundRemovalRequest,
     VeedCleanAudioRequest,
     VeedCleanAudioVideoRequest,
+    VeedDubbingRequest,
     VeedFabricRequest,
     VeedGreenScreenRequest,
     VeedJob,
@@ -33,6 +38,13 @@ MAX_FABRIC_AUDIO_SECONDS = 300
 MAX_LIPSYNC_AUDIO_SECONDS = 600
 MAX_BACKGROUND_REMOVAL_SECONDS = 60
 MAX_CLEAN_AUDIO_SECONDS = 1799
+MAX_DUBBING_SECONDS = 599
+DUBBING_STANDARD_LANGUAGES = [k for k in VEED_DUBBING_LANGUAGES if k not in VEED_DUBBING_PRO_ONLY]
+DUBBING_PRO_SOURCE_LANGUAGES = [k for k in VEED_DUBBING_LANGUAGES if k not in VEED_DUBBING_STANDARD_ONLY]
+DUBBING_PRO_LANGUAGES = sorted(
+    [k for k in DUBBING_PRO_SOURCE_LANGUAGES if k not in ("English", "French", "Portuguese", "Spanish")]
+    + list(VEED_DUBBING_ACCENTS)
+)
 
 
 async def _run_job(cls: type[IO.ComfyNode], route: str, request: BaseModel) -> VeedJob:
@@ -431,6 +443,89 @@ class VeedCleanVideoAudioNode(IO.ComfyNode):
         return IO.NodeOutput(await download_url_to_video_output(job.result.video.url))
 
 
+def _dubbing_option(
+    key: str, target_languages: list[str], default_language: str, source_languages: list[str]
+) -> IO.DynamicCombo.Option:
+    return IO.DynamicCombo.Option(
+        key,
+        [
+            IO.Video.Input(
+                "video",
+                tooltip=f"Video with a visible face and speech, up to {MAX_DUBBING_SECONDS} seconds. "
+                "The output is as long as its audio track and plays at 25 fps.",
+            ),
+            IO.Combo.Input("target_language", options=target_languages, default=default_language),
+            IO.Combo.Input(
+                "source_language",
+                options=["auto", *source_languages],
+                tooltip="Language spoken in the video.",
+            ),
+            IO.Int.Input(
+                "seed",
+                default=42,
+                min=0,
+                max=2147483647,
+                display_mode=IO.NumberDisplay.number,
+                control_after_generate=True,
+                tooltip="Seed controls whether the node should re-run; "
+                "results are non-deterministic regardless of seed.",
+            ),
+        ],
+    )
+
+
+class VeedDubbingNode(IO.ComfyNode):
+    @classmethod
+    def define_schema(cls):
+        return IO.Schema(
+            node_id="VeedDubbingNode",
+            display_name="VEED Dubbing",
+            category="partner/video/VEED",
+            description="Translate the speech in a video into another language with VEED. Each speaker's voice is "
+            "cloned and their lips are synced to the translation.",
+            inputs=[
+                IO.DynamicCombo.Input(
+                    "model",
+                    options=[
+                        _dubbing_option("standard", DUBBING_STANDARD_LANGUAGES, "English", DUBBING_STANDARD_LANGUAGES),
+                        _dubbing_option("pro", DUBBING_PRO_LANGUAGES, "English (US)", DUBBING_PRO_SOURCE_LANGUAGES),
+                    ],
+                    tooltip="standard: lower price, mono audio; Spanish is Latin American and Portuguese is Brazilian. "
+                    "pro: regional accents and stereo audio.",
+                ),
+            ],
+            outputs=[IO.Video.Output()],
+            hidden=[
+                IO.Hidden.auth_token_comfy_org,
+                IO.Hidden.api_key_comfy_org,
+                IO.Hidden.unique_id,
+            ],
+            is_api_node=True,
+            price_badge=IO.PriceBadge(
+                depends_on=IO.PriceBadgeDepends(widgets=["model"]),
+                expr="""{"type":"usd","usd": widgets.model = "pro" ? 0.2574 : 0.1573, "format":{"suffix":"/second"}}""",
+            ),
+        )
+
+    @classmethod
+    async def execute(cls, model: dict) -> IO.NodeOutput:
+        validate_video_duration(model["video"], max_duration=MAX_DUBBING_SECONDS)
+        with av.open(model["video"].get_stream_source()) as container:
+            if not container.streams.audio:
+                raise ValueError("The video has no audio track to dub.")
+        source = model["source_language"]
+        job = await _run_job(
+            cls,
+            "dubbing-pro" if model["model"] == "pro" else "dubbing",
+            VeedDubbingRequest(
+                video_url=await upload_video_to_comfyapi(cls, model["video"]),
+                target_language={**VEED_DUBBING_LANGUAGES, **VEED_DUBBING_ACCENTS}[model["target_language"]],
+                source_language=None if source == "auto" else VEED_DUBBING_LANGUAGES[source],
+            ),
+        )
+        return IO.NodeOutput(await download_url_to_video_output(job.result.video.url))
+
+
 class VeedExtension(ComfyExtension):
     @override
     async def get_node_list(self) -> list[type[IO.ComfyNode]]:
@@ -440,6 +535,7 @@ class VeedExtension(ComfyExtension):
             VeedRemoveVideoBackgroundNode,
             VeedCleanAudioNode,
             VeedCleanVideoAudioNode,
+            VeedDubbingNode,
         ]
 
 

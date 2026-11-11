@@ -9,7 +9,11 @@ from comfy.cli_args import args as cli_args
 if not torch.cuda.is_available():
     cli_args.cpu = True
 
+import comfy.lora  # noqa: E402
+import comfy.model_patcher  # noqa: E402
+import comfy.model_prefetch  # noqa: E402
 import comfy.ops  # noqa: E402
+from comfy.quant_ops import QuantizedTensor  # noqa: E402
 from comfy.text_encoders.llama import MLP, RMSNorm  # noqa: E402
 
 
@@ -32,9 +36,122 @@ def test_mlp_folded_norm_matches_eager_norm():
     x = torch.randn(1, 3, 16)
     for merged in (False, True):
         mlp = _mlp(merged)
+        assert set(mlp.state_dict()) == (
+            {"gate_up_proj.weight", "down_proj.weight"} if merged else
+            {"gate_proj.weight", "up_proj.weight", "down_proj.weight"}
+        )
         for add in (False, True):
             norm = _norm(add)
             assert torch.equal(mlp(x, norm=norm), mlp(norm(x)))
+
+
+def test_combined_gate_up_declines_without_running_split_or_activation():
+    mlp = _mlp(False)
+    combined = mlp.combined_gate_up
+    x = torch.randn(2, 16)
+    original = x.clone()
+    assert combined.forward(x) is NotImplemented
+    # An unsupported request must escape to the model, not enter the eager
+    # activation fallback (which would reject this activation name).
+    assert comfy.ops.linear_input_act(combined, x, "model_owned_activation") is NotImplemented
+    assert torch.equal(x, original)
+    assert [name for name, _ in mlp.named_modules()] == ["", "gate_proj", "up_proj", "down_proj"]
+
+
+def test_w6a8_packed_and_combined_on_hit_including_lora():
+    if not comfy.memory_management.aimdo_enabled or not torch.cuda.is_available():
+        pytest.skip("requires initialized CUDA DynamicVRAM")
+
+    torch.manual_seed(53)
+    device = torch.device("cuda:0")
+    ops = comfy.ops.mixed_precision_ops(compute_dtype=torch.bfloat16)
+
+    class Projections(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.a = ops.Linear(512, 96, bias=False)
+            self.b = ops.Linear(512, 160, bias=False)
+            self.c = ops.Linear(512, 128, bias=False)
+            for layer in (self.a, self.b, self.c):
+                weight = QuantizedTensor.from_float(
+                    torch.randn(layer.out_features, 512, dtype=torch.bfloat16) * 0.03,
+                    "AsymW4A8Int8Layout", bits=6, convrot_groupsize=256,
+                )
+                layer.weight = torch.nn.Parameter(weight, requires_grad=False)
+                layer.quant_format = "w6a8_int8"
+                layer.layout_type = weight.layout_cls
+                layer.comfy_gemv_optimized = True
+            self.combined = comfy.ops.CombinedLinear((self.a, self.b))
+            self.combined.comfy_gemv_optimized = True
+
+        def get_dynamic_vram__units(self):
+            return [self], []
+
+        def forward(self, x):
+            ab = self.combined.forward(x)
+            if ab is NotImplemented:
+                ab = torch.cat((self.a(x), self.b(x)), dim=-1)
+            return torch.cat((ab, self.c(x)), dim=-1)
+
+    model = Projections()
+    members = (model.a, model.b, model.c)
+    canonical = [s.weight.dequantize().to(device) for s in members]
+    base = comfy.model_patcher.ModelPatcherDynamic(model, device, torch.device("cpu"))
+    tensors = {}
+    for name in ("a", "c"):
+        tensors[f"{name}.lora_up.weight"] = torch.randn(getattr(model, name).out_features, 4) * 0.1
+        tensors[f"{name}.lora_down.weight"] = torch.randn(4, 512) * 0.1
+    patches = comfy.lora.load_lora(tensors, {"a": "a.weight", "c": "c.weight"})
+    lora = base.clone()
+    assert set(lora.add_patches(patches, strength_patch=0.75)) == {"a.weight", "c.weight"}
+    x = torch.randn(3, 512, device=device, dtype=torch.bfloat16)
+
+    def step(packed, expected=None):
+        comfy.model_prefetch.pin_modules(members, device, x.dtype)
+        try:
+            assert (model.combined._v_weight is not None) == packed
+            out = model(x)
+            if packed:
+                # Combined members give up their own weights; the combined weight and c pack.
+                assert model.a._v_weight is None and model.b._v_weight is None
+                assert model.combined._v_weight.params.mma_packed and model.c._v_weight.params.mma_packed
+                if expected:
+                    # Un-rotation on dequantize is a batched matmul whose rounding depends on the row count.
+                    torch.testing.assert_close(model.combined._v_weight.dequantize(), torch.cat(expected[:2]))
+                    torch.testing.assert_close(model.c._v_weight.dequantize(), expected[2])
+            else:
+                assert not any(s._v_weight.params.mma_packed for s in members)
+            return out.clone()
+        finally:
+            comfy.model_prefetch.cleanup_prefetched_modules(model, members)
+
+    def check(split, packed):
+        # The packed GEMM shares the int8 grid and int32 accumulation; only the fp32 epilogue order differs.
+        torch.testing.assert_close(packed.float(), split.float(), atol=2e-2, rtol=1e-2)
+
+    try:
+        # An unprefetched forward runs the canonical layout; the first pin after a
+        # load misses, resolves, packs and combines in the same pin.
+        base.partially_load(device)
+        split = model(x).clone()
+        packed = [step(True, canonical), step(True, canonical)]
+        assert torch.equal(packed[0], packed[1])
+        check(split, packed[0])
+
+        # The baked patch is what gets packed and combined. A reload dirties the members but
+        # not the group; the pin that precedes every block forward drops the stale group on
+        # the members' miss, so the unprefetched canonical reference drops it here.
+        lora.partially_load(device)
+        model.combined._v_weight = None
+        patched = [model(x).clone(), step(True)]
+        assert not torch.equal(split, patched[0])
+        check(*patched)
+
+        base.partially_load(device)
+        assert torch.equal(packed[0], step(True, canonical))
+    finally:
+        torch.cuda.synchronize()
+        base.unpatch_model(unpatch_weights=True)
 
 
 def test_rms_norm_scale_adds_one_without_caching():
@@ -176,15 +293,17 @@ def _masked_attention(q, k, v, mask):
 
 
 def test_cache_mask_matches_attend(monkeypatch):
-    # the additive mask reproduces attend()'s chain staircase over the whole cache
+    # the additive mask reproduces attend()'s chain staircase and tree ancestry over the whole cache
     from comfy.text_encoders.llama import FixedKVCache
+    tree = _tree2s2()
     torch.manual_seed(0)
     shared = FixedKVCache.shared(2, "cpu")
     kv = FixedKVCache.zeros(2, 1, 24, 64, "cpu", torch.float32, shared)
     kv.key.normal_()
     kv.value.normal_()
     kv.index = 9
-    for seq in (1, 3):
+    for seq, shaped in ((1, None), (3, None), (8, tree)):
+        kv.tracker["tree"] = shaped
         kv.prepare(seq)
         xq = torch.randn(2, 2, seq, 64)
         xk = torch.randn(2, 1, seq, 64)
@@ -194,7 +313,11 @@ def test_cache_mask_matches_attend(monkeypatch):
         mask = kv.mask(seq)
         assert mask.shape == (2, 1, seq, 24) and mask.dtype == torch.float32
         visible = (mask == 0)[0, 0]
-        assert visible.sum(-1).tolist() == [10 + j for j in range(seq)]
+        if shaped is None:
+            assert visible.sum(-1).tolist() == [10 + j for j in range(seq)]
+        else:
+            assert visible[:, 9:17].int().tolist() == [[(m >> t) & 1 for t in range(8)] for m in tree.mask.tolist()]
+            assert visible[:, :9].all() and not visible[:, 17:].any()
         torch.testing.assert_close(_masked_attention(xq, kv.key, kv.value, mask), expected, rtol=1e-4, atol=1e-5)
 
 
@@ -216,7 +339,7 @@ def test_deferred_ctl_rows_wait_for_their_previous_copy(monkeypatch):
     tracker = LinearKV.deferred_tracker("cpu")
     tracker["copied"] = [Event(0), Event(1)]
     ctl = tracker["ctl"]
-    assert ctl.shape == (2,)  # {pending, parity}
+    assert ctl.shape == (26,)  # {pending, parity, slots[8], parents[8], program[8]}
     layers = [LinearKV(torch.zeros(1), torch.zeros(1), 0, None, None, ctl=ctl, ctl_tracker=tracker) for _ in range(2)]
 
     def step(n, discard=0):
@@ -235,6 +358,85 @@ def test_deferred_ctl_rows_wait_for_their_previous_copy(monkeypatch):
     assert step(3) == [1, 1]
     assert log == [("sync", 1), ("record", 1)]  # one copy per step, after its row's previous copy
     assert step(1) == [3, 0]
+
+
+def _tree2s2():
+    from comfy.text_encoders.qwen35 import MTP_MODES, VerifyTree
+    capacity, spec = MTP_MODES["tree2s2"]
+    return VerifyTree(spec, capacity, "cpu")
+
+
+def test_verify_tree_shapes():
+    from comfy.text_encoders.qwen35 import MTP_MODES, VerifyTree
+    tree = _tree2s2()
+    assert (tree.rows, tree.chain, tree.fanout) == (8, 2, 3)
+    assert tree.parent == [-1, 0, 1, 1, 1, 0, 0, -1] and tree.depth == [0, 1, 2, 2, 2, 1, 1, 0]
+    assert tree.mask.tolist() == [1, 3, 7, 11, 19, 33, 65, 128]
+    assert tree.ctl.tolist() == [-1, 0, 1, 1, 1, 0, 0, -1, 32, 5, 6, 33, 3, 4, 2, 7]
+    tree = VerifyTree(MTP_MODES["tree4s1m8"][1], 8, "cpu")
+    assert (tree.rows, tree.chain, tree.fanout) == (8, 4, 2)
+    assert tree.parent == [-1, 0, 1, 2, 3, 2, 1, 0] and tree.depth == [0, 1, 2, 3, 4, 3, 2, 1]
+    assert tree.mask.tolist() == [1, 3, 7, 15, 31, 39, 67, 129]
+    assert tree.ctl.tolist() == [-1, 0, 1, 2, 3, 2, 1, 0, 32, 7, 33, 6, 34, 5, 35, 4]
+    mask_ptr, pos_ptr = tree.mask.data_ptr(), tree.positions.data_ptr()
+    tree.update([[[[[[[[]]]]]]]])
+    assert tree.mask.tolist() == [1, 3, 7, 15, 31, 63, 127, 255]
+    assert tree.positions.tolist() == [list(range(8))]
+    tree.update(MTP_MODES["tree4s1m8"][1])
+    assert tree.mask.data_ptr() == mask_ptr and tree.positions.data_ptr() == pos_ptr
+    assert tree.mask.tolist() == [1, 3, 7, 15, 31, 39, 67, 129]
+    assert tree.positions.tolist() == [[0, 1, 2, 3, 4, 3, 2, 1]]
+    for name, depth in (("tree2s1", 2), ("tree3s1", 3)):
+        tree = VerifyTree(MTP_MODES[name][1], MTP_MODES[name][0], "cpu")
+        assert (tree.rows, tree.chain, tree.fanout) == (8, depth, 2)
+    chain = VerifyTree(MTP_MODES["3"][1], 4, "cpu")
+    assert (chain.rows, chain.chain, chain.fanout, chain.children[:3]) == (4, 3, 1, [[1], [2], [3]])
+    assert chain.mask.tolist() == [1, 3, 7, 15]
+    for depth, capacity in ((2, 4), (4, 8), (5, 8)):
+        tree = VerifyTree(MTP_MODES[str(depth)][1], capacity, "cpu")
+        assert tree.chain == depth and tree.rows == capacity
+        assert tree.parent[depth + 1:] == [-1] * (capacity - depth - 1)
+        assert tree.ctl[8 + depth + 1:].tolist() == list(range(depth + 1, 8))
+        assert all(not children for children in tree.children[depth:])
+
+
+def test_tree_verify_cache_prefix_and_commit_path():
+    from comfy.text_encoders.llama import FixedKVCache
+    tree = _tree2s2()
+    shared = FixedKVCache.shared(1, "cpu")
+    kv = FixedKVCache.zeros(1, 1, 32, 256, "cpu", torch.bfloat16, shared)
+    kv.index = 10
+    kv.tracker["tree"] = tree
+    kv.prepare(8)
+    assert kv.seqlen.tolist() == [10]
+    kv.tracker["tree"] = None
+    kv.prepare(8)
+    assert kv.seqlen.tolist() == [18]
+    for r in range(7):
+        kv.key[:, :, 10 + r] = r
+        kv.value[:, :, 10 + r] = -r
+    kv.commit_path(10, [0, 1, 4])
+    assert kv.key[0, 0, 10:13, 0].tolist() == [0, 1, 4] and kv.value[0, 0, 12, 0].item() == -4
+
+
+def test_deferred_ctl_carries_accepted_path_and_tree_program():
+    from comfy.text_encoders.qwen35 import LinearKV
+    tree = _tree2s2()
+    tracker = LinearKV.deferred_tracker("cpu")
+    tracker["tree"] = tree
+    ctl = tracker["ctl"]
+    kv = LinearKV(torch.zeros(1), torch.zeros(1), 5, None, None, ctl=ctl, ctl_tracker=tracker)
+    kv.prepare(8)
+    assert ctl[2:10].tolist() == list(range(8)) and ctl[10:].tolist() == tree.ctl.tolist()
+    kv.advance(8)
+    kv.rollback(5)
+    kv.commit_path(5, [0, 1, 4])
+    kv.prepare(8)
+    assert ctl[0].item() == 3 and ctl[2:10].tolist() == [0, 1, 4, 3, 4, 5, 6, 7]
+    tracker["tree"] = None
+    kv.advance(8)
+    kv.prepare(1)
+    assert ctl[2:].tolist() == tracker["single"].tolist()
 
 
 def _tiny_model(monkeypatch, layers=4, head_dim=64):
@@ -257,7 +459,7 @@ def _tiny_model(monkeypatch, layers=4, head_dim=64):
 
 @pytest.mark.parametrize("image_prompt", [False, True])
 def test_greedy_mtp_matches_plain_greedy(monkeypatch, image_prompt):
-    # auto and fixed-depth chain verify through the kitchen torch paths: causal GQA, deferred DeltaNet
+    # chain and tree verify through the kitchen torch paths: GQA prefix + tree merge, deferred DeltaNet
     from comfy.text_encoders.llama import FixedKVCache
     from comfy.text_encoders.qwen_vl import qwen2vl_mrope_position_ids
     model = _tiny_model(monkeypatch)
@@ -270,10 +472,60 @@ def test_greedy_mtp_matches_plain_greedy(monkeypatch, image_prompt):
     if image_prompt:
         assert positions.shape == (3, 24) and positions[:, -1].tolist() == [11, 11, 11]
     plain = model.generate(embeds.clone(), do_sample=False, max_length=40, mtp=False, position_ids=positions)
-    for mtp in (True, 3, 5):
+    for mtp in (True, "2", "3", "4", "5", "tree2s1", "tree2s2", "tree3s1", "tree4s1m8"):
         discards.clear()
         assert model.generate(embeds.clone(), do_sample=False, max_length=40, mtp=mtp, position_ids=positions) == plain
         assert discards and min(discards) < max(discards)  # partial acceptance happened
+
+
+@pytest.mark.parametrize("quantile", [0.42, 0.8, 0.92])
+@pytest.mark.parametrize("top_k", [0, 7])
+def test_sampled_tree_matches_sequential_with_same_draws(monkeypatch, quantile, top_k):
+    # Couple draws by quantile rather than RNG consumption: unused tree rows also sample.
+    def draw(weights, num_samples, generator=None):
+        assert num_samples == 1
+        cdf = weights.cumsum(-1) / weights.sum(-1, keepdim=True)
+        return (cdf < quantile).sum(-1, keepdim=True)
+
+    monkeypatch.setattr(torch, "multinomial", draw)
+    model = _tiny_model(monkeypatch)
+    embeds = torch.randn(1, 5, 64)
+    settings = dict(do_sample=True, max_length=65, temperature=0.7, top_k=top_k, top_p=0.95,
+                    min_p=0.05, repetition_penalty=1.2, presence_penalty=0.8)
+    expected = model.generate(embeds.clone(), mtp=False, **settings)
+    for preset in (True, "2", "3", "4", "5", "tree2s1", "tree2s2", "tree3s1", "tree4s1m8"):
+        assert model.generate(embeds.clone(), mtp=preset, **settings) == expected, preset
+        stop = expected[4]
+        stopped = expected[:expected.index(stop) + 1]
+        assert model.generate(embeds.clone(), mtp=preset, stop_tokens=[stop], **settings) == stopped
+
+
+@pytest.mark.parametrize("sampled", [False, True])
+def test_adaptive_switch_preserves_sequential_output(monkeypatch, sampled):
+    import comfy.text_encoders.qwen35 as qwen35
+
+    def draw(weights, num_samples, generator=None):
+        cdf = weights.cumsum(-1) / weights.sum(-1, keepdim=True)
+        return (cdf < 0.8).sum(-1, keepdim=True)
+
+    switches = []
+
+    def best_widths(widths, hits, draft_ms, verify_ms):
+        # every 32nd step: cycle through shapes that differ in depth and fanout
+        assert len(hits) == 7 and all(h >= 0 for row in hits for h in row)
+        switches.append(((1,) * 7, (2, 1, 4), (7,), (4, 3))[len(switches) % 4])
+        return switches[-1]
+
+    monkeypatch.setattr(torch, "multinomial", draw)
+    monkeypatch.setattr(qwen35, "best_widths", best_widths)
+    model = _tiny_model(monkeypatch)
+    embeds = torch.randn(1, 5, 64)
+    settings = dict(do_sample=sampled, max_length=400, temperature=0.7, top_k=7,
+                    top_p=0.95, min_p=0.05, repetition_penalty=1.2, presence_penalty=0.8)
+    expected = model.generate(embeds.clone(), mtp=False, **settings)
+    assert model.generate(embeds.clone(), mtp=True, **settings) == expected
+    assert len(set(switches)) == 4, switches
+    assert model.generate(embeds.clone(), mtp=False, **{**settings, "repetition_penalty": 1.0, "presence_penalty": 0.0}) != expected
 
 
 class _FakePacked:
@@ -296,11 +548,11 @@ def _int8_cache(monkeypatch, capacity=32):
     _fake_kitchen(monkeypatch)
     merges = []
 
-    def step_merge(out, lse, q, k, v, result):
-        merges.append((k, v))
+    def tree_merge(out, lse, q, k, v, mask, result):
+        merges.append((k, v, mask.clone()))
         return out
     monkeypatch.setattr(llama, "Int8DecodeCache", _FakePacked, raising=False)
-    monkeypatch.setattr(llama.comfy_kitchen, "flash_attention_decode_step_merge", step_merge)
+    monkeypatch.setattr(llama.comfy_kitchen, "flash_attention_decode_tree_merge", tree_merge)
     shared = FixedKVCache.shared(1, "cpu")
     return llama.Int8FixedKVCache.zeros(1, 1, capacity, 256, "cpu", torch.bfloat16, shared), merges
 
@@ -319,8 +571,8 @@ def test_int8_cache_merges_current_chain_rows(monkeypatch):
     assert kv.attend(xq, xk, xv).shape == (1, 3, 512)
     # the committed prefix is quantized once, then refreshed to the same length before attending
     assert kv.packed.updates == [([10], True), ([10], False)]
-    k, v = merges[-1]
-    assert k is xk and v is xv
+    k, v, mask = merges[-1]
+    assert k is xk and v is xv and mask.tolist() == [1, 3, 7]
 
 
 def test_int8_cache_keeps_bounded_circular_window(monkeypatch):
@@ -344,6 +596,27 @@ def test_int8_cache_keeps_bounded_circular_window(monkeypatch):
     kv.write(xk, xk)
     kv.attend(torch.randn(1, 2, 3, 256, dtype=torch.bfloat16), xk, xk)
     assert torch.equal(kv.key[:, :, 2:5], xk) and kv.packed.updates[-1] == ([14], False)
+
+
+@pytest.mark.parametrize("path", [[0, 1, 2, 3, 4], [0, 1, 2, 5], [0, 7]])
+def test_tree4s1m8_cache_commits_deep_and_sibling_paths(monkeypatch, path):
+    from comfy.text_encoders.qwen35 import MTP_MODES, VerifyTree
+    tree = VerifyTree(MTP_MODES["tree4s1m8"][1], 8, "cpu")
+    kv, merges = _int8_cache(monkeypatch)
+    kv.index = 10
+    kv.tracker["tree"] = tree
+    kv.prepare(8)
+    xk = torch.randn(1, 1, 8, 256, dtype=torch.bfloat16)
+    kv.write(xk, -xk)
+    kv.attend(torch.randn(1, 2, 8, 256, dtype=torch.bfloat16), xk, -xk)
+    assert merges[-1][2].tolist() == [1, 3, 7, 15, 31, 39, 67, 129]
+    kv.advance(8)
+    kv.rollback(8 - len(path))
+    kv.commit_path(10, path)
+    assert kv.index == 10 + len(path)
+    for token, row in enumerate(path, 10):
+        assert torch.equal(kv.key[:, :, token % 12], xk[:, :, row])
+        assert torch.equal(kv.value[:, :, token % 12], -xk[:, :, row])
 
 
 def _attention_config(config):
@@ -405,8 +678,8 @@ def test_checkpoint_and_lora_attention_select_each_kv_layer(monkeypatch):
     assert cache_types() == (FixedKVCache, FixedKVCache, FixedKVCache)
 
 
-@pytest.mark.parametrize("seq", [1, 3])
-def test_configured_decode_preserves_causal_visibility(monkeypatch, seq):
+@pytest.mark.parametrize("seq,tree_verify", [(1, False), (3, False), (8, True)])
+def test_configured_decode_preserves_causal_and_tree_visibility(monkeypatch, seq, tree_verify):
     import comfy.ldm.modules.attention as attention
     # Make the configured backend observably different from the default backend.
     @attention.wrap_attn
@@ -423,13 +696,25 @@ def test_configured_decode_preserves_causal_visibility(monkeypatch, seq):
     kv.prepare(9)
     attn(prefix, attention_mask=torch.full((9, 9), -torch.inf).triu(1),
          freqs_cis=torch.zeros(1, 1, 9, 32, 2, 2), optimized_attention=attention.attention_pytorch, past_key_value=kv)
-    # Repeat after rollback; stale rows past the current chain must not become visible.
+    tree = _tree2s2() if tree_verify else None
+    kv.tracker["tree"] = tree
+    # Repeat after rollback; stale tree rows must not become visible.
     for start in (9, 4):
         kv.index = start
         kv.prepare(seq)
         out, _ = attn(current, freqs_cis=torch.zeros(1, 1, seq, 32, 2, 2), past_key_value=kv)
         full = torch.cat((prefix[:, :start], current), dim=1)
         mask = torch.full((start + seq, start + seq), -torch.inf).triu(1)
+        parents = [-1, 0, 1, 1, 1, 0, 0, -1]
+        for row in range(seq):
+            ancestors = []
+            r = row
+            while r >= 0:
+                ancestors.append(start + r)
+                r = parents[r] if tree_verify else r - 1
+            visible = list(range(start)) + sorted(ancestors)
+            mask[start + row] = -torch.inf
+            mask[start + row, visible] = 0
         expected, _ = attn(full, attention_mask=mask, freqs_cis=torch.zeros(1, 1, start + seq, 32, 2, 2),
                            optimized_attention=attention.attention_pytorch)
         torch.testing.assert_close(out, expected[:, start:])
