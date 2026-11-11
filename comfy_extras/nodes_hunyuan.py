@@ -9,6 +9,7 @@ from typing_extensions import override
 from comfy_api.latest import ComfyExtension, io
 from comfy.ldm.hunyuan_video.upsampler import HunyuanVideo15SRModel
 from comfy.ldm.lightricks.latent_upsampler import LatentUpsampler
+from comfy.ldm.minimax.latent_upscaler import MiniMaxH3LatentUpscaler
 import folder_paths
 import json
 
@@ -222,6 +223,19 @@ class LatentUpscaleModelLoader(io.ComfyNode):
         elif "post_upsample_res_blocks.0.conv2.bias" in sd:
             config = json.loads(metadata["config"])
             model = LatentUpsampler.from_config(config, operations=comfy.ops.disable_weight_init).to(dtype=comfy.model_management.vae_dtype(allowed_dtypes=[torch.bfloat16, torch.float32]))
+            comfy.model_management.archive_model_dtypes(model)
+            model_patcher = comfy.model_patcher.CoreModelPatcher(model, load_device=comfy.model_management.get_torch_device(), offload_device=comfy.model_management.unet_offload_device(), fast_disk=fast_disk)
+            model.load_state_dict(sd, assign=model_patcher.is_dynamic())
+            model = model_patcher
+        elif "in_blocks.0.emb_layers.1.weight" in sd and "conv_in.weight" in sd and "in_blocks.1.dwconv.weight" in sd:
+            model = MiniMaxH3LatentUpscaler(
+                in_channels=sd["conv_in.weight"].shape[1],
+                channels=sd["conv_in.weight"].shape[0],
+                in_blocks=len({k.split(".")[1] for k in sd if k.startswith("in_blocks.") and ".in_layers." in k}),
+                out_blocks=len({k.split(".")[1] for k in sd if k.startswith("out_blocks.") and ".in_layers." in k}),
+                temporal_kernel=sd["in_blocks.1.dwconv.weight"].shape[2],
+                dtype=comfy.model_management.vae_dtype(allowed_dtypes=[torch.float16, torch.bfloat16, torch.float32]),
+                operations=comfy.ops.disable_weight_init)
             comfy.model_management.archive_model_dtypes(model)
             model_patcher = comfy.model_patcher.CoreModelPatcher(model, load_device=comfy.model_management.get_torch_device(), offload_device=comfy.model_management.unet_offload_device(), fast_disk=fast_disk)
             model.load_state_dict(sd, assign=model_patcher.is_dynamic())

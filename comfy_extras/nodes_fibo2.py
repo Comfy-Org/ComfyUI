@@ -4,6 +4,7 @@ import torch
 from typing_extensions import override
 
 import comfy.model_management
+import comfy.text_encoders.fibo2
 import comfy.utils
 import node_helpers
 import nodes
@@ -35,7 +36,7 @@ class TextEncodeFibo2(io.ComfyNode):
             inputs=[
                 io.Clip.Input("clip"),
                 io.String.Input("prompt", multiline=True),
-                io.String.Input("negative_prompt", multiline=True, advanced=True, tooltip="Empty is the null caption Fibo 2.0 was trained with for classifier-free guidance."),
+                io.String.Input("negative_prompt", multiline=True, advanced=True, tooltip="Empty is the null caption Fibo 2.0 was trained with for CFG with edit workflows."),
                 io.Vae.Input("vae", optional=True),
                 io.Autogrow.Input(
                     "images",
@@ -77,8 +78,8 @@ class TextEncodeFibo2(io.ComfyNode):
             # ranges include both ends: the base stops just above sigma 0.9, which already has the text images
             positive = (node_helpers.conditioning_set_values(base, {"end_percent": TEXT_IMAGES_START - 1e-6})
                         + node_helpers.conditioning_set_values(positive, {"start_percent": TEXT_IMAGES_START}))
-        # the negative is text only; an edit's reference latents condition both
-        negative = clip.encode_from_tokens_scheduled(clip.tokenize(negative_prompt))
+        # the negative is text only, encoded as written in the chat template, not cleaned like a caption, an edit's reference latents condition both
+        negative = clip.encode_from_tokens_scheduled(clip.tokenize(comfy.text_encoders.fibo2.TEMPLATE.format(negative_prompt) if negative_prompt.strip() else ""))
 
         if vae is not None and len(images) > 0:
             ref_latents = [vae.encode(image) for image in images]
