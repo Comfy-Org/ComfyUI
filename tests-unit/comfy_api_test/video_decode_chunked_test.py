@@ -282,19 +282,50 @@ def test_video_from_list_conforms_other_frame_rates_like_get_components(fixture_
     assert torch.equal(video.get_audio()["waveform"], components.audio["waveform"])
 
 
-def test_conformed_chunks_pick_the_same_frames_as_conformed_frame_indices():
+def test_video_from_list_conforms_alpha_with_the_frames(fixture_files, tmp_path):
+    other = write_video(str(tmp_path / "other.mov"), codec="png", pix_fmt="rgba", container_format="mov", fps=12, frames=9)
+    video = VideoFromList([VideoFromFile(fixture_files["png-alpha"]), VideoFromFile(other)])
+    components = video.get_components()
+    _, images, alpha = joined(video.decode_chunked(chunk_frames=4))
+    assert torch.equal(images, components.images)
+    assert alpha is not None and torch.equal(alpha.squeeze(-1), components.alpha.reshape(alpha.shape[:3]))
+
+
+def test_video_from_list_conforms_as_it_decodes(fixture_files, tmp_path, monkeypatch):
+    other = VideoFromFile(write_video(str(tmp_path / "other.mp4"), fps=12, frames=24, audio=False))
+    pulled = []
+    real = VideoFromFile.decode_chunked
+
+    def counting(self, *args, **kwargs):
+        for chunk in real(self, *args, **kwargs):
+            pulled.append(self is other)
+            yield chunk
+    monkeypatch.setattr(VideoFromFile, "decode_chunked", counting)
+    chunks = VideoFromList([VideoFromFile(fixture_files["h264"]), other]).decode_chunked(chunk_frames=4)
+    while next(chunks).start_frame < 20:  # the 24 fps part's 20 frames
+        pass
+    assert pulled.count(True) == 1, "a part at another frame rate is decoded ahead of the chunks it yields"
+    list(chunks)
+    assert pulled.count(True) == 6
+
+
+def test_conformed_frame_chunks_pick_the_same_frames_as_conformed_frame_indices():
     for source, target in [(24, 30), (30, 24), (12, 60), (60, 12), (25, Fraction(30000, 1001)), (Fraction(24000, 1001), 24)]:
         for count in range(0, 40, 3):
             frames = torch.arange(count, dtype=torch.float32).view(count, 1, 1, 1)
             expected = frames[video_types.conformed_frame_indices(count, source, target)]
             for chunk_frames in (1, 4, 7, 64):
-                source_chunks = (VideoChunk(images=frames[i:i + chunk_frames], start_frame=i, alpha=frames[i:i + chunk_frames] + 100)
-                                 for i in range(0, count, chunk_frames))
-                out = list(video_types.conformed_chunks(source_chunks, source, target, chunk_frames))
-                got = torch.cat([c.images for c in out]) if out else frames[:0]
-                assert torch.equal(got, expected), f"{source}->{target} fps, {count} frames, chunks of {chunk_frames}"
-                assert all(c.images.shape[0] <= chunk_frames for c in out)
-                assert all(torch.equal(c.alpha, c.images + 100) for c in out), "alpha follows the images"
+                for with_alpha in (True, False):
+                    source_chunks = ((frames[i:i + chunk_frames], frames[i:i + chunk_frames] + 100 if with_alpha else None)
+                                     for i in range(0, count, chunk_frames))
+                    out = list(video_types.conformed_frame_chunks(source_chunks, source, target, chunk_frames))
+                    got = torch.cat([images for images, _ in out]) if out else frames[:0]
+                    assert torch.equal(got, expected), f"{source}->{target} fps, {count} frames, chunks of {chunk_frames}"
+                    assert all(images.shape[0] <= chunk_frames for images, _ in out)
+                    if with_alpha:
+                        assert all(torch.equal(alpha, images + 100) for images, alpha in out), "alpha follows the images"
+                    else:
+                        assert all(alpha is None for _, alpha in out)
 
 
 def test_get_audio_skips_decoding_frames(fixture_files, monkeypatch):

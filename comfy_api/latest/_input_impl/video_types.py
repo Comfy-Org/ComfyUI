@@ -432,9 +432,9 @@ def conformed_frame_count(frame_count, source_rate, target_rate):
     return len(conformed_frame_indices(frame_count, source_rate, target_rate))
 
 
-def conformed_chunks(chunks, source_rate, target_rate, chunk_frames):
-    """The frames conformed_frame_indices picks from the chunks, in chunks of at most chunk_frames, holding one
-    source chunk at a time."""
+def conformed_frame_chunks(chunks, source_rate, target_rate, chunk_frames):
+    """The frames conformed_frame_indices picks from (images, alpha) chunks, as (images, alpha) chunks of at most
+    chunk_frames, holding one source chunk at a time."""
     slots_per_frame = Fraction(target_rate) / Fraction(source_rate)
     held = (None, None)  # the last frame picked so far (images, alpha), each one frame long
     out_count = index = 0
@@ -447,29 +447,26 @@ def conformed_chunks(chunks, source_rate, target_rate, chunk_frames):
         picked = tensor[rows[repeats:]]
         return torch.cat([last.expand(repeats, *last.shape[1:]), picked]) if repeats else picked
 
-    for chunk in chunks:
+    for images, alpha in chunks:
         rows = []
-        for row in range(chunk.images.shape[0]):
+        for row in range(images.shape[0]):
             slot = conformed_output_slot((index + row) * slots_per_frame, (index + row + 1) * slots_per_frame,
                                          out_count - 1)
             if slot is not None:
-                if out_count:  # as conformed_frame_indices: fill up to the slot with the last frame picked
-                    rows.extend([rows[-1] if rows else -1] * (slot - out_count))
-                    out_count = slot
+                rows.extend([rows[-1] if rows else -1] * (slot - out_count))
                 rows.append(row)
-                out_count += 1
-        index += chunk.images.shape[0]
+                out_count = slot + 1
+        index += images.shape[0]
         for start in range(0, len(rows), chunk_frames):
             part = rows[start:start + chunk_frames]
-            yield VideoChunk(images=pick(chunk.images, held[0], part), start_frame=0,
-                             alpha=pick(chunk.alpha, held[1], part))
+            yield pick(images, held[0], part), pick(alpha, held[1], part)
         if rows:
-            held = (pick(chunk.images, held[0], rows[-1:]), pick(chunk.alpha, held[1], rows[-1:]))
+            held = (pick(images, held[0], rows[-1:]), pick(alpha, held[1], rows[-1:]))
     tail = math.floor(index * slots_per_frame + Fraction(1, 2)) - out_count
     if held[0] is not None:
         for start in range(0, max(tail, 0), chunk_frames):
             part = [-1] * min(chunk_frames, tail - start)
-            yield VideoChunk(images=pick(held[0], held[0], part), start_frame=0, alpha=pick(held[1], held[1], part))
+            yield pick(held[0], held[0], part), pick(held[1], held[1], part)
 
 
 def conformed_waveform(audio, sample_rate, channels):
@@ -1746,12 +1743,14 @@ class VideoFromList(VideoInput):
         keep_alpha = all(video._has_alpha() for video in self.videos)
         offset = 0
         for video in self.videos:
-            chunks = video.decode_chunked(chunk_frames, dtype)
-            if video.get_frame_rate() != frame_rate:
-                chunks = conformed_chunks(chunks, video.get_frame_rate(), frame_rate, chunk_frames)
-            for chunk in chunks:
-                yield VideoChunk(images=chunk.images, start_frame=offset, alpha=chunk.alpha if keep_alpha else None)
-                offset += chunk.images.shape[0]
+            chunks = ((chunk.images, chunk.alpha if keep_alpha else None)
+                      for chunk in video.decode_chunked(chunk_frames, dtype))
+            source_rate = video.get_frame_rate()
+            if source_rate != frame_rate:
+                chunks = conformed_frame_chunks(chunks, source_rate, frame_rate, chunk_frames)
+            for images, alpha in chunks:
+                yield VideoChunk(images=images, start_frame=offset, alpha=alpha)
+                offset += images.shape[0]
 
     def _decodes_as_base(self) -> bool:
         return (type(self).get_components is VideoFromList.get_components
