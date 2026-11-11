@@ -1239,6 +1239,9 @@ class CFGGuider:
         return self.inner_model.process_latent_out(samples.to(torch.float32))
 
     def outer_sample(self, noise, latent_image, sampler, sigmas, denoise_mask=None, callback=None, disable_pbar=False, seed=None, latent_shapes=None):
+        # The outer invocation's geometry must be visible to memory admission.
+        # inner_sample() rebinds it again for wrapper-transformed invocations.
+        self.model_patcher.model.latent_shapes = latent_shapes
         self.inner_model, self.conds, self.loaded_models = comfy.sampler_helpers.prepare_sampling(self.model_patcher, noise.shape, self.conds, self.model_options)
         device = self.model_patcher.load_device
 
