@@ -101,6 +101,25 @@ jobs:
           ref: ${{ inputs.git_tag }}
           fetch-depth: 150
           persist-credentials: false
+      - name: Check release version
+        shell: python
+        env:
+          RELEASE_TAG: ${{ inputs.git_tag }}
+        run: |
+          import ast
+          import os
+          from pathlib import Path
+
+          module = ast.parse(Path("comfyui_version.py").read_text(encoding="utf-8"))
+          version = next(
+              ast.literal_eval(node.value)
+              for node in module.body
+              if isinstance(node, ast.Assign)
+              and any(isinstance(target, ast.Name) and target.id == "__version__" for target in node.targets)
+          )
+          tag = os.environ["RELEASE_TAG"]
+          if tag != f"v{version}":
+              raise SystemExit(f"Release tag {tag!r} does not match comfyui_version.py version {version!r}")
       - uses: actions/cache/restore@v4
         id: cache
         with:
