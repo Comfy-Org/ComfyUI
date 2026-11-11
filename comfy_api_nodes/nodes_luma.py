@@ -15,11 +15,9 @@ from comfy_api_nodes.apis.luma import (
     LumaRay32KeyframeItem,
 )
 from comfy_api_nodes.util import (
-    ApiEndpoint,
     download_url_to_image_tensor,
     download_url_to_video_output,
-    poll_op,
-    sync_op,
+    router_op,
     upload_image_to_comfyapi,
     upload_video_to_comfyapi,
     validate_string,
@@ -68,37 +66,6 @@ async def _luma2_upload_image_refs(
     if len(out) > max_count:
         raise ValueError(f"Maximum {max_count} reference images are allowed.")
     return out or None
-
-
-async def _luma2_submit_and_poll(
-    cls: type[IO.ComfyNode],
-    request: Luma2GenerationRequest,
-    *,
-    estimated_duration: int | None = None,
-) -> Luma2Generation:
-    """Submit a Luma Agents generation and poll until done; returns the completed generation."""
-    initial = await sync_op(
-        cls,
-        ApiEndpoint(path="/proxy/luma_2/generations", method="POST"),
-        response_model=Luma2Generation,
-        data=request,
-    )
-    if not initial.id:
-        raise RuntimeError("Luma API did not return a generation id.")
-    final = await poll_op(
-        cls,
-        ApiEndpoint(path=f"/proxy/luma_2/generations/{initial.id}", method="GET"),
-        response_model=Luma2Generation,
-        status_extractor=lambda r: r.state,
-        progress_extractor=lambda r: None,
-        estimated_duration=estimated_duration,
-    )
-    if not final.output or not final.output[0].url:
-        msg = final.failure_reason or "no output returned"
-        if final.failure_code:
-            msg = f"{msg} [{final.failure_code}]"
-        raise RuntimeError(f"Luma generation failed: {msg}")
-    return final
 
 
 class LumaImageNode(IO.ComfyNode):
@@ -227,7 +194,7 @@ class LumaImageNode(IO.ComfyNode):
             web_search=model["web_search"],
             image_ref=await _luma2_upload_image_refs(cls, model.get("image_ref"), max_count=9),
         )
-        final = await _luma2_submit_and_poll(cls, request)
+        final = await router_op(cls, f"luma_2/{request.model}", response_model=Luma2Generation, data=request)
         return IO.NodeOutput(await download_url_to_image_tensor(final.output[0].url))
 
 
@@ -314,7 +281,7 @@ class LumaImageEditNode(IO.ComfyNode):
             web_search=model["web_search"],
             image_ref=await _luma2_upload_image_refs(cls, model.get("image_ref"), max_count=8),
         )
-        final = await _luma2_submit_and_poll(cls, request)
+        final = await router_op(cls, f"luma_2/{request.model}", response_model=Luma2Generation, data=request)
         return IO.NodeOutput(await download_url_to_image_tensor(final.output[0].url))
 
 
@@ -383,7 +350,7 @@ def _ray32_seed_input() -> IO.Input:
 
 async def _ray32_generate(cls: type[IO.ComfyNode], request: Luma2GenerationRequest) -> IO.NodeOutput:
     """Run a ray-3.2 generation and return (video, generation_id)."""
-    final = await _luma2_submit_and_poll(cls, request, estimated_duration=120)
+    final = await router_op(cls, "luma_2/ray-3.2", response_model=Luma2Generation, data=request)
     video = await download_url_to_video_output(final.output[0].url)
     return IO.NodeOutput(video, final.id or "")
 
