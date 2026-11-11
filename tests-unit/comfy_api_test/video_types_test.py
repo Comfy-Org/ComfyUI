@@ -1347,10 +1347,22 @@ def test_concatenation_conforms_clips_to_the_first_clip_frame_rate(first_fps, se
         pytest.param(6, 30, 25, [0, 1, 2, 3, 5], id="higher-rate-drops-a-frame"),
         pytest.param(4, 50, 25, [0, 2], id="double-rate-keeps-every-other-frame"),
         pytest.param(3, 24, 24, [0, 1, 2], id="same-rate-keeps-every-frame"),
+        pytest.param(6, 50, 20, [0, 2, 5], id="last-frame-starting-a-partial-slot-is-kept"),
     ],
 )
 def test_conformed_frame_indices_pick_frames_by_time(frame_count, source_rate, target_rate, expected):
     assert conformed_frame_indices(frame_count, Fraction(source_rate), Fraction(target_rate)) == expected
+
+
+def test_concatenation_frame_count_matches_the_saved_frames_when_a_clip_ends_in_a_partial_slot():
+    first = create_transcode_source(frames=20, fps=20)
+    second = create_transcode_source(frames=6, fps=50)
+    try:
+        video = VideoFromList([VideoFromFile(first), VideoFromFile(second)])
+        assert video.get_frame_count() == len(video.get_components().images) == transcode_and_probe(video)["frames"] == 23
+    finally:
+        os.unlink(first)
+        os.unlink(second)
 
 
 def test_materializing_conforms_clips_to_the_first_clip():

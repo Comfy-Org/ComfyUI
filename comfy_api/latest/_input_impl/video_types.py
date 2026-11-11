@@ -401,10 +401,6 @@ def conformed_output_slot(start, end, last_slot):
     return None if slot == last_slot or slot >= end else slot
 
 
-def conformed_frame_count(frame_count, source_rate, target_rate):
-    return math.floor(frame_count * Fraction(target_rate) / Fraction(source_rate) + Fraction(1, 2))
-
-
 def conformed_frame_indices(frame_count, source_rate, target_rate):
     slots_per_frame = Fraction(target_rate) / Fraction(source_rate)
     indices = []
@@ -413,8 +409,14 @@ def conformed_frame_indices(frame_count, source_rate, target_rate):
         if slot is not None:
             indices.extend(indices[-1:] * (slot - len(indices)))
             indices.append(index)
-    indices.extend(indices[-1:] * (conformed_frame_count(frame_count, source_rate, target_rate) - len(indices)))
+    indices.extend(indices[-1:] * (math.floor(frame_count * slots_per_frame + Fraction(1, 2)) - len(indices)))
     return indices
+
+
+def conformed_frame_count(frame_count, source_rate, target_rate):
+    if source_rate == target_rate:
+        return frame_count
+    return len(conformed_frame_indices(frame_count, source_rate, target_rate))
 
 
 def conformed_waveform(audio, sample_rate, channels):
