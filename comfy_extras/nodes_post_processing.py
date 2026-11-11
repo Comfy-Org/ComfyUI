@@ -20,8 +20,9 @@ class Blend(io.ComfyNode):
     def define_schema(cls):
         return io.Schema(
             node_id="ImageBlend",
-            display_name="Image Blend",
-            category="image/postprocessing",
+            search_aliases=["mix images"],
+            display_name="Blend Images",
+            category="image/filters",
             essentials_category="Image Tools",
             inputs=[
                 io.Image.Input("image1"),
@@ -46,6 +47,8 @@ class Blend(io.ComfyNode):
         blended_image = cls.blend_mode(image1, image2, blend_mode)
         blended_image = image1 * (1 - blend_factor) + blended_image * blend_factor
         blended_image = torch.clamp(blended_image, 0, 1)
+        if image1.shape[-1] == 4:  # alpha stores transparency, not color
+            blended_image[..., 3] = image1[..., 3]
         return io.NodeOutput(blended_image)
 
     @classmethod
@@ -79,8 +82,8 @@ class Blur(io.ComfyNode):
     def define_schema(cls):
         return io.Schema(
             node_id="ImageBlur",
-            display_name="Image Blur",
-            category="image/postprocessing",
+            display_name="Blur Image",
+            category="image/filters",
             inputs=[
                 io.Image.Input("image"),
                 io.Int.Input("blur_radius", default=1, min=1, max=31, step=1),
@@ -115,7 +118,8 @@ class Quantize(io.ComfyNode):
     def define_schema(cls):
         return io.Schema(
             node_id="ImageQuantize",
-            category="image/postprocessing",
+            display_name="Quantize Image",
+            category="image/filters",
             inputs=[
                 io.Image.Input("image"),
                 io.Int.Input("colors", default=256, min=1, max=256, step=1),
@@ -154,11 +158,12 @@ class Quantize(io.ComfyNode):
 
     @classmethod
     def execute(cls, image: torch.Tensor, colors: int, dither: str) -> io.NodeOutput:
-        batch_size, height, width, _ = image.shape
-        result = torch.zeros_like(image)
+        rgb = image[..., :3]
+        batch_size, height, width, _ = rgb.shape
+        result = torch.zeros_like(rgb)
 
         for b in range(batch_size):
-            im = Image.fromarray((image[b] * 255).to(torch.uint8).numpy(), mode='RGB')
+            im = Image.fromarray((rgb[b] * 255).to(torch.uint8).numpy(), mode='RGB')
 
             pal_im = im.quantize(colors=colors) # Required as described in https://github.com/python-pillow/Pillow/issues/5836
 
@@ -173,6 +178,8 @@ class Quantize(io.ComfyNode):
             quantized_array = torch.tensor(np.array(quantized_image.convert("RGB"))).float() / 255
             result[b] = quantized_array
 
+        if image.shape[-1] == 4:
+            result = torch.cat((result, image[..., 3:]), dim=-1)
         return io.NodeOutput(result)
 
 class Sharpen(io.ComfyNode):
@@ -180,7 +187,8 @@ class Sharpen(io.ComfyNode):
     def define_schema(cls):
         return io.Schema(
             node_id="ImageSharpen",
-            category="image/postprocessing",
+            display_name="Sharpen Image",
+            category="image/filters",
             inputs=[
                 io.Image.Input("image"),
                 io.Int.Input("sharpen_radius", default=1, min=1, max=31, step=1, advanced=True),
@@ -224,6 +232,7 @@ class ImageScaleToTotalPixels(io.ComfyNode):
     def define_schema(cls):
         return io.Schema(
             node_id="ImageScaleToTotalPixels",
+            display_name="Scale Image to Total Pixels",
             category="image/upscaling",
             inputs=[
                 io.Image.Input("image"),
@@ -434,7 +443,7 @@ class ResizeImageMaskNode(io.ComfyNode):
             node_id="ResizeImageMaskNode",
             display_name="Resize Image/Mask",
             description="Resize an image or mask using various scaling methods.",
-            category="transform",
+            category="image/transform",
             search_aliases=["resize", "resize image", "resize mask", "scale", "scale image", "scale mask", "image resize", "change size", "dimensions", "shrink", "enlarge"],
             inputs=[
                 io.MatchType.Input("input", template=template),
@@ -564,11 +573,11 @@ def batch_latents(latents: list[dict[str, torch.Tensor]]) -> dict[str, torch.Ten
 class BatchImagesNode(io.ComfyNode):
     @classmethod
     def define_schema(cls):
-        autogrow_template = io.Autogrow.TemplatePrefix(io.Image.Input("image"), prefix="image", min=2, max=50)
+        autogrow_template = io.Autogrow.TemplatePrefix(io.Image.Input("image"), prefix="image", min=1, max=50)
         return io.Schema(
             node_id="BatchImagesNode",
             display_name="Batch Images",
-            category="image",
+            category="image/batch",
             essentials_category="Image Tools",
             search_aliases=["batch", "image batch", "batch images", "combine images", "merge images", "stack images"],
             inputs=[
@@ -586,12 +595,12 @@ class BatchImagesNode(io.ComfyNode):
 class BatchMasksNode(io.ComfyNode):
     @classmethod
     def define_schema(cls):
-        autogrow_template = io.Autogrow.TemplatePrefix(io.Mask.Input("mask"), prefix="mask", min=2, max=50)
+        autogrow_template = io.Autogrow.TemplatePrefix(io.Mask.Input("mask"), prefix="mask", min=1, max=50)
         return io.Schema(
             node_id="BatchMasksNode",
             search_aliases=["combine masks", "stack masks", "merge masks"],
             display_name="Batch Masks",
-            category="mask",
+            category="image/mask",
             inputs=[
                 io.Autogrow.Input("masks", template=autogrow_template)
             ],
@@ -607,12 +616,12 @@ class BatchMasksNode(io.ComfyNode):
 class BatchLatentsNode(io.ComfyNode):
     @classmethod
     def define_schema(cls):
-        autogrow_template = io.Autogrow.TemplatePrefix(io.Latent.Input("latent"), prefix="latent", min=2, max=50)
+        autogrow_template = io.Autogrow.TemplatePrefix(io.Latent.Input("latent"), prefix="latent", min=1, max=50)
         return io.Schema(
             node_id="BatchLatentsNode",
             search_aliases=["combine latents", "stack latents", "merge latents"],
             display_name="Batch Latents",
-            category="latent",
+            category="model/latent/batch",
             inputs=[
                 io.Autogrow.Input("latents", template=autogrow_template)
             ],
@@ -666,12 +675,13 @@ class ColorTransfer(io.ComfyNode):
     def define_schema(cls):
         return io.Schema(
             node_id="ColorTransfer",
-            category="image/postprocessing",
+            display_name="Transfer Color",
+            category="image/filters",
             description="Match the colors of one image to another using various algorithms.",
             search_aliases=["color match", "color grading", "color correction", "match colors", "color transform", "mkl", "reinhard", "histogram"],
             inputs=[
                 io.Image.Input("image_target", tooltip="Image(s) to apply the color transform to."),
-                io.Image.Input("image_ref", optional=True, tooltip="Reference image(s) to match colors to. If not provided, processing is skipped"),
+                io.Image.Input("image_ref", tooltip="Reference image(s) to match colors to."),
                 io.Combo.Input("method", options=['reinhard_lab', 'mkl_lab', 'histogram'],),
                 io.DynamicCombo.Input("source_stats",
                     tooltip="per_frame: each frame matched to image_ref individually. uniform: pool stats across all source frames as baseline, match to image_ref. target_frame: use one chosen frame as the baseline for the transform to image_ref, applied uniformly to all frames (preserves relative differences)",

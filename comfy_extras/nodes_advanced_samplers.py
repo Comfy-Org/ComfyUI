@@ -45,7 +45,7 @@ class SamplerLCMUpscale(io.ComfyNode):
     def define_schema(cls) -> io.Schema:
         return io.Schema(
             node_id="SamplerLCMUpscale",
-            category="sampling/custom_sampling/samplers",
+            category="model/sampling/samplers",
             inputs=[
                 io.Float.Input("scale_ratio", default=1.0, min=0.1, max=20.0, step=0.01, advanced=True),
                 io.Int.Input("scale_steps", default=-1, min=-1, max=1000, step=1, advanced=True),
@@ -86,13 +86,44 @@ def sample_euler_pp(model, x, sigmas, extra_args=None, callback=None, disable=No
     return x
 
 
+class SamplerLCM(io.ComfyNode):
+    @classmethod
+    def define_schema(cls) -> io.Schema:
+        return io.Schema(
+            node_id="SamplerLCM",
+            category="model/sampling/samplers",
+            description=("LCM sampler with tunable per-step noise. s_noise is a multiplier on the model's training noise scale"),
+            inputs=[
+                io.Float.Input("s_noise", default=1.0, min=0.0, max=64.0, step=0.01,
+                               tooltip="Per-step noise multiplier at the first step (1.0 = match training)."),
+                io.Float.Input("s_noise_end", default=1.0, min=0.0, max=64.0, step=0.01,
+                               tooltip="Per-step noise multiplier at the last step. Set equal to s_noise for a constant schedule."),
+                io.Float.Input("noise_clip_std", default=0.0, min=0.0, max=10.0, step=0.01,
+                               tooltip="Clamp per-step noise to +/- N*std. 0 disables."),
+            ],
+            outputs=[io.Sampler.Output()],
+        )
+
+    @classmethod
+    def execute(cls, s_noise, s_noise_end, noise_clip_std) -> io.NodeOutput:
+        sampler = comfy.samplers.ksampler(
+            "lcm",
+            {
+                "s_noise": float(s_noise),
+                "s_noise_end": float(s_noise_end),
+                "noise_clip_std": float(noise_clip_std),
+            },
+        )
+        return io.NodeOutput(sampler)
+
+
 class SamplerEulerCFGpp(io.ComfyNode):
     @classmethod
     def define_schema(cls) -> io.Schema:
         return io.Schema(
             node_id="SamplerEulerCFGpp",
             display_name="SamplerEulerCFG++",
-            category="_for_testing",  # "sampling/custom_sampling/samplers"
+            category="experimental",  # "sampling/samplers"
             inputs=[
                 io.Combo.Input("version", options=["regular", "alternative"], advanced=True),
             ],
@@ -114,6 +145,7 @@ class AdvancedSamplersExtension(ComfyExtension):
     async def get_node_list(self) -> list[type[io.ComfyNode]]:
         return [
             SamplerLCMUpscale,
+            SamplerLCM,
             SamplerEulerCFGpp,
         ]
 

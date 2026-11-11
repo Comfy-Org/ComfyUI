@@ -9,7 +9,8 @@ class CLIPTextEncodeSDXLRefiner(io.ComfyNode):
     def define_schema(cls):
         return io.Schema(
             node_id="CLIPTextEncodeSDXLRefiner",
-            category="advanced/conditioning",
+            display_name="CLIP Text Encode (SDXL Refiner)",
+            category="model/conditioning/stable diffusion",
             inputs=[
                 io.Float.Input("ascore", default=6.0, min=0.0, max=1000.0, step=0.01),
                 io.Int.Input("width", default=1024, min=0, max=nodes.MAX_RESOLUTION),
@@ -30,7 +31,8 @@ class CLIPTextEncodeSDXL(io.ComfyNode):
     def define_schema(cls):
         return io.Schema(
             node_id="CLIPTextEncodeSDXL",
-            category="advanced/conditioning",
+            display_name="CLIP Text Encode (SDXL)",
+            category="model/conditioning/stable diffusion",
             inputs=[
                 io.Clip.Input("clip"),
                 io.Int.Input("width", default=1024, min=0, max=nodes.MAX_RESOLUTION),

@@ -1,6 +1,5 @@
 ### 🗻 This file is created through the spirit of Mount Fuji at its peak
 # TODO(yoland): clean up this after I get back down
-import sys
 import pytest
 import os
 import tempfile
@@ -9,8 +8,6 @@ from importlib import reload
 
 import folder_paths
 import comfy.cli_args
-from comfy.options import enable_args_parsing
-enable_args_parsing()
 
 
 @pytest.fixture()
@@ -26,17 +23,13 @@ def temp_dir():
 
 
 @pytest.fixture
-def set_base_dir():
+def set_base_dir(monkeypatch):
     def _set_base_dir(base_dir):
-        # Mock CLI args
-        with patch.object(sys, 'argv', ["main.py", "--base-directory", base_dir]):
-            reload(comfy.cli_args)
-            reload(folder_paths)
-    yield _set_base_dir
-    # Reload the modules after each test to ensure isolation
-    with patch.object(sys, 'argv', ["main.py"]):
-        reload(comfy.cli_args)
+        monkeypatch.setattr(comfy.cli_args.args, "base_directory", base_dir)
         reload(folder_paths)
+    yield _set_base_dir
+    monkeypatch.undo()
+    reload(folder_paths)
 
 
 def test_get_directory_by_type(clear_folder_paths):
@@ -53,8 +46,11 @@ def test_annotated_filepath():
 
 def test_get_annotated_filepath():
     default_dir = "/default/dir"
-    assert folder_paths.get_annotated_filepath("test.txt", default_dir) == os.path.join(default_dir, "test.txt")
-    assert folder_paths.get_annotated_filepath("test.txt [output]") == os.path.join(folder_paths.get_output_directory(), "test.txt")
+    # get_annotated_filepath now normalizes with os.path.abspath (part of the
+    # GHSA-779p traversal hardening), so compare against the normalized form —
+    # on Windows abspath also prepends the current drive letter.
+    assert folder_paths.get_annotated_filepath("test.txt", default_dir) == os.path.abspath(os.path.join(default_dir, "test.txt"))
+    assert folder_paths.get_annotated_filepath("test.txt [output]") == os.path.abspath(os.path.join(folder_paths.get_output_directory(), "test.txt"))
 
 def test_add_model_folder_path_append(clear_folder_paths):
     folder_paths.add_model_folder_path("test_folder", "/default/path", is_default=True)
@@ -160,3 +156,17 @@ def test_base_path_change_clears_old(set_base_dir):
 
     for name in ["controlnet", "diffusion_models", "text_encoders"]:
         assert len(folder_paths.get_folder_paths(name)) == 2
+
+
+def test_models_directory_cli_and_getters(temp_dir, monkeypatch):
+    try:
+        monkeypatch.setattr(comfy.cli_args.args, "models_directory", temp_dir)
+        reload(folder_paths)
+
+        assert folder_paths.models_dir == os.path.abspath(temp_dir)
+
+        with pytest.raises(Exception):
+            comfy.cli_args.is_valid_directory(os.path.join(temp_dir, "non_existent_folder_path"))
+    finally:
+        monkeypatch.undo()
+        reload(folder_paths)

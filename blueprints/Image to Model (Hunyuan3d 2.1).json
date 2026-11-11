@@ -72,7 +72,7 @@
         },
         "revision": 0,
         "config": {},
-        "name": "local-Image to Model (Hunyuan3d 2.1)",
+        "name": "Image to 3D Model (Hunyuan3d 2.1)",
         "inputNode": {
           "id": -10,
           "bounding": [
@@ -765,7 +765,8 @@
         "extra": {
           "workflowRendererVersion": "LG"
         },
-        "category": "3D/Image to 3D Model"
+        "category": "3D/Image to 3D Model",
+        "description": "Generates 3D mesh models from a single input image using Hunyuan3D 2.0/2.1."
       }
     ]
   },

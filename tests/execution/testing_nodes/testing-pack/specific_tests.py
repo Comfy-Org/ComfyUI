@@ -305,6 +305,37 @@ class TestDynamicDependencyCycle:
             "expand": g.finalize(),
         }
 
+class TestDisabledNode:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {"required": {}}
+
+    RETURN_TYPES = ()
+    FUNCTION = "execute"
+    CATEGORY = "Testing/Nodes"
+    OUTPUT_NODE = True
+
+    def execute(self):
+        return ()
+
+class TestExpandsToDisabledNode:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {"required": {}}
+
+    RETURN_TYPES = ()
+    FUNCTION = "expand"
+    CATEGORY = "Testing/Nodes"
+    OUTPUT_NODE = True
+
+    def expand(self):
+        g = GraphBuilder()
+        g.node("TestDisabledNode")
+        return {
+            "result": (),
+            "expand": g.finalize(),
+        }
+
 class TestMixedExpansionReturns:
     @classmethod
     def INPUT_TYPES(cls):
@@ -409,7 +440,7 @@ class TestSleep(ComfyNodeABC):
     RETURN_TYPES = (IO.ANY,)
     FUNCTION = "sleep"
 
-    CATEGORY = "_for_testing"
+    CATEGORY = "experimental"
 
     async def sleep(self, value, seconds, unique_id):
         pbar = ProgressBar(seconds, node_id=unique_id)
@@ -440,7 +471,7 @@ class TestParallelSleep(ComfyNodeABC):
         }
     RETURN_TYPES = ("IMAGE",)
     FUNCTION = "parallel_sleep"
-    CATEGORY = "_for_testing"
+    CATEGORY = "experimental"
     OUTPUT_NODE = True
 
     def parallel_sleep(self, image1, image2, image3, sleep1, sleep2, sleep3, unique_id):
@@ -474,13 +505,74 @@ class TestOutputNodeWithSocketOutput:
         }
     RETURN_TYPES = ("IMAGE",)
     FUNCTION = "process"
-    CATEGORY = "_for_testing"
+    CATEGORY = "experimental"
     OUTPUT_NODE = True
 
     def process(self, image, value):
         # Apply value scaling and return both as output and socket
         result = image * value
         return (result,)
+
+
+class TestExecutedNodeIdsChild:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "value": ("STRING", {"default": "expanded-child"}),
+            },
+        }
+
+    RETURN_TYPES = ()
+    FUNCTION = "emit"
+    CATEGORY = "Testing/Nodes"
+    OUTPUT_NODE = True
+
+    def emit(self, value):
+        return {"ui": {"values": [value]}}
+
+
+class TestExecutedNodeIdsExpander:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "value": ("STRING", {"default": "expanded-child"}),
+            },
+        }
+
+    RETURN_TYPES = ()
+    FUNCTION = "expand"
+    CATEGORY = "Testing/Nodes"
+    OUTPUT_NODE = True
+
+    @classmethod
+    def IS_CHANGED(cls, **kwargs):
+        return float("NaN")
+
+    def expand(self, value):
+        graph = GraphBuilder()
+        graph.node("TestExecutedNodeIdsChild", value=value)
+        return {"result": (), "expand": graph.finalize()}
+
+
+class TestExecutedNodeIdsBlocking:
+    started_event = None
+    release_event = None
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {"required": {}}
+
+    RETURN_TYPES = ()
+    FUNCTION = "block"
+    CATEGORY = "Testing/Nodes"
+    OUTPUT_NODE = True
+
+    async def block(self):
+        self.started_event.set()
+        await self.release_event.wait()
+        return {"ui": {"completed": [True]}}
 
 TEST_NODE_CLASS_MAPPINGS = {
     "TestLazyMixImages": TestLazyMixImages,
@@ -493,11 +585,16 @@ TEST_NODE_CLASS_MAPPINGS = {
     "TestCustomValidation4": TestCustomValidation4,
     "TestCustomValidation5": TestCustomValidation5,
     "TestDynamicDependencyCycle": TestDynamicDependencyCycle,
+    "TestDisabledNode": TestDisabledNode,
+    "TestExpandsToDisabledNode": TestExpandsToDisabledNode,
     "TestMixedExpansionReturns": TestMixedExpansionReturns,
     "TestSamplingInExpansion": TestSamplingInExpansion,
     "TestSleep": TestSleep,
     "TestParallelSleep": TestParallelSleep,
     "TestOutputNodeWithSocketOutput": TestOutputNodeWithSocketOutput,
+    "TestExecutedNodeIdsChild": TestExecutedNodeIdsChild,
+    "TestExecutedNodeIdsExpander": TestExecutedNodeIdsExpander,
+    "TestExecutedNodeIdsBlocking": TestExecutedNodeIdsBlocking,
 }
 
 TEST_NODE_DISPLAY_NAME_MAPPINGS = {
@@ -511,9 +608,14 @@ TEST_NODE_DISPLAY_NAME_MAPPINGS = {
     "TestCustomValidation4": "Custom Validation 4",
     "TestCustomValidation5": "Custom Validation 5",
     "TestDynamicDependencyCycle": "Dynamic Dependency Cycle",
+    "TestDisabledNode": "Disabled Node",
+    "TestExpandsToDisabledNode": "Expands To Disabled Node",
     "TestMixedExpansionReturns": "Mixed Expansion Returns",
     "TestSamplingInExpansion": "Sampling In Expansion",
     "TestSleep": "Test Sleep",
     "TestParallelSleep": "Test Parallel Sleep",
     "TestOutputNodeWithSocketOutput": "Test Output Node With Socket Output",
+    "TestExecutedNodeIdsChild": "Executed Node IDs Child",
+    "TestExecutedNodeIdsExpander": "Executed Node IDs Expander",
+    "TestExecutedNodeIdsBlocking": "Executed Node IDs Blocking",
 }

@@ -1,0 +1,45 @@
+name: Tag Dispatch to Cloud
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  dispatch-cloud:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Send repository dispatch to cloud
+        env:
+          DISPATCH_TOKEN: ${{ secrets.CLOUD_REPO_DISPATCH_TOKEN }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${DISPATCH_TOKEN:-}" ]; then
+            echo "::error::CLOUD_REPO_DISPATCH_TOKEN is required but not set."
+            exit 1
+          fi
+
+          RELEASE_URL="https://github.com/${{ github.repository }}/releases/tag/${RELEASE_TAG}"
+
+          PAYLOAD="$(jq -n \
+            --arg release_tag "$RELEASE_TAG" \
+            --arg release_url "$RELEASE_URL" \
+            '{
+              event_type: "comfyui_tag_pushed",
+              client_payload: {
+                release_tag: $release_tag,
+                release_url: $release_url
+              }
+            }')"
+
+          curl -fsSL \
+            -X POST \
+            -H "Accept: application/vnd.github+json" \
+            -H "Content-Type: application/json" \
+            -H "Authorization: Bearer ${DISPATCH_TOKEN}" \
+            https://api.github.com/repos/Comfy-Org/cloud/dispatches \
+            -d "$PAYLOAD"
+
+          echo "✅ Dispatched ComfyUI tag ${RELEASE_TAG} to Comfy-Org/cloud"

@@ -21,7 +21,7 @@ class ModelMergeSimple:
     RETURN_TYPES = ("MODEL",)
     FUNCTION = "merge"
 
-    CATEGORY = "advanced/model_merging"
+    CATEGORY = "model/merging"
 
     def merge(self, model1, model2, ratio):
         m = model1.clone()
@@ -40,7 +40,7 @@ class ModelSubtract:
     RETURN_TYPES = ("MODEL",)
     FUNCTION = "merge"
 
-    CATEGORY = "advanced/model_merging"
+    CATEGORY = "model/merging"
 
     def merge(self, model1, model2, multiplier):
         m = model1.clone()
@@ -58,7 +58,7 @@ class ModelAdd:
     RETURN_TYPES = ("MODEL",)
     FUNCTION = "merge"
 
-    CATEGORY = "advanced/model_merging"
+    CATEGORY = "model/merging"
 
     def merge(self, model1, model2):
         m = model1.clone()
@@ -78,7 +78,7 @@ class CLIPMergeSimple:
     RETURN_TYPES = ("CLIP",)
     FUNCTION = "merge"
 
-    CATEGORY = "advanced/model_merging"
+    CATEGORY = "model/merging"
 
     def merge(self, clip1, clip2, ratio):
         m = clip1.clone()
@@ -101,7 +101,7 @@ class CLIPSubtract:
     RETURN_TYPES = ("CLIP",)
     FUNCTION = "merge"
 
-    CATEGORY = "advanced/model_merging"
+    CATEGORY = "model/merging"
 
     def merge(self, clip1, clip2, multiplier):
         m = clip1.clone()
@@ -123,7 +123,7 @@ class CLIPAdd:
     RETURN_TYPES = ("CLIP",)
     FUNCTION = "merge"
 
-    CATEGORY = "advanced/model_merging"
+    CATEGORY = "model/merging"
 
     def merge(self, clip1, clip2):
         m = clip1.clone()
@@ -147,7 +147,7 @@ class ModelMergeBlocks:
     RETURN_TYPES = ("MODEL",)
     FUNCTION = "merge"
 
-    CATEGORY = "advanced/model_merging"
+    CATEGORY = "model/merging"
 
     def merge(self, model1, model2, **kwargs):
         m = model1.clone()
@@ -242,7 +242,7 @@ class CheckpointSave:
     FUNCTION = "save"
     OUTPUT_NODE = True
 
-    CATEGORY = "advanced/model_merging"
+    CATEGORY = "model/merging"
 
     def save(self, model, clip, vae, filename_prefix, prompt=None, extra_pnginfo=None):
         save_checkpoint(model, clip=clip, vae=vae, filename_prefix=filename_prefix, output_dir=self.output_dir, prompt=prompt, extra_pnginfo=extra_pnginfo)
@@ -261,7 +261,7 @@ class CLIPSave:
     FUNCTION = "save"
     OUTPUT_NODE = True
 
-    CATEGORY = "advanced/model_merging"
+    CATEGORY = "model/merging"
 
     def save(self, clip, filename_prefix, prompt=None, extra_pnginfo=None):
         prompt_info = ""
@@ -276,8 +276,8 @@ class CLIPSave:
                 for x in extra_pnginfo:
                     metadata[x] = json.dumps(extra_pnginfo[x])
 
-        comfy.model_management.load_models_gpu([clip.load_model()], force_patch_weights=True)
-        clip_sd = clip.get_sd()
+        clip.load_model()
+        clip_sd = clip.state_dict_for_saving()
 
         for prefix in ["clip_l.", "clip_g.", "clip_h.", "t5xxl.", "pile_t5xl.", "mt5xl.", "umt5xxl.", "t5base.", "gemma2_2b.", "llama.", "hydit_clip.", ""]:
             k = list(filter(lambda a: a.startswith(prefix), clip_sd.keys()))
@@ -318,7 +318,7 @@ class VAESave:
     FUNCTION = "save"
     OUTPUT_NODE = True
 
-    CATEGORY = "advanced/model_merging"
+    CATEGORY = "model/merging"
 
     def save(self, vae, filename_prefix, prompt=None, extra_pnginfo=None):
         full_output_folder, filename, counter, subfolder, filename_prefix = folder_paths.get_save_image_path(filename_prefix, self.output_dir)
@@ -353,7 +353,7 @@ class ModelSave:
     FUNCTION = "save"
     OUTPUT_NODE = True
 
-    CATEGORY = "advanced/model_merging"
+    CATEGORY = "model/merging"
 
     def save(self, model, filename_prefix, prompt=None, extra_pnginfo=None):
         save_checkpoint(model, filename_prefix=filename_prefix, output_dir=self.output_dir, prompt=prompt, extra_pnginfo=extra_pnginfo)

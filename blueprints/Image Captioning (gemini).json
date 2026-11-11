@@ -310,7 +310,8 @@
         "extra": {
           "workflowRendererVersion": "LG"
         },
-        "category": "Text generation/Image Captioning"
+        "category": "Image Tools",
+        "description": "Generates descriptive captions for images using Google's Gemini multimodal LLM."
       }
     ]
   }

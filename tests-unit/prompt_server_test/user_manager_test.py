@@ -69,7 +69,11 @@ async def test_listuserdata_full_info(aiohttp_client, app, tmp_path):
     assert len(result) == 1
     assert result[0]["path"] == "file1.txt"
     assert "size" in result[0]
-    assert "modified" in result[0]
+    assert isinstance(result[0]["modified"], int)
+    assert isinstance(result[0]["created"], int)
+    # Verify millisecond magnitude (timestamps after year 2000 in ms are > 946684800000)
+    assert result[0]["modified"] > 946684800000
+    assert result[0]["created"] > 946684800000
 
 
 async def test_listuserdata_split_path(aiohttp_client, app, tmp_path):

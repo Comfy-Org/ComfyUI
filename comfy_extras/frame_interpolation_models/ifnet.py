@@ -74,6 +74,9 @@ class IFNet(nn.Module):
     def get_dtype(self):
         return self.encode.cnn0.weight.dtype
 
+    def memory_used_forward(self, shape, dtype):
+        return 300 * shape[1] * shape[2] * dtype.itemsize
+
     def _build_warp_grids(self, H, W, device):
         if (H, W) in self._warp_grids:
             return

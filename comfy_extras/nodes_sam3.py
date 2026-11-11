@@ -93,7 +93,7 @@ class SAM3_Detect(io.ComfyNode):
         return io.Schema(
             node_id="SAM3_Detect",
             display_name="SAM3 Detect",
-            category="detection/",
+            category="image/detection",
             search_aliases=["sam3", "segment anything", "open vocabulary", "text detection", "segment"],
             inputs=[
                 io.Model.Input("model", display_name="model"),
@@ -264,16 +264,16 @@ class SAM3_VideoTrack(io.ComfyNode):
     def define_schema(cls):
         return io.Schema(
             node_id="SAM3_VideoTrack",
-            display_name="SAM3 Video Track",
-            category="detection/",
+            display_name="Run SAM3 Video Track",
+            category="image/detection",
             search_aliases=["sam3", "video", "track", "propagate"],
             inputs=[
                 io.Image.Input("images", display_name="images", tooltip="Video frames as batched images"),
                 io.Model.Input("model", display_name="model"),
                 io.Mask.Input("initial_mask", display_name="initial_mask", optional=True, tooltip="Mask(s) for the first frame to track (one per object)"),
                 io.Conditioning.Input("conditioning", display_name="conditioning", optional=True, tooltip="Text conditioning for detecting new objects during tracking"),
-                io.Float.Input("detection_threshold", display_name="detection_threshold", default=0.5, min=0.0, max=1.0, step=0.01, tooltip="Score threshold for text-prompted detection"),
-                io.Int.Input("max_objects", display_name="max_objects", default=0, min=0, tooltip="Max tracked objects (0=unlimited). Initial masks count toward this limit."),
+                io.Float.Input("detection_threshold", display_name="detection_threshold", default=0.5, min=0.0, max=1.0, step=0.01, tooltip="Score threshold for text-prompted detection."),
+                io.Int.Input("max_objects", display_name="max_objects", default=4, min=0, max=64, tooltip="Max tracked objects. Initial masks count toward this limit. 0 uses the internal cap of 64."),
                 io.Int.Input("detect_interval", display_name="detect_interval", default=1, min=1, tooltip="Run detection every N frames (1=every frame). Higher values save compute."),
             ],
             outputs=[
@@ -290,8 +290,7 @@ class SAM3_VideoTrack(io.ComfyNode):
         dtype = model.model.get_dtype()
         sam3_model = model.model.diffusion_model
 
-        frames = images[..., :3].movedim(-1, 1)
-        frames_in = comfy.utils.common_upscale(frames, 1008, 1008, "bilinear", crop="disabled").to(device=device, dtype=dtype)
+        frames_in = images[..., :3].movedim(-1, 1)
 
         init_masks = None
         if initial_mask is not None:
@@ -308,7 +307,7 @@ class SAM3_VideoTrack(io.ComfyNode):
         result = sam3_model.forward_video(
             images=frames_in, initial_masks=init_masks, pbar=pbar, text_prompts=text_prompts,
             new_det_thresh=detection_threshold, max_objects=max_objects,
-            detect_interval=detect_interval)
+            detect_interval=detect_interval, target_device=device, target_dtype=dtype)
         result["orig_size"] = (H, W)
         return io.NodeOutput(result)
 
@@ -321,7 +320,7 @@ class SAM3_TrackPreview(io.ComfyNode):
         return io.Schema(
             node_id="SAM3_TrackPreview",
             display_name="SAM3 Track Preview",
-            category="detection/",
+            category="image/detection",
             inputs=[
                 SAM3TrackData.Input("track_data", display_name="track_data"),
                 io.Image.Input("images", display_name="images", optional=True),
@@ -449,14 +448,18 @@ class SAM3_TrackPreview(io.ComfyNode):
                     cx = (bool_masks * grid_x).sum(dim=(-1, -2)) // area
                     has = area > 1
                     scores = track_data.get("scores", [])
+                    label_scale = max(3, H // 240) # Scale font with resolutio
+                    size_caps = (area.float().sqrt() / 15).clamp_(min=1).long().tolist() #cap per-object so the number doesn't dwarf small masks
                     for obj_idx in range(N_obj):
                         if has[obj_idx]:
                             _cx, _cy = int(cx[obj_idx]), int(cy[obj_idx])
                             color = cls.COLORS[obj_idx % len(cls.COLORS)]
-                            SAM3_TrackPreview._draw_number_gpu(frame_gpu, obj_idx, _cx, _cy, color)
+                            obj_scale = min(label_scale, size_caps[obj_idx])
+                            score_scale = max(1, obj_scale * 2 // 3)
+                            SAM3_TrackPreview._draw_number_gpu(frame_gpu, obj_idx, _cx, _cy, color, scale=obj_scale)
                             if obj_idx < len(scores) and scores[obj_idx] < 1.0:
                                 SAM3_TrackPreview._draw_number_gpu(frame_gpu, int(scores[obj_idx] * 100),
-                                                                   _cx, _cy + 5 * 3 + 3, color, scale=2)
+                                                                   _cx, _cy + 5 * obj_scale + 3, color, scale=score_scale)
                     frame_cpu.copy_(frame_gpu.clamp_(0, 1).mul_(255).byte())
                 else:
                     frame_cpu.copy_(frame.clamp_(0, 1).mul_(255).byte())
@@ -475,7 +478,7 @@ class SAM3_TrackToMask(io.ComfyNode):
         return io.Schema(
             node_id="SAM3_TrackToMask",
             display_name="SAM3 Track to Mask",
-            category="detection/",
+            category="image/detection",
             inputs=[
                 SAM3TrackData.Input("track_data", display_name="track_data"),
                 io.String.Input("object_indices", display_name="object_indices", default="",
@@ -507,9 +510,10 @@ class SAM3_TrackToMask(io.ComfyNode):
         if not indices:
             return io.NodeOutput(torch.zeros(N, H, W, device=comfy.model_management.intermediate_device()))
 
-        selected = packed[:, indices]
-        binary = unpack_masks(selected)  # [N, len(indices), Hm, Wm] bool
-        union = binary.any(dim=1, keepdim=True).float()
+        union_packed = packed[:, indices[0]].clone()
+        for i in indices[1:]:
+            union_packed |= packed[:, i]
+        union = unpack_masks(union_packed).unsqueeze(1).float()  # [N, 1, Hm, Wm]
         mask_out = F.interpolate(union, size=(H, W), mode="bilinear", align_corners=False)[:, 0]
         return io.NodeOutput(mask_out)
 

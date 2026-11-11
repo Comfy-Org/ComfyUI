@@ -86,6 +86,6 @@ def image_alpha_fix(destination, source):
     if destination.shape[-1] < source.shape[-1]:
         source = source[...,:destination.shape[-1]]
     elif destination.shape[-1] > source.shape[-1]:
-        destination = torch.nn.functional.pad(destination, (0, 1))
-        destination[..., -1] = 1.0
+        source = torch.nn.functional.pad(source, (0, 1))
+        source[..., -1] = 1.0
     return destination, source

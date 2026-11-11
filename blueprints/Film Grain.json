@@ -580,7 +580,8 @@
         "extra": {
           "workflowRendererVersion": "LG"
         },
-        "category": "Image Tools/Color adjust"
+        "category": "Image Tools/Color adjust",
+        "description": "Adds procedural film grain texture for a cinematic look via GPU fragment shader."
       }
     ]
   }

@@ -200,8 +200,13 @@ def pack_masks(masks):
 
 def unpack_masks(packed):
     """Unpack bit-packed [*, H, W//8] uint8 to bool [*, H, W*8]."""
-    shifts = torch.arange(8, device=packed.device)
-    return ((packed.unsqueeze(-1) >> shifts) & 1).view(*packed.shape[:-1], -1).bool()
+    bits = torch.tensor([1, 2, 4, 8, 16, 32, 64, 128], dtype=torch.uint8, device=packed.device)
+    return (packed.unsqueeze(-1) & bits).bool().view(*packed.shape[:-1], -1)
+
+
+def _prep_frame(images, idx, device, dt, size):
+    """Slice CPU full-res frames, transfer to GPU in target dtype, and resize to (size, size)."""
+    return comfy.utils.common_upscale(images[idx].to(device=device, dtype=dt), size, size, "bicubic", crop="disabled")
 
 
 def _compute_backbone(backbone_fn, frame, frame_idx=None):
@@ -1078,16 +1083,19 @@ class SAM3Tracker(nn.Module):
         # SAM3: drop last FPN level
         return vision_feats[:-1], vision_pos[:-1], feat_sizes[:-1]
 
-    def _track_single_object(self, backbone_fn, images, initial_mask, pbar=None):
+    def _track_single_object(self, backbone_fn, images, initial_mask, pbar=None,
+                             target_device=None, target_dtype=None):
         """Track one object, computing backbone per frame to save VRAM."""
         N = images.shape[0]
-        device, dt = images.device, images.dtype
+        device = target_device if target_device is not None else images.device
+        dt = target_dtype if target_dtype is not None else images.dtype
+        size = self.image_size
         output_dict = {"cond_frame_outputs": {}, "non_cond_frame_outputs": {}}
         all_masks = []
 
         for frame_idx in tqdm(range(N), desc="tracking"):
             vision_feats, vision_pos, feat_sizes = self._compute_backbone_frame(
-                backbone_fn, images[frame_idx:frame_idx + 1], frame_idx=frame_idx)
+                backbone_fn, _prep_frame(images, slice(frame_idx, frame_idx + 1), device, dt, size), frame_idx=frame_idx)
             mask_input = None
             if frame_idx == 0:
                 mask_input = F.interpolate(initial_mask.to(device=device, dtype=dt),
@@ -1114,12 +1122,13 @@ class SAM3Tracker(nn.Module):
 
         return torch.cat(all_masks, dim=0)  # [N, 1, H, W]
 
-    def track_video(self, backbone_fn, images, initial_masks, pbar=None, **kwargs):
+    def track_video(self, backbone_fn, images, initial_masks, pbar=None,
+                    target_device=None, target_dtype=None, **kwargs):
         """Track one or more objects across video frames.
 
         Args:
             backbone_fn: callable that returns (sam2_features, sam2_positions, trunk_out) for a frame
-            images: [N, 3, 1008, 1008] video frames
+            images: [N, 3, H, W] CPU full-res video frames (resized per-frame to self.image_size)
             initial_masks: [N_obj, 1, H, W] binary masks for first frame (one per object)
             pbar: optional progress bar
 
@@ -1130,7 +1139,8 @@ class SAM3Tracker(nn.Module):
         per_object = []
         for obj_idx in range(N_obj):
             obj_masks = self._track_single_object(
-                backbone_fn, images, initial_masks[obj_idx:obj_idx + 1], pbar=pbar)
+                backbone_fn, images, initial_masks[obj_idx:obj_idx + 1], pbar=pbar,
+                target_device=target_device, target_dtype=target_dtype)
             per_object.append(obj_masks)
 
         return torch.cat(per_object, dim=1)  # [N, N_obj, H, W]
@@ -1632,11 +1642,18 @@ class SAM31Tracker(nn.Module):
             return det_scores[new_dets].tolist() if det_scores is not None else [0.0] * new_dets.sum().item()
         return []
 
+    INTERNAL_MAX_OBJECTS = 64  # Hard ceiling on accumulated tracks; max_objects=0 or any value above this is clamped here.
+
     def track_video_with_detection(self, backbone_fn, images, initial_masks, detect_fn=None,
                                    new_det_thresh=0.5, max_objects=0, detect_interval=1,
-                                   backbone_obj=None, pbar=None):
+                                   backbone_obj=None, pbar=None, target_device=None, target_dtype=None):
         """Track with optional per-frame detection. Returns [N, max_N_obj, H, W] mask logits."""
-        N, device, dt = images.shape[0], images.device, images.dtype
+        if max_objects <= 0 or max_objects > self.INTERNAL_MAX_OBJECTS:
+            max_objects = self.INTERNAL_MAX_OBJECTS
+        N = images.shape[0]
+        device = target_device if target_device is not None else images.device
+        dt = target_dtype if target_dtype is not None else images.dtype
+        size = self.image_size
         output_dict = {"cond_frame_outputs": {}, "non_cond_frame_outputs": {}}
         all_masks = []
         idev = comfy.model_management.intermediate_device()
@@ -1656,7 +1673,7 @@ class SAM31Tracker(nn.Module):
                 prefetch = True
             except RuntimeError:
                 pass
-        cur_bb = self._compute_backbone_frame(backbone_fn, images[0:1], frame_idx=0)
+        cur_bb = self._compute_backbone_frame(backbone_fn, _prep_frame(images, slice(0, 1), device, dt, size), frame_idx=0)
 
         for frame_idx in tqdm(range(N), desc="tracking"):
             vision_feats, vision_pos, feat_sizes, high_res_prop, trunk_out = cur_bb
@@ -1666,7 +1683,7 @@ class SAM31Tracker(nn.Module):
                 backbone_stream.wait_stream(torch.cuda.current_stream(device))
                 with torch.cuda.stream(backbone_stream):
                     next_bb = self._compute_backbone_frame(
-                        backbone_fn, images[frame_idx + 1:frame_idx + 2], frame_idx=frame_idx + 1)
+                        backbone_fn, _prep_frame(images, slice(frame_idx + 1, frame_idx + 2), device, dt, size), frame_idx=frame_idx + 1)
 
             # Per-frame detection with NMS (skip if no detect_fn, or interval/max not met)
             det_masks = torch.empty(0, device=device)
@@ -1687,7 +1704,7 @@ class SAM31Tracker(nn.Module):
                 current_out = self._condition_with_masks(
                     initial_masks.to(device=device, dtype=dt), frame_idx, vision_feats, vision_pos,
                     feat_sizes, high_res_prop, output_dict, N, mux_state, backbone_obj,
-                    images[frame_idx:frame_idx + 1], trunk_out)
+                    _prep_frame(images, slice(frame_idx, frame_idx + 1), device, dt, size), trunk_out)
                 last_occluded = torch.full((mux_state.total_valid_entries,), -1, device=device, dtype=torch.long)
                 obj_scores = [1.0] * mux_state.total_valid_entries
                 if keep_alive is not None:
@@ -1702,7 +1719,7 @@ class SAM31Tracker(nn.Module):
                     current_out = self._condition_with_masks(
                         det_masks, frame_idx, vision_feats, vision_pos, feat_sizes, high_res_prop,
                         output_dict, N, mux_state, backbone_obj,
-                        images[frame_idx:frame_idx + 1], trunk_out, threshold=0.0)
+                        _prep_frame(images, slice(frame_idx, frame_idx + 1), device, dt, size), trunk_out, threshold=0.0)
                     last_occluded = torch.full((mux_state.total_valid_entries,), -1, device=device, dtype=torch.long)
                     obj_scores = det_scores[:mux_state.total_valid_entries].tolist()
                     if keep_alive is not None:
@@ -1718,7 +1735,7 @@ class SAM31Tracker(nn.Module):
                             torch.cuda.current_stream(device).wait_stream(backbone_stream)
                             cur_bb = next_bb
                         else:
-                            cur_bb = self._compute_backbone_frame(backbone_fn, images[frame_idx + 1:frame_idx + 2], frame_idx=frame_idx + 1)
+                            cur_bb = self._compute_backbone_frame(backbone_fn, _prep_frame(images, slice(frame_idx + 1, frame_idx + 2), device, dt, size), frame_idx=frame_idx + 1)
                     continue
             else:
                 N_obj = mux_state.total_valid_entries
@@ -1768,7 +1785,7 @@ class SAM31Tracker(nn.Module):
                     torch.cuda.current_stream(device).wait_stream(backbone_stream)
                     cur_bb = next_bb
                 else:
-                    cur_bb = self._compute_backbone_frame(backbone_fn, images[frame_idx + 1:frame_idx + 2], frame_idx=frame_idx + 1)
+                    cur_bb = self._compute_backbone_frame(backbone_fn, _prep_frame(images, slice(frame_idx + 1, frame_idx + 2), device, dt, size), frame_idx=frame_idx + 1)
 
         if not all_masks or all(m is None for m in all_masks):
             return {"packed_masks": None, "n_frames": N, "scores": []}

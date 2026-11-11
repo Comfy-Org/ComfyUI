@@ -1,0 +1,81 @@
+"""SeedVR2 constants."""
+
+# Temporal chunk-size law: the sampler's activation wall is linear in
+# T_latent * pixel area (17-cell resolution sweep + T bisection, RTX 5090, 3b fp16):
+#   max_latent_frames = (free_GiB - RESERVED - K*SIGMA) / (GIB_PER_MPX_FRAME * megapixels)
+# RESERVED covers model staging plus fixed CUDA/torch overhead; SIGMA is the measured
+# run-to-run spread of the wall; K=4 trades ~10% smaller chunks for ~1e-5 OOM odds.
+SEEDVR2_CHUNK_GIB_PER_MPX_FRAME = 0.55
+SEEDVR2_CHUNK_RESERVED_GIB = 8.5
+SEEDVR2_CHUNK_SIGMA_GIB = 0.55
+SEEDVR2_CHUNK_SIGMA_K = 4
+
+SEEDVR2_7B_VID_DIM = 3072
+SEEDVR2_OOM_BACKOFF_DIVISOR = 2
+SEEDVR2_DTYPE_BYTES_FLOOR = 4
+SEEDVR2_MLP_CHUNK = 8192
+SEEDVR2_ROPE_PARTIAL_CHUNK_TOKENS = 4096  # partial-RoPE application token-chunk.
+SEEDVR2_LATENT_CHANNELS = 16
+
+# VAE temporal caches: int8-packed (rotated, per-token scales) between slices.
+SEEDVR2_VAE_CACHE_QUANT_BYTES = 64 * 1024 ** 2         # tails at or above this size are packed.
+SEEDVR2_CACHE_BYTES_PER_FRAME_PIXEL = 6200             # host-held caches and parked frames, per output-frame pixel.
+
+# Free memory above the floor goes to the caches on the device first, then to longer slices.
+SEEDVR2_MAX_SLICE_LATENTS = 4
+SEEDVR2_SLICE_MEM_HEADROOM = 0.8
+SEEDVR2_DECODE_SLICE_BYTES_PER_FRAME_PIXEL = 5300      # per latent frame of a slice, per output-frame pixel.
+SEEDVR2_ENCODE_SLICE_BYTES_PER_PIXEL = 3150            # per input-frame pixel.
+SEEDVR2_DECODE_TAIL_BYTES_PER_FRAME_PIXEL = 5550       # caches on the device; the fixed part covers tiles too small to pack.
+SEEDVR2_DECODE_TAIL_FIXED_BYTES = 768 * 1024 ** 2
+SEEDVR2_ENCODE_TAIL_BYTES_PER_PIXEL = 2700
+SEEDVR2_ENCODE_TAIL_FIXED_BYTES = 512 * 1024 ** 2
+
+# VAE decode estimate: the free VRAM an untiled decode needs under cudaMallocAsync (ComfyUI's default),
+# fitted 2-7% above the measured floor from 480p to 4K. Flat in clip length: the decoded frames go
+# to sd.py's output buffer off the GPU slice by slice (1088p: 5.33 GiB allocated at 61 and 121 frames).
+SEEDVR2_DECODE_BYTES_PER_FRAME_PIXEL = 3150            # working set, per output-frame pixel.
+SEEDVR2_DECODE_FIXED_BYTES = 384 * 1024 ** 2
+SEEDVR2_DECODE_LAB_BYTES_PER_OUTPUT_PIXEL = 160        # colour correction is per frame in the node.
+
+# VAE encode estimate, likewise fitted 3-23% above the measured floor; slicing keeps it flat in clip length.
+SEEDVR2_ENCODE_BYTES_PER_PIXEL = 2550                  # per input-frame pixel.
+SEEDVR2_ENCODE_FIXED_BYTES = 576 * 1024 ** 2
+
+# The fits cover the fp16 channels-last path; other dtypes run the eager path, measured at about this
+# many times the estimate per two bytes of element.
+SEEDVR2_EAGER_DECODE_FACTOR = 5
+SEEDVR2_EAGER_ENCODE_FACTOR = 3
+
+# Tiled decode, in latent units (8 output pixels each).
+SEEDVR2_TILE_MEM_HEADROOM = 0.6
+SEEDVR2_MIN_TILE_LATENT = 32
+SEEDVR2_MAX_TILE_LATENT = 96                           # 768 px; larger tiles measured no faster.
+
+SEEDVR2_COLOR_MEM_HEADROOM = 0.75
+SEEDVR2_LAB_SCALE_MULTIPLIER = 13
+SEEDVR2_WAVELET_SCALE_MULTIPLIER = 10  # per-frame byte multiplier, wavelet path.
+SEEDVR2_ADAIN_SCALE_MULTIPLIER = 6
+
+BYTEDANCE_VAE_SCALING_FACTOR = 0.9152   # configs_3b/main.yaml:57.
+BYTEDANCE_VAE_SHIFTING_FACTOR = 0.0
+BYTEDANCE_VAE_CONV_MEM_GIB = 0.5
+BYTEDANCE_VAE_NORM_MEM_GIB = 0.5
+BYTEDANCE_GN_CHUNKS_FP16 = 4            # causal_inflation_lib.py:351 (GroupNorm chunk count, fp16).
+BYTEDANCE_GN_CHUNKS_FP32 = 2            # causal_inflation_lib.py:351 (GroupNorm chunk count, fp32).
+BYTEDANCE_BLOCK_OUT_CHANNELS = (128, 256, 512, 512)  # s8_c16_t4_inflation_sd3.yaml:7-11.
+BYTEDANCE_SLICING_SAMPLE_MIN = 4        # s8_c16_t4_inflation_sd3.yaml:22 (slicing_sample_min_size).
+BYTEDANCE_VAE_TEMPORAL_DOWNSAMPLE = 4   # infer.py:230 (temporal_downsample_factor); the 4n+1 factor.
+BYTEDANCE_VAE_SPATIAL_DOWNSAMPLE = 8    # infer.py:231 (spatial_downsample_factor).
+BYTEDANCE_720P_REF_AREA = 45 * 80       # dit_v2/window.py:32 (720p reference area for window scaling).
+BYTEDANCE_MAX_TEMPORAL_WINDOW = 30      # dit_v2/window.py:35 (max temporal window frames).
+BYTEDANCE_ROPE_MAX_FREQ = 256           # dit_v2/rope.py:31 (pixel-RoPE max frequency).
+BYTEDANCE_SINUSOIDAL_DIM = 256          # dit_3b/nadit.py:120 (timestep sinusoidal embed dim).
+
+ROPE_THETA = 10000   # RoPE base; Su et al., "RoFormer", arXiv:2104.09864.
+
+CIELAB_DELTA = 6.0 / 29.0          # CIE 15 (delta).
+CIELAB_KAPPA = (29.0 / 3.0) ** 3   # CIE 15 (kappa).
+D65_WHITE_X = 0.95047              # CIE D65 standard illuminant Xn (Yn = 1).
+D65_WHITE_Z = 1.08883              # CIE D65 standard illuminant Zn.
+WAVELET_DECOMP_LEVELS = 5          # wavelet color-fix decomposition depth (GIMP/Krita; StableSR).

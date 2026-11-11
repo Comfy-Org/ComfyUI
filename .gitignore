@@ -23,3 +23,5 @@ web_custom_versions/
 .DS_Store
 filtered-openapi.yaml
 uv.lock
+.comfy_environment
+/previews/

@@ -199,6 +199,9 @@ class FILMNet(nn.Module):
     def get_dtype(self):
         return self.extract.extract_sublevels.convs[0][0].conv.weight.dtype
 
+    def memory_used_forward(self, shape, dtype):
+        return 1700 * shape[1] * shape[2] * dtype.itemsize
+
     def _build_warp_grids(self, H, W, device):
         """Pre-compute warp grids for all pyramid levels."""
         if (H, W) in self._warp_grids:

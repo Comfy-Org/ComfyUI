@@ -16,7 +16,7 @@ class APG(io.ComfyNode):
         return io.Schema(
             node_id="APG",
             display_name="Adaptive Projected Guidance",
-            category="sampling/custom_sampling",
+            category="model/sampling/custom",
             inputs=[
                 io.Model.Input("model"),
                 io.Float.Input(

@@ -1,0 +1,519 @@
+name: Backport Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      commit:
+        description: 'Full 40-char SHA of the tip commit of the backport source branch (the PR head commit that passed tests). The branch is resolved from this SHA and must be unique.'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  pull-requests: read
+  checks: read
+
+jobs:
+  backport-release:
+    name: Create backport release
+    runs-on: ubuntu-latest
+    environment: backport release
+
+    steps:
+      - name: Generate GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1
+        with:
+          app-id: ${{ secrets.FEN_RELEASE_APP_ID }}
+          private-key: ${{ secrets.FEN_RELEASE_PRIVATE_KEY }}
+
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          token: ${{ steps.app-token.outputs.token }}
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Configure git
+        run: |
+          git config user.name  "fen-release[bot]"
+          git config user.email "fen-release[bot]@users.noreply.github.com"
+
+      - name: Resolve source branch from commit SHA
+        id: resolve
+        env:
+          SOURCE_COMMIT:  ${{ inputs.commit }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+
+          # Require a full 40-char lowercase-hex SHA. Short SHAs are ambiguous
+          # and we will be comparing this value against API responses (PR head
+          # SHA, ref tips) that always return the full form.
+          if [[ ! "${SOURCE_COMMIT}" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::Input commit '${SOURCE_COMMIT}' is not a full 40-char lowercase hex SHA."
+            exit 1
+          fi
+
+          # Fetch all remote branches so we can search for which one(s) point
+          # at this SHA. `actions/checkout` with fetch-depth: 0 fetches full
+          # history of the checked-out ref but does not necessarily populate
+          # every refs/remotes/origin/*, so do it explicitly.
+          git fetch --prune origin '+refs/heads/*:refs/remotes/origin/*'
+
+          # Verify the commit actually exists in this repo's object DB.
+          if ! git cat-file -e "${SOURCE_COMMIT}^{commit}" 2>/dev/null; then
+            echo "::error::Commit ${SOURCE_COMMIT} was not found in the repository."
+            exit 1
+          fi
+
+          # Find every remote branch whose tip == SOURCE_COMMIT. Exactly one
+          # branch must point at it. If zero, the commit isn't anyone's tip
+          # (likely stale, force-pushed past, or never the PR head). If more
+          # than one, the (branch -> SHA) mapping is ambiguous and we refuse
+          # to guess — the operator must give us a unique branch to release.
+          mapfile -t matching_branches < <(
+            git for-each-ref \
+              --format='%(refname:strip=3)' \
+              --points-at="${SOURCE_COMMIT}" \
+              refs/remotes/origin/ \
+              | grep -vx 'HEAD' || true
+          )
+
+          if [[ "${#matching_branches[@]}" -eq 0 ]]; then
+            echo "::error::No branch on origin has ${SOURCE_COMMIT} as its tip."
+            echo "::error::Either the branch was updated after you copied this SHA, or this commit was never the head of a branch."
+            exit 1
+          fi
+
+          if [[ "${#matching_branches[@]}" -gt 1 ]]; then
+            echo "::error::More than one branch on origin has ${SOURCE_COMMIT} as its tip; cannot pick one:"
+            for b in "${matching_branches[@]}"; do
+              echo "::error::  - ${b}"
+            done
+            echo "::error::Refusing to proceed with an ambiguous source branch."
+            exit 1
+          fi
+
+          source_branch="${matching_branches[0]}"
+
+          if [[ "${source_branch}" == "${DEFAULT_BRANCH}" ]]; then
+            echo "::error::Source branch must not be the default branch ('${DEFAULT_BRANCH}')."
+            exit 1
+          fi
+
+          echo "Resolved commit ${SOURCE_COMMIT} to branch '${source_branch}'."
+          echo "source_branch=${source_branch}" >> "$GITHUB_OUTPUT"
+
+      - name: Determine latest stable release
+        id: latest
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          set -euo pipefail
+
+          # List all tags matching vMAJOR.MINOR.PATCH and pick the highest by numeric
+          # comparison of each component. We DO NOT use `sort -V` because it treats
+          # v0.19.99 as higher than v0.20.1.
+          latest_tag="$(
+            git tag --list 'v[0-9]*.[0-9]*.[0-9]*' \
+              | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' \
+              | awk -F'[v.]' '{ printf "%010d %010d %010d %s\n", $2, $3, $4, $0 }' \
+              | sort -k1,1n -k2,2n -k3,3n \
+              | tail -n1 \
+              | awk '{print $4}'
+          )"
+
+          if [[ -z "${latest_tag}" ]]; then
+            echo "::error::No stable release tags (vMAJOR.MINOR.PATCH) were found."
+            exit 1
+          fi
+
+          # Parse components
+          ver="${latest_tag#v}"
+          major="${ver%%.*}"
+          rest="${ver#*.}"
+          minor="${rest%%.*}"
+          patch="${rest#*.}"
+
+          new_patch=$((patch + 1))
+          new_version="v${major}.${minor}.${new_patch}"
+          release_branch="release/v${major}.${minor}"
+
+          latest_sha="$(git rev-list -n 1 "refs/tags/${latest_tag}")"
+
+          echo "latest_tag=${latest_tag}"             >> "$GITHUB_OUTPUT"
+          echo "latest_sha=${latest_sha}"             >> "$GITHUB_OUTPUT"
+          echo "major=${major}"                       >> "$GITHUB_OUTPUT"
+          echo "minor=${minor}"                       >> "$GITHUB_OUTPUT"
+          echo "patch=${patch}"                       >> "$GITHUB_OUTPUT"
+          echo "new_version=${new_version}"           >> "$GITHUB_OUTPUT"
+          echo "new_version_no_v=${major}.${minor}.${new_patch}" >> "$GITHUB_OUTPUT"
+          echo "release_branch=${release_branch}"     >> "$GITHUB_OUTPUT"
+
+          echo "Latest stable release: ${latest_tag} (${latest_sha})"
+          echo "New version will be:   ${new_version}"
+          echo "Release branch:        ${release_branch}"
+
+      - name: Validate source branch is cut directly from the latest stable release
+        env:
+          SOURCE_BRANCH:   ${{ steps.resolve.outputs.source_branch }}
+          SOURCE_COMMIT:   ${{ inputs.commit }}
+          LATEST_TAG_SHA:  ${{ steps.latest.outputs.latest_sha }}
+          LATEST_TAG:      ${{ steps.latest.outputs.latest_tag }}
+        run: |
+          set -euo pipefail
+
+          # Use the user-provided SHA directly rather than re-resolving the branch
+          # tip — the resolve step already proved the branch tip equals SOURCE_COMMIT,
+          # and pinning to the SHA here makes the rest of the job TOCTOU-safe against
+          # someone pushing to the branch mid-run.
+          source_sha="${SOURCE_COMMIT}"
+
+          # Walking first-parent from the source tip must reach LATEST_TAG_SHA.
+          # We capture rev-list into a variable and grep against a here-string
+          # rather than piping `rev-list | grep -q`: under `set -o pipefail`,
+          # `grep -q` would exit on first match and SIGPIPE the still-streaming
+          # `rev-list`, propagating exit 141 as a spurious "not found".
+          first_parent_chain="$(git rev-list --first-parent "${source_sha}")"
+          if ! grep -Fxq "${LATEST_TAG_SHA}" <<< "${first_parent_chain}"; then
+            echo "::error::Source branch '${SOURCE_BRANCH}' is not cut from '${LATEST_TAG}'."
+            echo "::error::Its first-parent history does not include ${LATEST_TAG_SHA}."
+            exit 1
+          fi
+
+          # Additionally, every commit added on top of the tag (the set we are
+          # about to publish) must itself be a descendant of the tag along
+          # first-parent — i.e. no sibling commits from master sneak in via a
+          # non-first-parent path. Enforce by requiring that the symmetric
+          # difference is empty in one direction: commits in source that are
+          # NOT first-parent-reachable from source starting at the tag.
+          # We do this by intersecting:
+          #   A = commits reachable from source but not from tag (full DAG)
+          #   B = commits on the first-parent chain from source down to tag
+          # and requiring A == B.
+          all_added="$(git rev-list "${LATEST_TAG_SHA}..${source_sha}" | sort)"
+          first_parent_added="$(
+            git rev-list --first-parent "${LATEST_TAG_SHA}..${source_sha}" | sort
+          )"
+
+          if [[ "${all_added}" != "${first_parent_added}" ]]; then
+            echo "::error::Source branch '${SOURCE_BRANCH}' contains commits not on its first-parent chain from '${LATEST_TAG}'."
+            echo "::error::This usually means the branch was cut from master (not from the tag) or contains a merge from master."
+            echo "Commits reachable but not on first-parent chain:"
+            comm -23 <(printf '%s\n' "${all_added}") <(printf '%s\n' "${first_parent_added}") \
+              | while read -r sha; do
+                  echo "  $(git log -1 --format='%h %s' "${sha}")"
+                done
+            exit 1
+          fi
+
+          added_count="$(printf '%s\n' "${all_added}" | grep -c . || true)"
+          echo "Source branch is cut directly from ${LATEST_TAG} with ${added_count} commit(s) on top."
+
+      - name: Validate PR exists, is open, named correctly, has latest commit, and checks pass
+        env:
+          GH_TOKEN:      ${{ steps.app-token.outputs.token }}
+          SOURCE_BRANCH: ${{ steps.resolve.outputs.source_branch }}
+          SOURCE_COMMIT: ${{ inputs.commit }}
+          NEW_VERSION:   ${{ steps.latest.outputs.new_version }}
+          REPO:          ${{ github.repository }}
+        run: |
+          set -euo pipefail
+
+          expected_title="ComfyUI backport release ${NEW_VERSION}"
+
+          # Find open PRs from this branch into master. The --state open filter
+          # is load-bearing: a closed/merged PR with passing checks must not be
+          # accepted as authorization for a new release.
+          pr_json="$(
+            gh pr list \
+              --repo "${REPO}" \
+              --state open \
+              --head "${SOURCE_BRANCH}" \
+              --base master \
+              --json number,title,headRefOid,state \
+              --limit 10
+          )"
+
+          pr_count="$(echo "${pr_json}" | jq 'length')"
+          if [[ "${pr_count}" -eq 0 ]]; then
+            echo "::error::No open PR found from '${SOURCE_BRANCH}' into 'master'. The PR must exist and be open."
+            exit 1
+          fi
+
+          # Pick the PR matching the expected title
+          pr_number="$(echo "${pr_json}" | jq -r --arg t "${expected_title}" '
+            map(select(.title == $t)) | .[0].number // empty
+          ')"
+          pr_head_sha="$(echo "${pr_json}" | jq -r --arg t "${expected_title}" '
+            map(select(.title == $t)) | .[0].headRefOid // empty
+          ')"
+
+          if [[ -z "${pr_number}" ]]; then
+            echo "::error::No open PR from '${SOURCE_BRANCH}' into 'master' is titled '${expected_title}'."
+            echo "Found PRs:"
+            echo "${pr_json}" | jq -r '.[] | "  #\(.number): \(.title)"'
+            exit 1
+          fi
+
+          # The PR's current head commit must equal the SHA the operator gave us.
+          # This is what closes the door on releasing stale code: if anyone has
+          # pushed to the branch since the operator validated tests passed, the
+          # PR head will have advanced past SOURCE_COMMIT and we abort. (The
+          # resolve step already proved the branch tip == SOURCE_COMMIT; this
+          # ties that same SHA to the PR that authorizes the release.)
+          if [[ "${pr_head_sha}" != "${SOURCE_COMMIT}" ]]; then
+            echo "::error::PR #${pr_number} head commit is ${pr_head_sha}, but the operator-provided commit is ${SOURCE_COMMIT}."
+            echo "::error::The PR has new commits since this release was authorized. Re-run with the new head SHA after verifying its checks."
+            exit 1
+          fi
+
+          echo "Found open PR #${pr_number} titled '${expected_title}' at head ${pr_head_sha} (matches operator-provided commit)."
+
+          # Verify all check runs on the head commit have completed successfully.
+          # A check is considered passing if conclusion is success, neutral, or skipped.
+          checks_json="$(
+            gh api \
+              --paginate \
+              "repos/${REPO}/commits/${pr_head_sha}/check-runs" \
+              --jq '.check_runs[] | {name: .name, status: .status, conclusion: .conclusion}'
+          )"
+
+          if [[ -z "${checks_json}" ]]; then
+            echo "::error::No check runs found on PR head commit ${pr_head_sha}."
+            exit 1
+          fi
+
+          echo "Check runs on ${pr_head_sha}:"
+          echo "${checks_json}" | jq -s '.'
+
+          failing="$(echo "${checks_json}" | jq -s '
+            map(select(
+              .status != "completed"
+              or (.conclusion as $c
+                  | ["success","neutral","skipped"]
+                  | index($c) | not)
+            ))
+          ')"
+
+          failing_count="$(echo "${failing}" | jq 'length')"
+          if [[ "${failing_count}" -gt 0 ]]; then
+            echo "::error::One or more checks have not passed on PR head commit ${pr_head_sha}:"
+            echo "${failing}" | jq -r '.[] | "  - \(.name): status=\(.status) conclusion=\(.conclusion)"'
+            exit 1
+          fi
+
+          echo "All checks have passed on ${pr_head_sha}."
+
+      - name: Prepare release branch
+        id: prepare
+        env:
+          GH_TOKEN:        ${{ steps.app-token.outputs.token }}
+          REPO:            ${{ github.repository }}
+          RELEASE_BRANCH:  ${{ steps.latest.outputs.release_branch }}
+          LATEST_TAG:      ${{ steps.latest.outputs.latest_tag }}
+          LATEST_TAG_SHA:  ${{ steps.latest.outputs.latest_sha }}
+          PATCH:           ${{ steps.latest.outputs.patch }}
+        run: |
+          set -euo pipefail
+
+          # Try to fetch the release branch. If patch == 0, it shouldn't exist yet
+          # and we'll create it from the latest stable tag. If patch > 0, it must
+          # already exist and its tip must equal the latest stable tag commit (i.e.
+          # the previous patch release).
+          if git ls-remote --exit-code --heads origin "${RELEASE_BRANCH}" >/dev/null 2>&1; then
+            echo "Release branch '${RELEASE_BRANCH}' already exists on origin."
+            git fetch origin "refs/heads/${RELEASE_BRANCH}:refs/remotes/origin/${RELEASE_BRANCH}"
+            git checkout -B "${RELEASE_BRANCH}" "refs/remotes/origin/${RELEASE_BRANCH}"
+
+            current_tip="$(git rev-parse HEAD)"
+            if [[ "${current_tip}" != "${LATEST_TAG_SHA}" ]]; then
+              echo "::error::Release branch '${RELEASE_BRANCH}' tip (${current_tip}) is not at the latest stable release '${LATEST_TAG}' (${LATEST_TAG_SHA})."
+              echo "::error::Refusing to release on top of a divergent branch."
+              exit 1
+            fi
+            echo "branch_existed=true" >> "$GITHUB_OUTPUT"
+          else
+            if [[ "${PATCH}" != "0" ]]; then
+              echo "::error::Release branch '${RELEASE_BRANCH}' does not exist on origin, but the latest stable release '${LATEST_TAG}' has patch=${PATCH} (>0). This is inconsistent."
+              exit 1
+            fi
+            echo "Release branch '${RELEASE_BRANCH}' does not exist. Creating from ${LATEST_TAG}."
+            git checkout -B "${RELEASE_BRANCH}" "refs/tags/${LATEST_TAG}"
+            echo "branch_existed=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Fast-forward merge source branch into release branch
+        env:
+          SOURCE_BRANCH:  ${{ steps.resolve.outputs.source_branch }}
+          SOURCE_COMMIT:  ${{ inputs.commit }}
+          RELEASE_BRANCH: ${{ steps.latest.outputs.release_branch }}
+        run: |
+          set -euo pipefail
+
+          # --ff-only guarantees no merge commit is created. If a fast-forward is
+          # not possible (i.e. the release branch has commits the source branch
+          # doesn't), the merge will fail and we abort. Because we already validated
+          # that the source branch is rooted on the latest stable tag, and the
+          # release branch tip equals that same tag, this fast-forward should
+          # always succeed for a well-formed backport branch.
+          #
+          # We merge the operator-provided SHA, not the branch ref, so a push to
+          # the branch in the window between resolve and now cannot smuggle new
+          # commits into the release.
+          if ! git merge --ff-only "${SOURCE_COMMIT}"; then
+            echo "::error::Cannot fast-forward '${RELEASE_BRANCH}' to ${SOURCE_COMMIT} (tip of '${SOURCE_BRANCH}'). A merge commit would be required. Aborting."
+            exit 1
+          fi
+
+          echo "Fast-forwarded '${RELEASE_BRANCH}' to ${SOURCE_COMMIT} (tip of '${SOURCE_BRANCH}')."
+
+      - name: Bump version files
+        env:
+          NEW_VERSION_NO_V: ${{ steps.latest.outputs.new_version_no_v }}
+        run: |
+          set -euo pipefail
+
+          if [[ ! -f comfyui_version.py ]]; then
+            echo "::error::comfyui_version.py not found in repo root."
+            exit 1
+          fi
+          if [[ ! -f pyproject.toml ]]; then
+            echo "::error::pyproject.toml not found in repo root."
+            exit 1
+          fi
+
+          # Replace the version string in comfyui_version.py.
+          # Expected format:  __version__ = "X.Y.Z"
+          python3 - "$NEW_VERSION_NO_V" <<'PY'
+          import re, sys, pathlib
+          new = sys.argv[1]
+
+          p = pathlib.Path("comfyui_version.py")
+          src = p.read_text()
+          new_src, n = re.subn(
+              r'(__version__\s*=\s*[\'"])[^\'"]+([\'"])',
+              lambda m: f'{m.group(1)}{new}{m.group(2)}',
+              src,
+              count=1,
+          )
+          if n != 1:
+              sys.exit("Could not find __version__ assignment in comfyui_version.py")
+          p.write_text(new_src)
+
+          p = pathlib.Path("pyproject.toml")
+          src = p.read_text()
+          # Replace the first `version = "..."` inside [project] or [tool.poetry].
+          new_src, n = re.subn(
+              r'(?m)^(version\s*=\s*")[^"]+(")',
+              lambda m: f'{m.group(1)}{new}{m.group(2)}',
+              src,
+              count=1,
+          )
+          if n != 1:
+              sys.exit("Could not find version assignment in pyproject.toml")
+          p.write_text(new_src)
+          PY
+
+          echo "Updated version to ${NEW_VERSION_NO_V} in comfyui_version.py and pyproject.toml."
+          git --no-pager diff -- comfyui_version.py pyproject.toml
+
+      - name: Commit version bump and tag release
+        env:
+          NEW_VERSION: ${{ steps.latest.outputs.new_version }}
+        run: |
+          set -euo pipefail
+
+          git add comfyui_version.py pyproject.toml
+          git commit -m "ComfyUI ${NEW_VERSION}"
+
+          if git rev-parse -q --verify "refs/tags/${NEW_VERSION}" >/dev/null; then
+            echo "::error::Tag ${NEW_VERSION} already exists locally."
+            exit 1
+          fi
+          git tag "${NEW_VERSION}"
+
+      - name: Verify tag does not already exist on origin
+        env:
+          NEW_VERSION: ${{ steps.latest.outputs.new_version }}
+        run: |
+          set -euo pipefail
+          if git ls-remote --exit-code --tags origin "refs/tags/${NEW_VERSION}" >/dev/null 2>&1; then
+            echo "::error::Tag ${NEW_VERSION} already exists on origin. Aborting."
+            exit 1
+          fi
+
+      - name: Push release branch and tag
+        env:
+          RELEASE_BRANCH: ${{ steps.latest.outputs.release_branch }}
+          NEW_VERSION:    ${{ steps.latest.outputs.new_version }}
+        run: |
+          set -euo pipefail
+
+          # Push the branch first, then the tag. Atomic-ish: if the branch push
+          # fails we never publish the tag.
+          git push origin "refs/heads/${RELEASE_BRANCH}:refs/heads/${RELEASE_BRANCH}"
+          git push origin "refs/tags/${NEW_VERSION}"
+
+          echo "Released ${NEW_VERSION} on ${RELEASE_BRANCH}."
+
+      - name: Delete remote source branch
+        env:
+          GH_TOKEN:        ${{ steps.app-token.outputs.token }}
+          REPO:            ${{ github.repository }}
+          SOURCE_BRANCH:   ${{ steps.resolve.outputs.source_branch }}
+          SOURCE_COMMIT:   ${{ inputs.commit }}
+          RELEASE_BRANCH:  ${{ steps.latest.outputs.release_branch }}
+          DEFAULT_BRANCH:  ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+
+          # Belt-and-braces: the resolve step already refuses the default branch,
+          # but never delete the default or the release branch under any
+          # circumstances.
+          if [[ "${SOURCE_BRANCH}" == "${DEFAULT_BRANCH}" || "${SOURCE_BRANCH}" == "${RELEASE_BRANCH}" ]]; then
+            echo "::error::Refusing to delete '${SOURCE_BRANCH}' (matches default or release branch)."
+            exit 1
+          fi
+
+          # Delete the source branch on origin, but only if its tip is still the
+          # SHA we released from. If someone pushed new commits to it after we
+          # resolved it, leave it alone — those commits would be silently lost.
+          current_tip="$(git ls-remote origin "refs/heads/${SOURCE_BRANCH}" | awk '{print $1}')"
+          if [[ -z "${current_tip}" ]]; then
+            echo "Source branch '${SOURCE_BRANCH}' no longer exists on origin; nothing to delete."
+            exit 0
+          fi
+          if [[ "${current_tip}" != "${SOURCE_COMMIT}" ]]; then
+            echo "::warning::Source branch '${SOURCE_BRANCH}' tip (${current_tip}) no longer matches released commit (${SOURCE_COMMIT}). Leaving it in place."
+            exit 0
+          fi
+
+          git push origin --delete "refs/heads/${SOURCE_BRANCH}"
+          echo "Deleted remote branch '${SOURCE_BRANCH}'."
+
+      - name: Summary
+        if: always()
+        env:
+          NEW_VERSION:    ${{ steps.latest.outputs.new_version }}
+          RELEASE_BRANCH: ${{ steps.latest.outputs.release_branch }}
+          LATEST_TAG:     ${{ steps.latest.outputs.latest_tag }}
+          SOURCE_BRANCH:  ${{ steps.resolve.outputs.source_branch }}
+          SOURCE_COMMIT:  ${{ inputs.commit }}
+        run: |
+          # SOURCE_BRANCH is empty if the resolve step never produced an output
+          # (e.g. the workflow failed in or before that step). Show a placeholder
+          # in that case so the summary table still renders cleanly.
+          source_branch_display="${SOURCE_BRANCH:-(unresolved)}"
+          {
+            echo "## Backport release"
+            echo ""
+            echo "| Field | Value |"
+            echo "|---|---|"
+            echo "| Source commit | \`${SOURCE_COMMIT}\` |"
+            echo "| Source branch | \`${source_branch_display}\` |"
+            echo "| Previous stable | \`${LATEST_TAG}\` |"
+            echo "| New version | \`${NEW_VERSION}\` |"
+            echo "| Release branch | \`${RELEASE_BRANCH}\` |"
+          } >> "$GITHUB_STEP_SUMMARY"

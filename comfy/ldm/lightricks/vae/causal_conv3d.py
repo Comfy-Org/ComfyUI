@@ -49,6 +49,12 @@ class CausalConv3d(nn.Module):
         )
         self.temporal_cache_state={}
 
+    def _empty_output(self, x):
+        # empty (0 frame) outputs must still have the conv's output channels and spatial dims
+        h = (x.shape[3] + 2 * self.conv.padding[1] - self.conv.kernel_size[1]) // self.conv.stride[1] + 1
+        w = (x.shape[4] + 2 * self.conv.padding[2] - self.conv.kernel_size[2]) // self.conv.stride[2] + 1
+        return x.new_empty((x.shape[0], self.out_channels, 0, h, w))
+
     def forward(self, x, causal: bool = True):
         tid = threading.get_ident()
 
@@ -58,7 +64,7 @@ class CausalConv3d(nn.Module):
             if not causal:
                 padding_length = padding_length // 2
             if x.shape[2] == 0:
-                return x
+                return self._empty_output(x)
             cached = x[:, :, :1, :, :].repeat((1, 1, padding_length, 1, 1))
         pieces = [ cached, x ]
         if is_end and not causal:
@@ -83,7 +89,7 @@ class CausalConv3d(nn.Module):
         elif is_end:
             self.temporal_cache_state[tid] = (None, True)
 
-        return self.conv(x) if x.shape[2] >= self.time_kernel_size else x[:, :, :0, :, :]
+        return self.conv(x) if x.shape[2] >= self.time_kernel_size else self._empty_output(x)
 
     @property
     def weight(self):

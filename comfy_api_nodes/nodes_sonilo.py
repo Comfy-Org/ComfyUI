@@ -8,17 +8,26 @@ import aiohttp
 from typing_extensions import override
 
 from comfy_api.latest import IO, ComfyExtension, Input
+from comfy_api_nodes.apis.sonilo import (
+    SoniloTask,
+    SoniloTaskSubmitResponse,
+    SoniloTextToMusicLyricsRequest,
+)
 from comfy_api_nodes.util import (
     ApiEndpoint,
     audio_bytes_to_audio_input,
+    download_url_as_bytesio,
+    poll_op,
+    sync_op,
     upload_video_to_comfyapi,
     validate_string,
 )
 from comfy_api_nodes.util._helpers import (
     default_base_url,
-    get_auth_header,
+    get_comfy_api_headers,
     get_node_id,
     is_processing_interrupted,
+    refresh_partner_token,
 )
 from comfy_api_nodes.util.common_exceptions import ProcessingInterrupted
 from server import PromptServer
@@ -34,7 +43,7 @@ class SoniloVideoToMusic(IO.ComfyNode):
         return IO.Schema(
             node_id="SoniloVideoToMusic",
             display_name="Sonilo Video to Music",
-            category="api node/audio/Sonilo",
+            category="partner/audio/Sonilo",
             description="Generate music from video content using Sonilo's AI model. "
             "Analyzes the video and creates matching music.",
             inputs=[
@@ -67,7 +76,7 @@ class SoniloVideoToMusic(IO.ComfyNode):
             ],
             is_api_node=True,
             price_badge=IO.PriceBadge(
-                expr='{"type":"usd","usd":0.009,"format":{"suffix":"/second"}}',
+                expr='{"type":"usd","usd":0.01287,"format":{"suffix":"/second"}}',
             ),
         )
 
@@ -99,9 +108,8 @@ class SoniloTextToMusic(IO.ComfyNode):
         return IO.Schema(
             node_id="SoniloTextToMusic",
             display_name="Sonilo Text to Music",
-            category="api node/audio/Sonilo",
-            description="Generate music from a text prompt using Sonilo's AI model. "
-            "Leave duration at 0 to let the model infer it from the prompt.",
+            category="partner/audio/Sonilo",
+            description="Generate music from a text prompt using Sonilo's AI model.",
             inputs=[
                 IO.String.Input(
                     "prompt",
@@ -111,11 +119,10 @@ class SoniloTextToMusic(IO.ComfyNode):
                 ),
                 IO.Int.Input(
                     "duration",
-                    default=0,
-                    min=0,
+                    default=30,
+                    min=1,
                     max=360,
-                    tooltip="Target duration in seconds. Set to 0 to let the model "
-                    "infer the duration from the prompt. Maximum: 6 minutes.",
+                    tooltip="Target duration in seconds. Maximum: 6 minutes.",
                 ),
                 IO.Int.Input(
                     "seed",
@@ -136,12 +143,81 @@ class SoniloTextToMusic(IO.ComfyNode):
             is_api_node=True,
             price_badge=IO.PriceBadge(
                 depends_on=IO.PriceBadgeDepends(widgets=["duration"]),
+                expr='{"type":"usd","usd": 0.0032175 * widgets.duration}',
+            ),
+        )
+
+    @classmethod
+    async def execute(
+        cls,
+        prompt: str,
+        duration: int = 1,
+        seed: int = 0,
+    ) -> IO.NodeOutput:
+        validate_string(prompt, strip_whitespace=True, min_length=1, max_length=1000)
+        form = aiohttp.FormData()
+        form.add_field("prompt", prompt)
+        form.add_field("duration", str(duration))
+        audio_bytes = await _stream_sonilo_music(
+            cls,
+            ApiEndpoint(path="/proxy/sonilo/t2m/generate", method="POST"),
+            form,
+        )
+        return IO.NodeOutput(audio_bytes_to_audio_input(audio_bytes))
+
+
+class SoniloMusic15(IO.ComfyNode):
+    @classmethod
+    def define_schema(cls) -> IO.Schema:
+        return IO.Schema(
+            node_id="SoniloMusic15",
+            display_name="Sonilo Music 1.5",
+            category="partner/audio/Sonilo",
+            description="Generate a song with sung vocals from a text prompt using Sonilo Music 1.5.",
+            inputs=[
+                IO.String.Input(
+                    "prompt",
+                    default="",
+                    multiline=True,
+                    tooltip="Describe the song: genre, mood, instruments and vocals. "
+                    "To set the words, add a 'Lyrics:' block with [Verse] / [Chorus] tags; "
+                    "without one, the model writes its own lyrics. Maximum: 2000 characters.",
+                ),
+                IO.DynamicCombo.Input(
+                    "duration",
+                    options=[
+                        IO.DynamicCombo.Option("auto", []),
+                        IO.DynamicCombo.Option(
+                            "custom",
+                            [IO.Int.Input("seconds", default=60, min=10, max=360)],
+                        ),
+                    ],
+                    tooltip="'auto' fits the song length to the lyrics. "
+                    "A custom length cuts lyrics that do not fit and repeats short ones.",
+                ),
+                IO.Int.Input(
+                    "seed",
+                    default=42,
+                    min=0,
+                    max=0xFFFFFFFFFFFFFFFF,
+                    control_after_generate=True,
+                    tooltip="Seed controls whether the node should re-run; "
+                    "results are non-deterministic regardless of seed.",
+                ),
+            ],
+            outputs=[IO.Audio.Output()],
+            hidden=[
+                IO.Hidden.auth_token_comfy_org,
+                IO.Hidden.api_key_comfy_org,
+                IO.Hidden.unique_id,
+            ],
+            is_api_node=True,
+            price_badge=IO.PriceBadge(
+                depends_on=IO.PriceBadgeDepends(widgets=["duration", "duration.seconds"]),
                 expr="""
-                (
-                  widgets.duration > 0
-                    ? {"type":"usd","usd": 0.005 * widgets.duration}
-                    : {"type":"usd","usd": 0.005, "format":{"suffix":"/second"}}
-                )
+                widgets.duration = "custom"
+                  ? {"type":"usd","usd": 0.0032175 * $lookup(widgets, "duration.seconds")}
+                  : {"type":"usd","usd": 0.0032175, "format":{"suffix":"/second"}}
                 """,
             ),
         )
@@ -150,20 +226,30 @@ class SoniloTextToMusic(IO.ComfyNode):
     async def execute(
         cls,
         prompt: str,
-        duration: int = 0,
-        seed: int = 0,
+        duration: dict,
+        seed: int,
     ) -> IO.NodeOutput:
-        validate_string(prompt, strip_whitespace=True, min_length=1)
-        form = aiohttp.FormData()
-        form.add_field("prompt", prompt)
-        if duration > 0:
-            form.add_field("duration", str(duration))
-        audio_bytes = await _stream_sonilo_music(
+        validate_string(prompt, strip_whitespace=True, min_length=1, max_length=2000)
+        task = await sync_op(
             cls,
-            ApiEndpoint(path="/proxy/sonilo/t2m/generate", method="POST"),
-            form,
+            ApiEndpoint(path="/proxy/sonilo/v1/text-to-music-l", method="POST"),
+            response_model=SoniloTaskSubmitResponse,
+            data=SoniloTextToMusicLyricsRequest(
+                prompt=prompt.strip(),
+                duration=duration["seconds"] if duration["duration"] == "custom" else None,
+            ),
+            content_type="multipart/form-data",
         )
-        return IO.NodeOutput(audio_bytes_to_audio_input(audio_bytes))
+        result = await poll_op(
+            cls,
+            ApiEndpoint(path=f"/proxy/sonilo/v1/tasks/{task.task_id}"),
+            response_model=SoniloTask,
+            status_extractor=lambda r: r.status,
+            completed_statuses=["succeeded"],
+            failed_statuses=["failed"],
+        )
+        audio = await download_url_as_bytesio(result.audio.url, cls=cls)
+        return IO.NodeOutput(audio_bytes_to_audio_input(audio.getvalue()))
 
 
 async def _stream_sonilo_music(
@@ -174,8 +260,8 @@ async def _stream_sonilo_music(
     """POST ``form`` to Sonilo, read the NDJSON stream, and return the first stream's audio bytes."""
     url = urljoin(default_base_url().rstrip("/") + "/", endpoint.path.lstrip("/"))
 
-    headers: dict[str, str] = {}
-    headers.update(get_auth_header(cls))
+    await refresh_partner_token(cls)
+    headers = get_comfy_api_headers(cls)
     headers.update(endpoint.headers)
 
     node_id = get_node_id(cls)
@@ -185,7 +271,7 @@ async def _stream_sonilo_music(
     title: str | None = None
 
     timeout = aiohttp.ClientTimeout(total=1200.0, sock_read=300.0)
-    async with aiohttp.ClientSession(timeout=timeout) as session:
+    async with aiohttp.ClientSession(timeout=timeout, trust_env=True) as session:
         PromptServer.instance.send_progress_text("Status: Queued", node_id)
         async with session.post(url, data=form, headers=headers) as resp:
             if resp.status >= 400:
@@ -280,7 +366,7 @@ async def _extract_error_message(resp: aiohttp.ClientResponse) -> str:
 class SoniloExtension(ComfyExtension):
     @override
     async def get_node_list(self) -> list[type[IO.ComfyNode]]:
-        return [SoniloVideoToMusic, SoniloTextToMusic]
+        return [SoniloVideoToMusic, SoniloTextToMusic, SoniloMusic15]
 
 
 async def comfy_entrypoint() -> SoniloExtension:

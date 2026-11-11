@@ -307,7 +307,8 @@
         "extra": {
           "workflowRendererVersion": "LG"
         },
-        "category": "Text generation/Video Captioning"
+        "category": "Video Tools",
+        "description": "Generates descriptive captions for video input using Google's Gemini multimodal LLM."
       }
     ]
   }

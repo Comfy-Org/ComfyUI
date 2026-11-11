@@ -30,7 +30,7 @@ class LoraLoaderBypass:
     OUTPUT_TOOLTIPS = ("The modified diffusion model.", "The modified CLIP model.")
     FUNCTION = "load_lora"
 
-    CATEGORY = "loaders"
+    CATEGORY = "model/loaders"
     DESCRIPTION = "Apply LoRA in bypass mode. Unlike regular LoRA, this doesn't modify model weights - instead it injects the LoRA computation during forward pass. Useful for training scenarios."
     EXPERIMENTAL = True
 

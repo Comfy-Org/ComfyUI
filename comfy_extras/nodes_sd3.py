@@ -13,8 +13,9 @@ class TripleCLIPLoader(io.ComfyNode):
     def define_schema(cls):
         return io.Schema(
             node_id="TripleCLIPLoader",
-            category="advanced/loaders",
-            description="[Recipes]\n\nsd3: clip-l, clip-g, t5",
+            display_name="Load CLIP (Triple)",
+            category="model/loaders",
+            description="Recipes:\nsd3: clip-l, clip-g, t5",
             inputs=[
                 io.Combo.Input("clip_name1", options=folder_paths.get_filename_list("text_encoders")),
                 io.Combo.Input("clip_name2", options=folder_paths.get_filename_list("text_encoders")),
@@ -41,7 +42,7 @@ class EmptySD3LatentImage(io.ComfyNode):
     def define_schema(cls):
         return io.Schema(
             node_id="EmptySD3LatentImage",
-            category="latent/sd3",
+            category="model/latent/stable diffusion",
             inputs=[
                 io.Int.Input("width", default=1024, min=16, max=nodes.MAX_RESOLUTION, step=16),
                 io.Int.Input("height", default=1024, min=16, max=nodes.MAX_RESOLUTION, step=16),
@@ -54,7 +55,7 @@ class EmptySD3LatentImage(io.ComfyNode):
 
     @classmethod
     def execute(cls, width, height, batch_size=1) -> io.NodeOutput:
-        latent = torch.zeros([batch_size, 16, height // 8, width // 8], device=comfy.model_management.intermediate_device())
+        latent = torch.zeros([batch_size, 16, height // 8, width // 8], device=comfy.model_management.intermediate_device(), dtype=comfy.model_management.intermediate_dtype())
         return io.NodeOutput({"samples": latent, "downscale_ratio_spacial": 8})
 
     generate = execute  # TODO: remove
@@ -66,7 +67,8 @@ class CLIPTextEncodeSD3(io.ComfyNode):
         return io.Schema(
             node_id="CLIPTextEncodeSD3",
             search_aliases=["sd3 prompt"],
-            category="advanced/conditioning",
+            display_name="CLIP Text Encode (SD3)",
+            category="model/conditioning/stable diffusion",
             inputs=[
                 io.Clip.Input("clip"),
                 io.String.Input("clip_l", multiline=True, dynamic_prompts=True),
@@ -113,7 +115,7 @@ class ControlNetApplySD3(io.ComfyNode):
         return io.Schema(
             node_id="ControlNetApplySD3",
             display_name="Apply Controlnet with VAE",
-            category="conditioning/controlnet",
+            category="model/conditioning/controlnet",
             inputs=[
                 io.Conditioning.Input("positive"),
                 io.Conditioning.Input("negative"),

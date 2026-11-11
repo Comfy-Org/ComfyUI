@@ -575,7 +575,8 @@
         "extra": {
           "workflowRendererVersion": "LG"
         },
-        "category": "Image Tools/Color adjust"
+        "category": "Image Tools/Color adjust",
+        "description": "Adds a glow/bloom effect around bright image areas via GPU fragment shader."
       }
     ]
   }

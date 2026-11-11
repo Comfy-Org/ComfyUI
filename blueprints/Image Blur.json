@@ -374,7 +374,8 @@
         "extra": {
           "workflowRendererVersion": "LG"
         },
-        "category": "Image Tools/Blur"
+        "category": "Image Tools/Blur",
+        "description": "Applies Gaussian, Box, or Radial blur to soften images and create stylized depth or motion effects."
       }
     ]
   }

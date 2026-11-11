@@ -23,7 +23,7 @@ class BriaEditImageRequest(BaseModel):
         None,
         description="Mask image (black and white). Black areas will be preserved, white areas will be edited. "
         "If omitted, the edit applies to the entire image. "
-        "The input image and the the input mask must be of the same size.",
+        "The input image and the input mask must be of the same size.",
     )
     negative_prompt: str | None = Field(None)
     guidance_scale: float = Field(...)
@@ -45,6 +45,22 @@ class BriaEditImageRequest(BaseModel):
     )
 
 
+class BriaGenerateImageRequest(BaseModel):
+    prompt: str | None = Field(None)
+    structured_prompt: str | None = Field(None)
+    images: list[str] | None = Field(None, description="A single reference image.")
+    aspect_ratio: str = Field(...)
+    resolution: str = Field(...)
+    seed: int = Field(...)
+    prompt_content_moderation: bool = Field(False, description="If true, returns 422 on prompt moderation failure.")
+    visual_input_content_moderation: bool = Field(
+        False, description="If true, returns 422 on reference image moderation failure."
+    )
+    visual_output_content_moderation: bool = Field(
+        False, description="If true, returns 422 on visual output moderation failure."
+    )
+
+
 class BriaRemoveBackgroundRequest(BaseModel):
     image: str = Field(...)
     sync: bool = Field(False)
@@ -55,6 +71,81 @@ class BriaRemoveBackgroundRequest(BaseModel):
         False, description="If true, returns 422 on visual output moderation failure."
     )
     seed: int = Field(...)
+
+
+class BriaGenFillRequest(BaseModel):
+    image: str = Field(...)
+    mask: str = Field(
+        ...,
+        description="Binary mask defining the region to fill: white (255) pixels are generated, "
+        "black (0) pixels are preserved. Must have the same aspect ratio as the image.",
+    )
+    prompt: str = Field(...)
+    negative_prompt: str | None = Field(None)
+    refine_prompt: bool = Field(True)
+    seed: int = Field(...)
+    prompt_content_moderation: bool = Field(False, description="If true, returns 422 on prompt moderation failure.")
+    visual_input_content_moderation: bool = Field(
+        False, description="If true, returns 422 on image or mask moderation failure."
+    )
+    visual_output_content_moderation: bool = Field(
+        False, description="If true, returns 422 on visual output moderation failure."
+    )
+
+
+class BriaEraseRequest(BaseModel):
+    image: str = Field(...)
+    mask: str = Field(
+        ...,
+        description="Binary mask defining the region to erase: white (255) pixels are removed, "
+        "black (0) pixels are preserved. Must have the same aspect ratio as the image.",
+    )
+    mask_type: str = Field("manual", description="'manual' for hand-drawn masks, 'automatic' for segmentation masks.")
+    visual_input_content_moderation: bool = Field(
+        False, description="If true, returns 422 on image or mask moderation failure."
+    )
+    visual_output_content_moderation: bool = Field(
+        False, description="If true, returns 422 on visual output moderation failure."
+    )
+
+
+class BriaExpandRequest(BaseModel):
+    image: str = Field(...)
+    aspect_ratio: str | float | None = Field(
+        None,
+        description="Target ratio: a preset string (1:1, 2:3, 3:2, 3:4, 4:3, 4:5, 5:4, 9:16, 16:9) "
+        "or a float between 0.5 and 3.0. When set, the canvas/placement fields are ignored.",
+    )
+    canvas_size: list[int] | None = Field(None, description="Output canvas [width, height]; area up to 5000x5000.")
+    original_image_size: list[int] | None = Field(
+        None, description="Size [width, height] of the original image inside the canvas."
+    )
+    original_image_location: list[int] | None = Field(
+        None,
+        description="Top-left corner [x, y] of the original image inside the canvas; "
+        "values may fall outside the canvas, cropping the image.",
+    )
+    prompt: str | None = Field(None, description="If omitted, Bria auto-generates a prompt from the image.")
+    negative_prompt: str | None = Field(None)
+    seed: int = Field(...)
+    prompt_content_moderation: bool = Field(False, description="If true, returns 422 on prompt moderation failure.")
+    visual_input_content_moderation: bool = Field(
+        False, description="If true, returns 422 on image moderation failure."
+    )
+    visual_output_content_moderation: bool = Field(
+        False, description="If true, returns 422 on visual output moderation failure."
+    )
+
+
+class BriaIncreaseResolutionRequest(BaseModel):
+    image: str = Field(...)
+    desired_increase: int = Field(..., description="Resolution multiplier, 2 or 4.")
+    visual_input_content_moderation: bool = Field(
+        False, description="If true, returns 422 on image moderation failure."
+    )
+    visual_output_content_moderation: bool = Field(
+        False, description="If true, returns 422 on visual output moderation failure."
+    )
 
 
 class BriaStatusResponse(BaseModel):
@@ -70,6 +161,26 @@ class BriaRemoveBackgroundResult(BaseModel):
 class BriaRemoveBackgroundResponse(BaseModel):
     status: str = Field(...)
     result: BriaRemoveBackgroundResult | None = Field(None)
+
+
+class BriaImageResult(BaseModel):
+    image_url: str = Field(...)
+
+
+class BriaImageResultResponse(BaseModel):
+    status: str = Field(...)
+    result: BriaImageResult | None = Field(None)
+
+
+class BriaExpandResult(BaseModel):
+    image_url: str = Field(...)
+    prompt: str | None = Field(None)
+    seed: int | None = Field(None)
+
+
+class BriaExpandResponse(BaseModel):
+    status: str = Field(...)
+    result: BriaExpandResult | None = Field(None)
 
 
 class BriaImageEditResult(BaseModel):
@@ -97,3 +208,206 @@ class BriaRemoveVideoBackgroundResult(BaseModel):
 class BriaRemoveVideoBackgroundResponse(BaseModel):
     status: str = Field(...)
     result: BriaRemoveVideoBackgroundResult | None = Field(None)
+
+
+class BriaVideoGreenScreenRequest(BaseModel):
+    video: str = Field(..., description="Publicly accessible URL of the input video.")
+    green_shade: str = Field(
+        default="broadcast_green",
+        description="Solid chroma-key shade applied behind the foreground "
+        "(broadcast_green, chroma_green, or blue_screen).",
+    )
+    output_container_and_codec: str = Field(...)
+    preserve_audio: bool = Field(True)
+    seed: int = Field(...)
+
+
+class BriaVideoReplaceBackgroundRequest(BaseModel):
+    video: str = Field(..., description="Publicly accessible URL of the input (foreground) video.")
+    background_url: str = Field(
+        ...,
+        description="Publicly accessible URL of the background image or video to composite behind "
+        "the foreground. Stretched to the foreground frame; match its aspect ratio for "
+        "undistorted results.",
+    )
+    output_container_and_codec: str = Field(...)
+    preserve_audio: bool = Field(True)
+    seed: int = Field(...)
+
+
+class BriaEraseByTextRequest(BaseModel):
+    image: str = Field(...)
+    object_name: str = Field(..., description="Name of the object to remove, for example 'the lamp'.")
+    visual_input_content_moderation: bool = Field(
+        False, description="If true, returns 422 on input image moderation failure."
+    )
+    visual_output_content_moderation: bool = Field(
+        False, description="If true, returns 422 on visual output moderation failure."
+    )
+
+
+class BriaReplaceBackgroundRequest(BaseModel):
+    image: str = Field(...)
+    prompt: str | None = Field(
+        None,
+        description="Description of the new background. Mutually exclusive with ref_images; "
+        "a hex color code produces a solid color background.",
+    )
+    ref_images: list[str] | None = Field(
+        None,
+        description="Reference images guiding the new background. Mutually exclusive with prompt.",
+    )
+    mode: str | None = Field(
+        None, description="'base', 'high_control' or 'fast'. Applies to the prompt path only."
+    )
+    refine_prompt: bool | None = Field(
+        None, description="When true, the prompt is rewritten for better results. Prompt path only."
+    )
+    enhance_ref_images: bool | None = Field(
+        None, description="When true, the reference images get extra processing. Reference path only."
+    )
+    original_quality: bool = Field(
+        False,
+        description="When true, the output keeps the input's pixel size; otherwise it is scaled to 1MP.",
+    )
+    seed: int = Field(...)
+    prompt_content_moderation: bool = Field(False, description="If true, returns 422 on prompt moderation failure.")
+    visual_input_content_moderation: bool = Field(
+        False, description="If true, returns 422 on input image moderation failure."
+    )
+    visual_output_content_moderation: bool = Field(
+        False, description="If true, returns 422 on visual output moderation failure."
+    )
+
+
+class BriaEraseForegroundRequest(BaseModel):
+    image: str = Field(...)
+    visual_input_content_moderation: bool = Field(
+        False, description="If true, returns 422 on input image moderation failure."
+    )
+    visual_output_content_moderation: bool = Field(
+        False, description="If true, returns 422 on visual output moderation failure."
+    )
+
+
+class BriaAddObjectRequest(BaseModel):
+    image: str = Field(...)
+    instruction: str = Field(
+        ..., description="What to add and where, for example 'Place a red vase with flowers on the table'."
+    )
+    visual_input_content_moderation: bool = Field(
+        False, description="If true, returns 422 on input image moderation failure."
+    )
+    visual_output_content_moderation: bool = Field(
+        False, description="If true, returns 422 on visual output moderation failure."
+    )
+
+
+class BriaReplaceObjectRequest(BaseModel):
+    image: str = Field(...)
+    instruction: str = Field(
+        ..., description="What to replace with what, for example 'Replace the red apple with a green pear'."
+    )
+    visual_input_content_moderation: bool = Field(
+        False, description="If true, returns 422 on input image moderation failure."
+    )
+    visual_output_content_moderation: bool = Field(
+        False, description="If true, returns 422 on visual output moderation failure."
+    )
+
+
+class BriaRelightRequest(BaseModel):
+    image: str = Field(...)
+    light_type: str = Field(..., description="Lighting atmosphere to apply.")
+    light_direction: str = Field(..., description="Where the light comes from: front, side, bottom or top-down.")
+    visual_input_content_moderation: bool = Field(
+        False, description="If true, returns 422 on input image moderation failure."
+    )
+    visual_output_content_moderation: bool = Field(
+        False, description="If true, returns 422 on visual output moderation failure."
+    )
+
+
+class BriaRestoreRequest(BaseModel):
+    image: str = Field(...)
+    visual_input_content_moderation: bool = Field(
+        False, description="If true, returns 422 on input image moderation failure."
+    )
+    visual_output_content_moderation: bool = Field(
+        False, description="If true, returns 422 on visual output moderation failure."
+    )
+
+
+class BriaReseasonRequest(BaseModel):
+    image: str = Field(...)
+    season: str = Field(..., description="Season to apply: spring, summer, autumn or winter.")
+    visual_input_content_moderation: bool = Field(
+        False, description="If true, returns 422 on input image moderation failure."
+    )
+    visual_output_content_moderation: bool = Field(
+        False, description="If true, returns 422 on visual output moderation failure."
+    )
+
+
+class BriaVideoEraseRequest(BaseModel):
+    video: str = Field(..., description="Publicly accessible URL of the input video.")
+    mask: str = Field(
+        ...,
+        description="Publicly accessible URL of a mask video: white pixels are erased, black pixels are kept. "
+        "Must have the same dimensions and frame count as the input video.",
+    )
+    preserve_audio: bool = Field(True)
+    output_container_and_codec: str = Field(...)
+
+
+class BriaGuidedRemoveBackgroundRequest(BaseModel):
+    image: str = Field(...)
+    prompt: str = Field(..., description="What the cutout keeps, for example 'only the chair'.")
+    visual_input_content_moderation: bool = Field(
+        False, description="If true, returns 422 on input image moderation failure."
+    )
+    visual_output_content_moderation: bool = Field(
+        False, description="If true, returns 422 on visual output moderation failure."
+    )
+
+
+class BriaProductHoldingRequest(BaseModel):
+    person_image: str = Field(...)
+    product_images: list[str] = Field(..., description="One to three images of the product.")
+    instruction: str | None = Field(None, description="Extra direction appended to the built-in instruction.")
+    aspect_ratio: str | None = Field(None, description="Omitted keeps the person image's aspect ratio.")
+    seed: int = Field(...)
+    visual_output_content_moderation: bool = Field(
+        False, description="If true, returns 422 on visual output moderation failure."
+    )
+
+
+class BriaVirtualTryOnRequest(BaseModel):
+    person_image: str = Field(...)
+    garment_images: list[str] = Field(..., description="One to three garment or accessory images.")
+    instruction: str | None = Field(None, description="Extra direction appended to the built-in instruction.")
+    aspect_ratio: str | None = Field(None, description="Omitted keeps the person image's aspect ratio.")
+    seed: int = Field(...)
+    visual_output_content_moderation: bool = Field(
+        False, description="If true, returns 422 on visual output moderation failure."
+    )
+
+
+class BriaFiboEditResult(BaseModel):
+    image_url: str = Field(...)
+    structured_prompt: str | None = Field(None)
+
+
+class BriaFiboEditResponse(BaseModel):
+    status: str = Field(...)
+    result: BriaFiboEditResult | None = Field(None)
+
+
+class BriaReplaceBackgroundResult(BaseModel):
+    image_url: str = Field(...)
+    refined_prompt: str | None = Field(None)
+
+
+class BriaReplaceBackgroundResponse(BaseModel):
+    status: str = Field(...)
+    result: BriaReplaceBackgroundResult | None = Field(None)

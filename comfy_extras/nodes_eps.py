@@ -18,7 +18,7 @@ class EpsilonScaling(io.ComfyNode):
     def define_schema(cls):
         return io.Schema(
             node_id="Epsilon Scaling",
-            category="model_patches/unet",
+            category="model/patch/unet",
             inputs=[
                 io.Model.Input("model"),
                 io.Float.Input(
@@ -84,7 +84,7 @@ class TemporalScoreRescaling(io.ComfyNode):
         return io.Schema(
             node_id="TemporalScoreRescaling",
             display_name="TSR - Temporal Score Rescaling",
-            category="model_patches/unet",
+            category="model/patch/unet",
             inputs=[
                 io.Model.Input("model"),
                 io.Float.Input(

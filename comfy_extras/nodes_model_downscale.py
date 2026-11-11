@@ -10,7 +10,7 @@ class PatchModelAddDownscale(io.ComfyNode):
         return io.Schema(
             node_id="PatchModelAddDownscale",
             display_name="PatchModelAddDownscale (Kohya Deep Shrink)",
-            category="model_patches/unet",
+            category="model/patch/unet",
             inputs=[
                 io.Model.Input("model"),
                 io.Int.Input("block_number", default=3, min=1, max=32, step=1, advanced=True),

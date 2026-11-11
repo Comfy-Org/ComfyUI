@@ -31,7 +31,7 @@ class OptimalStepsScheduler(io.ComfyNode):
     def define_schema(cls):
         return io.Schema(
             node_id="OptimalStepsScheduler",
-            category="sampling/custom_sampling/schedulers",
+            category="model/sampling/schedulers",
             inputs=[
                 io.Combo.Input("model_type", options=["FLUX", "Wan", "Chroma"]),
                 io.Int.Input("steps", default=20, min=3, max=1000),

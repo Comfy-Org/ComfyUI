@@ -22,7 +22,7 @@ class LatentAdd(io.ComfyNode):
         return io.Schema(
             node_id="LatentAdd",
             search_aliases=["combine latents", "sum latents"],
-            category="latent/advanced",
+            category="model/latent/advanced",
             inputs=[
                 io.Latent.Input("samples1"),
                 io.Latent.Input("samples2"),
@@ -49,7 +49,7 @@ class LatentSubtract(io.ComfyNode):
         return io.Schema(
             node_id="LatentSubtract",
             search_aliases=["difference latent", "remove features"],
-            category="latent/advanced",
+            category="model/latent/advanced",
             inputs=[
                 io.Latent.Input("samples1"),
                 io.Latent.Input("samples2"),
@@ -76,7 +76,7 @@ class LatentMultiply(io.ComfyNode):
         return io.Schema(
             node_id="LatentMultiply",
             search_aliases=["scale latent", "amplify latent", "latent gain"],
-            category="latent/advanced",
+            category="model/latent/advanced",
             inputs=[
                 io.Latent.Input("samples"),
                 io.Float.Input("multiplier", default=1.0, min=-10.0, max=10.0, step=0.01),
@@ -100,7 +100,7 @@ class LatentInterpolate(io.ComfyNode):
         return io.Schema(
             node_id="LatentInterpolate",
             search_aliases=["blend latent", "mix latent", "lerp latent", "transition"],
-            category="latent/advanced",
+            category="model/latent/advanced",
             inputs=[
                 io.Latent.Input("samples1"),
                 io.Latent.Input("samples2"),
@@ -139,7 +139,7 @@ class LatentConcat(io.ComfyNode):
         return io.Schema(
             node_id="LatentConcat",
             search_aliases=["join latents", "stitch latents"],
-            category="latent/advanced",
+            category="model/latent/advanced",
             inputs=[
                 io.Latent.Input("samples1"),
                 io.Latent.Input("samples2"),
@@ -179,7 +179,7 @@ class LatentCut(io.ComfyNode):
         return io.Schema(
             node_id="LatentCut",
             search_aliases=["crop latent", "slice latent", "extract region"],
-            category="latent/advanced",
+            category="model/latent/advanced",
             inputs=[
                 io.Latent.Input("samples"),
                 io.Combo.Input("dim", options=["x", "y", "t"]),
@@ -220,7 +220,7 @@ class LatentCutToBatch(io.ComfyNode):
         return io.Schema(
             node_id="LatentCutToBatch",
             search_aliases=["slice to batch", "split latent", "tile latent"],
-            category="latent/advanced",
+            category="model/latent/advanced",
             inputs=[
                 io.Latent.Input("samples"),
                 io.Combo.Input("dim", options=["t", "x", "y"]),
@@ -262,7 +262,8 @@ class LatentBatch(io.ComfyNode):
         return io.Schema(
             node_id="LatentBatch",
             search_aliases=["combine latents", "merge latents", "join latents"],
-            category="latent/batch",
+            display_name="Batch Latents (DEPRECATED)",
+            category="model/latent/batch",
             is_deprecated=True,
             inputs=[
                 io.Latent.Input("samples1"),
@@ -290,7 +291,7 @@ class LatentBatchSeedBehavior(io.ComfyNode):
     def define_schema(cls):
         return io.Schema(
             node_id="LatentBatchSeedBehavior",
-            category="latent/advanced",
+            category="model/latent/advanced",
             inputs=[
                 io.Latent.Input("samples"),
                 io.Combo.Input("seed_behavior", options=["random", "fixed"], default="fixed"),
@@ -319,7 +320,7 @@ class LatentApplyOperation(io.ComfyNode):
         return io.Schema(
             node_id="LatentApplyOperation",
             search_aliases=["transform latent"],
-            category="latent/advanced/operations",
+            category="model/latent/advanced/operations",
             is_experimental=True,
             inputs=[
                 io.Latent.Input("samples"),
@@ -343,11 +344,13 @@ class LatentApplyOperationCFG(io.ComfyNode):
     def define_schema(cls):
         return io.Schema(
             node_id="LatentApplyOperationCFG",
-            category="latent/advanced/operations",
+            category="model/latent/advanced/operations",
             is_experimental=True,
             inputs=[
                 io.Model.Input("model"),
                 io.LatentOperation.Input("operation"),
+                io.Float.Input("start_percent", default=0.0, min=0.0, max=1.0, step=0.001, optional=True, tooltip="Start applying the operation at this fraction of the model's denoising schedule. 0 is the beginning."),
+                io.Float.Input("end_percent", default=1.0, min=0.0, max=1.0, step=0.001, optional=True, tooltip="Stop applying the operation at this fraction of the model's denoising schedule. 1 is the end."),
             ],
             outputs=[
                 io.Model.Output(),
@@ -355,11 +358,17 @@ class LatentApplyOperationCFG(io.ComfyNode):
         )
 
     @classmethod
-    def execute(cls, model, operation) -> io.NodeOutput:
+    def execute(cls, model, operation, start_percent=0.0, end_percent=1.0) -> io.NodeOutput:
         m = model.clone()
+        model_sampling = m.get_model_object("model_sampling")
+        sigma_start = model_sampling.percent_to_sigma(start_percent)
+        sigma_end = model_sampling.percent_to_sigma(end_percent)
 
         def pre_cfg_function(args):
             conds_out = args["conds_out"]
+            sigma = args["sigma"][0].item()
+            if sigma > sigma_start or sigma < sigma_end:
+                return conds_out
             if len(conds_out) == 2:
                 conds_out[0] = operation(latent=(conds_out[0] - conds_out[1])) + conds_out[1]
             else:
@@ -369,13 +378,46 @@ class LatentApplyOperationCFG(io.ComfyNode):
         m.set_model_sampler_pre_cfg_function(pre_cfg_function)
         return io.NodeOutput(m)
 
+class LatentOperationBlend(io.ComfyNode):
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="LatentOperationBlend",
+            display_name="Latent Operation Blend",
+            category="model/latent/advanced/operations",
+            description="Blend the entire latent toward the reference latent, resizing the reference with nearest-neighbor interpolation when needed.",
+            is_experimental=True,
+            inputs=[
+                io.Latent.Input("reference"),
+                io.Float.Input("strength", default=1.0, min=0.0, max=1.0, step=0.0001, tooltip="0 leaves the latent unchanged; 1 matches the resized reference latent."),
+            ],
+            outputs=[
+                io.LatentOperation.Output(),
+            ],
+        )
+
+    @classmethod
+    def execute(cls, reference, strength) -> io.NodeOutput:
+        samples = reference["samples"]
+
+        def match_reference(latent, **kwargs):
+            if strength == 0:
+                return latent
+            target = samples.to(latent)
+            if target.shape[2:] != latent.shape[2:]:
+                target = torch.nn.functional.interpolate(target, size=latent.shape[2:], mode="nearest")
+            target = comfy.utils.repeat_to_batch_size(target, latent.shape[0])
+            return torch.lerp(latent, target, strength)
+
+        return io.NodeOutput(match_reference)
+
 class LatentOperationTonemapReinhard(io.ComfyNode):
     @classmethod
     def define_schema(cls):
         return io.Schema(
             node_id="LatentOperationTonemapReinhard",
             search_aliases=["hdr latent"],
-            category="latent/advanced/operations",
+            category="model/latent/advanced/operations",
             is_experimental=True,
             inputs=[
                 io.Float.Input("multiplier", default=1.0, min=0.0, max=100.0, step=0.01),
@@ -410,7 +452,7 @@ class LatentOperationSharpen(io.ComfyNode):
     def define_schema(cls):
         return io.Schema(
             node_id="LatentOperationSharpen",
-            category="latent/advanced/operations",
+            category="model/latent/advanced/operations",
             is_experimental=True,
             inputs=[
                 io.Int.Input("sharpen_radius", default=9, min=1, max=31, step=1, advanced=True),
@@ -447,7 +489,8 @@ class ReplaceVideoLatentFrames(io.ComfyNode):
     def define_schema(cls):
         return io.Schema(
             node_id="ReplaceVideoLatentFrames",
-            category="latent/batch",
+            display_name="Replace Video Latent Frames",
+            category="model/latent/batch",
             inputs=[
                 io.Latent.Input("destination", tooltip="The destination latent where frames will be replaced."),
                 io.Latent.Input("source", optional=True, tooltip="The source latent providing frames to insert into the destination latent. If not provided, the destination latent is returned unchanged."),
@@ -494,6 +537,7 @@ class LatentExtension(ComfyExtension):
             LatentBatchSeedBehavior,
             LatentApplyOperation,
             LatentApplyOperationCFG,
+            LatentOperationBlend,
             LatentOperationTonemapReinhard,
             LatentOperationSharpen,
             ReplaceVideoLatentFrames

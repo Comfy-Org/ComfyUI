@@ -54,13 +54,13 @@ class BASE:
     optimizations = {"fp8": False}
 
     @classmethod
-    def matches(s, unet_config, state_dict=None):
+    def matches(s, unet_config, state_dict=None, unet_key_prefix=""):
         for k in s.unet_config:
             if k not in unet_config or s.unet_config[k] != unet_config[k]:
                 return False
         if state_dict is not None:
             for k in s.required_keys:
-                if k not in state_dict:
+                if k.format(unet_key_prefix) not in state_dict:
                     return False
         return True
 
@@ -115,7 +115,7 @@ class BASE:
         replace_prefix = {"": self.vae_key_prefix[0]}
         return utils.state_dict_prefix_replace(state_dict, replace_prefix)
 
-    def set_inference_dtype(self, dtype, manual_cast_dtype):
+    def set_inference_dtype(self, dtype, manual_cast_dtype, device=None):
         self.unet_config['dtype'] = dtype
         self.manual_cast_dtype = manual_cast_dtype
 

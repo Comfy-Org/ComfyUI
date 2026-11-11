@@ -2,15 +2,207 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from dataclasses import dataclass, field
+from tqdm import tqdm
+import contextlib
 import os
-import math
+import time
 
 import comfy.model_management
-from comfy.ldm.modules.attention import optimized_attention_for_device
+import comfy.model_prefetch
+import comfy.ops
+import comfy_kitchen
+from comfy_kitchen.int8_decode import is_available as int8_decode_is_available
+from comfy.quant_ops import QuantizedTensor
+from comfy.ldm.modules.attention import AttentionTensorContainer, ComfyAttention, optimized_attention_for_device
 from comfy import sd1_clip
 import comfy.text_encoders.qwen_vl
 
-from .llama import BaseLlama, BaseGenerate, Llama2_, MLP, RMSNorm, apply_rope
+from .llama import SPEC_ROWS, BaseLlama, BaseGenerate, FixedKV, FixedKVCache, Int8FixedKVCache, Llama2_, MLP, RMSNorm, apply_penalty, apply_rope, penalty_active, precompute_freqs_cis, rope_matrix
+
+
+@dataclass
+class LinearKV(FixedKV):
+    # DeltaNet state on the FixedKV interface: key=conv_state, value=recurrent_state (fp32)
+    g_decay: torch.Tensor = None
+    dt_bias: torch.Tensor = None
+    norm_weight: torch.Tensor = None
+    # deferred commit (kitchen gated_delta_decode_deferred): a decode step leaves the state untouched
+    # and the next step first replays its ctl[0] still-accepted tokens from the [1 - ctl[1]] side
+    # buffers. ctl and its tracker are shared by every layer.
+    qkv_buf: torch.Tensor = None
+    proj_buf: torch.Tensor = None
+    gates_buf: torch.Tensor = None
+    sumsq_buf: torch.Tensor = None
+    ctl: torch.Tensor = None
+    ctl_tracker: dict = None
+    uncommitted: int = 0
+
+    @staticmethod
+    def deferred_tracker(device):
+        # ctl = {pending, parity, slot[sm], parent[sm], prog[sm]}; without MTP, only row 0 runs.
+        n, sm = comfy_kitchen.gated_delta_ctl_ints, comfy_kitchen.gated_delta_slot_max
+        single = torch.tensor(list(range(sm)) + [-1] * sm + list(range(sm)), dtype=torch.int32)
+        host = torch.zeros((2, n), dtype=torch.int32)
+        # the host rows are pinned and fenced by events only where the copy is asynchronous
+        cuda = torch.device(device).type == "cuda"
+        return {"ctl": torch.zeros((n,), dtype=torch.int32, device=device), "host": host.pin_memory() if cuda else host,
+                "copied": [torch.cuda.Event(), torch.cuda.Event()] if cuda else None, "step": None, "parity": 0, "single": single, "path": None, "tree": None}
+
+    def decode_step(self, num_tokens):
+        return self.index > 0 and num_tokens <= SPEC_ROWS
+
+    def prepare(self, num_tokens):
+        # runs eagerly before the layer (a replayed graph skips its Python): the first linear
+        # layer of a step hands the kernels what to commit, every layer records what it leaves
+        t = self.ctl_tracker
+        if t["step"] != (self.index, num_tokens):
+            t["step"] = (self.index, num_tokens)
+            t["parity"] ^= 1
+            # the pinned row is reused every other step: its previous copy must have landed
+            if t["copied"] is not None:
+                t["copied"][t["parity"]].synchronize()
+            host = t["host"][t["parity"]]
+            host[0] = self.uncommitted
+            host[1] = t["parity"]
+            host[2:] = t["single"]
+            if t["path"] is not None:
+                host[2:2 + len(t["path"])] = torch.tensor(t["path"], dtype=torch.int32)
+                t["path"] = None
+            if t["tree"] is not None:
+                host[-len(t["tree"].ctl):] = t["tree"].ctl  # parent[], prog[]
+            self.ctl.copy_(host, non_blocking=True)
+            if t["copied"] is not None:
+                t["copied"][t["parity"]].record(torch.cuda.current_stream(self.ctl.device))
+        self.uncommitted = num_tokens if self.decode_step(num_tokens) else 0
+
+    def commit_path(self, base, path):
+        # the next step replays the accepted verify rows
+        self.ctl_tracker["path"] = path
+
+    def rollback(self, discard=1):
+        # nothing was written: the next step replays fewer tokens
+        self.index -= discard
+        self.uncommitted -= discard
+
+    @property
+    def conv_state(self):
+        return self.key
+
+    @property
+    def recurrent_state(self):
+        return self.value
+
+
+class VerifyTree:
+    """Shape of one MTP verify step: draft tokens in a tree rooted at the committed next token.
+
+    Built from nested child lists. A node's first child is the MTP argmax, later children its
+    runner-ups, and only argmax-chain nodes have children. Rows are numbered depth-first, first
+    child first, so the chain is rows 0..chain and no row sits above its depth.
+    """
+
+    def __init__(self, spec, capacity, device):
+        self.device = device
+        self.rows = capacity
+        self.mask = self.positions = None
+        self.update(spec)
+
+    def update(self, spec):
+        # Equal-row topology changes retain the addresses captured by CUDA graphs.
+        self.parent, self.children, self.depth = [], [], []
+
+        def add(node, parent):
+            r = len(self.parent)
+            self.parent.append(parent)
+            self.children.append([])
+            self.depth.append(0 if parent < 0 else self.depth[parent] + 1)
+            if parent >= 0:
+                self.children[parent].append(r)
+            for child in node:
+                add(child, r)
+
+        add(spec, -1)
+        count = len(self.parent)
+        self.chain = 0  # drafts on the argmax chain
+        while self.children[self.chain]:
+            self.chain = self.children[self.chain][0]
+        self.fanout = max(len(c) for c in self.children)
+        self.parent.extend([-1] * (self.rows - count))
+        self.children.extend([] for _ in range(self.rows - count))
+        self.depth.extend([0] * (self.rows - count))
+        # kitchen flash_attention_decode_tree_merge: bit t of row r's mask lets it attend row t
+        mask = []
+        for r in range(self.rows):
+            bits, a = 0, r
+            while a >= 0:
+                bits |= 1 << a
+                a = self.parent[a]
+            mask.append(bits)
+        mask = torch.tensor(mask, dtype=torch.int32, device=self.device)
+        if self.mask is None:
+            self.mask = mask
+        else:
+            self.mask.copy_(mask)
+        # kitchen gated_delta_decode_deferred program: a chain row commits (bit 5) after its
+        # children's leaves ran against its state without committing
+        prog = []
+        for r in range(self.chain + 1):
+            prog.append(r | (32 if self.children[r] else 0))
+            prog.extend(self.children[r][1:])
+        sm = comfy_kitchen.gated_delta_slot_max
+        self.ctl = torch.tensor(self.parent + [-1] * (sm - self.rows) + prog + list(range(count, sm)), dtype=torch.int32)
+        positions = torch.tensor([self.depth], dtype=torch.long, device=self.device)
+        if self.positions is None:
+            self.positions = positions
+        else:
+            self.positions.copy_(positions)
+
+
+# Verify capacity and topology. A fixed depth is a tree with one child per node.
+MTP_MODES = {
+    "2": (4, [[[]]]),
+    "3": (4, [[[[]]]]),
+    "4": (8, [[[[[]]]]]),
+    "5": (8, [[[[[[]]]]]]),
+    "tree2s1": (8, [[[], []], []]),
+    "tree2s2": (8, [[[], [], []], [], []]),
+    "tree3s1": (8, [[[[], []], []], []]),
+    "tree4s1m8": (8, [[[[[]], []], []], []]),
+    "auto": (8, None),
+}
+
+# Every positive composition of seven: a primary chain with terminal siblings.
+_SHAPES = []
+for _cuts in range(64):
+    _ends = [0] + [i for i in range(1, 7) if _cuts & (1 << (i - 1))] + [7]
+    _SHAPES.append(tuple(b - a for a, b in zip(_ends, _ends[1:])))
+
+
+def tree_spec(widths):
+    node = []
+    for width in reversed(widths):
+        node = [node] + [[] for _ in range(width - 1)]
+    return node
+
+
+def best_widths(widths, hits, draft_ms, verify_ms):
+    """Reallocate seven draft rows using conditional rank hits and measured GPU cost."""
+    probabilities = []
+    prior = [0.125] * 8
+    for row in hits:
+        count = sum(row)
+        prior = [(hit + 4 * p) / (count + 4) for hit, p in zip(row, prior)]
+        probabilities.append(prior)
+
+    def score(shape):
+        reach, emitted = 1.0, 1.0
+        for width, probability in zip(shape, probabilities):
+            emitted += reach * sum(probability[:width])
+            reach *= probability[0]
+        return emitted / (verify_ms + len(shape) * draft_ms)
+
+    best = max(_SHAPES, key=score)
+    return best if score(best) > 1.03 * score(widths) else widths
 
 
 def _qwen35_layer_types(n):
@@ -49,6 +241,7 @@ class Qwen35Config:
     transformer_type: str = "qwen35_2b"
     rope_dims: list = None
     rope_scale: float = None
+    mtp: bool = False
 
 QWEN35_VISION_DEFAULTS = dict(hidden_size=1024, num_heads=16, intermediate_size=4096, depth=24, patch_size=16, temporal_patch_size=2, in_channels=3, spatial_merge_size=2, num_position_embeddings=2304)
 
@@ -136,18 +329,6 @@ def torch_chunk_gated_delta_rule(query, key, value, g, beta, chunk_size=64, init
     return core_attn_out, last_recurrent_state
 
 
-def torch_causal_conv1d_update(x, conv_state, weight, bias=None):
-    # conv_state: [B, channels, kernel_size-1], x: [B, channels, 1]
-    # weight: [channels, kernel_size]
-    state_len = conv_state.shape[-1]
-    combined = torch.cat([conv_state, x], dim=-1).to(weight.dtype)  # [B, channels, kernel_size]
-    conv_state.copy_(combined[:, :, -state_len:])
-    out = (combined * weight).sum(dim=-1, keepdim=True)  # [B, channels, 1]
-    if bias is not None:
-        out = out + bias.unsqueeze(0).unsqueeze(-1)
-    return F.silu(out).to(x.dtype)
-
-
 # GatedDeltaNet - Linear Attention Layer
 
 class GatedDeltaNet(nn.Module):
@@ -169,6 +350,7 @@ class GatedDeltaNet(nn.Module):
 
         self.in_proj_qkv = ops.Linear(hidden, conv_dim, bias=False, device=device, dtype=dtype)
         self.in_proj_z = ops.Linear(hidden, value_dim, bias=False, device=device, dtype=dtype)
+        self.combined_qkvz = comfy.ops.CombinedLinear((self.in_proj_qkv, self.in_proj_z))
         self.in_proj_b = ops.Linear(hidden, self.num_value_heads, bias=False, device=device, dtype=dtype)
         self.in_proj_a = ops.Linear(hidden, self.num_value_heads, bias=False, device=device, dtype=dtype)
         self.out_proj = ops.Linear(value_dim, hidden, bias=False, device=device, dtype=dtype)
@@ -184,86 +366,75 @@ class GatedDeltaNet(nn.Module):
     def forward(self, x, past_key_value=None, **kwargs):
         batch_size, seq_len, _ = x.shape
 
-        use_recurrent = (
-            past_key_value is not None
-            and past_key_value[2] > 0
-            and seq_len == 1
-        )
-
         # Projections (shared)
-        mixed_qkv = self.in_proj_qkv(x).transpose(1, 2)  # [B, conv_dim, seq_len]
-        z = self.in_proj_z(x)
+        qkvz = self.combined_qkvz.forward(x)
+        if qkvz is NotImplemented:
+            proj = self.in_proj_qkv(x)  # [B, seq_len, conv_dim]
+            z = self.in_proj_z(x)
+        else:
+            proj, z = qkvz.split((self.key_dim * 2 + self.value_dim, self.value_dim), dim=-1)
+
+        if past_key_value is not None and past_key_value.decode_step(seq_len):
+            # decode: conv step into the side buffer, then gates + delta rule + gated norm in one
+            # kernel; both first commit the previous step's accepted tokens
+            kv = past_key_value
+            with comfy.ops.CastBiasWeightContext(self.conv1d, proj, offloadable=True) as (conv_weight, conv_bias):
+                comfy_kitchen.deltanet_conv_step_deferred(proj, kv.conv_state, conv_weight, conv_bias, kv.proj_buf, kv.qkv_buf, kv.ctl)
+            with comfy.ops.CastBiasWeightContext(self.in_proj_a, x, offloadable=True) as (w_a, _), \
+                 comfy.ops.CastBiasWeightContext(self.in_proj_b, x, offloadable=True) as (w_b, _):
+                if isinstance(w_a, QuantizedTensor):
+                    w_a = w_a.dequantize()
+                if isinstance(w_b, QuantizedTensor):
+                    w_b = w_b.dequantize()
+                core_attn_out = comfy_kitchen.gated_delta_decode_deferred(
+                    x, w_a, w_b, kv.dt_bias, kv.g_decay, kv.recurrent_state,
+                    self.key_dim, self.num_key_heads, self.key_head_dim ** -0.5, z, kv.norm_weight, self.norm.eps,
+                    kv.qkv_buf, kv.gates_buf, kv.sumsq_buf, kv.ctl)
+            return self.out_proj(core_attn_out.reshape(batch_size, seq_len, -1)), past_key_value
+
+        mixed_qkv = proj.transpose(1, 2)  # [B, conv_dim, seq_len]
         b = self.in_proj_b(x)
         a = self.in_proj_a(x)
 
         # Conv1d
-        if use_recurrent:
-            recurrent_state, conv_state, step_index = past_key_value
-            conv_weight = comfy.model_management.cast_to_device(self.conv1d.weight, mixed_qkv.device, mixed_qkv.dtype).squeeze(1)
-            conv_bias = comfy.model_management.cast_to_device(self.conv1d.bias, mixed_qkv.device, mixed_qkv.dtype) if self.conv1d.bias is not None else None
-            mixed_qkv = torch_causal_conv1d_update(mixed_qkv, conv_state, conv_weight, conv_bias)
-        else:
-            if past_key_value is not None:
-                recurrent_state, conv_state, step_index = past_key_value
-                conv_state_init = F.pad(mixed_qkv, (self.conv_kernel_size - mixed_qkv.shape[-1], 0))
-                conv_state.copy_(conv_state_init[:, :, -conv_state.shape[-1]:])
-            mixed_qkv = F.silu(self.conv1d(mixed_qkv)[:, :, :seq_len])
+        if past_key_value is not None:
+            conv_state = past_key_value.conv_state
+            conv_state_init = F.pad(mixed_qkv, (self.conv_kernel_size - mixed_qkv.shape[-1], 0))
+            conv_state.copy_(conv_state_init[:, :, -conv_state.shape[-1]:])
+        mixed_qkv = F.silu(self.conv1d(mixed_qkv)[:, :, :seq_len])
 
         # Split QKV and compute beta/g
         mixed_qkv = mixed_qkv.transpose(1, 2)  # [B, seq_len, conv_dim]
         query, key, value = mixed_qkv.split([self.key_dim, self.key_dim, self.value_dim], dim=-1)
+        g_decay = -comfy.model_management.cast_to_device(self.A_log, x.device, torch.float32).exp()
+        dt_bias = comfy.model_management.cast_to_device(self.dt_bias, x.device, torch.float32)
+        if past_key_value is not None:
+            past_key_value.g_decay = g_decay
+            past_key_value.dt_bias = dt_bias
+            past_key_value.norm_weight = comfy.model_management.cast_to(self.norm.weight, dtype=x.dtype, device=x.device)
+
         beta = b.sigmoid()
-        g = -self.A_log.float().exp() * F.softplus(a.float() + self.dt_bias.float())
+        g = g_decay * F.softplus(a.float() + dt_bias)
+        query = query.reshape(batch_size, seq_len, self.num_key_heads, self.key_head_dim)
+        key = key.reshape(batch_size, seq_len, self.num_key_heads, self.key_head_dim)
+        value = value.reshape(batch_size, seq_len, self.num_value_heads, self.value_head_dim)
+        if self.num_value_heads != self.num_key_heads:
+            rep = self.num_value_heads // self.num_key_heads
+            query = query.repeat_interleave(rep, dim=2)
+            key = key.repeat_interleave(rep, dim=2)
 
         # Delta rule
-        if use_recurrent:
-            # single-token path: work in [B, heads, dim] without seq dim
-            query = query.reshape(batch_size, self.num_key_heads, self.key_head_dim)
-            key = key.reshape(batch_size, self.num_key_heads, self.key_head_dim)
-            value = value.reshape(batch_size, self.num_value_heads, self.value_head_dim)
+        core_attn_out, last_recurrent_state = torch_chunk_gated_delta_rule(
+            query, key, value, g=g, beta=beta,
+            initial_state=None,
+            output_final_state=past_key_value is not None,
+        )
 
-            if self.num_value_heads != self.num_key_heads:
-                rep = self.num_value_heads // self.num_key_heads
-                query = query.repeat_interleave(rep, dim=1)
-                key = key.repeat_interleave(rep, dim=1)
-
-            scale = self.key_head_dim ** -0.5
-            q = F.normalize(query.float(), dim=-1) * scale
-            k = F.normalize(key.float(), dim=-1)
-            v = value.float()
-            beta_t = beta.reshape(batch_size, -1)
-            g_t = g.reshape(batch_size, -1).exp()
-
-            # In-place state update: [B, heads, k_dim, v_dim]
-            recurrent_state.mul_(g_t[:, :, None, None])
-            kv_mem = torch.einsum('bhk,bhkv->bhv', k, recurrent_state)
-            delta = (v - kv_mem) * beta_t[:, :, None]
-            recurrent_state.add_(k.unsqueeze(-1) * delta.unsqueeze(-2))
-            core_attn_out = torch.einsum('bhk,bhkv->bhv', q, recurrent_state)
-
-            core_attn_out = core_attn_out.to(x.dtype).unsqueeze(1)
-            present_key_value = (recurrent_state, conv_state, step_index + 1)
-        else:
-            query = query.reshape(batch_size, seq_len, -1, self.key_head_dim)
-            key = key.reshape(batch_size, seq_len, -1, self.key_head_dim)
-            value = value.reshape(batch_size, seq_len, -1, self.value_head_dim)
-
-            if self.num_value_heads != self.num_key_heads:
-                rep = self.num_value_heads // self.num_key_heads
-                query = query.repeat_interleave(rep, dim=2)
-                key = key.repeat_interleave(rep, dim=2)
-
-            core_attn_out, last_recurrent_state = torch_chunk_gated_delta_rule(
-                query, key, value, g=g, beta=beta,
-                initial_state=None,
-                output_final_state=past_key_value is not None,
-            )
-
-            present_key_value = None
-            if past_key_value is not None:
-                if last_recurrent_state is not None:
-                    recurrent_state.copy_(last_recurrent_state.to(recurrent_state.dtype))
-                present_key_value = (recurrent_state, conv_state, step_index + seq_len)
+        present_key_value = None
+        if past_key_value is not None:
+            if last_recurrent_state is not None:
+                past_key_value.recurrent_state.copy_(last_recurrent_state.to(past_key_value.recurrent_state.dtype))
+            present_key_value = past_key_value
 
         # Gated norm + output projection (shared)
         core_attn_out = self.norm(core_attn_out.reshape(-1, self.value_head_dim), z.reshape(-1, self.value_head_dim))
@@ -272,29 +443,6 @@ class GatedDeltaNet(nn.Module):
 
 
 # GatedAttention - Full Attention with output gating
-def precompute_partial_rope(head_dim, rotary_dim, position_ids, theta, device=None, mrope_section=None):
-    """Compute RoPE frequencies for partial rotary embeddings."""
-    theta_numerator = torch.arange(0, rotary_dim, 2, device=device).float()
-    inv_freq = 1.0 / (theta ** (theta_numerator / rotary_dim))
-
-    inv_freq_expanded = inv_freq[None, :, None].float().expand(position_ids.shape[0], -1, 1)
-    position_ids_expanded = position_ids[:, None, :].float()
-    freqs = (inv_freq_expanded.float() @ position_ids_expanded.float()).transpose(1, 2)
-    emb = torch.cat((freqs, freqs), dim=-1)
-    cos = emb.cos()
-    sin = emb.sin()
-
-    if mrope_section is not None and position_ids.shape[0] == 3:
-        mrope_section_2 = [s * 2 for s in mrope_section]
-        cos = torch.cat([m[i % 3] for i, m in enumerate(cos.split(mrope_section_2, dim=-1))], dim=-1).unsqueeze(0)
-        sin = torch.cat([m[i % 3] for i, m in enumerate(sin.split(mrope_section_2, dim=-1))], dim=-1).unsqueeze(0)
-
-    cos = cos.unsqueeze(1)
-    sin = sin.unsqueeze(1)
-    sin_split = sin.shape[-1] // 2
-    return (cos, sin[..., :sin_split], -sin[..., sin_split:])
-
-
 def apply_partial_rope(xq, xk, freqs_cis, rotary_dim):
     """Apply RoPE to only the first rotary_dim dimensions."""
     xq_rot = xq[..., :rotary_dim]
@@ -324,24 +472,43 @@ class GatedAttention(nn.Module):
         self.q_proj = ops.Linear(config.hidden_size, self.inner_size * 2, bias=config.qkv_bias, device=device, dtype=dtype)
         self.k_proj = ops.Linear(config.hidden_size, self.num_kv_heads * self.head_dim, bias=config.qkv_bias, device=device, dtype=dtype)
         self.v_proj = ops.Linear(config.hidden_size, self.num_kv_heads * self.head_dim, bias=config.qkv_bias, device=device, dtype=dtype)
+        self.combined_qkv = comfy.ops.CombinedLinear((self.q_proj, self.k_proj, self.v_proj))
         self.o_proj = ops.Linear(self.inner_size, config.hidden_size, bias=False, device=device, dtype=dtype)
 
         # QK norms with (1+weight) scaling
         self.q_norm = RMSNorm(self.head_dim, eps=config.rms_norm_eps, add=config.rms_norm_add, device=device, dtype=dtype)
         self.k_norm = RMSNorm(self.head_dim, eps=config.rms_norm_eps, add=config.rms_norm_add, device=device, dtype=dtype)
+        self.comfy_attention = ComfyAttention()
+
+    def kv_cache_type(self, device, dtype):
+        method = self.comfy_attention.method
+        if method == "comfy_kitchen_int8" or method is None and comfy.model_management.comfy_kitchen_attention_enabled():
+            if dtype == torch.bfloat16 and self.head_dim == 256 and int8_decode_is_available(device):
+                return Int8FixedKVCache
+        return FixedKVCache
+
+    def init_kv_cache(self, batch, capacity, device, dtype, shared):
+        cache_type = self.kv_cache_type(device, dtype)
+        if cache_type not in shared:
+            shared[cache_type] = cache_type.shared(batch, device)
+        return cache_type.zeros(batch, self.num_kv_heads, capacity, self.head_dim, device, dtype, shared[cache_type])
 
     def forward(self, x, attention_mask=None, freqs_cis=None, optimized_attention=None, past_key_value=None):
         batch_size, seq_length, _ = x.shape
 
         # Project Q (with gate), K, V
-        qg = self.q_proj(x)
+        qkv = self.combined_qkv.forward(x)
+        if qkv is NotImplemented:
+            qg = self.q_proj(x)
+            xk = self.k_proj(x)
+            xv = self.v_proj(x)
+        else:
+            kv_size = self.num_kv_heads * self.head_dim
+            qg, xk, xv = qkv.split((self.inner_size * 2, kv_size, kv_size), dim=-1)
         # Split into query and gate: each is [B, seq, inner_size]
         qg = qg.view(batch_size, seq_length, self.num_heads, self.head_dim * 2)
         xq, gate = qg[..., :self.head_dim], qg[..., self.head_dim:]
         gate = gate.reshape(batch_size, seq_length, -1)  # [B, seq, inner_size]
-
-        xk = self.k_proj(x)
-        xv = self.v_proj(x)
 
         xq = self.q_norm(xq).transpose(1, 2)  # [B, heads, seq, head_dim]
         xk = self.k_norm(xk.view(batch_size, seq_length, self.num_kv_heads, self.head_dim)).transpose(1, 2)
@@ -351,30 +518,28 @@ class GatedAttention(nn.Module):
         xq, xk = apply_partial_rope(xq, xk, freqs_cis, self.rotary_dim)
 
         # KV cache
-        present_key_value = None
-        if past_key_value is not None:
-            past_key, past_value, index = past_key_value
-            num_tokens = xk.shape[2]
-            if past_key.shape[2] >= (index + num_tokens):
-                past_key[:, :, index:index + num_tokens] = xk
-                past_value[:, :, index:index + num_tokens] = xv
-                xk = past_key[:, :, :index + num_tokens]
-                xv = past_value[:, :, :index + num_tokens]
-                present_key_value = (past_key, past_value, index + num_tokens)
-            else:
-                if index > 0:
-                    xk = torch.cat((past_key[:, :, :index], xk), dim=2)
-                    xv = torch.cat((past_value[:, :, :index], xv), dim=2)
-                present_key_value = (xk, xv, index + num_tokens)
+        present_key_value = past_key_value
+        decode = past_key_value is not None and seq_length <= SPEC_ROWS and attention_mask is None
+        if decode:
+            past_key_value.write(xk, xv)
 
-        # Expand KV heads for GQA
-        if self.num_heads != self.num_kv_heads:
-            xk = xk.repeat_interleave(self.num_heads // self.num_kv_heads, dim=1)
-            xv = xv.repeat_interleave(self.num_heads // self.num_kv_heads, dim=1)
+        if decode and (isinstance(past_key_value, Int8FixedKVCache) or
+                       self.comfy_attention.method is None and not comfy.model_management.comfy_kitchen_attention_enabled()):
+            output = past_key_value.attend(xq, xk, xv)
+        else:
+            if decode:
+                xk, xv = past_key_value.key, past_key_value.value
+                attention_mask = past_key_value.mask(seq_length)
+                optimized_attention = optimized_attention_for_device(x.device)
+            elif past_key_value is not None:
+                xk, xv = past_key_value.append(xk, xv)
+            gqa_kwargs = {"enable_gqa": True} if self.num_heads != self.num_kv_heads else {}
+            q, k, v = map(AttentionTensorContainer, (xq, xk, xv))
+            del xq, xk, xv
+            output = optimized_attention(q, k, v, self.num_heads, mask=attention_mask, skip_reshape=True,
+                                         preferred_attention=self.comfy_attention, **gqa_kwargs)
 
-        output = optimized_attention(xq, xk, xv, self.num_heads, mask=attention_mask, skip_reshape=True)
         output = output * gate.sigmoid()
-
         return self.o_proj(output), present_key_value
 
 
@@ -392,13 +557,15 @@ class Qwen35TransformerBlock(nn.Module):
         self.post_attention_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps, add=config.rms_norm_add, device=device, dtype=dtype)
 
     def forward(self, x, attention_mask=None, freqs_cis=None, optimized_attention=None, past_key_value=None):
+        output = x
         if self.layer_type == "linear_attention":
             h, present_key_value = self.linear_attn(self.input_layernorm(x), attention_mask=attention_mask, past_key_value=past_key_value)
         else:
             h, present_key_value = self.self_attn(self.input_layernorm(x), attention_mask=attention_mask, freqs_cis=freqs_cis, optimized_attention=optimized_attention, past_key_value=past_key_value)
 
-        x = x + h
-        x = x + self.mlp(self.post_attention_layernorm(x))
+        # in-place into the input buffer so CUDA-graph replays land in the static x
+        x = torch.add(x, h, out=output)
+        x = torch.add(x, self.mlp(x, norm=self.post_attention_layernorm), out=output)
         return x, present_key_value
 
 
@@ -407,9 +574,9 @@ class Qwen35Transformer(Llama2_):
     def __init__(self, config, device=None, dtype=None, ops=None):
         nn.Module.__init__(self)
         self.config = config
+        self.prefetch_dynamic_vbars = True
+        self.graph_dynamic_vbar_blocks = True
         self.vocab_size = config.vocab_size
-        self.normalize_in = False
-
         self.embed_tokens = ops.Embedding(config.vocab_size, config.hidden_size, device=device, dtype=dtype)
         self.layers = nn.ModuleList([
             Qwen35TransformerBlock(config, index=i, device=device, dtype=dtype, ops=ops)
@@ -424,21 +591,10 @@ class Qwen35Transformer(Llama2_):
         if config.lm_head:
             self.lm_head = ops.Linear(config.hidden_size, config.vocab_size, bias=False, device=device, dtype=dtype)
 
-    def get_past_len(self, past_key_values):
-        for i, layer in enumerate(self.layers):
-            if layer.layer_type == "full_attention":
-                if len(past_key_values) > i:
-                    return past_key_values[i][2]
-                break
-        return 0
-
     def compute_freqs_cis(self, position_ids, device):
         rotary_dim = int(self.config.head_dim * self.config.partial_rotary_factor)
-        return precompute_partial_rope(
-            self.config.head_dim, rotary_dim, position_ids,
-            self.config.rope_theta, device=device,
-            mrope_section=self.config.mrope_section,
-        )
+        return precompute_freqs_cis(rotary_dim, position_ids, self.config.rope_theta,
+                                    rope_dims=self.config.mrope_section, interleaved_mrope=True, device=device)
 
 
 # Vision Encoder
@@ -453,9 +609,8 @@ class Qwen35VisionPatchEmbed(nn.Module):
         self.proj = ops.Conv3d(self.in_channels, self.embed_dim, kernel_size=kernel_size, stride=kernel_size, bias=True, device=device, dtype=dtype)
 
     def forward(self, x):
-        target_dtype = self.proj.weight.dtype
         x = x.view(-1, self.in_channels, self.temporal_patch_size, self.patch_size, self.patch_size)
-        return self.proj(x.to(target_dtype)).view(-1, self.embed_dim)
+        return self.proj(x).view(-1, self.embed_dim)
 
 
 class Qwen35VisionMLP(nn.Module):
@@ -566,6 +721,8 @@ class Qwen35VisionModel(nn.Module):
             for _ in range(config["depth"])
         ])
         self.merger = Qwen35VisionPatchMerger(self.hidden_size, self.spatial_merge_size, config["out_hidden_size"], device=device, dtype=dtype, ops=ops)
+        self.deepstack_visual_indexes = [] # DeepStack, per-layer visual features (Qwen3-VL)
+        self.deepstack_merger_list = None
 
     def rot_pos_emb(self, grid_thw):
         merge_size = self.spatial_merge_size
@@ -649,11 +806,12 @@ class Qwen35VisionModel(nn.Module):
             patch_pos_embeds_permute.append(pos_embed)
         return torch.cat(patch_pos_embeds_permute)
 
-    def forward(self, x, grid_thw):
+    def forward(self, x, grid_thw, premerge=None):
+        # premerge: optional {block index: None}, filled with those blocks' outputs (before any merger)
         x = self.patch_embed(x)
         pos_embeds = self.fast_pos_embed_interpolate(grid_thw).to(x.device)
         x = x + pos_embeds
-        rotary_pos_emb = self.rot_pos_emb(grid_thw)
+        rotary_pos_emb = self.rot_pos_emb(grid_thw).to(x.device)
         seq_len = x.shape[0]
         x = x.reshape(seq_len, -1)
         rotary_pos_emb = rotary_pos_emb.reshape(seq_len, -1)
@@ -667,10 +825,34 @@ class Qwen35VisionModel(nn.Module):
         ).cumsum(dim=0, dtype=torch.int32)
         cu_seqlens = F.pad(cu_seqlens, (1, 0), value=0)
         optimized_attention = optimized_attention_for_device(x.device, mask=False, small_input=True)
-        for blk in self.blocks:
+        deepstack_features = []
+        for layer_num, blk in enumerate(self.blocks):
             x = blk(x, cu_seqlens=cu_seqlens, position_embeddings=position_embeddings, optimized_attention=optimized_attention)
+            if self.deepstack_merger_list is not None and layer_num in self.deepstack_visual_indexes:
+                deepstack_features.append(self.deepstack_merger_list[self.deepstack_visual_indexes.index(layer_num)](x))
+            if premerge is not None and layer_num in premerge:
+                premerge[layer_num] = x
         merged = self.merger(x)
+        if self.deepstack_merger_list is not None:
+            return merged, deepstack_features
         return merged
+
+class MTPHead(nn.Module):
+    # MTP draft head: fc(cat[norm(embed), norm(hidden)]) -> attention block (own KV) -> norm
+    def __init__(self, config, device=None, dtype=None, ops=None):
+        super().__init__()
+        self.fc = ops.Linear(config.hidden_size * 2, config.hidden_size, bias=False, device=device, dtype=dtype)
+        self.pre_fc_norm_embedding = RMSNorm(config.hidden_size, eps=config.rms_norm_eps, add=config.rms_norm_add, device=device, dtype=dtype)
+        self.pre_fc_norm_hidden = RMSNorm(config.hidden_size, eps=config.rms_norm_eps, add=config.rms_norm_add, device=device, dtype=dtype)
+        self.layers = nn.ModuleList([Qwen35TransformerBlock(config, index=3, device=device, dtype=dtype, ops=ops)])
+        self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps, add=config.rms_norm_add, device=device, dtype=dtype)
+
+    def forward(self, embeds, hidden, freqs_cis, past_key_value):
+        x = self.fc(torch.cat([self.pre_fc_norm_embedding(embeds), self.pre_fc_norm_hidden(hidden)], dim=-1))
+        attention = optimized_attention_for_device(x.device, mask=False, small_input=True)
+        x, _ = self.layers[0](x, attention_mask=None, freqs_cis=freqs_cis, optimized_attention=attention, past_key_value=past_key_value)
+        return self.norm(x), x  # (for logits, pre-norm hidden for recursive drafting)
+
 
 # Model Wrapper
 class Qwen35(BaseLlama, BaseGenerate, torch.nn.Module):
@@ -681,47 +863,324 @@ class Qwen35(BaseLlama, BaseGenerate, torch.nn.Module):
         config = _make_config(self.model_type, config_dict)
         self.num_layers = config.num_hidden_layers
         self.model = Qwen35Transformer(config, device=device, dtype=dtype, ops=operations)
+        self.mtp = None
+        if config.mtp:
+            self.mtp = MTPHead(config, device=device, dtype=dtype, ops=operations)
+        # Prefer small-M execution for autoregressive linears, including the draft/head.
+        decode_units = [self.model.layers] + ([self.mtp] if config.mtp else []) + ([self.model.lm_head] if config.lm_head else [])
+        for unit in decode_units:
+            for m in unit.modules():
+                if isinstance(m, comfy.ops.MixedPrecisionOp):
+                    m.comfy_gemv_optimized = True
+                    if m._combined_linear is not None:
+                        m._combined_linear.comfy_gemv_optimized = True
         vision_overrides = QWEN35_MODELS.get(self.model_type, {}).get("vision", {})
         vision_config = {**QWEN35_VISION_DEFAULTS, **vision_overrides, "out_hidden_size": config.hidden_size}
         self.visual = Qwen35VisionModel(vision_config, device=device, dtype=dtype, ops=operations)
         self.dtype = dtype
 
+    def get_dynamic_vram__units(self):
+        units, last_units = self.model.get_dynamic_vram__units()
+        # head and MTP draft weights run every decode step: fault them resident ahead of the body.
+        # a separate embedding goes last: evicted, its rows are gathered from the host copy instead.
+        # a tied table is the head, so it stays first.
+        head = self.model.lm_head if hasattr(self.model, "lm_head") else self.model.embed_tokens
+        hot = head if self.mtp is None else (head, self.mtp)
+        if hasattr(self.model, "lm_head"):
+            return [hot, *units], [*last_units, self.model.embed_tokens]
+        return [hot, *units], last_units
+
     def preprocess_embed(self, embed, device):
         if embed["type"] == "image":
-            image, grid = comfy.text_encoders.qwen_vl.process_qwen2vl_images(embed["data"], patch_size=16)
+            # Qwen3.5 normalizes to [-1, 1] (mean/std 0.5), same as Qwen3-VL.
+            image, grid = comfy.text_encoders.qwen_vl.process_qwen2vl_images(embed["data"], patch_size=16, image_mean=[0.5, 0.5, 0.5], image_std=[0.5, 0.5, 0.5])
             return self.visual(image.to(device, dtype=torch.float32), grid), grid
+        if embed["type"] == "video":
+            height, width = embed["size"]
+            video, grid = comfy.text_encoders.qwen_vl.process_qwen2vl_video(embed["data"], height, width, patch_size=16, image_mean=[0.5, 0.5, 0.5], image_std=[0.5, 0.5, 0.5])
+            return self.visual(video.to(device, dtype=torch.float32), grid), grid
         return None, None
 
     def forward(self, x, attention_mask=None, embeds=None, num_tokens=None, intermediate_output=None, final_layer_norm_intermediate=True, dtype=None, embeds_info=[], past_key_values=None):
-        grid = None
-        position_ids = None
-        offset = 0
-        for e in embeds_info:
-            if e.get("type") == "image":
-                grid = e.get("extra", None)
-                start = e.get("index")
-                if position_ids is None:
-                    position_ids = torch.zeros((3, embeds.shape[1]), device=embeds.device)
-                    position_ids[:, :start] = torch.arange(0, start, device=embeds.device)
-                end = e.get("size") + start
-                len_max = int(grid.max()) // 2
-                start_next = len_max + start
-                position_ids[:, end:] = torch.arange(start_next + offset, start_next + (embeds.shape[1] - end) + offset, device=embeds.device)
-                position_ids[0, start:end] = start + offset
-                max_d = int(grid[0][1]) // 2
-                position_ids[1, start:end] = torch.arange(start + offset, start + max_d + offset, device=embeds.device).unsqueeze(1).repeat(1, math.ceil((end - start) / max_d)).flatten(0)[:end - start]
-                max_d = int(grid[0][2]) // 2
-                position_ids[2, start:end] = torch.arange(start + offset, start + max_d + offset, device=embeds.device).unsqueeze(0).repeat(math.ceil((end - start) / max_d), 1).flatten(0)[:end - start]
-                offset += len_max - (end - start)
-
-        if grid is None:
-            position_ids = None
-
+        position_ids = comfy.text_encoders.qwen_vl.qwen2vl_mrope_position_ids(embeds_info, embeds.shape[1], embeds.device)
         return super().forward(x, attention_mask=attention_mask, embeds=embeds, num_tokens=num_tokens, intermediate_output=intermediate_output, final_layer_norm_intermediate=final_layer_norm_intermediate, dtype=dtype, position_ids=position_ids, past_key_values=past_key_values)
+
+    def generate(self, embeds=None, do_sample=True, max_length=256, temperature=1.0, top_k=50, top_p=0.9, min_p=0.0, repetition_penalty=1.0, seed=42, stop_tokens=None, **kwargs):
+        mtp = kwargs.pop("mtp", True)
+        if self.mtp is None or not mtp or kwargs.get("initial_input_ids") is not None:
+            return super().generate(embeds=embeds, do_sample=do_sample, max_length=max_length, temperature=temperature,
+                                    top_k=top_k, top_p=top_p, min_p=min_p, repetition_penalty=repetition_penalty,
+                                    seed=seed, stop_tokens=stop_tokens, **kwargs)
+        sampling = None
+        if do_sample and temperature != 0.0:
+            sampling = {"temperature": temperature, "top_k": top_k, "top_p": top_p, "min_p": min_p,
+                        "seed": seed if seed is not None else 42}
+        return self._generate_mtp(embeds, max_length, stop_tokens, mtp, sampling=sampling, position_ids=kwargs.get("position_ids"),
+                                  repetition_penalty=repetition_penalty, presence_penalty=kwargs.get("presence_penalty", 0.0) or 0.0)
+
+    def _generate_mtp(self, embeds, max_length, stop_tokens, mtp, sampling=None, position_ids=None, repetition_penalty=1.0, presence_penalty=0.0):
+        device = embeds.device
+        cfg = self.model.config
+        if stop_tokens is None:
+            stop_tokens = cfg.stop_tokens
+        dt = torch.bfloat16 if comfy.model_management.should_use_bf16(device) else torch.float32
+        embeds = embeds.to(dt)
+        if embeds.ndim == 2:
+            embeds = embeds.unsqueeze(0)
+        cap = embeds.shape[1] + max_length + 7
+        pkv = self.init_kv_cache(embeds.shape[0], cap, device, dt)
+        # repair window: drafting ahead plus a near-full rollback
+        mtp_kv = self.mtp.layers[0].self_attn.init_kv_cache(embeds.shape[0], cap, device, dt, {})
+        head = self.model.lm_head if hasattr(self.model, "lm_head") else self.model.embed_tokens
+
+        def verify_logits(x):
+            if not head.comfy_cast_weights:
+                return F.linear(x, head.weight.to(x), None)
+            with comfy.ops.CastBiasWeightContext(head, x, offloadable=True) as (w, _bias):
+                return F.linear(x, w)
+
+        generator = None
+        if sampling is not None:
+            generator = torch.Generator(device=device).manual_seed(sampling["seed"])
+        penalized = penalty_active(repetition_penalty, presence_penalty)
+
+        # after an image, text positions run behind the cache index (MRoPE); decode continues from the last prefill position
+        rope_offset = 0 if position_ids is None else int(position_ids[:, -1].max()) + 1 - embeds.shape[1]
+
+        # rope table once per generate, sliced per draft
+        ftab = rope_matrix(self.model.compute_freqs_cis(torch.arange(rope_offset, cap + rope_offset, device=device, dtype=torch.float).unsqueeze(0), device))
+
+        def freqs_at(p, n=1):
+            return ftab[:, :, p:p + n]
+
+        # cross-step state lives in static carriers: nothing allocated inside a step may outlive it
+        nt_buf = torch.empty((embeds.shape[0], 1), device=device, dtype=torch.long)
+        h_buf = torch.empty((embeds.shape[0], 1, cfg.hidden_size), device=device, dtype=dt)
+        x, _, _ = self.model.forward(None, embeds=embeds, attention_mask=None, past_key_values=pkv, position_ids=position_ids)
+        lg0 = self.logits(x)[:, -1]
+        if sampling is None:
+            nt_buf.copy_(lg0.argmax(dim=-1, keepdim=True))
+        else:
+            nt_buf.copy_(self.sample_token(lg0, sampling["temperature"], sampling["top_k"], sampling["top_p"], sampling["min_p"],
+                                           1.0, [], generator))
+        pen_mask = torch.zeros((lg0.shape[-1],), device=device, dtype=torch.bool) if penalized else None
+        h_buf.copy_(x[:, -1:, :])
+        del x, lg0
+        if hasattr(self.model.embed_tokens, "_v"):
+            vbar = self.model.embed_tokens._v[0]
+            comfy.model_management.reset_cast_buffers()
+            vbar.set_watermark(vbar.max_size)
+        ids = [nt_buf[0].item()]
+        if penalized:
+            pen_mask.index_fill_(0, nt_buf.reshape(-1), True)
+        pos = embeds.shape[1]
+        progress = comfy.utils.ProgressBar(max_length)
+        console = tqdm(total=max_length, desc="Generating tokens", initial=1)
+
+        def update_progress(n):
+            progress.update(n)
+            console.update(n)
+
+        adaptive = mtp is True
+        # auto: seven draft rows as a chain of widths, reshaped from rank hits and measured step cost
+        widths = (4, 3)
+        hits = [[0.0] * 8 for _ in range(7)]
+        steps, draft_ms, verify_ms = 0, 0.0, 0.0
+        draft_ranks = torch.zeros((7, 7), device=device, dtype=torch.long) if adaptive else None
+        timers = [torch.cuda.Event(enable_timing=True) for _ in range(3)] if adaptive and device.type == "cuda" else None
+        clocks = [0.0] * 3
+        capacity, spec = MTP_MODES["auto" if adaptive else mtp]
+        tree = VerifyTree(tree_spec(widths) if adaptive else spec, capacity, device)
+        depth = tree.chain
+        for kv in pkv:
+            if isinstance(kv, LinearKV):
+                kv.ctl_tracker["tree"] = tree
+            else:
+                kv.tracker["tree"] = tree
+        verify_tokens = torch.zeros((embeds.shape[0], tree.rows), device=device, dtype=torch.long)
+        verify_buffers = (torch.empty((embeds.shape[0], tree.rows, cfg.hidden_size), device=device, dtype=dt), freqs_at(pos, tree.rows).clone())
+        draft_top = torch.empty((embeds.shape[0], 7 if adaptive else tree.fanout), device=device, dtype=torch.long)
+        use_graph = self.model.graph_dynamic_vbar_blocks
+        compile_allocations = use_graph and comfy.model_prefetch.malloc_graph_enabled(device)
+        embed = self.model.embed_tokens
+        draft_token = torch.empty_like(nt_buf)
+        draft_emb = torch.empty_like(h_buf)
+        draft_hidden = torch.empty_like(h_buf)
+        draft_freqs = freqs_at(pos).clone()
+
+        def draft(token, hidden, p):
+            # one drafted token (and its runner-ups for a tree): mtp head + lm_head, graph-replayed when resident
+            mtp_kv.prepare(1)
+            draft_token.copy_(token)
+            draft_hidden.copy_(hidden)
+            draft_freqs.copy_(freqs_at(p))
+            host_rows = hasattr(embed, "_v") and embed.weight_lowvram_function is None and len(embed.weight_function) == 0 and comfy.ops.vbar_above_watermark(embed)
+            queue = comfy.model_prefetch.make_prefetch_queue(
+                [None if host_rows else embed, [head, self.mtp]], device,
+                {"prefetch_dynamic_vbars": self.model.prefetch_dynamic_vbars})
+
+            def embed_core():
+                draft_emb.copy_(embed.host_rows(draft_token, out_dtype=dt) if host_rows else embed(draft_token).to(dt))
+
+            def core():
+                n1, r1 = self.mtp(draft_emb, draft_hidden, draft_freqs, mtp_kv)
+                draft_hidden.copy_(r1)
+                logits = self.logits(n1)[:, -1]
+                if adaptive:
+                    draft_top.copy_(logits.topk(7, dim=-1).indices)
+                    draft_token.copy_(draft_top[:, :1])
+                else:
+                    draft_token.copy_(logits.argmax(dim=-1, keepdim=True))
+                if tree.fanout > 1 and not adaptive:
+                    draft_top.copy_(logits.topk(tree.fanout, dim=-1).indices)
+
+            # Host rows stay eager; a tied table uses its graph slot for MTP + head.
+            comfy.model_prefetch.prefetch_queue_pop(queue, device, embed, dt, core=embed_core,
+                                                  enable_graph=use_graph and not host_rows and embed is not head, malloc_scope="mtp")
+            comfy.model_prefetch.prefetch_queue_pop(queue, device, head, dt, core=core,
+                                                  enable_graph=use_graph, malloc_scope="mtp")
+            comfy.model_prefetch.prefetch_queue_pop(queue, device, None, malloc_scope="mtp")
+            mtp_kv.advance(1)
+            return draft_token, draft_top, draft_hidden
+
+        def verify_sample(lg):
+            s = sampling
+            rows = lg[0] if s is None else lg[0].float()
+            if penalized:
+                # Each row sees committed history and its own path, never siblings.
+                mask = pen_mask.unsqueeze(0).repeat(tree.rows, 1)
+                for r in range(1, tree.rows):
+                    mask[r].copy_(mask[tree.parent[r]])
+                    mask[r].index_fill_(0, verify_tokens[:, r], True)
+                rows = torch.where(mask, apply_penalty(rows, repetition_penalty, presence_penalty), rows)
+            if s is None:
+                return rows.argmax(dim=-1).unsqueeze(0)
+            return self.sample_token(rows, s["temperature"], s["top_k"], s["top_p"], s["min_p"],
+                                     1.0, [], generator).transpose(0, 1)
+
+        def step():
+            # scoped so every temporary dies before the compiler bracket closes
+            nonlocal pos
+            if adaptive:
+                if timers:
+                    timers[0].record(torch.cuda.current_stream(device))
+                else:
+                    clocks[0] = time.perf_counter()
+            # chain draft k fills row k + 1, its runner-ups that node's sibling rows
+            verify_tokens[:, :1].copy_(nt_buf)
+            hid_in = h_buf
+            for k in range(depth):
+                dk, top, hid_in = draft(verify_tokens[:, k:k + 1], hid_in, pos + k)
+                if adaptive:
+                    draft_ranks[k].copy_(top[0])
+                children = tree.children[k]
+                verify_tokens[:, children[0]:children[0] + 1].copy_(dk)
+                for j, c in enumerate(children[1:], 1):
+                    verify_tokens[:, c:c + 1].copy_(top[:, j:j + 1])
+            if adaptive:
+                if timers:
+                    timers[1].record(torch.cuda.current_stream(device))
+                else:
+                    clocks[1] = time.perf_counter()
+            embed = self.model.embed_tokens
+            if hasattr(embed, "_v") and embed.weight_lowvram_function is None and len(embed.weight_function) == 0 and comfy.ops.vbar_above_watermark(embed):
+                ev = embed.host_rows(verify_tokens, out_dtype=dt)
+            else:
+                ev = embed(verify_tokens).to(dt)
+            verify_pos = tree.positions + pos + rope_offset
+            x, _, _ = self.model.forward(None, embeds=ev, attention_mask=None, past_key_values=pkv, position_ids=verify_pos, decode_buffers=verify_buffers)
+            # all verify positions in one lm_head GEMV, accept decided GPU-side, one sync
+            lg = verify_logits(x)
+            toks = lg.argmax(dim=-1) if sampling is None and not penalized else verify_sample(lg)
+            if adaptive:
+                if timers:
+                    timers[2].record(torch.cuda.current_stream(device))
+                else:
+                    clocks[2] = time.perf_counter()
+            packet = [toks[0], verify_tokens[0, 1:]]
+            if adaptive:
+                packet.append(draft_ranks.reshape(-1))
+            vals = torch.cat(packet).tolist()
+            t, dr = vals[:tree.rows], [None] + vals[tree.rows:2 * tree.rows - 1]
+            # Continue only along a child containing the main model's chosen token.
+            path = [0]
+            while True:
+                node = next((c for c in tree.children[path[-1]] if dr[c] == t[path[-1]]), None)
+                if node is None:
+                    break
+                path.append(node)
+            ranks = []
+            if adaptive:
+                for node in path:
+                    if node >= depth:
+                        break
+                    candidates = vals[15 + 7 * node:22 + 7 * node]
+                    ranks.append(next((r for r, token in enumerate(candidates) if token == t[node]), 7))
+                if timers:
+                    clocks[0], clocks[1], clocks[2] = 0.0, timers[0].elapsed_time(timers[1]), timers[0].elapsed_time(timers[2])
+                else:
+                    clocks[:] = [t * 1000 for t in clocks]
+            commit = tuple(dr[r] for r in path[1:]) + (t[path[-1]],)
+            row = path[-1]
+            next_tok = toks[:, row:row + 1]
+            if len(path) < tree.rows:
+                for kv in pkv:
+                    kv.rollback(tree.rows - len(path))
+            on_chain = row == len(path) - 1
+            if not on_chain:
+                for kv in pkv:
+                    kv.commit_path(pos, path)
+            # mtp entries fed by a rejected or off-chain draft token
+            kept = min(len(path) if on_chain else len(path) - 1, depth)
+            if kept < depth:
+                mtp_kv.rollback(depth - kept)
+            nt_buf.copy_(next_tok)
+            h_buf.copy_(x[:, row:row + 1, :])
+            if penalized:
+                for r in path[1:]:
+                    pen_mask.index_fill_(0, verify_tokens[:, r], True)
+                pen_mask.index_fill_(0, nt_buf.reshape(-1), True)
+            pos += len(commit)
+            return commit, ranks
+
+        try:
+            while len(ids) < max_length and ids[-1] not in stop_tokens:
+                with (comfy.model_prefetch.malloc_graph_scope(device) if compile_allocations else contextlib.nullcontext()):
+                    commit, ranks = step()
+                if adaptive:
+                    steps += 1
+                    for row in hits:
+                        for r in range(8):
+                            row[r] *= 0.984375
+                    for level, rank in enumerate(ranks):
+                        hits[level][rank] += 1
+                    # Do not learn graph capture cost as steady-state execution cost.
+                    if steps > 8:
+                        mix = 1.0 if steps == 9 else 0.125
+                        draft_ms += mix * ((clocks[1] - clocks[0]) / len(widths) - draft_ms)
+                        verify_ms += mix * (clocks[2] - clocks[1] - verify_ms)
+                    if steps % 32 == 0:
+                        best = best_widths(widths, hits, draft_ms, verify_ms)
+                        if best != widths:
+                            widths = best
+                            tree.update(tree_spec(widths))
+                            depth = tree.chain
+                commit = list(commit[:max_length - len(ids)])
+                stop = next((i for i, t in enumerate(commit) if t in stop_tokens), None)
+                if stop is not None:
+                    del commit[stop + 1:]
+                ids.extend(commit)
+                update_progress(len(commit))
+        finally:
+            console.close()
+            comfy.model_prefetch.cleanup_prefetch_queues()
+        return ids
 
     def init_kv_cache(self, batch, max_cache_len, device, execution_dtype):
         model_config = self.model.config
         past_key_values = []
+        shared = {}
+        tracker = LinearKV.deferred_tracker(device)
         for i in range(model_config.num_hidden_layers):
             if model_config.layer_types[i] == "linear_attention":
                 recurrent_state = torch.zeros(
@@ -733,13 +1192,13 @@ class Qwen35(BaseLlama, BaseGenerate, torch.nn.Module):
                     [batch, conv_dim, model_config.conv_kernel_size - 1],
                     device=device, dtype=execution_dtype
                 )
-                past_key_values.append((recurrent_state, conv_state, 0))
+                kv = LinearKV(conv_state, recurrent_state, 0, None, None)
+                kv.qkv_buf, kv.proj_buf, kv.gates_buf, kv.sumsq_buf = comfy_kitchen.gated_delta_deferred_buffers(
+                    batch, conv_dim, model_config.linear_num_value_heads, model_config.linear_num_key_heads, execution_dtype, device)
+                kv.ctl, kv.ctl_tracker = tracker["ctl"], tracker
+                past_key_values.append(kv)
             else:
-                past_key_values.append((
-                    torch.empty([batch, model_config.num_key_value_heads, max_cache_len, model_config.head_dim], device=device, dtype=execution_dtype),
-                    torch.empty([batch, model_config.num_key_value_heads, max_cache_len, model_config.head_dim], device=device, dtype=execution_dtype),
-                    0
-                ))
+                past_key_values.append(self.model.layers[i].self_attn.init_kv_cache(batch, max_cache_len, device, execution_dtype, shared))
         return past_key_values
 
 # Tokenizer and Text Encoder Wrappers
@@ -760,10 +1219,36 @@ class Qwen35ImageTokenizer(sd1_clip.SD1Tokenizer):
         self.llama_template = "<|im_start|>user\n{}<|im_end|>\n<|im_start|>assistant\n"
         self.llama_template_images = "<|im_start|>user\n<|vision_start|><|image_pad|><|vision_end|>{}<|im_end|>\n<|im_start|>assistant\n"
 
-    def tokenize_with_weights(self, text, return_word_ids=False, llama_template=None, images=[], prevent_empty_text=False, thinking=False, **kwargs):
+    def video_embeds(self, frames, fps):
+        # Qwen3-VL sampling: 2 fps, 4 to 768 frames, consecutive pairs form one temporal patch
+        # introduced by its midpoint timestamp. Returns (prompt text, one embed per pair).
+        total = frames.shape[0]
+        num_frames = min(max(int(total / fps * 2), 4), 768, total)
+        indices = [round(i * (total - 1) / max(num_frames - 1, 1)) for i in range(num_frames)]
+        if len(indices) % 2 == 1:
+            indices.append(indices[-1])
+        height, width = comfy.text_encoders.qwen_vl.qwen2vl_video_smart_resize(num_frames, frames.shape[1], frames.shape[2])
+        text = ""
+        embeds = []
+        for i in range(0, len(indices), 2):
+            seconds = (indices[i] + indices[i + 1]) / (2 * fps)
+            text += f"<{seconds:.1f} seconds><|vision_start|><|video_pad|><|vision_end|>"
+            embeds.append({"type": "video", "data": frames[indices[i:i + 2]], "size": (height, width), "original_type": "video"})
+        return text, embeds
+
+    def tokenize_with_weights(self, text, return_word_ids=False, llama_template=None, images=[], videos=[], prevent_empty_text=False, thinking=False, system_prompt="", **kwargs):
         image = kwargs.get("image", None)
         if image is not None and len(images) == 0:
-            images = [image]
+            images = [image[i:i + 1] for i in range(image.shape[0])]
+        video = kwargs.get("video", None)
+        if video is not None and len(videos) == 0:
+            videos = [video]
+        video_text = ""
+        video_embeds = []
+        for v in videos:
+            t, e = self.video_embeds(v, kwargs.get("fps", 24))
+            video_text += t
+            video_embeds += e
 
         skip_template = False
         if text.startswith('<|im_start|>'):
@@ -774,43 +1259,61 @@ class Qwen35ImageTokenizer(sd1_clip.SD1Tokenizer):
         if skip_template:
             llama_text = text
         else:
-            if llama_template is None:
-                if len(images) > 0:
-                    llama_text = self.llama_template_images.format(text)
-                else:
-                    llama_text = self.llama_template.format(text)
+            if llama_template is not None:
+                template = llama_template
+            elif len(images) == 0 and len(video_embeds) == 0:
+                template = self.llama_template
             else:
-                llama_text = llama_template.format(text)
-            if not thinking:
-                llama_text += "<think>\n</think>\n"
+                template = self.llama_template_images
+                vision_block = "<|vision_start|><|image_pad|><|vision_end|>"
+                template = template.replace(vision_block, vision_block * len(images) + video_text, 1)
+            llama_text = template.format(text)
+            if system_prompt:
+                llama_text = "<|im_start|>system\n" + system_prompt + "<|im_end|>\n" + llama_text
+            if llama_template is None:  # chat template: thinking opens the block, otherwise an empty block disables reasoning
+                llama_text += "<think>\n" if thinking else "<think>\n\n</think>\n\n"
 
         tokens = super().tokenize_with_weights(llama_text, return_word_ids=return_word_ids, disable_weights=True, **kwargs)
         key_name = next(iter(tokens))
         embed_count = 0
+        video_count = 0
         qwen_tokens = tokens[key_name]
         for r in qwen_tokens:
             for i in range(len(r)):
-                if r[i][0] == 248056:  # <|image_pad|>
+                if isinstance(r[i][0], (int, float)) and r[i][0] == 248056:  # <|image_pad|>
                     if len(images) > embed_count:
                         r[i] = ({"type": "image", "data": images[embed_count], "original_type": "image"},) + r[i][1:]
                         embed_count += 1
+                elif isinstance(r[i][0], (int, float)) and r[i][0] == 248057:  # <|video_pad|>
+                    if len(video_embeds) > video_count:
+                        r[i] = (video_embeds[video_count],) + r[i][1:]
+                        video_count += 1
         return tokens
 
 
 class Qwen35ClipModel(sd1_clip.SDClipModel):
-    def __init__(self, device="cpu", layer="hidden", layer_idx=-2, dtype=None, attention_mask=True, model_options={}, model_type="qwen35_2b"):
+    def __init__(self, device="cpu", layer="hidden", layer_idx=-2, dtype=None, attention_mask=True, model_options={}, model_type="qwen35_2b", mtp=False):
         class Qwen35_(Qwen35):
             pass
         Qwen35_.model_type = model_type
 
-        super().__init__(device=device, layer=layer, layer_idx=layer_idx, textmodel_json_config={},
+        super().__init__(device=device, layer=layer, layer_idx=layer_idx, textmodel_json_config={"mtp": True} if mtp else {},
             dtype=dtype, special_tokens={"pad": 248044}, layer_norm_hidden_state=False,
             model_class=Qwen35_, enable_attention_masks=attention_mask, return_attention_masks=attention_mask, model_options=model_options)
 
+    def generate(self, tokens, do_sample, max_length, temperature, top_k, top_p, min_p, repetition_penalty, seed, presence_penalty=0.0, mtp=True):
+        if isinstance(tokens, dict):
+            tokens = next(iter(tokens.values()))
+        tokens_only = [[t[0] for t in b] for b in tokens]
+        embeds, _, _, embeds_info = self.process_tokens(tokens_only, self.execution_device)
+        position_ids = comfy.text_encoders.qwen_vl.qwen2vl_mrope_position_ids(embeds_info, embeds.shape[1], embeds.device)
+        return self.transformer.generate(embeds, do_sample, max_length, temperature, top_k, top_p, min_p, repetition_penalty, seed,
+                                         presence_penalty=presence_penalty, position_ids=position_ids, mtp=mtp)
+
 
 class Qwen35TEModel(sd1_clip.SD1ClipModel):
-    def __init__(self, device="cpu", dtype=None, model_options={}, model_type="qwen35_2b"):
-        clip_model = lambda **kw: Qwen35ClipModel(**kw, model_type=model_type)
+    def __init__(self, device="cpu", dtype=None, model_options={}, model_type="qwen35_2b", mtp=False):
+        clip_model = lambda **kw: Qwen35ClipModel(**kw, model_type=model_type, mtp=mtp)
         super().__init__(device=device, dtype=dtype, name=model_type, clip_model=clip_model, model_options=model_options)
 
 
@@ -821,7 +1324,7 @@ def tokenizer(model_type="qwen35_2b"):
     return Qwen35ImageTokenizer_
 
 
-def te(dtype_llama=None, llama_quantization_metadata=None, model_type="qwen35_2b"):
+def te(dtype_llama=None, llama_quantization_metadata=None, model_type="qwen35_2b", mtp=False):
     class Qwen35TEModel_(Qwen35TEModel):
         def __init__(self, device="cpu", dtype=None, model_options={}):
             if dtype_llama is not None:
@@ -829,5 +1332,5 @@ def te(dtype_llama=None, llama_quantization_metadata=None, model_type="qwen35_2b
             if llama_quantization_metadata is not None:
                 model_options = model_options.copy()
                 model_options["quantization_metadata"] = llama_quantization_metadata
-            super().__init__(device=device, dtype=dtype, model_options=model_options, model_type=model_type)
+            super().__init__(device=device, dtype=dtype, model_options=model_options, model_type=model_type, mtp=mtp)
     return Qwen35TEModel_

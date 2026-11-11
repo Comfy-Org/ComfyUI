@@ -37,11 +37,17 @@ def prepare_noise(latent_image, seed, noise_inds=None):
 
     return noises
 
-def fix_empty_latent_channels(model, latent_image, downscale_ratio_spacial=None):
+def prepare_empty_noise(latent_image):
+    if latent_image.is_nested:
+        return comfy.nested_tensor.NestedTensor([torch.zeros_like(t, device="cpu") for t in latent_image.unbind()])
+    return torch.zeros_like(latent_image, device="cpu")
+
+def fix_empty_latent_channels(model, latent_image, downscale_ratio_spacial=None, downscale_ratio_temporal=None):
     if latent_image.is_nested:
         return latent_image
-    latent_format = model.get_model_object("latent_format") #Resize the empty latent image so it has the right number of channels
-    if torch.count_nonzero(latent_image) == 0:
+    latent_format = model.get_model_object("latent_format")
+    is_empty = torch.count_nonzero(latent_image) == 0
+    if is_empty:
         if latent_format.latent_channels != latent_image.shape[1]:
             latent_image = comfy.utils.repeat_to_batch_size(latent_image, latent_format.latent_channels, dim=1)
         if downscale_ratio_spacial is not None:
@@ -51,6 +57,16 @@ def fix_empty_latent_channels(model, latent_image, downscale_ratio_spacial=None)
 
     if latent_format.latent_dimensions == 3 and latent_image.ndim == 4:
         latent_image = latent_image.unsqueeze(2)
+
+    if is_empty and downscale_ratio_temporal is not None:
+        if downscale_ratio_temporal != latent_format.temporal_downscale_ratio:
+            ratio = downscale_ratio_temporal / latent_format.temporal_downscale_ratio
+            new_t = max(1, round(latent_image.shape[2] * ratio))
+            latent_image = comfy.utils.repeat_to_batch_size(latent_image, new_t, dim=2)
+
+    if is_empty:
+        latent_image = latent_format.fix_empty_latent(latent_image)
+
     return latent_image
 
 def prepare_sampling(model, noise_shape, positive, negative, noise_mask):

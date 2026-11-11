@@ -7,7 +7,7 @@ import torch.nn.functional as F
 from einops import rearrange
 
 from comfy.ldm.modules.diffusionmodules.mmdit import TimestepEmbedder, Mlp, timestep_embedding
-from comfy.ldm.modules.attention import optimized_attention
+from comfy.ldm.modules.attention import AttentionTensorContainer, ComfyAttention, optimized_attention
 
 # if model_management.xformers_enabled():
 #     import xformers.ops
@@ -25,6 +25,7 @@ def t2i_modulate(x, shift, scale):
 class MultiHeadCrossAttention(nn.Module):
     def __init__(self, d_model, num_heads, attn_drop=0., proj_drop=0., dtype=None, device=None, operations=None, **kwargs):
         super(MultiHeadCrossAttention, self).__init__()
+        self.comfy_attention = ComfyAttention()
         assert d_model % num_heads == 0, "d_model must be divisible by num_heads"
 
         self.d_model = d_model
@@ -71,7 +72,9 @@ class MultiHeadCrossAttention(nn.Module):
         #             attn_mask = torch.block_diag(attn_mask, attn_mask_template)
         #     x = optimized_attention(q, k, v, self.num_heads, mask=attn_mask, skip_reshape=True)
 
-        x = optimized_attention(q.view(B, -1, C), k.view(B, -1, C), v.view(B, -1, C), self.num_heads, mask=None)
+        q, k, v = AttentionTensorContainer(q.view(B, -1, C)), AttentionTensorContainer(k.view(B, -1, C)), AttentionTensorContainer(v.view(B, -1, C))
+        del kv
+        x = optimized_attention(q, k, v, self.num_heads, mask=None, preferred_attention=self.comfy_attention)
         x = self.proj(x)
         x = self.proj_drop(x)
         return x
@@ -87,6 +90,7 @@ class AttentionKVCompress(nn.Module):
             qkv_bias (bool:  If True, add a learnable bias to query, key, value.
         """
         super().__init__()
+        self.comfy_attention = ComfyAttention()
         assert dim % num_heads == 0, 'dim should be divisible by num_heads'
         self.num_heads = num_heads
         self.head_dim = dim // num_heads
@@ -169,7 +173,9 @@ class AttentionKVCompress(nn.Module):
 
         # attention 2
         q, k, v = map(lambda t: t.transpose(1, 2), (q, k, v),)
-        x = optimized_attention(q, k, v, self.num_heads, mask=None, skip_reshape=True)
+        q, k, v = AttentionTensorContainer(q), AttentionTensorContainer(k), AttentionTensorContainer(v)
+        del qkv
+        x = optimized_attention(q, k, v, self.num_heads, mask=None, skip_reshape=True, preferred_attention=self.comfy_attention)
 
         x = x.view(B, N, C)
         x = self.proj(x)

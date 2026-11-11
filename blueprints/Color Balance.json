@@ -1129,7 +1129,8 @@
         "extra": {
           "workflowRendererVersion": "LG"
         },
-        "category": "Image Tools/Color adjust"
+        "category": "Image Tools/Color adjust",
+        "description": "Balances colors across shadows, midtones, and highlights using a real-time GPU fragment shader."
       }
     ]
   }

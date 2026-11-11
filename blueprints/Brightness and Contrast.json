@@ -431,7 +431,8 @@
         "extra": {
           "workflowRendererVersion": "LG"
         },
-        "category": "Image Tools/Color adjust"
+        "category": "Image Tools/Color adjust",
+        "description": "Adjusts image brightness and contrast using a real-time GPU fragment shader."
       }
     ]
   },

@@ -71,7 +71,7 @@ class HitPawGeneralImageEnhance(IO.ComfyNode):
         return IO.Schema(
             node_id="HitPawGeneralImageEnhance",
             display_name="HitPaw General Image Enhance",
-            category="api node/image/HitPaw",
+            category="partner/image/HitPaw",
             description="Upscale low-resolution images to super-resolution, eliminate artifacts and noise. "
             f"Maximum output: {MAX_MP_GENERATIVE} megapixels.",
             inputs=[
@@ -169,16 +169,13 @@ class HitPawGeneralImageEnhance(IO.ComfyNode):
         )
         if initial_res.code != 200:
             raise ValueError(f"Task creation failed with code {initial_res.code}: {initial_res.message}")
-        request_price = initial_res.data.consume_coins / 1000
         final_response = await poll_op(
             cls,
             ApiEndpoint(path="/proxy/hitpaw/api/task-status", method="POST"),
             data=TaskCreateDataResponse(job_id=initial_res.data.job_id),
             response_model=TaskStatusResponse,
             status_extractor=lambda x: x.data.status,
-            price_extractor=lambda x: request_price,
             poll_interval=10.0,
-            max_poll_attempts=480,
         )
         return IO.NodeOutput(await download_url_to_image_tensor(final_response.data.res_url))
 
@@ -202,7 +199,7 @@ class HitPawVideoEnhance(IO.ComfyNode):
         return IO.Schema(
             node_id="HitPawVideoEnhance",
             display_name="HitPaw Video Enhance",
-            category="api node/video/HitPaw",
+            category="partner/video/HitPaw",
             description="Upscale low-resolution videos to high resolution, eliminate artifacts and noise. "
             "Prices shown are per second of video.",
             inputs=[
@@ -313,7 +310,6 @@ class HitPawVideoEnhance(IO.ComfyNode):
             wait_label="Creating task",
             final_label_on_success="Task created",
         )
-        request_price = initial_res.data.consume_coins / 1000
         if initial_res.code != 200:
             raise ValueError(f"Task creation failed with code {initial_res.code}: {initial_res.message}")
         final_response = await poll_op(
@@ -322,9 +318,7 @@ class HitPawVideoEnhance(IO.ComfyNode):
             data=TaskStatusPollRequest(job_id=initial_res.data.job_id),
             response_model=TaskStatusResponse,
             status_extractor=lambda x: x.data.status,
-            price_extractor=lambda x: request_price,
             poll_interval=10.0,
-            max_poll_attempts=320,
         )
         return IO.NodeOutput(await download_url_to_video_output(final_response.data.res_url))
 

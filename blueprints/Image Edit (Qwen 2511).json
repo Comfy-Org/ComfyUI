@@ -132,7 +132,7 @@
         },
         "revision": 0,
         "config": {},
-        "name": "local-Image Edit (Qwen 2511)",
+        "name": "Image Edit (Qwen 2511)",
         "inputNode": {
           "id": -10,
           "bounding": [
@@ -1468,7 +1468,8 @@
           "VHS_MetadataImage": true,
           "VHS_KeepIntermediate": true
         },
-        "category": "Image generation and editing/Edit image"
+        "category": "Image editing/Edit image",
+        "description": "Edits images via text instructions using Qwen-Image-Edit-2511 with improved character consistency and integrated LoRA."
       }
     ]
   },

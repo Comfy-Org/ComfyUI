@@ -2,16 +2,19 @@ import torch
 from einops import rearrange
 from torch import Tensor
 
-from comfy.ldm.modules.attention import optimized_attention
+from comfy.ldm.modules.attention import AttentionTensorContainer, optimized_attention
 import comfy.model_management
-import logging
+import comfy.quant_ops
 
 
-def attention(q: Tensor, k: Tensor, v: Tensor, pe: Tensor, mask=None, transformer_options={}) -> Tensor:
+def attention(q: Tensor, k: Tensor, v: Tensor, pe: Tensor, mask=None, transformer_options={}, preferred_attention=None) -> Tensor:
+    if isinstance(q, AttentionTensorContainer):
+        q, k, v = q.take(), k.take(), v.take()
     if pe is not None:
         q, k = apply_rope(q, k, pe)
     heads = q.shape[1]
-    x = optimized_attention(q, k, v, heads, skip_reshape=True, mask=mask, transformer_options=transformer_options)
+    q, k, v = AttentionTensorContainer(q), AttentionTensorContainer(k), AttentionTensorContainer(v)
+    x = optimized_attention(q, k, v, heads, skip_reshape=True, mask=mask, transformer_options=transformer_options, preferred_attention=preferred_attention)
     return x
 
 def rope(pos: Tensor, dim: int, theta: int) -> Tensor:
@@ -44,21 +47,15 @@ def _apply_rope(xq: Tensor, xk: Tensor, freqs_cis: Tensor):
     return apply_rope1(xq, freqs_cis), apply_rope1(xk, freqs_cis)
 
 
-try:
-    import comfy.quant_ops
-    q_apply_rope = comfy.quant_ops.ck.apply_rope
-    q_apply_rope1 = comfy.quant_ops.ck.apply_rope1
-    def apply_rope(xq, xk, freqs_cis):
-        if comfy.model_management.in_training:
-            return _apply_rope(xq, xk, freqs_cis)
-        else:
-            return apply_rope1(xq, freqs_cis), apply_rope1(xk, freqs_cis)
-    def apply_rope1(x, freqs_cis):
-        if comfy.model_management.in_training:
-            return _apply_rope1(x, freqs_cis)
-        else:
-            return q_apply_rope1(x, freqs_cis)
-except:
-    logging.warning("No comfy kitchen, using old apply_rope functions.")
-    apply_rope = _apply_rope
-    apply_rope1 = _apply_rope1
+def apply_rope(xq, xk, freqs_cis):
+    if comfy.model_management.in_training:
+        return _apply_rope(xq, xk, freqs_cis)
+    else:
+        return comfy.quant_ops.ck.apply_rope(xq, xk, freqs_cis)
+
+
+def apply_rope1(x, freqs_cis):
+    if comfy.model_management.in_training:
+        return _apply_rope1(x, freqs_cis)
+    else:
+        return comfy.quant_ops.ck.apply_rope1(x, freqs_cis)

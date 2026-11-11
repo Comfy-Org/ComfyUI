@@ -752,7 +752,8 @@
         "extra": {
           "workflowRendererVersion": "LG"
         },
-        "category": "Image Tools/Color adjust"
+        "category": "Image Tools/Color adjust",
+        "description": "Adjusts hue, saturation, and lightness of an image using a real-time GPU fragment shader."
       }
     ]
   }

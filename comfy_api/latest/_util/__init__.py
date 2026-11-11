@@ -1,5 +1,5 @@
-from .video_types import VideoContainer, VideoCodec, VideoComponents
-from .geometry_types import VOXEL, MESH, File3D
+from .video_types import VideoContainer, VideoCodec, VideoComponents, normalize_crop_rect
+from .geometry_types import VOXEL, MESH, SPLAT, File3D
 from .image_types import SVG
 
 __all__ = [
@@ -7,8 +7,10 @@ __all__ = [
     "VideoContainer",
     "VideoCodec",
     "VideoComponents",
+    "normalize_crop_rect",
     "VOXEL",
     "MESH",
+    "SPLAT",
     "File3D",
     "SVG",
 ]

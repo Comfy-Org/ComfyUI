@@ -162,7 +162,7 @@
         },
         "revision": 0,
         "config": {},
-        "name": "local-Canny to Image (Z-Image-Turbo)",
+        "name": "Canny to Image (Z-Image-Turbo)",
         "inputNode": {
           "id": -10,
           "bounding": [
@@ -1553,7 +1553,8 @@
           "VHS_MetadataImage": true,
           "VHS_KeepIntermediate": true
         },
-        "category": "Image generation and editing/Canny to image"
+        "category": "Image generation/Conditioned",
+        "description": "Generates an image from a Canny edge map using Z-Image-Turbo, with text conditioning."
       }
     ]
   },
