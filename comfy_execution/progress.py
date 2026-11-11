@@ -7,6 +7,7 @@ from tqdm import tqdm
 from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from comfy_execution.graph import DynamicPrompt
+    from comfy_execution.server_protocol import ExecutionServer
 from protocol import BinaryEventTypes
 from comfy_api import feature_flags
 
@@ -150,7 +151,7 @@ class WebUIProgressHandler(ProgressHandler):
     Handler that sends progress updates to the WebUI via WebSockets.
     """
 
-    def __init__(self, server_instance):
+    def __init__(self, server_instance: "ExecutionServer"):
         super().__init__("webui")
         self.server_instance = server_instance
 

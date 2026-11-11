@@ -1123,7 +1123,7 @@
         "extra": {
           "workflowRendererVersion": "LG"
         },
-        "category": "Image generation and editing/Text to image",
+        "category": "Image generation/Text to image",
         "description": "Generates images from text prompts using Z-Image-Turbo defaults with Qwen3 text encoder and VAE."
       }
     ]

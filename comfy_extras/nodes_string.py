@@ -415,6 +415,7 @@ class JsonExtractString(io.ComfyNode):
             display_name="Extract Text from JSON",
             category="text",
             search_aliases=["json", "extract json", "parse json", "json value", "read json"],
+            description="Extract a key's value from the first valid JSON object in the text, including Markdown code blocks.",
             inputs=[
                 io.String.Input("json_string", multiline=True),
                 io.String.Input("key", multiline=False),
@@ -426,19 +427,17 @@ class JsonExtractString(io.ComfyNode):
 
     @classmethod
     def execute(cls, json_string, key):
-        try:
-            data = json.loads(json_string)
-            if isinstance(data, dict) and key in data:
-                value = data[key]
-                if value is None:
-                    return io.NodeOutput("")
+        decoder = json.JSONDecoder()
+        for match in re.finditer(r"\{", json_string):
+            try:
+                data, _ = decoder.raw_decode(json_string, match.start())
+            except json.JSONDecodeError:
+                continue
 
-                return io.NodeOutput(str(value))
+            value = data.get(key)
+            return io.NodeOutput("" if value is None else str(value))
 
-            return io.NodeOutput("")
-
-        except (json.JSONDecodeError, TypeError):
-            return io.NodeOutput("")
+        return io.NodeOutput("")
 
 
 def _dump_json(value, indent):

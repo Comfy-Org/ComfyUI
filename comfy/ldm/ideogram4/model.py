@@ -17,7 +17,7 @@ import comfy.ops
 import comfy.patcher_extension
 import comfy.quant_ops
 from comfy.ldm.lumina.model import FeedForward
-from comfy.ldm.modules.attention import optimized_attention_masked
+from comfy.ldm.modules.attention import AttentionTensorContainer, ComfyAttention, optimized_attention_masked
 from comfy.text_encoders.llama import precompute_freqs_cis
 
 # Per-token role indicators
@@ -47,6 +47,7 @@ def _apply_rope_split_half1(x, freqs_cis):
 class Ideogram4Attention(nn.Module):
     def __init__(self, hidden_size, num_heads, eps=1e-5, dtype=None, device=None, operations=None):
         super().__init__()
+        self.comfy_attention = ComfyAttention()
         self.num_heads = num_heads
         self.head_dim = hidden_size // num_heads
         self.hidden_size = hidden_size
@@ -74,11 +75,12 @@ class Ideogram4Attention(nn.Module):
             comfy.ops.uncast_bias_weight(self.norm_k, k_scale, None, k_offload_stream)
 
         # (B, heads, L, head_dim)
-        q = q.transpose(1, 2)
-        k = k.transpose(1, 2)
-        v = v.transpose(1, 2)
+        q = AttentionTensorContainer(q.transpose(1, 2))
+        k = AttentionTensorContainer(k.transpose(1, 2))
+        v = AttentionTensorContainer(v.transpose(1, 2))
+        del qkv
 
-        out = optimized_attention_masked(q, k, v, self.num_heads, attn_mask, skip_reshape=True, transformer_options=transformer_options)
+        out = optimized_attention_masked(q, k, v, self.num_heads, attn_mask, skip_reshape=True, preferred_attention=self.comfy_attention, transformer_options=transformer_options)
         return self.o(out)
 
 

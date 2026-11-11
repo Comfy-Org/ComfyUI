@@ -199,6 +199,8 @@ class BypassForwardHook:
         self._move_adapter_weights_to_device(device, dtype)
 
         self.original_forward = self.module.forward
+        self.original_force_forward = getattr(self.module, "comfy_force_forward", False)
+        self.module.comfy_force_forward = True
         self.module.forward = self._bypass_forward
         logging.debug(
             f"[BypassHook] Injected bypass forward for {type(self.module).__name__} (adapter={type(self.adapter).__name__})"
@@ -255,6 +257,7 @@ class BypassForwardHook:
             return  # Not injected
 
         self.module.forward = self.original_forward
+        self.module.comfy_force_forward = self.original_force_forward
         self.original_forward = None
         logging.debug(
             f"[BypassHook] Ejected bypass forward for {type(self.module).__name__}"

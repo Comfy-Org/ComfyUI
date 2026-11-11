@@ -6,6 +6,7 @@ import math
 from tqdm import tqdm
 import comfy.utils
 import comfy_kitchen
+from comfy_kitchen.int8_decode import Int8DecodeCache
 
 from comfy.ldm.modules.attention import optimized_attention_for_device
 import comfy.model_management
@@ -15,6 +16,9 @@ import comfy.ldm.common_dit
 import comfy.clip_model
 
 from . import qwen_vl
+
+# widest speculative verify (draft chain or tree rows) the decode caches serve in one step
+SPEC_ROWS = 8
 
 
 @dataclass
@@ -31,6 +35,118 @@ class FixedKV:
 
     def advance(self, num_tokens):
         self.index += num_tokens
+
+    def rollback(self, discard=1):
+        # drop the rejected verify tail; stale slots and bias are overwritten by the next write/prepare
+        self.index -= discard
+
+@dataclass
+class FixedKVState(FixedKV):
+    tracker: dict = None
+
+    def prepare(self, num_tokens):
+        tree = self.tracker["tree"]
+        if self.tracker["step"] == (self.index, num_tokens, tree):
+            return
+        self.tracker["step"] = (self.index, num_tokens, tree)
+        torch.arange(self.index, self.index + self.position.shape[0], out=self.position)
+        # A tree verify attends the committed prefix, then folds in its own rows.
+        self.seqlen.fill_(self.index if tree is not None else self.index + num_tokens)
+
+    def commit_path(self, base, path):
+        # the accepted tree rows path[1:] become tokens base + 1, ...; a row never sits above its
+        # depth, so ascending copies never clobber a later source. Modulo for a circular window.
+        for k, r in enumerate(path[1:], 1):
+            if r != k:
+                dst, src = (base + k) % self.key.shape[2], (base + r) % self.key.shape[2]
+                self.key[:, :, dst] = self.key[:, :, src]
+                self.value[:, :, dst] = self.value[:, :, src]
+
+    @staticmethod
+    def shared(batch, device):
+        # all layers advance in lockstep, so the caches share one position/seqlen/tracker
+        position = torch.empty((SPEC_ROWS,), device=device, dtype=torch.int64)
+        seqlen = torch.empty((batch,), device=device, dtype=torch.int32)
+        return position, seqlen, {"step": -1, "tree": None}
+
+
+class FixedKVCache(FixedKVState):
+    # [B, kv heads, capacity, D] storage with shared decode position state.
+    @classmethod
+    def zeros(cls, batch, kv_heads, capacity, head_dim, device, dtype, shared):
+        # zero-init: decode attends full capacity with masked tails, 0*0 stays finite
+        key = torch.zeros((batch, kv_heads, capacity, head_dim), device=device, dtype=dtype)
+        return cls(key, torch.zeros_like(key), 0, *shared)
+
+    def append(self, xk, xv):
+        seq = xk.shape[2]
+        self.key[:, :, self.index:self.index + seq] = xk
+        self.value[:, :, self.index:self.index + seq] = xv
+        return self.key[:, :, :self.index + seq], self.value[:, :, :self.index + seq]
+
+    def write(self, xk, xv):
+        # CUDA-graphable: device-side write position
+        position = self.position[:xk.shape[2]]
+        self.key.index_copy_(2, position, xk)
+        self.value.index_copy_(2, position, xv)
+
+    def attend(self, xq, xk, xv):
+        tree = self.tracker["tree"]
+        if tree is not None:
+            # every row attends the committed prefix, then its ancestors and itself through the log-sum-exp
+            out, lse = comfy_kitchen.flash_attention_decode_gqa(xq, self.key, self.value, self.seqlen, return_lse=True, causal=False)
+            return comfy_kitchen.flash_attention_decode_tree_merge(out, lse, xq, xk, xv, tree.mask, torch.empty_like(out))
+        return comfy_kitchen.flash_attention_decode_gqa(xq, self.key, self.value, self.seqlen)
+
+    def mask(self, seq):
+        # additive [B, 1, seq, capacity] mask with attend()'s visibility, for a generic attention over the
+        # whole cache: a chain row sees slots up to its own, a tree row the prefix plus its ancestors and itself
+        rel = torch.arange(self.key.shape[2], device=self.key.device) - self.seqlen.view(-1, 1, 1, 1)
+        tree = self.tracker["tree"]
+        if tree is not None:
+            visible = (rel < 0) | ((rel < seq) & ((tree.mask.view(seq, 1) >> rel.clamp(0, seq - 1)) & 1).bool())
+        else:
+            visible = rel < torch.arange(1 - seq, 1, device=self.key.device).view(seq, 1)
+        return torch.zeros(visible.shape, device=self.key.device, dtype=self.key.dtype).masked_fill_(~visible, float("-inf"))
+
+
+class Int8FixedKVCache(FixedKVState):
+    # INT8 prefix with a bounded BF16 window for page updates and speculative commits.
+    @classmethod
+    def zeros(cls, batch, kv_heads, capacity, head_dim, device, dtype, shared):
+        packed = Int8DecodeCache(batch, kv_heads, capacity, device)
+        # Two pages may be refreshed after a rollback while new rows enter the next page.
+        window = min(capacity, 3 * packed.key.shape[3])
+        key = torch.zeros((batch, kv_heads, window, head_dim), device=device, dtype=dtype)
+        cache = cls(key, torch.zeros_like(key), 0, *shared)
+        cache.packed = packed
+        cache.chain_mask = torch.tensor([(1 << (r + 1)) - 1 for r in range(SPEC_ROWS)], dtype=torch.int32, device=device)
+        return cache
+
+    def append(self, xk, xv):
+        # Prefill attends its original tensors; only the quantized prefix survives it.
+        seq = xk.shape[2]
+        length = torch.full_like(self.position[:1], seq)
+        self.packed.update(xk.contiguous(), xv.contiguous(), length, initialize=True)
+        start = max(0, seq - self.key.shape[2])
+        slots = torch.arange(start, seq, device=xk.device).remainder(self.key.shape[2])
+        self.key.index_copy_(2, slots, xk[:, :, start:])
+        self.value.index_copy_(2, slots, xv[:, :, start:])
+        return xk, xv
+
+    def write(self, xk, xv):
+        position = self.position[:xk.shape[2]].remainder(self.key.shape[2])
+        self.key.index_copy_(2, position, xk)
+        self.value.index_copy_(2, position, xv)
+
+    def attend(self, xq, xk, xv):
+        seq = xq.shape[2]
+        length = self.position[:1]
+        self.packed.update(self.key, self.value, length)
+        out, lse = self.packed.attend(xq, length)
+        tree = self.tracker["tree"]
+        mask = tree.mask if tree is not None else self.chain_mask[:seq]
+        return comfy_kitchen.flash_attention_decode_tree_merge(out, lse, xq, xk, xv, mask, torch.empty_like(out))
 
 @dataclass
 class Llama2Config:
@@ -278,12 +394,23 @@ class Qwen3VL_8BConfig(Qwen3_8BConfig):
     rope_theta: float = 5000000.0
     rope_dims = [24, 20, 20]
     interleaved_mrope = True
+    fixed_kv: bool = True
+    graph_dynamic_vbar_blocks = True
+    prefetch_dynamic_vbars = True
 
 @dataclass
 class Qwen3VL_4BConfig(Qwen3VL_8BConfig):
     hidden_size: int = 2560
     intermediate_size: int = 9728
     lm_head: bool = False  # 4B ties word embeddings
+
+@dataclass
+class Qwen3VL_2BConfig(Qwen3VL_8BConfig):
+    hidden_size: int = 2048
+    intermediate_size: int = 6144
+    num_hidden_layers: int = 28
+    num_attention_heads: int = 16
+    lm_head: bool = False  # 2B ties word embeddings
 
 @dataclass
 class Qwen3VL_32BConfig(Qwen3VL_8BConfig):
@@ -433,12 +560,11 @@ class RMSNorm(nn.Module):
         self.weight = nn.Parameter(torch.empty(dim, device=device, dtype=dtype))
         self.add = add
 
-    def forward(self, x: torch.Tensor):
-        w = self.weight
-        if self.add:
-            w = w + 1.0
+    def scale(self):
+        return self.weight + 1.0 if self.add else self.weight
 
-        return comfy.ldm.common_dit.rms_norm(x, w, self.eps)
+    def forward(self, x: torch.Tensor):
+        return comfy.ldm.common_dit.rms_norm(x, self.scale(), self.eps)
 
 
 
@@ -489,23 +615,55 @@ def precompute_freqs_cis(head_dim, position_ids, theta, rope_scale=None, rope_di
 
     return out
 
+def moe_experts_forward(x, topk_idx, topk_weight, num_experts, gate_up_proj, down_proj, activation):
+    num_tokens, top_k = topk_idx.shape
+    # group the (token, slot) assignments by expert: one host sync per call instead of two per expert
+    order = torch.argsort(topk_idx.reshape(-1))
+    counts = torch.bincount(topk_idx.reshape(-1), minlength=num_experts).tolist()
+    sorted_x = x[order // top_k]
+    weight = topk_weight.reshape(-1)[order].unsqueeze(1)
+    sorted_out = torch.empty_like(sorted_x)
+
+    start = 0
+    with gate_up_proj.bank_resident(x) as gate_up_bank, down_proj.bank_resident(x) as down_bank:
+        for expert_idx, n in enumerate(counts):
+            if n == 0:
+                continue
+            gated = activation(gate_up_bank.expert_linear(sorted_x[start:start + n], expert_idx))
+            sorted_out[start:start + n] = (down_bank.expert_linear(gated, expert_idx) * weight[start:start + n]).to(sorted_out.dtype)
+            start += n
+
+    out = torch.empty_like(sorted_out)
+    out[order] = sorted_out
+    return out.view(num_tokens, top_k, -1).sum(dim=1)
+
+
+def rope_matrix(freqs_cis):
+    if torch.is_tensor(freqs_cis):
+        return freqs_cis
+    cos, sin, neg_sin = freqs_cis
+    half = sin.shape[-1]
+    matrix = torch.stack((cos[..., :half], neg_sin, sin, cos[..., half:]), dim=-1)
+    return matrix.reshape(*matrix.shape[:-1], 2, 2)
+
+
 def apply_rope(xq, xk, freqs_cis):
-    org_dtype = xq.dtype
-    cos = freqs_cis[0]
-    sin = freqs_cis[1]
-    nsin = freqs_cis[2]
+    matrix = rope_matrix(freqs_cis)
+    if matrix.ndim == 5:
+        matrix = matrix.unsqueeze(0)
 
-    q_embed = (xq * cos)
-    q_split = q_embed.shape[-1] // 2
-    q_embed[..., : q_split].addcmul_(xq[..., q_split :], nsin)
-    q_embed[..., q_split :].addcmul_(xq[..., : q_split], sin)
+    q_ndim, k_ndim = xq.ndim, xk.ndim
+    if q_ndim == 3:
+        xq = xq.unsqueeze(0)
+    if k_ndim == 3:
+        xk = xk.unsqueeze(0)
 
-    k_embed = (xk * cos)
-    k_split = k_embed.shape[-1] // 2
-    k_embed[..., : k_split].addcmul_(xk[..., k_split :], nsin)
-    k_embed[..., k_split :].addcmul_(xk[..., : k_split], sin)
-
-    return q_embed.to(org_dtype), k_embed.to(org_dtype)
+    xq, xk = comfy_kitchen.apply_rope_split_half(xq, xk, matrix)
+    if q_ndim == 3:
+        xq = xq.squeeze(0)
+    if k_ndim == 3:
+        xk = xk.squeeze(0)
+    return xq, xk
 
 
 class Attention(nn.Module):
@@ -527,6 +685,7 @@ class Attention(nn.Module):
             self.q_proj = ops.Linear(config.hidden_size, self.inner_size, bias=config.qkv_bias, device=device, dtype=dtype)
             self.k_proj = ops.Linear(config.hidden_size, self.kv_size, bias=config.qkv_bias, device=device, dtype=dtype)
             self.v_proj = ops.Linear(config.hidden_size, self.kv_size, bias=config.qkv_bias, device=device, dtype=dtype)
+            self.combined_qkv = comfy.ops.CombinedLinear((self.q_proj, self.k_proj, self.v_proj))
         self.o_proj = ops.Linear(self.inner_size, config.hidden_size, bias=False, device=device, dtype=dtype)
 
         self.q_norm = None
@@ -551,9 +710,13 @@ class Attention(nn.Module):
         if self.merged_qkv:
             xq, xk, xv = self.qkv_proj(hidden_states).split((self.inner_size, self.kv_size, self.kv_size), dim=-1)
         else:
-            xq = self.q_proj(hidden_states)
-            xk = self.k_proj(hidden_states)
-            xv = self.v_proj(hidden_states)
+            qkv = self.combined_qkv.forward(hidden_states)
+            if qkv is NotImplemented:
+                xq = self.q_proj(hidden_states)
+                xk = self.k_proj(hidden_states)
+                xv = self.v_proj(hidden_states)
+            else:
+                xq, xk, xv = qkv.split((self.inner_size, self.kv_size, self.kv_size), dim=-1)
 
         xq = xq.view(batch_size, seq_length, self.num_heads, self.head_dim).transpose(1, 2)
         xk = xk.view(batch_size, seq_length, self.num_kv_heads, self.head_dim).transpose(1, 2)
@@ -633,6 +796,7 @@ class MLP(nn.Module):
         else:
             self.gate_proj = ops.Linear(config.hidden_size, intermediate_size, bias=False, device=device, dtype=dtype)
             self.up_proj = ops.Linear(config.hidden_size, intermediate_size, bias=False, device=device, dtype=dtype)
+            self.combined_gate_up = comfy.ops.CombinedLinear((self.gate_proj, self.up_proj))
         self.down_proj = ops.Linear(intermediate_size, config.hidden_size, bias=False, device=device, dtype=dtype)
         if config.mlp_activation == "silu":
             self.activation = torch.nn.functional.silu
@@ -641,13 +805,20 @@ class MLP(nn.Module):
             self.activation = lambda a: torch.nn.functional.gelu(a, approximate="tanh")
             self.merged_input_act = None
 
-    def forward(self, x):
-        if self.merged_mlp:
-            x = self.gate_up_proj(x)
+    def forward(self, x, norm=None):
+        # norm: the block's pre-norm, folded into the merged projection's input quantizer where supported
+        gate_up = self.gate_up_proj if self.merged_mlp else self.combined_gate_up
+        if norm is not None:
+            combined = comfy.ops.linear_input_act(gate_up, x, "rms_norm", norm.scale(), norm.eps)
+        else:
+            combined = comfy.ops.linear_input_act(gate_up, x, None)
+        if combined is not NotImplemented:
             if self.merged_input_act is not None:
-                return comfy.ops.linear_input_act(self.down_proj, x, self.merged_input_act)
-            gate, up = x.chunk(2, dim=-1)
+                return comfy.ops.linear_input_act(self.down_proj, combined, self.merged_input_act)
+            gate, up = combined.chunk(2, dim=-1)
             return self.down_proj(self.activation(gate) * up)
+        if norm is not None:
+            x = norm(x)
         return self.down_proj(self.activation(self.gate_proj(x)) * self.up_proj(x))
 
 class TransformerBlock(nn.Module):
@@ -756,6 +927,9 @@ def _make_scaled_embedding(ops, vocab_size, hidden_size, scale, device, dtype):
     class ScaledEmbedding(ops.Embedding):
         def forward(self, input_ids, out_dtype=None):
             return super().forward(input_ids, out_dtype=out_dtype) * scale
+
+        def host_rows(self, input_ids, out_dtype=None):
+            return super().host_rows(input_ids, out_dtype=out_dtype) * scale
     return ScaledEmbedding(vocab_size, hidden_size, device=device, dtype=dtype)
 
 
@@ -767,7 +941,8 @@ class Llama2_(nn.Module):
         super().__init__()
         self.config = config
         self.fixed_kv = getattr(config, "fixed_kv", False)
-        self.graph_dynamic_vbar_blocks = False
+        self.graph_dynamic_vbar_blocks = getattr(config, "graph_dynamic_vbar_blocks", False)
+        self.prefetch_dynamic_vbars = getattr(config, "prefetch_dynamic_vbars", False)
         self.vocab_size = config.vocab_size
 
         if self.config.transformer_type == "gemma2" or self.config.transformer_type == "gemma3":
@@ -799,18 +974,25 @@ class Llama2_(nn.Module):
 
     def init_kv_cache(self, batch, capacity, device, dtype):
         caches = []
-        fixed_kv = self.fixed_kv and comfy_kitchen.flash_attention_decode_is_available(device)
+        flash = getattr(comfy_kitchen, "flash_attention_decode_is_available", None)
+        flash_kv = self.fixed_kv and flash is not None and flash(device)
+        if flash_kv:
+            pos = torch.empty((batch,), device=device, dtype=torch.int64)
+            seqlen = torch.zeros((batch,), device=device, dtype=torch.int32)
         for _ in range(self.config.num_hidden_layers):
-            if fixed_kv:
+            if flash_kv:
                 key = torch.empty((batch, capacity, self.config.num_key_value_heads, self.config.head_dim), device=device, dtype=dtype)
                 value = torch.empty_like(key)
-                position = torch.empty((batch,), device=device, dtype=torch.int64)
-                seqlen = torch.zeros((batch,), device=device, dtype=torch.int32)
-                caches.append(FixedKV(key, value, 0, position, seqlen))
+                caches.append(FixedKV(key, value, 0, pos, seqlen))
             else:
                 key = torch.empty((batch, self.config.num_key_value_heads, capacity, self.config.head_dim), device=device, dtype=dtype)
                 caches.append((key, torch.empty_like(key), 0))
         return caches
+
+    def init_decode_buffers(self, batch, device, dtype):
+        hidden = torch.empty((batch, 1, self.config.hidden_size), device=device, dtype=dtype)
+        positions = torch.zeros((1, 1), device=device, dtype=torch.int64)
+        return hidden, rope_matrix(self.compute_freqs_cis(positions, device))
 
     def compute_freqs_cis(self, position_ids, device):
         return precompute_freqs_cis(self.config.head_dim,
@@ -822,7 +1004,7 @@ class Llama2_(nn.Module):
                                     device=device)
 
     def forward(self, x, attention_mask=None, embeds=None, num_tokens=None, intermediate_output=None, final_layer_norm_intermediate=True,
-                dtype=None, position_ids=None, embeds_info=[], past_key_values=None, input_ids=None,deepstack_embeds=None, visual_pos_masks=None):
+                dtype=None, position_ids=None, embeds_info=[], past_key_values=None, input_ids=None,deepstack_embeds=None, visual_pos_masks=None, decode_buffers=None, freqs_cis=None):
         if embeds is not None:
             x = embeds
         else:
@@ -837,17 +1019,18 @@ class Llama2_(nn.Module):
         if fixed_kv_decode:
             attention_mask = None
 
-        if position_ids is None:
-            position_ids = torch.arange(past_len, past_len + seq_len, device=x.device).unsqueeze(0)
-
-        freqs_cis = self.compute_freqs_cis(position_ids, x.device)
+        if freqs_cis is None:
+            if position_ids is None:
+                position_ids = torch.arange(past_len, past_len + seq_len, device=x.device).unsqueeze(0)
+            freqs_cis = self.compute_freqs_cis(position_ids, x.device)
 
         mask = None
         if attention_mask is not None:
             mask = 1.0 - attention_mask.to(x.dtype).reshape((attention_mask.shape[0], 1, -1, attention_mask.shape[-1])).expand(attention_mask.shape[0], 1, seq_len, attention_mask.shape[-1])
             mask = mask.masked_fill(mask.to(torch.bool), torch.finfo(x.dtype).min / 4)
 
-        if seq_len > 1:
+        spec_decode = fixed_kv and any(isinstance(kv, FixedKVState) for kv in past_key_values) and 2 <= seq_len <= SPEC_ROWS and past_len > 0 and attention_mask is None
+        if seq_len > 1 and not spec_decode:  # spec verify: the staircase decode bias is causal
             causal_mask = torch.empty(past_len + seq_len, past_len + seq_len, dtype=x.dtype, device=x.device).fill_(torch.finfo(x.dtype).min / 4).triu_(1)
             if mask is not None:
                 mask += causal_mask
@@ -856,9 +1039,16 @@ class Llama2_(nn.Module):
 
         optimized_attention = optimized_attention_for_device(x.device, mask=mask is not None, small_input=True)
 
-        enable_graph = self.graph_dynamic_vbar_blocks and fixed_kv_decode
+        enable_graph = self.graph_dynamic_vbar_blocks and (fixed_kv_decode or spec_decode)
         if enable_graph:
-            x = x.clone()
+            if decode_buffers is None:
+                x = x.clone()
+            else:
+                hidden_buffer, rotary_buffer = decode_buffers
+                hidden_buffer.copy_(x)
+                x = hidden_buffer
+                rotary_buffer.copy_(rope_matrix(freqs_cis))
+                freqs_cis = rotary_buffer
 
         intermediate = None
         all_intermediate = None
@@ -873,7 +1063,7 @@ class Llama2_(nn.Module):
             elif intermediate_output < 0:
                 intermediate_output = len(self.layers) + intermediate_output
 
-        prefetch_queue = comfy.model_prefetch.make_prefetch_queue(list(self.layers), x.device, {"prefetch_dynamic_vbars": getattr(self, "prefetch_dynamic_vbars", False)})
+        prefetch_queue = comfy.model_prefetch.make_prefetch_queue(list(self.layers), x.device, {"prefetch_dynamic_vbars": self.prefetch_dynamic_vbars and past_key_values is not None})
         next_key_values = list(past_key_values) if past_key_values is not None else []
         for i, layer in enumerate(self.layers):
             if all_intermediate is not None:
@@ -884,11 +1074,14 @@ class Llama2_(nn.Module):
             if past_key_values is not None:
                 past_kv = past_key_values[i] if len(past_key_values) > 0 else []
 
-            if fixed_kv:
+            if fixed_kv and type(past_kv) is not FixedKV:
                 past_kv.prepare(seq_len)
 
             def core():
                 nonlocal x
+                # Plain FixedKV shares GPU counters; prepare once, eager or graph-replayed.
+                if i == 0 and type(past_kv) is FixedKV:
+                    past_kv.prepare(seq_len)
                 output, current_kv = layer(
                     x=x,
                     attention_mask=mask,
@@ -985,6 +1178,23 @@ class BaseLlama:
     def forward(self, input_ids, *args, **kwargs):
         return self.model(input_ids, *args, **kwargs)
 
+def penalty_active(repetition_penalty, presence_penalty):
+    return repetition_penalty != 1.0 or (presence_penalty is not None and presence_penalty != 0.0)
+
+
+def apply_penalty(logits, repetition_penalty, presence_penalty):
+    if repetition_penalty != 1.0:
+        logits = torch.where(logits < 0, logits * repetition_penalty, logits / repetition_penalty)
+    if presence_penalty is not None and presence_penalty != 0.0:
+        logits = logits - presence_penalty
+    return logits
+
+
+def generate_dtype(device):
+    # the dtype generation and its multimodal preprocessing run in
+    return torch.bfloat16 if comfy.model_management.should_use_bf16(device) else torch.float32
+
+
 class BaseGenerate:
     def logits(self, x):
         input = x[:, -1:]
@@ -994,7 +1204,7 @@ class BaseGenerate:
             module = self.model.embed_tokens
 
         if not module.comfy_cast_weights:
-            return torch.nn.functional.linear(input, self.model.embed_tokens.weight.to(x), None)
+            return torch.nn.functional.linear(input, module.weight.to(x), None)
         with comfy.ops.CastBiasWeightContext(module, input, offloadable=True) as (weight, _bias):
             return torch.nn.functional.linear(input, weight, None)
 
@@ -1008,10 +1218,7 @@ class BaseGenerate:
             stop_tokens = self.model.config.stop_tokens
 
         if execution_dtype is None:
-            if comfy.model_management.should_use_bf16(device):
-                execution_dtype = torch.bfloat16
-            else:
-                execution_dtype = torch.float32
+            execution_dtype = generate_dtype(device)
         embeds = embeds.to(execution_dtype)
 
         if embeds.ndim == 2:
@@ -1029,85 +1236,88 @@ class BaseGenerate:
         next_pos = int(position_ids[:, -1].max()) + 1 if position_ids is not None else None
 
         compile_allocations = self.model.graph_dynamic_vbar_blocks and comfy.model_prefetch.malloc_graph_enabled(device)
+        decode_buffers = None
+        if compile_allocations and not comfy.model_management.args.disable_cuda_graphs:
+            init_decode_buffers = getattr(self.model, "init_decode_buffers", None)
+            if init_decode_buffers is not None:
+                decode_buffers = init_decode_buffers(embeds.shape[0], device, execution_dtype)
         decode_tokens = torch.empty((embeds.shape[0], 1), dtype=torch.long, device=device)
+        # Precompute decode RoPE once; MRoPE decode positions (t = h = w) index it from next_pos.
+        rope = None
+        if decode_buffers is not None:
+            rope = rope_matrix(self.model.compute_freqs_cis(torch.arange(max_cache_len, device=device, dtype=torch.float).unsqueeze(0), device))
+        penalize = penalty_active(repetition_penalty, presence_penalty)
+        penalty_mask = None
 
-        # Generation loop
         current_input_ids = initial_input_ids
-        for step in tqdm(range(max_length), desc="Generating tokens"):
-            if step > 0:
-                if compile_allocations:
-                    comfy.model_prefetch.malloc_graph_begin(self, device)
-                embeds = self.model.embed_tokens(decode_tokens).to(execution_dtype)
-                current_input_ids = decode_tokens if initial_input_ids is not None else None
-                position_ids = torch.tensor([[next_pos]], device=device) if next_pos is not None else None
+        try:
+            for step in tqdm(range(max_length), desc="Generating tokens"):
+                if step > 0:
+                    if compile_allocations:
+                        comfy.model_prefetch.malloc_graph_begin(device)
+                    embed = self.model.embed_tokens
+                    if hasattr(embed, "_v") and embed.weight_lowvram_function is None and len(embed.weight_function) == 0 and comfy.ops.vbar_above_watermark(embed):
+                        embeds = embed.host_rows(decode_tokens, out_dtype=execution_dtype)
+                    else:
+                        embeds = embed(decode_tokens).to(execution_dtype)
+                    current_input_ids = decode_tokens if initial_input_ids is not None else None
+                    position_ids = torch.tensor([[next_pos]], device=device) if next_pos is not None and rope is None else None
 
-            # DeepStack visual features are injected on the prefill only; gemma4's forward lacks these kwargs.
-            extra = {}
-            if step == 0 and deepstack_embeds is not None:
-                extra["deepstack_embeds"] = deepstack_embeds
-                extra["visual_pos_masks"] = visual_pos_masks
-            x, _, past_key_values = self.model.forward(None, embeds=embeds, attention_mask=None, past_key_values=past_key_values, input_ids=current_input_ids, position_ids=position_ids, **extra, embeds_info=(embeds_info if step == 0 else None))
-            logits = self.logits(x)[:, -1]
-            next_token = self.sample_token(logits, temperature, top_k, top_p, min_p, repetition_penalty, initial_tokens + generated_token_ids, generator, do_sample=do_sample, presence_penalty=presence_penalty)
+                # DeepStack visual features are injected on the prefill only; gemma4's forward lacks these kwargs.
+                extra = {}
+                if decode_buffers is not None:
+                    extra["decode_buffers"] = decode_buffers
+                    if rope is not None and step > 0:
+                        pos = next_pos if next_pos is not None else self.model.get_past_len(past_key_values)
+                        extra["freqs_cis"] = rope[:, :, pos:pos + 1]
+                if step == 0 and deepstack_embeds is not None:
+                    extra["deepstack_embeds"] = deepstack_embeds
+                    extra["visual_pos_masks"] = visual_pos_masks
+                x, _, past_key_values = self.model.forward(None, embeds=embeds, attention_mask=None, past_key_values=past_key_values, input_ids=current_input_ids, position_ids=position_ids, **extra, embeds_info=(embeds_info if step == 0 else None))
+                logits = self.logits(x)[:, -1]
+                if penalty_mask is None and penalize:
+                    # allocated on the (unbracketed) first step; later steps only index_fill_ it
+                    penalty_mask = torch.zeros((logits.shape[-1],), dtype=torch.bool, device=device)
+                    if len(initial_tokens) > 0:
+                        penalty_mask.index_fill_(0, torch.tensor(initial_tokens, device=device), True)
+                next_token = self.sample_token(logits, temperature, top_k, top_p, min_p, repetition_penalty, [], generator, do_sample=do_sample, presence_penalty=presence_penalty, penalty_mask=penalty_mask)
 
-            decode_tokens.copy_(next_token)
-            del next_token, logits, x, embeds, position_ids
-            if step > 0 and compile_allocations:
-                comfy.model_prefetch.malloc_graph_end()
+                decode_tokens.copy_(next_token)
+                if penalty_mask is not None:
+                    penalty_mask.index_fill_(0, decode_tokens[0], True)
+                del next_token, logits, x, embeds, position_ids
+                if step > 0 and compile_allocations:
+                    comfy.model_prefetch.malloc_graph_end()
 
-            token_id = decode_tokens[0].item()
-            generated_token_ids.append(token_id)
+                token_id = decode_tokens[0].item()
+                generated_token_ids.append(token_id)
 
-            if step > 0 and next_pos is not None:
-                next_pos += 1
-            pbar.update(1)
+                if step == 0 and hasattr(self.model.embed_tokens, "_v"):
+                    # prefill's transients can evict body pages and lower the VBAR watermark: let the decode fault them back
+                    vbar = self.model.embed_tokens._v[0]
+                    comfy.model_management.reset_cast_buffers()
+                    vbar.set_watermark(vbar.max_size)
 
-            if token_id in stop_tokens:
-                break
+                if step > 0 and next_pos is not None:
+                    next_pos += 1
+                pbar.update(1)
+
+                if token_id in stop_tokens:
+                    break
+        finally:
+            comfy.model_prefetch.cleanup_prefetch_queues()
 
         return generated_token_ids
 
-    def sample_token(self, logits, temperature, top_k, top_p, min_p, repetition_penalty, token_history, generator, do_sample=True, presence_penalty=0.0):
-
-        if not do_sample or temperature == 0.0:
-            return torch.argmax(logits, dim=-1, keepdim=True)
-
-        # Sampling mode
-        if len(token_history) > 0 and (repetition_penalty != 1.0 or (presence_penalty is not None and presence_penalty != 0.0)):
-            token_ids = torch.tensor(list(set(token_history)), device=logits.device)
-            token_logits = logits[:, token_ids]
-            if repetition_penalty != 1.0:
-                token_logits = torch.where(token_logits < 0, token_logits * repetition_penalty, token_logits / repetition_penalty)
-            if presence_penalty is not None and presence_penalty != 0.0:
-                token_logits = token_logits - presence_penalty
-            logits[:, token_ids] = token_logits
-
+    def processed_probs(self, logits, temperature, top_k, top_p, min_p):
+        # returns (probs, indices)
         if temperature != 1.0:
             logits = logits / temperature
 
+        top_indices = None
         if top_k > 0:
             top_k = min(top_k, logits.shape[-1])
             logits, top_indices = torch.topk(logits, top_k)
-
-            if min_p > 0.0:
-                probs_before_filter = torch.nn.functional.softmax(logits, dim=-1)
-                top_probs, _ = probs_before_filter.max(dim=-1, keepdim=True)
-                min_threshold = min_p * top_probs
-                indices_to_remove = probs_before_filter < min_threshold
-                logits[indices_to_remove] = torch.finfo(logits.dtype).min
-
-            if top_p < 1.0:
-                sorted_logits, sorted_indices = torch.sort(logits, descending=True)
-                cumulative_probs = torch.cumsum(torch.nn.functional.softmax(sorted_logits, dim=-1), dim=-1)
-                sorted_indices_to_remove = cumulative_probs > top_p
-                sorted_indices_to_remove[..., 0] = False
-                indices_to_remove = torch.zeros_like(logits, dtype=torch.bool)
-                indices_to_remove.scatter_(1, sorted_indices, sorted_indices_to_remove)
-                logits[indices_to_remove] = torch.finfo(logits.dtype).min
-
-            probs = torch.nn.functional.softmax(logits, dim=-1)
-            next_token = torch.multinomial(probs, num_samples=1, generator=generator)
-            return top_indices.gather(1, next_token)
 
         if min_p > 0.0:
             probs_before_filter = torch.nn.functional.softmax(logits, dim=-1)
@@ -1119,15 +1329,32 @@ class BaseGenerate:
         if top_p < 1.0:
             sorted_logits, sorted_indices = torch.sort(logits, descending=True)
             cumulative_probs = torch.cumsum(torch.nn.functional.softmax(sorted_logits, dim=-1), dim=-1)
-            sorted_indices_to_remove = cumulative_probs > top_p
+            sorted_indices_to_remove = cumulative_probs >= top_p
+            sorted_indices_to_remove[..., 1:] = sorted_indices_to_remove[..., :-1].clone()
             sorted_indices_to_remove[..., 0] = False
             indices_to_remove = torch.zeros_like(logits, dtype=torch.bool)
             indices_to_remove.scatter_(1, sorted_indices, sorted_indices_to_remove)
             logits[indices_to_remove] = torch.finfo(logits.dtype).min
 
-        probs = torch.nn.functional.softmax(logits, dim=-1)
+        return torch.nn.functional.softmax(logits, dim=-1), top_indices
 
-        return torch.multinomial(probs, num_samples=1, generator=generator)
+    def sample_token(self, logits, temperature, top_k, top_p, min_p, repetition_penalty, token_history, generator, do_sample=True, presence_penalty=0.0, penalty_mask=None):
+        # penalty_mask [vocab] bool stands in for token_history
+        if penalty_active(repetition_penalty, presence_penalty):
+            if penalty_mask is not None:
+                logits = torch.where(penalty_mask.unsqueeze(0), apply_penalty(logits, repetition_penalty, presence_penalty), logits)
+            elif len(token_history) > 0:
+                token_ids = torch.tensor(list(set(token_history)), device=logits.device)
+                logits[:, token_ids] = apply_penalty(logits[:, token_ids], repetition_penalty, presence_penalty)
+
+        if not do_sample or temperature == 0.0:
+            return torch.argmax(logits, dim=-1, keepdim=True)
+
+        probs, top_indices = self.processed_probs(logits, temperature, top_k, top_p, min_p)
+        next_token = torch.multinomial(probs, num_samples=1, generator=generator)
+        if top_indices is not None:
+            return top_indices.gather(1, next_token)
+        return next_token
 
 class BaseQwen3:
     def logits(self, x):

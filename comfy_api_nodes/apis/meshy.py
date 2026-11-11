@@ -36,7 +36,8 @@ class MeshyTextToModelRequest(BaseModel):
     )
     symmetry_mode: str = Field(..., description="'auto', 'off' or 'on'")
     pose_mode: str = Field(...)
-    ultra_mode: bool = Field(False)
+    ultra_mode: bool | None = Field(None)
+    geometry_resolution: str | None = Field(None)
     seed: int = Field(...)
     moderation: bool = Field(False)
 
@@ -66,7 +67,8 @@ class MeshyImageToModelRequest(BaseModel):
     enable_pbr: bool | None = Field(...)
     texture_resolution: str | None = Field(None)
     pose_mode: str = Field(...)
-    ultra_mode: bool = Field(False)
+    ultra_mode: bool | None = Field(None)
+    geometry_resolution: str | None = Field(None)
     texture_prompt: str | None = Field(None, max_length=600)
     texture_image_url: str | None = Field(None)
     seed: int = Field(...)
@@ -87,10 +89,36 @@ class MeshyMultiImageToModelRequest(BaseModel):
     enable_pbr: bool | None = Field(...)
     texture_resolution: str | None = Field(None)
     pose_mode: str = Field(...)
+    ultra_mode: bool | None = Field(None)
+    geometry_resolution: str | None = Field(None)
     texture_prompt: str | None = Field(None, max_length=600)
     texture_image_url: str | None = Field(None)
     seed: int = Field(...)
     moderation: bool = Field(False)
+
+
+class MeshySmartTopologyTextToModelRequest(BaseModel):
+    mode: str = Field("preview")
+    model_type: str = Field("smart-topology")
+    prompt: str = Field(...)
+    ai_model: str = Field(...)
+    target_polycount: int = Field(...)
+    pose_mode: str = Field(...)
+    seed: int = Field(...)
+
+
+class MeshySmartTopologyImageToModelRequest(BaseModel):
+    image_url: str = Field(...)
+    model_type: str = Field("smart-topology")
+    ai_model: str = Field(...)
+    target_polycount: int = Field(...)
+    should_texture: bool = Field(...)
+    enable_pbr: bool | None = Field(...)
+    texture_resolution: str | None = Field(...)
+    texture_prompt: str | None = Field(...)
+    texture_image_url: str | None = Field(...)
+    pose_mode: str = Field(...)
+    seed: int = Field(...)
 
 
 class MeshyRiggingRequest(BaseModel):

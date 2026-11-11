@@ -72,6 +72,7 @@ parser.add_argument("--extra-model-paths-config", type=str, default=None, metava
 parser.add_argument("--output-directory", type=str, default=None, help="Set the ComfyUI output directory. Overrides --base-directory.")
 parser.add_argument("--temp-directory", type=str, default=None, help="Set the ComfyUI temp directory (default is in the ComfyUI directory). Overrides --base-directory.")
 parser.add_argument("--input-directory", type=str, default=None, help="Set the ComfyUI input directory. Overrides --base-directory.")
+parser.add_argument("--previews-directory", type=str, default=None, help="Set the directory for generated asset previews. Overrides --base-directory.")
 parser.add_argument("--auto-launch", action="store_true", help="Automatically launch ComfyUI in the default browser.")
 parser.add_argument("--disable-auto-launch", action="store_true", help="Disable auto launching the browser.")
 parser.add_argument("--cuda-device", type=str, default=None, metavar="DEVICE_ID", help="Set the ids of cuda devices this instance will use, as a comma-separated list (e.g. '0' or '0,1'), or 'all' to leave all currently visible devices available. All other devices will not be visible.")
@@ -117,7 +118,7 @@ parser.add_argument("--directml", type=int, nargs="?", metavar="DIRECTML_DEVICE"
 parser.add_argument("--oneapi-device-selector", type=str, default=None, metavar="SELECTOR_STRING", help="Sets the oneAPI device(s) this instance will use.")
 parser.add_argument("--supports-fp8-compute", action="store_true", help="ComfyUI will act like if the device supports fp8 compute.")
 parser.add_argument("--enable-triton-backend", action="store_true", help="ComfyUI will enable the use of Triton backend in comfy-kitchen. Is disabled at launch by default.")
-parser.add_argument("--disable-triton-backend", action="store_true", help="Force-disable the comfy-kitchen Triton backend, overriding the automatic ROCm/AMD default and --enable-triton-backend.")
+parser.add_argument("--disable-triton-backend", action="store_true", help="Force-disable the comfy-kitchen Triton backend, overriding --enable-triton-backend.")
 
 class LatentPreviewMethod(enum.Enum):
     NoPreviews = "none"
@@ -159,6 +160,7 @@ upcast.add_argument("--dont-upcast-attention", action="store_true", help="Disabl
 
 
 parser.add_argument("--enable-manager", action="store_true", help="Enable the ComfyUI-Manager feature.")
+parser.add_argument("--enable-agent", action="store_true", help="Enable the ComfyUI agent feature.")
 manager_group = parser.add_mutually_exclusive_group()
 manager_group.add_argument("--disable-manager-ui", action="store_true", help="Disables only the ComfyUI-Manager UI and endpoints. Scheduled installations and similar background tasks will still operate.")
 manager_group.add_argument("--enable-manager-legacy-ui", action="store_true", help="Enables the legacy UI of ComfyUI-Manager. Implies --enable-manager.")
@@ -179,7 +181,8 @@ parser.add_argument("--async-offload", nargs='?', const=2, type=int, default=Non
 parser.add_argument("--disable-async-offload", action="store_true", help="Disable async weight offloading.")
 parser.add_argument("--disable-dynamic-vram", action="store_true", help="Disable dynamic VRAM and use estimate based model loading.")
 parser.add_argument("--enable-dynamic-vram", action="store_true", help="Enable dynamic VRAM on systems where it's not enabled by default.")
-parser.add_argument("--fast-disk", action="store_true", help="Prefer disk-backed dynamic loading and offload over unpinned RAM. Can be faster for users with fast NVME disks.")
+parser.add_argument("--fast-disk", action="store_true", help="Force disk-backed dynamic loading and offload over unpinned RAM. Can be faster for users with fast NVME disks.")
+parser.add_argument("--disable-fast-disk", action="store_true", help="Disable disk-backed dynamic loading and offload over unpinned RAM. Overrides --fast-disk.")
 parser.add_argument("--disable-cuda-graphs", action="store_true", help="Disable CUDA graphs.")
 parser.add_argument("--disable-comfy-compiler", action="store_true", help="Disable the Comfy model compiler, including its CUDA graph subfeature.")
 parser.add_argument("--assert-graph-breaks", action="store_true", help="Fail on Comfy model compiler graph breaks.")
@@ -207,13 +210,17 @@ parser.add_argument("--mmap-torch-files", action="store_true", help="Use mmap wh
 parser.add_argument("--disable-mmap", action="store_true", help="Don't use mmap when loading safetensors.")
 
 parser.add_argument("--dont-print-server", action="store_true", help="Don't print server output.")
+parser.add_argument("--disable-product-tips", action="store_true", help="Hide console tips about new products from Comfy-Org. Same as setting the env var COMFYUI_DISABLE_PRODUCT_TIPS=1.")
 parser.add_argument("--quick-test-for-ci", action="store_true", help="Quick test for CI.")
-parser.add_argument("--windows-standalone-build", action="store_true", help="Windows standalone build: Enable convenient things that most people using the standalone windows build will probably enjoy (like auto opening the page on startup).")
+parser.add_argument("--windows-standalone-build", action="store_true", help="Windows standalone build: Enable convenient things that most people using the standalone windows build will probably enjoy (like auto opening the page on startup and turning on the assets system; --disable-assets turns it off).")
 
 parser.add_argument("--disable-metadata", action="store_true", help="Disable saving prompt metadata in files.")
 parser.add_argument("--disable-all-custom-nodes", action="store_true", help="Disable loading all custom nodes.")
 parser.add_argument("--whitelist-custom-nodes", type=str, nargs='+', default=[], help="Specify custom node folders to load even when --disable-all-custom-nodes is enabled.")
-parser.add_argument("--disable-api-nodes", action="store_true", help="Disable loading all api nodes. Also prevents the frontend from communicating with the internet.")
+parser.add_argument("--disabled-nodes-config", type=str, default=None, metavar="PATH", help="Path to a YAML file listing node IDs to disable.")
+parser.add_argument("--disable-partner-nodes", action="store_true", help="Disable loading partner nodes (the paid API nodes). The frontend keeps its internet access.")
+parser.add_argument("--offline", action="store_true", help="Prevent the frontend from communicating with the internet by setting a restrictive Content-Security-Policy header. Also disables partner nodes.")
+parser.add_argument("--disable-api-nodes", action="store_true", help="Deprecated alias for --offline. Use --offline, or --disable-partner-nodes to only disable partner nodes.")
 
 parser.add_argument("--multi-user", action="store_true", help="Enables per-user storage.")
 
@@ -271,8 +278,9 @@ database_default_path = os.path.abspath(
     os.path.join(os.path.dirname(__file__), "..", "user", "comfyui.db")
 )
 parser.add_argument("--database-url", type=str, default=None, help="Specify the database URL, e.g. for an in-memory database you can use 'sqlite:///:memory:'. Defaults to 'comfyui.db' in the effective user directory.")
-parser.add_argument("--enable-assets", action="store_true", help="Enable the assets system (API routes, database synchronization, and background scanning).")
-parser.add_argument("--enable-asset-hashing", action="store_true", help="Compute blake3 content hashes when scanning assets. Hashing enables future asset-portability features (deduplication, cross-machine model resolution) but adds startup cost and per-output cost on large models directories. Off by default; enable to opt in.")
+parser.add_argument("--enable-assets", action="store_true", help="Enable the assets system (API routes, database synchronization, and background scanning). Off by default.")
+parser.add_argument("--disable-assets", action="store_true", help="Disable the assets system, even when --enable-assets is also given.")
+parser.add_argument("--enable-asset-hashing", action="store_true", help="Compute blake3 content hashes when scanning assets. Files uploaded through the API are hashed either way. Hashing enables future asset-portability features (deduplication, cross-machine model resolution) but adds startup cost and per-output cost on large models directories. Off by default; enable to opt in. Requires the assets system (--enable-assets or --windows-standalone-build).")
 parser.add_argument("--feature-flag", type=str, action='append', default=[], metavar="KEY[=VALUE]", help="Set a server feature flag. Use KEY=VALUE to set an explicit value, or bare KEY to set it to true. Can be specified multiple times. Boolean values (true/false) and numbers are auto-converted. Examples: --feature-flag show_signin_button=true  or  --feature-flag show_signin_button")
 parser.add_argument("--list-feature-flags", action="store_true", help="Print the registry of known CLI-settable feature flags as JSON and exit.")
 
@@ -289,6 +297,17 @@ if args.high_ram:
 
 if args.windows_standalone_build:
     args.auto_launch = True
+    args.enable_assets = True
+
+if args.disable_api_nodes:
+    args.offline = True
+
+if args.offline:
+    args.disable_partner_nodes = True
+
+# Assets are off unless --enable-assets is given; --disable-assets wins over it.
+if not args.enable_assets:
+    args.disable_assets = True
 
 if args.disable_auto_launch:
     args.auto_launch = False

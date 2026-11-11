@@ -1,12 +1,21 @@
 import tempfile
+from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 from sqlalchemy import create_engine, event
-from sqlalchemy.orm import Session
+from sqlalchemy.pool import StaticPool
+from sqlalchemy.orm import Session, Session as SASession, sessionmaker
 
+import folder_paths
+from app.assets import mode
 from app.assets.database.models import Base
+
+
+def _memory_engine():
+    # One shared connection: upload previews are stored from a worker thread.
+    return create_engine("sqlite:///:memory:", poolclass=StaticPool, connect_args={"check_same_thread": False})
 
 
 @pytest.fixture(autouse=True)
@@ -15,10 +24,20 @@ def autoclean_unit_test_assets():
     yield
 
 
+@pytest.fixture(autouse=True)
+def initialised_hash_mode():
+    class _HashingOff:
+        enable_asset_hashing = False
+
+    mode.init(_HashingOff())
+    yield
+    mode.init(None)
+
+
 @pytest.fixture
 def db_engine():
     """In-memory SQLite engine for fast unit tests."""
-    engine = create_engine("sqlite:///:memory:")
+    engine = _memory_engine()
     Base.metadata.create_all(engine)
     return engine
 
@@ -26,7 +45,7 @@ def db_engine():
 @pytest.fixture
 def db_engine_fk():
     """In-memory SQLite engine with foreign key enforcement enabled."""
-    engine = create_engine("sqlite:///:memory:")
+    engine = _memory_engine()
 
     @event.listens_for(engine, "connect")
     def _set_pragma(dbapi_connection, connection_record):
@@ -48,15 +67,13 @@ def session(db_engine):
 @pytest.fixture
 def mock_create_session(db_engine):
     """Patch create_session to use our in-memory database."""
-    from contextlib import contextmanager
-    from sqlalchemy.orm import Session as SASession
-
     @contextmanager
     def _create_session():
         with SASession(db_engine) as sess:
             yield sess
 
     with patch("app.assets.services.ingest.create_session", _create_session), \
+         patch("app.database.db.WriteSession", sessionmaker(bind=db_engine)), \
          patch("app.assets.services.asset_management.create_session", _create_session), \
          patch("app.assets.services.tagging.create_session", _create_session):
         yield _create_session
@@ -67,3 +84,18 @@ def temp_dir():
     """Temporary directory for file operations."""
     with tempfile.TemporaryDirectory() as tmpdir:
         yield Path(tmpdir)
+
+
+@pytest.fixture
+def roots(tmp_path: Path):
+    """input/, output/ and previews/ in tmp_path, as Core's roots."""
+    saved = (folder_paths.get_output_directory(), folder_paths.get_input_directory(), folder_paths.get_previews_directory())
+    folder_paths.set_output_directory(str(tmp_path / "output"))
+    folder_paths.set_input_directory(str(tmp_path / "input"))
+    folder_paths.set_previews_directory(str(tmp_path / "previews"))
+    for name in ("output", "input", "previews"):
+        (tmp_path / name).mkdir()
+    yield tmp_path
+    folder_paths.set_output_directory(saved[0])
+    folder_paths.set_input_directory(saved[1])
+    folder_paths.set_previews_directory(saved[2])

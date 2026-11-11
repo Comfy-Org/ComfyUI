@@ -12,6 +12,8 @@ from comfy_api_nodes.apis.meshy import (
     MeshyRefineTask,
     MeshyRiggedResult,
     MeshyRiggingRequest,
+    MeshySmartTopologyImageToModelRequest,
+    MeshySmartTopologyTextToModelRequest,
     MeshyTaskResponse,
     MeshyTextToModelRequest,
     MeshyTextureRequest,
@@ -21,9 +23,19 @@ from comfy_api_nodes.util import (
     download_url_to_file_3d,
     poll_op,
     sync_op,
+    upload_image_to_comfyapi,
     upload_images_to_comfyapi,
     validate_string,
 )
+
+
+def validate_ultra_mode(model: str, ultra_mode: bool, ultra_resolution: str = "2k") -> None:
+    if not ultra_mode:
+        return
+    if model not in ("meshy-7.1", "meshy-7", "latest"):
+        raise ValueError("ultra_mode requires the meshy-7.1, meshy-7 or latest model")
+    if ultra_resolution == "4k" and model not in ("meshy-7.1", "latest"):
+        raise ValueError("4k ultra_resolution requires the meshy-7.1 or latest model")
 
 
 class MeshyTextToModelNode(IO.ComfyNode):
@@ -35,7 +47,7 @@ class MeshyTextToModelNode(IO.ComfyNode):
             display_name="Meshy: Text to Model",
             category="partner/3d/Meshy",
             inputs=[
-                IO.Combo.Input("model", options=["meshy-7", "meshy-6", "latest"]),
+                IO.Combo.Input("model", options=["meshy-7.1", "meshy-7", "meshy-6", "latest"]),
                 IO.String.Input("prompt", multiline=True, default=""),
                 IO.Combo.Input("style", options=["realistic"]),
                 IO.DynamicCombo.Input(
@@ -80,6 +92,13 @@ class MeshyTextToModelNode(IO.ComfyNode):
                     default=False,
                     tooltip="Run an extra refinement pass for higher-fidelity geometry with finer surface detail.",
                 ),
+                IO.Combo.Input(
+                    "ultra_resolution",
+                    options=["2k", "4k"],
+                    tooltip="Resolution of the ultra pass: 2k runs it at 2048³, 4k at 4096³ for the finest "
+                    "surface detail. 4k requires meshy-7.1 or latest. Used only when ultra_mode is enabled.",
+                    optional=True,
+                ),
             ],
             outputs=[
                 IO.String.Output(display_name="model_file"),  # for backward compatibility only
@@ -98,8 +117,9 @@ class MeshyTextToModelNode(IO.ComfyNode):
                 depends_on=IO.PriceBadgeDepends(widgets=["model", "ultra_mode"]),
                 expr="""
                 (
-                  $credits := 20 + ((widgets.ultra_mode and widgets.model in ["meshy-7", "latest"]) ? 5 : 0);
-                  {"type":"usd","usd": $round($credits * 0.0572, 4)}
+                  $credits := 20
+                    + ((widgets.ultra_mode and widgets.model in ["meshy-7.1", "meshy-7", "latest"]) ? 5 : 0);
+                  {"type":"usd","usd": $credits * 0.0572}
                 )
                 """,
             ),
@@ -116,10 +136,10 @@ class MeshyTextToModelNode(IO.ComfyNode):
         pose_mode: str,
         seed: int,
         ultra_mode: bool,
+        ultra_resolution: str = "2k",
     ) -> IO.NodeOutput:
         validate_string(prompt, field_name="prompt", min_length=1, max_length=600)
-        if ultra_mode and model not in ("meshy-7", "latest"):
-            raise ValueError("ultra_mode requires the meshy-7 or latest model")
+        validate_ultra_mode(model, ultra_mode, ultra_resolution)
         response = await sync_op(
             cls,
             ApiEndpoint(path="/proxy/meshy/openapi/v2/text-to-3d", method="POST"),
@@ -133,7 +153,8 @@ class MeshyTextToModelNode(IO.ComfyNode):
                 should_remesh=should_remesh["should_remesh"] == "true",
                 symmetry_mode=symmetry_mode,
                 pose_mode=pose_mode.lower(),
-                ultra_mode=ultra_mode,
+                ultra_mode=True if ultra_mode and model == "meshy-7" else None,
+                geometry_resolution=ultra_resolution if ultra_mode and model != "meshy-7" else None,
                 seed=seed,
             ),
         )
@@ -163,7 +184,7 @@ class MeshyRefineNode(IO.ComfyNode):
             category="partner/3d/Meshy",
             description="Refine a previously created draft model.",
             inputs=[
-                IO.Combo.Input("model", options=["meshy-7", "meshy-6", "latest"]),
+                IO.Combo.Input("model", options=["meshy-7.1", "meshy-7", "meshy-6", "latest"]),
                 IO.Custom("MESHY_TASK_ID").Input("meshy_task_id"),
                 IO.Boolean.Input(
                     "enable_pbr",
@@ -207,7 +228,7 @@ class MeshyRefineNode(IO.ComfyNode):
                 expr="""
                 (
                   $credits := widgets.texture_resolution = "8k" ? 15 : 10;
-                  {"type":"usd","usd": $round($credits * 0.0572, 4)}
+                  {"type":"usd","usd": $credits * 0.0572}
                 )
                 """,
             ),
@@ -268,7 +289,7 @@ class MeshyImageToModelNode(IO.ComfyNode):
             display_name="Meshy: Image to Model",
             category="partner/3d/Meshy",
             inputs=[
-                IO.Combo.Input("model", options=["meshy-7", "meshy-6", "latest"]),
+                IO.Combo.Input("model", options=["meshy-7.1", "meshy-7", "meshy-6", "latest"]),
                 IO.Image.Input("image"),
                 IO.DynamicCombo.Input(
                     "should_remesh",
@@ -350,6 +371,13 @@ class MeshyImageToModelNode(IO.ComfyNode):
                     default=False,
                     tooltip="Run an extra refinement pass for higher-fidelity geometry with finer surface detail.",
                 ),
+                IO.Combo.Input(
+                    "ultra_resolution",
+                    options=["2k", "4k"],
+                    tooltip="Resolution of the ultra pass: 2k runs it at 2048³, 4k at 4096³ for the finest "
+                    "surface detail. 4k requires meshy-7.1 or latest. Used only when ultra_mode is enabled.",
+                    optional=True,
+                ),
             ],
             outputs=[
                 IO.String.Output(display_name="model_file"),  # for backward compatibility only
@@ -374,8 +402,8 @@ class MeshyImageToModelNode(IO.ComfyNode):
                   $resolution := $textured ? $lookup(widgets, "should_texture.texture_resolution") : "2k";
                   $credits := ($textured ? 30 : 20)
                     + ($resolution = "8k" ? 5 : 0)
-                    + ((widgets.ultra_mode and widgets.model in ["meshy-7", "latest"]) ? 5 : 0);
-                  {"type":"usd","usd": $round($credits * 0.0572, 4)}
+                    + ((widgets.ultra_mode and widgets.model in ["meshy-7.1", "meshy-7", "latest"]) ? 5 : 0);
+                  {"type":"usd","usd": $credits * 0.0572}
                 )
                 """,
             ),
@@ -392,9 +420,9 @@ class MeshyImageToModelNode(IO.ComfyNode):
         pose_mode: str,
         seed: int,
         ultra_mode: bool,
+        ultra_resolution: str = "2k",
     ) -> IO.NodeOutput:
-        if ultra_mode and model not in ("meshy-7", "latest"):
-            raise ValueError("ultra_mode requires the meshy-7 or latest model")
+        validate_ultra_mode(model, ultra_mode, ultra_resolution)
         texture = should_texture["should_texture"] == "true"
         texture_image_url = texture_prompt = None
         if texture:
@@ -424,7 +452,8 @@ class MeshyImageToModelNode(IO.ComfyNode):
                 enable_pbr=should_texture.get("enable_pbr", None),
                 texture_resolution=should_texture.get("texture_resolution", None),
                 pose_mode=pose_mode.lower(),
-                ultra_mode=ultra_mode,
+                ultra_mode=True if ultra_mode and model == "meshy-7" else None,
+                geometry_resolution=ultra_resolution if ultra_mode and model != "meshy-7" else None,
                 texture_prompt=texture_prompt,
                 texture_image_url=texture_image_url,
                 seed=seed,
@@ -455,7 +484,7 @@ class MeshyMultiImageToModelNode(IO.ComfyNode):
             display_name="Meshy: Multi-Image to Model",
             category="partner/3d/Meshy",
             inputs=[
-                IO.Combo.Input("model", options=["meshy-7", "meshy-6", "latest"]),
+                IO.Combo.Input("model", options=["meshy-7.1", "meshy-7", "meshy-6", "latest"]),
                 IO.Autogrow.Input(
                     "images",
                     template=IO.Autogrow.TemplatePrefix(IO.Image.Input("image"), prefix="image", min=2, max=4),
@@ -535,6 +564,13 @@ class MeshyMultiImageToModelNode(IO.ComfyNode):
                     tooltip="Seed controls whether the node should re-run; "
                     "results are non-deterministic regardless of seed.",
                 ),
+                IO.Boolean.Input(
+                    "ultra_mode",
+                    default=False,
+                    tooltip="Run an extra refinement pass at 2048³ for higher-fidelity geometry "
+                    "with finer surface detail.",
+                    optional=True,
+                ),
             ],
             outputs=[
                 IO.String.Output(display_name="model_file"),  # for backward compatibility only
@@ -551,14 +587,16 @@ class MeshyMultiImageToModelNode(IO.ComfyNode):
             is_output_node=True,
             price_badge=IO.PriceBadge(
                 depends_on=IO.PriceBadgeDepends(
-                    widgets=["should_texture", "should_texture.texture_resolution"],
+                    widgets=["model", "should_texture", "should_texture.texture_resolution", "ultra_mode"],
                 ),
                 expr="""
                 (
                   $textured := widgets.should_texture = "true";
                   $resolution := $textured ? $lookup(widgets, "should_texture.texture_resolution") : "2k";
-                  $credits := ($textured ? 30 : 20) + ($resolution = "8k" ? 5 : 0);
-                  {"type":"usd","usd": $round($credits * 0.0572, 4)}
+                  $credits := ($textured ? 30 : 20)
+                    + ($resolution = "8k" ? 5 : 0)
+                    + ((widgets.ultra_mode and widgets.model in ["meshy-7.1", "meshy-7", "latest"]) ? 5 : 0);
+                  {"type":"usd","usd": $credits * 0.0572}
                 )
                 """,
             ),
@@ -574,7 +612,9 @@ class MeshyMultiImageToModelNode(IO.ComfyNode):
         should_texture: InputShouldTexture,
         pose_mode: str,
         seed: int,
+        ultra_mode: bool = False,
     ) -> IO.NodeOutput:
+        validate_ultra_mode(model, ultra_mode)
         texture = should_texture["should_texture"] == "true"
         texture_image_url = texture_prompt = None
         if texture:
@@ -606,6 +646,8 @@ class MeshyMultiImageToModelNode(IO.ComfyNode):
                 enable_pbr=should_texture.get("enable_pbr", None),
                 texture_resolution=should_texture.get("texture_resolution", None),
                 pose_mode=pose_mode.lower(),
+                ultra_mode=True if ultra_mode and model == "meshy-7" else None,
+                geometry_resolution="2k" if ultra_mode and model != "meshy-7" else None,
                 texture_prompt=texture_prompt,
                 texture_image_url=texture_image_url,
                 seed=seed,
@@ -624,6 +666,232 @@ class MeshyMultiImageToModelNode(IO.ComfyNode):
             task_id,
             await download_url_to_file_3d(result.model_urls.glb, "glb", task_id=task_id),
             await download_url_to_file_3d(result.model_urls.fbx, "fbx", task_id=task_id),
+        )
+
+
+class MeshyTextToModelSmartTopologyNode(IO.ComfyNode):
+
+    @classmethod
+    def define_schema(cls):
+        return IO.Schema(
+            node_id="MeshyTextToModelSmartTopologyNode",
+            display_name="Meshy: Text to Model (Smart Topology)",
+            category="partner/3d/Meshy",
+            description="Generate a game-ready triangle mesh directly at a target face count.",
+            search_aliases=["meshy t2.5", "low poly"],
+            inputs=[
+                IO.Combo.Input("model", options=["meshy-t2.5"]),
+                IO.String.Input("prompt", multiline=True, default=""),
+                IO.Int.Input(
+                    "target_polycount",
+                    default=15000,
+                    min=100,
+                    max=30000,
+                    display_mode=IO.NumberDisplay.number,
+                    tooltip="Approximate number of triangles in the generated mesh.",
+                ),
+                IO.Combo.Input("pose_mode", options=["", "A-pose", "T-pose"], advanced=True),
+                IO.Int.Input(
+                    "seed",
+                    default=42,
+                    min=0,
+                    max=2147483647,
+                    display_mode=IO.NumberDisplay.number,
+                    control_after_generate=True,
+                    tooltip="Seed controls whether the node should re-run; "
+                    "results are non-deterministic regardless of seed.",
+                ),
+            ],
+            outputs=[
+                IO.Custom("MESHY_TASK_ID").Output(display_name="meshy_task_id"),
+                IO.File3DGLB.Output(display_name="GLB"),
+                IO.File3DFBX.Output(display_name="FBX"),
+            ],
+            hidden=[
+                IO.Hidden.auth_token_comfy_org,
+                IO.Hidden.api_key_comfy_org,
+                IO.Hidden.unique_id,
+            ],
+            is_api_node=True,
+            price_badge=IO.PriceBadge(expr='{"type":"usd","usd":0.286}'),
+        )
+
+    @classmethod
+    async def execute(
+        cls,
+        model: str,
+        prompt: str,
+        target_polycount: int,
+        pose_mode: str,
+        seed: int,
+    ) -> IO.NodeOutput:
+        validate_string(prompt, field_name="prompt", min_length=1, max_length=800)
+        response = await sync_op(
+            cls,
+            ApiEndpoint(path="/proxy/meshy/openapi/v2/text-to-3d", method="POST"),
+            response_model=MeshyTaskResponse,
+            data=MeshySmartTopologyTextToModelRequest(
+                prompt=prompt,
+                ai_model=model,
+                target_polycount=target_polycount,
+                pose_mode=pose_mode.lower(),
+                seed=seed,
+            ),
+        )
+        task_id = response.result
+        result = await poll_op(
+            cls,
+            ApiEndpoint(path=f"/proxy/meshy/openapi/v2/text-to-3d/{task_id}"),
+            response_model=MeshyModelResult,
+            status_extractor=lambda r: r.status,
+            progress_extractor=lambda r: r.progress,
+        )
+        return IO.NodeOutput(
+            task_id,
+            await download_url_to_file_3d(result.model_urls.glb, "glb"),
+            await download_url_to_file_3d(result.model_urls.fbx, "fbx"),
+        )
+
+
+class MeshyImageToModelSmartTopologyNode(IO.ComfyNode):
+
+    @classmethod
+    def define_schema(cls):
+        return IO.Schema(
+            node_id="MeshyImageToModelSmartTopologyNode",
+            display_name="Meshy: Image to Model (Smart Topology)",
+            category="partner/3d/Meshy",
+            description="Generate a game-ready triangle mesh directly at a target face count.",
+            search_aliases=["meshy t2.5", "low poly"],
+            inputs=[
+                IO.Combo.Input("model", options=["meshy-t2.5"]),
+                IO.Image.Input("image"),
+                IO.Int.Input(
+                    "target_polycount",
+                    default=15000,
+                    min=100,
+                    max=30000,
+                    display_mode=IO.NumberDisplay.number,
+                    tooltip="Approximate number of triangles in the generated mesh.",
+                ),
+                IO.DynamicCombo.Input(
+                    "should_texture",
+                    options=[
+                        IO.DynamicCombo.Option(
+                            "true",
+                            [
+                                IO.Boolean.Input(
+                                    "enable_pbr",
+                                    default=False,
+                                    tooltip="Generate PBR Maps (metallic, roughness, normal) "
+                                    "in addition to the base color.",
+                                ),
+                                IO.String.Input(
+                                    "texture_prompt",
+                                    default="",
+                                    multiline=True,
+                                    tooltip="Provide a text prompt to guide the texturing process. "
+                                    "Maximum 800 characters. Cannot be used at the same time as 'texture_image'.",
+                                ),
+                                IO.Image.Input(
+                                    "texture_image",
+                                    tooltip="Only one of 'texture_image' or 'texture_prompt' "
+                                    "may be used at the same time.",
+                                    optional=True,
+                                ),
+                                IO.Combo.Input("texture_resolution", options=["2k", "4k", "8k"]),
+                            ],
+                        ),
+                        IO.DynamicCombo.Option("false", []),
+                    ],
+                ),
+                IO.Combo.Input("pose_mode", options=["", "A-pose", "T-pose"], advanced=True),
+                IO.Int.Input(
+                    "seed",
+                    default=42,
+                    min=0,
+                    max=2147483647,
+                    display_mode=IO.NumberDisplay.number,
+                    control_after_generate=True,
+                    tooltip="Seed controls whether the node should re-run; "
+                    "results are non-deterministic regardless of seed.",
+                ),
+            ],
+            outputs=[
+                IO.Custom("MESHY_TASK_ID").Output(display_name="meshy_task_id"),
+                IO.File3DGLB.Output(display_name="GLB"),
+                IO.File3DFBX.Output(display_name="FBX"),
+            ],
+            hidden=[
+                IO.Hidden.auth_token_comfy_org,
+                IO.Hidden.api_key_comfy_org,
+                IO.Hidden.unique_id,
+            ],
+            is_api_node=True,
+            price_badge=IO.PriceBadge(
+                depends_on=IO.PriceBadgeDepends(widgets=["should_texture", "should_texture.texture_resolution"]),
+                expr="""
+                (
+                  $credits := widgets.should_texture = "true"
+                    ? ($lookup(widgets, "should_texture.texture_resolution") = "8k" ? 20 : 15)
+                    : 5;
+                  {"type":"usd","usd": $credits * 0.0572}
+                )
+                """,
+            ),
+        )
+
+    @classmethod
+    async def execute(
+        cls,
+        model: str,
+        image: Input.Image,
+        target_polycount: int,
+        should_texture: InputShouldTexture,
+        pose_mode: str,
+        seed: int,
+    ) -> IO.NodeOutput:
+        texture = should_texture["should_texture"] == "true"
+        texture_image_url = texture_prompt = None
+        if texture:
+            if should_texture["texture_prompt"] and should_texture["texture_image"] is not None:
+                raise ValueError("texture_prompt and texture_image cannot be used at the same time")
+            if should_texture["texture_prompt"]:
+                validate_string(should_texture["texture_prompt"], field_name="texture_prompt", max_length=800)
+                texture_prompt = should_texture["texture_prompt"]
+            if should_texture["texture_image"] is not None:
+                texture_image_url = await upload_image_to_comfyapi(
+                    cls, should_texture["texture_image"], wait_label="Uploading texture"
+                )
+        response = await sync_op(
+            cls,
+            ApiEndpoint(path="/proxy/meshy/openapi/v1/image-to-3d", method="POST"),
+            response_model=MeshyTaskResponse,
+            data=MeshySmartTopologyImageToModelRequest(
+                image_url=await upload_image_to_comfyapi(cls, image, wait_label="Uploading base image"),
+                ai_model=model,
+                target_polycount=target_polycount,
+                should_texture=texture,
+                enable_pbr=should_texture.get("enable_pbr", None),
+                texture_resolution=should_texture.get("texture_resolution", None),
+                texture_prompt=texture_prompt,
+                texture_image_url=texture_image_url,
+                pose_mode=pose_mode.lower(),
+                seed=seed,
+            ),
+        )
+        task_id = response.result
+        result = await poll_op(
+            cls,
+            ApiEndpoint(path=f"/proxy/meshy/openapi/v1/image-to-3d/{task_id}"),
+            response_model=MeshyModelResult,
+            status_extractor=lambda r: r.status,
+            progress_extractor=lambda r: r.progress,
+        )
+        return IO.NodeOutput(
+            task_id,
+            await download_url_to_file_3d(result.model_urls.glb, "glb"),
+            await download_url_to_file_3d(result.model_urls.fbx, "fbx"),
         )
 
 
@@ -831,7 +1099,7 @@ class MeshyTextureNode(IO.ComfyNode):
                 expr="""
                 (
                   $credits := widgets.texture_resolution = "8k" ? 15 : 10;
-                  {"type":"usd","usd": $round($credits * 0.0572, 4)}
+                  {"type":"usd","usd": $credits * 0.0572}
                 )
                 """,
             ),
@@ -936,7 +1204,7 @@ class MeshyTextureMultiViewNode(IO.ComfyNode):
                 expr="""
                 (
                   $credits := widgets.texture_resolution = "8k" ? 15 : 10;
-                  {"type":"usd","usd": $round($credits * 0.0572, 4)}
+                  {"type":"usd","usd": $credits * 0.0572}
                 )
                 """,
             ),
@@ -995,6 +1263,8 @@ class MeshyExtension(ComfyExtension):
             MeshyRefineNode,
             MeshyImageToModelNode,
             MeshyMultiImageToModelNode,
+            MeshyTextToModelSmartTopologyNode,
+            MeshyImageToModelSmartTopologyNode,
             MeshyRigModelNode,
             MeshyAnimateModelNode,
             MeshyTextureNode,
