@@ -692,9 +692,9 @@ class LumaRay32VideoReframeNode(IO.ComfyNode):
             display_name="Luma Ray 3.2 Video Reframe",
             category="partner/video/Luma",
             description="Change the aspect ratio of an existing video, using Luma Ray 3.2 to fill the newly "
-            "exposed canvas areas. Source video up to 30 seconds. Billed per second of output.",
+            "exposed canvas areas. Source video up to 10 seconds. Billed per second of output.",
             inputs=[
-                IO.Video.Input("video", tooltip="Source video to reframe. Up to 30 seconds."),
+                IO.Video.Input("video", tooltip="Source video to reframe. Up to 10 seconds."),
                 IO.String.Input(
                     "prompt",
                     multiline=True,
@@ -725,7 +725,7 @@ class LumaRay32VideoReframeNode(IO.ComfyNode):
         validate_string(prompt, strip_whitespace=False, min_length=1, max_length=6000)
         if resolution == "1080p" and aspect_ratio in {"9:16", "3:4"}:
             raise ValueError("1080p is not available for vertical aspect ratios (9:16, 3:4) when reframing.")
-        source_url = await upload_video_to_comfyapi(cls, video, max_duration=30)
+        source_url = await upload_video_to_comfyapi(cls, video, max_duration=10)
         request = Luma2GenerationRequest(
             prompt=prompt,
             model="ray-3.2",
