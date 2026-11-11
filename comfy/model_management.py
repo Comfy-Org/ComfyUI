@@ -1644,6 +1644,7 @@ def is_integrated_gpu():
     device = get_torch_device()
     return device.type == "cuda" and bool(torch.cuda.get_device_properties(device).is_integrated)
 
+WSL = "microsoft" in platform.uname().release.lower()
 DISABLE_PINNED_MEMORY = args.disable_pinned_memory
 if not DISABLE_PINNED_MEMORY and is_integrated_gpu():
     # Integrated GPU VRAM is carved out of system RAM, so pinning host memory only takes RAM from the GPU.
@@ -1652,8 +1653,9 @@ if not DISABLE_PINNED_MEMORY and is_integrated_gpu():
 if not DISABLE_PINNED_MEMORY:
     if is_nvidia() or is_amd():
         ram = get_total_memory(torch.device("cpu"))
-        if WINDOWS:
-            MAX_PINNED_MEMORY = ram * 0.40  # Windows limit is apparently 50%
+        if WINDOWS or WSL:
+            # Windows limit is apparently 50%. Under WSL2 the GPU is the Windows host's and its driver pins the memory, so the same limit applies.
+            MAX_PINNED_MEMORY = ram * 0.40
         else:
             swap = 0 if comfy.system_memory.cgroup_memory_limit() is not None else get_disk_swap_total()
             MAX_PINNED_MEMORY = max(ram * 0.40, min(ram * 0.90, ram - 4 * 1024 ** 3, ram + swap - 16 * 1024 ** 3))
