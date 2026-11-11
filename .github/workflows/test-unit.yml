@@ -10,19 +10,19 @@ jobs:
   test:
     strategy:
       matrix:
-        os: [ubuntu-latest, windows-2022, macos-latest]
+        os: [ubuntu-latest, windows-2022, macos-latest, ubuntu-24.04-arm]
     runs-on: ${{ matrix.os }}
     continue-on-error: true
     steps:
     - uses: actions/checkout@v4
     - name: Set up Python      
-      uses: actions/setup-python@v4
+      uses: actions/setup-python@v5
       with:
         python-version: '3.12'
     - name: Install requirements
       run: |
         python -m pip install --upgrade pip
-        pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
+        pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
         pip install -r requirements.txt
     - name: Run Unit Tests
       run: |

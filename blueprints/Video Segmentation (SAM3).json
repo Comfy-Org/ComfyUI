@@ -818,7 +818,7 @@
           }
         ],
         "extra": {},
-        "category": "Conditioning & Preprocessors/Segmentation & Mask",
+        "category": "Preprocessors/Segmentation",
         "description": "Segments video into temporally consistent masks using Meta SAM3 from text or interactive prompts."
       }
     ]

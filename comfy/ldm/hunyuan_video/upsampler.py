@@ -102,14 +102,14 @@ UPSAMPLERS = {
 }
 
 class HunyuanVideo15SRModel():
-    def __init__(self, model_type, config):
+    def __init__(self, model_type, config, fast_disk=False):
         self.load_device = comfy.model_management.vae_device()
         offload_device = comfy.model_management.vae_offload_device()
         self.dtype = comfy.model_management.vae_dtype(self.load_device)
         self.model_class = UPSAMPLERS.get(model_type)
         self.model = self.model_class(**config).eval()
 
-        self.patcher = comfy.model_patcher.CoreModelPatcher(self.model, load_device=self.load_device, offload_device=offload_device)
+        self.patcher = comfy.model_patcher.CoreModelPatcher(self.model, load_device=self.load_device, offload_device=offload_device, fast_disk=fast_disk)
 
     def load_sd(self, sd):
         return self.model.load_state_dict(sd, strict=True, assign=self.patcher.is_dynamic())

@@ -3350,7 +3350,7 @@
           }
         ],
         "extra": {},
-        "category": "Video generation and editing/Conditioned",
+        "category": "Video generation/Conditioned",
         "description": "Generates a video interpolating between first and last keyframes using LTX-2.3."
       }
     ]

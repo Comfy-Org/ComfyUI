@@ -5,9 +5,8 @@ from comfy_api.latest import ComfyExtension, io
 class CreateList(io.ComfyNode):
     @classmethod
     def define_schema(cls):
-        template_matchtype = io.MatchType.Template("type")
         template_autogrow = io.Autogrow.TemplatePrefix(
-            input=io.MatchType.Input("input", template=template_matchtype),
+            input=io.AnyType.Input("input"),
             prefix="input",
         )
         return io.Schema(
@@ -18,8 +17,7 @@ class CreateList(io.ComfyNode):
             search_aliases=["Image Iterator", "Text Iterator", "Iterator"],
             inputs=[io.Autogrow.Input("inputs", template=template_autogrow)],
             outputs=[
-                io.MatchType.Output(
-                    template=template_matchtype,
+                io.AnyType.Output(
                     is_output_list=True,
                     display_name="list",
                 ),
@@ -34,11 +32,32 @@ class CreateList(io.ComfyNode):
         return io.NodeOutput(output_list)
 
 
+class GetItemFromList(io.ComfyNode):
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="GetItemFromList",
+            display_name="Get Item From List",
+            category="utilities",
+            is_input_list=True,
+            inputs=[
+                io.AnyType.Input("list"),
+                io.Int.Input("index", default=0),
+            ],
+            outputs=[io.AnyType.Output()],
+        )
+
+    @classmethod
+    def execute(cls, list, index) -> io.NodeOutput:
+        return io.NodeOutput(list[index[0]])
+
+
 class ToolkitExtension(ComfyExtension):
     @override
     async def get_node_list(self) -> list[type[io.ComfyNode]]:
         return [
             CreateList,
+            GetItemFromList,
         ]
 
 

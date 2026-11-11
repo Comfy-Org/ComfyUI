@@ -8,6 +8,7 @@ class VideoCodec(str, Enum):
     AUTO = "auto"
     H264 = "h264"
     AV1 = "av1"
+    PRORES = "prores"
 
     @classmethod
     def as_input(cls) -> list[str]:
@@ -21,6 +22,7 @@ class VideoContainer(str, Enum):
     MP4 = "mp4"
     MKV = "mkv"
     WEBM = "webm"
+    MOV = "mov"
 
     @classmethod
     def as_input(cls) -> list[str]:
@@ -42,6 +44,8 @@ class VideoContainer(str, Enum):
             return "mkv"
         if value == VideoContainer.WEBM:
             return "webm"
+        if value == VideoContainer.MOV:
+            return "mov"
         return ""
 
 @dataclass

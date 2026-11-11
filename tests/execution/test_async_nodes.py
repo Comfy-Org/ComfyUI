@@ -24,6 +24,7 @@ class TestAsyncNodes:
             '--port', str(args_pytest["port"]),
             '--extra-model-paths-config', 'tests/execution/extra_model_paths.yaml',
             '--cpu',
+            '--disable-assets',
         ]
         use_lru, lru_size = request.param
         if use_lru:

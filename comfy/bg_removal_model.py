@@ -7,6 +7,7 @@ import logging
 import comfy.ops
 import comfy.model_patcher
 import comfy.model_management
+import comfy.storage
 import comfy.clip_model
 import comfy.background_removal.birefnet
 
@@ -15,7 +16,7 @@ BG_REMOVAL_MODELS = {
 }
 
 class BackgroundRemovalModel():
-    def __init__(self, json_config):
+    def __init__(self, json_config, fast_disk=False):
         with open(json_config) as f:
             config = json.load(f)
 
@@ -32,7 +33,7 @@ class BackgroundRemovalModel():
         self.model = model_class(config, self.dtype, offload_device, comfy.ops.manual_cast)
         self.model.eval()
 
-        self.patcher = comfy.model_patcher.CoreModelPatcher(self.model, load_device=self.load_device, offload_device=offload_device)
+        self.patcher = comfy.model_patcher.CoreModelPatcher(self.model, load_device=self.load_device, offload_device=offload_device, fast_disk=fast_disk)
 
     def load_sd(self, sd):
         return self.model.load_state_dict(sd, strict=False, assign=self.patcher.is_dynamic())
@@ -64,7 +65,7 @@ def load_background_removal_model(sd):
     else:
         return None
 
-    bg_model = BackgroundRemovalModel(json_config)
+    bg_model = BackgroundRemovalModel(json_config, fast_disk=comfy.storage.state_dict_fast_disk(sd))
     m, u = bg_model.load_sd(sd)
     if len(m) > 0:
         logging.warning("missing background removal: {}".format(m))

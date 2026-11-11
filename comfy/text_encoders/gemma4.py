@@ -1,6 +1,6 @@
 import torch
 import torch.nn as nn
-import torchaudio.functional as AF
+import comfy.audio
 import torchvision.transforms.functional as TVF
 import numpy as np
 from tokenizers import Tokenizer
@@ -87,6 +87,8 @@ class Gemma4_31B_Config(Gemma4Config):
     num_hidden_layers: int = 60
     num_attention_heads: int = 32
     num_key_value_heads: int = 16
+    num_global_key_value_heads = 4
+    attention_k_eq_v = True
     vision_bidirectional = True
     sliding_attention = [1024, 1024, 1024, 1024, 1024, False]
     hidden_size_per_layer_input: int = 0
@@ -528,17 +530,18 @@ class Gemma4Transformer(nn.Module):
                         and comfy.model_management.is_device_cuda(x.device))
         decode_bias = None
         decode_masks = None
-        if decode:
+        if fixed_kv:
+            # prefill must advance the device-side write position of the global caches too
             prepared = set()
             for kv in past_key_values:
                 if isinstance(kv, FixedKV) and id(kv.position) not in prepared:
                     kv.prepare(seq_len)
                     prepared.add(id(kv.position))
-            if mask is not None:
-                decode_masks = {}
-                for kv in past_key_values:
-                    if isinstance(kv, FixedKV) and id(kv.position) not in decode_masks:
-                        decode_masks[id(kv.position)] = _fixed_kv_decode_mask(mask, kv, min_val)
+        if decode and mask is not None:
+            decode_masks = {}
+            for kv in past_key_values:
+                if isinstance(kv, FixedKV) and id(kv.position) not in decode_masks:
+                    decode_masks[id(kv.position)] = _fixed_kv_decode_mask(mask, kv, min_val)
         if compiled_decode:
             capacities = tuple(sorted({kv.key.shape[2] for kv in past_key_values if isinstance(kv, FixedKV)}))
             valid = past_len + 1
@@ -1411,14 +1414,14 @@ class Gemma4_Tokenizer():
     @staticmethod
     def _resample_16k(waveform, sample_rate):
         """Mix to mono and resample to 16kHz. Kaiser params reproduce the reference (transformers
-        load_audio -> librosa/soxr_hq) to ~1e-12 MSE using only torchaudio."""
+        load_audio -> librosa/soxr_hq) to ~1e-12 MSE using sinc resampling."""
         if waveform.dim() > 1 and waveform.shape[0] > 1:
             waveform = waveform.mean(dim=0, keepdim=True)
         if waveform.dim() == 1:
             waveform = waveform.unsqueeze(0)
         audio = waveform.float()
         if sample_rate != 16000:
-            audio = AF.resample(audio, sample_rate, 16000, resampling_method="sinc_interp_kaiser",
+            audio = comfy.audio.resample(audio, sample_rate, 16000, resampling_method="sinc_interp_kaiser",
                                 lowpass_filter_width=121, rolloff=0.9568384289091556, beta=21.01531462440614)
         return audio.squeeze(0).contiguous()
 
@@ -1467,21 +1470,32 @@ class Gemma4_Tokenizer():
         up_slopes = slopes[:, 2:] / filter_diff[1:]
         return np.maximum(np.zeros(1), np.minimum(down_slopes, up_slopes))
 
-    def tokenize_with_weights(self, text, return_word_ids=False, image=None, audio=None, video=None, llama_template=None, skip_template=True, thinking=False, **kwargs):
+    def tokenize_with_weights(self, text, return_word_ids=False, image=None, audio=None, video=None, llama_template=None, skip_template=True, thinking=False, system_prompt="", images=[], audios=[], videos=[], **kwargs):
 
         # Process audio
+        if audio is not None and len(audios) == 0:
+            audios = [audio]
         audio_features = []
-        if audio is not None:
+        audio_token_counts = []
+        for audio in audios:
             waveform = audio["waveform"].squeeze(0) if hasattr(audio, "__getitem__") else audio
             sample_rate = audio.get("sample_rate", 16000) if hasattr(audio, "get") else 16000
             feat, feat_mask = self._extract_audio_features(waveform, sample_rate)
-            audio_features = [(feat.unsqueeze(0), feat_mask.unsqueeze(0))]  # ([1, T, D], [1, T])
+            audio_features.append((feat.unsqueeze(0), feat_mask.unsqueeze(0)))  # ([1, T, D], [1, T])
+            # Compute audio token count (always at 16kHz)
+            num_samples = int(waveform.shape[-1] * 16000 / sample_rate) if sample_rate != 16000 else waveform.shape[-1]
+            audio_token_counts.append(self._audio_token_count(num_samples))
 
         # Process image/video frames
-        is_video = video is not None
-        source = video if is_video else image
-        images = []
-        if source is not None:
+        if video is not None and len(videos) == 0:
+            videos = [video]
+        if image is not None and len(images) == 0:
+            images = [image]
+        sources = [(source, False) for source in images] + [(source, True) for source in videos]
+        image_frames = []
+        video_frames = []
+        video_frame_counts = []
+        for source, is_video in sources:
             samples = source.movedim(-1, 1)  # [B, C, H, W]
             num_frames = samples.shape[0]
 
@@ -1494,6 +1508,7 @@ class Gemma4_Tokenizer():
                     indices = [0]
                 samples = samples[indices]
                 num_frames = len(indices)
+                video_frame_counts.append(num_frames)
 
             h, w = samples.shape[2], samples.shape[3]
             patch_size = 16
@@ -1502,13 +1517,14 @@ class Gemma4_Tokenizer():
             max_patches = max_soft_tokens * pooling_k * pooling_k
             target_h, target_w = _get_aspect_ratio_preserving_size(h, w, patch_size, max_patches, pooling_k)
 
+            frames = video_frames if is_video else image_frames
             for i in range(num_frames):
                 # rescaling to match reference code
                 s = (samples[i].clamp(0, 1) * 255).to(torch.uint8)  # [C, H, W] uint8
                 if target_h != h or target_w != w:
                     s = TVF.resize(s, [target_h, target_w], interpolation=TVF.InterpolationMode.BICUBIC, antialias=True)
                 s = s.float() * (1.0 / 255.0)
-                images.append({"pixels": s.unsqueeze(0).movedim(1, -1)[:, :, :, :3], "max_soft_tokens": max_soft_tokens})
+                frames.append({"pixels": s.unsqueeze(0).movedim(1, -1)[:, :, :, :3], "max_soft_tokens": max_soft_tokens})
 
         if text.startswith('<|turn>'):
             skip_template = True
@@ -1520,27 +1536,24 @@ class Gemma4_Tokenizer():
                 llama_text = llama_template.format(text)
             else:
                 # Build template from modalities present
-                system = "<|turn>system\n<|think|>\n<turn|>\n" if thinking else ""
+                think = "<|think|>\n" if thinking else ""
+                system = f"<|turn>system\n{think}{system_prompt}<turn|>\n" if thinking or system_prompt else ""
                 media = ""
-                if len(images) > 0:
-                    if is_video:
-                        media += "\n\n"
-                        for i in range(len(images)):
-                            ts = f"{int(i // 60):02d}:{int(i % 60):02d}"
-                            sep = "" if i == 0 else " "
-                            media += f"{sep}{ts} <|image><|video|><image|>"
-                        media += "\n\n"
-                    else:
-                        media += "\n\n"
-                        for i in range(len(images)):
-                            if i > 0:
-                                media += "\n\n\n\n"
-                            media += "<|image><|image|><image|>"
-                        media += "\n\n"
-                if len(audio_features) > 0:
-                    # Compute audio token count (always at 16kHz)
-                    num_samples = int(waveform.shape[-1] * 16000 / sample_rate) if sample_rate != 16000 else waveform.shape[-1]
-                    n_audio_tokens = self._audio_token_count(num_samples)
+                if len(image_frames) > 0:
+                    media += "\n\n"
+                    for i in range(len(image_frames)):
+                        if i > 0:
+                            media += "\n\n\n\n"
+                        media += "<|image><|image|><image|>"
+                    media += "\n\n"
+                for num_frames in video_frame_counts:
+                    media += "\n\n"
+                    for i in range(num_frames):
+                        ts = f"{int(i // 60):02d}:{int(i % 60):02d}"
+                        sep = "" if i == 0 else " "
+                        media += f"{sep}{ts} <|image><|video|><image|>"
+                    media += "\n\n"
+                for n_audio_tokens in audio_token_counts:
                     media += "<|audio>" + "<|audio|>" * n_audio_tokens + "<audio|>"
                 # 12B/31B prime a closed thought block for non-thinking mode, E2B/E4B must not: it cues them into reasoning inline.
                 model_open = "<|channel>thought\n<channel|>" if self.prime_empty_thought and not thinking else ""
@@ -1562,9 +1575,8 @@ class Gemma4_Tokenizer():
                 else:
                     i += 1
 
-        if len(images) > 0:
-            img_token_id = 258884 if is_video else 258880
-            img_embeds = [{"type": "image", "data": img["pixels"], "max_soft_tokens": img["max_soft_tokens"]} for img in images]
+        for img_token_id, frames in ((258880, image_frames), (258884, video_frames)):
+            img_embeds = [{"type": "image", "data": img["pixels"], "max_soft_tokens": img["max_soft_tokens"]} for img in frames]
             for r in text_tokens:
                 _replace_placeholders(r, img_token_id, img_embeds)
 
@@ -1663,7 +1675,7 @@ class Gemma4Model(sd1_clip.SDClipModel):
         self.dtypes.add(dtype)
         super().__init__(device=device, layer=layer, layer_idx=layer_idx, textmodel_json_config={}, dtype=dtype, special_tokens={"start": 2, "pad": 0}, layer_norm_hidden_state=False, model_class=self.model_class, enable_attention_masks=attention_mask, return_attention_masks=attention_mask, model_options=model_options)
 
-    def generate(self, tokens, do_sample, max_length, temperature, top_k, top_p, min_p, repetition_penalty, seed, presence_penalty=0.0):
+    def generate(self, tokens, do_sample, max_length, temperature, top_k, top_p, min_p, repetition_penalty, seed, presence_penalty=0.0, mtp=True):
         if isinstance(tokens, dict):
             tokens = next(iter(tokens.values()))
         tokens_only = [[t[0] for t in b] for b in tokens]
@@ -1707,9 +1719,6 @@ def gemma4_te(dtype_llama=None, llama_quantization_metadata=None, model_class=No
             if dtype_llama is not None:
                 dtype = dtype_llama
             super().__init__(device=device, dtype=dtype, name="gemma4", clip_model=clip_model, model_options=model_options)
-
-        def get_dynamic_vram__units(self):
-            return getattr(self, self.clip).transformer.model.get_dynamic_vram__units()
     return Gemma4TEModel_
 
 

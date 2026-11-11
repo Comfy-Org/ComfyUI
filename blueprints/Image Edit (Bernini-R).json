@@ -3131,7 +3131,7 @@
           }
         ],
         "extra": {},
-        "category": "Image generation and editing/Edit image",
+        "category": "Image editing/Edit image",
         "description": "Edits a single image using a text prompt, leveraging Bernini-R's latent semantic planning for changes like object addition, removal, or style transfer. Ideal for creative edits requiring precise semantic understanding, such as adding a snowman to a scene or altering an object's appearance."
       },
       {

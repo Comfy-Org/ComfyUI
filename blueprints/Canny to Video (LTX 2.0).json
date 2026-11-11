@@ -3600,7 +3600,7 @@
         "extra": {
           "workflowRendererVersion": "LG"
         },
-        "category": "Video generation and editing/Conditioned",
+        "category": "Video generation/Conditioned",
         "description": "Generates video from Canny edge maps using LTX-2, with optional synchronized audio."
       }
     ]

@@ -164,3 +164,49 @@ def sparse_submanifold_conv3d(
         output += bias.unsqueeze(0).to(output.dtype)
 
     return output, neighbor
+
+
+def sparse_pool3d_mean(
+    feats: torch.Tensor,
+    coords: torch.Tensor,
+    shape: tuple,
+    factor: int,
+) -> Tuple[torch.Tensor, torch.Tensor, tuple, torch.Tensor]:
+    """Average-pool a sparse volume by `factor` along the three spatial axes.
+
+    coords are (batch, x, y, z) and shape is the spatial extent (X, Y, Z), as for
+    sparse_submanifold_conv3d. Returns the pooled (feats, coords, shape) plus the
+    fine->coarse index, which is what sparse_upsample3d_nearest needs to invert the pooling.
+    """
+    batch = coords[:, 0].long()
+    fine = coords[:, 1:4].long()
+    out_x, out_y, out_z = ((int(s) + factor - 1) // factor for s in shape)
+
+    coarse = fine.div(factor, rounding_mode="floor")
+    flat = ((batch * out_x + coarse[:, 0]) * out_y + coarse[:, 1]) * out_z + coarse[:, 2]
+    unique_flat, index = torch.unique(flat, return_inverse=True)
+
+    pooled = torch.zeros((unique_flat.shape[0], feats.shape[-1]), device=feats.device, dtype=feats.dtype)
+    pooled.index_add_(0, index, feats)
+    counts = torch.zeros((unique_flat.shape[0],), device=feats.device, dtype=feats.dtype)
+    counts.index_add_(0, index, torch.ones_like(index, dtype=feats.dtype))
+    pooled /= counts.unsqueeze(-1)
+
+    z = unique_flat % out_z
+    rest = unique_flat.div(out_z, rounding_mode="floor")
+    y = rest % out_y
+    rest = rest.div(out_y, rounding_mode="floor")
+    x = rest % out_x
+    b = rest.div(out_x, rounding_mode="floor")
+    out_coords = torch.stack([b, x, y, z], dim=-1).to(torch.int32)
+
+    return pooled, out_coords, (out_x, out_y, out_z), index
+
+
+def sparse_upsample3d_nearest(feats: torch.Tensor, pool_index: torch.Tensor) -> torch.Tensor:
+    """Invert sparse_pool3d_mean's spatial mapping: each fine voxel takes its parent's feature.
+
+    `pool_index` is the index returned by the matching sparse_pool3d_mean call, so the
+    output is aligned with that call's input coords (the UNet's skip coords).
+    """
+    return feats[pool_index]
