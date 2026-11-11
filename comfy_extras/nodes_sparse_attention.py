@@ -1,6 +1,7 @@
 """Block-sparse attention on comfy_kitchen's sparse attention kernels (Sol-Attn adaptive
 threshold, SLA-style top-k, or FastVideo's VSA). Generic models go through the
-attention override; MiniMax-H3 gets the chunked qkv producer through block patches."""
+attention override; MiniMax-H3 and the Flux single blocks get the chunked qkv
+producer through block patches."""
 from __future__ import annotations
 
 import logging
@@ -13,6 +14,7 @@ import torch
 import comfy.model_management
 import comfy.model_prefetch
 import comfy.patcher_extension
+from comfy.ldm.flux.model import Flux
 from comfy.ldm.minimax.model import MiniMaxH3Model
 from comfy_api.latest import ComfyExtension, io
 
@@ -64,6 +66,26 @@ class SparseAttnPatch:
         if self.verbose and key not in self._logged:
             self._logged.add(key)
             logging.info(f"BlockSparseAttention: {message}")
+
+    def sol_attn_chunked(self, key, chunks, n, heads, freqs, qk_norm_weights, **kwargs):
+        """ck.sol_attn_chunked with this key's K means and V scales of the previous step; the first call measures them."""
+        pooled = self.pooled.get(key)
+        first = pooled is None
+        if first:
+            with comfy.model_prefetch.pause_malloc_graph():   # kept across steps
+                pooled = (
+                    torch.empty((heads, HEAD_DIM), dtype=torch.float32, device=freqs.device),
+                    torch.empty((heads, HEAD_DIM), dtype=torch.float32, device=freqs.device),
+                )
+        out, kmean, vscale = ck.sol_attn_chunked(
+            chunks, n, heads, freqs, qk_norm_weights,
+            kmean=None if first else pooled[0],
+            vscale=None if first else pooled[1],
+            tau=self.tau, topk_ratio=self.topk_ratio, token_aug=self.extra_tokens, **kwargs)
+        pooled[0].copy_(kmean)
+        pooled[1].copy_(vscale)
+        self.pooled[key] = pooled
+        return out
 
     def dense_reason(self, transformer_options, tokens, block_index):
         """Why this call stays dense regardless of its tensors, or None."""
@@ -254,20 +276,12 @@ def h3_sparse_attention(attn, x, rope_freqs, transformer_options, patch: SparseA
     kw = comfy.model_management.cast_to(attn.k_norm.weight, device=x.device)
     extra, plan, gate = {}, None, None
     n, freqs = n_tokens, rope_freqs
-    with comfy.model_prefetch.pause_malloc_graph():
-        if patch.vsa:
+    if patch.vsa:
+        with comfy.model_prefetch.pause_malloc_graph():
             plan = patch.vsa_plan(transformer_options["minimax_h3_layout"], x.device)
             n = plan["n"]
             freqs = patch.vsa_rope_freqs(rope_freqs, plan)
-
-        key = (block_index, n, tuple(transformer_options.get("uuids", ())))   # statistics per conditioning branch
-        pooled = patch.pooled.get(key)
-        first = pooled is None
-        if first:
-            pooled = (
-                torch.empty((heads, head_dim), dtype=torch.float32, device=x.device),
-                torch.empty((heads, head_dim), dtype=torch.float32, device=x.device),
-            )
+    key = (block_index, n, tuple(transformer_options.get("uuids", ())))   # statistics per conditioning branch
 
     if patch.vsa:
         sink = sink_q = (0, plan["n_prefix"])
@@ -289,16 +303,8 @@ def h3_sparse_attention(attn, x, rope_freqs, transformer_options, patch: SparseA
                 extra["coarse_gate"].view(n, heads * head_dim)[i:i + xc.shape[0]] = gate(xc)
             yield attn.qkv_proj(xc)
 
-    out, kmean, vscale = ck.sol_attn_chunked(
-        chunks, n, heads, freqs, (qw, kw),
-        kmean=None if first else pooled[0],
-        vscale=None if first else pooled[1],
-        tau=patch.tau, topk_ratio=patch.topk_ratio, token_aug=patch.extra_tokens,
-        sink_blocks=list(sink), sink_q=list(sink_q),
-        rope_eps=attn.q_norm.eps, **extra)
-    pooled[0].copy_(kmean)
-    pooled[1].copy_(vscale)
-    patch.pooled[key] = pooled
+    out = patch.sol_attn_chunked(key, chunks, n, heads, freqs, (qw, kw), sink_blocks=list(sink), sink_q=list(sink_q),
+                                 rope_eps=attn.q_norm.eps, **extra)
     mode = f"VSA tiles ({n} padded rows, {sink[1]} prefix tiles)" if plan is not None else f"sinks {sink}/{sink_q}"
     patch.log_once(("producer", n), f"sparse producer path: {n_tokens} tokens, {mode}")
     out = out.view(n, heads * head_dim)
@@ -318,6 +324,68 @@ def make_h3_block_patch(block, block_index, patch: SparseAttnPatch):
         return extra["original_block"](args)
 
     return block_patch
+
+
+def flux_single_eligible(block, x, attn_mask, transformer_options, patch: SparseAttnPatch):
+    """Whether this Flux single block call takes the sparse producer (decided before any work): only the long
+    sequences the model already chunks. Declined calls run the block as usual, where the attention override applies."""
+    if (not transformer_options.get("chunk_tokens") or attn_mask is not None or x.shape[0] != 1
+            or block.hidden_size // block.num_heads != HEAD_DIM or "attn1_patch" in transformer_options.get("patches", {})):
+        return False
+    return (patch.dense_reason(transformer_options, x.shape[1], transformer_options.get("block_index")) is None
+            and ck.sol_attn_is_available(x.device))
+
+
+def flux_single_sparse_attention(block, qkv_chunks, pe, transformer_options, patch: SparseAttnPatch):
+    """Flux single-block attention through the chunked producer: the block's q|k|v
+    projection chunks go straight into the kernel's int8 carriers, full Q/K/V never built."""
+    heads, hidden, n, device = block.num_heads, block.hidden_size, pe.shape[2], pe.device
+    # Flux rotates the channel pairs (2i, 2i+1) of a head, the producer's fused rope the pairs (i, i+64): reordering
+    # q and k inside each head leaves q.k unchanged. order = a head's channels, columns = those of a q|k|v chunk.
+    order = torch.cat((torch.arange(0, HEAD_DIM, 2, device=device), torch.arange(1, HEAD_DIM, 2, device=device)))
+    qk = (order + HEAD_DIM * torch.arange(heads, device=device)[:, None]).flatten()
+    columns = torch.cat((qk, qk + hidden, torch.arange(2 * hidden, 3 * hidden, device=device)))
+
+    def chunks():
+        for chunk in qkv_chunks(PRODUCER_CHUNK):
+            reordered = chunk[0].index_select(-1, columns).to(torch.bfloat16)
+            del chunk  # the projection chunk goes before the next one is made
+            yield reordered
+
+    key = ("flux_single", transformer_options.get("block_index"), n, tuple(transformer_options.get("uuids", ())))
+    with block.norm.query_norm.cast_weight(pe) as (qw, _), block.norm.key_norm.cast_weight(pe) as (kw, _):
+        # pe as it is, so the kernel's packed table is built once per step; eps is the default of Flux's q and k norms
+        out = patch.sol_attn_chunked(key, chunks, n, heads, pe, (qw[order], kw[order]), rope_eps=torch.finfo(torch.float32).eps)
+    patch.log_once(("flux_producer", n), f"sparse producer path: {n} tokens (Flux single blocks)")
+    return out.view(1, n, hidden)
+
+
+class FluxSingleBlockPatch:
+    """Runs a Flux single block with its attention swapped for the sparse producer, on top of the block patch it replaces."""
+    def __init__(self, block, patch: SparseAttnPatch, previous):
+        self.block = block
+        self.patch = patch
+        self.previous = previous
+
+    def __call__(self, args, extra):
+        x = args["img"]
+        if flux_single_eligible(self.block, x, args.get("attn_mask"), args["transformer_options"], self.patch):
+            def chunk_attention(qkv_chunks, pe, transformer_options):
+                return flux_single_sparse_attention(self.block, qkv_chunks, pe, transformer_options, self.patch).to(x.dtype)
+            args = {**args, "chunk_attention": chunk_attention}
+        return extra["original_block"](args) if self.previous is None else self.previous(args, extra)
+
+    def to(self, device_or_dtype):
+        if hasattr(self.previous, "to"):
+            self.previous = self.previous.to(device_or_dtype)
+        return self
+
+    def cleanup(self):
+        if hasattr(self.previous, "cleanup"):
+            self.previous.cleanup()
+
+    def models(self):
+        return self.previous.models() if hasattr(self.previous, "models") else []
 
 
 def apply_block_sparse_attention(model, *, tau, topk_ratio, vsa, start_percent, end_percent, min_tokens,
@@ -347,6 +415,10 @@ def apply_block_sparse_attention(model, *, tau, topk_ratio, vsa, start_percent, 
             logging.warning("VSA: the model has no to_gate_compress layers; running the fine stage without the coarse branch")
     elif vsa:
         raise ValueError("VSA selection needs a MiniMax-H3 model")
+    elif isinstance(diffusion_model, Flux):
+        blocks_replace = m.model_options["transformer_options"].get("patches_replace", {}).get("dit", {})
+        for i, block in enumerate(diffusion_model.single_blocks):
+            m.set_model_patch_replace(FluxSingleBlockPatch(block, patch, blocks_replace.get(("single_block", i))), "dit", "single_block", i)
     return m
 
 

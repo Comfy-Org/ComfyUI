@@ -12,6 +12,16 @@ from .math import attention, rope
 # Fix import for some custom nodes, TODO: delete eventually.
 RMSNorm = None
 
+# With transformer_options["chunk_tokens"] set by the model, the blocks build their widest activations (the q|k|v and
+# feed-forward projections, 3 to 9 hidden states wide) CHUNK_TOKENS rows at a time and normalize q and k in place.
+CHUNK_TOKENS = 16384
+
+
+def chunk_tokens(x, transformer_options, modulation_dims):
+    # not with row-range modulation, which indexes the whole sequence
+    return transformer_options.get("chunk_tokens") and x.shape[1] > CHUNK_TOKENS and modulation_dims is None and not comfy.model_management.in_training
+
+
 class EmbedND(nn.Module):
     def __init__(self, dim: int, theta: int, axes_dim: list):
         super().__init__()
@@ -102,6 +112,12 @@ class QKNorm(torch.nn.Module):
         k = self.key_norm(k)
         return q.to(v), k.to(v)
 
+    def norm_rope_(self, q: Tensor, k: Tensor, pe: Tensor):
+        """Normalizes and rotates q and k, [B, heads, N, dim] views of one q|k|v projection, in place."""
+        with self.query_norm.cast_weight(q) as (q_scale, _), self.key_norm.cast_weight(k) as (k_scale, _):
+            # token-major, the projection's own layout; eps is the default of the norms above
+            comfy.quant_ops.ck.rms_rope_(q.transpose(1, 2), k.transpose(1, 2), pe.transpose(1, 2), q_scale, k_scale, torch.finfo(torch.float32).eps)
+
 
 class SelfAttention(nn.Module):
     def __init__(self, dim: int, num_heads: int = 8, qkv_bias: bool = False, proj_bias: bool = True, dtype=None, device=None, operations=None):
@@ -166,7 +182,7 @@ class SiLUActivation(nn.Module):
 
     def forward(self, x: Tensor) -> Tensor:
         x1, x2 = x.chunk(2, dim=-1)
-        return self.gate_fn(x1) * x2
+        return self.gate_fn(x1).mul_(x2)
 
 
 class DoubleStreamBlock(nn.Module):
@@ -209,28 +225,42 @@ class DoubleStreamBlock(nn.Module):
         transformer_patches = transformer_options.get("patches", {})
         extra_options = transformer_options.copy()
 
-        # prepare image for attention
-        img_modulated = modulated_norm(img, self.img_norm1, img_mod1.scale, img_mod1.shift, modulation_dims_img)
-        img_qkv = self.img_attn.qkv(img_modulated)
-        del img_modulated
-        img_q, img_k, img_v = img_qkv.view(img_qkv.shape[0], img_qkv.shape[1], 3, self.num_heads, -1).permute(2, 0, 3, 1, 4)
-        del img_qkv
-        img_q, img_k = self.img_attn.norm(img_q, img_k, img_v)
+        chunked = chunk_tokens(img, transformer_options, modulation_dims_img)
+        if chunked and "attn1_patch" not in transformer_patches:
+            # both streams projected into one q|k|v buffer and normalized there, each with its own weights
+            n_txt = txt.shape[1]
+            qkv = img.new_empty((img.shape[0], n_txt + img.shape[1], 3 * self.hidden_size))
+            qkv[:, :n_txt] = self.txt_attn.qkv(modulated_norm(txt, self.txt_norm1, txt_mod1.scale, txt_mod1.shift, modulation_dims_txt))
+            for s in range(0, img.shape[1], CHUNK_TOKENS):
+                qkv[:, n_txt + s:n_txt + s + CHUNK_TOKENS] = self.img_attn.qkv(modulated_norm(img[:, s:s + CHUNK_TOKENS], self.img_norm1, img_mod1.scale, img_mod1.shift))
+            q, k, v = qkv.view(qkv.shape[0], qkv.shape[1], 3, self.num_heads, -1).permute(2, 0, 3, 1, 4)
+            del qkv
+            self.txt_attn.norm.norm_rope_(q[:, :, :n_txt], k[:, :, :n_txt], pe[:, :, :n_txt])
+            self.img_attn.norm.norm_rope_(q[:, :, n_txt:], k[:, :, n_txt:], pe[:, :, n_txt:])
+            pe = None
+        else:
+            # prepare image for attention
+            img_modulated = modulated_norm(img, self.img_norm1, img_mod1.scale, img_mod1.shift, modulation_dims_img)
+            img_qkv = self.img_attn.qkv(img_modulated)
+            del img_modulated
+            img_q, img_k, img_v = img_qkv.view(img_qkv.shape[0], img_qkv.shape[1], 3, self.num_heads, -1).permute(2, 0, 3, 1, 4)
+            del img_qkv
+            img_q, img_k = self.img_attn.norm(img_q, img_k, img_v)
 
-        # prepare txt for attention
-        txt_modulated = modulated_norm(txt, self.txt_norm1, txt_mod1.scale, txt_mod1.shift, modulation_dims_txt)
-        txt_qkv = self.txt_attn.qkv(txt_modulated)
-        del txt_modulated
-        txt_q, txt_k, txt_v = txt_qkv.view(txt_qkv.shape[0], txt_qkv.shape[1], 3, self.num_heads, -1).permute(2, 0, 3, 1, 4)
-        del txt_qkv
-        txt_q, txt_k = self.txt_attn.norm(txt_q, txt_k, txt_v)
+            # prepare txt for attention
+            txt_modulated = modulated_norm(txt, self.txt_norm1, txt_mod1.scale, txt_mod1.shift, modulation_dims_txt)
+            txt_qkv = self.txt_attn.qkv(txt_modulated)
+            del txt_modulated
+            txt_q, txt_k, txt_v = txt_qkv.view(txt_qkv.shape[0], txt_qkv.shape[1], 3, self.num_heads, -1).permute(2, 0, 3, 1, 4)
+            del txt_qkv
+            txt_q, txt_k = self.txt_attn.norm(txt_q, txt_k, txt_v)
 
-        q = torch.cat((txt_q, img_q), dim=2)
-        del txt_q, img_q
-        k = torch.cat((txt_k, img_k), dim=2)
-        del txt_k, img_k
-        v = torch.cat((txt_v, img_v), dim=2)
-        del txt_v, img_v
+            q = torch.cat((txt_q, img_q), dim=2)
+            del txt_q, img_q
+            k = torch.cat((txt_k, img_k), dim=2)
+            del txt_k, img_k
+            v = torch.cat((txt_v, img_v), dim=2)
+            del txt_v, img_v
 
         extra_options["img_slice"] = [txt.shape[1], q.shape[2]]
         if "attn1_patch" in transformer_patches:
@@ -254,7 +284,13 @@ class DoubleStreamBlock(nn.Module):
         # calculate the img bloks
         img += apply_mod(self.img_attn.proj(img_attn), img_mod1.gate, None, modulation_dims_img)
         del img_attn
-        img += apply_mod(self.img_mlp(modulated_norm(img, self.img_norm2, img_mod2.scale, img_mod2.shift, modulation_dims_img)), img_mod2.gate, None, modulation_dims_img)
+        img_mlp = modulated_norm(img, self.img_norm2, img_mod2.scale, img_mod2.shift, modulation_dims_img)
+        if chunked:
+            for s in range(0, img.shape[1], CHUNK_TOKENS):
+                img_mlp[:, s:s + CHUNK_TOKENS] = self.img_mlp(img_mlp[:, s:s + CHUNK_TOKENS])
+        else:
+            img_mlp = self.img_mlp(img_mlp)
+        img += apply_mod(img_mlp, img_mod2.gate, None, modulation_dims_img)
 
         # calculate the txt bloks
         txt += apply_mod(self.txt_attn.proj(txt_attn), txt_mod1.gate, None, modulation_dims_txt)
@@ -323,7 +359,22 @@ class SingleStreamBlock(nn.Module):
         else:
             self.modulation = None
 
-    def forward(self, x: Tensor, vec: Tensor, pe: Tensor, attn_mask=None, modulation_dims=None, transformer_options={}) -> Tensor:
+    def mlp_activation(self, mlp):
+        if self.yak_mlp:
+            return self.mlp_act(mlp[..., self.mlp_hidden_dim_first // 2:]) * mlp[..., :self.mlp_hidden_dim_first // 2]
+        return self.mlp_act(mlp)
+
+    def qkv_chunks(self, x, mod, mlp, chunk):
+        """The q|k|v part of the first projection, chunk rows at a time; its feed-forward part is activated into mlp."""
+        for s in range(0, x.shape[1], chunk):
+            chunk_qkv, chunk_mlp = torch.split(self.linear1(modulated_norm(x[:, s:s + chunk], self.pre_norm, mod.scale, mod.shift)), [3 * self.hidden_size, self.mlp_hidden_dim_first], dim=-1)
+            mlp[:, s:s + chunk] = self.mlp_activation(chunk_mlp)
+            yield chunk_qkv
+            del chunk_qkv, chunk_mlp  # this chunk's projection goes before the next one is made
+
+    def forward(self, x: Tensor, vec: Tensor, pe: Tensor, attn_mask=None, modulation_dims=None, transformer_options={}, chunk_attention=None) -> Tensor:
+        # chunk_attention: replaces a chunked block's attention with chunk_attention(qkv_chunks, pe, transformer_options) -> [B, N, hidden],
+        # qkv_chunks(chunk) yielding the unnormalized q|k|v projection chunk rows at a time
         if self.modulation:
             mod, _ = self.modulation(vec)
         else:
@@ -332,22 +383,41 @@ class SingleStreamBlock(nn.Module):
         transformer_patches = transformer_options.get("patches", {})
         extra_options = transformer_options.copy()
 
-        qkv, mlp = torch.split(self.linear1(modulated_norm(x, self.pre_norm, mod.scale, mod.shift, modulation_dims)), [3 * self.hidden_size, self.mlp_hidden_dim_first], dim=-1)
+        chunked = chunk_tokens(x, transformer_options, modulation_dims)
+        if chunked:
+            mlp = x.new_empty((x.shape[0], x.shape[1], self.mlp_hidden_dim))
 
-        q, k, v = qkv.view(qkv.shape[0], qkv.shape[1], 3, self.num_heads, -1).permute(2, 0, 3, 1, 4)
-        del qkv
-        q, k = self.norm(q, k, v)
+        if chunked and chunk_attention is not None:
+            attn = chunk_attention(lambda chunk: self.qkv_chunks(x, mod, mlp, chunk), pe, transformer_options)
+        else:
+            if chunked:
+                qkv = x.new_empty((x.shape[0], x.shape[1], 3 * self.hidden_size))
+                s = 0
+                for chunk_qkv in self.qkv_chunks(x, mod, mlp, CHUNK_TOKENS):
+                    qkv[:, s:s + CHUNK_TOKENS] = chunk_qkv
+                    s += CHUNK_TOKENS
+                    del chunk_qkv
+            else:
+                qkv, mlp = torch.split(self.linear1(modulated_norm(x, self.pre_norm, mod.scale, mod.shift, modulation_dims)), [3 * self.hidden_size, self.mlp_hidden_dim_first], dim=-1)
 
-        if "attn1_patch" in transformer_patches:
-            patch = transformer_patches["attn1_patch"]
-            for p in patch:
-                out = p(q, k, v, pe=pe, attn_mask=attn_mask, extra_options=extra_options)
-                q, k, v, pe, attn_mask = out.get("q", q), out.get("k", k), out.get("v", v), out.get("pe", pe), out.get("attn_mask", attn_mask)
+            q, k, v = qkv.view(qkv.shape[0], qkv.shape[1], 3, self.num_heads, -1).permute(2, 0, 3, 1, 4)
+            del qkv
+            if chunked and "attn1_patch" not in transformer_patches:
+                self.norm.norm_rope_(q, k, pe)
+                pe = None
+            else:
+                q, k = self.norm(q, k, v)
 
-        # compute attention
-        q, k, v = AttentionTensorContainer(q), AttentionTensorContainer(k), AttentionTensorContainer(v)
-        attn = attention(q, k, v, pe=pe, mask=attn_mask, transformer_options=transformer_options, preferred_attention=self.comfy_attention)
-        del q, k, v
+            if "attn1_patch" in transformer_patches:
+                patch = transformer_patches["attn1_patch"]
+                for p in patch:
+                    out = p(q, k, v, pe=pe, attn_mask=attn_mask, extra_options=extra_options)
+                    q, k, v, pe, attn_mask = out.get("q", q), out.get("k", k), out.get("v", v), out.get("pe", pe), out.get("attn_mask", attn_mask)
+
+            # compute attention
+            q, k, v = AttentionTensorContainer(q), AttentionTensorContainer(k), AttentionTensorContainer(v)
+            attn = attention(q, k, v, pe=pe, mask=attn_mask, transformer_options=transformer_options, preferred_attention=self.comfy_attention)
+            del q, k, v
 
         if "attn1_output_patch" in transformer_patches:
             patch = transformer_patches["attn1_output_patch"]
@@ -355,11 +425,13 @@ class SingleStreamBlock(nn.Module):
                 attn = p(attn, extra_options)
 
         # compute activation in mlp stream, cat again and run second linear layer
-        if self.yak_mlp:
-            mlp = self.mlp_act(mlp[..., self.mlp_hidden_dim_first // 2:]) * mlp[..., :self.mlp_hidden_dim_first // 2]
+        if chunked:
+            for s in range(0, x.shape[1], CHUNK_TOKENS):
+                attn[:, s:s + CHUNK_TOKENS] = self.linear2(torch.cat((attn[:, s:s + CHUNK_TOKENS], mlp[:, s:s + CHUNK_TOKENS]), 2))
+            output = attn
         else:
-            mlp = self.mlp_act(mlp)
-        output = self.linear2(torch.cat((attn, mlp), 2))
+            mlp = self.mlp_activation(mlp)
+            output = self.linear2(torch.cat((attn, mlp), 2))
         x += apply_mod(output, mod.gate, None, modulation_dims)
         if x.dtype == torch.float16:
             x = torch.nan_to_num(x, nan=0.0, posinf=65504, neginf=-65504)
