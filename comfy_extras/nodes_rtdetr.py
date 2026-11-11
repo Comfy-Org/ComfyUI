@@ -9,6 +9,21 @@ from torchvision.transforms import ToPILImage, ToTensor
 from PIL import ImageDraw, ImageFont
 
 
+def bboxes_per_frame(bboxes, B=None):
+    # one detection list per image: a dict or a flat list applies to every image, a short per-image list pads with empty ones; B=None keeps the given frames
+    if isinstance(bboxes, dict):
+        bboxes = [[bboxes]]
+    elif not isinstance(bboxes, list) or not bboxes:
+        bboxes = [[]]
+    elif isinstance(bboxes[0], dict):
+        bboxes = [bboxes]
+    if B is None:
+        return bboxes
+    if len(bboxes) == 1:
+        bboxes = bboxes * B
+    return (bboxes + [[]] * B)[:B]
+
+
 class RTDETR_detect(io.ComfyNode):
     @classmethod
     def define_schema(cls):
@@ -84,21 +99,10 @@ class DrawBBoxes(io.ComfyNode):
 
     @classmethod
     def execute(cls, bboxes, image=None) -> io.NodeOutput:
-        # Normalise to list[list[dict]], then fit to batch size B.
-        B = image.shape[0] if image is not None else 1
-        if isinstance(bboxes, dict):
-            bboxes = [[bboxes]]
-        elif not isinstance(bboxes, list) or not bboxes:
-            bboxes = [[]]
-        elif isinstance(bboxes[0], dict):
-            bboxes = [bboxes]  # flat list → same detections for every image
-
-        if len(bboxes) == 1:
-            bboxes = bboxes * B
-        bboxes = (bboxes + [[]] * B)[:B]
+        bboxes = bboxes_per_frame(bboxes, image.shape[0] if image is not None else None)
+        B = len(bboxes)
 
         if image is None:
-            B = len(bboxes)
             max_w = max((int(d["x"] + d["width"])  for frame in bboxes for d in frame), default=640)
             max_h = max((int(d["y"] + d["height"]) for frame in bboxes for d in frame), default=640)
             image = torch.zeros((B, max_h, max_w, 3), dtype=torch.float32)
@@ -108,12 +112,12 @@ class DrawBBoxes(io.ComfyNode):
             detections = bboxes[i]
             if detections:
                 boxes  = torch.tensor([[d["x"], d["y"], d["x"] + d["width"], d["y"] + d["height"]] for d in detections])
-                labels = [d.get("label") if d.get("label") in COCO_CLASSES else None for d in detections]
-                scores = torch.tensor([d.get("score", 1.0) for d in detections])
+                labels = [None if d.get("label") is None else str(d["label"]) for d in detections]
+                scores = [d.get("score") for d in detections]
             else:
                 boxes  = torch.zeros((0, 4))
                 labels = []
-                scores = torch.zeros((0,))
+                scores = []
 
             pil_image = image[i].movedim(-1, 0)
             img = ToPILImage()(pil_image)
@@ -133,13 +137,14 @@ class DrawBBoxes(io.ComfyNode):
             font = ImageFont.load_default()
         colors = [(255,0,0),(0,200,0),(0,0,255),(255,165,0),(128,0,128),
                 (0,255,255),(255,20,147),(100,149,237)]
-        for box, label, score in sorted(zip(boxes, labels, scores), key=lambda x: x[2].item()):
+        order = list(dict.fromkeys(labels))  # COCO classes keep their colors, any other label gets one by first appearance
+        for box, label, score in sorted(zip(boxes, labels, scores), key=lambda x: 1.0 if x[2] is None else x[2]):
             x1, y1, x2, y2 = box.tolist()
-            color_idx = COCO_CLASSES.index(label) if label is not None else 0
+            color_idx = COCO_CLASSES.index(label) if label in COCO_CLASSES else order.index(label)
             c = colors[color_idx % len(colors)]
             draw.rectangle([x1, y1, x2, y2], outline=c, width=3)
             if label is not None:
-                draw.text((x1 + 2, y1 + 2), f'{label} {score:.2f}', fill=c, font=font)
+                draw.text((x1 + 2, y1 + 2), label if score is None else f'{label} {score:.2f}', fill=c, font=font)
         return img
 
 

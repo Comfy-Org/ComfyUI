@@ -405,6 +405,14 @@ class Qwen3VL_4BConfig(Qwen3VL_8BConfig):
     lm_head: bool = False  # 4B ties word embeddings
 
 @dataclass
+class Qwen3VL_2BConfig(Qwen3VL_8BConfig):
+    hidden_size: int = 2048
+    intermediate_size: int = 6144
+    num_hidden_layers: int = 28
+    num_attention_heads: int = 16
+    lm_head: bool = False  # 2B ties word embeddings
+
+@dataclass
 class Qwen3VL_32BConfig(Qwen3VL_8BConfig):
     # MiniMax H3 conditioning checkpoint: truncated to the first 50 of 64 layers,
     # consumed as the unnormalized hidden state after layer 50 (no final norm, no lm_head)
@@ -1182,6 +1190,11 @@ def apply_penalty(logits, repetition_penalty, presence_penalty):
     return logits
 
 
+def generate_dtype(device):
+    # the dtype generation and its multimodal preprocessing run in
+    return torch.bfloat16 if comfy.model_management.should_use_bf16(device) else torch.float32
+
+
 class BaseGenerate:
     def logits(self, x):
         input = x[:, -1:]
@@ -1205,10 +1218,7 @@ class BaseGenerate:
             stop_tokens = self.model.config.stop_tokens
 
         if execution_dtype is None:
-            if comfy.model_management.should_use_bf16(device):
-                execution_dtype = torch.bfloat16
-            else:
-                execution_dtype = torch.float32
+            execution_dtype = generate_dtype(device)
         embeds = embeds.to(execution_dtype)
 
         if embeds.ndim == 2:
@@ -1232,9 +1242,9 @@ class BaseGenerate:
             if init_decode_buffers is not None:
                 decode_buffers = init_decode_buffers(embeds.shape[0], device, execution_dtype)
         decode_tokens = torch.empty((embeds.shape[0], 1), dtype=torch.long, device=device)
-        # Precompute decode RoPE once; explicit MRoPE positions keep their existing path.
+        # Precompute decode RoPE once; MRoPE decode positions (t = h = w) index it from next_pos.
         rope = None
-        if decode_buffers is not None and next_pos is None:
+        if decode_buffers is not None:
             rope = rope_matrix(self.model.compute_freqs_cis(torch.arange(max_cache_len, device=device, dtype=torch.float).unsqueeze(0), device))
         penalize = penalty_active(repetition_penalty, presence_penalty)
         penalty_mask = None
@@ -1251,21 +1261,21 @@ class BaseGenerate:
                     else:
                         embeds = embed(decode_tokens).to(execution_dtype)
                     current_input_ids = decode_tokens if initial_input_ids is not None else None
-                    position_ids = torch.tensor([[next_pos]], device=device) if next_pos is not None else None
+                    position_ids = torch.tensor([[next_pos]], device=device) if next_pos is not None and rope is None else None
 
                 # DeepStack visual features are injected on the prefill only; gemma4's forward lacks these kwargs.
                 extra = {}
                 if decode_buffers is not None:
                     extra["decode_buffers"] = decode_buffers
                     if rope is not None and step > 0:
-                        past_len = self.model.get_past_len(past_key_values)
-                        extra["freqs_cis"] = rope[:, :, past_len:past_len + 1]
+                        pos = next_pos if next_pos is not None else self.model.get_past_len(past_key_values)
+                        extra["freqs_cis"] = rope[:, :, pos:pos + 1]
                 if step == 0 and deepstack_embeds is not None:
                     extra["deepstack_embeds"] = deepstack_embeds
                     extra["visual_pos_masks"] = visual_pos_masks
                 x, _, past_key_values = self.model.forward(None, embeds=embeds, attention_mask=None, past_key_values=past_key_values, input_ids=current_input_ids, position_ids=position_ids, **extra, embeds_info=(embeds_info if step == 0 else None))
                 logits = self.logits(x)[:, -1]
-                if penalty_mask is None and do_sample and penalize:
+                if penalty_mask is None and penalize:
                     # allocated on the (unbracketed) first step; later steps only index_fill_ it
                     penalty_mask = torch.zeros((logits.shape[-1],), dtype=torch.bool, device=device)
                     if len(initial_tokens) > 0:
@@ -1299,15 +1309,8 @@ class BaseGenerate:
 
         return generated_token_ids
 
-    def processed_probs(self, logits, temperature, top_k, top_p, min_p, repetition_penalty, token_history, presence_penalty=0.0, penalty_mask=None):
-        # returns (probs, indices); penalty_mask [vocab] bool stands in for token_history
-        if penalty_active(repetition_penalty, presence_penalty):
-            if penalty_mask is not None:
-                logits = torch.where(penalty_mask.unsqueeze(0), apply_penalty(logits, repetition_penalty, presence_penalty), logits)
-            elif len(token_history) > 0:
-                token_ids = torch.tensor(list(set(token_history)), device=logits.device)
-                logits[:, token_ids] = apply_penalty(logits[:, token_ids], repetition_penalty, presence_penalty)
-
+    def processed_probs(self, logits, temperature, top_k, top_p, min_p):
+        # returns (probs, indices)
         if temperature != 1.0:
             logits = logits / temperature
 
@@ -1336,11 +1339,18 @@ class BaseGenerate:
         return torch.nn.functional.softmax(logits, dim=-1), top_indices
 
     def sample_token(self, logits, temperature, top_k, top_p, min_p, repetition_penalty, token_history, generator, do_sample=True, presence_penalty=0.0, penalty_mask=None):
+        # penalty_mask [vocab] bool stands in for token_history
+        if penalty_active(repetition_penalty, presence_penalty):
+            if penalty_mask is not None:
+                logits = torch.where(penalty_mask.unsqueeze(0), apply_penalty(logits, repetition_penalty, presence_penalty), logits)
+            elif len(token_history) > 0:
+                token_ids = torch.tensor(list(set(token_history)), device=logits.device)
+                logits[:, token_ids] = apply_penalty(logits[:, token_ids], repetition_penalty, presence_penalty)
 
         if not do_sample or temperature == 0.0:
             return torch.argmax(logits, dim=-1, keepdim=True)
 
-        probs, top_indices = self.processed_probs(logits, temperature, top_k, top_p, min_p, repetition_penalty, token_history, presence_penalty=presence_penalty, penalty_mask=penalty_mask)
+        probs, top_indices = self.processed_probs(logits, temperature, top_k, top_p, min_p)
         next_token = torch.multinomial(probs, num_samples=1, generator=generator)
         if top_indices is not None:
             return top_indices.gather(1, next_token)
