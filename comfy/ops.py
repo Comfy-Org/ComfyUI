@@ -142,6 +142,10 @@ def vbar_above_watermark(s):
 
 # FIXME: add n=1 cache hit fast path
 def cast_modules_with_vbar(comfy_modules, dtype, device, bias_dtype, non_blocking, return_faulted=False):
+    with comfy.model_management.PIN_LOCK:
+        return _cast_modules_with_vbar_locked(comfy_modules, dtype, device, bias_dtype, non_blocking, return_faulted=return_faulted)
+
+def _cast_modules_with_vbar_locked(comfy_modules, dtype, device, bias_dtype, non_blocking, return_faulted=False):
     offload_stream = None
     cast_buffer = None
     cast_buffer_offset = 0
@@ -560,6 +564,10 @@ class WritableWeight(torch.nn.Module, CastWeightBiasOp):
                     self.writeback(values[0])
 
     def writeback(self, value):
+        with comfy.model_management.PIN_LOCK:
+            return self._writeback_locked(value)
+
+    def _writeback_locked(self, value):
         subset = self._pin_subset
         pin = comfy.pinned_memory.get_pin(self, subset) if subset is not None else None
         if pin is None:

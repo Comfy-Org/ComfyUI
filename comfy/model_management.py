@@ -671,8 +671,16 @@ def models_for_pin_eviction(active, current_prompt=None):
             (current_prompt is None or pin_state["current_prompt"] == current_prompt)):
             yield model
 
+# Pin bookkeeping (budgets, registrations, stealing) is shared by every device. With more than one GPU working
+# (MultiGPU CFG split) each device loads its weights from its own thread, so the paths that queue copies out of
+# pins and the ones that evict pins take this lock.
+PIN_LOCK = threading.RLock()
+
 def free_model_pins(size, subsets, current_prompt, active, registrations=False):
     freed_total = 0
+    if size > 0 and len(STREAMS) > 1:
+        # another device may still have a copy queued out of a pin that is about to be unregistered or freed
+        sync_all_offload_streams()
     for model in models_for_pin_eviction(active, current_prompt=current_prompt):
         if size <= 0:
             return freed_total

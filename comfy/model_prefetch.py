@@ -110,6 +110,10 @@ def cleanup_malloc_graph():
         del graph
 
 def pin_modules(comfy_modules, device, dtype=None):
+    with comfy.model_management.PIN_LOCK:
+        return _pin_modules_locked(comfy_modules, device, dtype)
+
+def _pin_modules_locked(comfy_modules, device, dtype=None):
     registerable_size = 0
     for s in comfy_modules:
         registerable_size += comfy.memory_management.vram_aligned_size([s.weight, s.bias])
