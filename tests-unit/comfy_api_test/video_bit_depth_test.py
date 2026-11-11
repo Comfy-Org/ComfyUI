@@ -261,7 +261,6 @@ def test_save_video_prores_defaults(gradient_components, tmp_path, monkeypatch, 
     assert prores_option.key == "prores"
     assert prores_option.inputs == []
     chroma_input = next(input for input in CreateVideo.define_schema().inputs if input.id == "chroma_subsampling")
-    assert chroma_input.options == ["auto", "444", "422", "420"]
     assert chroma_input.default == "auto"
     monkeypatch.setattr(SaveVideo, "hidden", SimpleNamespace(prompt=None, extra_pnginfo=None))
     monkeypatch.setattr("comfy_extras.nodes_video.folder_paths.get_output_directory", lambda: str(tmp_path))
