@@ -2757,12 +2757,15 @@ class KlingTryOnNode(IO.ComfyNode):
         return IO.NodeOutput(await download_url_to_image_tensor(final_response.data[0].outputs[0].url))
 
 
-def _kling4_resolution() -> IO.Combo.Input:
-    return IO.Combo.Input("resolution", options=["720p", "1080p"])
+KLING4_VIDEO_SECONDS_LIMIT = {"kling-4.0": 30, "kling-4.0-flash": 20.4}
 
 
-def _kling4_duration() -> IO.Int.Input:
-    return IO.Int.Input("duration", default=5, min=3, max=30, display_mode=IO.NumberDisplay.slider)
+def _kling4_resolution(options: list[str]) -> IO.Combo.Input:
+    return IO.Combo.Input("resolution", options=options)
+
+
+def _kling4_duration(max_duration: int) -> IO.Int.Input:
+    return IO.Int.Input("duration", default=5, min=3, max=max_duration, display_mode=IO.NumberDisplay.slider)
 
 
 def _kling4_seed() -> IO.Int.Input:
@@ -2792,7 +2795,7 @@ def _kling4_reference_images() -> IO.Autogrow.Input:
     )
 
 
-def _kling4_reference_videos(names: list[str]) -> IO.Autogrow.Input:
+def _kling4_reference_videos(names: list[str], max_seconds: int) -> IO.Autogrow.Input:
     return IO.Autogrow.Input(
         "reference_videos",
         template=IO.Autogrow.TemplateNames(
@@ -2800,16 +2803,18 @@ def _kling4_reference_videos(names: list[str]) -> IO.Autogrow.Input:
             names=names,
             min=0,
         ),
-        tooltip="Each video and all videos together must be 3-30 seconds long.",
+        tooltip=f"Each video and all videos together must be 3-{max_seconds} seconds long.",
     )
 
 
 def _kling4_price_badge() -> IO.PriceBadge:
     return IO.PriceBadge(
-        depends_on=IO.PriceBadgeDepends(widgets=["model.resolution", "model.duration"]),
+        depends_on=IO.PriceBadgeDepends(widgets=["model", "model.resolution", "model.duration"]),
         expr="""
         (
-          $rate := $lookup(widgets, "model.resolution") = "1080p" ? 0.33605 : 0.22451;
+          $rate := $contains(widgets.model, "flash")
+            ? 0.13442
+            : ($lookup(widgets, "model.resolution") = "1080p" ? 0.33605 : 0.22451);
           {"type":"usd","usd": $rate * $lookup(widgets, "model.duration")}
         )
         """,
@@ -2836,9 +2841,9 @@ def _validate_kling4_images(images: list[torch.Tensor]) -> None:
         validate_image_aspect_ratio(image, (2, 5), (5, 2), strict=False)
 
 
-def _validate_kling4_videos(videos: list[Input.Video]) -> None:
+def _validate_kling4_videos(videos: list[Input.Video], max_seconds: float) -> None:
     for video in videos:
-        validate_video_duration(video, min_duration=3, max_duration=30)
+        validate_video_duration(video, min_duration=3, max_duration=max_seconds)
         validate_video_dimensions(video, min_width=700, min_height=700, max_width=4553, max_height=4553)
         width, height = video.get_dimensions()
         if width * height > 8294400:
@@ -2848,8 +2853,8 @@ def _validate_kling4_videos(videos: list[Input.Video]) -> None:
         if video.get_frame_rate() < 23:
             raise ValueError(f"Video frame rate must be at least 24 fps, got {float(video.get_frame_rate()):.2f} fps.")
     total = sum(video.get_duration() for video in videos)
-    if total > 30.05:
-        raise ValueError(f"All videos together must be at most 30 seconds long, got {total:.2f}s.")
+    if total > max_seconds + 0.05:
+        raise ValueError(f"All videos together must be at most {max_seconds} seconds long, got {total:.2f}s.")
 
 
 async def _kling4_media_contents(
@@ -2865,6 +2870,71 @@ async def _kling4_media_contents(
     return contents
 
 
+def _kling4_text_to_video_inputs(resolutions: list[str], max_duration: int) -> list[IO.Input]:
+    return [
+        IO.String.Input("prompt", multiline=True, default=""),
+        _kling4_resolution(resolutions),
+        IO.Combo.Input("aspect_ratio", options=["16:9", "9:16", "1:1", "21:9"]),
+        _kling4_duration(max_duration),
+        _kling4_seed(),
+    ]
+
+
+def _kling4_reference_to_video_inputs(resolutions: list[str], max_duration: int, frames: list[str]) -> list[IO.Input]:
+    return [
+        _kling4_reference_images(),
+        _kling4_reference_videos([f"video_{i}" for i in range(1, 6)], max_duration),
+        *[
+            IO.Image.Input(
+                frame,
+                optional=True,
+                tooltip="Counts toward the 10-image limit together with the reference images.",
+            )
+            for frame in frames
+        ],
+        IO.String.Input(
+            "prompt",
+            multiline=True,
+            default="",
+            tooltip="Refer to the inputs as @Image1, @Image2, ... and @Video1, @Video2, ...",
+        ),
+        _kling4_resolution(resolutions),
+        _kling4_omni_aspect_ratio(
+            "adaptive follows the prompt, then the first frame or the reference videos, otherwise 16:9."
+        ),
+        _kling4_duration(max_duration),
+        _kling4_seed(),
+    ]
+
+
+def _kling4_edit_inputs(resolutions: list[str], max_seconds: int) -> list[IO.Input]:
+    return [
+        IO.Video.Input(
+            "video_1",
+            tooltip=f"The video to edit, 3-{max_seconds} seconds. The output keeps its length.",
+        ),
+        _kling4_reference_videos([f"video_{i}" for i in range(2, 6)], max_seconds),
+        _kling4_reference_images(),
+        IO.String.Input(
+            "prompt",
+            multiline=True,
+            default="",
+            tooltip="Describe what to change and what to keep. Refer to the input video as "
+            "@Video1, the reference videos as @Video2, ... and the images as @Image1, ...",
+        ),
+        _kling4_resolution(resolutions),
+        _kling4_omni_aspect_ratio("adaptive keeps the aspect ratio of the input video."),
+        _kling4_seed(),
+        IO.Combo.Input(
+            "audio",
+            options=["native", "original"],
+            default="native",
+            optional=True,
+            tooltip="native generates new audio. original keeps the audio of the input video.",
+        ),
+    ]
+
+
 class Kling4TextToVideoNode(IO.ComfyNode):
 
     @classmethod
@@ -2874,20 +2944,13 @@ class Kling4TextToVideoNode(IO.ComfyNode):
             display_name="Kling 4.0 Text to Video",
             category="partner/video/Kling",
             description="Generate a video with audio from a text prompt.",
+            search_aliases=["kling 4.0 flash", "kling flash"],
             inputs=[
                 IO.DynamicCombo.Input(
                     "model",
                     options=[
-                        IO.DynamicCombo.Option(
-                            "kling-4.0",
-                            [
-                                IO.String.Input("prompt", multiline=True, default=""),
-                                _kling4_resolution(),
-                                IO.Combo.Input("aspect_ratio", options=["16:9", "9:16", "1:1", "21:9"]),
-                                _kling4_duration(),
-                                _kling4_seed(),
-                            ],
-                        ),
+                        IO.DynamicCombo.Option("kling-4.0", _kling4_text_to_video_inputs(["720p", "1080p"], 30)),
+                        IO.DynamicCombo.Option("kling-4.0-flash", _kling4_text_to_video_inputs(["720p"], 20)),
                     ],
                 ),
             ],
@@ -2926,8 +2989,10 @@ class Kling4ImageToVideoNode(IO.ComfyNode):
             node_id="Kling4ImageToVideoNode",
             display_name="Kling 4.0 Image to Video",
             category="partner/video/Kling",
-            description="Generate a video with audio through up to 10 keyframes. "
+            description="Generate a video with audio through up to 10 keyframes on kling-4.0, "
+            "or from a first frame on kling-4.0-flash. "
             "Middle frames are spaced evenly; the video takes the aspect ratio of the first keyframe.",
+            search_aliases=["kling 4.0 flash", "kling flash"],
             inputs=[
                 IO.DynamicCombo.Input(
                     "model",
@@ -2953,8 +3018,23 @@ class Kling4ImageToVideoNode(IO.ComfyNode):
                                     tooltip="Optional. Refer to the frames as @Image1, @Image2, ... "
                                     "in order: first frame, middle frames, last frame.",
                                 ),
-                                _kling4_resolution(),
-                                _kling4_duration(),
+                                _kling4_resolution(["720p", "1080p"]),
+                                _kling4_duration(30),
+                                _kling4_seed(),
+                            ],
+                        ),
+                        IO.DynamicCombo.Option(
+                            "kling-4.0-flash",
+                            [
+                                IO.Image.Input("first_frame"),
+                                IO.String.Input(
+                                    "prompt",
+                                    multiline=True,
+                                    default="",
+                                    tooltip="Optional. Refer to the first frame as @Image1.",
+                                ),
+                                _kling4_resolution(["720p"]),
+                                _kling4_duration(20),
                                 _kling4_seed(),
                             ],
                         ),
@@ -2976,11 +3056,14 @@ class Kling4ImageToVideoNode(IO.ComfyNode):
     @classmethod
     async def execute(cls, model: dict) -> IO.NodeOutput:
         frames = [
-            ("middle_frame", image) for batch in model["middle_frames"].values() if batch is not None for image in batch
+            ("middle_frame", image)
+            for batch in model.get("middle_frames", {}).values()
+            if batch is not None
+            for image in batch
         ]
         if model["first_frame"] is not None:
             frames.insert(0, ("first_frame", model["first_frame"][0]))
-        if model["last_frame"] is not None:
+        if model.get("last_frame") is not None:
             frames.append(("last_frame", model["last_frame"][0]))
         if not frames:
             raise ValueError("Connect at least one frame: first_frame, a middle frame or last_frame.")
@@ -3016,39 +3099,18 @@ class Kling4ReferenceToVideoNode(IO.ComfyNode):
             category="partner/video/Kling",
             description="Generate a video with audio from reference images and videos, "
             "optionally starting or ending on given frames.",
+            search_aliases=["kling 4.0 flash", "kling flash"],
             inputs=[
                 IO.DynamicCombo.Input(
                     "model",
                     options=[
                         IO.DynamicCombo.Option(
                             "kling-4.0",
-                            [
-                                _kling4_reference_images(),
-                                _kling4_reference_videos([f"video_{i}" for i in range(1, 6)]),
-                                IO.Image.Input(
-                                    "first_frame",
-                                    optional=True,
-                                    tooltip="Counts toward the 10-image limit together with the reference images.",
-                                ),
-                                IO.Image.Input(
-                                    "last_frame",
-                                    optional=True,
-                                    tooltip="Counts toward the 10-image limit together with the reference images.",
-                                ),
-                                IO.String.Input(
-                                    "prompt",
-                                    multiline=True,
-                                    default="",
-                                    tooltip="Refer to the inputs as @Image1, @Image2, ... and @Video1, @Video2, ...",
-                                ),
-                                _kling4_resolution(),
-                                _kling4_omni_aspect_ratio(
-                                    "adaptive follows the prompt, then the first frame or the reference videos, "
-                                    "otherwise 16:9."
-                                ),
-                                _kling4_duration(),
-                                _kling4_seed(),
-                            ],
+                            _kling4_reference_to_video_inputs(["720p", "1080p"], 30, ["first_frame", "last_frame"]),
+                        ),
+                        IO.DynamicCombo.Option(
+                            "kling-4.0-flash",
+                            _kling4_reference_to_video_inputs(["720p"], 20, ["first_frame"]),
                         ),
                     ],
                 ),
@@ -3064,19 +3126,21 @@ class Kling4ReferenceToVideoNode(IO.ComfyNode):
             is_api_node=True,
             price_badge=IO.PriceBadge(
                 depends_on=IO.PriceBadgeDepends(
-                    widgets=["model.resolution", "model.duration"],
+                    widgets=["model", "model.resolution", "model.duration"],
                     input_groups=["model.reference_videos"],
                 ),
                 expr="""
                 (
+                  $flash := $contains(widgets.model, "flash");
                   $hd := $lookup(widgets, "model.resolution") = "1080p";
                   $duration := $lookup(widgets, "model.duration");
                   $exists(inputGroups) and $lookup(inputGroups, "model.reference_videos") > 0
                     ? (
-                        $rate := $hd ? 0.20163 : 0.13442;
-                        {"type":"range_usd","min_usd": $rate * 2 * $duration,"max_usd": $rate * (30 + $duration)}
+                        $rate := $flash ? 0.09009 : ($hd ? 0.20163 : 0.13442);
+                        $max_input := $flash ? 20 : 30;
+                        {"type":"range_usd","min_usd": $rate * 2 * $duration,"max_usd": $rate * ($max_input + $duration)}
                       )
-                    : {"type":"usd","usd": ($hd ? 0.33605 : 0.22451) * $duration}
+                    : {"type":"usd","usd": ($flash ? 0.13442 : ($hd ? 0.33605 : 0.22451)) * $duration}
                 )
                 """,
             ),
@@ -3086,14 +3150,14 @@ class Kling4ReferenceToVideoNode(IO.ComfyNode):
     async def execute(cls, model: dict) -> IO.NodeOutput:
         images = [image for batch in model["reference_images"].values() if batch is not None for image in batch]
         videos = [video for video in model["reference_videos"].values() if video is not None]
-        keyframes = [(name, model[name][0]) for name in ("first_frame", "last_frame") if model[name] is not None]
+        keyframes = [(name, model[name][0]) for name in ("first_frame", "last_frame") if model.get(name) is not None]
         _validate_kling4_images(images + [image for _, image in keyframes])
-        _validate_kling4_videos(videos)
+        _validate_kling4_videos(videos, KLING4_VIDEO_SECONDS_LIMIT[model["model"]])
         prompt = _kling4_prompt(model["prompt"], len(images), len(videos))
         validate_string(prompt, min_length=1, max_length=26000)
         if model["first_frame"] is not None:
             prompt = f"The video starts exactly on @first_frame. {prompt}"
-        if model["last_frame"] is not None:
+        if model.get("last_frame") is not None:
             prompt = f"{prompt} The video ends exactly on @last_frame."
         contents = [Kling4Content(type="prompt", text=prompt)]
         contents.extend(await _kling4_media_contents(cls, images, [("feature_video", video) for video in videos]))
@@ -3122,31 +3186,13 @@ class Kling4EditVideoNode(IO.ComfyNode):
             category="partner/video/Kling",
             description="Edit a video with a text prompt and optional reference images and videos. "
             "The result has the same length as the input video.",
+            search_aliases=["kling 4.0 flash", "kling flash"],
             inputs=[
                 IO.DynamicCombo.Input(
                     "model",
                     options=[
-                        IO.DynamicCombo.Option(
-                            "kling-4.0",
-                            [
-                                IO.Video.Input(
-                                    "video_1",
-                                    tooltip="The video to edit, 3-30 seconds. The output keeps its length.",
-                                ),
-                                _kling4_reference_videos([f"video_{i}" for i in range(2, 6)]),
-                                _kling4_reference_images(),
-                                IO.String.Input(
-                                    "prompt",
-                                    multiline=True,
-                                    default="",
-                                    tooltip="Describe what to change and what to keep. Refer to the input video as "
-                                    "@Video1, the reference videos as @Video2, ... and the images as @Image1, ...",
-                                ),
-                                _kling4_resolution(),
-                                _kling4_omni_aspect_ratio("adaptive keeps the aspect ratio of the input video."),
-                                _kling4_seed(),
-                            ],
-                        ),
+                        IO.DynamicCombo.Option("kling-4.0", _kling4_edit_inputs(["720p", "1080p"], 30)),
+                        IO.DynamicCombo.Option("kling-4.0-flash", _kling4_edit_inputs(["720p"], 20)),
                     ],
                 ),
             ],
@@ -3160,10 +3206,15 @@ class Kling4EditVideoNode(IO.ComfyNode):
             ],
             is_api_node=True,
             price_badge=IO.PriceBadge(
-                depends_on=IO.PriceBadgeDepends(widgets=["model.resolution"], input_groups=["model.reference_videos"]),
+                depends_on=IO.PriceBadgeDepends(
+                    widgets=["model", "model.resolution"],
+                    input_groups=["model.reference_videos"],
+                ),
                 expr="""
                 (
-                  $rate := $lookup(widgets, "model.resolution") = "1080p" ? 0.20163 : 0.13442;
+                  $rate := $contains(widgets.model, "flash")
+                    ? 0.09009
+                    : ($lookup(widgets, "model.resolution") = "1080p" ? 0.20163 : 0.13442);
                   $exists(inputGroups) and $lookup(inputGroups, "model.reference_videos") > 0
                     ? {"type":"range_usd","min_usd": $rate,"max_usd": $rate * 2,"format":{"suffix":"/second of input video"}}
                     : {"type":"usd","usd": $rate * 2,"format":{"suffix":"/second of input video"}}
@@ -3173,12 +3224,16 @@ class Kling4EditVideoNode(IO.ComfyNode):
         )
 
     @classmethod
+    def validate_inputs(cls, **kwargs) -> bool:
+        return True
+
+    @classmethod
     async def execute(cls, model: dict) -> IO.NodeOutput:
         images = [image for batch in model["reference_images"].values() if batch is not None for image in batch]
         videos = [("base_video", model["video_1"])]
         videos += [("feature_video", v) for v in model["reference_videos"].values() if v is not None]
         _validate_kling4_images(images)
-        _validate_kling4_videos([v for _, v in videos])
+        _validate_kling4_videos([v for _, v in videos], KLING4_VIDEO_SECONDS_LIMIT[model["model"]])
         prompt = _kling4_prompt(model["prompt"], len(images), len(videos))
         validate_string(prompt, min_length=1, max_length=26000)
         return await _run_kling_task(
@@ -3186,7 +3241,11 @@ class Kling4EditVideoNode(IO.ComfyNode):
             f"/proxy/kling/omni-video/{model['model']}",
             Kling4ContentsRequest(
                 contents=[Kling4Content(type="prompt", text=prompt), *await _kling4_media_contents(cls, images, videos)],
-                settings=Kling4Settings(resolution=model["resolution"], aspect_ratio=model["aspect_ratio"]),
+                settings=Kling4Settings(
+                    resolution=model["resolution"],
+                    aspect_ratio=model["aspect_ratio"],
+                    audio="original" if model.get("audio") == "original" else None,
+                ),
             ),
         )
 

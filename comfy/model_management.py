@@ -1541,6 +1541,21 @@ def reset_cast_buffers():
     STREAM_AIMDO_CAST_BUFFERS.clear()
     soft_empty_cache()
 
+def new_stream(device):
+    if is_device_cuda(device):
+        s = torch.cuda.Stream(device=device, priority=0)
+        s.as_context = torch.cuda.stream
+    elif is_device_xpu(device):
+        s = torch.xpu.Stream(device=device, priority=0)
+        s.as_context = torch.xpu.stream
+    elif is_device_npu(device):
+        # torch.npu.stream provides the context manager for torch-npu streams.
+        s = torch.npu.Stream(device=device, priority=0)
+        s.as_context = torch.npu.stream
+    else:
+        return None
+    return s
+
 def get_offload_stream(device):
     stream_counter = stream_counters.get(device, 0)
     if NUM_STREAMS == 0:
@@ -1556,39 +1571,24 @@ def get_offload_stream(device):
         stream_counter = (stream_counter + 1) % len(ss)
         stream_counters[device] = stream_counter
         return ss[stream_counter]
-    elif is_device_cuda(device):
-        ss = []
-        for k in range(NUM_STREAMS):
-            s1 = torch.cuda.Stream(device=device, priority=0)
-            s1.as_context = torch.cuda.stream
-            ss.append(s1)
-        STREAMS[device] = ss
-        s = ss[stream_counter]
-        stream_counters[device] = stream_counter
-        return s
-    elif is_device_xpu(device):
-        ss = []
-        for k in range(NUM_STREAMS):
-            s1 = torch.xpu.Stream(device=device, priority=0)
-            s1.as_context = torch.xpu.stream
-            ss.append(s1)
-        STREAMS[device] = ss
-        s = ss[stream_counter]
-        stream_counters[device] = stream_counter
-        return s
-    elif is_device_npu(device):
-        ss = []
-        # Match the CUDA/XPU stream interface used by the shared offload path.
-        # torch.npu.stream provides the context manager for torch-npu streams.
-        for k in range(NUM_STREAMS):
-            s1 = torch.npu.Stream(device=device, priority=0)
-            s1.as_context = torch.npu.stream
-            ss.append(s1)
-        STREAMS[device] = ss
-        s = ss[stream_counter]
-        stream_counters[device] = stream_counter
-        return s
-    return None
+    s = new_stream(device)
+    if s is None:
+        return None
+    ss = [s] + [new_stream(device) for _ in range(NUM_STREAMS - 1)]
+    STREAMS[device] = ss
+    stream_counters[device] = stream_counter
+    return ss[stream_counter]
+
+DATA_STREAMS = {}
+
+def get_data_stream(device):
+    """One stream per device for data copies such as cache staging and decoder output, kept off the
+    offload streams so they don't disturb the weight prefetch. Callers order on it themselves."""
+    if NUM_STREAMS == 0 or torch.compiler.is_compiling():
+        return None
+    if device not in DATA_STREAMS:
+        DATA_STREAMS[device] = new_stream(device)
+    return DATA_STREAMS[device]
 
 def sync_all_offload_streams():
     if NUM_STREAMS == 0:
@@ -1788,6 +1788,59 @@ def unpin_memory(tensor):
         discard_cuda_async_error()
 
     return False
+
+class HostWriter:
+    """Copies device tensors of one shape into slices of a CPU tensor without the device waiting on each copy:
+    every write goes through one of two pinned staging buffers on the data stream and lands in its slice one
+    write later. Writes go straight through when the target is on the device, the device has no streams or the
+    buffers can't be pinned."""
+
+    def __init__(self, device, target, shape):
+        self.device = device
+        self.staging = []
+        self.pending = [None, None]
+        self.slot = 0
+        self.stream = get_data_stream(device) if is_device_cpu(target.device) else None
+        if self.stream is not None:
+            # inactive model pins make room for the staging buffers, active ones stay
+            if ensure_pin_budget(2 * torch.Size(shape).numel() * target.element_size(), evict_active=False):
+                for _ in range(2):
+                    buffer = torch.empty(shape, dtype=target.dtype)
+                    if pin_memory(buffer, evict_active=False):
+                        self.staging.append(buffer)
+            if len(self.staging) < 2:
+                self.stream = None
+
+    def __enter__(self):
+        return self
+
+    def write(self, dest, src):
+        if self.stream is None:
+            dest.copy_(src)
+            return
+        if self.pending[self.slot] is not None:
+            self._collect(self.slot)
+        self.stream.wait_stream(current_stream(self.device))
+        cast_to(src, None, torch.device("cpu"), non_blocking=True, stream=self.stream, r=self.staging[self.slot])
+        # src stays referenced until its copy is done
+        self.pending[self.slot] = (self.stream.record_event(), dest, src)
+        self.slot ^= 1
+
+    def _collect(self, slot):
+        event, dest, _ = self.pending[slot]
+        event.synchronize()
+        dest.copy_(self.staging[slot])
+        self.pending[slot] = None
+
+    def __exit__(self, exc_type, exc, tb):
+        if self.stream is not None:
+            if exc_type is None:
+                for slot in (self.slot, self.slot ^ 1):
+                    if self.pending[slot] is not None:
+                        self._collect(slot)
+            self.stream.synchronize()
+        for buffer in self.staging:
+            unpin_memory(buffer)
 
 def sage_attention_enabled():
     return args.use_sage_attention

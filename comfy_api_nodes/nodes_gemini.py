@@ -1819,6 +1819,7 @@ OMNI_URI_DELIVERY_RESOLUTIONS = ("1080p", "4k")
 OMNI_MODELS: dict[str, str] = {
     "Omni Flash": "gemini-omni-flash-preview",
     "Omni Flash 1.1": "gemini-omni-1.1-flash",
+    "Omni Flash 1.2": "gemini-omni-1.2-flash",
 }
 
 
@@ -2106,6 +2107,56 @@ def _omni_v2_flash_1_1_inputs() -> list[Input]:
     ]
 
 
+def _omni_v2_flash_1_2_inputs() -> list[Input]:
+    return [
+        IO.String.Input(
+            "prompt",
+            multiline=True,
+            default="",
+            tooltip="Describe the video to generate, or the edit to apply to an attached video. Specify the "
+            'length directly in the prompt, e.g. "a 6-second clip" or, for the \'extend\' task, "extend by 5 seconds"; '
+            "the generated length may be 3-15 seconds, and 'extend' adds at most 10 seconds.",
+        ),
+        IO.Combo.Input(
+            "resolution",
+            options=["360p", "720p", "1080p", "4k"],
+            default="720p",
+            tooltip="Output resolution.",
+        ),
+        IO.Combo.Input(
+            "aspect_ratio",
+            options=["16:9", "9:16"],
+            default="16:9",
+            tooltip="Output aspect ratio: 16:9 (landscape) or 9:16 (portrait). "
+            "The 'edit' and 'extend' tasks keep the aspect ratio of the input video instead.",
+        ),
+        _omni_task_input(with_extend=True),
+        IO.Autogrow.Input(
+            "images",
+            template=IO.Autogrow.TemplateNames(
+                IO.Image.Input("image"),
+                names=[f"image_{i}" for i in range(1, OMNI_MAX_IMAGES + 1)],
+                min=0,
+            ),
+            tooltip=f"Optional reference image(s) to guide or animate the video. Up to {OMNI_MAX_IMAGES} images; "
+            "with the 'image_to_video' task the first one is the starting frame and an optional second one "
+            "is the ending frame.",
+        ),
+        IO.Autogrow.Input(
+            "videos",
+            template=IO.Autogrow.TemplateNames(
+                IO.Video.Input("video"),
+                names=[f"video_{i}" for i in range(1, OMNI_MAX_VIDEOS + 1)],
+                min=0,
+            ),
+            tooltip=f"Optional reference video(s) to guide or edit. Up to {OMNI_MAX_VIDEOS} videos, "
+            "each up to 15 seconds long. The 'extend' task accepts up to 25 seconds, "
+            "and its result can be at most 30 seconds.",
+        ),
+        _omni_seed_input(),
+    ]
+
+
 
 class GeminiVideoOmniV2(IO.ComfyNode):
 
@@ -2118,11 +2169,12 @@ class GeminiVideoOmniV2(IO.ComfyNode):
             essentials_category="Video Generation",
             description="Generate a video with audio from a text prompt using Google's Gemini Omni Flash models. "
             "Optionally provide reference images and/or videos to guide or edit the result. Describe the desired "
-            "length (3-10s) directly in the prompt.",
+            "length directly in the prompt (3-15s for Omni Flash 1.2, 3-10s for older models).",
             inputs=[
                 IO.DynamicCombo.Input(
                     "model",
                     options=[
+                        IO.DynamicCombo.Option("Omni Flash 1.2", _omni_v2_flash_1_2_inputs()),
                         IO.DynamicCombo.Option("Omni Flash 1.1", _omni_v2_flash_1_1_inputs()),
                         IO.DynamicCombo.Option("Omni Flash", _omni_v2_flash_inputs()),
                     ],
@@ -2143,9 +2195,11 @@ class GeminiVideoOmniV2(IO.ComfyNode):
                 depends_on=IO.PriceBadgeDepends(widgets=["model", "model.resolution"]),
                 expr="""
                 (
-                  $prices := {"360p": 0.0483, "720p": 0.1449, "1080p": 0.2174, "4k": 0.4349};
+                  $prices := widgets.model = "omni flash 1.2"
+                    ? {"360p": 0.0331, "720p": 0.0994, "1080p": 0.1491, "4k": 0.2982}
+                    : {"360p": 0.0483, "720p": 0.1449, "1080p": 0.2174, "4k": 0.4349};
                   $r := $lookup(widgets, "model.resolution");
-                  {"type":"usd","usd": $r ? $lookup($prices, $r) : 0.1449,
+                  {"type":"usd","usd": $lookup($prices, $r ? $r : "720p"),
                    "format":{"suffix":"/second","approximate":true}}
                 )
                 """,
@@ -2166,8 +2220,11 @@ class GeminiVideoOmniV2(IO.ComfyNode):
             raise ValueError(f"The current maximum number of supported images is {OMNI_MAX_IMAGES}.")
         if len(videos) > OMNI_MAX_VIDEOS:
             raise ValueError(f"The current maximum number of supported videos is {OMNI_MAX_VIDEOS}.")
+        max_video_duration = 10.1
+        if model["model"] == "Omni Flash 1.2":
+            max_video_duration = 25.1 if task == "extend" else 15.1
         for video in videos:
-            validate_video_duration(video, max_duration=10.1)
+            validate_video_duration(video, max_duration=max_video_duration)
         if task == "text_to_video" and (images or videos):
             raise ValueError("The 'text_to_video' task generates from the prompt alone; detach the reference media.")
         if task == "image_to_video" and videos:

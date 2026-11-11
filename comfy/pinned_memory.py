@@ -90,6 +90,8 @@ def pin_memory(module, subset="weights", size=None):
     hostbuf, stack, stack_split, pinned_size, counter, buckets = pin_state[subset]
     if size is None:
         size = comfy.memory_management.vram_aligned_size([ module.weight, module.bias ])
+    if size == 0:
+        return
     registerable_size = size
     loaded = subset.endswith("-loaded")
     fast = subset.endswith("-fast")
