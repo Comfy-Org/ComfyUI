@@ -1378,6 +1378,7 @@ def force_channels_last():
 
 
 STREAMS = {}
+STREAMS_LOCK = threading.Lock()
 NUM_STREAMS = 0
 if args.async_offload is not None:
     NUM_STREAMS = args.async_offload
@@ -1532,7 +1533,8 @@ def get_offload_stream(device):
     if s is None:
         return None
     ss = [s] + [new_stream(device) for _ in range(NUM_STREAMS - 1)]
-    STREAMS[device] = ss
+    with STREAMS_LOCK:
+        STREAMS[device] = ss
     stream_counters[device] = stream_counter
     return ss[stream_counter]
 
@@ -1551,7 +1553,10 @@ def sync_all_offload_streams():
     if NUM_STREAMS == 0:
         synchronize()
         return
-    for streams in STREAMS.values():
+    with STREAMS_LOCK:
+        # another device can register its streams from its own thread while these are synchronized
+        all_streams = list(STREAMS.values())
+    for streams in all_streams:
         for stream in streams:
             stream.synchronize()
 
