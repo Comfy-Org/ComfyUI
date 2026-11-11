@@ -16,7 +16,7 @@ from comfy_api_nodes.apis.krea import (
 from comfy_api_nodes.util import (
     ApiEndpoint,
     download_url_to_image_tensor,
-    poll_op,
+    router_op,
     sync_op,
     tensor_to_bytesio,
     validate_string,
@@ -44,16 +44,15 @@ async def _upload_image_to_krea_assets(cls: type[IO.ComfyNode], image: Input.Ima
 _MODEL_MEDIUM = "Krea 2 Medium"
 _MODEL_MEDIUM_TURBO = "Krea 2 Medium Turbo"
 _MODEL_LARGE = "Krea 2 Large"
-_MODEL_ENDPOINTS: dict[str, str] = {
-    _MODEL_MEDIUM: "/proxy/krea/generate/image/krea/krea-2/medium",
-    _MODEL_MEDIUM_TURBO: "/proxy/krea/generate/image/krea/krea-2/medium-turbo",
-    _MODEL_LARGE: "/proxy/krea/generate/image/krea/krea-2/large",
+_MODEL_IDS: dict[str, str] = {
+    _MODEL_MEDIUM: "krea/krea-2-medium",
+    _MODEL_MEDIUM_TURBO: "krea/krea-2-medium-turbo",
+    _MODEL_LARGE: "krea/krea-2-large",
 }
 
 _ASPECT_RATIOS = ["1:1", "4:3", "3:2", "16:9", "2.35:1", "4:5", "2:3", "9:16"]
 _RESOLUTIONS = ["1K"]
 _CREATIVITY_LEVELS = ["raw", "low", "medium", "high"]
-_KREA_QUEUED_STATUSES = ["backlogged", "queued", "scheduled"]
 
 _UUID_RE = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
 
@@ -201,8 +200,8 @@ class Krea2ImageNode(IO.ComfyNode):
         validate_string(prompt, strip_whitespace=False, min_length=1)
 
         model_choice = model["model"]
-        endpoint_path = _MODEL_ENDPOINTS.get(model_choice)
-        if endpoint_path is None:
+        model_id = _MODEL_IDS.get(model_choice)
+        if model_id is None:
             raise ValueError(f"Unknown Krea 2 model: {model_choice!r}")
 
         moodboards: list[KreaMoodboard] | None = None
@@ -221,9 +220,9 @@ class Krea2ImageNode(IO.ComfyNode):
             image_style_references = [
                 KreaImageStyleReference(url=ref["url"], strength=float(ref["strength"])) for ref in style_reference
             ]
-        initial = await sync_op(
+        job = await router_op(
             cls,
-            ApiEndpoint(path=endpoint_path, method="POST"),
+            model_id,
             response_model=KreaJob,
             data=KreaGenerateImageRequest(
                 prompt=prompt,
@@ -234,13 +233,6 @@ class Krea2ImageNode(IO.ComfyNode):
                 moodboards=moodboards,
                 image_style_references=image_style_references,
             ),
-        )
-        job = await poll_op(
-            cls,
-            ApiEndpoint(path=f"/proxy/krea/jobs/{initial.job_id}", method="GET"),
-            response_model=KreaJob,
-            status_extractor=lambda r: r.status,
-            queued_statuses=_KREA_QUEUED_STATUSES,
         )
         if not job.result or not job.result.urls:
             raise RuntimeError(f"Krea 2 job {job.job_id} completed without any image URLs.")
@@ -419,9 +411,9 @@ class Krea3ImageNode(IO.ComfyNode):
         image_urls = [
             await _upload_image_to_krea_assets(cls, image, reference_pixels) for image in model["images"].values()
         ]
-        initial = await sync_op(
+        job = await router_op(
             cls,
-            ApiEndpoint(path="/proxy/krea/generate/image/krea/krea-3", method="POST"),
+            "krea/krea-3",
             response_model=KreaJob,
             data=Krea3GenerateImageRequest(
                 prompt=prompt,
@@ -432,14 +424,6 @@ class Krea3ImageNode(IO.ComfyNode):
                 image_urls=image_urls or None,
                 regional_edit=None if ultra else model["precise_edit"],
             ),
-        )
-        job = await poll_op(
-            cls,
-            ApiEndpoint(path=f"/proxy/krea/jobs/{initial.job_id}", method="GET"),
-            response_model=KreaJob,
-            status_extractor=lambda r: r.status,
-            queued_statuses=_KREA_QUEUED_STATUSES,
-            poll_interval=5.0 if ultra else 1.0,
         )
         return IO.NodeOutput(await download_url_to_image_tensor(job.result.urls[0]))
 
