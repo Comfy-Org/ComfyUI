@@ -108,8 +108,8 @@ def _krea_model_inputs() -> list:
         IO.Float.Input(
             "moodboard_strength",
             default=0.35,
-            min=-0.5,
-            max=1.5,
+            min=0.0,
+            max=1.0,
             step=0.05,
             tooltip="Moodboard influence; ignored when moodboard_id is empty.",
             optional=True,
@@ -261,10 +261,9 @@ class Krea2StyleReferenceNode(IO.ComfyNode):
                 IO.Float.Input(
                     "strength",
                     default=1.0,
-                    min=-2.0,
-                    max=2.0,
+                    min=0.0,
+                    max=1.0,
                     step=0.05,
-                    tooltip="Reference strength; negative values invert the style influence.",
                 ),
                 IO.Custom(KreaIO.STYLE_REF).Input(
                     "style_reference",
@@ -422,7 +421,7 @@ class Krea3ImageNode(IO.ComfyNode):
                 aspect_ratio=None if model["aspect_ratio"] == "auto" else model["aspect_ratio"],
                 seed=model["seed"],
                 image_urls=image_urls or None,
-                regional_edit=None if ultra else model["precise_edit"],
+                regional_edit=None if ultra or not image_urls else model["precise_edit"],
             ),
         )
         return IO.NodeOutput(await download_url_to_image_tensor(job.result.urls[0]))
