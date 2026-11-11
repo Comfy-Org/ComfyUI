@@ -2074,7 +2074,9 @@ class MOSSImage(supported_models_base.BASE):
     unet_extra_config = {}
     latent_format = latent_formats.Flux2
 
-    supported_inference_dtypes = [torch.bfloat16, torch.float32]
+    # fp16 after bf16 so bf16 devices are unchanged; RDNA2 has no bf16 and needs the
+    # fp16 path instead of fp32. The block clamps its residual for the fp16 case.
+    supported_inference_dtypes = [torch.bfloat16, torch.float16, torch.float32]
 
     vae_key_prefix = ["vae."]
     text_encoder_key_prefix = ["text_encoders."]
