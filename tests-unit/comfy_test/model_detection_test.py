@@ -1,4 +1,5 @@
 from collections import defaultdict
+import logging
 
 import torch
 
@@ -6,6 +7,35 @@ from comfy.model_detection import detect_unet_config, model_config_from_unet, mo
 from comfy.ldm.lumina.model import NextDiT
 import comfy.ops
 import comfy.supported_models
+
+
+def test_minimax_h3_image_full_time_embedder_warns(caplog):
+    sd = {
+        "video_patch_proj.weight": torch.empty(8, 96, device="meta"),
+        "condition_proj.weight": torch.empty(8, 16, device="meta"),
+        "final_layer.video_out.weight": torch.empty(576, 8, device="meta"),
+        "blocks.0.attn.q_norm.weight": torch.empty(8, device="meta"),
+        "blocks.0.attn.qkv_proj.weight": torch.empty(24, 8, device="meta"),
+        "blocks.0.mlp.fc1.weight": torch.empty(32, 8, device="meta"),
+        "rope.inv_freq": torch.empty(16, device="meta"),
+        "time_embedder.proj_in.weight": torch.empty(8, 256, device="meta"),
+        "time_embedder.proj_out.weight": torch.empty(8, 8, device="meta"),
+    }
+    metadata = {"config": '{"transformer": {"pdd_steps": 6}}'}
+    with caplog.at_level(logging.WARNING):
+        config = detect_unet_config(sd, "", metadata)
+    assert config["image_model"] == "minimax_h3_image"
+    assert config["latents_dim"] == 24
+    assert config["time_embed_dim"] == 8
+    assert "unvalidated full time-embedder layout" in caplog.text
+
+    del sd["time_embedder.proj_in.weight"], sd["time_embedder.proj_out.weight"]
+    sd["adaln_t_table"] = torch.empty(1025, 8, device="meta")
+    caplog.clear()
+    with caplog.at_level(logging.WARNING):
+        config = detect_unet_config(sd, "", metadata)
+    assert config["adaln_curve_grid"] == 1025
+    assert not caplog.records
 
 
 def _freeze(value):
