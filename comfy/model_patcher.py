@@ -783,6 +783,8 @@ class ModelPatcher:
                 for i in range(len(patch_list)):
                     if hasattr(patch_list[i], "to"):
                         patch_list[i] = patch_list[i].to(device)
+                        if comfy.model_management.is_vulkan():
+                            comfy.model_management.synchronize()
         if "patches_replace" in to:
             patches = to["patches_replace"]
             for name in patches:
@@ -790,10 +792,14 @@ class ModelPatcher:
                 for k in patch_list:
                     if hasattr(patch_list[k], "to"):
                         patch_list[k] = patch_list[k].to(device)
+                        if comfy.model_management.is_vulkan():
+                            comfy.model_management.synchronize()
         if "model_function_wrapper" in self.model_options:
             wrap_func = self.model_options["model_function_wrapper"]
             if hasattr(wrap_func, "to"):
                 self.model_options["model_function_wrapper"] = wrap_func.to(device)
+                if comfy.model_management.is_vulkan():
+                    comfy.model_management.synchronize()
 
     def model_patches_models(self):
         to = self.model_options["transformer_options"]

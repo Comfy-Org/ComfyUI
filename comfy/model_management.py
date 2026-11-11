@@ -220,7 +220,7 @@ def get_torch_device():
         if is_vulkan():
             # see other comments about torchvulkan versioning
             if hasattr(torchvulkan, "current_device"):
-                return torchvulkan.current_device()
+                return torch.device("vulkan", torchvulkan.current_device())
             else:
                 global default_vulkan_device
                 return default_vulkan_device
@@ -507,9 +507,11 @@ try:
         if torch_version_numeric[0] >= 2:
             if ENABLE_PYTORCH_ATTENTION == False and args.use_split_cross_attention == False and args.use_quad_cross_attention == False:
                 ENABLE_PYTORCH_ATTENTION = True
-    if is_intel_xpu() or is_ascend_npu() or is_mlu() or is_ixuca() or is_vulkan():
+    if is_intel_xpu() or is_ascend_npu() or is_mlu() or is_ixuca():
         if args.use_split_cross_attention == False and args.use_quad_cross_attention == False:
             ENABLE_PYTORCH_ATTENTION = True
+    if is_vulkan():
+        ENABLE_PYTORCH_ATTENTION = False # For now, until fused attention is implemented. Otherwise, VRAM consumption is too high
 except:
     pass
 
@@ -1490,6 +1492,7 @@ def get_cast_buffer(offload_stream, device, size, ref):
     return cast_buffer
 
 def get_aimdo_cast_buffer(offload_stream, device):
+    if is_vulkan(): raise NotImplementedError
     cast_buffer = STREAM_AIMDO_CAST_BUFFERS.get(offload_stream, None)
     if cast_buffer is None:
         cast_buffer = comfy_aimdo.vram_buffer.VRAMBuffer(DEFAULT_AIMDO_CAST_BUFFER_RESERVATION_SIZE, device.index)
@@ -1497,6 +1500,7 @@ def get_aimdo_cast_buffer(offload_stream, device):
     return cast_buffer
 
 def reset_cast_buffers():
+    if is_vulkan(): raise NotImplementedError
     global LARGEST_CASTED_WEIGHT
     global LARGEST_AIMDO_CASTED_WEIGHT
 
@@ -1681,6 +1685,7 @@ def get_disk_swap_total():
 
 def is_integrated_gpu():
     device = get_torch_device()
+    print(device.type)
     return device.type == "cuda" and bool(torch.cuda.get_device_properties(device).is_integrated)
 
 DISABLE_PINNED_MEMORY = args.disable_pinned_memory
@@ -1991,8 +1996,9 @@ def should_use_fp16(device=None, model_params=0, prioritize_performance=True, ma
         return False
     
     if is_vulkan():
-        if hasattr(torchvulkan, "get_device_properties"):
-            return torchvulkan.get_device_properties(device).has_fp16
+        props = torchvulkan.get_device_properties(device)
+        if hasattr(props, "has_fp16"):
+            return props.has_fp16
         return False
 
     if is_intel_xpu():
@@ -2062,8 +2068,9 @@ def should_use_bf16(device=None, model_params=0, prioritize_performance=True, ma
         return False
     
     if is_vulkan():
-        if hasattr(torchvulkan, "get_device_properties"):
-            return torchvulkan.get_device_properties(device).has_bf16
+        props = torchvulkan.get_device_properties(device)
+        if hasattr(props, "has_bf16"):
+            return props.has_bf16
         return False
 
     if is_intel_xpu():
@@ -2161,8 +2168,9 @@ def supports_fp64(device=None):
         return False
     
     if is_vulkan():
-        if hasattr(torchvulkan, "get_device_properties"):
-            return torchvulkan.get_device_properties(device).has_fp64
+        props = torchvulkan.get_device_properties(device)
+        if hasattr(props, "has_fp64"):
+            return props.has_fp64
         return False
     
     if is_intel_xpu():
@@ -2187,8 +2195,9 @@ def supports_int8_compute(device=None):
         return False
     
     if is_vulkan():
-        if hasattr(torchvulkan, "get_device_properties"):
-            return torchvulkan.get_device_properties(device).has_int8
+        props = torchvulkan.get_device_properties(device)
+        if hasattr(props, "has_int8"):
+            return props.has_int8
         return False
     
     if is_intel_xpu():
