@@ -106,6 +106,7 @@ class SparseAttnPatch:
         key = (tuple(layout.signature), tuple(layout.segments), str(device))
         plan = self.vsa_plans.get(key)
         if plan is not None:
+            plan["layout"] = weakref.ref(layout)
             return plan
         _text_len, latent_t, latent_h, latent_w, _audio_t = layout.signature
         grid = (int(latent_t), int(latent_h) // 2, int(latent_w) // 2)
@@ -135,6 +136,7 @@ class SparseAttnPatch:
         inv = torch.empty(layout.seq_len, dtype=torch.int64, device=device)
         inv[src[live]] = torch.nonzero(live).flatten()
         plan = {"n": int(src.numel()), "n_prefix": n_prefix, "src": src, "inv": inv,
+                "layout": weakref.ref(layout),
                 "block_len": (tiles >= 0).sum(1).to(torch.int32)}
         while len(self.vsa_plans) >= VSA_PLAN_CACHE:
             del self.vsa_plans[next(iter(self.vsa_plans))]
@@ -143,11 +145,16 @@ class SparseAttnPatch:
 
     def vsa_rope_freqs(self, rope_freqs, plan):
         hit = self.vsa_rope
-        if hit is not None and hit[0]() is rope_freqs and hit[1] is plan:
+        layout = plan["layout"]()
+        if (hit is not None and layout is not None and hit[0]() is layout and hit[1] is plan
+                and hit[2].shape[2:] == rope_freqs.shape[2:]
+                and hit[2].dtype == rope_freqs.dtype and hit[2].device == rope_freqs.device):
             return hit[2]
+        self.vsa_rope = None
+        del hit
         padded = rope_freqs.new_zeros((1, plan["n"]) + tuple(rope_freqs.shape[2:]))
         padded[0, plan["inv"]] = rope_freqs[0]
-        self.vsa_rope = (weakref.ref(rope_freqs), plan, padded)
+        self.vsa_rope = (weakref.ref(layout), plan, padded)
         return padded
 
 
