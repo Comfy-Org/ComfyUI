@@ -31,6 +31,7 @@ from comfy.comfy_types import IO, ComfyNodeABC, InputTypeDict, FileLocator
 from comfy_api.internal import register_versions, ComfyAPIWithVersion
 from comfy_api.version_list import supported_versions
 from comfy_api.latest import io, ComfyExtension, InputImpl
+from comfy_api.v4 import _packs as v4_packs
 
 import comfy.clip_vision
 
@@ -2252,6 +2253,7 @@ def get_module_name(module_path: str) -> str:
     return base_path
 
 
+@v4_packs._loading_pack
 async def load_custom_node(module_path: str, ignore=set(), module_parent="custom_nodes") -> bool:
     module_name = get_module_name(module_path)
     if os.path.isfile(module_path):
@@ -2330,6 +2332,8 @@ async def load_custom_node(module_path: str, ignore=set(), module_parent="custom
                 node_list = await extension.get_node_list()
                 if not isinstance(node_list, list):
                     logging.warning(f"comfy_entrypoint in {module_path} did not return a list of nodes, skipping.")
+                    return False
+                if not await v4_packs._add_pack(module_path, extension, node_list):
                     return False
                 for node_cls in node_list:
                     node_cls: io.ComfyNode
