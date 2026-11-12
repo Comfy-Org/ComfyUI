@@ -1011,6 +1011,17 @@ class MiniMaxH3(supported_models_base.BASE):
         detect = comfy.text_encoders.hunyuan_video.llama_detect(state_dict, "{}qwen3vl_32b.transformer.".format(pref))
         return supported_models_base.ClipTarget(comfy.text_encoders.minimax.MiniMaxH3Tokenizer, comfy.text_encoders.minimax.te(**detect))
 
+class MiniMaxH3Image(MiniMaxH3):
+    unet_config = {
+        "image_model": "minimax_h3_image",
+    }
+
+    sampling_settings = {}
+    latent_format = latent_formats.MiniMaxH3Video
+
+    def get_model(self, state_dict, prefix="", device=None):
+        return model_base.MiniMaxH3Image(self, device=device)
+
 class HunyuanVideo(supported_models_base.BASE):
     unet_config = {
         "image_model": "hunyuan_video",
@@ -1577,6 +1588,19 @@ class WAN21_SCAIL2(WAN21_T2V):
     def get_model(self, state_dict, prefix="", device=None):
         out = model_base.WAN21_SCAIL2(self, image_to_video=False, device=device)
         return out
+
+class WAN22_RelayVSR(WAN21_T2V):
+    unet_config = {
+        "image_model": "wan2.1",
+        "model_type": "relayvsr",
+    }
+
+    latent_format = latent_formats.RelayVSR
+
+    def get_model(self, state_dict, prefix="", device=None):
+        out = model_base.WAN22_RelayVSR(self, device=device)
+        return out
+
 
 class WAN22_WanDancer(WAN21_T2V):
     unet_config = {
@@ -2692,6 +2716,7 @@ models = [
     LTXV,
     LTXAV,
     MiniMaxH3,
+    MiniMaxH3Image,
     HunyuanVideo15_SR_Distilled,
     HunyuanVideo15,
     HunyuanImage21Refiner,
@@ -2724,6 +2749,7 @@ models = [
     WAN21_FlowRVS,
     WAN21_SCAIL,
     WAN21_SCAIL2,
+    WAN22_RelayVSR,
     WAN22_WanDancer,
     Hunyuan3Dv2mini,
     Hunyuan3Dv2,

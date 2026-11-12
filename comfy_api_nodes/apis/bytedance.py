@@ -23,11 +23,16 @@ class Seedream4TaskCreationRequest(BaseModel):
     sequential_image_generation_options: Seedream4Options | None = Field(Seedream4Options(max_images=15))
     watermark: bool = Field(False)
     output_format: str | None = None
+    background: str | None = None
     optimize_prompt_options: Seedream5OptimizePromptOptions | None = None
 
 
 class Seedream5LayerOptimizePromptOptions(BaseModel):
     mode: Literal["standard", "fast"] = Field(...)
+
+
+class Seedream55LayerOptions(BaseModel):
+    max_images: int = Field(..., ge=2, le=100)
 
 
 class Seedream5LayerSeparationRequest(BaseModel):
@@ -41,6 +46,7 @@ class Seedream5LayerSeparationRequest(BaseModel):
     layer_decomposition: bool = Field(True)
     watermark: bool = Field(False)
     optimize_prompt_options: Seedream5LayerOptimizePromptOptions | None = Field(None)
+    layer_decomposition_options: Seedream55LayerOptions | None = Field(None)
 
 
 class ImageTaskCreationResponse(BaseModel):
@@ -279,6 +285,32 @@ RECOMMENDED_PRESETS_SEEDREAM_5_FLASH = [
     ("(2K) 2496x1664 (3:2)", 2496, 1664),
     ("(2K) 3136x1344 (21:9)", 3136, 1344),
 ] + _CUSTOM_PRESET
+RECOMMENDED_PRESETS_SEEDREAM_5_5 = [
+    ("(1K) 1024x1024 (1:1)", 1024, 1024),
+    ("(1K) 880x1184 (3:4)", 880, 1184),
+    ("(1K) 1184x880 (4:3)", 1184, 880),
+    ("(1K) 1360x768 (16:9)", 1360, 768),
+    ("(1K) 768x1360 (9:16)", 768, 1360),
+    ("(1K) 832x1248 (2:3)", 832, 1248),
+    ("(1K) 1248x832 (3:2)", 1248, 832),
+    ("(1K) 1568x672 (21:9)", 1568, 672),
+    ("(1.5K) 1536x1536 (1:1)", 1536, 1536),
+    ("(1.5K) 1328x1776 (3:4)", 1328, 1776),
+    ("(1.5K) 1776x1328 (4:3)", 1776, 1328),
+    ("(1.5K) 2048x1152 (16:9)", 2048, 1152),
+    ("(1.5K) 1152x2048 (9:16)", 1152, 2048),
+    ("(1.5K) 1248x1888 (2:3)", 1248, 1888),
+    ("(1.5K) 1888x1248 (3:2)", 1888, 1248),
+    ("(1.5K) 2352x1008 (21:9)", 2352, 1008),
+    ("(2K) 2048x2048 (1:1)", 2048, 2048),
+    ("(2K) 1776x2368 (3:4)", 1776, 2368),
+    ("(2K) 2368x1776 (4:3)", 2368, 1776),
+    ("(2K) 2736x1536 (16:9)", 2736, 1536),
+    ("(2K) 1536x2736 (9:16)", 1536, 2736),
+    ("(2K) 1680x2512 (2:3)", 1680, 2512),
+    ("(2K) 2512x1680 (3:2)", 2512, 1680),
+    ("(2K) 3136x1344 (21:9)", 3136, 1344),
+] + _CUSTOM_PRESET
 RECOMMENDED_PRESETS_SEEDREAM_5_LITE = (
     _PRESETS_SEEDREAM_2K + _PRESETS_SEEDREAM_3K + _PRESETS_SEEDREAM_4K + _CUSTOM_PRESET
 )
@@ -308,6 +340,7 @@ SEEDANCE2_REF_VIDEO_PIXEL_LIMITS = {
         "480p": {"min": 409_600, "max": 8_295_044},
         "720p": {"min": 409_600, "max": 8_295_044},
         "1080p": {"min": 409_600, "max": 8_295_044},
+        "4k": {"min": 409_600, "max": 8_295_044},
     },
 }
 

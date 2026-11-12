@@ -22,6 +22,7 @@ import torch
 import logging
 import comfy.ldm.lightricks.av_model
 import comfy.ldm.minimax.model
+import comfy.ldm.minimax.sampling
 import comfy.ldm.minimax_music.dit
 import comfy.ldm.yue2.model
 import comfy.nested_tensor
@@ -52,6 +53,7 @@ import comfy.ldm.wan.model_animate
 import comfy.ldm.wan.model_animate2
 import comfy.ldm.wan.ar_model
 import comfy.ldm.wan.model_wandancer
+import comfy.ldm.wan.model_vsr
 import comfy.ldm.hunyuan3d.model
 import comfy.ldm.triposplat.model
 import comfy.ldm.hidream.model
@@ -1067,6 +1069,22 @@ class Flux(BaseModel):
             ref_latents_method = kwargs.get("reference_latents_method", None)
             if ref_latents_method is not None:
                 out['ref_latents_method'] = comfy.conds.CONDConstant(ref_latents_method)
+
+        # Multi-view (UltraTex): batch items as tiles of one image, and background token dropping.
+        view_grid = kwargs.get("view_grid", None)
+        if view_grid is not None:
+            out['view_grid'] = comfy.conds.CONDConstant(view_grid)
+        token_masks = kwargs.get("token_masks", None)
+        if token_masks is not None:
+            # the kept token indices depend on the conditioning alone: compute them once, not every step
+            device = kwargs["device"]
+            masks = {"target": token_masks["target"].to(device), "refs": [None if m is None else m.to(device) for m in token_masks["refs"]]}
+            background = self.process_latent_in(kwargs["background_latent"]).to(device=device, dtype=self.get_dtype_inference())
+            out['token_keep'] = comfy.conds.CONDConstant(self.diffusion_model.preprocess_token_masks(
+                masks, view_grid, kwargs["noise"].shape, [lat.shape for lat in ref_latents], background))
+        reference_views = kwargs.get("reference_views", None)
+        if reference_views is not None:
+            out['reference_views'] = comfy.conds.CONDConstant(reference_views)
         return out
 
     def extra_conds_shapes(self, **kwargs):
@@ -2045,6 +2063,19 @@ class WAN21_SCAIL(WAN21):
 
         return out
 
+class WAN22_RelayVSR(WAN21):
+    def __init__(self, model_config, model_type=ModelType.FLOW, device=None):
+        super(WAN21, self).__init__(model_config, model_type, device=device, unet_model=comfy.ldm.wan.model_vsr.RelayVSRWanModel)
+        self.image_to_video = False
+
+    def extra_conds(self, **kwargs):
+        out = super().extra_conds(**kwargs)
+        lq_images = kwargs.get("lq_images", None)
+        if lq_images is not None:
+            out['lq_pixels'] = comfy.conds.CONDRegular(lq_images[..., :3].movedim(-1, 0).unsqueeze(0) * 2.0 - 1.0)
+        return out
+
+
 class WAN21_SCAIL2(WAN21_SCAIL):
     """SCAIL-2: SCAIL-Preview + an additive binary multi-identity mask stream."""
 
@@ -2193,14 +2224,14 @@ class Hunyuan3Dv2_1(BaseModel):
         return out
 
 class MiniMaxH3(BaseModel):
-    def __init__(self, model_config, model_type=ModelType.FLOW_AV, device=None):
-        super().__init__(model_config, model_type, device=device, unet_model=comfy.ldm.minimax.model.MiniMaxH3Model)
+    def __init__(self, model_config, model_type=ModelType.FLOW_AV, device=None, unet_model=comfy.ldm.minimax.model.MiniMaxH3Model):
+        super().__init__(model_config, model_type, device=device, unet_model=unet_model)
 
     def audio_scale(self):
         """Scale the sampler carries the audio stream at, 1.0 when not sampling the packed latent."""
         if self.latent_shapes is None or len(self.latent_shapes) < 2:
             return 1.0
-        return self.model_sampling.audio_scale
+        return getattr(self.model_sampling, "audio_scale", 1.0)
 
     def _scale_audio_slice(self, latent, scale):
         # the sampler carries the audio stream scaled onto the video schedule
@@ -2230,7 +2261,7 @@ class MiniMaxH3(BaseModel):
             out['c_crossattn'] = comfy.conds.CONDRegular(cross_attn)
 
         latent_shapes = kwargs.get("latent_shapes", None)
-        if latent_shapes is not None:
+        if latent_shapes is not None and len(latent_shapes) > 1:  # the image model samples one stream
             out['latent_shapes'] = comfy.conds.CONDConstant(latent_shapes)
 
         # Everything H3-specific rides in one dict so _apply_model's dtype cast
@@ -2394,6 +2425,21 @@ class MiniMaxH3(BaseModel):
         x_blend_weight = (token_grid_mask - denoise_mask) / (1.0 - denoise_mask).clamp(min=1e-6)
         x_blend_weight = torch.where(denoise_mask < 1.0, x_blend_weight.clamp(0.0, 1.0), torch.zeros_like(x_blend_weight))
         return injected + x_blend_weight.to(injected.dtype) * (x - injected)
+
+class MiniMaxH3Image(MiniMaxH3):
+    def __init__(self, model_config, model_type=ModelType.FLOW, device=None):
+        super().__init__(model_config, model_type, device=device, unet_model=comfy.ldm.minimax.model.MiniMaxH3ImageModel)
+        self.model_sampling = comfy.ldm.minimax.sampling.MiniMaxH3ImageModelSampling(model_config)
+
+    def extra_conds(self, **kwargs):
+        out = super().extra_conds(**kwargs)
+        if 'c_crossattn' in out:
+            # the image is one latent stream without audio
+            payload = out['minimax_payload'].cond
+            shape = kwargs["noise"].shape
+            payload["layout"] = comfy.ldm.minimax.model.PackedLayout(
+                out['c_crossattn'].cond.shape[1], shape[2], (shape[3] + 1) // 2 * 2, (shape[4] + 1) // 2 * 2, 0, refs=payload.get("refs"))
+        return out
 
 class TripoSplat(BaseModel):
     def __init__(self, model_config, model_type=ModelType.FLOW, device=None):

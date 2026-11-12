@@ -10,6 +10,7 @@ from comfy_api.feature_flags import (
     SERVER_FEATURE_FLAGS,
     _coerce_flag_value,
     _parse_cli_feature_flags,
+    _server_feature_flags,
 )
 from app.comfy_api_env import (
     environment_overrides_for_base,
@@ -192,6 +193,25 @@ class TestParseCliFeatureFlags:
 
 class TestCliFeatureFlagRegistry:
     """Test suite for the CLI feature flag registry."""
+
+    @pytest.mark.parametrize("key", ["partner_node_token", "local_web_sso"])
+    def test_local_sso_flags_are_on_by_default(self, key):
+        assert CLI_FEATURE_FLAG_REGISTRY[key]["default"] is True
+
+    def test_server_features_report_registry_defaults(self, monkeypatch):
+        monkeypatch.setattr("comfy_api.feature_flags.args", type("Args", (), {"feature_flag": []})())
+        features = _server_feature_flags()
+        for key, info in CLI_FEATURE_FLAG_REGISTRY.items():
+            assert features[key] == info["default"], key
+
+    @pytest.mark.parametrize("key", ["partner_node_token", "local_web_sso"])
+    def test_cli_flag_turns_a_default_on_flag_off(self, monkeypatch, key):
+        monkeypatch.setattr("comfy_api.feature_flags.args", type("Args", (), {"feature_flag": [f"{key}=false"]})())
+        assert _server_feature_flags()[key] is False
+
+    def test_cli_flags_cannot_override_core_flags(self, monkeypatch):
+        monkeypatch.setattr("comfy_api.feature_flags.args", type("Args", (), {"feature_flag": ["node_replacements=false"]})())
+        assert _server_feature_flags()["node_replacements"] is True
 
     def test_registry_entries_have_required_fields(self):
         for key, info in CLI_FEATURE_FLAG_REGISTRY.items():

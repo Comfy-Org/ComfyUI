@@ -794,6 +794,9 @@ def _response_detail(body: Any) -> str:
     if isinstance(body, dict):
         for key in ("detail", "message"):
             if isinstance(body.get(key), str) and body[key]:
+                upstream = body.get("upstream_detail")
+                if isinstance(upstream, str) and upstream:
+                    return f"{body[key].rstrip('.')}: {upstream}"
                 return body[key]
         if isinstance(body.get("detail"), list):
             return "; ".join(
