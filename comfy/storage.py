@@ -4,6 +4,7 @@ import os
 import platform
 import re
 import stat
+
 import psutil
 
 import comfy_aimdo.storage
@@ -59,8 +60,10 @@ def _fast_nvme(name):
 def _btrfs_devices(name):
     try:
         filesystems = os.listdir("/sys/fs/btrfs")
+    except FileNotFoundError:
+        return [name]
     except OSError:
-        filesystems = []
+        return None
     for fsid in filesystems:
         devices = f"/sys/fs/btrfs/{fsid}/devices"
         if os.path.exists(f"{devices}/{name}"):
@@ -90,7 +93,11 @@ def _linux_fast_storage(device):
 def _mount_source_device(path):
     path = os.path.realpath(path)
     source, depth = "", -1
-    for part in psutil.disk_partitions(all=True):
+    try:
+        partitions = psutil.disk_partitions(all=True)
+    except OSError:
+        return None
+    for part in partitions:
         if len(part.mountpoint) >= depth and os.path.commonpath([path, part.mountpoint]) == part.mountpoint:
             source, depth = part.device, len(part.mountpoint)
     try:

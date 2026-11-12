@@ -111,3 +111,12 @@ def test_unreadable_btrfs_devices_is_unknown():
         mock.patch.object(comfy.storage.os.path, "exists", return_value=True),
     ):
         assert comfy.storage._btrfs_devices("nvme0n1") is None
+
+
+def test_unknown_sysfs_or_mounts_returns_none():
+    with mock.patch.object(comfy.storage.os, "listdir", side_effect=PermissionError):
+        assert comfy.storage._btrfs_devices("sda") is None
+    with mock.patch.object(comfy.storage.os, "listdir", side_effect=FileNotFoundError):
+        assert comfy.storage._btrfs_devices("sda") == ["sda"]
+    with mock.patch.object(comfy.storage.psutil, "disk_partitions", side_effect=OSError):
+        assert comfy.storage._mount_source_device("/models/x") is None
