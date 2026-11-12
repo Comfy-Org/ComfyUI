@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import threading
 
 from aiohttp import web
 
@@ -31,24 +32,39 @@ class NodeReplaceManager:
 
     def __init__(self):
         self._replacements: dict[str, list[NodeReplace]] = {}
+        # A node registers from the prompt thread while the server lists them on its own.
+        self._lock = threading.Lock()
 
-    def register(self, node_replace: NodeReplace):
-        """Register a node replacement mapping.
+    def register(self, node_replace: NodeReplace) -> bool:
+        """Register a node replacement mapping. Returns whether it added one.
 
         Idempotent: if a replacement with the same (old_node_id, new_node_id)
         is already registered, the duplicate is ignored. This prevents stale
         entries from accumulating when custom nodes are reloaded in the same
         process (e.g. via ComfyUI-Manager).
         """
-        existing = self._replacements.setdefault(node_replace.old_node_id, [])
-        for entry in existing:
-            if entry.new_node_id == node_replace.new_node_id:
-                logging.debug(
-                    "Node replacement %s -> %s already registered, ignoring duplicate.",
-                    node_replace.old_node_id, node_replace.new_node_id,
-                )
-                return
-        existing.append(node_replace)
+        with self._lock:
+            existing = self._replacements.get(node_replace.old_node_id, [])
+            for entry in existing:
+                if entry.new_node_id == node_replace.new_node_id:
+                    logging.debug(
+                        "Node replacement %s -> %s already registered, ignoring duplicate.",
+                        node_replace.old_node_id, node_replace.new_node_id,
+                    )
+                    return False
+            # A new list: one that was handed out is not changed while it is read.
+            self._replacements[node_replace.old_node_id] = [*existing, node_replace]
+            return True
+
+    def unregister(self, node_replace: NodeReplace):
+        """Remove a node replacement mapping that `register` added; does nothing otherwise."""
+        with self._lock:
+            existing = self._replacements.get(node_replace.old_node_id, [])
+            remaining = [entry for entry in existing if entry is not node_replace]
+            if remaining:
+                self._replacements[node_replace.old_node_id] = remaining
+            else:
+                self._replacements.pop(node_replace.old_node_id, None)
 
     def get_replacement(self, old_node_id: str) -> list[NodeReplace] | None:
         """Get replacements for an old node ID."""
@@ -112,10 +128,11 @@ class NodeReplaceManager:
 
     def as_dict(self):
         """Serialize all replacements to dict."""
-        return {
-            k: [v.as_dict() for v in v_list]
-            for k, v_list in self._replacements.items()
-        }
+        with self._lock:
+            return {
+                k: [v.as_dict() for v in v_list]
+                for k, v_list in self._replacements.items()
+            }
 
     def add_routes(self, routes):
         @routes.get("/node_replacements")
