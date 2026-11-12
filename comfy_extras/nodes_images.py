@@ -2,6 +2,7 @@ import nodes
 import folder_paths
 
 import av
+import io
 import json
 
 import os
@@ -12,15 +13,21 @@ import struct
 import torch
 import logging
 import tempfile
+import uuid
 
 import zlib
 import comfy.utils
+import comfy.model_management
 from av.video.reformatter import ColorPrimaries, ColorRange, ColorTrc
+from enum import Enum
 from fractions import Fraction
+from typing import TypedDict
 from PIL.Image import Exif
 
 from server import PromptServer
 from comfy_api.latest import ComfyExtension, IO, UI
+from comfy_execution.preview_tonemap import linear_to_preview
+from comfy_extras.color_util import hex_to_rgb
 from comfy.cli_args import args
 from typing_extensions import override
 
@@ -643,6 +650,147 @@ class ResizeAndPadImage(IO.ComfyNode):
     resize_and_pad = execute  # TODO: remove
 
 
+class PadType(str, Enum):
+    PAD_DIMENSIONS = "pad dimensions"
+    PAD_BY = "pad by multiplier"
+    PAD_TO_MULTIPLE = "pad to multiple"
+
+
+class PadStyle(str, Enum):
+    COLOR = "color"
+    MIRROR = "mirror image"
+
+
+def split_padding(total: int) -> tuple[int, int]:
+    return total // 2, total - total // 2
+
+
+def mirror_indices(size: int, before: int, after: int, device: torch.device) -> torch.Tensor:
+    # reflect without repeating the edge pixel, repeating the mirrored image when the padding exceeds the size
+    period = max(2 * (size - 1), 1)
+    idx = torch.arange(-before, size + after, device=device).abs() % period
+    return torch.where(idx < size, idx, period - idx)
+
+
+def pad_mirror(image: torch.Tensor, left: int, top: int, right: int, bottom: int) -> torch.Tensor:
+    _, height, width, _ = image.shape
+    rows = mirror_indices(height, top, bottom, image.device)
+    cols = mirror_indices(width, left, right, image.device)
+    return image[:, rows[:, None], cols[None, :]]
+
+
+def feather_weight(size: int, before: int, after: int, feathering: int, device: torch.device) -> torch.Tensor:
+    # integer distances: fp16/bf16 can't represent large pixel indices exactly
+    i = torch.arange(size, device=device)
+    dist = torch.full_like(i, feathering)
+    if before > 0:
+        dist = torch.minimum(dist, i)
+    if after > 0:
+        dist = torch.minimum(dist, size - 1 - i)
+    return ((feathering - dist) / (feathering + 1)).square()
+
+
+def pad_color(image: torch.Tensor, left: int, top: int, right: int, bottom: int, color: str, feathering: int) -> torch.Tensor:
+    batch, height, width, channels = image.shape
+    rgb = [c / 255.0 for c in hex_to_rgb(color[:7])]
+    fill = torch.tensor((rgb + [1.0] * channels)[:channels], dtype=image.dtype, device=image.device)
+
+    out = torch.empty((batch, height + top + bottom, width + left + right, channels), dtype=image.dtype, device=image.device)
+    out[:] = fill
+    inner = out[:, top:top + height, left:left + width]
+    inner.copy_(image)
+
+    if feathering > 0:
+        wy = feather_weight(height, top, bottom, feathering, image.device).to(image.dtype)
+        wx = feather_weight(width, left, right, feathering, image.device).to(image.dtype)
+        inner.lerp_(fill, torch.maximum(wy[:, None], wx[None, :]).unsqueeze(-1))
+    return out
+
+
+class PadImageNode(IO.ComfyNode):
+    class PadTypedDict(TypedDict):
+        padding_type: PadType
+        left: int
+        top: int
+        right: int
+        bottom: int
+        multiplier: float
+        multiple: int
+
+    class PadStyleTypedDict(TypedDict):
+        padding_style: PadStyle
+        color: str
+        feathering: int
+
+    @classmethod
+    def define_schema(cls):
+        return IO.Schema(
+            node_id="PadImageNode",
+            display_name="Pad Image",
+            description="Pad an image with a solid color or a mirrored copy of its edges.",
+            category="image/transform",
+            search_aliases=["pad", "pad image", "padding", "reflect", "mirror", "extend canvas", "expand image", "border"],
+            inputs=[
+                IO.Image.Input("image"),
+                IO.DynamicCombo.Input(
+                    "padding_type",
+                    tooltip="Select how much padding to add: exact amounts per side, a size multiplier, or up to the next multiple.",
+                    options=[
+                        IO.DynamicCombo.Option(PadType.PAD_DIMENSIONS, [
+                            IO.Int.Input("left", default=0, min=0, max=MAX_RESOLUTION, step=1, tooltip="Pixels to add on the left."),
+                            IO.Int.Input("top", default=0, min=0, max=MAX_RESOLUTION, step=1, tooltip="Pixels to add on the top."),
+                            IO.Int.Input("right", default=0, min=0, max=MAX_RESOLUTION, step=1, tooltip="Pixels to add on the right."),
+                            IO.Int.Input("bottom", default=0, min=0, max=MAX_RESOLUTION, step=1, tooltip="Pixels to add on the bottom."),
+                        ]),
+                        IO.DynamicCombo.Option(PadType.PAD_BY, [
+                            IO.Float.Input("multiplier", default=1.0, min=1.0, max=8.0, step=0.01, tooltip="Output size relative to the input (e.g., 1.5 adds 25% on each side). Padding is split evenly between opposite sides."),
+                        ]),
+                        IO.DynamicCombo.Option(PadType.PAD_TO_MULTIPLE, [
+                            IO.Int.Input("multiple", default=32, min=1, max=MAX_RESOLUTION, step=1, tooltip="Pad so width and height are divisible by this number. Padding is split evenly between opposite sides, with the extra pixel going to the right/bottom."),
+                        ]),
+                    ],
+                ),
+                IO.DynamicCombo.Input(
+                    "padding_style",
+                    tooltip="What to fill the padded area with.",
+                    options=[
+                        IO.DynamicCombo.Option(PadStyle.COLOR, [
+                            IO.Color.Input("color", default="#000000", tooltip="Fill color for the padded area. Alpha is ignored."),
+                            IO.Int.Input("feathering", default=0, min=0, max=MAX_RESOLUTION, step=1, tooltip="Blend this many pixels of the image edge into the fill color on the padded sides."),
+                        ]),
+                        IO.DynamicCombo.Option(PadStyle.MIRROR, []),
+                    ],
+                ),
+            ],
+            outputs=[IO.Image.Output(display_name="image")],
+        )
+
+    @classmethod
+    def execute(cls, image: IO.Image.Type, padding_type: PadTypedDict, padding_style: PadStyleTypedDict) -> IO.NodeOutput:
+        _, height, width, _ = image.shape
+        selected_type = padding_type["padding_type"]
+        if selected_type == PadType.PAD_DIMENSIONS:
+            left, top, right, bottom = padding_type["left"], padding_type["top"], padding_type["right"], padding_type["bottom"]
+        elif selected_type == PadType.PAD_BY:
+            left, right = split_padding(round(width * padding_type["multiplier"]) - width)
+            top, bottom = split_padding(round(height * padding_type["multiplier"]) - height)
+        elif selected_type == PadType.PAD_TO_MULTIPLE:
+            multiple = padding_type["multiple"]
+            left, right = split_padding(-width % multiple)
+            top, bottom = split_padding(-height % multiple)
+        else:
+            raise ValueError(f"Unsupported padding type: {selected_type}")
+        if left == top == right == bottom == 0:
+            return IO.NodeOutput(image)
+
+        selected_style = padding_style["padding_style"]
+        if selected_style == PadStyle.MIRROR:
+            return IO.NodeOutput(pad_mirror(image, left, top, right, bottom))
+        elif selected_style == PadStyle.COLOR:
+            return IO.NodeOutput(pad_color(image, left, top, right, bottom, padding_style["color"], padding_style["feathering"]))
+        raise ValueError(f"Unsupported padding style: {selected_style}")
+
+
 class SaveSVGNode(IO.ComfyNode):
     @classmethod
     def define_schema(cls):
@@ -748,6 +896,45 @@ class GetImageSize(IO.ComfyNode):
         return IO.NodeOutput(width, height, batch_size)
 
     get_size = execute  # TODO: remove
+
+
+class GetLatentSize(IO.ComfyNode):
+    @classmethod
+    def define_schema(cls):
+        return IO.Schema(
+            node_id="GetLatentSize",
+            search_aliases=["dimensions", "resolution", "latent info", "video latent size"],
+            display_name="Get Image/Video Latent Size",
+            description="Returns the width, height, frame count, and batch size of an image or video latent.",
+            category="latent",
+            inputs=[
+                IO.Latent.Input("latent", tooltip="The image or video latent to inspect."),
+            ],
+            outputs=[
+                IO.Int.Output(display_name="width", tooltip="The latent width."),
+                IO.Int.Output(display_name="height", tooltip="The latent height."),
+                IO.Int.Output(display_name="frames", tooltip="The latent frame count. Image latents have one frame."),
+                IO.Int.Output(display_name="batch_size", tooltip="The number of latents in the batch."),
+            ],
+            hidden=[IO.Hidden.unique_id],
+        )
+
+    @classmethod
+    def execute(cls, latent) -> IO.NodeOutput:
+        samples = latent["samples"]
+        if samples.is_nested:
+            samples = samples.unbind()[0]
+
+        if samples.ndim == 5:
+            batch_size, _, frames, height, width = samples.shape
+        else:
+            batch_size, _, height, width = samples.shape
+            frames = 1
+
+        if cls.hidden.unique_id:
+            PromptServer.instance.send_progress_text(f"width: {width}, height: {height}\n frames: {frames}, batch size: {batch_size}", cls.hidden.unique_id)
+
+        return IO.NodeOutput(width, height, frames, batch_size)
 
 
 class ImageRotate(IO.ComfyNode):
@@ -1002,6 +1189,9 @@ _FORMAT_SPECS = {
     ("png", "16-bit", 1): {"scale": 65535.0, "dtype": np.uint16,  "frame_fmt": "gray16le",  "stream_fmt": "gray16be"},
     ("png", "16-bit", 3): {"scale": 65535.0, "dtype": np.uint16,  "frame_fmt": "rgb48le",   "stream_fmt": "rgb48be"},
     ("png", "16-bit", 4): {"scale": 65535.0, "dtype": np.uint16,  "frame_fmt": "rgba64le",  "stream_fmt": "rgba64be"},
+    ("exr", "16-bit float", 1): {"scale": 1.0, "dtype": np.float32, "frame_fmt": "grayf32le",  "stream_fmt": "grayf32le"},
+    ("exr", "16-bit float", 3): {"scale": 1.0, "dtype": np.float32, "frame_fmt": "gbrpf32le",  "stream_fmt": "gbrpf32le"},
+    ("exr", "16-bit float", 4): {"scale": 1.0, "dtype": np.float32, "frame_fmt": "gbrapf32le", "stream_fmt": "gbrapf32le"},
     ("exr", "32-bit float", 1): {"scale": 1.0, "dtype": np.float32, "frame_fmt": "grayf32le",  "stream_fmt": "grayf32le"},
     ("exr", "32-bit float", 3): {"scale": 1.0, "dtype": np.float32, "frame_fmt": "gbrpf32le",  "stream_fmt": "gbrpf32le"},
     ("exr", "32-bit float", 4): {"scale": 1.0, "dtype": np.float32, "frame_fmt": "gbrapf32le", "stream_fmt": "gbrapf32le"},
@@ -1130,19 +1320,103 @@ def _compress_rgb_gamut(rgb, weights):
     return torch.where(in_gamut, rgb, torch.addcmul(luminance, chroma, saturation)).clamp(0.0, 1.0)
 
 
+_LOTTES_HDR_PARAMETERS = (
+    -0.1517456472, -1.465687394, -0.2663205862, -1.11367178,
+    -2.938027859, -2.948823929, -2.97376132, -2.978893757,
+    -2.991618395, -2.956256151, -2.810376167, -2.666443586,
+    -2.584222317, -2.532898188, -2.458465099, -2.309132099,
+    -2.216364861, -2.167824268, -2.096168995, -2.062468767,
+    -2.130614519, 0.5,
+)
+
+
+def _sdr_to_hdr_lottes(rgb, target_luminance):
+    rgb = srgb_to_linear(rgb.clamp(0, 1))
+    p = rgb.new_tensor(_LOTTES_HDR_PARAMETERS)
+    y = _rgb_luminance(rgb, (0.2126, 0.7152, 0.0722))
+    safe_y = y.clamp_min(1e-6)
+    a = 0.7 + 0.6 * p[0].sigmoid()
+    d = 0.5 + 2 * p[1].sigmoid()
+    peak = 1 + 7 * p[2].sigmoid()
+    c = 0.5 + 2 * p[3].sigmoid()
+    expanded = safe_y.pow(a) / ((1 / peak - c) * safe_y.pow(a * d) + c).clamp_min(1e-5)
+    rational_gain = (expanded / safe_y).clamp_min(1e-3).log2().clamp(-1, 3.5)
+    knots = torch.nn.functional.softplus(p[4:21]).cumsum(0)
+    x = y.clamp(0, 1).sqrt() * 16
+    index = x.long().clamp_max(15)
+    curve_gain = knots[index] + (x - index) * (knots[index + 1] - knots[index])
+    blend = p[21].clamp(0, 1)
+    gain = blend * rational_gain + (1 - blend) * curve_gain
+    hdr = _convert_rgb_primaries(rgb, _REC709_TO_REC2020) * gain.exp2()
+
+    if target_luminance is not None:
+        white_gain = blend * peak.log2().clamp(-1, 3.5) + (1 - blend) * knots[-1]
+        source_white = white_gain.exp2()
+        target_white = target_luminance / _SDR_WHITE_NITS
+        y_hdr = _rgb_luminance(hdr, _REC2020_LUMA)
+        hdr = hdr / (1 + (1 / target_white - 1 / source_white) * y_hdr).clamp_min(1e-6)
+
+    # Inverse HLG OOTF followed by OETF, with zero display black.
+    peak_nits = max(_HLG_PEAK_NITS, target_luminance or 0.0)
+    gamma = 1.2 + 0.42 * math.log10(peak_nits / 1000.0)
+    display = hdr.clamp_min(0) * (_SDR_WHITE_NITS / peak_nits)
+    luminance = _rgb_luminance(display, _REC2020_LUMA)
+    scene = (display * luminance.clamp_min(1e-12).pow(1 / gamma - 1)).clamp(0, 1)
+    low = (3 * scene).sqrt()
+    high = _HLG_A * (12 * scene - _HLG_B).clamp_min(1e-12).log() + _HLG_C
+    return torch.where(scene <= 1 / 12, low, high)
+
+
+class ImageSDRToHDR(IO.ComfyNode):
+    @classmethod
+    def define_schema(cls):
+        return IO.Schema(
+            node_id="ImageSDRToHDR",
+            display_name="Convert SDR to HDR",
+            category="image/color",
+            description="Expand sRGB brightness into Rec.2020 HLG HDR. Save the result with the HDR color space selected. Alpha is preserved.",
+            inputs=[
+                IO.Image.Input("image", tooltip="SDR image(s) in sRGB."),
+                IO.DynamicCombo.Input("algorithm", options=[
+                    IO.DynamicCombo.Option("lottes", [
+                        IO.Float.Input("target_luminance", default=650.0, min=0.0, max=10000.0, step=1.0,
+                                       tooltip="Peak-white target in nits. 0 keeps the calibrated rendering. Dark images are not normalized to this peak."),
+                    ]),
+                ], tooltip="Lottes-style rational expansion blended with a calibrated monotonic log-gain curve."),
+            ],
+            outputs=[IO.Image.Output()],
+        )
+
+    @classmethod
+    def execute(cls, image, algorithm: IO.DynamicCombo.Type) -> IO.NodeOutput:
+        if algorithm["algorithm"] != "lottes":
+            raise ValueError(f"Unsupported HDR algorithm: {algorithm['algorithm']}")
+        target_luminance = algorithm["target_luminance"] or None
+        if image.shape[-1] == 1:
+            image = image.expand(*image.shape[:-1], 3)
+        output = torch.empty_like(image, device=comfy.model_management.intermediate_device(), dtype=comfy.model_management.intermediate_dtype())
+        device = comfy.model_management.get_torch_device()
+        for i, frame in enumerate(image):
+            rgb = frame[..., :3].to(device=device, dtype=torch.float32)
+            output[i, ..., :3] = _sdr_to_hdr_lottes(rgb, target_luminance)
+        if image.shape[-1] == 4:
+            output[..., 3:] = image[..., 3:]
+        return IO.NodeOutput(output)
+
+
 class ImageColorSpace(IO.ComfyNode):
     @classmethod
     def define_schema(cls):
-        spaces = ["sRGB", "HDR", "HDR PQ", "linear", "HDR LogC3", "HDR ACEScct"]
+        spaces = ["sRGB", "HDR", "HDR ACEScct", "HDR LogC3", "HDR PQ", "linear", "linear ACEScg"]
         return IO.Schema(
             node_id="ImageColorSpace",
             display_name="Convert Image Color Space",
             category="image/color",
-            description="Convert sRGB, linear Rec.709, HDR (Rec.2020 HLG), HDR PQ (Rec.2020 PQ), HDR LogC3, and HDR ACEScct. LogC3 uses the EI 800 curve with Rec.709 primaries and codes clamped to [0, 1]. ACEScct uses AP1 primaries and D60 white, with Bradford adaptation to D65. Convert LogC3 or ACEScct to linear for EXR saving. Linear 1.0 uses the same 203-nit reference white as sRGB; HLG uses a 1000-nit reference display. Linear and ACEScct outputs preserve extended values. Linear-to-HDR conversions preserve highlights without tone mapping; HLG and PQ outputs clip negative channels. SDR output and PQ-to-HLG conversion tone-map excess luminance across the batch and compress out-of-gamut colors. Conversions compute in float32 and return the intermediate device and dtype. Straight alpha is not color-transformed.",
+            description="Convert sRGB, linear Rec.709, HDR (Rec.2020 HLG), HDR PQ (Rec.2020 PQ), HDR LogC3, linear ACEScg, and HDR ACEScct. LogC3 uses the EI 800 curve with Rec.709 primaries and codes clamped to [0, 1]. ACEScg is scene-linear AP1 with D60 white. ACEScct is the ACEScg log encoding. Both use Bradford adaptation to D65. Convert LogC3 or ACEScct to linear ACEScg (AP1 scene-linear) or linear (Rec.709) before saving EXR. Linear 1.0 and ACEScg 1.0 use the same 203-nit reference white as sRGB; HLG uses a 1000-nit reference display. Linear, ACEScg, and ACEScct outputs preserve extended values. Linear-to-HDR conversions preserve highlights without tone mapping; HLG and PQ outputs clip negative channels. SDR output and PQ-to-HLG conversion tone-map excess luminance across the batch and compress out-of-gamut colors. Conversions compute in float32 and return the intermediate device and dtype. Straight alpha is not color-transformed.",
             inputs=[
                 IO.Image.Input("image"),
                 IO.Combo.Input("source", options=spaces, default="sRGB", tooltip="Color space of the input pixels."),
-                IO.Combo.Input("destination", options=spaces, default="sRGB", tooltip="Color space of the output pixels. Set the save node to this same color space. Convert LogC3 or ACEScct to linear before saving EXR, or to sRGB/HDR/HDR PQ before saving video."),
+                IO.Combo.Input("destination", options=spaces, default="sRGB", tooltip="Color space of the output pixels. Set the save node to this same color space. Convert LogC3 or ACEScct to linear ACEScg for ACEScg EXR, or to linear for Rec.709 EXR. Convert to sRGB/HDR/HDR PQ before saving video."),
             ],
             outputs=[IO.Image.Output()],
         )
@@ -1160,6 +1434,8 @@ class ImageColorSpace(IO.ComfyNode):
             rgb = _convert_rgb_primaries(srgb_to_linear(rgb), _REC709_TO_REC2020) * _SDR_WHITE_NITS
         elif source == "linear":
             rgb = _convert_rgb_primaries(rgb, _REC709_TO_REC2020) * _SDR_WHITE_NITS
+        elif source == "linear ACEScg":
+            rgb = _convert_rgb_primaries(rgb, _ACESCG_TO_REC2020) * _SDR_WHITE_NITS
         elif source == "HDR LogC3":
             rgb = rgb.clamp(0.0, 1.0)
             low = (rgb - _LOGC3_F) / _LOGC3_E
@@ -1184,6 +1460,8 @@ class ImageColorSpace(IO.ComfyNode):
 
         if destination == "linear":
             rgb = _convert_rgb_primaries(rgb / _SDR_WHITE_NITS, _REC2020_TO_REC709)
+        elif destination == "linear ACEScg":
+            rgb = _convert_rgb_primaries(rgb / _SDR_WHITE_NITS, _REC2020_TO_ACESCG)
         elif destination == "HDR LogC3":
             rgb = _convert_rgb_primaries(rgb / _SDR_WHITE_NITS, _REC2020_TO_REC709).clamp_min(0.0)
             low = _LOGC3_E * rgb + _LOGC3_F
@@ -1263,12 +1541,14 @@ def inject_png_metadata(png_bytes: bytes, prompt: dict | None, extra_pnginfo: di
 
 
 # Standard chromaticities (CIE 1931 xy) for the colorspaces this node writes.
-# Each tuple is (Rx, Ry, Gx, Gy, Bx, By, Wx, Wy). All share D65 white point.
+# Each tuple is (Rx, Ry, Gx, Gy, Bx, By, Wx, Wy).
 _CHROMATICITIES = {
-    # ITU-R BT.709 / sRGB primaries
+    # ITU-R BT.709 / sRGB primaries, D65
     "Rec.709":  (0.6400, 0.3300, 0.3000, 0.6000, 0.1500, 0.0600, 0.3127, 0.3290),
-    # ITU-R BT.2020 (UHDTV / wide-gamut HDR) primaries
+    # ITU-R BT.2020 (UHDTV / wide-gamut HDR) primaries, D65
     "Rec.2020": (0.7080, 0.2920, 0.1700, 0.7970, 0.1310, 0.0460, 0.3127, 0.3290),
+    # ACEScg / AP1 primaries, ACES white (D60). SMPTE ST 2065-1.
+    "ACEScg":   (0.7130, 0.2930, 0.1650, 0.8300, 0.1280, 0.0440, 0.32168, 0.33767),
 }
 
 
@@ -1299,15 +1579,18 @@ def inject_exr_metadata(
     their RGB→XYZ relationship is the `chromaticities` attribute. We pick the
     primaries that match what the user told us their input was:
 
-      colorspace="sRGB" → Rec. 709 / sRGB primaries (D65)
-      colorspace="HDR"  → Rec. 2020 / BT.2100 primaries (D65)
+      colorspace="sRGB"           → Rec. 709 / sRGB primaries (D65)
+      colorspace="HDR"            → Rec. 2020 / BT.2100 primaries (D65)
+      colorspace="linear"         → Rec. 709 primaries (D65)
+      colorspace="linear ACEScg"  → ACEScg / AP1 primaries (D60)
 
     Pixels are always converted to linear scene light upstream (sRGB EOTF
-    inverse for sRGB; HLG OETF inverse for HDR), so the file content is
-    scene-linear in the indicated gamut. OpenEXR has no standard transfer-
-    function attribute (the OpenEXR TSC has discussed adding one but it
-    doesn't exist), so we don't invent one — `chromaticities` plus the EXR
-    linear-by-convention rule fully specifies the color.
+    inverse for sRGB; HLG OETF inverse for HDR; ACEScg is already linear),
+    so the file content is scene-linear in the indicated gamut. OpenEXR has
+    no standard transfer-function attribute (the OpenEXR TSC has discussed
+    adding one but it doesn't exist), so we don't invent one —
+    `chromaticities` plus the EXR linear-by-convention rule fully specifies
+    the color.
 
     Prompt/workflow: written as plain `string` attributes using the same keys
     (`prompt`, `workflow`, ...) that Comfy uses for PNG tEXt chunks, so the
@@ -1329,11 +1612,13 @@ def inject_exr_metadata(
     if colorspace is not None:
         # Map each colorspace option to the RGB primaries the linear pixels
         # are now in. "sRGB" and "linear" both produce Rec. 709 linear; "HDR"
-        # (HLG-encoded Rec. 2020 input) produces Rec. 2020 linear.
+        # (HLG-encoded Rec. 2020 input) produces Rec. 2020 linear; "linear ACEScg"
+        # is already ACEScg / AP1 linear.
         primaries_name = {
-            "sRGB":   "Rec.709",
-            "linear": "Rec.709",
-            "HDR":    "Rec.2020",
+            "sRGB":          "Rec.709",
+            "HDR":           "Rec.2020",
+            "linear":        "Rec.709",
+            "linear ACEScg": "ACEScg",
         }.get(colorspace, "Rec.709")
         new_blob += _exr_attribute(
             "chromaticities",
@@ -1636,6 +1921,49 @@ def inject_avif_metadata(path: str, metadata: dict) -> None:
 # Encoding
 # ---------------------------------------------------------------------------
 
+def _to_scene_linear(img_tensor: torch.Tensor, colorspace: str) -> torch.Tensor:
+    if colorspace == "sRGB":
+        return srgb_to_linear(img_tensor)
+    if colorspace == "HDR":
+        return hlg_to_linear(img_tensor)
+    # "linear" (Rec.709) and "linear ACEScg" (AP1) are already scene-linear.
+    return img_tensor
+
+
+def _write_asset_preview(linear: torch.Tensor) -> dict | None:
+    """Write a preview of a scene-linear image to previews/, named by its blake3 hash."""
+    try:
+        from blake3 import blake3  # an optional assets dependency; ComfyUI starts without it
+
+        image = linear_to_preview(linear)
+        buffer = io.BytesIO()
+        if image.mode == "RGBA":
+            image.save(buffer, format="WEBP", quality=80)
+            ext = "webp"
+        else:
+            image.save(buffer, format="JPEG", quality=85)
+            ext = "jpg"
+        data = buffer.getvalue()
+        filename = f"{blake3(data).hexdigest()}.{ext}"
+        directory = folder_paths.get_previews_directory()
+        path = os.path.join(directory, filename)
+        if not os.path.exists(path):
+            os.makedirs(directory, exist_ok=True)
+            # Publish atomically, so a truncated file never sits under a trusted name.
+            temp_path = f"{path}.{uuid.uuid4().hex}.tmp"
+            try:
+                with open(temp_path, "wb") as f:
+                    f.write(data)
+                os.replace(temp_path, path)
+            finally:
+                if os.path.exists(temp_path):
+                    os.remove(temp_path)
+        return {"filename": filename, "width": image.width, "height": image.height}
+    except Exception:
+        logging.warning("Could not write a preview for an EXR output", exc_info=True)
+        return None
+
+
 def _encode_image(
     img_tensor: torch.Tensor,
     file_format: str,
@@ -1648,11 +1976,13 @@ def _encode_image(
     For EXR the input is interpreted according to `colorspace` and converted
     to scene-linear (EXR's convention) before writing:
 
-      "sRGB"   → input is sRGB-encoded Rec. 709; apply inverse sRGB EOTF.
-      "HDR"    → input is HLG-encoded Rec. 2020 (BT.2100); apply inverse HLG
-                 OETF to get scene-linear, per BT.2100 Note 5a.
-      "linear" → input is already scene-linear (Rec. 709 primaries); write
-                 through unchanged. Use this for renderer/compositor output.
+      "sRGB"           → input is sRGB-encoded Rec. 709; apply inverse sRGB EOTF.
+      "HDR"            → input is HLG-encoded Rec. 2020 (BT.2100); apply inverse HLG
+                         OETF to get scene-linear, per BT.2100 Note 5a.
+      "linear"         → input is already scene-linear (Rec. 709 primaries); write
+                         through unchanged. Use this for renderer/compositor output.
+      "linear ACEScg"  → input is already scene-linear ACEScg (AP1 / D60); write
+                         through unchanged. Use this for ACES VFX plates.
 
     For PNG, colorspace selection does not modify pixels — PNG is delivered
     sRGB-encoded and there is no PNG path for wide-gamut HDR in this node.
@@ -1670,10 +2000,10 @@ def _encode_image(
 
     if spec["dtype"] == np.float32:
         # EXR path: preserve full range, no clamp.
-        if colorspace == "sRGB":
-            img_tensor = srgb_to_linear(img_tensor)
-        elif colorspace == "HDR":
-            img_tensor = hlg_to_linear(img_tensor)
+        img_tensor = _to_scene_linear(img_tensor, colorspace)
+        if bit_depth == "16-bit float":
+            # Round to half precision before FFmpeg's truncating float-to-half conversion.
+            img_tensor = img_tensor.to(torch.float16)
         img_np = img_tensor.cpu().numpy().astype(np.float32)
     else:
         # PNG path: quantize to integer range.
@@ -1688,6 +2018,8 @@ def _encode_image(
     codec.height = height
     codec.pix_fmt = spec["stream_fmt"]
     codec.time_base = Fraction(1, 1)
+    if file_format == "exr":
+        codec.options = {"format": "half" if bit_depth == "16-bit float" else "float", "compression": "zip16"}
 
     frame = av.VideoFrame.from_ndarray(img_np, format=spec["frame_fmt"])
     if spec["frame_fmt"] != spec["stream_fmt"]:
@@ -1791,17 +2123,18 @@ class SaveImageAdvanced(IO.ComfyNode):
                             IO.Combo.Input("input_color_space", options=["sRGB"], default="sRGB", advanced=True),
                         ]),
                         IO.DynamicCombo.Option("exr", [
-                            IO.Combo.Input("bit_depth", options=["32-bit float"], default="32-bit float", advanced=True),
+                            IO.Combo.Input("bit_depth", options=["32-bit float", "16-bit float"], default="16-bit float", advanced=True),
                             IO.Combo.Input(
                                 "input_color_space",
-                                options=["sRGB", "HDR", "linear"],
+                                options=["sRGB", "HDR", "linear", "linear ACEScg"],
                                 default="sRGB",
                                 advanced=True,
                                 tooltip=(
                                     "Colorspace of the input tensor. The EXR is always written as scene-linear in the matching gamut.\n"
                                     "sRGB — input is sRGB-encoded Rec.709; the inverse sRGB EOTF is applied.\n"
                                     "HDR — input is HLG-encoded Rec.2020 (BT.2100); the inverse HLG OETF is applied to get scene-linear light.\n"
-                                    "linear — input is already scene-linear (Rec.709 primaries); written through unchanged. Use this for renderer/compositor output."
+                                    "linear — input is already scene-linear (Rec.709 primaries); written through unchanged. Use this for renderer/compositor output.\n"
+                                    "linear ACEScg — input is already scene-linear ACEScg (AP1 / D60); written through unchanged with ACEScg chromaticities."
                                 ),
                             ),
                         ]),
@@ -1905,8 +2238,13 @@ class SaveImageAdvanced(IO.ComfyNode):
                 ui["animated"] = (True,)
             return IO.NodeOutput(images, ui=ui)
 
+        write_previews = file_format == "exr" and PromptServer.instance.asset_manager.enabled
         for batch_number, image in enumerate(images):
-            encoded = _encode_image(image, file_format, bit_depth, colorspace)
+            if file_format == "exr":
+                if image.ndim == 2:
+                    image = image.unsqueeze(-1)  # before conversion, which reads a 4-wide last dim as RGBA
+                image = _to_scene_linear(image, colorspace)
+            encoded = _encode_image(image, file_format, bit_depth, "linear" if file_format == "exr" else colorspace)
 
             if write_metadata:
                 if file_format == "png":
@@ -1919,7 +2257,12 @@ class SaveImageAdvanced(IO.ComfyNode):
             with open(os.path.join(full_output_folder, file), "wb") as f:
                 f.write(encoded)
 
-            results.append({"filename": file, "subfolder": subfolder, "type": "output"})
+            entry = {"filename": file, "subfolder": subfolder, "type": "output"}
+            if write_previews:
+                asset_preview = _write_asset_preview(image)
+                if asset_preview is not None:
+                    entry["asset_preview"] = asset_preview
+            results.append(entry)
             counter += 1
 
         return IO.NodeOutput(images, ui={"images": results})
@@ -1936,6 +2279,7 @@ class ImagesExtension(ComfyExtension):
             RepeatImageBatch,
             ImageFromBatch,
             ImageAddNoise,
+            ImageSDRToHDR,
             ImageColorSpace,
             SaveAnimatedWEBP,
             SaveAnimatedPNG,
@@ -1943,7 +2287,9 @@ class ImagesExtension(ComfyExtension):
             SaveSVGNode,
             ImageStitch,
             ResizeAndPadImage,
+            PadImageNode,
             GetImageSize,
+            GetLatentSize,
             ImageRotate,
             ImageFlip,
             ImageScaleToMaxDimension,

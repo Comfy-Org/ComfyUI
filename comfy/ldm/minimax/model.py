@@ -6,6 +6,8 @@ The packed sequence is:
 [text | cond rows | audio | video] for t2va/fl2va
 [text | reference blocks | audio | video] for ref2va
 
+MiniMaxH3ImageModel is the same stack without the audio stream: [text | reference images | target image].
+
 Timestep domain: the model receives the *video* sigma from the sampler and
 derives per-token timesteps t = 1 - sigma internally; the audio stream runs on
 its own shifted schedule (sigma_shift video 12.0 / audio 3.0), mapped from the
@@ -37,6 +39,11 @@ def time_shift_sigma(sigma, from_shift, to_shift):
     # invert sigma = s*b/(1+(s-1)*b) to the base grid, re-apply the other shift
     base = sigma / (from_shift + sigma * (1.0 - from_shift))
     return to_shift * base / (1.0 + (to_shift - 1.0) * base)
+
+
+def pdd_grid(n, flow_shift):
+    # the video PDD head banks are distilled on the uniform base grid under the stream's flow shift
+    return [time_shift_sigma(k / n, 1.0, flow_shift) for k in range(n, -1, -1)]
 
 
 def patchify_video(latent, patch_size=(1, 2, 2)):
@@ -228,6 +235,22 @@ class AdalnProj(nn.Module):
         return x.chunk(self.expand, dim=-1)
 
 
+# adaln modality tag per packed segment kind (text 1, visual 0, audio 2); mod rows are timestep * 3 + tag
+SEG_TAG = {"text": 1, "video": 0, "audio": 2, "cond": 0, "ref_img": 0, "cond_audio": 2, "ref_audio": 2}
+
+
+def _tag_runs(a, b, row_base, tags):
+    # the presentation text span mixes tags (vision pads carry the video modality): one mod segment per tag run
+    tags = tags.view(-1).tolist()
+    runs = []
+    run_start = 0
+    for i in range(1, b - a + 1):
+        if i == b - a or tags[i] != tags[run_start]:
+            runs.append((a + run_start, a + i, row_base + int(tags[run_start])))
+            run_start = i
+    return runs
+
+
 def _mod_row(vecs, row, dtype):
     # row is a mod-row index, or a per-token LongTensor of mod-row indices
     return vecs[row].to(dtype)
@@ -299,50 +322,59 @@ class DiTBlock(nn.Module):
 
 
 class FinalLayer(nn.Module):
-    def __init__(self, hidden, t_dim, video_dim, audio_dim, eps, apply_silu=True, adaln_dtype=None,
+    def __init__(self, hidden, t_dim, video_dim, audio_dim, eps, apply_silu=True, adaln_dtype=None, pdd_steps=1,
                  dtype=None, device=None, operations=None):
         super().__init__()
+        self.video_dim = video_dim
         self.norm = operations.RMSNorm(hidden, eps=eps, dtype=dtype, device=device)
         self.adaln_proj = AdalnProj(t_dim, hidden, 2, 1, apply_silu=apply_silu,
                                     dtype=adaln_dtype if adaln_dtype is not None else dtype,
                                     device=device, operations=operations)
-        # output heads are the checkpoint's fp32 island; norm/adaln are stored at model dtype
-        self.video_out = operations.Linear(hidden, video_dim, bias=True, dtype=torch.float32, device=device)
-        self.audio_out = operations.Linear(hidden, audio_dim, bias=True, dtype=torch.float32, device=device)
+        # output heads are the checkpoint's fp32 island; norm/adaln are stored at model dtype.
+        # a PDD checkpoint ships pdd_steps stacked heads per stream (a PDD LoRA grows plain heads to the same layout)
+        self.video_out = operations.Linear(hidden, video_dim * pdd_steps, bias=True, dtype=torch.float32, device=device)
+        self.audio_out = None
+        if audio_dim is not None:
+            self.audio_out = operations.Linear(hidden, audio_dim * pdd_steps, bias=True, dtype=torch.float32, device=device)
 
-    def forward(self, x, t_emb, video_seg, audio_seg, sigma, sample_sigmas, shifts):
-        # video_seg / audio_seg: (start, stop, row) of the target streams, where row
-        # is a mod-row index or a per-token blend (see _mod_row)
+    @property
+    def pdd_steps(self):
+        return self.video_out.weight.shape[0] // self.video_dim
+
+    def _modulate(self, x, shift, scale, seg):
+        # seg: (start, stop, row) of a target stream, where row is a mod-row index or a per-token blend (see _mod_row)
+        a, b, row = seg
+        return (self.norm(x[a:b]) * (1.0 + _mod_row(scale, row, scale.dtype)) + _mod_row(shift, row, shift.dtype)).to(torch.float32)
+
+    def forward(self, x, t_emb, video_seg, audio_seg, sigma, sample_sigmas, grids):
+        # grids: one decreasing sigma grid (pdd_steps + 1 points) per output stream, video first; a
+        # model without an audio stream passes one grid
         shift, scale = self.adaln_proj(t_emb)
-
-        def mod(seg):
-            a, b, row = seg
-            return (self.norm(x[a:b]) * (1.0 + _mod_row(scale, row, scale.dtype)) + _mod_row(shift, row, shift.dtype)).to(torch.float32)
-
-        n = self.video_out.weight.shape[0] // self.video_out.out_features
-        if n == 1:
-            return self.video_out(mod(video_seg)), self.audio_out(mod(audio_seg))
-
-        # PDD head bank: row block 0 is a full head, later blocks are offsets from it;
-        # a step consumes the dt-weighted mean of the heads it spans.
-        if sample_sigmas is None:
-            raise ValueError("MiniMax H3 PDD heads need the sampler's sigma schedule")
-        i = int((sample_sigmas - sigma).abs().argmin())
-        sigma_next = sample_sigmas[min(i + 1, sample_sigmas.shape[0] - 1)]
-        start, stop = (round(float(1.0 - time_shift_sigma(s, shifts[0], 1.0)) * n) for s in (sigma, sigma_next))
-        start = min(start, n - 1)
-        stop = max(stop, start + 1)
-        return (_pdd_head(self.video_out, mod(video_seg), n, start, stop, shifts[0]),
-                _pdd_head(self.audio_out, mod(audio_seg), n, start, stop, shifts[1]))
+        n = self.pdd_steps
+        if n > 1:
+            # a step consumes the heads of the grid intervals it spans
+            if sample_sigmas is None:
+                raise ValueError("MiniMax H3 PDD heads need the sampler's sigma schedule")
+            i = int((sample_sigmas - sigma).abs().argmin())
+            sigma_next = sample_sigmas[min(i + 1, sample_sigmas.shape[0] - 1)]
+            start, stop = (min(range(n + 1), key=lambda k: abs(grids[0][k] - float(s))) for s in (sigma, sigma_next))
+            start = min(start, n - 1)
+            stop = max(stop, start + 1)
+        out = []
+        for head, seg, grid in zip((self.video_out, self.audio_out), (video_seg, audio_seg), grids):
+            h = self._modulate(x, shift, scale, seg)
+            out.append(head(h) if n == 1 else _pdd_head(head, h, grid, start, stop))
+        return out
 
 
-def _pdd_head(head, h, n, start, stop, flow_shift):
-    grid = torch.linspace(1.0, 0.0, n + 1, dtype=torch.float64)
-    dt = (1.0 - flow_shift * grid / (1.0 + (flow_shift - 1.0) * grid)).diff()[start:stop]
-    w = (dt / dt.sum()).to(h)
+def _pdd_head(head, h, grid, start, stop):
+    # PDD head bank: row block 0 is a full head, later blocks are offsets from it;
+    # the step from grid[start] to grid[stop] takes the dt-weighted mean of the heads it spans
+    dt = [grid[k] - grid[k + 1] for k in range(start, stop)]
+    w = torch.tensor(dt, dtype=h.dtype, device=h.device) / sum(dt)
     with comfy.ops.CastBiasWeightContext(head, h, offloadable=True) as (weight, bias):
-        rows = weight.reshape(n, -1, weight.shape[1])
-        brows = bias.reshape(n, -1)
+        rows = weight.reshape(len(grid) - 1, -1, weight.shape[1])
+        brows = bias.reshape(len(grid) - 1, -1)
         first = max(start, 1)
         return nn.functional.linear(h, rows[0] + torch.einsum("n,noi->oi", w[first - start:], rows[first:stop]),
                                     brows[0] + torch.einsum("n,no->o", w[first - start:], brows[first:stop]))
@@ -361,7 +393,7 @@ class PackedLayout:
         pos = [g]  # per segment: [n, 3] float64 (t, h, w)
 
         img_pos, img_update = [], []
-        audio_pos, audio_update = [], []
+        audio_pos, audio_update = [torch.zeros(0, dtype=torch.long)], [torch.zeros(0, dtype=torch.bool)]
         row = text_len
 
         target_audio_w = (float(w_grid[0]), float(w_grid[-1]))
@@ -438,12 +470,13 @@ class PackedLayout:
                     row += n
                     cursor += max(float(rt), sum(_video_t_spans(vt)))
 
-        # target audio then target video, always the last two segments
-        segments.append(("audio", audio_t * 2))
-        pos.append(_audio_grid(cursor, audio_t, *target_audio_w))
-        audio_pos.append(torch.arange(row, row + audio_t * 2))
-        audio_update.append(torch.ones(audio_t * 2, dtype=torch.bool))
-        row += audio_t * 2
+        # target audio (none for the image model) then target video, always last
+        if audio_t:
+            segments.append(("audio", audio_t * 2))
+            pos.append(_audio_grid(cursor, audio_t, *target_audio_w))
+            audio_pos.append(torch.arange(row, row + audio_t * 2))
+            audio_update.append(torch.ones(audio_t * 2, dtype=torch.bool))
+            row += audio_t * 2
 
         n_video = latent_t * frame_rows
         segments.append(("video", n_video))
@@ -478,7 +511,7 @@ class MiniMaxH3Model(nn.Module):
                  timestep_input_dim=256, time_embed_hidden_size=5376, time_embed_dim=2688,
                  rope_inv_freq_len=16, norm_eps=1e-5, qk_norm_eps=1e-5, final_norm_eps=1e-5,
                  sigma_shift_video=12.0, sigma_shift_audio=3.0,
-                 adaln_curve_grid=None, gate_compress=False,
+                 adaln_curve_grid=None, gate_compress=False, pdd_steps=1,
                  image_model=None, dtype=None, device=None, operations=None, **kwargs):
         super().__init__()
         self.dtype = dtype
@@ -495,7 +528,8 @@ class MiniMaxH3Model(nn.Module):
         video_patch_dim = latents_dim * self.patch_size[0] * self.patch_size[1] * self.patch_size[2]
 
         self.video_patch_proj = operations.Linear(video_patch_dim, hidden_size, bias=True, dtype=torch.float32, device=device)
-        self.audio_patch_proj = operations.Linear(audio_latents_dim, hidden_size, bias=True, dtype=torch.float32, device=device)
+        if audio_latents_dim is not None:
+            self.audio_patch_proj = operations.Linear(audio_latents_dim, hidden_size, bias=True, dtype=torch.float32, device=device)
         self.condition_proj = operations.Linear(text_dim, hidden_size, bias=True, dtype=dtype, device=device)
         if self.use_adaln_curves:
             self.register_buffer("adaln_t_table", torch.empty(adaln_curve_grid, time_embed_dim, dtype=torch.float32))
@@ -513,7 +547,7 @@ class MiniMaxH3Model(nn.Module):
                      dtype=dtype, device=device, operations=operations)
             for _ in range(num_layers)])
         self.final_layer = FinalLayer(hidden_size, time_embed_dim, video_patch_dim, audio_latents_dim,
-                                      final_norm_eps, **curve, dtype=dtype, device=device, operations=operations)
+                                      final_norm_eps, **curve, pdd_steps=pdd_steps, dtype=dtype, device=device, operations=operations)
 
     def preprocess_text_embeds(self, text_states):
         """[B, L, text_dim] Qwen states -> [B, L, hidden] refined text embeds."""
@@ -557,6 +591,84 @@ class MiniMaxH3Model(nn.Module):
                 r = aug * r + (1.0 - aug) * noise.to(r.device)
             rows.append(r.to(device))
         return torch.cat(rows, dim=0) if rows else None
+
+    def _embed_and_pack(self, video_x, audio_x, context, layout, payload, transformer_options):
+        device = video_x.device
+        dtype = context.dtype
+        img_update = layout.img_update.to(device)
+        audio_update = layout.audio_update.to(device)
+        video_rows = patchify_video(video_x.to(torch.float32), self.patch_size)
+        cond_video_rows = self._cond_video_rows(payload, device)
+
+        all_video_rows = video_rows
+        if cond_video_rows is not None:
+            all_video_rows = torch.empty(img_update.shape[0], video_rows.shape[1], dtype=torch.float32, device=device)
+            all_video_rows[~img_update] = cond_video_rows
+            all_video_rows[img_update] = video_rows
+        video_embed = self.video_patch_proj(all_video_rows).to(dtype)
+
+        if audio_x is not None:
+            audio_rows = pack_audio(audio_x.to(torch.float32))
+            cond_audio_rows = self._cond_audio_rows(payload, device)
+            all_audio_rows = audio_rows
+            if cond_audio_rows is not None:
+                all_audio_rows = torch.empty(audio_update.shape[0], audio_rows.shape[1], dtype=torch.float32, device=device)
+                all_audio_rows[~audio_update] = cond_audio_rows
+                all_audio_rows[audio_update] = audio_rows
+            audio_embed = self.audio_patch_proj(all_audio_rows).to(dtype)
+        text_states = context[0]
+        if text_states.shape[-1] != self.hidden_size:
+            text_states = self.token_refiner(self.condition_proj(text_states),
+                                             transformer_options=transformer_options)
+
+        # segments are contiguous: assemble by slices, embed rows follow segment order
+        h = torch.empty(layout.seq_len, self.hidden_size, dtype=dtype, device=device)
+        voff = aoff = 0
+        for a, b, kind in layout.segments:
+            n = b - a
+            if kind == "text":
+                h[a:b] = text_states
+            elif kind in ("cond", "ref_img", "video"):
+                h[a:b] = video_embed[voff:voff + n]
+                voff += n
+            else:  # ref_audio / audio
+                h[a:b] = audio_embed[aoff:aoff + n]
+                aoff += n
+        return h
+
+    def _time_embedding(self, unique_t, device, dtype):
+        t_vals = torch.tensor(unique_t, dtype=torch.float32, device=device)
+        if self.use_adaln_curves:
+            # adaln projections consume interpolated coordinates of the time-embedding curve
+            table = comfy.model_management.cast_to(self.adaln_t_table, device=device)
+            pos = t_vals.clamp(0.0, 1.0) * (table.shape[0] - 1)     # t in [0,1] -> fractional grid index, out-of-range t clamps to the curve ends
+            i0 = pos.floor().long().clamp(max=table.shape[0] - 2)   # lower grid row, max-clamp keeps t=1.0 on the last interval instead of reading past the table
+            return torch.lerp(table[i0], table[i0 + 1], (pos - i0).unsqueeze(1))  # blend the two rows by the fractional part
+        return self.time_embedder(t_vals).to(dtype)
+
+    def _run_blocks(self, h, t_emb, mod_segments, layout, transformer_options):
+        device = h.device
+        # rotation table computed once per forward, consumed by the kitchen split-half rope
+        rope_freqs = rope_rotation_table(self.rope_freqs(layout.position_ids, device), h.dtype)
+
+        patches_replace = transformer_options.get("patches_replace", {})
+        blocks_replace = patches_replace.get("dit", {})
+        prefetch_queue = comfy.model_prefetch.make_prefetch_queue(list(self.blocks), device, transformer_options)
+        for i, block in enumerate(self.blocks):
+            comfy.model_prefetch.prefetch_queue_pop(prefetch_queue, device, block, malloc_scope="block")
+            transformer_options["block_index"] = i
+            if ("double_block", i) in blocks_replace:
+                def block_wrap(args):
+                    return {"img": block(args["img"], args["t_emb"], args["mod_segments"], args["rope_freqs"],
+                                         transformer_options=args["transformer_options"], attention=args.get("attention"))}
+                h = blocks_replace[("double_block", i)](
+                    {"img": h, "t_emb": t_emb, "mod_segments": mod_segments, "rope_freqs": rope_freqs,
+                     "layout": layout, "transformer_options": transformer_options},
+                    {"original_block": block_wrap})["img"]
+            else:
+                h = block(h, t_emb, mod_segments, rope_freqs, transformer_options=transformer_options)
+        comfy.model_prefetch.prefetch_queue_pop(prefetch_queue, device, None, malloc_scope="block")
+        return h
 
     def forward(self, x, timestep, context, transformer_options={}, minimax_payload=None, denoise_mask=None, audio_denoise_mask=None, **kwargs):
         # the sampler carries the audio as (sigma_v / sigma_a) * x_audio; undo it outside
@@ -665,7 +777,6 @@ class MiniMaxH3Model(nn.Module):
                           | (set(video_rows_t.unique().tolist()) if video_rows_t is not None else set())
                           | (set(audio_rows_t.unique().tolist()) if audio_rows_t is not None else set()))
         t_row = {t: i for i, t in enumerate(unique_t)}
-        seg_tag = {"text": 1, "video": 0, "audio": 2, "cond": 0, "ref_img": 0, "cond_audio": 2, "ref_audio": 2}
 
         def rows_to_mod_index(rows_t, tag):
             # per-row timestep values -> per-row mod-row indices into the t_emb table
@@ -679,91 +790,17 @@ class MiniMaxH3Model(nn.Module):
         for a, b, kind in layout.segments:
             row_base = t_row[seg_t[kind]] * 3
             if kind == "text" and text_tags is not None:
-                # the presentation text span mixes tags (vision pads carry the video modality) split into tag runs
-                tags = text_tags.view(-1).tolist()
-                run_start = 0
-                for i in range(1, b - a + 1):
-                    if i == b - a or tags[i] != tags[run_start]:
-                        mod_segments.append((a + run_start, a + i, row_base + int(tags[run_start])))
-                        run_start = i
+                mod_segments.extend(_tag_runs(a, b, row_base, text_tags))
             elif kind == "video" and video_rows_t is not None:
-                mod_segments.append((a, b, rows_to_mod_index(video_rows_t, seg_tag[kind])))
+                mod_segments.append((a, b, rows_to_mod_index(video_rows_t, SEG_TAG[kind])))
             elif kind == "audio" and audio_rows_t is not None:
-                mod_segments.append((a, b, rows_to_mod_index(audio_rows_t, seg_tag[kind])))
+                mod_segments.append((a, b, rows_to_mod_index(audio_rows_t, SEG_TAG[kind])))
             else:
-                mod_segments.append((a, b, row_base + seg_tag[kind]))
+                mod_segments.append((a, b, row_base + SEG_TAG[kind]))
 
-        # embed
-        img_update = layout.img_update.to(device)
-        audio_update = layout.audio_update.to(device)
-        video_rows = patchify_video(video_x.to(torch.float32), self.patch_size)
-        audio_rows = pack_audio(audio_x.to(torch.float32))
-        cond_video_rows = self._cond_video_rows(payload, device)
-        cond_audio_rows = self._cond_audio_rows(payload, device)
-
-        all_video_rows = video_rows
-        if cond_video_rows is not None:
-            all_video_rows = torch.empty(img_update.shape[0], video_rows.shape[1], dtype=torch.float32, device=device)
-            all_video_rows[~img_update] = cond_video_rows
-            all_video_rows[img_update] = video_rows
-        all_audio_rows = audio_rows
-        if cond_audio_rows is not None:
-            all_audio_rows = torch.empty(audio_update.shape[0], audio_rows.shape[1], dtype=torch.float32, device=device)
-            all_audio_rows[~audio_update] = cond_audio_rows
-            all_audio_rows[audio_update] = audio_rows
-
-        video_embed = self.video_patch_proj(all_video_rows).to(dtype)
-        audio_embed = self.audio_patch_proj(all_audio_rows).to(dtype)
-        text_states = context[0]
-        if text_states.shape[-1] != self.hidden_size:
-            text_states = self.token_refiner(self.condition_proj(text_states),
-                                             transformer_options=transformer_options)
-
-        # segments are contiguous: assemble by slices, embed rows follow segment order
-        h = torch.empty(layout.seq_len, self.hidden_size, dtype=dtype, device=device)
-        voff = aoff = 0
-        for a, b, kind in layout.segments:
-            n = b - a
-            if kind == "text":
-                h[a:b] = text_states
-            elif kind in ("cond", "ref_img", "video"):
-                h[a:b] = video_embed[voff:voff + n]
-                voff += n
-            else:  # ref_audio / audio
-                h[a:b] = audio_embed[aoff:aoff + n]
-                aoff += n
-
-        t_vals = torch.tensor(unique_t, dtype=torch.float32, device=device)
-        if self.use_adaln_curves:
-            # adaln projections consume interpolated coordinates of the time-embedding curve
-            table = comfy.model_management.cast_to(self.adaln_t_table, device=device)
-            pos = t_vals.clamp(0.0, 1.0) * (table.shape[0] - 1)     # t in [0,1] -> fractional grid index, out-of-range t clamps to the curve ends
-            i0 = pos.floor().long().clamp(max=table.shape[0] - 2)   # lower grid row, max-clamp keeps t=1.0 on the last interval instead of reading past the table
-            t_emb = torch.lerp(table[i0], table[i0 + 1], (pos - i0).unsqueeze(1))  # blend the two rows by the fractional part
-        else:
-            t_emb = self.time_embedder(t_vals).to(dtype)
-
-        # rotation table computed once per forward, consumed by the kitchen split-half rope
-        rope_freqs = rope_rotation_table(self.rope_freqs(layout.position_ids, device), dtype)
-
-        # blocks
-        patches_replace = transformer_options.get("patches_replace", {})
-        blocks_replace = patches_replace.get("dit", {})
-        prefetch_queue = comfy.model_prefetch.make_prefetch_queue(list(self.blocks), device, transformer_options)
-        for i, block in enumerate(self.blocks):
-            comfy.model_prefetch.prefetch_queue_pop(prefetch_queue, device, block, malloc_scope="block")
-            transformer_options["block_index"] = i
-            if ("double_block", i) in blocks_replace:
-                def block_wrap(args):
-                    return {"img": block(args["img"], args["t_emb"], args["mod_segments"], args["rope_freqs"],
-                                         transformer_options=args["transformer_options"], attention=args.get("attention"))}
-                h = blocks_replace[("double_block", i)](
-                    {"img": h, "t_emb": t_emb, "mod_segments": mod_segments, "rope_freqs": rope_freqs,
-                     "layout": layout, "transformer_options": transformer_options},
-                    {"original_block": block_wrap})["img"]
-            else:
-                h = block(h, t_emb, mod_segments, rope_freqs, transformer_options=transformer_options)
-        comfy.model_prefetch.prefetch_queue_pop(prefetch_queue, device, None, malloc_scope="block")
+        h = self._embed_and_pack(video_x, audio_x, context, layout, payload, transformer_options)
+        t_emb = self._time_embedding(unique_t, device, dtype)
+        h = self._run_blocks(h, t_emb, mod_segments, layout, transformer_options)
 
         # target streams are single contiguous segments (audio then video, last two)
         va, vb, _ = next(s for s in layout.segments if s[2] == "video")
@@ -776,10 +813,81 @@ class MiniMaxH3Model(nn.Module):
             audio_seg = (aa, ab, rows_to_mod_index(audio_rows_t, 0) // 3)
         else:
             audio_seg = (aa, ab, t_row[seg_t["audio"]])
-        v, a = self.final_layer(h, t_emb, video_seg, audio_seg, sigma_v, transformer_options.get("sample_sigmas"), (shift_v, shift_a))
+        grids = (pdd_grid(self.final_layer.pdd_steps, shift_v), pdd_grid(self.final_layer.pdd_steps, shift_a))
+        v, a = self.final_layer(h, t_emb, video_seg, audio_seg, sigma_v, transformer_options.get("sample_sigmas"), grids)
 
         video_out = unpatchify_video(v, latent_t, lat_h // 2, lat_w // 2, self.latents_dim, self.patch_size)
         video_out = video_out[:, :, :orig_t, :orig_h, :orig_w]
         audio_out = unpack_audio(a)
 
         return [-video_out.to(video_x.dtype), -audio_out.to(audio_x.dtype)]
+
+
+class MiniMaxH3ImageModel(MiniMaxH3Model):
+    """MiniMax-H3-Image: the H3 DiT without the audio stream, denoising one latent frame.
+
+    Packed sequence [text | reference images | target image]. The checkpoint's PDD head bank is distilled on
+    its own sigma grid (pdd_sigmas) instead of the video models' shifted uniform grid.
+    """
+
+    def __init__(self, pdd_sigmas, pdd_steps=1, **kwargs):
+        super().__init__(audio_latents_dim=None, pdd_steps=pdd_steps, **kwargs)
+        self.pdd_sigmas = [float(s) for s in pdd_sigmas]
+
+    def forward(self, x, timestep, context, transformer_options={}, minimax_payload=None, **kwargs):
+        compile_allocations = comfy.model_prefetch.malloc_graph_enabled(x.device)
+        if compile_allocations:
+            out = torch.empty_like(x)
+            comfy.model_prefetch.malloc_graph_begin(x.device)
+        graph_out = comfy.patcher_extension.WrapperExecutor.new_class_executor(
+            self._forward,
+            self,
+            comfy.patcher_extension.get_all_wrappers(comfy.patcher_extension.WrappersMP.DIFFUSION_MODEL, transformer_options)
+        ).execute(x, timestep, context, transformer_options, minimax_payload=minimax_payload, **kwargs)
+        if not compile_allocations:
+            return graph_out
+        out.copy_(graph_out)
+        del graph_out
+        comfy.model_prefetch.malloc_graph_end()
+        return out
+
+    def _forward(self, x, timestep, context, transformer_options={}, minimax_payload=None, **kwargs):
+        orig_h, orig_w = x.shape[3], x.shape[4]
+        x = comfy.ldm.common_dit.pad_to_patch_size(x, self.patch_size)
+        if x.shape[0] != 1:
+            raise ValueError("MiniMax H3 supports batch size 1")
+        payload = minimax_payload or {}
+        device = x.device
+        dtype = context.dtype
+
+        latent_t, lat_h, lat_w = x.shape[2], x.shape[3], x.shape[4]
+        text_len = context.shape[1]
+        layout = payload.get("layout")
+        if layout is None or layout.signature != (text_len, latent_t, lat_h, lat_w, 0):
+            layout = PackedLayout(text_len, latent_t, lat_h, lat_w, 0, refs=payload.get("refs"))
+        transformer_options["minimax_h3_layout"] = layout
+
+        # model_base passes sigma * 1000; text follows the target, reference rows pin near 1
+        sigma = float(timestep.flatten()[0]) / 1000.0
+        t = 1.0 - sigma
+        seg_t = {"text": t, "video": t, "ref_img": max(t, VISUAL_COND_TIMESTEP)}
+        unique_t = sorted({seg_t[k] for _, _, k in layout.segments})
+        t_row = {v: i for i, v in enumerate(unique_t)}
+
+        text_tags = payload.get("text_token_tags")
+        mod_segments = []
+        for a, b, kind in layout.segments:
+            row_base = t_row[seg_t[kind]] * 3
+            if kind == "text" and text_tags is not None:
+                mod_segments.extend(_tag_runs(a, b, row_base, text_tags))
+            else:
+                mod_segments.append((a, b, row_base + SEG_TAG[kind]))
+
+        h = self._embed_and_pack(x, None, context, layout, payload, transformer_options)
+        t_emb = self._time_embedding(unique_t, device, dtype)
+        h = self._run_blocks(h, t_emb, mod_segments, layout, transformer_options)
+
+        va, vb, _ = layout.segments[-1]  # the target image is the last segment
+        v, = self.final_layer(h, t_emb, (va, vb, t_row[t]), None, sigma, transformer_options.get("sample_sigmas"), (self.pdd_sigmas,))
+        out = unpatchify_video(v, latent_t, lat_h // 2, lat_w // 2, self.latents_dim, self.patch_size)
+        return -out[:, :, :, :orig_h, :orig_w].to(x.dtype)

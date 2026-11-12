@@ -22,7 +22,7 @@ def copy_node_struct(node_struct: NodeStruct, empty_inputs: bool = False) -> Nod
         new_node_struct["inputs"] = {}
     else:
         new_node_struct["inputs"] = node_struct["inputs"].copy()
-    new_node_struct["_meta"] = node_struct["_meta"].copy()
+    new_node_struct["_meta"] = node_struct.get("_meta", {}).copy()
     return new_node_struct
 
 
@@ -94,7 +94,7 @@ class NodeReplaceManager:
                 for input_map in replacement.input_mapping:
                     if "set_value" in input_map:
                         new_node_struct["inputs"][input_map["new_id"]] = input_map["set_value"]
-                    elif "old_id" in input_map:
+                    elif "old_id" in input_map and input_map["old_id"] in node_struct["inputs"]:
                         new_node_struct["inputs"][input_map["new_id"]] = node_struct["inputs"][input_map["old_id"]]
             # finalize input replacement
             prompt[node_number] = new_node_struct

@@ -751,6 +751,6 @@ class SD1ClipModel(torch.nn.Module):
 
     def get_dynamic_vram__units(self):
         # forward to the inner transformer so ModelPatcher can register vbar units (graph decode)
-        model = getattr(getattr(getattr(self, self.clip), "transformer", None), "model", None)
-        get_units = getattr(model, "get_dynamic_vram__units", None)
+        transformer = getattr(getattr(self, self.clip), "transformer", None)
+        get_units = getattr(transformer, "get_dynamic_vram__units", None) or getattr(getattr(transformer, "model", None), "get_dynamic_vram__units", None)
         return get_units() if get_units is not None else ([], [])

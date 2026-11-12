@@ -44,6 +44,11 @@ _GROK_IMAGE_QUALITY_MODELS = {"grok-imagine-image-2.0"}
 
 _GROK_IMAGE_QUALITY_OPTIONS = ["medium", "low"]
 
+_GROK_RETIRED_IMAGE_MODELS_TOOLTIP = (
+    "grok-imagine-image-quality and grok-imagine-image-pro are retired by xAI "
+    "and now run as grok-imagine-image-2.0 at low quality."
+)
+
 _GROK_IMAGE_EDIT_MAX_IMAGES = {
     "grok-imagine-image-2.0": 3,
     "grok-imagine-image-pro": 1,
@@ -51,10 +56,7 @@ _GROK_IMAGE_EDIT_MAX_IMAGES = {
     "grok-imagine-image": 3,
 }
 
-_GROK_IMAGE_EDIT_ASPECT_RATIO_NEEDS_MULTIPLE = {
-    "grok-imagine-image-quality",
-    "grok-imagine-image",
-}
+_GROK_IMAGE_EDIT_ASPECT_RATIO_NEEDS_MULTIPLE = {"grok-imagine-image"}
 
 _GROK_VOICE_OPTIONS = [
     "none",
@@ -144,6 +146,7 @@ class GrokImageNode(IO.ComfyNode):
                         "grok-imagine-image-pro",
                         "grok-imagine-image",
                     ],
+                    tooltip=_GROK_RETIRED_IMAGE_MODELS_TOOLTIP,
                 ),
                 IO.String.Input(
                     "prompt",
@@ -212,9 +215,7 @@ class GrokImageNode(IO.ComfyNode):
                   $is1k := widgets.resolution = "1k";
                   $rate := widgets.model = "grok-imagine-image-2.0"
                     ? (widgets.quality = "low" ? ($is1k ? 0.04 : 0.06) : ($is1k ? 0.06 : 0.08))
-                    : (widgets.model = "grok-imagine-image-quality"
-                        ? ($is1k ? 0.05 : 0.07)
-                        : ($contains(widgets.model, "pro") ? 0.07 : 0.02));
+                    : (widgets.model = "grok-imagine-image" ? 0.02 : ($is1k ? 0.04 : 0.06));
                   {"type":"usd","usd": $rate * widgets.number_of_images}
                 )
                 """,
@@ -336,6 +337,7 @@ class GrokImageEditNode(IO.ComfyNode):
                         "grok-imagine-image-pro",
                         "grok-imagine-image",
                     ],
+                    tooltip=_GROK_RETIRED_IMAGE_MODELS_TOOLTIP,
                 ),
                 IO.Image.Input("image", display_name="images"),
                 IO.String.Input(
@@ -399,12 +401,10 @@ class GrokImageEditNode(IO.ComfyNode):
                 depends_on=IO.PriceBadgeDepends(widgets=["model", "number_of_images", "resolution"]),
                 expr="""
                 (
-                  $isQualityModel := widgets.model = "grok-imagine-image-quality";
+                  $is10 := widgets.model = "grok-imagine-image";
                   $isPro := $contains(widgets.model, "pro");
-                  $rate := $isQualityModel
-                    ? (widgets.resolution = "1k" ? 0.05 : 0.07)
-                    : ($isPro ? 0.07 : 0.02);
-                  $base := $isQualityModel ? 0.01 : 0.002;
+                  $rate := $is10 ? 0.02 : (widgets.resolution = "1k" ? 0.04 : 0.06);
+                  $base := $is10 ? 0.002 : 0.01;
                   $output := $rate * widgets.number_of_images;
                   $isPro
                     ? {"type":"usd","usd": $base + $output}
@@ -489,7 +489,11 @@ class GrokImageEditNodeV2(IO.ComfyNode):
                         ),
                         IO.DynamicCombo.Option(
                             "grok-imagine-image-quality",
-                            _grok_image_edit_model_inputs(max_ref_images=3, with_aspect_ratio=True),
+                            _grok_image_edit_model_inputs(
+                                max_ref_images=3,
+                                with_aspect_ratio=True,
+                                aspect_ratio_needs_multiple=False,
+                            ),
                         ),
                         IO.DynamicCombo.Option(
                             "grok-imagine-image-pro",
@@ -500,6 +504,7 @@ class GrokImageEditNodeV2(IO.ComfyNode):
                             _grok_image_edit_model_inputs(max_ref_images=3, with_aspect_ratio=True),
                         ),
                     ],
+                    tooltip=_GROK_RETIRED_IMAGE_MODELS_TOOLTIP,
                 ),
                 IO.Int.Input(
                     "seed",
@@ -528,6 +533,7 @@ class GrokImageEditNodeV2(IO.ComfyNode):
                 ),
                 expr="""
                 (
+                  $is10 := widgets.model = "grok-imagine-image";
                   $is20 := widgets.model = "grok-imagine-image-2.0";
                   $isPro := $contains(widgets.model, "pro");
                   $res := $lookup(widgets, "model.resolution");
@@ -537,10 +543,8 @@ class GrokImageEditNodeV2(IO.ComfyNode):
                     ? ($lookup(widgets, "model.quality") = "low"
                         ? ($is1k ? 0.04 : 0.06)
                         : ($is1k ? 0.06 : 0.08))
-                    : (widgets.model = "grok-imagine-image-quality"
-                        ? ($is1k ? 0.05 : 0.07)
-                        : ($isPro ? 0.07 : 0.02));
-                  $base := ($is20 or widgets.model = "grok-imagine-image-quality") ? 0.01 : 0.002;
+                    : ($is10 ? 0.02 : ($is1k ? 0.04 : 0.06));
+                  $base := $is10 ? 0.002 : 0.01;
                   $output := $rate * $n;
                   $isPro
                     ? {"type":"usd","usd": $base + $output}
@@ -624,24 +628,26 @@ class GrokVideoNode(IO.ComfyNode):
             inputs=[
                 IO.Combo.Input(
                     "model",
-                    options=["grok-imagine-video", "grok-imagine-video-1.5"],
+                    options=["grok-imagine-video", "grok-imagine-video-1.5", "grok-imagine-video-1.5-lite"],
+                    default="grok-imagine-video-1.5-lite",
                     tooltip="The model to use for video generation.",
                 ),
                 IO.String.Input(
                     "prompt",
                     multiline=True,
                     tooltip="Text description of the desired video. "
-                    "Optional for grok-imagine-video-1.5 when an input image is provided.",
+                    "Optional for the grok-imagine-video-1.5 models when an input image is provided.",
                 ),
                 IO.Combo.Input(
                     "resolution",
                     options=["480p", "720p", "1080p"],
-                    tooltip="The resolution of the output video. 1080p is only available for grok-imagine-video-1.5.",
+                    tooltip="The resolution of the output video. 1080p is not available for grok-imagine-video.",
                 ),
                 IO.Combo.Input(
                     "aspect_ratio",
                     options=["auto", "16:9", "4:3", "3:2", "1:1", "2:3", "3:4", "9:16"],
-                    tooltip="The aspect ratio of the output video.",
+                    tooltip="The aspect ratio of the output video. "
+                    "Ignored when an input image is provided; the video follows the image's aspect ratio.",
                 ),
                 IO.Int.Input(
                     "duration",
@@ -682,10 +688,13 @@ class GrokVideoNode(IO.ComfyNode):
                 depends_on=IO.PriceBadgeDepends(widgets=["model", "duration", "resolution"], inputs=["image"]),
                 expr="""
                 (
+                  $isLite := widgets.model = "grok-imagine-video-1.5-lite";
                   $is15 := $contains(widgets.model, "1.5");
-                  $rate := $is15
-                    ? (widgets.resolution = "1080p" ? 0.25 : (widgets.resolution = "720p" ? 0.14 : 0.08))
-                    : (widgets.resolution = "720p" ? 0.07 : 0.05);
+                  $rate := $isLite
+                    ? (widgets.resolution = "1080p" ? 0.14 : (widgets.resolution = "720p" ? 0.03 : 0.02))
+                    : ($is15
+                        ? (widgets.resolution = "1080p" ? 0.25 : (widgets.resolution = "720p" ? 0.14 : 0.08))
+                        : (widgets.resolution = "720p" ? 0.07 : 0.05));
                   $imgCost := $is15 ? 0.01 : 0.002;
                   $base := $rate * widgets.duration;
                   $total := inputs.image.connected ? $base + $imgCost : $base;
@@ -706,14 +715,14 @@ class GrokVideoNode(IO.ComfyNode):
         seed: int,
         image: Input.Image | None = None,
     ) -> IO.NodeOutput:
-        if resolution == "1080p" and model != "grok-imagine-video-1.5":
-            raise ValueError(f"1080p resolution is only available for grok-imagine-video-1.5, not '{model}'.")
+        if resolution == "1080p" and model == "grok-imagine-video":
+            raise ValueError("1080p resolution is not available for grok-imagine-video.")
         image_url = None
         if image is not None:
             if get_number_of_images(image) != 1:
                 raise ValueError("Only one input image is supported.")
             image_url = InputUrlObject(url=f"data:image/png;base64,{tensor_to_base64_string(image)}")
-        if image is None or model != "grok-imagine-video-1.5":
+        if image is None or model == "grok-imagine-video":
             validate_string(prompt, strip_whitespace=True, min_length=1)
         initial_response = await sync_op(
             cls,

@@ -1,21 +1,26 @@
 """Turns incoming bytes into catalogued assets: multipart uploads moved into a
 hash-addressed destination, files registered where they already sit, and
-records created from a hash the catalog already holds. Every path persists the
-stat that hashing verified, so a row's recorded size and mtime describe the
-same observation as its hash. A live row already at the destination is
-reconciled before the write, so an upload never adopts a fresh hash onto
-records created for bytes it just replaced.
+records created from a hash the catalog already holds. Registration persists
+the stat that hashing verified, so a row's recorded size and mtime describe the
+same observation as its hash; an upload records the stat of the file once it is
+in place, since a copy across volumes has its own mtime. A live row already at
+the destination is reconciled before the write, so an upload never adopts a
+fresh hash onto records created for bytes it just replaced.
 """
 
 import contextlib
+import errno
 import logging
 import mimetypes
 import os
+import re
+import shutil
 from typing import Any, NamedTuple, Sequence
 
-from sqlalchemy import func, select
-from sqlalchemy.orm import Session
+from sqlalchemy import false, func, select
+from sqlalchemy.orm import Session, aliased
 
+import folder_paths
 from app.assets import mode
 from app.assets.database.models import Asset, AssetContent, AssetTag
 from app.assets.database.queries.records import (
@@ -25,13 +30,13 @@ from app.assets.database.queries.records import (
 )
 from app.assets.helpers import normalize_tags, to_stored_hash
 from app.assets.services.file_utils import get_mtime_ns, get_size_and_mtime_ns
-from app.assets.services.image_dimensions import extract_image_dimensions
 from app.assets.services.lookup import (
     claim_qualified_content,
     lookup_for_from_hash,
     lookup_for_view,
     refresh_qualified_content,
 )
+from app.assets.services.media_metadata import extract_media_metadata
 from app.assets.services.metadata_extract import extract_file_metadata
 from app.assets.services.path_utils import (
     compute_loader_path,
@@ -65,8 +70,8 @@ def _extract_system_metadata_sync(
 ) -> dict[str, Any]:
     """Extract ``system_metadata`` at registration time (S29/D8).
 
-    Mirrors the ``scanner.enrich`` pass: tier-1/tier-2 file metadata plus image
-    dimensions for image MIME types, so records carry metadata at creation
+    Mirrors the ``scanner.enrich`` pass: tier-1/tier-2 file metadata plus media
+    metadata for image and video MIME types, so records carry metadata at creation
     instead of waiting for the background enrich pass to fill it.
     """
     metadata = extract_file_metadata(
@@ -75,11 +80,81 @@ def _extract_system_metadata_sync(
         relative_filename=compute_loader_path(locator),
     )
     system_metadata = metadata.to_user_metadata()
-    if mime_type and mime_type.startswith("image/"):
-        dims = extract_image_dimensions(locator, mime_type=mime_type)
-        if dims:
-            system_metadata.update(dims)
+    dims = extract_media_metadata(locator, mime_type=mime_type)
+    if dims:
+        system_metadata.update(dims)
     return system_metadata
+
+
+def _live_sibling_preview_id(session: Session, content_id: str) -> str | None:
+    """A ``preview``-tagged preview another record of the same content has, if its file is still there.
+
+    A preview tagged otherwise was nominated by hand for that record, not made for the bytes.
+    """
+    preview = aliased(Asset)
+    preview_content = aliased(AssetContent)
+    rows = session.execute(
+        select(Asset.preview_id, preview_content.path)
+        .join(preview, preview.id == Asset.preview_id)
+        .join(preview_content, preview_content.id == preview.content_id)
+        .join(AssetTag, (AssetTag.asset_id == preview.id) & (AssetTag.tag_name == "preview"))
+        .where(
+            Asset.content_id == content_id,
+            preview_content.is_missing == false(),
+        )
+        .order_by(Asset.created_at.desc())
+    )
+    # previews/ is never scanned, so a file removed by hand still reads as live.
+    return next((preview_id for preview_id, path in rows if os.path.isfile(path)), None)
+
+
+_PREVIEW_FILENAME = re.compile(r"[0-9a-f]{64}\.(jpg|webp)")
+
+
+def _probe_output_preview(preview_ref: dict | None) -> tuple[str, str, int, int, os.stat_result] | None:
+    """The file a save node named as its output's preview: trusted by name, so stat only."""
+    if preview_ref is None:
+        return None
+    try:
+        filename = preview_ref["filename"]
+        if not isinstance(filename, str) or not _PREVIEW_FILENAME.fullmatch(filename):
+            raise ValueError(f"not a preview file name: {filename!r}")
+        path = os.path.join(folder_paths.get_previews_directory(), filename)
+        return path, filename, int(preview_ref["width"]), int(preview_ref["height"]), os.stat(path)
+    except Exception:
+        logging.warning("Ignoring the preview named for an output: %r", preview_ref, exc_info=True)
+        return None
+
+
+def _link_output_preview(session: Session, record: Asset, preview: tuple[str, str, int, int, os.stat_result]) -> None:
+    """Link the output to its preview's record, creating it on first use; never fails the output."""
+    path, filename, width, height, stat_result = preview
+    try:
+        with session.begin_nested():
+            if not os.path.isfile(path):
+                return  # deleted with its last user since the probe; the write lock rules out a later delete
+            content, _ = create_content_reporting_insert(
+                session, path, f"blake3:{filename.partition('.')[0]}", stat_result.st_size, get_mtime_ns(stat_result)
+            )
+            preview_id = session.scalar(
+                select(Asset.id)
+                .join(AssetTag, (AssetTag.asset_id == Asset.id) & (AssetTag.tag_name == "preview"))
+                .where(Asset.content_id == content.id)
+                .limit(1)
+            )
+            if preview_id is None:
+                preview_id = create_record(
+                    session,
+                    content.id,
+                    filename,
+                    mime_type="image/webp" if filename.endswith(".webp") else "image/jpeg",
+                    tags=["preview"],
+                    system_metadata={"kind": "image", "width": width, "height": height},
+                ).id
+            record.preview_id = preview_id
+            session.flush()
+    except Exception:
+        logging.warning("Could not link the preview %s", filename, exc_info=True)
 
 
 def _discard_unreferenced_content(session: Session, content_id: str) -> None:
@@ -187,7 +262,12 @@ def _guess_upload_mime_type(
 def _move_temp_to_dest(temp_path: str, dest_abs: str) -> None:
     os.makedirs(os.path.dirname(dest_abs), exist_ok=True)
     try:
-        os.replace(temp_path, dest_abs)
+        try:
+            os.replace(temp_path, dest_abs)
+        except OSError as e:  # EXDEV: destination is on another volume
+            if e.errno != errno.EXDEV:
+                raise
+            shutil.copyfile(temp_path, dest_abs)
     except Exception as e:
         raise RuntimeError(f"failed to move uploaded file into place: {e}") from e
 
@@ -205,6 +285,9 @@ def _create_upload_record(
 ) -> Asset:
     if preview_id is not None and session.get(Asset, preview_id) is None:
         raise ValueError(f"preview_id {preview_id!r} does not reference an existing asset")
+    if preview_id is None:
+        # Same bytes, same picture: reuse the preview instead of generating another.
+        preview_id = _live_sibling_preview_id(session, content_id)
     record = create_record(
         session,
         content_id,
@@ -310,7 +393,7 @@ def _reconcile_live_content_at_path(
     existing = session.scalars(
         select(AssetContent).where(
             AssetContent.path == locator,
-            AssetContent.is_missing.is_(False),
+            AssetContent.is_missing == false(),
         )
     ).first()
     if existing is None:
@@ -365,7 +448,7 @@ def _settle_destination_before_write(session: Session, dest_abs: str) -> None:
     existing = session.scalars(
         select(AssetContent).where(
             AssetContent.path == dest_abs,
-            AssetContent.is_missing.is_(False),
+            AssetContent.is_missing == false(),
         )
     ).first()
     if existing is None:
@@ -448,7 +531,7 @@ def upload_from_temp_path(
     user_metadata = user_metadata or {}
 
     try:
-        digest, verified_stat = _snapshot_hash_with_retry(temp_path)
+        digest, _ = _snapshot_hash_with_retry(temp_path)
     except UploadUnstableError:
         _remove_temp_path(temp_path)
         raise
@@ -489,7 +572,9 @@ def upload_from_temp_path(
         _move_temp_to_dest(temp_path, dest_abs)
     finally:
         _remove_temp_path(temp_path)
-    size_bytes, mtime_ns = verified_stat.st_size, verified_stat.st_mtime_ns
+    # A cross-volume copy gets a new mtime, so record the file on disk (a rename keeps it).
+    placed_stat = os.stat(dest_abs)
+    size_bytes, mtime_ns = placed_stat.st_size, placed_stat.st_mtime_ns
     system_metadata = _extract_system_metadata_sync(dest_abs, content_type)
     with create_session() as session:
         _reconcile_live_content_at_path(
@@ -661,7 +746,7 @@ def register_cached_output(
         with create_session() as session:
             existing = session.scalars(
                 select(AssetContent).where(
-                    AssetContent.path == locator, AssetContent.is_missing.is_(False)
+                    AssetContent.path == locator, AssetContent.is_missing == false()
                 )
             ).first()
             if existing is None:
@@ -701,6 +786,9 @@ def register_cached_output(
                     tags=path_tags,
                     system_metadata=system_metadata,
                 )
+                sibling_preview_id = _live_sibling_preview_id(session, existing.id)
+                if sibling_preview_id is not None:
+                    record.preview_id = sibling_preview_id
                 session.commit()
             except Exception:
                 session.rollback()
@@ -709,6 +797,7 @@ def register_cached_output(
             record_content_id = record.content_id
             record_job_id = record.job_id
             record_name = record.name
+            record_preview_id = record.preview_id
     except Exception:
         logging.exception("Failed to register cached output: %s", locator)
         return None
@@ -718,13 +807,15 @@ def register_cached_output(
         content_id=record_content_id,
         job_id=record_job_id,
         name=record_name,
+        preview_id=record_preview_id,
     )
 
 
 def register_executed_output(
-    abs_path: str, job_id: str | None = None
+    abs_path: str, job_id: str | None = None, preview_ref: dict | None = None
 ) -> RegisteredAsset | None:
     locator = os.path.abspath(abs_path)
+    preview = _probe_output_preview(preview_ref)
     try:
         stat_result = os.stat(locator, follow_symlinks=True)
         size_bytes = stat_result.st_size
@@ -740,7 +831,7 @@ def register_executed_output(
                 existing = session.scalars(
                     select(AssetContent).where(
                         AssetContent.path == locator,
-                        AssetContent.is_missing.is_(False),
+                        AssetContent.is_missing == false(),
                     )
                 ).first()
                 if existing is not None:
@@ -760,11 +851,14 @@ def register_executed_output(
                     tags=path_tags,
                     system_metadata=system_metadata,
                 )
+                if preview is not None:
+                    _link_output_preview(session, record, preview)
                 # Read before commit: expiry would reload them in a second write transaction.
                 record_id = record.id
                 record_content_id = record.content_id
                 record_job_id = record.job_id
                 record_name = record.name
+                record_preview_id = record.preview_id
                 session.commit()
             except Exception:
                 session.rollback()
@@ -780,4 +874,5 @@ def register_executed_output(
         content_id=record_content_id,
         job_id=record_job_id,
         name=record_name,
+        preview_id=record_preview_id,
     )

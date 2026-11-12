@@ -26,7 +26,7 @@ class MageFlowTokenizer(comfy.text_encoders.qwen3vl.Qwen3VLTokenizer):
         self.llama_template = MAGE_T2I_TEMPLATE
         self.llama_template_images = MAGE_EDIT_TEMPLATE
 
-    def tokenize_with_weights(self, text, return_word_ids=False, llama_template=None, images=[], prevent_empty_text=False, thinking=True, **kwargs):
+    def tokenize_with_weights(self, text, return_word_ids=False, llama_template=None, images=[], prevent_empty_text=False, **kwargs):
         image = kwargs.get("image", None)
         if image is not None and len(images) == 0:
             images = [image[i:i + 1] for i in range(image.shape[0])]
@@ -37,8 +37,7 @@ class MageFlowTokenizer(comfy.text_encoders.qwen3vl.Qwen3VLTokenizer):
                 llama_template = self.llama_template_images.replace("{}", prefix + "{}", 1)
             else:
                 llama_template = self.llama_template
-        # thinking=True: Mage templates end at "<|im_start|>assistant\n" with no <think> block.
-        return super().tokenize_with_weights(text, return_word_ids=return_word_ids, llama_template=llama_template, images=images, prevent_empty_text=prevent_empty_text, thinking=thinking, **kwargs)
+        return super().tokenize_with_weights(text, return_word_ids=return_word_ids, llama_template=llama_template, images=images, prevent_empty_text=prevent_empty_text, **kwargs)
 
 
 class MageFlowQwen3VLClipModel(comfy.text_encoders.qwen3vl.Qwen3VLClipModel):
