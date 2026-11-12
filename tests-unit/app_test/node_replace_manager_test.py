@@ -88,3 +88,73 @@ def test_register_dedupe_does_not_affect_other_old_nodes(NodeReplaceManager):
     manager.register(FakeNodeReplace(new_node_id="NewB", old_node_id="OldB"))
     assert len(manager.get_replacement("OldA")) == 1
     assert len(manager.get_replacement("OldB")) == 1
+
+
+def test_unregister_removes_only_the_replacement_it_is_given(NodeReplaceManager):
+    manager = NodeReplaceManager()
+    first = FakeNodeReplace(new_node_id="AltA", old_node_id="OldNode")
+    second = FakeNodeReplace(new_node_id="AltB", old_node_id="OldNode")
+    manager.register(first)
+    manager.register(second)
+
+    manager.unregister(first)
+
+    assert manager.get_replacement("OldNode") == [second]
+    manager.unregister(second)
+    assert not manager.has_replacement("OldNode")
+
+
+def test_unregister_leaves_a_pair_another_registration_made(NodeReplaceManager):
+    """A duplicate `register` adds nothing, so its `unregister` removes nothing."""
+    manager = NodeReplaceManager()
+    first = FakeNodeReplace(new_node_id="NewNode", old_node_id="OldNode")
+    manager.register(first)
+    duplicate = FakeNodeReplace(new_node_id="NewNode", old_node_id="OldNode")
+    manager.register(duplicate)
+
+    manager.unregister(duplicate)
+    manager.unregister(FakeNodeReplace(new_node_id="NewNode", old_node_id="Unknown"))
+
+    assert manager.get_replacement("OldNode") == [first]
+
+
+def test_the_replacements_handed_out_for_a_node_are_not_changed_afterwards(NodeReplaceManager):
+    """`apply_replacements` reads the list on the server thread while a node registers."""
+    manager = NodeReplaceManager()
+    first = FakeNodeReplace(new_node_id="AltA", old_node_id="OldNode")
+    second = FakeNodeReplace(new_node_id="AltB", old_node_id="OldNode")
+    manager.register(first)
+    handed_out = manager.get_replacement("OldNode")
+
+    manager.register(second)
+    manager.unregister(first)
+    manager.unregister(second)
+
+    assert handed_out == [first]
+    assert not manager.has_replacement("OldNode")
+
+
+def test_listing_while_another_thread_registers_does_not_fail(NodeReplaceManager):
+    import threading
+
+    manager = NodeReplaceManager()
+    failures = []
+
+    class Listed(FakeNodeReplace):
+        def as_dict(self):
+            return {"new_node_id": self.new_node_id}
+
+    def register():
+        for n in range(20000):
+            manager.register(Listed(new_node_id="NewNode", old_node_id=f"Old{n}"))
+
+    thread = threading.Thread(target=register)
+    thread.start()
+    while thread.is_alive():
+        try:
+            manager.as_dict()
+        except RuntimeError as error:
+            failures.append(error)
+    thread.join()
+
+    assert failures == [] and len(manager.as_dict()) == 20000
