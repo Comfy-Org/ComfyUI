@@ -10,7 +10,7 @@ import aiohttp
 import torch
 from pydantic import BaseModel, Field
 
-from comfy_api.latest import IO, Input, Types
+from comfy_api.v3 import IO, Input, Types
 
 from . import request_logger
 from ._helpers import diagnose_connectivity, is_processing_interrupted, sleep_with_interrupt

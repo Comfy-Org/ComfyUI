@@ -6,7 +6,7 @@ import comfy.model_management
 import comfy.utils
 import numpy as np
 from typing_extensions import override
-from comfy_api.latest import ComfyExtension, io
+from comfy_api.v3 import ComfyExtension, io
 from comfy_extras.nodes_wan import parse_json_tracks
 
 # https://github.com/ali-vilab/Wan-Move/blob/main/wan/modules/trajectory.py

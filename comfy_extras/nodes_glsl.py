@@ -10,7 +10,7 @@ import torch
 
 import nodes
 import comfy_angle
-from comfy_api.latest import ComfyExtension, io, ui
+from comfy_api.v3 import ComfyExtension, io, ui
 from typing_extensions import override
 
 logger = logging.getLogger(__name__)

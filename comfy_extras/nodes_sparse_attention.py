@@ -14,7 +14,7 @@ import comfy.model_management
 import comfy.model_prefetch
 import comfy.patcher_extension
 from comfy.ldm.minimax.model import MiniMaxH3Model
-from comfy_api.latest import ComfyExtension, io
+from comfy_api.v3 import ComfyExtension, io
 
 HEAD_DIM = 128
 BLOCK_SIZE = 64

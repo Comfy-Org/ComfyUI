@@ -4,7 +4,7 @@ import torch
 from comfy.ldm.rt_detr.rtdetr_v4 import COCO_CLASSES
 import comfy.model_management
 import comfy.utils
-from comfy_api.latest import ComfyExtension, io
+from comfy_api.v3 import ComfyExtension, io
 from torchvision.transforms import ToPILImage, ToTensor
 from PIL import ImageDraw, ImageFont
 

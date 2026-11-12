@@ -10,8 +10,8 @@ import aiohttp
 import torch
 from aiohttp.client_exceptions import ClientError, ContentTypeError
 
-from comfy_api.latest import IO as COMFY_IO
-from comfy_api.latest import InputImpl, Types
+from comfy_api.v3 import IO as COMFY_IO
+from comfy_api.v3 import InputImpl, Types
 from folder_paths import get_output_directory
 
 from . import request_logger

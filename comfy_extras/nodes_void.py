@@ -12,7 +12,7 @@ import folder_paths
 import node_helpers
 import nodes
 from comfy.utils import model_trange as trange
-from comfy_api.latest import ComfyExtension, io
+from comfy_api.v3 import ComfyExtension, io
 from torchvision.models.optical_flow import raft_large
 from typing_extensions import override
 

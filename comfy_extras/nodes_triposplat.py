@@ -10,7 +10,7 @@ import comfy.model_management
 import comfy.nested_tensor
 import comfy.patcher_extension
 import comfy.utils
-from comfy_api.latest import ComfyExtension, IO, Types
+from comfy_api.v3 import ComfyExtension, IO, Types
 
 
 _Q_TOKEN_LENGTH = 8192

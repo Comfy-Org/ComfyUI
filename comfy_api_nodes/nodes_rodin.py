@@ -17,7 +17,7 @@ from PIL import Image
 from typing_extensions import override
 
 import folder_paths as comfy_paths
-from comfy_api.latest import IO, ComfyExtension, Types
+from comfy_api.v3 import IO, ComfyExtension, Types
 from comfy_api_nodes.apis.rodin import (
     JobStatus,
     Rodin3DCheckStatusRequest,

@@ -2,7 +2,7 @@ import math
 
 from typing_extensions import override
 
-from comfy_api.latest import ComfyExtension, IO
+from comfy_api.v3 import ComfyExtension, IO
 
 # Scene layout shared with the frontend preview (src/extensions/core/cameraAngle/types.ts):
 # a unit subject cube sits at the world origin, where downstream 3D nodes centre their models.

@@ -7,7 +7,7 @@ import comfy.model_patcher
 import comfy.samplers
 import comfy.utils
 from comfy.k_diffusion.sampling import to_d
-from comfy_api.latest import ComfyExtension, io
+from comfy_api.v3 import ComfyExtension, io
 
 
 @torch.no_grad()

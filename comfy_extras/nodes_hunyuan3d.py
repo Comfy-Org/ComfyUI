@@ -3,8 +3,8 @@ from comfy.ldm.modules.diffusionmodules.mmdit import get_1d_sincos_pos_embed_fro
 import comfy.model_management
 from comfy_extras.nodes_save_3d import pack_variable_mesh_batch
 from typing_extensions import override
-from comfy_api.latest import ComfyExtension, IO, Types
-from comfy_api.latest._util import MESH, VOXEL  # only for backward compatibility if someone import it from this file (will be removed later) # noqa
+from comfy_api.v3 import ComfyExtension, IO, Types
+from comfy_api.v3._util import MESH, VOXEL  # only for backward compatibility if someone import it from this file (will be removed later) # noqa
 
 
 class EmptyLatentHunyuan3Dv2(IO.ComfyNode):

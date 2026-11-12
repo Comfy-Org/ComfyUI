@@ -3,7 +3,7 @@ from typing_extensions import override
 
 import comfy.model_management
 import node_helpers
-from comfy_api.latest import ComfyExtension, IO
+from comfy_api.v3 import ComfyExtension, IO
 
 
 class TextEncodeAceStepAudio(IO.ComfyNode):

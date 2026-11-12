@@ -15,7 +15,7 @@ from scipy.sparse.csgraph import connected_components
 
 import comfy.model_management
 import comfy.utils
-from comfy_api.latest import ComfyExtension, IO, Types
+from comfy_api.v3 import ComfyExtension, IO, Types
 from comfy_extras.mesh3d.postprocess.qem_decimate import _compute_vertex_normals
 from comfy_extras.mesh3d.postprocess.remesh import remesh_narrow_band_dc
 from comfy_extras.nodes_camera import _lookat_camera_info, _mat_to_quat, _quat_mul, _quat_to_mat, _rotate_camera_info, camera_list

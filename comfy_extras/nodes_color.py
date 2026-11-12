@@ -1,5 +1,5 @@
 from typing_extensions import override
-from comfy_api.latest import ComfyExtension, io
+from comfy_api.v3 import ComfyExtension, io
 from comfy_extras.color_util import hex_to_rgb
 
 

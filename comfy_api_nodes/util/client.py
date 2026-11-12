@@ -23,7 +23,7 @@ from comfy.model_management import (
     interrupt_current_processing,
     throw_exception_if_processing_interrupted,
 )
-from comfy_api.latest import IO
+from comfy_api.v3 import IO
 from server import PromptServer
 
 from . import request_logger

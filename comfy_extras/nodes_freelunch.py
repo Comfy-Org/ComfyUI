@@ -3,7 +3,7 @@
 import torch
 import logging
 from typing_extensions import override
-from comfy_api.latest import ComfyExtension, IO
+from comfy_api.v3 import ComfyExtension, IO
 
 def Fourier_filter(x, threshold, scale):
     # FFT

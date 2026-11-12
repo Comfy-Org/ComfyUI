@@ -2,7 +2,7 @@ from fractions import Fraction
 
 from typing_extensions import override
 
-from comfy_api.latest import IO, ComfyExtension, Input, InputImpl, Types
+from comfy_api.v3 import IO, ComfyExtension, Input, InputImpl, Types
 from comfy_api_nodes.apis.beeble import (
     CreateSwitchXRequest,
     SwitchXStatusResponse,

@@ -4,7 +4,7 @@ from io import BytesIO
 import torch
 from typing_extensions import override
 
-from comfy_api.latest import IO, ComfyExtension, Input, Types
+from comfy_api.v3 import IO, ComfyExtension, Input, Types
 from comfy_api_nodes.apis.hunyuan3d import (
     Hunyuan3DViewImage,
     InputGenerateType,

@@ -3,7 +3,7 @@ from typing_extensions import override
 
 import comfy.model_management
 from comfy.text_encoders.yue2 import FRAMES_PER_SECOND
-from comfy_api.latest import ComfyExtension, io
+from comfy_api.v3 import ComfyExtension, io
 
 
 class YuE2GenerateABC(io.ComfyNode):

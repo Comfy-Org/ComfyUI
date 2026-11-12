@@ -1,6 +1,6 @@
 import numpy as np
 
-from comfy_api.latest import ComfyExtension, io
+from comfy_api.v3 import ComfyExtension, io
 from comfy_api.input import CurveInput
 from typing_extensions import override
 

@@ -2,7 +2,7 @@ import torch
 from typing_extensions import override
 
 from comfy.k_diffusion.sampling import sigma_to_half_log_snr
-from comfy_api.latest import ComfyExtension, io
+from comfy_api.v3 import ComfyExtension, io
 
 
 class EpsilonScaling(io.ComfyNode):

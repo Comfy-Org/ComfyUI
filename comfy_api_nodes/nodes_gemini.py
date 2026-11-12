@@ -14,7 +14,7 @@ import torch
 from typing_extensions import override
 
 import folder_paths
-from comfy_api.latest import IO, ComfyExtension, Input, InputImpl, Types
+from comfy_api.v3 import IO, ComfyExtension, Input, InputImpl, Types
 from comfy_api_nodes.apis.gemini import (
     GeminiContent,
     GeminiFile,

@@ -4,7 +4,7 @@ from typing_extensions import override
 import comfy.utils
 import node_helpers
 from comfy.ldm.flux.model import views_to_grid
-from comfy_api.latest import ComfyExtension, io
+from comfy_api.v3 import ComfyExtension, io
 
 VIEW_GRID = [(0, 0), (0, 2), (1, 0), (0, 1), (1, 1), (1, 2)]
 VIEW_NAMES = ["front", "right", "back", "left", "top", "bottom"]

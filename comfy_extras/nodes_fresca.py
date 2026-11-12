@@ -2,7 +2,7 @@
 import torch
 import torch.fft as fft
 from typing_extensions import override
-from comfy_api.latest import ComfyExtension, io
+from comfy_api.v3 import ComfyExtension, io
 
 
 def Fourier_filter(x, scale_low=1.0, scale_high=1.5, freq_cutoff=20):

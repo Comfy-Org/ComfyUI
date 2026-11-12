@@ -3,7 +3,7 @@ import torch
 from PIL import Image as PILImage, ImageColor, ImageDraw, ImageFont
 from typing_extensions import override
 
-from comfy_api.latest import ComfyExtension, IO
+from comfy_api.v3 import ComfyExtension, IO
 
 
 class TextOverlay(IO.ComfyNode):

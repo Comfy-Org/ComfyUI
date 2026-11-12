@@ -3,7 +3,7 @@
 import torch
 from typing import Tuple, Callable, Optional
 from typing_extensions import override
-from comfy_api.latest import ComfyExtension, io
+from comfy_api.v3 import ComfyExtension, io
 import math
 
 def do_nothing(x: torch.Tensor, mode:str=None):

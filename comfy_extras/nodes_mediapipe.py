@@ -22,7 +22,7 @@ import comfy.model_patcher
 import comfy.storage
 import comfy.utils
 import folder_paths
-from comfy_api.latest import ComfyExtension, io
+from comfy_api.v3 import ComfyExtension, io
 
 from comfy_extras.mediapipe.face_landmarker import FaceLandmarker
 from comfy_extras.mediapipe.face_geometry import transformation_matrix_from_detection

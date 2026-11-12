@@ -1,4 +1,4 @@
-from comfy_api.latest import ComfyExtension, io, ComfyAPI
+from comfy_api.v3 import ComfyExtension, io, ComfyAPI
 
 api = ComfyAPI()
 

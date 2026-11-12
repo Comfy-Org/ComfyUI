@@ -1,6 +1,6 @@
 import folder_paths
 from typing_extensions import override
-from comfy_api.latest import ComfyExtension, IO
+from comfy_api.v3 import ComfyExtension, IO
 from comfy.bg_removal_model import load
 
 

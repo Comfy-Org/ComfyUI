@@ -4,7 +4,7 @@ from typing_extensions import override
 import comfy.model_management
 import comfy.utils
 import node_helpers
-from comfy_api.latest import ComfyExtension, io
+from comfy_api.v3 import ComfyExtension, io
 
 
 def _resize_long_edge(image, max_size, stride=16):

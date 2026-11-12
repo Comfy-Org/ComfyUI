@@ -4,7 +4,7 @@ import comfy.model_management
 import nodes
 import torch
 from typing_extensions import override
-from comfy_api.latest import ComfyExtension, io
+from comfy_api.v3 import ComfyExtension, io
 from comfy_extras.nodes_slg import SkipLayerGuidanceDiT
 
 

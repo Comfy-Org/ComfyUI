@@ -1,4 +1,4 @@
-from comfy_api.latest import io
+from comfy_api.v3 import io
 from comfy_execution.graph_utils import GraphBuilder, is_link
 from server import PromptServer
 

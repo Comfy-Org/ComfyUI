@@ -3,7 +3,7 @@ from typing_extensions import override
 import folder_paths
 import comfy.sd
 import comfy.model_management
-from comfy_api.latest import ComfyExtension, io
+from comfy_api.v3 import ComfyExtension, io
 
 
 class QuadrupleCLIPLoader(io.ComfyNode):
