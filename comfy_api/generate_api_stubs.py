@@ -8,6 +8,7 @@ import os
 import sys
 import logging
 import importlib
+import importlib.util
 
 # Add ComfyUI to path so we can import modules
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -21,6 +22,12 @@ def generate_stubs_for_module(module_name: str) -> None:
     try:
         # Import the module
         module = importlib.import_module(module_name)
+
+        # A version with its own generator writes its own stubs
+        if importlib.util.find_spec(f"{module_name}._generate") is not None:
+            importlib.import_module(f"{module_name}._generate").main()
+            logging.info(f"Generated stub file for {module_name}")
+            return
 
         # Check if module has ComfyAPISync (the sync wrapper)
         if hasattr(module, "ComfyAPISync"):
