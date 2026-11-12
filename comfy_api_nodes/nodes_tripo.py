@@ -4,7 +4,7 @@ from urllib.parse import urlparse
 
 from typing_extensions import override
 
-from comfy_api.latest import IO, ComfyExtension, Input, Types
+from comfy_api.v3 import IO, ComfyExtension, Input, Types
 from comfy_api_nodes.apis.tripo import (
     TRIPO_BIPED_ANIMATIONS,
     TripoAnimatePrerigcheckRequest,

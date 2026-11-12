@@ -10,7 +10,7 @@ from typing_extensions import override
 
 import folder_paths
 import node_helpers
-from comfy_api.latest import ComfyExtension, io, Input, InputImpl, Types
+from comfy_api.v3 import ComfyExtension, io, Input, InputImpl, Types
 
 
 def load_and_process_images(image_files, input_dir):

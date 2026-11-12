@@ -4,7 +4,7 @@ import torch
 from typing_extensions import override
 
 import comfy.model_management
-from comfy_api.latest import ComfyExtension, IO
+from comfy_api.v3 import ComfyExtension, IO
 
 
 def _quat_to_mat(q):

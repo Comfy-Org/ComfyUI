@@ -1,7 +1,7 @@
 import nodes
 
 from typing_extensions import override
-from comfy_api.latest import IO, ComfyExtension
+from comfy_api.v3 import IO, ComfyExtension
 
 
 class ImageCompare(IO.ComfyNode):

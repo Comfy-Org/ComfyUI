@@ -6,7 +6,7 @@ import os
 import logging
 from enum import Enum
 from typing_extensions import override
-from comfy_api.latest import ComfyExtension, io
+from comfy_api.v3 import ComfyExtension, io
 from tqdm.auto import trange
 
 CLAMP_QUANTILE = 0.99

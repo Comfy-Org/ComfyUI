@@ -7,7 +7,7 @@ from PIL import Image
 
 import folder_paths
 import node_helpers
-from comfy_api.latest import ComfyExtension, io, UI
+from comfy_api.v3 import ComfyExtension, io, UI
 from typing_extensions import override
 
 

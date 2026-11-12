@@ -1,7 +1,7 @@
 import logging
 
 from typing_extensions import override
-from comfy_api.latest import ComfyExtension, io
+from comfy_api.v3 import ComfyExtension, io
 import torch
 
 import comfy.model_management

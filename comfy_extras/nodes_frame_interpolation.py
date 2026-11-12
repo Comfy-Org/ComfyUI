@@ -9,7 +9,7 @@ import folder_paths
 from comfy import model_management
 from comfy_extras.frame_interpolation_models.ifnet import IFNet, detect_rife_config
 from comfy_extras.frame_interpolation_models.film_net import FILMNet
-from comfy_api.latest import ComfyExtension, io
+from comfy_api.v3 import ComfyExtension, io
 
 FrameInterpolationModel = io.Custom("INTERP_MODEL")
 

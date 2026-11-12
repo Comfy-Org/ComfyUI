@@ -1,6 +1,6 @@
 import node_helpers
 from typing_extensions import override
-from comfy_api.latest import ComfyExtension, io
+from comfy_api.v3 import ComfyExtension, io
 import math
 import comfy.utils
 

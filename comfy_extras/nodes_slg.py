@@ -2,7 +2,7 @@ import comfy.model_patcher
 import comfy.samplers
 import re
 from typing_extensions import override
-from comfy_api.latest import ComfyExtension, io
+from comfy_api.v3 import ComfyExtension, io
 
 
 class SkipLayerGuidanceDiT(io.ComfyNode):

@@ -21,7 +21,7 @@ from app.comfy_api_env import normalize_comfy_api_base
 from app.deploy_environment import get_deploy_environment
 from comfy.cli_args import args
 from comfy.model_management import processing_interrupted
-from comfy_api.latest import IO
+from comfy_api.v3 import IO
 from comfy_execution.graph_utils import is_link
 from comfy_execution.utils import get_executing_context
 from comfyui_version import __version__ as comfyui_version

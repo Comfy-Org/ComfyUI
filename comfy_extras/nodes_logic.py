@@ -1,7 +1,7 @@
 from typing import TypedDict
 from typing_extensions import override
-from comfy_api.latest import ComfyExtension, io
-from comfy_api.latest import _io
+from comfy_api.v3 import ComfyExtension, io
+from comfy_api.v3 import _io
 
 # sentinel for missing inputs
 MISSING = object()

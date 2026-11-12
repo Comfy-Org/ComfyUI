@@ -7,7 +7,7 @@ from typing_extensions import override
 
 import comfy.model_patcher
 import comfy.samplers
-from comfy_api.latest import ComfyExtension, io
+from comfy_api.v3 import ComfyExtension, io
 
 
 class PerturbedAttentionGuidance(io.ComfyNode):

@@ -8,7 +8,7 @@ import hashlib
 import node_helpers
 import logging
 from typing_extensions import override
-from comfy_api.latest import ComfyExtension, IO, UI
+from comfy_api.v3 import ComfyExtension, IO, UI
 from server import PromptServer
 
 class EmptyLatentAudio(IO.ComfyNode):

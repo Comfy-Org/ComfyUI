@@ -5,7 +5,7 @@ import numpy as np
 import torch
 from typing_extensions import override
 
-from comfy_api.latest import ComfyExtension, IO, Types
+from comfy_api.v3 import ComfyExtension, IO, Types
 from comfy_extras.mesh3d.fileio import gltf_read, mesh_file_read
 
 

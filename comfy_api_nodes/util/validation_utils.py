@@ -2,7 +2,7 @@ import logging
 
 import torch
 
-from comfy_api.latest import Input
+from comfy_api.v3 import Input
 
 
 def get_image_dimensions(image: torch.Tensor) -> tuple[int, int]:

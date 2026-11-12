@@ -26,7 +26,7 @@ import comfy.utils
 import node_helpers
 from comfy.ldm.minimax.model import FRAME_PER_TOKEN, FRAME_RESCALE
 from comfy.ldm.minimax.vae import IMAGENET_MEAN
-from comfy_api.latest import ComfyExtension, io
+from comfy_api.v3 import ComfyExtension, io
 
 CANVAS_MULTIPLE = 32
 BASE_SHORT_EDGE = 768

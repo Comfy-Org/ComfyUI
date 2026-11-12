@@ -16,7 +16,7 @@ from typing_extensions import override
 
 import folder_paths
 from comfy.cli_args import args
-from comfy_api.latest import ComfyExtension, IO, Types, UI
+from comfy_api.v3 import ComfyExtension, IO, Types, UI
 from server import PromptServer
 
 

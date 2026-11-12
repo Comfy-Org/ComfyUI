@@ -4,7 +4,7 @@ import numpy as np
 import torch
 
 from typing_extensions import override
-from comfy_api.latest import ComfyExtension, io
+from comfy_api.v3 import ComfyExtension, io
 
 
 def loglinear_interp(t_steps, num_steps):

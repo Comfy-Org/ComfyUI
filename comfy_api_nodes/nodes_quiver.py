@@ -2,7 +2,7 @@ from io import BytesIO
 
 from typing_extensions import override
 
-from comfy_api.latest import IO, ComfyExtension
+from comfy_api.v3 import IO, ComfyExtension
 from comfy_api_nodes.apis.quiver import (
     QuiverImageObject,
     QuiverImageToSVGRequest,

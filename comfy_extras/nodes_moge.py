@@ -6,7 +6,7 @@ import math
 
 import comfy.utils
 import folder_paths
-from comfy_api.latest import ComfyExtension, Types, io
+from comfy_api.v3 import ComfyExtension, Types, io
 from typing_extensions import override
 
 from comfy.ldm.colormap import turbo as _turbo

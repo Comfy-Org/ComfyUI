@@ -2,7 +2,7 @@ import json
 import node_helpers
 import comfy.utils
 from typing_extensions import override
-from comfy_api.latest import ComfyExtension, io
+from comfy_api.v3 import ComfyExtension, io
 import comfy.model_management
 import torch
 import math

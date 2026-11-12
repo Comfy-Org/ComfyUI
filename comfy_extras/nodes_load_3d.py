@@ -4,7 +4,7 @@ import os
 import uuid
 
 from typing_extensions import override
-from comfy_api.latest import IO, UI, ComfyExtension, InputImpl, Types
+from comfy_api.v3 import IO, UI, ComfyExtension, InputImpl, Types
 
 from pathlib import Path
 

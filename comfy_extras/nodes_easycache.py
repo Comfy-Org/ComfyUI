@@ -1,6 +1,6 @@
 from __future__ import annotations
 from typing import TYPE_CHECKING, Union
-from comfy_api.latest import io, ComfyExtension
+from comfy_api.v3 import io, ComfyExtension
 import comfy.patcher_extension
 import logging
 import torch

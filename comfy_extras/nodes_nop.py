@@ -1,4 +1,4 @@
-from comfy_api.latest import ComfyExtension, io
+from comfy_api.v3 import ComfyExtension, io
 from typing_extensions import override
 # If you write a node that is so useless that it breaks ComfyUI it will be featured in this exclusive list
 
