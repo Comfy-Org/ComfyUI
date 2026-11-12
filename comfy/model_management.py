@@ -127,17 +127,19 @@ if args.vulkan is not None:
     import torchvulkan
     vulkan_enabled = True
     default_vulkan_device = torch.device(f"vulkan:{args.vulkan}")
+    torch.set_default_device(default_vulkan_device)
+    torchvulkan.set_device(default_vulkan_device)
     logging.info("Using vulkan with device: {}".format(args.vulkan))
     lowvram_available = False # not quite ready yet.
 
 try:
     _ = torch.xpu.device_count()
-    xpu_available = torch.xpu.is_available()
+    xpu_available = torch.xpu.is_available() and (not vulkan_enabled)
 except:
     xpu_available = False
 
 try:
-    if torch.backends.mps.is_available():
+    if torch.backends.mps.is_available() and (not vulkan_enabled):
         cpu_state = CPUState.MPS
         import torch.mps
 except:
@@ -146,14 +148,14 @@ except:
 try:
     import torch_npu  # noqa: F401
     _ = torch.npu.device_count()
-    npu_available = torch.npu.is_available()
+    npu_available = torch.npu.is_available() and (not vulkan_enabled)
 except:
     npu_available = False
 
 try:
     import torch_mlu  # noqa: F401
     _ = torch.mlu.device_count()
-    mlu_available = torch.mlu.is_available()
+    mlu_available = torch.mlu.is_available() and (not vulkan_enabled)
 except:
     mlu_available = False
 
@@ -218,12 +220,7 @@ def get_torch_device():
         return torch.device("cpu")
     else:
         if is_vulkan():
-            # see other comments about torchvulkan versioning
-            if hasattr(torchvulkan, "current_device"):
-                return torch.device("vulkan", torchvulkan.current_device())
-            else:
-                global default_vulkan_device
-                return default_vulkan_device
+            return torch.device("vulkan", torchvulkan.current_device())
         elif is_intel_xpu():
             return torch.device("xpu", torch.xpu.current_device())
         elif is_ascend_npu():
@@ -347,19 +344,11 @@ def get_total_memory(dev=None, torch_total_too=False):
         mem_total_torch = mem_total
     else:
         if is_vulkan():
-            # Current torchvulkan release does not have memory management functionality, but new releases will.
-            # Building torchvulkan from source in master branch will allow users to use it.
-            # This condition should be removed once future releases are available.
-            if hasattr(torchvulkan, "memory_stats"):
-                stats = torchvulkan.memory_stats(dev)
-                mem_reserved = stats['reserved_bytes.all.current']
-                mem_total_vk = torchvulkan.get_device_properties(dev).total_memory
-                mem_total_torch = mem_reserved
-                mem_total = mem_total_vk
-            else:
-                # follow same workaround as directml
-                mem_total = 1024 * 1024 * 1024
-                mem_total_torch = mem_total
+            stats = torchvulkan.memory_stats(dev)
+            mem_reserved = stats['reserved_bytes.all.current']
+            mem_total_vk = torchvulkan.get_device_properties(dev).total_memory
+            mem_total_torch = mem_reserved
+            mem_total = mem_total_vk
         elif directml_enabled:
             mem_total = 1024 * 1024 * 1024 #TODO
             mem_total_torch = mem_total
@@ -464,6 +453,8 @@ else:
 def is_nvidia():
     global cpu_state
     if cpu_state == CPUState.GPU:
+        if is_vulkan():
+            return False
         if torch.version.cuda:
             return True
     return False
@@ -471,6 +462,8 @@ def is_nvidia():
 def is_amd():
     global cpu_state
     if cpu_state == CPUState.GPU:
+        if is_vulkan():
+            return False
         if torch.version.hip:
             return True
     return False
@@ -644,10 +637,7 @@ if DISABLE_SMART_MEMORY:
 def get_torch_device_name(device):
     if hasattr(device, 'type'):
         if device.type == "vulkan":
-            if hasattr(torchvulkan, "get_device_name"):
-                return f"Vulkan {device.index}: {torchvulkan.get_device_name(device)}"
-            else:
-                return f"Vulkan {device.index}" # versions with get_device_name not yet implemented
+            return f"Vulkan {device.index}: {torchvulkan.get_device_name(device)}"
         elif device.type == "cuda":
             try:
                 allocator_backend = torch.cuda.get_allocator_backend()
@@ -1940,17 +1930,12 @@ def get_free_memory(dev=None, torch_free_too=False):
             mem_free_total = 1024 * 1024 * 1024 #TODO
             mem_free_torch = mem_free_total
         elif is_vulkan():
-            if hasattr(torchvulkan, "memory_stats"):
-                stats = torchvulkan.memory_stats(dev)
-                mem_active = stats['active_bytes.all.current']
-                mem_reserved = stats['reserved_bytes.all.current']
-                mem_free_vk = torchvulkan.get_device_properties(dev).total_memory - mem_reserved
-                mem_free_torch = mem_reserved - mem_active
-                mem_free_total = mem_free_vk + mem_free_torch
-            else:
-                # same workaround as directml
-                mem_free_total = 1024 * 1024 * 1024
-                mem_free_torch = mem_free_total
+            stats = torchvulkan.memory_stats(dev)
+            mem_active = stats['active_bytes.all.current']
+            mem_reserved = stats['reserved_bytes.all.current']
+            mem_free_vk = torchvulkan.get_device_properties(dev).total_memory - mem_reserved
+            mem_free_torch = mem_reserved - mem_active
+            mem_free_total = mem_free_vk + mem_free_torch
         elif is_intel_xpu():
             stats = torch.xpu.memory_stats(dev)
             mem_active = stats['active_bytes.all.current']
@@ -2049,6 +2034,8 @@ def should_use_fp16(device=None, model_params=0, prioritize_performance=True, ma
         return False
     
     if is_vulkan():
+        # Current torchvulkan release does not have dtype checking support.
+        # This feature is implemented, and will be available in future releases.
         props = torchvulkan.get_device_properties(device)
         if hasattr(props, "has_fp16"):
             return props.has_fp16
