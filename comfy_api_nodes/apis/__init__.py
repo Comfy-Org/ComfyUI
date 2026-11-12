@@ -5359,7 +5359,7 @@ class NodeVersion(BaseModel):
     )
     supported_accelerators: Optional[List[str]] = Field(
         None,
-        description='List of accelerators (e.g. CUDA, DirectML, ROCm) that this node supports',
+        description='List of accelerators (e.g. CUDA, ROCm) that this node supports',
     )
     supported_comfyui_frontend_version: Optional[str] = Field(
         None, description='Supported versions of ComfyUI frontend'
@@ -6011,7 +6011,7 @@ class Node(BaseModel):
     )
     supported_accelerators: Optional[List[str]] = Field(
         None,
-        description='List of accelerators (e.g. CUDA, DirectML, ROCm) that this node supports',
+        description='List of accelerators (e.g. CUDA, ROCm) that this node supports',
     )
     supported_comfyui_frontend_version: Optional[str] = Field(
         None, description='Supported versions of ComfyUI frontend'
