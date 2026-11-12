@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 from tqdm import tqdm
 import contextlib
 import os
+import time
 
 import comfy.model_management
 import comfy.model_prefetch
@@ -16,7 +17,7 @@ from comfy.ldm.modules.attention import AttentionTensorContainer, ComfyAttention
 from comfy import sd1_clip
 import comfy.text_encoders.qwen_vl
 
-from .llama import BaseLlama, BaseGenerate, FixedKV, FixedKVCache, Int8FixedKVCache, Llama2_, MLP, RMSNorm, apply_penalty, apply_rope, penalty_active, precompute_freqs_cis, rope_matrix
+from .llama import SPEC_ROWS, BaseLlama, BaseGenerate, FixedKV, FixedKVCache, Int8FixedKVCache, Llama2_, MLP, RMSNorm, apply_penalty, apply_rope, penalty_active, precompute_freqs_cis, rope_matrix
 
 
 @dataclass
@@ -38,16 +39,17 @@ class LinearKV(FixedKV):
 
     @staticmethod
     def deferred_tracker(device):
-        # ctl = {pending, parity}: replay the previous step's accepted prefix
-        n = comfy_kitchen.gated_delta_ctl_ints
+        # ctl = {pending, parity, slot[sm], parent[sm], prog[sm]}; without MTP, only row 0 runs.
+        n, sm = comfy_kitchen.gated_delta_ctl_ints, comfy_kitchen.gated_delta_slot_max
+        single = torch.tensor(list(range(sm)) + [-1] * sm + list(range(sm)), dtype=torch.int32)
         host = torch.zeros((2, n), dtype=torch.int32)
         # the host rows are pinned and fenced by events only where the copy is asynchronous
         cuda = torch.device(device).type == "cuda"
         return {"ctl": torch.zeros((n,), dtype=torch.int32, device=device), "host": host.pin_memory() if cuda else host,
-                "copied": [torch.cuda.Event(), torch.cuda.Event()] if cuda else None, "step": None, "parity": 0}
+                "copied": [torch.cuda.Event(), torch.cuda.Event()] if cuda else None, "step": None, "parity": 0, "single": single, "path": None, "tree": None}
 
     def decode_step(self, num_tokens):
-        return self.index > 0 and num_tokens <= 6
+        return self.index > 0 and num_tokens <= SPEC_ROWS
 
     def prepare(self, num_tokens):
         # runs eagerly before the layer (a replayed graph skips its Python): the first linear
@@ -62,10 +64,20 @@ class LinearKV(FixedKV):
             host = t["host"][t["parity"]]
             host[0] = self.uncommitted
             host[1] = t["parity"]
+            host[2:] = t["single"]
+            if t["path"] is not None:
+                host[2:2 + len(t["path"])] = torch.tensor(t["path"], dtype=torch.int32)
+                t["path"] = None
+            if t["tree"] is not None:
+                host[-len(t["tree"].ctl):] = t["tree"].ctl  # parent[], prog[]
             self.ctl.copy_(host, non_blocking=True)
             if t["copied"] is not None:
                 t["copied"][t["parity"]].record(torch.cuda.current_stream(self.ctl.device))
         self.uncommitted = num_tokens if self.decode_step(num_tokens) else 0
+
+    def commit_path(self, base, path):
+        # the next step replays the accepted verify rows
+        self.ctl_tracker["path"] = path
 
     def rollback(self, discard=1):
         # nothing was written: the next step replays fewer tokens
@@ -81,6 +93,116 @@ class LinearKV(FixedKV):
         return self.value
 
 
+class VerifyTree:
+    """Shape of one MTP verify step: draft tokens in a tree rooted at the committed next token.
+
+    Built from nested child lists. A node's first child is the MTP argmax, later children its
+    runner-ups, and only argmax-chain nodes have children. Rows are numbered depth-first, first
+    child first, so the chain is rows 0..chain and no row sits above its depth.
+    """
+
+    def __init__(self, spec, capacity, device):
+        self.device = device
+        self.rows = capacity
+        self.mask = self.positions = None
+        self.update(spec)
+
+    def update(self, spec):
+        # Equal-row topology changes retain the addresses captured by CUDA graphs.
+        self.parent, self.children, self.depth = [], [], []
+
+        def add(node, parent):
+            r = len(self.parent)
+            self.parent.append(parent)
+            self.children.append([])
+            self.depth.append(0 if parent < 0 else self.depth[parent] + 1)
+            if parent >= 0:
+                self.children[parent].append(r)
+            for child in node:
+                add(child, r)
+
+        add(spec, -1)
+        count = len(self.parent)
+        self.chain = 0  # drafts on the argmax chain
+        while self.children[self.chain]:
+            self.chain = self.children[self.chain][0]
+        self.fanout = max(len(c) for c in self.children)
+        self.parent.extend([-1] * (self.rows - count))
+        self.children.extend([] for _ in range(self.rows - count))
+        self.depth.extend([0] * (self.rows - count))
+        # kitchen flash_attention_decode_tree_merge: bit t of row r's mask lets it attend row t
+        mask = []
+        for r in range(self.rows):
+            bits, a = 0, r
+            while a >= 0:
+                bits |= 1 << a
+                a = self.parent[a]
+            mask.append(bits)
+        mask = torch.tensor(mask, dtype=torch.int32, device=self.device)
+        if self.mask is None:
+            self.mask = mask
+        else:
+            self.mask.copy_(mask)
+        # kitchen gated_delta_decode_deferred program: a chain row commits (bit 5) after its
+        # children's leaves ran against its state without committing
+        prog = []
+        for r in range(self.chain + 1):
+            prog.append(r | (32 if self.children[r] else 0))
+            prog.extend(self.children[r][1:])
+        sm = comfy_kitchen.gated_delta_slot_max
+        self.ctl = torch.tensor(self.parent + [-1] * (sm - self.rows) + prog + list(range(count, sm)), dtype=torch.int32)
+        positions = torch.tensor([self.depth], dtype=torch.long, device=self.device)
+        if self.positions is None:
+            self.positions = positions
+        else:
+            self.positions.copy_(positions)
+
+
+# Verify capacity and topology. A fixed depth is a tree with one child per node.
+MTP_MODES = {
+    "2": (4, [[[]]]),
+    "3": (4, [[[[]]]]),
+    "4": (8, [[[[[]]]]]),
+    "5": (8, [[[[[[]]]]]]),
+    "tree2s1": (8, [[[], []], []]),
+    "tree2s2": (8, [[[], [], []], [], []]),
+    "tree3s1": (8, [[[[], []], []], []]),
+    "tree4s1m8": (8, [[[[[]], []], []], []]),
+    "auto": (8, None),
+}
+
+# Every positive composition of seven: a primary chain with terminal siblings.
+_SHAPES = []
+for _cuts in range(64):
+    _ends = [0] + [i for i in range(1, 7) if _cuts & (1 << (i - 1))] + [7]
+    _SHAPES.append(tuple(b - a for a, b in zip(_ends, _ends[1:])))
+
+
+def tree_spec(widths):
+    node = []
+    for width in reversed(widths):
+        node = [node] + [[] for _ in range(width - 1)]
+    return node
+
+
+def best_widths(widths, hits, draft_ms, verify_ms):
+    """Reallocate seven draft rows using conditional rank hits and measured GPU cost."""
+    probabilities = []
+    prior = [0.125] * 8
+    for row in hits:
+        count = sum(row)
+        prior = [(hit + 4 * p) / (count + 4) for hit, p in zip(row, prior)]
+        probabilities.append(prior)
+
+    def score(shape):
+        reach, emitted = 1.0, 1.0
+        for width, probability in zip(shape, probabilities):
+            emitted += reach * sum(probability[:width])
+            reach *= probability[0]
+        return emitted / (verify_ms + len(shape) * draft_ms)
+
+    best = max(_SHAPES, key=score)
+    return best if score(best) > 1.03 * score(widths) else widths
 
 
 def _qwen35_layer_types(n):
@@ -228,6 +350,7 @@ class GatedDeltaNet(nn.Module):
 
         self.in_proj_qkv = ops.Linear(hidden, conv_dim, bias=False, device=device, dtype=dtype)
         self.in_proj_z = ops.Linear(hidden, value_dim, bias=False, device=device, dtype=dtype)
+        self.combined_qkvz = comfy.ops.CombinedLinear((self.in_proj_qkv, self.in_proj_z))
         self.in_proj_b = ops.Linear(hidden, self.num_value_heads, bias=False, device=device, dtype=dtype)
         self.in_proj_a = ops.Linear(hidden, self.num_value_heads, bias=False, device=device, dtype=dtype)
         self.out_proj = ops.Linear(value_dim, hidden, bias=False, device=device, dtype=dtype)
@@ -244,8 +367,12 @@ class GatedDeltaNet(nn.Module):
         batch_size, seq_len, _ = x.shape
 
         # Projections (shared)
-        proj = self.in_proj_qkv(x)  # [B, seq_len, conv_dim]
-        z = self.in_proj_z(x)
+        qkvz = self.combined_qkvz.forward(x)
+        if qkvz is NotImplemented:
+            proj = self.in_proj_qkv(x)  # [B, seq_len, conv_dim]
+            z = self.in_proj_z(x)
+        else:
+            proj, z = qkvz.split((self.key_dim * 2 + self.value_dim, self.value_dim), dim=-1)
 
         if past_key_value is not None and past_key_value.decode_step(seq_len):
             # decode: conv step into the side buffer, then gates + delta rule + gated norm in one
@@ -345,6 +472,7 @@ class GatedAttention(nn.Module):
         self.q_proj = ops.Linear(config.hidden_size, self.inner_size * 2, bias=config.qkv_bias, device=device, dtype=dtype)
         self.k_proj = ops.Linear(config.hidden_size, self.num_kv_heads * self.head_dim, bias=config.qkv_bias, device=device, dtype=dtype)
         self.v_proj = ops.Linear(config.hidden_size, self.num_kv_heads * self.head_dim, bias=config.qkv_bias, device=device, dtype=dtype)
+        self.combined_qkv = comfy.ops.CombinedLinear((self.q_proj, self.k_proj, self.v_proj))
         self.o_proj = ops.Linear(self.inner_size, config.hidden_size, bias=False, device=device, dtype=dtype)
 
         # QK norms with (1+weight) scaling
@@ -369,14 +497,18 @@ class GatedAttention(nn.Module):
         batch_size, seq_length, _ = x.shape
 
         # Project Q (with gate), K, V
-        qg = self.q_proj(x)
+        qkv = self.combined_qkv.forward(x)
+        if qkv is NotImplemented:
+            qg = self.q_proj(x)
+            xk = self.k_proj(x)
+            xv = self.v_proj(x)
+        else:
+            kv_size = self.num_kv_heads * self.head_dim
+            qg, xk, xv = qkv.split((self.inner_size * 2, kv_size, kv_size), dim=-1)
         # Split into query and gate: each is [B, seq, inner_size]
         qg = qg.view(batch_size, seq_length, self.num_heads, self.head_dim * 2)
         xq, gate = qg[..., :self.head_dim], qg[..., self.head_dim:]
         gate = gate.reshape(batch_size, seq_length, -1)  # [B, seq, inner_size]
-
-        xk = self.k_proj(x)
-        xv = self.v_proj(x)
 
         xq = self.q_norm(xq).transpose(1, 2)  # [B, heads, seq, head_dim]
         xk = self.k_norm(xk.view(batch_size, seq_length, self.num_kv_heads, self.head_dim)).transpose(1, 2)
@@ -387,7 +519,7 @@ class GatedAttention(nn.Module):
 
         # KV cache
         present_key_value = past_key_value
-        decode = past_key_value is not None and seq_length <= 6 and attention_mask is None
+        decode = past_key_value is not None and seq_length <= SPEC_ROWS and attention_mask is None
         if decode:
             past_key_value.write(xk, xv)
 
@@ -674,7 +806,8 @@ class Qwen35VisionModel(nn.Module):
             patch_pos_embeds_permute.append(pos_embed)
         return torch.cat(patch_pos_embeds_permute)
 
-    def forward(self, x, grid_thw):
+    def forward(self, x, grid_thw, premerge=None):
+        # premerge: optional {block index: None}, filled with those blocks' outputs (before any merger)
         x = self.patch_embed(x)
         pos_embeds = self.fast_pos_embed_interpolate(grid_thw).to(x.device)
         x = x + pos_embeds
@@ -697,6 +830,8 @@ class Qwen35VisionModel(nn.Module):
             x = blk(x, cu_seqlens=cu_seqlens, position_embeddings=position_embeddings, optimized_attention=optimized_attention)
             if self.deepstack_merger_list is not None and layer_num in self.deepstack_visual_indexes:
                 deepstack_features.append(self.deepstack_merger_list[self.deepstack_visual_indexes.index(layer_num)](x))
+            if premerge is not None and layer_num in premerge:
+                premerge[layer_num] = x
         merged = self.merger(x)
         if self.deepstack_merger_list is not None:
             return merged, deepstack_features
@@ -737,6 +872,8 @@ class Qwen35(BaseLlama, BaseGenerate, torch.nn.Module):
             for m in unit.modules():
                 if isinstance(m, comfy.ops.MixedPrecisionOp):
                     m.comfy_gemv_optimized = True
+                    if m._combined_linear is not None:
+                        m._combined_linear.comfy_gemv_optimized = True
         vision_overrides = QWEN35_MODELS.get(self.model_type, {}).get("vision", {})
         vision_config = {**QWEN35_VISION_DEFAULTS, **vision_overrides, "out_hidden_size": config.hidden_size}
         self.visual = Qwen35VisionModel(vision_config, device=device, dtype=dtype, ops=operations)
@@ -758,6 +895,10 @@ class Qwen35(BaseLlama, BaseGenerate, torch.nn.Module):
             # Qwen3.5 normalizes to [-1, 1] (mean/std 0.5), same as Qwen3-VL.
             image, grid = comfy.text_encoders.qwen_vl.process_qwen2vl_images(embed["data"], patch_size=16, image_mean=[0.5, 0.5, 0.5], image_std=[0.5, 0.5, 0.5])
             return self.visual(image.to(device, dtype=torch.float32), grid), grid
+        if embed["type"] == "video":
+            height, width = embed["size"]
+            video, grid = comfy.text_encoders.qwen_vl.process_qwen2vl_video(embed["data"], height, width, patch_size=16, image_mean=[0.5, 0.5, 0.5], image_std=[0.5, 0.5, 0.5])
+            return self.visual(video.to(device, dtype=torch.float32), grid), grid
         return None, None
 
     def forward(self, x, attention_mask=None, embeds=None, num_tokens=None, intermediate_output=None, final_layer_norm_intermediate=True, dtype=None, embeds_info=[], past_key_values=None):
@@ -773,13 +914,11 @@ class Qwen35(BaseLlama, BaseGenerate, torch.nn.Module):
         sampling = None
         if do_sample and temperature != 0.0:
             sampling = {"temperature": temperature, "top_k": top_k, "top_p": top_p, "min_p": min_p,
-                        "repetition_penalty": repetition_penalty,
-                        "presence_penalty": kwargs.get("presence_penalty", 0.0) or 0.0,
                         "seed": seed if seed is not None else 42}
-        fixed_depth = None if mtp is True else max(2, min(5, int(mtp)))
-        return self._generate_mtp(embeds, max_length, stop_tokens, sampling=sampling, fixed_depth=fixed_depth, position_ids=kwargs.get("position_ids"))
+        return self._generate_mtp(embeds, max_length, stop_tokens, mtp, sampling=sampling, position_ids=kwargs.get("position_ids"),
+                                  repetition_penalty=repetition_penalty, presence_penalty=kwargs.get("presence_penalty", 0.0) or 0.0)
 
-    def _generate_mtp(self, embeds, max_length, stop_tokens, sampling=None, fixed_depth=None, position_ids=None):
+    def _generate_mtp(self, embeds, max_length, stop_tokens, mtp, sampling=None, position_ids=None, repetition_penalty=1.0, presence_penalty=0.0):
         device = embeds.device
         cfg = self.model.config
         if stop_tokens is None:
@@ -788,8 +927,6 @@ class Qwen35(BaseLlama, BaseGenerate, torch.nn.Module):
         embeds = embeds.to(dt)
         if embeds.ndim == 2:
             embeds = embeds.unsqueeze(0)
-        # greedy drafts 3 deep (5 after the probe); sampled stays at 2
-        depth = fixed_depth if fixed_depth is not None else (3 if sampling is None else 2)
         cap = embeds.shape[1] + max_length + 7
         pkv = self.init_kv_cache(embeds.shape[0], cap, device, dt)
         # repair window: drafting ahead plus a near-full rollback
@@ -805,7 +942,7 @@ class Qwen35(BaseLlama, BaseGenerate, torch.nn.Module):
         generator = None
         if sampling is not None:
             generator = torch.Generator(device=device).manual_seed(sampling["seed"])
-        penalized = sampling is not None and penalty_active(sampling["repetition_penalty"], sampling["presence_penalty"])
+        penalized = penalty_active(repetition_penalty, presence_penalty)
 
         # after an image, text positions run behind the cache index (MRoPE); decode continues from the last prefill position
         rope_offset = 0 if position_ids is None else int(position_ids[:, -1].max()) + 1 - embeds.shape[1]
@@ -825,7 +962,7 @@ class Qwen35(BaseLlama, BaseGenerate, torch.nn.Module):
             nt_buf.copy_(lg0.argmax(dim=-1, keepdim=True))
         else:
             nt_buf.copy_(self.sample_token(lg0, sampling["temperature"], sampling["top_k"], sampling["top_p"], sampling["min_p"],
-                                           sampling["repetition_penalty"], [], generator, presence_penalty=sampling["presence_penalty"]))
+                                           1.0, [], generator))
         pen_mask = torch.zeros((lg0.shape[-1],), device=device, dtype=torch.bool) if penalized else None
         h_buf.copy_(x[:, -1:, :])
         del x, lg0
@@ -844,18 +981,25 @@ class Qwen35(BaseLlama, BaseGenerate, torch.nn.Module):
             progress.update(n)
             console.update(n)
 
-        verify_buffers = None
-        drafts = None
-
-        def set_depth(d):
-            nonlocal depth, verify_buffers, drafts
-            depth = d
-            # Saved draft IDs must survive capture of later draft units.
-            drafts = [torch.empty_like(nt_buf) for _ in range(d)]
-            # static hidden/rope buffers: graphed layers bake their input addresses
-            verify_buffers = (torch.empty((embeds.shape[0], d + 1, cfg.hidden_size), device=device, dtype=dt), freqs_at(pos, d + 1).clone())
-
-        set_depth(depth)
+        adaptive = mtp is True
+        # auto: seven draft rows as a chain of widths, reshaped from rank hits and measured step cost
+        widths = (4, 3)
+        hits = [[0.0] * 8 for _ in range(7)]
+        steps, draft_ms, verify_ms = 0, 0.0, 0.0
+        draft_ranks = torch.zeros((7, 7), device=device, dtype=torch.long) if adaptive else None
+        timers = [torch.cuda.Event(enable_timing=True) for _ in range(3)] if adaptive and device.type == "cuda" else None
+        clocks = [0.0] * 3
+        capacity, spec = MTP_MODES["auto" if adaptive else mtp]
+        tree = VerifyTree(tree_spec(widths) if adaptive else spec, capacity, device)
+        depth = tree.chain
+        for kv in pkv:
+            if isinstance(kv, LinearKV):
+                kv.ctl_tracker["tree"] = tree
+            else:
+                kv.tracker["tree"] = tree
+        verify_tokens = torch.zeros((embeds.shape[0], tree.rows), device=device, dtype=torch.long)
+        verify_buffers = (torch.empty((embeds.shape[0], tree.rows, cfg.hidden_size), device=device, dtype=dt), freqs_at(pos, tree.rows).clone())
+        draft_top = torch.empty((embeds.shape[0], 7 if adaptive else tree.fanout), device=device, dtype=torch.long)
         use_graph = self.model.graph_dynamic_vbar_blocks
         compile_allocations = use_graph and comfy.model_prefetch.malloc_graph_enabled(device)
         embed = self.model.embed_tokens
@@ -865,14 +1009,14 @@ class Qwen35(BaseLlama, BaseGenerate, torch.nn.Module):
         draft_freqs = freqs_at(pos).clone()
 
         def draft(token, hidden, p):
-            # one drafted token: mtp head + lm_head argmax, graph-replayed when resident
+            # one drafted token (and its runner-ups for a tree): mtp head + lm_head, graph-replayed when resident
             mtp_kv.prepare(1)
             draft_token.copy_(token)
             draft_hidden.copy_(hidden)
             draft_freqs.copy_(freqs_at(p))
             host_rows = hasattr(embed, "_v") and embed.weight_lowvram_function is None and len(embed.weight_function) == 0 and comfy.ops.vbar_above_watermark(embed)
             queue = comfy.model_prefetch.make_prefetch_queue(
-                [None if host_rows else embed, (head, self.mtp)], device,
+                [None if host_rows else embed, [head, self.mtp]], device,
                 {"prefetch_dynamic_vbars": self.model.prefetch_dynamic_vbars})
 
             def embed_core():
@@ -881,7 +1025,14 @@ class Qwen35(BaseLlama, BaseGenerate, torch.nn.Module):
             def core():
                 n1, r1 = self.mtp(draft_emb, draft_hidden, draft_freqs, mtp_kv)
                 draft_hidden.copy_(r1)
-                draft_token.copy_(self.logits(n1)[:, -1].argmax(dim=-1, keepdim=True))
+                logits = self.logits(n1)[:, -1]
+                if adaptive:
+                    draft_top.copy_(logits.topk(7, dim=-1).indices)
+                    draft_token.copy_(draft_top[:, :1])
+                else:
+                    draft_token.copy_(logits.argmax(dim=-1, keepdim=True))
+                if tree.fanout > 1 and not adaptive:
+                    draft_top.copy_(logits.topk(tree.fanout, dim=-1).indices)
 
             # Host rows stay eager; a tied table uses its graph slot for MTP + head.
             comfy.model_prefetch.prefetch_queue_pop(queue, device, embed, dt, core=embed_core,
@@ -890,104 +1041,136 @@ class Qwen35(BaseLlama, BaseGenerate, torch.nn.Module):
                                                   enable_graph=use_graph, malloc_scope="mtp")
             comfy.model_prefetch.prefetch_queue_pop(queue, device, None, malloc_scope="mtp")
             mtp_kv.advance(1)
-            return draft_token, draft_hidden
+            return draft_token, draft_top, draft_hidden
 
-        def verify_sample(lg, drafts):
-            # accept draft i w.p. p_i(draft), else sample the residual; all depth+1 columns as one batch
+        def verify_sample(lg):
             s = sampling
-            rows = lg[0].float()
+            rows = lg[0] if s is None else lg[0].float()
             if penalized:
-                # committed tokens penalize every column, each draft the columns after it
-                mask = pen_mask.unsqueeze(0).repeat(depth + 1, 1)
-                for c, d in enumerate(drafts):
-                    mask[c + 1:].index_fill_(1, d.reshape(-1), True)
-                rows = torch.where(mask, apply_penalty(rows, s["repetition_penalty"], s["presence_penalty"]), rows)
-            probs, idx = self.processed_probs(rows, s["temperature"], s["top_k"], s["top_p"], s["min_p"], 1.0, [])
-            dr = torch.cat(drafts, dim=1).reshape(-1, 1)
-            if idx is None:
-                p_draft = probs[:depth].gather(1, dr).reshape(-1)
-                w = probs.clone()
-                w[:depth].scatter_(1, dr, 0.0)
-            else:
-                hit = idx[:depth] == dr
-                p_draft = (probs[:depth] * hit).sum(1)
-                w = probs.clone()
-                w[:depth].masked_fill_(hit, 0.0)
-            # residual: p with the draft zeroed (the rescue term only matters when discarded anyway)
-            w = w + (w.sum(1, keepdim=True) == 0) * probs
-            tok = torch.multinomial(w, num_samples=1, generator=generator)
-            corr = tok if idx is None else idx.gather(1, tok)
-            u = torch.rand(depth, device=device, generator=generator)
-            accepted = (u < p_draft).long().cumprod(0).sum()
-            return dr, corr, accepted
+                # Each row sees committed history and its own path, never siblings.
+                mask = pen_mask.unsqueeze(0).repeat(tree.rows, 1)
+                for r in range(1, tree.rows):
+                    mask[r].copy_(mask[tree.parent[r]])
+                    mask[r].index_fill_(0, verify_tokens[:, r], True)
+                rows = torch.where(mask, apply_penalty(rows, repetition_penalty, presence_penalty), rows)
+            if s is None:
+                return rows.argmax(dim=-1).unsqueeze(0)
+            return self.sample_token(rows, s["temperature"], s["top_k"], s["top_p"], s["min_p"],
+                                     1.0, [], generator).transpose(0, 1)
 
         def step():
             # scoped so every temporary dies before the compiler bracket closes
             nonlocal pos
-            tok_in, hid_in = nt_buf, h_buf
+            if adaptive:
+                if timers:
+                    timers[0].record(torch.cuda.current_stream(device))
+                else:
+                    clocks[0] = time.perf_counter()
+            # chain draft k fills row k + 1, its runner-ups that node's sibling rows
+            verify_tokens[:, :1].copy_(nt_buf)
+            hid_in = h_buf
             for k in range(depth):
-                dk, rk = draft(tok_in, hid_in, pos + k)
-                drafts[k].copy_(dk)
-                tok_in, hid_in = drafts[k], rk
-            tokens = torch.cat([nt_buf] + drafts, dim=1)
+                dk, top, hid_in = draft(verify_tokens[:, k:k + 1], hid_in, pos + k)
+                if adaptive:
+                    draft_ranks[k].copy_(top[0])
+                children = tree.children[k]
+                verify_tokens[:, children[0]:children[0] + 1].copy_(dk)
+                for j, c in enumerate(children[1:], 1):
+                    verify_tokens[:, c:c + 1].copy_(top[:, j:j + 1])
+            if adaptive:
+                if timers:
+                    timers[1].record(torch.cuda.current_stream(device))
+                else:
+                    clocks[1] = time.perf_counter()
             embed = self.model.embed_tokens
             if hasattr(embed, "_v") and embed.weight_lowvram_function is None and len(embed.weight_function) == 0 and comfy.ops.vbar_above_watermark(embed):
-                ev = embed.host_rows(tokens, out_dtype=dt)
+                ev = embed.host_rows(verify_tokens, out_dtype=dt)
             else:
-                ev = embed(tokens).to(dt)
-            verify_pos = torch.arange(pos + rope_offset, pos + rope_offset + depth + 1, device=device).unsqueeze(0)
+                ev = embed(verify_tokens).to(dt)
+            verify_pos = tree.positions + pos + rope_offset
             x, _, _ = self.model.forward(None, embeds=ev, attention_mask=None, past_key_values=pkv, position_ids=verify_pos, decode_buffers=verify_buffers)
             # all verify positions in one lm_head GEMV, accept decided GPU-side, one sync
             lg = verify_logits(x)
-            if sampling is None:
-                toks = lg.argmax(dim=-1)
-                vals = torch.cat([toks[0]] + [d[0] for d in drafts]).tolist()
-                t, dr = vals[:depth + 1], vals[depth + 1:]
-                accepts = 0
-                while accepts < depth and t[accepts] == dr[accepts]:
-                    accepts += 1
-                next_toks = tuple(toks[:, i:i + 1] for i in range(depth + 1))
-                commit = tuple(dr[:accepts]) + (t[accepts],)
-            else:
-                dr, corr, accepted = verify_sample(lg, drafts)
-                vals = torch.cat([dr[:, 0], corr[:, 0], accepted.reshape(1)]).tolist()
-                dr, cv, accepts = vals[:depth], vals[depth:2 * depth + 1], vals[-1]
-                next_toks = tuple(corr[i:i + 1] for i in range(depth + 1))
-                commit = tuple(dr[:accepts]) + (cv[accepts],)
-            if accepts < depth:
+            toks = lg.argmax(dim=-1) if sampling is None and not penalized else verify_sample(lg)
+            if adaptive:
+                if timers:
+                    timers[2].record(torch.cuda.current_stream(device))
+                else:
+                    clocks[2] = time.perf_counter()
+            packet = [toks[0], verify_tokens[0, 1:]]
+            if adaptive:
+                packet.append(draft_ranks.reshape(-1))
+            vals = torch.cat(packet).tolist()
+            t, dr = vals[:tree.rows], [None] + vals[tree.rows:2 * tree.rows - 1]
+            # Continue only along a child containing the main model's chosen token.
+            path = [0]
+            while True:
+                node = next((c for c in tree.children[path[-1]] if dr[c] == t[path[-1]]), None)
+                if node is None:
+                    break
+                path.append(node)
+            ranks = []
+            if adaptive:
+                for node in path:
+                    if node >= depth:
+                        break
+                    candidates = vals[15 + 7 * node:22 + 7 * node]
+                    ranks.append(next((r for r, token in enumerate(candidates) if token == t[node]), 7))
+                if timers:
+                    clocks[0], clocks[1], clocks[2] = 0.0, timers[0].elapsed_time(timers[1]), timers[0].elapsed_time(timers[2])
+                else:
+                    clocks[:] = [t * 1000 for t in clocks]
+            commit = tuple(dr[r] for r in path[1:]) + (t[path[-1]],)
+            row = path[-1]
+            next_tok = toks[:, row:row + 1]
+            if len(path) < tree.rows:
                 for kv in pkv:
-                    kv.rollback(depth - accepts)
-            if accepts < depth - 1:
-                mtp_kv.rollback(depth - 1 - accepts)  # mtp entries fed by a rejected draft token
-            nt_buf.copy_(next_toks[accepts])
-            h_buf.copy_(x[:, accepts:accepts + 1, :])
+                    kv.rollback(tree.rows - len(path))
+            on_chain = row == len(path) - 1
+            if not on_chain:
+                for kv in pkv:
+                    kv.commit_path(pos, path)
+            # mtp entries fed by a rejected or off-chain draft token
+            kept = min(len(path) if on_chain else len(path) - 1, depth)
+            if kept < depth:
+                mtp_kv.rollback(depth - kept)
+            nt_buf.copy_(next_tok)
+            h_buf.copy_(x[:, row:row + 1, :])
             if penalized:
-                for d in drafts[:accepts]:
-                    pen_mask.index_fill_(0, d.reshape(-1), True)
+                for r in path[1:]:
+                    pen_mask.index_fill_(0, verify_tokens[:, r], True)
                 pen_mask.index_fill_(0, nt_buf.reshape(-1), True)
-            pos += accepts + 1
-            return accepts, commit
+            pos += len(commit)
+            return commit, ranks
 
-        probe = None if fixed_depth is not None else [0, 0]  # steps, accepted drafts
         try:
             while len(ids) < max_length and ids[-1] not in stop_tokens:
                 with (comfy.model_prefetch.malloc_graph_scope(device) if compile_allocations else contextlib.nullcontext()):
-                    accepts, commit = step()
+                    commit, ranks = step()
+                if adaptive:
+                    steps += 1
+                    for row in hits:
+                        for r in range(8):
+                            row[r] *= 0.984375
+                    for level, rank in enumerate(ranks):
+                        hits[level][rank] += 1
+                    # Do not learn graph capture cost as steady-state execution cost.
+                    if steps > 8:
+                        mix = 1.0 if steps == 9 else 0.125
+                        draft_ms += mix * ((clocks[1] - clocks[0]) / len(widths) - draft_ms)
+                        verify_ms += mix * (clocks[2] - clocks[1] - verify_ms)
+                    if steps % 32 == 0:
+                        best = best_widths(widths, hits, draft_ms, verify_ms)
+                        if best != widths:
+                            widths = best
+                            tree.update(tree_spec(widths))
+                            depth = tree.chain
                 commit = list(commit[:max_length - len(ids)])
                 stop = next((i for i, t in enumerate(commit) if t in stop_tokens), None)
                 if stop is not None:
                     del commit[stop + 1:]
                 ids.extend(commit)
                 update_progress(len(commit))
-                if probe is not None:
-                    probe[0] += 1
-                    probe[1] += accepts
-                    if probe[0] == 32:
-                        # deepen once acceptance sustains it and a recapture round can amortize
-                        if sampling is None and max_length - len(ids) > 512 and 1 + probe[1] / probe[0] >= 2.2:
-                            comfy.model_prefetch.cleanup_prefetch_queues()
-                            set_depth(5)
-                        probe = None
         finally:
             console.close()
             comfy.model_prefetch.cleanup_prefetch_queues()
@@ -1036,10 +1219,36 @@ class Qwen35ImageTokenizer(sd1_clip.SD1Tokenizer):
         self.llama_template = "<|im_start|>user\n{}<|im_end|>\n<|im_start|>assistant\n"
         self.llama_template_images = "<|im_start|>user\n<|vision_start|><|image_pad|><|vision_end|>{}<|im_end|>\n<|im_start|>assistant\n"
 
-    def tokenize_with_weights(self, text, return_word_ids=False, llama_template=None, images=[], prevent_empty_text=False, thinking=False, system_prompt="", **kwargs):
+    def video_embeds(self, frames, fps):
+        # Qwen3-VL sampling: 2 fps, 4 to 768 frames, consecutive pairs form one temporal patch
+        # introduced by its midpoint timestamp. Returns (prompt text, one embed per pair).
+        total = frames.shape[0]
+        num_frames = min(max(int(total / fps * 2), 4), 768, total)
+        indices = [round(i * (total - 1) / max(num_frames - 1, 1)) for i in range(num_frames)]
+        if len(indices) % 2 == 1:
+            indices.append(indices[-1])
+        height, width = comfy.text_encoders.qwen_vl.qwen2vl_video_smart_resize(num_frames, frames.shape[1], frames.shape[2])
+        text = ""
+        embeds = []
+        for i in range(0, len(indices), 2):
+            seconds = (indices[i] + indices[i + 1]) / (2 * fps)
+            text += f"<{seconds:.1f} seconds><|vision_start|><|video_pad|><|vision_end|>"
+            embeds.append({"type": "video", "data": frames[indices[i:i + 2]], "size": (height, width), "original_type": "video"})
+        return text, embeds
+
+    def tokenize_with_weights(self, text, return_word_ids=False, llama_template=None, images=[], videos=[], prevent_empty_text=False, thinking=False, system_prompt="", **kwargs):
         image = kwargs.get("image", None)
         if image is not None and len(images) == 0:
             images = [image[i:i + 1] for i in range(image.shape[0])]
+        video = kwargs.get("video", None)
+        if video is not None and len(videos) == 0:
+            videos = [video]
+        video_text = ""
+        video_embeds = []
+        for v in videos:
+            t, e = self.video_embeds(v, kwargs.get("fps", 24))
+            video_text += t
+            video_embeds += e
 
         skip_template = False
         if text.startswith('<|im_start|>'):
@@ -1052,13 +1261,12 @@ class Qwen35ImageTokenizer(sd1_clip.SD1Tokenizer):
         else:
             if llama_template is not None:
                 template = llama_template
-            elif len(images) == 0:
+            elif len(images) == 0 and len(video_embeds) == 0:
                 template = self.llama_template
             else:
                 template = self.llama_template_images
-                if len(images) > 1:
-                    vision_block = "<|vision_start|><|image_pad|><|vision_end|>"
-                    template = template.replace(vision_block, vision_block * len(images), 1)
+                vision_block = "<|vision_start|><|image_pad|><|vision_end|>"
+                template = template.replace(vision_block, vision_block * len(images) + video_text, 1)
             llama_text = template.format(text)
             if system_prompt:
                 llama_text = "<|im_start|>system\n" + system_prompt + "<|im_end|>\n" + llama_text
@@ -1068,6 +1276,7 @@ class Qwen35ImageTokenizer(sd1_clip.SD1Tokenizer):
         tokens = super().tokenize_with_weights(llama_text, return_word_ids=return_word_ids, disable_weights=True, **kwargs)
         key_name = next(iter(tokens))
         embed_count = 0
+        video_count = 0
         qwen_tokens = tokens[key_name]
         for r in qwen_tokens:
             for i in range(len(r)):
@@ -1075,6 +1284,10 @@ class Qwen35ImageTokenizer(sd1_clip.SD1Tokenizer):
                     if len(images) > embed_count:
                         r[i] = ({"type": "image", "data": images[embed_count], "original_type": "image"},) + r[i][1:]
                         embed_count += 1
+                elif isinstance(r[i][0], (int, float)) and r[i][0] == 248057:  # <|video_pad|>
+                    if len(video_embeds) > video_count:
+                        r[i] = (video_embeds[video_count],) + r[i][1:]
+                        video_count += 1
         return tokens
 
 

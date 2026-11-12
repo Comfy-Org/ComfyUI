@@ -5,11 +5,11 @@ from pydantic import BaseModel, Field
 
 class KreaMoodboard(BaseModel):
     id: str = Field(...)
-    strength: float = Field(default=0.35, ge=-0.5, le=1.5)
+    strength: float = Field(default=0.35, ge=0.0, le=1.0)
 
 
 class KreaImageStyleReference(BaseModel):
-    strength: float = Field(..., ge=-2.0, le=2.0)
+    strength: float = Field(..., ge=0.0, le=1.0)
     url: str | None = Field(default=None)
 
 

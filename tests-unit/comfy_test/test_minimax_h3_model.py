@@ -150,3 +150,29 @@ def test_embed_and_pack_preserves_mixed_reference_row_order(device, video_kind):
     finally:
         for hook in hooks:
             hook.remove()
+
+
+@pytest.mark.parametrize("with_reference", [False, True])
+def test_embed_and_pack_without_audio(with_reference):
+    model = MiniMaxH3Model(
+        hidden_size=8, num_layers=0, token_refiner_num_layers=0,
+        num_attention_heads=1, attention_head_dim=8, ffn_hidden_size=8,
+        latents_dim=2, audio_latents_dim=3, text_dim=5,
+        timestep_input_dim=8, time_embed_hidden_size=8, time_embed_dim=8,
+        dtype=torch.float32, device="cpu", operations=nn,
+    )
+    video = torch.randn(1, 2, 1, 4, 6)
+    context = torch.randn(1, 4, 8)
+    payload = {}
+    expected_rows = patchify_video(video)
+    if with_reference:
+        reference = torch.randn_like(video)
+        payload = {"refs": [{"kind": "image", "latent_h": 4, "latent_w": 6}],
+                   "cond_video_latents": [reference], "visual_cond_noise_aug": 1.0}
+        expected_rows = torch.cat((patchify_video(reference), expected_rows))
+    layout = PackedLayout(4, 1, 4, 6, 0, refs=payload.get("refs"))
+    with torch.no_grad():
+        packed = model._embed_and_pack(video, None, context, layout, payload, {})
+        expected = torch.cat((context[0], model.video_patch_proj(expected_rows)))
+    assert torch.equal(packed, expected)
+    assert layout.audio_pos.numel() == 0
