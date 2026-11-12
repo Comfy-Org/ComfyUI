@@ -304,7 +304,6 @@ class Flux(nn.Module):
                                        pe=args["pe"],
                                        attn_mask=args.get("attn_mask"),
                                        transformer_options=args.get("transformer_options"),
-                                       chunk_attention=args.get("chunk_attention"),
                                        **extra_kwargs)
                     return out
 

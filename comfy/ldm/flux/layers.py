@@ -372,9 +372,7 @@ class SingleStreamBlock(nn.Module):
             yield chunk_qkv
             del chunk_qkv, chunk_mlp  # this chunk's projection goes before the next one is made
 
-    def forward(self, x: Tensor, vec: Tensor, pe: Tensor, attn_mask=None, modulation_dims=None, transformer_options={}, chunk_attention=None) -> Tensor:
-        # chunk_attention: replaces a chunked block's attention with chunk_attention(qkv_chunks, pe, transformer_options) -> [B, N, hidden],
-        # qkv_chunks(chunk) yielding the unnormalized q|k|v projection chunk rows at a time
+    def forward(self, x: Tensor, vec: Tensor, pe: Tensor, attn_mask=None, modulation_dims=None, transformer_options={}) -> Tensor:
         if self.modulation:
             mod, _ = self.modulation(vec)
         else:
@@ -384,12 +382,16 @@ class SingleStreamBlock(nn.Module):
         extra_options = transformer_options.copy()
 
         chunked = chunk_tokens(x, transformer_options, modulation_dims)
+        attn = None
         if chunked:
             mlp = x.new_empty((x.shape[0], x.shape[1], self.mlp_hidden_dim))
+            chunk_attention = transformer_options.get("chunked_attention_override")
+            if chunk_attention is not None and x.shape[0] == 1 and attn_mask is None and "attn1_patch" not in transformer_patches:
+                # an attention that takes the q|k|v projection chunk rows at a time, q and k still to be normalized and rotated by pe; None when it declines
+                with self.norm.query_norm.cast_weight(x) as (q_scale, _), self.norm.key_norm.cast_weight(x) as (k_scale, _):
+                    attn = chunk_attention(lambda chunk: self.qkv_chunks(x, mod, mlp, chunk), self.num_heads, pe, q_scale, k_scale, torch.finfo(torch.float32).eps, transformer_options)
 
-        if chunked and chunk_attention is not None:
-            attn = chunk_attention(lambda chunk: self.qkv_chunks(x, mod, mlp, chunk), pe, transformer_options)
-        else:
+        if attn is None:
             if chunked:
                 qkv = x.new_empty((x.shape[0], x.shape[1], 3 * self.hidden_size))
                 s = 0
