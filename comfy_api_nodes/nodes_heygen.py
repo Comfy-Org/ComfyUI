@@ -1253,9 +1253,10 @@ class HeyGenVoiceTextToSpeechNode(IO.ComfyNode):
                 expr="""
                 (
                   $t := $lookup(widgets, "model.text");
+                  $promo := $now() < "2026-11-01T00:00:00.000Z";
                   $rate := widgets.model = "heygen-voice-1-turbo"
-                    ? 0.00572
-                    : ($now() < "2026-11-01T00:00:00.000Z" ? 0.02145 : 0.0429);
+                    ? ($promo ? 0.00572 : 0.010725)
+                    : ($promo ? 0.02145 : 0.0429);
                   $type($t) = "string" and $length($t) > 0
                     ? {"type":"usd","usd": $length($t) * $rate / 1000}
                     : {"type":"usd","usd": $rate, "format":{"approximate":true,"suffix":"/1K chars"}}

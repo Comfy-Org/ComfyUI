@@ -27,6 +27,36 @@ def test_indexed_residual_full_precision_and_hooks(dtype):
     assert torch.equal(residual, residual_before)
 
 
+@pytest.mark.parametrize("full_precision_mm", [False, True])
+def test_combined_linear_preserves_segmented_residual(full_precision_mm):
+    operations = ops.mixed_precision_ops(compute_dtype=torch.bfloat16, full_precision_mm=full_precision_mm)
+    combined = ops.CombinedLinear((operations.Linear(256, 32, bias=False),
+                                   operations.Linear(256, 32, bias=False)))
+    combined._v_weight = ops.QuantizedTensor.from_float(
+        torch.randn(64, 256, dtype=torch.bfloat16), "TensorWiseINT8Layout",
+        convrot=True, per_channel=True)
+    x = torch.randn(5, 512, dtype=torch.bfloat16)
+    residual = torch.randn(5, 64, dtype=torch.bfloat16)
+    gates = torch.randn(3, 64, dtype=torch.float32)
+    rows = torch.tensor([2, 2, 0, 1, 0])
+    segments = [(0, 2, 2), (2, 5, rows[2:])]
+    original = residual.clone()
+    with torch.no_grad():
+        branch = combined.linear_input_act(x, "swiglu")
+        expected = torch.addcmul(residual, branch, gates[rows].to(branch.dtype))
+        actual = ops.linear_input_act(combined, x, "swiglu", residual=residual,
+                                      residual_scale=gates, residual_segments=segments)
+    assert torch.equal(actual, expected)
+    assert torch.equal(residual, original)
+
+
+def test_combined_linear_segments_preserve_not_implemented():
+    combined = ops.CombinedLinear((ops.manual_cast.Linear(8, 4, bias=False),))
+    x, residual, gates = torch.randn(3, 8), torch.randn(3, 4), torch.randn(1, 4)
+    assert ops.linear_input_act(combined, x, "model_owned_activation", residual=residual,
+                                residual_scale=gates, residual_segments=[(0, 3, 0)]) is NotImplemented
+
+
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
 @pytest.mark.parametrize("full_precision_mm", [False, True])
 def test_segmented_fallback_reuses_linear_output(dtype, full_precision_mm):

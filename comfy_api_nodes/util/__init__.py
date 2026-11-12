@@ -3,6 +3,8 @@ from .client import (
     ApiEndpoint,
     poll_op,
     poll_op_raw,
+    router_op,
+    router_op_raw,
     sync_op,
     sync_op_raw,
 )
@@ -68,6 +70,8 @@ __all__ = [
     "ApiEndpoint",
     "poll_op",
     "poll_op_raw",
+    "router_op",
+    "router_op_raw",
     "sync_op",
     "sync_op_raw",
     # Upload helpers

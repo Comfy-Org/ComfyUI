@@ -261,6 +261,7 @@ def normalize_history_item(prompt_id: str, history_item: dict, include_outputs: 
     if include_outputs:
         job['outputs'] = normalize_outputs(outputs)
         job['execution_status'] = status_info
+        job['execution_meta'] = history_item.get('meta', {})
         job['workflow'] = {
             'prompt': prompt,
             'extra_data': extra_data,

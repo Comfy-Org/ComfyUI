@@ -787,6 +787,14 @@ class TestExecution:
         except Exception as e:
             assert 'prompt_id' in e.args[0], f"Did not get back a proper error message: {e}"
             assert e.args[0]['node_id'] == generator.id, "Error should have been on the generator node"
+            prompt_id = e.args[0]['prompt_id']
+
+        for _ in range(100):
+            history = client.get_history(prompt_id)
+            if prompt_id in history:
+                break
+            time.sleep(0.1)
+        assert history[prompt_id]['status']['status_str'] == 'error'
 
     def test_missing_node_error(self, client: ComfyClient, builder: GraphBuilder):
         g = builder
@@ -1202,6 +1210,38 @@ class TestExecution:
 
         assert job['status'] == 'completed'
         assert output.id in job['outputs'], "Cached outputs must appear in job outputs without a client_id"
+
+    def test_cached_output_meta_names_its_own_node(self, client: ComfyClient, builder: GraphBuilder):
+        """Two identical previews share a cache entry; each must keep its own meta in the job detail."""
+        g = builder
+        image = g.node("StubImage", content="BLACK", height=32, width=32, batch_size=1)
+        first = g.node("PreviewImage", images=image.out(0))
+        second = g.node("PreviewImage", images=image.out(0))
+
+        result = client.run(g)
+        job = client.get_job(result.get_prompt_id())
+
+        meta = job['execution_meta']
+        for node in (first, second):
+            assert meta[node.id]['node_id'] == node.id
+            assert meta[node.id]['display_node'] == node.id
+
+    def test_expanded_output_meta_names_its_display_node(self, client: ComfyClient, builder: GraphBuilder):
+        """An output from an expanded node is shown on the node that expanded it."""
+        g = builder
+        expander = g.node("TestExecutedNodeIdsExpander", value="expanded-child")
+
+        result = client.run(g)
+        job = client.get_job(result.get_prompt_id())
+
+        expanded = {k: v for k, v in job['execution_meta'].items() if k != expander.id}
+        assert len(expanded) == 1
+        node_id, meta = next(iter(expanded.items()))
+        assert meta['node_id'] == node_id
+        assert meta['display_node'] == expander.id
+        assert meta['parent_node'] == expander.id
+        assert meta['real_node_id'] == expander.id
+        assert node_id in job['outputs']
 
     def _create_history_item(self, client, builder):
         g = GraphBuilder(prefix="offset_test")

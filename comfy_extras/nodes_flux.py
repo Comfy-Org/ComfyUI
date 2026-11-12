@@ -162,7 +162,7 @@ class FluxKontextMultiReferenceLatentMethod(io.ComfyNode):
                 io.Conditioning.Input("conditioning"),
                 io.Combo.Input(
                     "reference_latents_method",
-                    options=["offset", "index", "uxo/uno", "index_timestep_zero"],
+                    options=["offset", "index", "uxo/uno", "index_timestep_zero", "index_timestep_zero_isolated", "index_timestep_zero_text_start"],
                     advanced=True,
                 ),
             ],

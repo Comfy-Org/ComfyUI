@@ -215,13 +215,6 @@ class TaskCreationOutputField(BaseModel):
     task_status: str = Field(...)
 
 
-class TaskCreationResponse(BaseModel):
-    output: TaskCreationOutputField | None = Field(None)
-    request_id: str = Field(...)
-    code: str | None = Field(None, description="Error code for the failed request.")
-    message: str | None = Field(None, description="Details about the failed request.")
-
-
 class TaskResult(BaseModel):
     url: str | None = Field(None)
     code: str | None = Field(None)
