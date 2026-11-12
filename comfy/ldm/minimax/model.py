@@ -198,8 +198,8 @@ class Attention(nn.Module):
             q = q[0]
             k = k[0]
         else:
-            q = self.q_norm(q.view(s, self.heads, self.head_dim))
-            k = self.k_norm(k.view(s, self.heads, self.head_dim))
+            q = self.q_norm(q.view(s, self.heads, self.head_dim)).to(v.dtype)
+            k = self.k_norm(k.view(s, self.heads, self.head_dim)).to(v.dtype)
 
         q = AttentionTensorContainer(q.transpose(0, 1).unsqueeze(0))
         k = AttentionTensorContainer(k.transpose(0, 1).unsqueeze(0))
@@ -548,12 +548,6 @@ class MiniMaxH3Model(nn.Module):
             for _ in range(num_layers)])
         self.final_layer = FinalLayer(hidden_size, time_embed_dim, video_patch_dim, audio_latents_dim,
                                       final_norm_eps, **curve, pdd_steps=pdd_steps, dtype=dtype, device=device, operations=operations)
-
-    def preprocess_text_embeds(self, text_states):
-        """[B, L, text_dim] Qwen states -> [B, L, hidden] refined text embeds."""
-        if text_states.shape[-1] == self.hidden_size:
-            return text_states
-        return self.token_refiner(self.condition_proj(text_states[0])).unsqueeze(0)
 
     def rope_freqs(self, position_ids, device):
         # [S, 3] float64 -> [S, 96] fp32
