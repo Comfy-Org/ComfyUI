@@ -135,18 +135,22 @@ class ComfyAPI_v4(ComfyAPIBase):
 ComfyAPI = ComfyAPI_v4
 
 
-class ComfyAPISync:
-    """The API for nodes that are not async: the same calls, without `await`.
+if TYPE_CHECKING:
+    from .generated.ComfyAPISyncStub import ComfyAPISyncStub as ComfyAPISync
+else:
 
-    Make one and keep it: each one made is a separate object.
-    """
+    class ComfyAPISync:
+        """The API for nodes that are not async: the same calls, without `await`.
 
-    def __init__(self):
-        api = ComfyAPI_v4()
-        self.get_api_version = api.get_api_version
-        self.is_api_version_at_least = api.is_api_version_at_least
-        for name, declared in ComfyAPI_v4.__annotations__.items():
-            setattr(self, name, _SyncGroup(declared, getattr(api, name)))
+        Make one and keep it: each one made is a separate object.
+        """
+
+        def __init__(self):
+            api = ComfyAPI_v4()
+            self.get_api_version = api.get_api_version
+            self.is_api_version_at_least = api.is_api_version_at_least
+            for name, declared in ComfyAPI_v4.__annotations__.items():
+                setattr(self, name, _SyncGroup(declared, getattr(api, name)))
 
 
 if TYPE_CHECKING:
