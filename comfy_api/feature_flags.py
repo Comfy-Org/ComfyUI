@@ -123,8 +123,8 @@ _CORE_FEATURE_FLAGS: dict[str, Any] = {
     "assets": not args.disable_assets,
 }
 
-# Owned by app.deploy_to_cloud, which sets it via set_server_feature.
-_SERVER_SET_FEATURE_FLAGS = ("deploy_to_cloud",)
+# Owned by app.deploy_to_cloud and comfy_api.v4, which set them via set_server_feature.
+_SERVER_SET_FEATURE_FLAGS = ("deploy_to_cloud", "node_api")
 
 def _server_feature_flags() -> dict[str, Any]:
     """Registry defaults, then core flags, then CLI flags. CLI flags cannot overwrite core or server-set flags; main.py may still set "assets"."""

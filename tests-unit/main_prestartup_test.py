@@ -9,7 +9,7 @@ from types import SimpleNamespace
 import time
 
 import folder_paths
-from app import governance
+from app import extension_packs, governance
 
 
 def _load_execute_prestartup_script():
@@ -19,6 +19,7 @@ def _load_execute_prestartup_script():
     compiled = compile(ast.Module(body=[function], type_ignores=[]), filename=str(main_path), mode="exec")
     namespace = {
         "args": SimpleNamespace(disable_all_custom_nodes=False, whitelist_custom_nodes=[], enable_manager=False),
+        "extension_packs": extension_packs,
         "folder_paths": folder_paths,
         "governance": governance,
         "importlib": importlib,

@@ -17,7 +17,7 @@ import importlib.metadata
 import folder_paths
 import time
 from comfy.cli_args import enables_dynamic_vram
-from app import governance
+from app import extension_packs, governance
 from app import product_tips
 from app.logger import setup_logger
 console_log_level = get_console_log_level(args.verbose)
@@ -199,6 +199,7 @@ def execute_prestartup_script():
 
     node_paths = folder_paths.get_folder_paths("custom_nodes")
     node_prestartup_times = []
+    module_paths = []
     for custom_node_path in node_paths:
         possible_modules = os.listdir(custom_node_path)
 
@@ -217,14 +218,20 @@ def execute_prestartup_script():
                 logging.warning(refusal)
                 continue
 
-            script_path = os.path.join(module_path, "prestartup_script.py")
-            if os.path.exists(script_path):
-                if args.disable_all_custom_nodes and possible_module not in args.whitelist_custom_nodes:
+            if args.disable_all_custom_nodes and possible_module not in args.whitelist_custom_nodes:
+                if os.path.exists(os.path.join(module_path, "prestartup_script.py")):
                     logging.info(f"Prestartup Skipping {possible_module} due to disable_all_custom_nodes and whitelist_custom_nodes")
-                    continue
-                time_before = time.perf_counter()
-                success = execute_script(script_path)
-                node_prestartup_times.append((time.perf_counter() - time_before, module_path, success))
+                continue
+
+            module_paths.append(module_path)
+
+    pack_refusals = extension_packs.check_custom_nodes(module_paths)[1]
+    for module_path in module_paths:
+        script_path = os.path.join(module_path, "prestartup_script.py")
+        if module_path not in pack_refusals and os.path.exists(script_path):
+            time_before = time.perf_counter()
+            success = execute_script(script_path)
+            node_prestartup_times.append((time.perf_counter() - time_before, module_path, success))
     if len(node_prestartup_times) > 0:
         logging.info("\nPrestartup times for custom nodes:")
         for n in sorted(node_prestartup_times):

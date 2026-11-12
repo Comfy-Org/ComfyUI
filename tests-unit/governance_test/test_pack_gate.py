@@ -15,7 +15,7 @@ import time
 import pytest
 import torch
 
-from app import governance
+from app import extension_packs, governance
 from comfy.cli_args import args
 
 
@@ -45,6 +45,7 @@ def _load_execute_prestartup_script() -> Callable[[], None]:
     compiled = compile(ast.Module(body=[function], type_ignores=[]), filename=str(MAIN_PATH), mode="exec")
     namespace = {
         "args": args,
+        "extension_packs": extension_packs,
         "folder_paths": folder_paths,
         "governance": governance,
         "importlib": importlib,
