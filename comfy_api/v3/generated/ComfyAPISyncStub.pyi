@@ -1,0 +1,1 @@
+from comfy_api.latest.generated.ComfyAPISyncStub import ComfyAPISyncStub as ComfyAPISyncStub
