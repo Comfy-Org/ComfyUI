@@ -3,12 +3,16 @@
 This is the long form install reference: every GPU vendor, every accelerator, and the
 post-install options that are easy to miss.
 
-Most people do not need this page. The [desktop app](https://www.comfy.org/download) is
-the easiest and best way to use ComfyUI, and [comfy-cli](https://www.comfy.org/cli)
-(`pip install comfy-cli && comfy install`) covers most of the rest. See the
-[README](../README.md#install) for the short version, and
-[docs.comfy.org](https://docs.comfy.org/installation/manual_install) for the same
-material with navigation and translations.
+> **Note:** most people do not need this page. The
+> [desktop app](https://www.comfy.org/download) is the easiest and best way to use
+> ComfyUI, and [comfy-cli](https://www.comfy.org/cli)
+> (`pip install comfy-cli && comfy install`) covers most of the rest.
+
+Visit the [README](../README.md#install) for a condensed version of the install options.
+
+Or visit the [Manual Installation](https://docs.comfy.org/installation/manual_install)
+guide on Comfy Docs for additional installation instructions with navigation and
+translations.
 
 ## Contents
 
@@ -45,7 +49,11 @@ than 2 weeks old. If your pytorch is more than 6 months old, please update it.
 
 ### Instructions
 
-Git clone this repo.
+Git clone this repo:
+
+```
+git clone https://github.com/Comfy-Org/ComfyUI.git
+```
 
 Put your SD checkpoints (the huge ckpt/safetensors files) in: `models/checkpoints`
 
@@ -77,7 +85,11 @@ If you get the "Torch not compiled with CUDA enabled" error, uninstall torch wit
 pip uninstall torch
 ```
 
-And install it again with the command above.
+Then install it again with the stable command from above:
+
+```
+pip install torch torchvision torchaudio --extra-index-url https://download.pytorch.org/whl/cu130
+```
 
 ### AMD GPUs (Linux)
 
@@ -239,6 +251,13 @@ which subfolder to put them in under `ComfyUI\models\`.
 
 If you have trouble extracting it, right click the file -> properties -> unblock.
 
+To run on your CPU alone, the Nvidia build ships `advanced\run_cpu.bat`. The AMD and
+Intel builds have no CPU launcher, so open a terminal in the extracted folder and run:
+
+```
+.\python_embeded\python.exe -s ComfyUI\main.py --cpu --windows-standalone-build
+```
+
 The Nvidia build above comes with python 3.13 and pytorch cuda 13.0. Update your Nvidia
 drivers if it doesn't start.
 
@@ -246,6 +265,9 @@ drivers if it doesn't start.
 
 [ComfyUI-Manager](https://github.com/Comfy-Org/ComfyUI-Manager/tree/manager-v4) is an
 extension that allows you to easily install, update, and manage custom nodes for ComfyUI.
+
+> **Note:** the [desktop app](https://www.comfy.org/download) comes with ComfyUI-Manager
+> already set up. The steps below are only needed for manual and portable installs.
 
 1. Install the manager dependencies:
 
