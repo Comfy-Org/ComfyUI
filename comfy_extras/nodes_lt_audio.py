@@ -26,6 +26,12 @@ def _ltxv_audio_vae_path(ckpt_name: str | None, vae_name: str | None) -> str:
     raise ValueError("Select an audio VAE checkpoint or a VAE from models/vae.")
 
 
+def _accepts_combo_link(received_type: str | list) -> bool:
+    if isinstance(received_type, list):
+        return True
+    return received_type in (io.Combo.io_type, io.AnyType.io_type, io.MatchType.io_type)
+
+
 class LTXVAudioVAELoader(io.ComfyNode):
     @classmethod
     def define_schema(cls) -> io.Schema:
@@ -53,21 +59,33 @@ class LTXVAudioVAELoader(io.ComfyNode):
         )
 
     @classmethod
-    def validate_inputs(cls, ckpt_name: str | None = None, vae_name: str | None = None) -> bool | str:
+    def validate_inputs(cls, ckpt_name: str | None = None, vae_name: str | None = None, input_types: dict | None = None) -> bool | str:
         """Validate only the model the loader will actually use.
 
         ComfyUI's generic combo check rejects any value that is not in the current options, so a
         workflow that carries a checkpoint which is no longer installed would fail before the loader
         ran, even when a standalone VAE is selected and the checkpoint is unused.
+
+        A linked input is unresolved during prompt validation and reaches this method as `None`, so
+        `input_types` (which the executor fills only for links) is what separates a link from an empty
+        selection: a link is deferred to the load boundary, an empty selection is refused here.
         """
+        linked = input_types or {}
+        for name, received_type in linked.items():
+            if not _accepts_combo_link(received_type):
+                return f"{name} must come from a combo output, got {received_type}"
         if vae_name and vae_name != NO_SELECTION:
             if vae_name in folder_paths.get_filename_list("vae"):
                 return True
             return f"Invalid VAE file: {vae_name}"
+        if "vae_name" in linked:
+            return True
         if ckpt_name and ckpt_name != NO_SELECTION:
             if ckpt_name in folder_paths.get_filename_list("checkpoints"):
                 return True
             return f"Invalid audio VAE checkpoint: {ckpt_name}"
+        if "ckpt_name" in linked:
+            return True
         return "Select an audio VAE checkpoint or a VAE from models/vae."
 
     @classmethod
