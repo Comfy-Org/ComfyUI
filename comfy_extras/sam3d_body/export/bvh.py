@@ -4,6 +4,9 @@ BVH stores explicit bone OFFSETs per joint, so standard importers reconstruct
 anatomical bone orientations directly (unlike glTF). We skip the rig's joint 0
 (static world anchor) and use joint 1 as the ROOT (6 channels: XYZ pos + ZXY
 rot); other joints get 3 channels. Rotations are intrinsic Z-X-Y Euler degrees.
+OFFSETs are the bind pose's child-minus-parent vectors in world axes and the
+channels rotate relative to the bind pose, so all-zero channels give the bind
+pose that importers and retargeters use as their reference.
 """
 
 from __future__ import annotations
@@ -15,6 +18,7 @@ import numpy as np
 
 from .glb_shared import (
     Rig,
+    _quat_multiply_np,
     bone_locals_from_globals,
     collect_tracks,
     global_skel_state_from_pose_data,
@@ -115,11 +119,18 @@ def build_bvh(
     body_root = _find_bvh_root(parents, is_external)
     children_map = _build_children_map(parents)
 
-    # Bone OFFSETs = translation_offsets (joint position relative to parent).
-    # The BVH root uses its bind world position so the skeleton imports in place.
-    bind_global = rig.bind_global_cm                         # (NJ, 8) cm
-    bind_pos_m = bind_global[:, :3].astype(np.float64) * 0.01  # (NJ, 3) m
-    offset_m = rig.joint_offsets_cm.astype(np.float64) * 0.01
+    # Bone OFFSETs = bind-pose child position minus parent position, in world
+    # axes. The rig's translation_offsets are in the parent joint's own frame,
+    # so writing them directly garbles the rest skeleton whenever bind rotations
+    # are not identity (MHR). The BVH root uses its bind world position so the
+    # skeleton imports in place.
+    bind_global = rig.bind_global_cm.astype(np.float64)       # (NJ, 8) cm
+    bind_pos_m = bind_global[:, :3] * 0.01                    # (NJ, 3) m
+    offset_m = np.zeros_like(bind_pos_m)
+    for j in range(NJ):
+        p = int(parents[j])
+        if 0 <= p < NJ and p != j:
+            offset_m[j] = bind_pos_m[j] - bind_pos_m[p]
 
     # DFS order rooted at body_root — matches per-frame channel order.
     bvh_order: List[int] = []
@@ -136,6 +147,10 @@ def build_bvh(
         joint_coords_y_down=rig.per_frame_y_down,
     )
     rig_global_m[..., 3:7] = quat_sign_fix_per_joint(rig_global_m[..., 3:7])
+    # Rotate relative to the bind pose (q(f) * q_bind^-1) to match the
+    # world-aligned OFFSETs: identity at rest, unchanged posed joint positions.
+    bind_quat_inv = bind_global[:, 3:7] * np.array([-1.0, -1.0, -1.0, 1.0])
+    rig_global_m[..., 3:7] = _quat_multiply_np(rig_global_m[..., 3:7], bind_quat_inv)
     bvh_parents = parents.copy()
     bvh_parents[body_root] = -1
     bone_local = bone_locals_from_globals(rig_global_m, bvh_parents)
