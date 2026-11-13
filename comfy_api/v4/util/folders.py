@@ -2,6 +2,9 @@
 
 These calls are ComfyUI's `folder_paths`, for packs written against it; ComfyUI answers each.
 The calls that take a path take any path, as `folder_paths` does.
+
+A pack that runs in its own process gets the output, input, temp and user folders that process
+was started with.
 """
 
 import os

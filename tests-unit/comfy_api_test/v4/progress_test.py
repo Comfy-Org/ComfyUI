@@ -3,6 +3,7 @@ import time
 from types import SimpleNamespace
 
 import pytest
+from PIL import Image
 
 import comfy.utils
 
@@ -370,14 +371,13 @@ async def test_update_reports_through_comfyuis_progress_hook_as_its_progress_bar
     monkeypatch.setattr(comfy.utils, "PROGRESS_BAR_HOOK", hook)
 
     executor, server = await run_node(
-        "image = ('JPEG', Image.new('RGB', (4, 4)), args.preview_size)\n"
-        "comfy.utils.ProgressBar(2, node_id='v4').update_absolute(1, 2, image)\n"
-        "{call}.progress.update(1, 2, torch.zeros(1, 4, 4, 3))",
-        synchronous,
+        "{call}.progress.update(1, 2, torch.zeros(1, 4, 4, 3))", synchronous
     )
+    image = ("JPEG", Image.new("RGB", (4, 4)), args.preview_size)
+    comfy.utils.ProgressBar(2, node_id="v4").update_absolute(1, 2, image)
 
     assert executor.success, executor.status_messages
-    progress_bar, update = calls
+    update, progress_bar = calls
     assert update == progress_bar
 
 
