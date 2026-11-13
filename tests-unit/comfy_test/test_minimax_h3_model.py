@@ -4,7 +4,8 @@ import pytest
 import torch
 from torch import nn
 
-from comfy.ldm.minimax.model import MiniMaxH3Model, PackedLayout, time_shift_sigma
+from comfy.ldm.minimax.model import Attention, MiniMaxH3Model, PackedLayout, time_shift_sigma
+from comfy.model_base import BaseModel, MiniMaxH3
 from comfy.model_sampling import CONST
 
 
@@ -15,6 +16,61 @@ def make_model(video_output, audio_output):
     model.sigma_shift_audio = 3.0
     model._forward = lambda *args, **kwargs: [video_output.clone(), audio_output.clone()]
     return model
+
+
+def test_refiner_attention_uses_activation_dtype(monkeypatch):
+    class PromotingNorm(nn.Module):
+        def forward(self, x):
+            return x.float()
+
+    attention = Attention.__new__(Attention)
+    nn.Module.__init__(attention)
+    attention.heads = 1
+    attention.head_dim = 4
+    attention.qkv_proj = nn.Linear(4, 12, bias=False, dtype=torch.bfloat16)
+    attention.q_norm = PromotingNorm()
+    attention.k_norm = PromotingNorm()
+    attention.out_proj = nn.Linear(4, 4, bias=False, dtype=torch.bfloat16)
+    attention.comfy_attention = None
+
+    def same_dtype_attention(q, k, v, *args, **kwargs):
+        q, k, v = q.peek(), k.peek(), v.peek()
+        assert q.dtype == k.dtype == v.dtype == torch.bfloat16
+        return torch.nn.functional.scaled_dot_product_attention(q, k, v).transpose(1, 2).reshape(1, 3, 4)
+
+    monkeypatch.setattr("comfy.ldm.minimax.model.optimized_attention", same_dtype_attention)
+    output = attention(torch.ones(3, 4, dtype=torch.bfloat16))
+    assert output.shape == (3, 4)
+    assert output.dtype == torch.bfloat16
+
+
+def test_refiner_receives_sampling_transformer_options(monkeypatch):
+    diffusion_model = MiniMaxH3Model(
+        hidden_size=8, num_layers=0, token_refiner_num_layers=0,
+        num_attention_heads=1, attention_head_dim=8, ffn_hidden_size=8,
+        latents_dim=2, audio_latents_dim=3, text_dim=5,
+        timestep_input_dim=8, time_embed_hidden_size=8, time_embed_dim=8,
+        dtype=torch.float32, device="cpu", operations=nn,
+    )
+    model = MiniMaxH3.__new__(MiniMaxH3)
+    nn.Module.__init__(model)
+    model.latent_shapes = None
+    model.manual_cast_dtype = None
+    model.diffusion_model = diffusion_model
+    monkeypatch.setattr(BaseModel, "extra_conds", lambda self, **kwargs: {})
+
+    def refiner_forward(x, transformer_options={}):
+        return x + (10 if transformer_options.get("patches_replace") else 0)
+
+    monkeypatch.setattr(diffusion_model.token_refiner, "forward", refiner_forward)
+    text = torch.randn(1, 4, 5)
+    context = model.extra_conds(cross_attn=text, device="cpu")["c_crossattn"].cond
+    video = torch.randn(1, 2, 1, 4, 4)
+    layout = PackedLayout(4, 1, 4, 4, 0)
+    options = {"patches_replace": {"attn1": {}}}
+    packed = diffusion_model._embed_and_pack(video, None, context, layout, {}, options)
+    text_rows = torch.cat([packed[a:b] for a, b, kind in layout.segments if kind == "text"])
+    torch.testing.assert_close(text_rows, diffusion_model.condition_proj(text[0]) + 10)
 
 
 def test_forward_scales_velocity_to_mask_timestep():
