@@ -271,6 +271,19 @@ If you get the "Torch not compiled with CUDA enabled" error, uninstall torch wit
 
 And install it again with the command above.
 
+If instead you get "no kernel image is available for execution on the device", or a
+warning that your GPU "with CUDA capability sm_XX is not compatible with the current
+PyTorch installation", torch installed correctly but the wheel was not built for your
+card. Each CUDA build is compiled for a fixed list of compute capabilities, and the
+cu130 line above starts at 7.5 (Turing). A GTX 10-series card or a P40 (Pascal) needs
+cu126 specifically — cu128 dropped Pascal from PyTorch 2.8 onward, so it is not an
+alternative for those cards. A V100 (Volta) also wants cu126 on current releases; cu128
+carried Volta only through 2.10. A card newer than your torch version needs the nightly.
+Worth knowing before you pin: PyTorch stops publishing cu126 from 2.15, which ends
+prebuilt support for Maxwell, Pascal and Volta, so those cards should pin to 2.14 or
+earlier. [This table lists which build each GPU needs](https://referencesource.org/gpu-cuda-pytorch-compatibility/),
+with the line from PyTorch's build script it was read from.
+
 ### Dependencies
 
 Install the dependencies by opening your terminal inside the ComfyUI folder and:
