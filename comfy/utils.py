@@ -1140,14 +1140,17 @@ def lanczos(samples, width, height):
     #the below API is strict and expects grayscale to be squeezed
     if samples.ndim == 4:
         samples = samples.squeeze(1) if samples.shape[1] == 1 else samples.movedim(1, -1)
+    if samples.shape[0] == 0:
+        raise RuntimeError("lanczos: the batch is empty")
     first = _lanczos_image(samples[0], width, height)
-    result = torch.empty((samples.shape[0],) + tuple(first.shape), dtype=first.dtype)
+    result = torch.empty((samples.shape[0],) + tuple(first.shape), dtype=first.dtype, device="cpu")
     result[0] = first
-    inference = torch.is_inference_mode_enabled()
+    inference, grad = torch.is_inference_mode_enabled(), torch.is_grad_enabled()
 
     def resize(i):
-        # inference mode is thread local: the workers enter the caller's so they may write into result
-        with torch.inference_mode(inference):
+        # inference and grad mode are thread local: the workers enter the caller's (to write into result, and
+        # to read frames of a tensor that requires grad under no_grad, as before)
+        with torch.inference_mode(inference), torch.set_grad_enabled(grad):
             result[i] = _lanczos_image(samples[i], width, height)
 
     # PIL and numpy release the GIL, so the frames of a batch (a video) are resized in parallel; every frame goes
@@ -1156,7 +1159,14 @@ def lanczos(samples, width, height):
     workers = min(samples.shape[0] - 1, max(1, torch.get_num_threads()), LANCZOS_MAX_THREADS)
     if workers > 1:
         with ThreadPoolExecutor(max_workers=workers) as pool:
-            list(pool.map(resize, range(1, samples.shape[0])))
+            futures = [pool.submit(resize, i) for i in range(1, samples.shape[0])]
+            try:
+                for future in futures:
+                    future.result()
+            except BaseException:
+                for future in futures:  # the first error stops the frames not started yet
+                    future.cancel()
+                raise
     else:
         for i in range(1, samples.shape[0]):
             resize(i)
