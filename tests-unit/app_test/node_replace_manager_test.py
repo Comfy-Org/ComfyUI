@@ -88,3 +88,44 @@ def test_register_dedupe_does_not_affect_other_old_nodes(NodeReplaceManager):
     manager.register(FakeNodeReplace(new_node_id="NewB", old_node_id="OldB"))
     assert len(manager.get_replacement("OldA")) == 1
     assert len(manager.get_replacement("OldB")) == 1
+
+
+def test_rename_only_replacement_preserves_inputs(NodeReplaceManager):
+    sys.modules['nodes'].NODE_CLASS_MAPPINGS['ConditioningAverage'] = object()
+    manager = NodeReplaceManager()
+    manager.register(FakeNodeReplace(
+        new_node_id='ConditioningAverage', old_node_id='ConditioningAverage ',
+    ))
+    inputs = {
+        'conditioning_to': ['2', 0],
+        'conditioning_from': ['3', 0],
+        'conditioning_to_strength': 0.5,
+    }
+    prompt = {'1': {'class_type': 'ConditioningAverage ', 'inputs': inputs}}
+
+    manager.apply_replacements(prompt)
+
+    assert prompt['1']['class_type'] == 'ConditioningAverage'
+    assert prompt['1']['inputs'] == inputs
+    assert prompt['1']['inputs'] is not inputs
+
+
+@pytest.mark.parametrize('mapping, expected', [
+    ([], {}),
+    ([{'old_id': 'image', 'new_id': 'input'},
+      {'new_id': 'scale_method', 'set_value': 'lanczos'}],
+     {'input': ['2', 0], 'scale_method': 'lanczos'}),
+])
+def test_explicit_input_mapping_replaces_inputs(NodeReplaceManager, mapping, expected):
+    sys.modules['nodes'].NODE_CLASS_MAPPINGS['NewNode'] = object()
+    manager = NodeReplaceManager()
+    manager.register(FakeNodeReplace(
+        new_node_id='NewNode', old_node_id='OldNode', input_mapping=mapping,
+    ))
+    prompt = {'1': {'class_type': 'OldNode', 'inputs': {
+        'image': ['2', 0], 'unused': 'old value',
+    }}}
+
+    manager.apply_replacements(prompt)
+
+    assert prompt['1']['inputs'] == expected
