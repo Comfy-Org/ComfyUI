@@ -968,6 +968,13 @@ register_attention_function("pytorch", attention_pytorch)
 register_attention_function("sub_quad", attention_sub_quad)
 register_attention_function("split", attention_split)
 
+# Transparent Mac path: auto Flux TeaCache on MPS (INT8 goes through comfy-kitchen metal).
+try:
+    from comfy.mac_teacache import maybe_enable_mac_teacache
+    maybe_enable_mac_teacache()
+except Exception as e:
+    logging.debug("mac TeaCache not enabled: %s", e)
+
 
 def optimized_attention_for_device(device, mask=False, small_input=False):
     if small_input:

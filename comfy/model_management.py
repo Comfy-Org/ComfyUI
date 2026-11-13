@@ -2037,6 +2037,10 @@ def supports_fp8_compute(device=None):
     if SUPPORT_FP8_OPS:
         return True
 
+    # Metal kitchen implements per-tensor FP8 quant/dequant (software; not NVIDIA FP8 TC).
+    if (device is not None and is_device_mps(device)) or mps_mode():
+        return True
+
     if not is_nvidia():
         return False
 
@@ -2061,6 +2065,10 @@ def supports_nvfp4_compute(device=None):
     if is_device_cpu(device):
         return False
 
+    # Software NVFP4 (E2M1 @ 16 + E4M3 scales) via comfy_kitchen: dequant + MPS GEMM.
+    if (device is not None and is_device_mps(device)) or mps_mode():
+        return True
+
     if not is_nvidia():
         return False
 
@@ -2073,6 +2081,10 @@ def supports_nvfp4_compute(device=None):
 def supports_mxfp8_compute(device=None):
     if is_device_cpu(device):
         return False
+
+    # MXFP8 (E4M3 + E8M0 @ 32) matches Metal 4.1 multi-plane; kitchen dequant + MPS GEMM.
+    if (device is not None and is_device_mps(device)) or mps_mode():
+        return hasattr(torch, "float8_e8m0fnu")
 
     if not is_nvidia():
         return False
@@ -2102,11 +2114,10 @@ def supports_int8_compute(device=None):
     if is_device_cpu(device):
         return False
 
-    # The eager comfy_kitchen backend implements int8 weight-only quantized
-    # matmul via torch._int_mm, which PyTorch does not implement for MPS.
-    # https://github.com/pytorch/pytorch/issues/141287
+    # Metal kitchen: W8A8 via torch._int_mm (+ metallib row-wise quant) or
+    # _weight_int8pack_mm. Eager-only _int_mm on MPS is still incomplete upstream.
     if (device is not None and is_device_mps(device)) or mps_mode():
-        return False
+        return hasattr(torch, "_int_mm") or hasattr(torch, "_weight_int8pack_mm")
 
     if is_intel_xpu():
         return False
