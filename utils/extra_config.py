@@ -6,6 +6,9 @@ import logging
 def load_extra_path_config(yaml_path):
     with open(yaml_path, 'r', encoding='utf-8') as stream:
         config = yaml.safe_load(stream)
+    if config is None:
+        logging.warning("Extra model paths config {} is empty; skipping".format(yaml_path))
+        return
     yaml_dir = os.path.dirname(os.path.abspath(yaml_path))
     for c in config:
         conf = config[c]
