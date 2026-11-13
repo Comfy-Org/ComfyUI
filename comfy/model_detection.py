@@ -44,6 +44,48 @@ def calculate_transformer_depth(prefix, state_dict_keys, state_dict):
 def detect_unet_config(state_dict, key_prefix, metadata=None):
     state_dict_keys = list(state_dict.keys())
 
+    # TwinFlow-Z-Image: detect dual timestep embedder checkpoints first.
+    if any(k.startswith('{}t_embedder_2.'.format(key_prefix)) for k in state_dict_keys):
+        dit_config = {
+            "image_model": "twinflow_z_image",
+            "architecture": "TwinFlow_Z_Image",
+            "patch_size": 2,
+            "in_channels": 16,
+            "qk_norm": True,
+            "ffn_dim_multiplier": (8.0 / 3.0),
+            "z_image_modulation": True,
+            "time_scale": 1000.0,
+            "n_refiner_layers": 2,
+        }
+
+        cap_embedder_key = '{}cap_embedder.1.weight'.format(key_prefix)
+        if cap_embedder_key in state_dict:
+            w = state_dict[cap_embedder_key]
+            dit_config["dim"] = w.shape[0]
+            dit_config["cap_feat_dim"] = w.shape[1]
+
+        dit_config["n_layers"] = count_blocks(state_dict_keys, '{}layers.'.format(key_prefix) + '{}.')
+
+        # Match Z-Image style defaults (TwinFlow checkpoints are 3840-dim variants).
+        dit_config["n_heads"] = 30
+        dit_config["n_kv_heads"] = 30
+        dit_config["axes_dims"] = [32, 48, 48]
+        dit_config["axes_lens"] = [1536, 512, 512]
+        dit_config["rope_theta"] = 256.0
+
+        try:
+            dit_config["allow_fp16"] = torch.std(
+                state_dict['{}layers.{}.ffn_norm1.weight'.format(key_prefix, dit_config["n_layers"] - 2)],
+                unbiased=False
+            ).item() < 0.42
+        except Exception:
+            pass
+
+        if '{}cap_pad_token'.format(key_prefix) in state_dict_keys or '{}x_pad_token'.format(key_prefix) in state_dict_keys:
+            dit_config["pad_tokens_multiple"] = 32
+
+        return dit_config
+        
     if (
         '{}cond_layer_logits'.format(key_prefix) in state_dict_keys
         and '{}latent_conditioners.0.weight'.format(key_prefix) in state_dict_keys
