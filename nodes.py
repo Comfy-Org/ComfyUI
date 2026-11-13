@@ -2252,14 +2252,20 @@ def get_module_name(module_path: str) -> str:
     return base_path
 
 
-async def load_custom_node(module_path: str, ignore=set(), module_parent="custom_nodes") -> bool:
-    module_name = get_module_name(module_path)
+async def load_custom_node(
+    module_path: str,
+    ignore=set(),
+    module_parent="custom_nodes",
+    module_name: str | None = None,
+) -> bool:
+    loaded_module_name = get_module_name(module_path)
     if os.path.isfile(module_path):
         sp = os.path.splitext(module_path)
-        module_name = sp[0]
-        sys_module_name = module_name
+        loaded_module_name = sp[0]
+        sys_module_name = loaded_module_name
     elif os.path.isdir(module_path):
         sys_module_name = module_path.replace(".", "_x_")
+    registration_name = module_name or loaded_module_name
 
     try:
         logging.debug("Trying to load custom node {}".format(module_path))
@@ -2275,7 +2281,18 @@ async def load_custom_node(module_path: str, ignore=set(), module_parent="custom
         sys.modules[sys_module_name] = module
         module_spec.loader.exec_module(module)
 
-        LOADED_MODULE_DIRS[module_name] = os.path.abspath(module_dir)
+        # custom node API (comfy_api.v4): a pack's engine extensions (v2/engine/*.py) load next to the engine
+        if os.path.isdir(module_path):
+            from comfy_api.latest import _engine
+            _engine.load_pack_extensions(sys_module_name, module_dir)
+        LOADED_MODULE_DIRS[registration_name] = os.path.abspath(module_dir)
+        try:  # custom node API: the pack's declared routes ([[tool.comfy.routes]]), served on ComfyUI's server
+            from server import PromptServer
+            from comfy_api.latest import registration
+            if PromptServer.instance is not None:
+                registration.install_routes(module_dir, sys_module_name, PromptServer.instance)
+        except Exception as e:
+            logging.warning(f"Declared routes of {module_path} not served: {e}")
 
         try:
             from comfy_config import config_parser
@@ -2299,14 +2316,14 @@ async def load_custom_node(module_path: str, ignore=set(), module_parent="custom
         if hasattr(module, "WEB_DIRECTORY") and getattr(module, "WEB_DIRECTORY") is not None:
             web_dir = os.path.abspath(os.path.join(module_dir, getattr(module, "WEB_DIRECTORY")))
             if os.path.isdir(web_dir):
-                EXTENSION_WEB_DIRS[module_name] = web_dir
+                EXTENSION_WEB_DIRS[registration_name] = web_dir
 
         # V1 node definition
         if hasattr(module, "NODE_CLASS_MAPPINGS") and getattr(module, "NODE_CLASS_MAPPINGS") is not None:
             for name, node_cls in module.NODE_CLASS_MAPPINGS.items():
                 if name not in ignore:
                     NODE_CLASS_MAPPINGS[name] = node_cls
-                    node_cls.RELATIVE_PYTHON_MODULE = "{}.{}".format(module_parent, get_module_name(module_path))
+                    node_cls.RELATIVE_PYTHON_MODULE = "{}.{}".format(module_parent, registration_name)
             if hasattr(module, "NODE_DISPLAY_NAME_MAPPINGS") and getattr(module, "NODE_DISPLAY_NAME_MAPPINGS") is not None:
                 for name, display_name in module.NODE_DISPLAY_NAME_MAPPINGS.items():
                     if name not in ignore:
@@ -2336,9 +2353,12 @@ async def load_custom_node(module_path: str, ignore=set(), module_parent="custom
                     schema = node_cls.GET_SCHEMA()
                     if schema.node_id not in ignore:
                         NODE_CLASS_MAPPINGS[schema.node_id] = node_cls
-                        node_cls.RELATIVE_PYTHON_MODULE = "{}.{}".format(module_parent, get_module_name(module_path))
+                        node_cls.RELATIVE_PYTHON_MODULE = "{}.{}".format(module_parent, registration_name)
                         if schema.display_name is not None:
                             NODE_DISPLAY_NAME_MAPPINGS[schema.node_id] = schema.display_name
+                # custom node API: what the pack's ComfyExtension declares: samplers, schedulers, model folders, replacements
+                from comfy_api.latest import registration
+                registration.install(*registration.from_extension(await registration.collect(extension)), registration_name)
                 return True
             except Exception as e:
                 logging.warning(f"Error while calling comfy_entrypoint in {module_path}: {e}")
@@ -2350,6 +2370,23 @@ async def load_custom_node(module_path: str, ignore=set(), module_parent="custom
         logging.warning(traceback.format_exc())
         logging.warning(f"Cannot import {module_path} module for custom nodes: {e}")
         return False
+
+def custom_node_allowed(module_path):
+    """The custom-node admission policy: the whitelist, the manager's blocklist and governance.
+    Shared with an execution provider's own pack discovery (custom node API)."""
+    name = os.path.basename(os.path.normpath(module_path))
+    if args.disable_all_custom_nodes and name not in args.whitelist_custom_nodes:
+        logging.info(f"Skipping {name} due to disable_all_custom_nodes and whitelist_custom_nodes")
+        return False
+    if args.enable_manager and comfyui_manager.should_be_disabled(module_path):
+        logging.info(f"Blocked by policy: {module_path}")
+        return False
+    refusal = governance.pack_refusal(module_path)
+    if refusal is not None:
+        logging.warning(refusal)
+        return False
+    return True
+
 
 async def init_external_custom_nodes():
     """
@@ -2378,22 +2415,19 @@ async def init_external_custom_nodes():
                 continue
             if module_path.endswith(".disabled"):
                 continue
-            if args.disable_all_custom_nodes and possible_module not in args.whitelist_custom_nodes:
-                logging.info(f"Skipping {possible_module} due to disable_all_custom_nodes and whitelist_custom_nodes")
-                continue
-
-            if args.enable_manager:
-                if comfyui_manager.should_be_disabled(module_path):
-                    logging.info(f"Blocked by policy: {module_path}")
-                    continue
-
-            refusal = governance.pack_refusal(module_path)
-            if refusal is not None:
-                logging.warning(refusal)
+            if not custom_node_allowed(module_path):
                 continue
 
             time_before = time.perf_counter()
-            success = await load_custom_node(module_path, base_node_names, module_parent="custom_nodes")
+            # custom node API: a pack converted to it keeps its V1 code and adds a v2/ entrypoint
+            v2_path = os.path.join(module_path, "v2")
+            entrypoint_path = v2_path if os.path.isfile(os.path.join(v2_path, "__init__.py")) else module_path
+            success = await load_custom_node(
+                entrypoint_path,
+                base_node_names,
+                module_parent="custom_nodes",
+                module_name=possible_module,
+            )
             node_import_times.append((time.perf_counter() - time_before, module_path, success))
 
     if len(node_import_times) > 0:
@@ -2597,6 +2631,12 @@ async def init_public_apis():
 async def init_extra_nodes(init_custom_nodes=True, init_api_nodes=True):
     await init_public_apis()
 
+    try:  # custom node API: eng.ui.interact's response route, before the app starts
+        from server import PromptServer
+        from comfy_api.latest import interactions
+        interactions.register_routes(PromptServer.instance)
+    except Exception as e:
+        logging.debug(f"interaction route not registered: {e}")
     import_failed = await init_builtin_extra_nodes()
 
     import_failed_api = []
@@ -2604,7 +2644,13 @@ async def init_extra_nodes(init_custom_nodes=True, init_api_nodes=True):
         import_failed_api = await init_builtin_api_nodes()
 
     if init_custom_nodes:
-        await init_external_custom_nodes()
+        from comfy_api.latest import _runtime
+        setup_packs = getattr(_runtime.providers.execution_backend, "setup_packs", None)
+        if setup_packs is not None:  # custom node API: a provider that registers packs without importing them
+            import asyncio
+            await asyncio.to_thread(setup_packs)
+        else:
+            await init_external_custom_nodes()
     else:
         logging.info("Skipping loading of custom nodes")
 
