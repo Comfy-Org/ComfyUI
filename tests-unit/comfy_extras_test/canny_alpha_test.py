@@ -5,6 +5,7 @@ from comfy.cli_args import args as cli_args
 if not torch.cuda.is_available():
     cli_args.cpu = True
 
+from comfy_extras import nodes_canny  # noqa: E402
 from comfy_extras.nodes_canny import Canny  # noqa: E402
 
 
@@ -56,3 +57,21 @@ def test_does_not_mutate_input():
     Canny.execute(src, 0.4, 0.8)
 
     assert torch.equal(src, before)
+
+
+def test_batch_runs_one_frame_per_kornia_call(monkeypatch):
+    batch_sizes = []
+    real_canny = nodes_canny.canny
+
+    def spy(image, low_threshold, high_threshold):
+        batch_sizes.append(image.shape[0])
+        return real_canny(image, low_threshold, high_threshold)
+
+    monkeypatch.setattr(nodes_canny, "canny", spy)
+    batch = torch.cat([edged_image(3), edged_image(3).flip(2), edged_image(3)])
+
+    out = Canny.execute(batch, 0.4, 0.8).result[0]
+
+    assert batch_sizes == [1, 1, 1]
+    assert out.shape == batch.shape
+    assert torch.equal(out[1:2], Canny.execute(batch[1:2], 0.4, 0.8).result[0])
