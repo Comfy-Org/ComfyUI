@@ -16,7 +16,7 @@ from comfy.cli_args import args
 if not has_gpu():
     args.cpu = True
 
-from comfy import ops
+from comfy import ops, quant_ops
 from comfy.quant_ops import QUANT_ALGOS, QuantizedTensor
 import comfy.utils
 
@@ -390,6 +390,68 @@ class TestMixedPrecisionOps(unittest.TestCase):
             self.assertFalse(mm.supports_int8_compute(None))
         finally:
             mm.cpu_state = orig_cpu_state
+
+    def test_int8_linear_input_act_uses_registered_custom_op(self):
+        compiled_linear = torch.compile(ops.linear_input_act_, backend="eager", fullgraph=True)
+        for input_act, convrot in (("swiglu", False), ("rms_norm", True)):
+            with self.subTest(input_act=input_act, convrot=convrot):
+                quantized_weight = QuantizedTensor.from_float(
+                    torch.randn(16, 256, dtype=torch.bfloat16),
+                    "TensorWiseINT8Layout",
+                    per_channel=True,
+                    convrot=convrot,
+                )
+                layer = ops.mixed_precision_ops({}).Linear(
+                    256, 16, device="cpu", dtype=torch.bfloat16
+                )
+                layer.weight = torch.nn.Parameter(quantized_weight, requires_grad=False)
+                layer.bias = torch.nn.Parameter(
+                    torch.randn(16, dtype=torch.bfloat16), requires_grad=False,
+                )
+                layer.quant_format = "int8_tensorwise"
+                layer.weight_function = []
+                layer.bias_function = []
+
+                input_tensor = torch.randn(
+                    2, 512 if input_act == "swiglu" else 256, dtype=torch.bfloat16
+                )
+                act_weight = torch.randn(256, dtype=torch.bfloat16) if input_act == "rms_norm" else None
+                act_eps = 1e-6 if input_act == "rms_norm" else 0.0
+                residual = torch.randn(2, 16, dtype=torch.bfloat16)
+                residual_scale = torch.randn(16, dtype=torch.bfloat16)
+                expected = torch.empty(2, 16, dtype=torch.bfloat16)
+                with unittest.mock.patch.object(
+                    torch.ops.comfy_kitchen, "int8_linear", return_value=expected,
+                ) as int8_linear:
+                    output = ops.linear_input_act(
+                        layer, input_tensor, input_act, act_weight, act_eps,
+                        residual, residual_scale,
+                    )
+
+                self.assertIs(output, expected)
+                int8_linear.assert_called_once()
+                op_args = int8_linear.call_args.args
+                self.assertIs(op_args[0], input_tensor)
+                torch.testing.assert_close(op_args[1], quantized_weight._qdata, rtol=0, atol=0)
+                torch.testing.assert_close(op_args[2], quantized_weight._params.scale, rtol=0, atol=0)
+                torch.testing.assert_close(op_args[3], layer.bias, rtol=0, atol=0)
+                self.assertEqual(op_args[4], quant_ops.ck.DTYPE_TO_CODE[input_tensor.dtype])
+                self.assertEqual(op_args[5], convrot)
+                self.assertEqual(op_args[6], quantized_weight._params.convrot_groupsize)
+                self.assertEqual(op_args[7], input_act)
+                self.assertIs(op_args[8], act_weight)
+                self.assertEqual(op_args[9], act_eps)
+                self.assertIs(op_args[10], residual)
+                self.assertIs(op_args[11], residual_scale)
+
+                linear_args = (
+                    input_tensor, layer.weight, layer.bias, input_act, act_weight,
+                    act_eps, residual, residual_scale,
+                )
+                torch.testing.assert_close(
+                    compiled_linear(*linear_args), ops.linear_input_act_(*linear_args),
+                    rtol=0, atol=0,
+                )
 
     def test_convrot_w4a4_loads_into_params(self):
         """ConvRot W4A4 checkpoints must load as the dedicated kitchen layout."""
