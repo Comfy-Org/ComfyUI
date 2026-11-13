@@ -54,14 +54,25 @@ class KarrasScheduler(io.ComfyNode):
                 io.Int.Input("steps", default=20, min=1, max=10000),
                 io.Float.Input("sigma_max", default=14.614642, min=0.0, max=5000.0, step=0.01, round=False, advanced=True),
                 io.Float.Input("sigma_min", default=0.0291675, min=0.0, max=5000.0, step=0.01, round=False, advanced=True),
-                io.Float.Input("rho", default=7.0, min=0.0, max=100.0, step=0.01, round=False, advanced=True),
+                io.Float.Input("rho", default=7.0, min=0.01, max=100.0, step=0.01, round=False, advanced=True),
             ],
             outputs=[io.Sigmas.Output()]
         )
 
     @classmethod
     def execute(cls, steps, sigma_max, sigma_min, rho) -> io.NodeOutput:
-        sigmas = k_diffusion_sampling.get_sigmas_karras(n=steps, sigma_min=sigma_min, sigma_max=sigma_max, rho=rho)
+        # sigma_max ** (1 / rho) overflows for small rho, and inf - inf is nan. How
+        # small is too small depends on sigma_max, so a minimum on rho alone cannot
+        # rule it out and the result has to be checked. Nan sigmas do not fail
+        # loudly: sampling runs to completion and every pixel comes back nan.
+        try:
+            sigmas = k_diffusion_sampling.get_sigmas_karras(n=steps, sigma_min=sigma_min, sigma_max=sigma_max, rho=rho)
+        except OverflowError:
+            sigmas = None
+        if sigmas is None or not torch.isfinite(sigmas).all():
+            raise ValueError(
+                "KarrasScheduler: rho={} is too small for sigma_max={} — the schedule overflows "
+                "and the sigmas come out as nan. Raise rho or lower sigma_max.".format(rho, sigma_max))
         return io.NodeOutput(sigmas)
 
     get_sigmas = execute
