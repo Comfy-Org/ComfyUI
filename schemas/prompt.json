@@ -1,0 +1,89 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://github.com/Comfy-Org/ComfyUI/blob/main/schemas/prompt.json",
+  "title": "ComfyUI Prompt Format",
+  "description": "JSON Schema for the ComfyUI /prompt endpoint. Each key is a unique node ID, and each value describes a node with its class_type, inputs, and optional metadata.",
+  "type": "object",
+  "additionalProperties": {
+    "$ref": "#/definitions/node"
+  },
+  "definitions": {
+    "node": {
+      "type": "object",
+      "required": ["class_type", "inputs"],
+      "properties": {
+        "class_type": {
+          "type": "string",
+          "description": "The node class to instantiate. Must match a key in NODE_CLASS_MAPPINGS."
+        },
+        "inputs": {
+          "$ref": "#/definitions/inputs"
+        },
+        "_meta": {
+          "type": "object",
+          "description": "Optional UI metadata for a node.",
+          "properties": {
+            "title": {
+              "type": "string",
+              "description": "Display title for the node in the UI."
+            }
+          }
+        }
+      },
+      "additionalProperties": true
+    },
+    "inputs": {
+      "type": "object",
+      "description": "Node inputs. Keys are parameter names. Values are either direct values or node links [source_id, output_index].",
+      "additionalProperties": true
+    },
+    "node_link": {
+      "type": "array",
+      "description": "A link to another node's output.",
+      "items": [
+        {"type": "string", "description": "Source node ID"},
+        {"type": "integer", "description": "Output index of the source node"}
+      ],
+      "minItems": 2,
+      "maxItems": 2
+    }
+  },
+  "examples": [
+    {
+      "4": {
+        "class_type": "CheckpointLoaderSimple",
+        "inputs": {"ckpt_name": "v1-5-pruned-emaonly.safetensors"}
+      },
+      "5": {
+        "class_type": "EmptyLatentImage",
+        "inputs": {"width": 512, "height": 512, "batch_size": 1}
+      },
+      "6": {
+        "class_type": "CLIPTextEncode",
+        "inputs": {"text": "a beautiful landscape", "clip": ["4", 1]}
+      },
+      "7": {
+        "class_type": "CLIPTextEncode",
+        "inputs": {"text": "ugly, blurry", "clip": ["4", 1]}
+      },
+      "3": {
+        "class_type": "KSampler",
+        "inputs": {
+          "seed": 123456, "steps": 20, "cfg": 7.0,
+          "sampler_name": "euler", "scheduler": "normal", "denoise": 1.0,
+          "model": ["4", 0], "positive": ["6", 0], "negative": ["7", 0],
+          "latent_image": ["5", 0]
+        }
+      },
+      "8": {
+        "class_type": "VAEDecode",
+        "inputs": {"samples": ["3", 0], "vae": ["4", 2]},
+        "_meta": {"title": "VAE Decode"}
+      },
+      "9": {
+        "class_type": "SaveImage",
+        "inputs": {"filename_prefix": "ComfyUI", "images": ["8", 0]}
+      }
+    }
+  ]
+}
