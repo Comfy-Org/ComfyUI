@@ -645,8 +645,16 @@ def models_for_pin_eviction(active, current_prompt=None):
             (current_prompt is None or pin_state["current_prompt"] == current_prompt)):
             yield model
 
+# Pin bookkeeping (budgets, registrations, stealing) is shared by every device. With more than one GPU working
+# (MultiGPU CFG split) each device loads its weights from its own thread, so the paths that queue copies out of
+# pins and the ones that evict pins take this lock.
+PIN_LOCK = threading.RLock()
+
 def free_model_pins(size, subsets, current_prompt, active, registrations=False):
     freed_total = 0
+    if size > 0 and len(STREAMS) > 1:
+        # another device may still have a copy queued out of a pin that is about to be unregistered or freed
+        sync_all_offload_streams()
     for model in models_for_pin_eviction(active, current_prompt=current_prompt):
         if size <= 0:
             return freed_total
@@ -1340,6 +1348,7 @@ def force_channels_last():
 
 
 STREAMS = {}
+STREAMS_LOCK = threading.Lock()
 NUM_STREAMS = 0
 if args.async_offload is not None:
     NUM_STREAMS = args.async_offload
@@ -1494,7 +1503,8 @@ def get_offload_stream(device):
     if s is None:
         return None
     ss = [s] + [new_stream(device) for _ in range(NUM_STREAMS - 1)]
-    STREAMS[device] = ss
+    with STREAMS_LOCK:
+        STREAMS[device] = ss
     stream_counters[device] = stream_counter
     return ss[stream_counter]
 
@@ -1513,7 +1523,10 @@ def sync_all_offload_streams():
     if NUM_STREAMS == 0:
         synchronize()
         return
-    for streams in STREAMS.values():
+    with STREAMS_LOCK:
+        # another device can register its streams from its own thread while these are synchronized
+        all_streams = list(STREAMS.values())
+    for streams in all_streams:
         for stream in streams:
             stream.synchronize()
 
@@ -1606,6 +1619,7 @@ def is_integrated_gpu():
     device = get_torch_device()
     return device.type == "cuda" and bool(torch.cuda.get_device_properties(device).is_integrated)
 
+WSL = "microsoft" in platform.uname().release.lower()
 DISABLE_PINNED_MEMORY = args.disable_pinned_memory
 if not DISABLE_PINNED_MEMORY and is_integrated_gpu():
     # Integrated GPU VRAM is carved out of system RAM, so pinning host memory only takes RAM from the GPU.
@@ -1614,8 +1628,9 @@ if not DISABLE_PINNED_MEMORY and is_integrated_gpu():
 if not DISABLE_PINNED_MEMORY:
     if is_nvidia() or is_amd():
         ram = get_total_memory(torch.device("cpu"))
-        if WINDOWS:
-            MAX_PINNED_MEMORY = ram * 0.40  # Windows limit is apparently 50%
+        if WINDOWS or WSL:
+            # Windows limit is apparently 50%. Under WSL2 the GPU is the Windows host's and its driver pins the memory, so the same limit applies.
+            MAX_PINNED_MEMORY = ram * 0.40
         else:
             swap = 0 if comfy.system_memory.cgroup_memory_limit() is not None else get_disk_swap_total()
             MAX_PINNED_MEMORY = max(ram * 0.40, min(ram * 0.90, ram - 4 * 1024 ** 3, ram + swap - 16 * 1024 ** 3))
