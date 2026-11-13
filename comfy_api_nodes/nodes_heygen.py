@@ -830,7 +830,7 @@ class HeyGenReferenceToVideoNode(IO.ComfyNode):
             display_name="HeyGen Video 1.0 Reference to Video",
             category="partner/video/HeyGen",
             description="Generate a video with synchronized dialogue and sound from a text prompt using "
-            "HeyGen Video 1.0. Optionally connect up to 12 reference images, videos, and audio clips and "
+            "HeyGen Video 1.0. Optionally connect up to 15 reference images, videos, and audio clips and "
             "mention them in the prompt as @Image1, @Video1, @Audio1.",
             inputs=[
                 IO.DynamicCombo.Input(
@@ -851,16 +851,17 @@ class HeyGenReferenceToVideoNode(IO.ComfyNode):
                                     "duration",
                                     default=5,
                                     min=5,
-                                    max=15,
+                                    max=30,
                                     step=1,
                                     display_mode=IO.NumberDisplay.slider,
-                                    tooltip="Duration of the output video in seconds.",
+                                    tooltip="Duration of the output video in seconds. More than 15 seconds "
+                                    "is available only without reference images and videos.",
                                 ),
                                 IO.Combo.Input(
                                     "resolution",
-                                    options=["768p", "480p", "2k"],
-                                    tooltip="Output resolution. 2k requires the 16:9 or 9:16 aspect ratio; "
-                                    "'auto' works at 2k only without references.",
+                                    options=["768p", "480p", "1080p", "2k"],
+                                    tooltip="Output resolution. 1080p and 2k require the 16:9 or 9:16 aspect "
+                                    "ratio; 'auto' works at these resolutions only without references.",
                                 ),
                                 IO.Combo.Input(
                                     "aspect_ratio",
@@ -896,7 +897,7 @@ class HeyGenReferenceToVideoNode(IO.ComfyNode):
                                         min=0,
                                     ),
                                     tooltip="Up to 3 videos to use as references; refer to them as "
-                                    "@Video1, @Video2, ...",
+                                    "@Video1, @Video2, ... At most 15 seconds of footage is used in total.",
                                 ),
                                 IO.Autogrow.Input(
                                     "reference_audios",
@@ -909,6 +910,15 @@ class HeyGenReferenceToVideoNode(IO.ComfyNode):
                                     "them as @Audio1, @Audio2, ... Requires at least one reference image or "
                                     "video. A voice reference needs a few seconds of clean speech; clips "
                                     "shorter than about 2 seconds are usually ignored.",
+                                ),
+                                IO.Combo.Input(
+                                    "auto_duration",
+                                    options=["disabled", "enabled"],
+                                    default="disabled",
+                                    optional=True,
+                                    tooltip="When enabled, the video length follows the quoted dialogue in "
+                                    "the prompt (8 to 30 seconds, or 8 to 15 with reference images or videos) "
+                                    "and duration is ignored.",
                                 ),
                             ],
                         ),
@@ -924,27 +934,50 @@ class HeyGenReferenceToVideoNode(IO.ComfyNode):
             is_api_node=True,
             price_badge=IO.PriceBadge(
                 depends_on=IO.PriceBadgeDepends(
-                    widgets=["model", "model.duration", "model.resolution"],
+                    widgets=["model", "model.duration", "model.resolution", "model.auto_duration"],
                     input_groups=["model.reference_images", "model.reference_videos"],
                 ),
                 expr="""
                 (
                   $dur := $lookup(widgets, "model.duration");
                   $res := $lookup(widgets, "model.resolution");
+                  $auto := $lookup(widgets, "model.auto_duration") = "enabled";
                   $imgsRaw := $lookup(inputGroups, "model.reference_images");
                   $imgs := $imgsRaw ? $imgsRaw : 0;
                   $vidsRaw := $lookup(inputGroups, "model.reference_videos");
                   $vids := $vidsRaw ? $vidsRaw : 0;
-                  $rate := ($imgs + $vids) > 0
-                    ? $lookup({"480p": 0.0286, "768p": 0.0429, "2k": 0.1287}, $res)
-                    : $lookup({"480p": 0.0143, "768p": 0.02145, "2k": 0.06435}, $res);
-                  $vids > 0
-                    ? {"type":"range_usd","min_usd": $rate * $dur, "max_usd": $rate * ($dur + 5 * $vids)}
-                    : {"type":"usd","usd": $rate * $dur}
+                  $promo := $now() < "2026-12-01T00:00:00.000Z";
+                  $rate := $lookup($promo
+                    ? {"480p": 0.0143, "768p": 0.02574, "1080p": 0.0572, "2k": 0.0715}
+                    : {"480p": 0.0286, "768p": 0.05148, "1080p": 0.1144, "2k": 0.143}, $res);
+                  $longRate := $lookup({"480p": 0.06435, "768p": 0.10725, "1080p": 0.15015, "2k": 0.15015}, $res);
+                  $refRate := $lookup($promo
+                    ? {"480p": 0.05005, "768p": 0.0715, "1080p": 0.1287, "2k": 0.1287}
+                    : {"480p": 0.1001, "768p": 0.143, "1080p": 0.2574, "2k": 0.2574}, $res);
+                  $extraImgs := $imgs > 2 ? ($imgs - 2) * ($promo ? 0.0286 : 0.0572) : 0;
+                  ($imgs + $vids) > 0
+                    ? (
+                        ($auto or $vids > 0)
+                          ? {
+                              "type":"range_usd",
+                              "min_usd": $refRate * ($auto ? 8 : $dur) + $extraImgs,
+                              "max_usd": $refRate * (($auto ? 15 : $dur) + ($vids > 0 ? 15 : 0)) + $extraImgs
+                            }
+                          : {"type":"usd","usd": $refRate * $dur + $extraImgs}
+                      )
+                    : (
+                        $auto
+                          ? {"type":"range_usd","min_usd": $rate * 8, "max_usd": $longRate * 30}
+                          : {"type":"usd","usd": ($dur > 15 ? $longRate : $rate) * $dur}
+                      )
                 )
                 """,
             ),
         )
+
+    @classmethod
+    def validate_inputs(cls, **kwargs) -> bool:
+        return True
 
     @classmethod
     async def execute(cls, model: dict) -> IO.NodeOutput:
@@ -953,12 +986,12 @@ class HeyGenReferenceToVideoNode(IO.ComfyNode):
         reference_audios = model.get("reference_audios", {})
         if reference_audios and not (reference_images or reference_videos):
             raise ValueError("Reference audio requires at least one reference image or video.")
-        total = len(reference_images) + len(reference_videos) + len(reference_audios)
-        if total > 12:
-            raise ValueError(f"At most 12 references can be connected in total; got {total}.")
-        if model["resolution"] == "2k" and model["aspect_ratio"] not in ("16:9", "9:16"):
+        if model["resolution"] in ("1080p", "2k") and model["aspect_ratio"] not in ("16:9", "9:16"):
             if model["aspect_ratio"] != "auto" or reference_images or reference_videos:
-                raise ValueError("2k resolution requires the 16:9 or 9:16 aspect ratio.")
+                raise ValueError("1080p and 2k resolutions require the 16:9 or 9:16 aspect ratio.")
+        auto_duration = model.get("auto_duration") == "enabled"
+        if (reference_images or reference_videos) and not auto_duration and model["duration"] > 15:
+            raise ValueError("Durations above 15 seconds are not available with reference images or videos.")
         for key, image in reference_images.items():
             if get_number_of_images(image) != 1:
                 raise ValueError(f"Reference image input '{key}' must contain exactly one image, not a batch.")
@@ -967,12 +1000,12 @@ class HeyGenReferenceToVideoNode(IO.ComfyNode):
             model["prompt"],
             {"image": len(reference_images), "video": len(reference_videos), "audio": len(reference_audios)},
         )
-        validate_string(prompt, strip_whitespace=True, min_length=1, max_length=32000)
+        validate_string(prompt, strip_whitespace=True, min_length=1, max_length=16000)
         payload = {
             "model": model["model"],
             "mode": "reference_to_video" if reference_images or reference_videos else "text_to_video",
             "prompt": prompt,
-            "duration": model["duration"],
+            "duration": "auto" if auto_duration else model["duration"],
             "resolution": model["resolution"],
             "seed": model["seed"],
         }
@@ -1033,14 +1066,14 @@ class HeyGenImageToVideoNode(IO.ComfyNode):
                                     "duration",
                                     default=5,
                                     min=5,
-                                    max=15,
+                                    max=30,
                                     step=1,
                                     display_mode=IO.NumberDisplay.slider,
                                     tooltip="Duration of the output video in seconds.",
                                 ),
                                 IO.Combo.Input(
                                     "resolution",
-                                    options=["768p", "480p", "2k"],
+                                    options=["768p", "480p", "1080p", "2k"],
                                     tooltip="Output resolution.",
                                 ),
                                 IO.Int.Input(
@@ -1051,6 +1084,14 @@ class HeyGenImageToVideoNode(IO.ComfyNode):
                                     control_after_generate=True,
                                     tooltip="Seed for the generation. Results can still vary between runs "
                                     "with the same seed.",
+                                ),
+                                IO.Combo.Input(
+                                    "auto_duration",
+                                    options=["disabled", "enabled"],
+                                    default="disabled",
+                                    optional=True,
+                                    tooltip="When enabled, the video length follows the quoted dialogue in "
+                                    "the prompt (8 to 30 seconds) and duration is ignored.",
                                 ),
                             ],
                         ),
@@ -1065,17 +1106,32 @@ class HeyGenImageToVideoNode(IO.ComfyNode):
             ],
             is_api_node=True,
             price_badge=IO.PriceBadge(
-                depends_on=IO.PriceBadgeDepends(widgets=["model", "model.duration", "model.resolution"]),
+                depends_on=IO.PriceBadgeDepends(
+                    widgets=["model", "model.duration", "model.resolution", "model.auto_duration"]
+                ),
                 expr="""
-                {"type":"usd","usd": $lookup({"480p": 0.0143, "768p": 0.02145, "2k": 0.06435}, $lookup(widgets, "model.resolution"))
-                  * $lookup(widgets, "model.duration")}
+                (
+                  $dur := $lookup(widgets, "model.duration");
+                  $res := $lookup(widgets, "model.resolution");
+                  $rate := $lookup($now() < "2026-12-01T00:00:00.000Z"
+                    ? {"480p": 0.0143, "768p": 0.02574, "1080p": 0.0572, "2k": 0.0715}
+                    : {"480p": 0.0286, "768p": 0.05148, "1080p": 0.1144, "2k": 0.143}, $res);
+                  $longRate := $lookup({"480p": 0.06435, "768p": 0.10725, "1080p": 0.15015, "2k": 0.15015}, $res);
+                  $lookup(widgets, "model.auto_duration") = "enabled"
+                    ? {"type":"range_usd","min_usd": $rate * 8, "max_usd": $longRate * 30}
+                    : {"type":"usd","usd": ($dur > 15 ? $longRate : $rate) * $dur}
+                )
                 """,
             ),
         )
 
     @classmethod
+    def validate_inputs(cls, **kwargs) -> bool:
+        return True
+
+    @classmethod
     async def execute(cls, model: dict) -> IO.NodeOutput:
-        validate_string(model["prompt"], strip_whitespace=True, min_length=1, max_length=32000)
+        validate_string(model["prompt"], strip_whitespace=True, min_length=1, max_length=16000)
         if get_number_of_images(model["image"]) != 1:
             raise ValueError("The image input must contain exactly one image, not a batch.")
         validate_image_aspect_ratio(model["image"], (1, 4), (4, 1), strict=False)
@@ -1085,7 +1141,7 @@ class HeyGenImageToVideoNode(IO.ComfyNode):
             "mode": "image_to_video",
             "prompt": model["prompt"],
             "image": {"type": "url", "url": image_url},
-            "duration": model["duration"],
+            "duration": "auto" if model.get("auto_duration") == "enabled" else model["duration"],
             "resolution": model["resolution"],
             "seed": model["seed"],
         }
