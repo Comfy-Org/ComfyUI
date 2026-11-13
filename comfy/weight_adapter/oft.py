@@ -306,14 +306,14 @@ class OFTAdapter(WeightAdapterBase):
 
         # Reshape to apply block-diagonal transform
         # (*, out_features) -> (*, block_num, block_size)
-        y_blocked = y.view(*batch_shape, block_num, block_size)
+        y_blocked = y.reshape(*batch_shape, block_num, block_size)
 
         # Apply orthogonal transform: R @ y for each block
         # r: (block_num, block_size, block_size), y_blocked: (*, block_num, block_size)
         out_blocked = torch.einsum("k n m, ... k n -> ... k m", r, y_blocked)
 
         # Reshape back: (*, block_num, block_size) -> (*, out_features)
-        out = out_blocked.view(*batch_shape, out_features)
+        out = out_blocked.reshape(*batch_shape, out_features)
 
         # Apply rescale if present
         if rescale is not None:
