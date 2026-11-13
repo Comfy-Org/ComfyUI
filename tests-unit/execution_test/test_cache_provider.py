@@ -1,7 +1,9 @@
 """Tests for external cache provider API."""
 
+import asyncio
 import importlib.util
 import pytest
+from types import SimpleNamespace
 from typing import Optional
 
 
@@ -10,6 +12,7 @@ def _torch_available() -> bool:
     return importlib.util.find_spec("torch") is not None
 
 
+from comfy_execution.caching import CacheKeySetID, HierarchicalCache
 from comfy_execution.cache_provider import (
     CacheProvider,
     CacheContext,
@@ -24,6 +27,7 @@ from comfy_execution.cache_provider import (
     _estimate_value_size,
     _canonicalize,
 )
+from comfy_execution.graph import DynamicPrompt
 
 
 class TestCanonicalize:
@@ -386,6 +390,60 @@ class TestCacheValue:
         value = CacheValue(outputs=outputs)
 
         assert value.outputs == outputs
+
+
+class TestExpandedNodeCaching:
+    def setup_method(self):
+        _clear_cache_providers()
+
+    def teardown_method(self):
+        _clear_cache_providers()
+
+    @staticmethod
+    async def create_cache(enable_providers):
+        dynprompt = DynamicPrompt({
+            "parent": {"class_type": "ParentNode", "inputs": {}},
+        })
+        dynprompt.add_ephemeral_node(
+            "child",
+            {"class_type": "ChildNode", "inputs": {}},
+            "parent",
+            "parent",
+        )
+        cache = HierarchicalCache(CacheKeySetID, enable_providers=enable_providers)
+        await cache.set_prompt(dynprompt, ["parent"], None)
+        subcache = await cache.ensure_subcache_for("parent", ["child"])
+        return cache, subcache
+
+    @pytest.mark.asyncio
+    async def test_expanded_node_uses_external_cache_provider(self):
+        provider = MockCacheProvider()
+        register_cache_provider(provider)
+        cache, subcache = await self.create_cache(enable_providers=True)
+
+        await cache.set("child", SimpleNamespace(outputs=["stored"], ui=None))
+        await asyncio.gather(*subcache._pending_store_tasks)
+
+        subcache.cache.clear()
+        await cache.get("child")
+
+        assert len(provider.stores) == 1
+        assert len(provider.lookups) == 1
+        assert provider.stores[0][0].node_id == "child"
+        assert provider.lookups[0].node_id == "child"
+
+    @pytest.mark.asyncio
+    async def test_expanded_node_skips_external_provider_when_disabled(self):
+        provider = MockCacheProvider()
+        register_cache_provider(provider)
+        cache, subcache = await self.create_cache(enable_providers=False)
+
+        await cache.set("child", SimpleNamespace(outputs=["stored"], ui=None))
+        subcache.cache.clear()
+        await cache.get("child")
+
+        assert provider.stores == []
+        assert provider.lookups == []
 
 
 class MockCacheProvider(CacheProvider):
