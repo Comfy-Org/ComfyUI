@@ -1127,14 +1127,37 @@ def bislerp(samples, width, height):
     result = result.reshape(n, h_new, w_new, c).movedim(-1, 1)
     return result.to(orig_dtype)
 
+LANCZOS_MAX_THREADS = 8  # resizing is memory bound: more threads gain little and each holds a frame's buffers
+
+def _lanczos_image(image, width, height):
+    image = Image.fromarray(np.clip(255. * image.numpy(), 0, 255).astype(np.uint8))
+    image = image.resize((width, height), resample=Image.Resampling.LANCZOS)
+    t = np.array(image).astype(np.float32) / 255.0
+    return torch.from_numpy(t).movedim(-1, 0) if t.ndim == 3 else torch.from_numpy(t)
+
 def lanczos(samples, width, height):
     #the below API is strict and expects grayscale to be squeezed
     if samples.ndim == 4:
         samples = samples.squeeze(1) if samples.shape[1] == 1 else samples.movedim(1, -1)
-    images = [Image.fromarray(np.clip(255. * image.cpu().numpy(), 0, 255).astype(np.uint8)) for image in samples]
-    images = [image.resize((width, height), resample=Image.Resampling.LANCZOS) for image in images]
-    images = [torch.from_numpy(t).movedim(-1, 0) if (t := np.array(image).astype(np.float32) / 255.0).ndim == 3 else torch.from_numpy(t) for image in images]
-    result = torch.stack(images)
+    source = samples.cpu()
+    first = _lanczos_image(source[0], width, height)
+    result = torch.empty((source.shape[0],) + tuple(first.shape), dtype=first.dtype)
+    result[0] = first
+
+    def resize(i):
+        result[i] = _lanczos_image(source[i], width, height)
+
+    # PIL and numpy release the GIL, so the frames of a batch (a video) are resized in parallel; every frame goes
+    # through exactly the same steps as before, so the result is unchanged, and it is written straight into result
+    # instead of a list stacked at the end
+    workers = min(source.shape[0] - 1, max(1, torch.get_num_threads()), LANCZOS_MAX_THREADS)
+    if workers > 1:
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            list(pool.map(resize, range(1, source.shape[0])))
+    else:
+        for i in range(1, source.shape[0]):
+            resize(i)
     return result.to(samples.device, samples.dtype)
 
 def common_upscale(samples, width, height, upscale_method, crop):
