@@ -28,6 +28,7 @@ simpleeval>=1.0.0
 blake3
 
 #non essential dependencies:
+OpenEXR>=3.3.0
 kornia>=0.7.1
 spandrel
 pydantic~=2.0
