@@ -3,6 +3,16 @@ from unittest.mock import Mock, call
 import comfy.model_management as model_management
 
 
+def test_mps_allocator_failure_is_gpu_oom():
+    error = RuntimeError(
+        "MPS backend out of memory (MPS allocated: 8.00 MiB, "
+        "other allocations: 448.00 KiB, max allowed: 64.00 MiB). "
+        "Tried to allocate 128.00 MiB on shared pool."
+    )
+
+    assert model_management.is_oom(error)
+
+
 class NPUDevice:
     type = "npu"
 
