@@ -51,6 +51,7 @@ class TestExtractVideoMetadata:
         assert result["kind"] == "video"
         assert result["width"] == 64
         assert result["height"] == 48
+        assert result["codec"] == "h264"
         assert result["frame_count"] == 12
         assert result["fps"] == pytest.approx(8.0)
         assert result["duration"] == pytest.approx(12 / 8, abs=0.1)

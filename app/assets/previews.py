@@ -1,5 +1,5 @@
-"""Previews of uploaded EXRs: decoded, stored and linked on upload. Best-effort, since an
-asset without a preview is a normal state."""
+"""Previews of uploads browsers can't show, EXRs and ProRes: made, stored and linked on upload.
+Best-effort, since an asset without a preview is a normal state."""
 
 from __future__ import annotations
 
@@ -20,6 +20,8 @@ from app.assets.database.models import Asset
 from app.assets.database.queries.records import create_content, create_record
 from app.assets.event_log import emit, error_type
 from app.assets.services.image_dimensions import read_exr_windows
+from app.assets.services.ingest import link_preview
+from app.assets.services.video_proxy import needs_video_proxy, write_video_proxy
 from app.database.db import create_write_session
 from comfy_execution.preview_tonemap import linear_to_preview
 
@@ -105,14 +107,22 @@ def _emit_error(reason: str, exc: BaseException) -> None:
     emit("previews.generation_failed", reason=reason, error_type=error_type(exc))
 
 
-async def generate_upload_preview(asset_id: str, path: str | None, preview_id: str | None) -> str | None:
-    """The preview_id an upload ends with: the one it has, else one made now for an EXR."""
-    if preview_id is not None or not path or not is_exr(path):
+async def generate_upload_preview(
+    asset_id: str, path: str | None, preview_id: str | None, system_metadata: dict | None
+) -> str | None:
+    """The preview_id an upload ends with: the one it has, else one made now for an EXR or ProRes."""
+    if preview_id is not None or not path:
         return preview_id
+    if is_exr(path):
+        make, link = _make_preview, lambda made: _store_and_link(asset_id, *made)
+    elif needs_video_proxy(system_metadata):
+        make, link = write_video_proxy, lambda made: link_preview(asset_id, made)
+    else:
+        return None
     started = time.monotonic()
     try:
         async with _DECODE_SLOTS:
-            webp, width, height = await asyncio.to_thread(_make_preview, path)
+            made = await asyncio.to_thread(make, path)
     except PreviewSkipped as skipped:
         _emit_failed(skipped.args[0])
         return None
@@ -120,7 +130,7 @@ async def generate_upload_preview(asset_id: str, path: str | None, preview_id: s
         _emit_error("decode_failed", exc)
         return None
     try:
-        linked = await asyncio.to_thread(_store_and_link, asset_id, webp, width, height)
+        linked = await asyncio.to_thread(link, made)
     except Exception as exc:
         _emit_error("write_failed", exc)
         return None

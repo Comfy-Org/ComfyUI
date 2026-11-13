@@ -538,7 +538,7 @@ class PromptServer():
             post = await request.post()
             resp, view, filepath = store_image_upload(post)
             if view is not None:
-                preview_id = await generate_upload_preview(view.asset.id, filepath, view.asset.preview_id)
+                preview_id = await generate_upload_preview(view.asset.id, filepath, view.asset.preview_id, view.system_metadata)
                 live_previews = get_preview_file_paths([preview_id]) if preview_id else {}
                 preview_id, preview_url = preview_fields(
                     view.asset.id, preview_id, view.mime_type, filepath, False, live_previews
