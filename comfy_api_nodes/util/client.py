@@ -44,6 +44,10 @@ from .download_helpers import download_url_to_bytesio
 M = TypeVar("M", bound=BaseModel)
 
 
+class PollingTimeoutError(Exception):
+    """The polling budget ended before the provider task reached a terminal state."""
+
+
 class ApiEndpoint:
     def __init__(
         self,
@@ -577,11 +581,11 @@ async def poll_op_raw(
                 consumed_attempts += 1
 
         await _cancel()
-        raise Exception(
-            f"Polling timed out after {max_poll_attempts} non-queued attempts "
+        raise PollingTimeoutError(
+            f"Polling aborted due to error: Polling timed out after {max_poll_attempts} non-queued attempts "
             f"(~{int(max_poll_attempts * (max_poll_interval or poll_interval))}s of active polling)."
         )
-    except ProcessingInterrupted:
+    except (ProcessingInterrupted, PollingTimeoutError):
         raise
     except asyncio.CancelledError:
         await _cancel()
