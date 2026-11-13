@@ -123,6 +123,7 @@ except:
 try:
     import torch_npu  # noqa: F401
     _ = torch.npu.device_count()
+    torch_npu.npu.set_compile_mode(jit_compile = False)
     npu_available = torch.npu.is_available()
 except:
     npu_available = False
