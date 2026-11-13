@@ -9,6 +9,77 @@ import comfy.utils
 import folder_paths
 from comfy_api.latest import ComfyExtension, io
 
+_TENSOR_REF_KEY = "__comfy_option_tensor__"
+_DICT_ITEMS_KEY = "__dict_items__"
+
+
+def _extract_tensors_and_options(obj: object, sd: dict[str, torch.Tensor], tensor_counter: list[int]) -> object:
+    """Recursively extracts PyTorch tensors into state dict and preserves scalar non-string dictionary key types.
+
+    Args:
+        obj: The object, list, or dictionary to scan for PyTorch tensors.
+        sd: Root state dictionary where extracted tensors are placed.
+        tensor_counter: Counter list tracking collision-free tensor index IDs.
+
+    Returns:
+        JSON-serializable structure with preserved key types and sentinel tensor references.
+
+    Raises:
+        TypeError: If a dictionary contains non-scalar/unhashable key types (e.g., tuples or lists).
+    """
+    if isinstance(obj, torch.Tensor):
+        ref_id = f"__cond_tensor_{tensor_counter[0]}"
+        tensor_counter[0] += 1
+        sd[ref_id] = obj
+        return {_TENSOR_REF_KEY: ref_id}
+    elif isinstance(obj, dict):
+        if any(not isinstance(k, (str, int, float, bool, type(None))) for k in obj.keys()):
+            raise TypeError("Dictionary keys must be str, int, float, bool, or None to survive JSON round-trip.")
+        
+        has_non_str_keys = any(not isinstance(k, str) for k in obj.keys())
+        if has_non_str_keys:
+            items = [[k, _extract_tensors_and_options(v, sd, tensor_counter)] for k, v in obj.items()]
+            return {_DICT_ITEMS_KEY: items}
+        return {k: _extract_tensors_and_options(v, sd, tensor_counter) for k, v in obj.items()}
+    elif isinstance(obj, (list, tuple)):
+        res = [_extract_tensors_and_options(v, sd, tensor_counter) for v in obj]
+        return tuple(res) if isinstance(obj, tuple) else res
+    else:
+        return obj
+
+
+def _restore_tensors_and_options(obj: object, sd: dict[str, torch.Tensor], used_keys: set[str] | None = None) -> object:
+    """Recursively restores PyTorch tensors from state dict and reconstructs preserved scalar key types.
+
+    Args:
+        obj: The JSON-restored options structure containing tensor references.
+        sd: Root state dictionary containing loaded tensors.
+        used_keys: Set tracking consumed tensor keys to prevent duplicate legacy assignments.
+
+    Returns:
+        Restored options structure with re-attached PyTorch tensors and typed dictionary keys.
+    """
+    if used_keys is None:
+        used_keys = set()
+
+    if isinstance(obj, dict):
+        if _TENSOR_REF_KEY in obj and len(obj) == 1:
+            ref_key = obj[_TENSOR_REF_KEY]
+            used_keys.add(ref_key)
+            return sd.get(ref_key)
+        elif _DICT_ITEMS_KEY in obj and len(obj) == 1:
+            return {
+                k: _restore_tensors_and_options(v, sd, used_keys)
+                for k, v in obj[_DICT_ITEMS_KEY]
+            }
+        return {k: _restore_tensors_and_options(v, sd, used_keys) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [_restore_tensors_and_options(v, sd, used_keys) for v in obj]
+    elif isinstance(obj, tuple):
+        return tuple(_restore_tensors_and_options(v, sd, used_keys) for v in obj)
+    else:
+        return obj
+
 
 class CLIPTextEncodeControlnet(io.ComfyNode):
     @classmethod
@@ -38,6 +109,7 @@ class CLIPTextEncodeControlnet(io.ComfyNode):
             c.append(n)
         return io.NodeOutput(c)
 
+
 class T5TokenizerOptions(io.ComfyNode):
     @classmethod
     def define_schema(cls) -> io.Schema:
@@ -65,6 +137,8 @@ class T5TokenizerOptions(io.ComfyNode):
 
 
 class ConditioningLoader(io.ComfyNode):
+    """Loads saved conditioning structures from safetensors files in the embeddings directory."""
+
     @classmethod
     def define_schema(cls) -> io.Schema:
         return io.Schema(
@@ -83,8 +157,14 @@ class ConditioningLoader(io.ComfyNode):
         sd, metadata = comfy.utils.load_torch_file(folder_paths.get_full_path_or_raise("embeddings", conditioning_name), safe_load=True, return_metadata=True)
         cond = sd.pop("conditioning")
         options = json.loads((metadata or {}).get("conditioning_options", "{}"))
+
+        used_keys = set()
+        options = _restore_tensors_and_options(options, sd, used_keys=used_keys)
+
         lists = {}
         for k, v in sd.items():
+            if k in options or k in used_keys:
+                continue
             name, _, index = k.rpartition(".")
             if index.isdigit():
                 lists.setdefault(name, {})[int(index)] = v
@@ -95,6 +175,8 @@ class ConditioningLoader(io.ComfyNode):
 
 
 class SaveConditioning(io.ComfyNode):
+    """Saves conditioning tensors and options metadata to safetensors files in the output folder."""
+
     @classmethod
     def define_schema(cls) -> io.Schema:
         return io.Schema(
@@ -118,15 +200,20 @@ class SaveConditioning(io.ComfyNode):
         cond, options = conditioning[0]
         sd = {"conditioning": cond}
         values = {}
+        tensor_counter = [0]
         for k, v in options.items():
             if isinstance(v, torch.Tensor):
                 sd[k] = v
-            elif isinstance(v, (list, tuple)) and all(isinstance(t, torch.Tensor) for t in v):
-                sd.update({f"{k}.{i}": t for i, t in enumerate(v)})
             elif isinstance(v, (bool, int, float, str)):
                 values[k] = v
             elif v is not None:
-                raise ValueError(f"Conditioning option '{k}' ({type(v).__name__}) can't be saved.")
+                try:
+                    processed_val = _extract_tensors_and_options(v, sd, tensor_counter)
+                    json.dumps(processed_val)
+                    values[k] = processed_val
+                except (TypeError, OverflowError):
+                    raise ValueError(f"Conditioning option '{k}' ({type(v).__name__}) can't be saved.")
+
         full_output_folder, filename, counter, _, _ = folder_paths.get_save_image_path(filename_prefix, folder_paths.get_output_directory())
         safetensors.torch.save_file({k: v.detach().to("cpu", copy=True).contiguous() for k, v in sd.items()},
                                     os.path.join(full_output_folder, f"{filename}_{counter:05}_.safetensors"),
