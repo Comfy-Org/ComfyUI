@@ -2,6 +2,7 @@ import nodes
 
 from typing_extensions import override
 from comfy_api.latest import IO, ComfyExtension
+from comfy_execution.graph_utils import ExecutionBlocker
 
 
 class ImageCompare(IO.ComfyNode):
@@ -21,7 +22,9 @@ class ImageCompare(IO.ComfyNode):
                 IO.Image.Input("image_b", optional=True),
                 IO.ImageCompare.Input("compare_view"),
             ],
-            outputs=[],
+            outputs=[
+                IO.Image.Output(display_name="image_a"),
+            ],
         )
 
     @classmethod
@@ -38,7 +41,8 @@ class ImageCompare(IO.ComfyNode):
             saved = preview_node.save_images(image_b, "comfy.compare.b")
             result["b_images"] = saved["ui"]["images"]
 
-        return IO.NodeOutput(ui=result)
+        # image_a is optional; skip downstream nodes instead of passing them None
+        return IO.NodeOutput(image_a if image_a is not None else ExecutionBlocker(None), ui=result)
 
 
 class ImageCompareExtension(ComfyExtension):
