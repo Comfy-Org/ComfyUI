@@ -226,6 +226,8 @@ class ExecutionList(TopologicalSort):
         self.staged_node_id = None
         self.execution_cache = {}
         self.execution_cache_listeners = {}
+        self.consumers = {} # Nodes that read each node's output
+        self.completed = set() # Nodes that have finished executing, or were inhibited, in this prompt
 
     def is_cached(self, node_id):
         return self.output_cache.get_local(node_id) is not None
@@ -238,6 +240,7 @@ class ExecutionList(TopologicalSort):
         if from_node_id not in self.execution_cache_listeners:
             self.execution_cache_listeners[from_node_id] = set()
         self.execution_cache_listeners[from_node_id].add((to_node_id, from_socket))
+        self.consumers.setdefault(from_node_id, set()).add(to_node_id)
         if value is not None and from_socket is not None and self.output_link_callback is not None:
             self.output_link_callback(value.outputs[from_socket])
 
@@ -273,6 +276,7 @@ class ExecutionList(TopologicalSort):
             if from_node_id not in node_ids:
                 for node_id in node_ids:
                     blocked_nodes.pop(node_id, None)
+        producers = set()
         for node_id in node_ids:
             for blocked_node_id in self.blocking[node_id]:
                 if blocked_node_id not in node_ids:
@@ -280,10 +284,13 @@ class ExecutionList(TopologicalSort):
             del self.pendingNodes[node_id]
             del self.blockCount[node_id]
             del self.blocking[node_id]
-            self.execution_cache.pop(node_id, None)
+            producers.update(self.execution_cache.pop(node_id, {}))
             self.execution_cache_listeners.pop(node_id, None)
         for listeners in self.execution_cache_listeners.values():
             listeners.difference_update({listener for listener in listeners if listener[0] in node_ids})
+        # Inhibited nodes never read their inputs, so they no longer keep transient outputs alive.
+        self.completed.update(node_ids)
+        self.release_transient(producers)
 
     async def stage_node_execution(self):
         assert self.staged_node_id is None
@@ -368,9 +375,17 @@ class ExecutionList(TopologicalSort):
     def complete_node_execution(self):
         node_id = self.staged_node_id
         self.pop_node(node_id)
-        self.execution_cache.pop(node_id, None)
+        producers = self.execution_cache.pop(node_id, {}) # The nodes whose outputs this node read
         self.execution_cache_listeners.pop(node_id, None)
         self.staged_node_id = None
+        self.completed.add(node_id)
+        self.release_transient((node_id, *producers))
+
+    def release_transient(self, node_ids):
+        """Drop transient outputs from the output cache once every node that reads them is done."""
+        for node_id in node_ids:
+            if self.dynprompt.get_node(node_id).get("_transient") and self.consumers.get(node_id, set()) <= self.completed:
+                self.output_cache.remove_local(node_id)
 
     def get_nodes_in_cycle(self):
         # We'll dissolve the graph in reverse topological order to leave only the nodes in the cycle.
