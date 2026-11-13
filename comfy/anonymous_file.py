@@ -27,9 +27,9 @@ def create_anonymous_file(size=0):
 
     Uses Linux memfd or a Windows temporary-cache/delete-on-close file.
     Windows may still write to disk; Linux memfd may be swapped.
-    Initial sizing is sparse with zero-filled holes; Windows requires a filesystem
-    supporting sparse files. Keep the file open through all I/O and close
-    mappings before closing it. No persistent pathname is provided.
+    Initial sizing is sparse with zero-filled holes where the filesystem supports
+    sparse files; otherwise it is fully allocated. Keep the file open through all
+    I/O and close mappings before closing it. No persistent pathname is provided.
     """
     size = operator.index(size)
     if size < 0 or size > 0x7fffffffffffffff:
@@ -54,9 +54,8 @@ def create_anonymous_file(size=0):
             handle = msvcrt.get_osfhandle(file.fileno())
             transferred = wintypes.DWORD()
             # FSCTL_SET_SPARSE: unwritten ranges stay unallocated and read as zeros.
-            if not _kernel32.DeviceIoControl(handle, 0x900c4, None, 0, None, 0,
-                                             ctypes.byref(transferred), None):
-                raise ctypes.WinError(ctypes.get_last_error())
+            # Not all volumes support it (FAT32, exFAT); the file is then fully allocated.
+            _kernel32.DeviceIoControl(handle, 0x900c4, None, 0, None, 0, ctypes.byref(transferred), None)
             # FileEndOfFileInfo avoids the CRT truncate implementation's zero-fill loop.
             end = ctypes.c_longlong(size)
             if not _kernel32.SetFileInformationByHandle(handle, 6,
