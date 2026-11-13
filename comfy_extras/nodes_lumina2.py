@@ -69,12 +69,16 @@ class CLIPTextEncodeLumina2(io.ComfyNode):
             "degree of image-text alignment based on textual prompts or user prompts.",
         "alignment": "You are an assistant designed to generate high-quality images with the "\
             "highest degree of image-text alignment based on textual prompts."
+        "low-quality": "You are an assistant designed to generate low-quality images "\
+            "based on textual prompts."
     }
-    SYSTEM_PROMPT_TIP = "Lumina2 provide two types of system prompts:" \
+    SYSTEM_PROMPT_TIP = "Lumina2 provide 3 types of system prompts:" \
         "Superior: You are an assistant designed to generate superior images with the superior "\
         "degree of image-text alignment based on textual prompts or user prompts. "\
         "Alignment: You are an assistant designed to generate high-quality images with the highest "\
         "degree of image-text alignment based on textual prompts."
+        "Low Quality: You are an assistant designed to generate low-quality images "\
+        "based on textual prompts or user prompts."
     @classmethod
     def define_schema(cls):
         return io.Schema(
