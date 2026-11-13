@@ -38,6 +38,8 @@ import json
 import time
 import threading
 import warnings
+import collections
+from concurrent.futures import ThreadPoolExecutor
 
 MMAP_TORCH_FILES = args.mmap_torch_files
 DISABLE_MMAP = args.disable_mmap
@@ -1127,14 +1129,49 @@ def bislerp(samples, width, height):
     result = result.reshape(n, h_new, w_new, c).movedim(-1, 1)
     return result.to(orig_dtype)
 
+LANCZOS_MAX_THREADS = 8  # resizing is memory bound: more threads gain little and each holds a frame's buffers
+
+def _lanczos_pixels(pixels, width, height):
+    image = Image.fromarray(np.clip(255. * pixels, 0, 255).astype(np.uint8))
+    image = image.resize((width, height), resample=Image.Resampling.LANCZOS)
+    return np.array(image).astype(np.float32) / 255.0
+
+def _lanczos_frame(t):
+    return torch.from_numpy(t).movedim(-1, 0) if t.ndim == 3 else torch.from_numpy(t)
+
 def lanczos(samples, width, height):
     #the below API is strict and expects grayscale to be squeezed
     if samples.ndim == 4:
         samples = samples.squeeze(1) if samples.shape[1] == 1 else samples.movedim(1, -1)
-    images = [Image.fromarray(np.clip(255. * image.cpu().numpy(), 0, 255).astype(np.uint8)) for image in samples]
-    images = [image.resize((width, height), resample=Image.Resampling.LANCZOS) for image in images]
-    images = [torch.from_numpy(t).movedim(-1, 0) if (t := np.array(image).astype(np.float32) / 255.0).ndim == 3 else torch.from_numpy(t) for image in images]
-    result = torch.stack(images)
+    count = samples.shape[0]
+    if count == 0:
+        raise RuntimeError("lanczos: the batch is empty")
+    first = _lanczos_frame(_lanczos_pixels(samples[0].cpu().numpy(), width, height))
+    result = torch.empty((count,) + tuple(first.shape), dtype=first.dtype, device="cpu")
+    result[0] = first
+    workers = min(count - 1, max(1, torch.get_num_threads()), LANCZOS_MAX_THREADS)
+    if workers > 1:
+        # only the numpy / PIL work runs in the pool (it releases the GIL, so the frames of a video are resized in
+        # parallel); every tensor operation stays on this thread, in the caller's mode, and at most two frames per
+        # worker are in flight. Each frame goes through exactly the same steps as before: the result is unchanged
+        pending = collections.deque()
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            try:
+                for i in range(1, count):
+                    pending.append((i, pool.submit(_lanczos_pixels, samples[i].cpu().numpy(), width, height)))
+                    if len(pending) >= 2 * workers:
+                        j, future = pending.popleft()
+                        result[j] = _lanczos_frame(future.result())
+                while pending:
+                    j, future = pending.popleft()
+                    result[j] = _lanczos_frame(future.result())
+            except BaseException:
+                for _, future in pending:
+                    future.cancel()
+                raise
+    else:
+        for i in range(1, count):
+            result[i] = _lanczos_frame(_lanczos_pixels(samples[i].cpu().numpy(), width, height))
     return result.to(samples.device, samples.dtype)
 
 def common_upscale(samples, width, height, upscale_method, crop):
