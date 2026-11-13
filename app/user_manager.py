@@ -176,7 +176,7 @@ class UserManager():
             if not directory:
                 return web.Response(status=400, text="Directory not provided")
 
-            path = self.get_request_user_filepath(request, directory)
+            path = self.get_request_user_filepath(request, directory, create_dir=False)
             if not path:
                 return web.Response(status=403, text="Invalid directory")
 
