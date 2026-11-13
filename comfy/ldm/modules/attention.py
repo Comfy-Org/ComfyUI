@@ -524,6 +524,10 @@ except:
 
 @wrap_attn
 def attention_xformers(q, k, v, heads, mask=None, attn_precision=None, skip_reshape=False, skip_output_reshape=False, **kwargs):
+    if mask is not None:
+        # xformers only has kernels for a tensor attn_bias on capability <= (9, 0)
+        return attention_pytorch(q, k, v, heads, mask, skip_reshape=skip_reshape, skip_output_reshape=skip_output_reshape, **kwargs)
+
     b = q.shape[0]
     dim_head = q.shape[-1]
     # check to make sure xformers isn't broken
@@ -552,26 +556,6 @@ def attention_xformers(q, k, v, heads, mask=None, attn_precision=None, skip_resh
     else:
         dim_head //= heads
         q, k, v = _reshape_qkv_to_heads(q, k, v, b, heads, dim_head, kwargs.get("enable_gqa", False))
-
-    if mask is not None:
-        # add a singleton batch dimension
-        if mask.ndim == 2:
-            mask = mask.unsqueeze(0)
-        # add a singleton heads dimension
-        if mask.ndim == 3:
-            mask = mask.unsqueeze(1)
-        # pad to a multiple of 8
-        pad = 8 - mask.shape[-1] % 8
-        # the xformers docs says that it's allowed to have a mask of shape (1, Nq, Nk)
-        # but when using separated heads, the shape has to be (B, H, Nq, Nk)
-        # in flux, this matrix ends up being over 1GB
-        # here, we create a mask with the same batch/head size as the input mask (potentially singleton or full)
-        mask_out = torch.empty([mask.shape[0], mask.shape[1], q.shape[1], mask.shape[-1] + pad], dtype=q.dtype, device=q.device)
-
-        mask_out[..., :mask.shape[-1]] = mask
-        # doesn't this remove the padding again??
-        mask = mask_out[..., :mask.shape[-1]]
-        mask = mask.expand(b, heads, -1, -1)
 
     out = xformers.ops.memory_efficient_attention(q, k, v, attn_bias=mask, scale=kwargs.get("scale", None))
 
@@ -607,6 +591,8 @@ def attention_pytorch(q, k, v, heads, mask=None, attn_precision=None, skip_resha
         # add a heads dimension if there isn't already one
         if mask.ndim == 3:
             mask = mask.unsqueeze(1)
+        if mask.is_floating_point() and mask.dtype != q.dtype:
+            mask = mask.to(dtype=q.dtype)
 
     sdpa_keys = ("scale", "enable_gqa")
     sdpa_extra = {k: v for k, v in kwargs.items() if k in sdpa_keys}
