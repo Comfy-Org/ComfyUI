@@ -7,6 +7,7 @@ Tests cover:
 - Defense layers integration tests
 """
 
+import os
 import pytest
 from unittest.mock import MagicMock, patch
 import tempfile
@@ -121,6 +122,53 @@ class TestGetRequestUserFilepath:
             assert path is not None
             assert "default" in path
             assert path.endswith("test.txt")
+
+    def test_traversal_returns_none(self, user_manager, mock_request, mock_user_directory):
+        """Test dot-dot traversal outside user directory returns None."""
+        mock_request.headers = {"comfy-user": "default"}
+
+        with patch('app.user_manager.args') as mock_args:
+            mock_args.multi_user = True
+            result = user_manager.get_request_user_filepath(mock_request, "../escape.txt", create_dir=False)
+            assert result is None
+
+    def test_symlink_escape_returns_none(self, user_manager, mock_request, mock_user_directory):
+        """Test symlink inside user directory pointing outside returns None."""
+        mock_request.headers = {"comfy-user": "default"}
+        user_dir = os.path.join(mock_user_directory, "default")
+        os.makedirs(user_dir, exist_ok=True)
+
+        with tempfile.TemporaryDirectory() as outside_dir:
+            link_path = os.path.join(user_dir, "escape_link")
+            try:
+                os.symlink(outside_dir, link_path)
+            except (OSError, NotImplementedError):
+                pytest.skip("symlinks not supported on this platform/filesystem")
+
+            with patch('app.user_manager.args') as mock_args:
+                mock_args.multi_user = True
+                result = user_manager.get_request_user_filepath(
+                    mock_request, "escape_link/secret.txt", create_dir=False
+                )
+                assert result is None
+
+    def test_symlink_user_root_returns_none(self, user_manager, mock_request, mock_user_directory):
+        """Test symlinked user root pointing outside user directory returns None."""
+        mock_request.headers = {"comfy-user": "default"}
+        user_dir = os.path.join(mock_user_directory, "default")
+
+        with tempfile.TemporaryDirectory() as outside_dir:
+            try:
+                os.symlink(outside_dir, user_dir)
+            except (OSError, NotImplementedError):
+                pytest.skip("symlinks not supported on this platform/filesystem")
+
+            with patch('app.user_manager.args') as mock_args:
+                mock_args.multi_user = True
+                result = user_manager.get_request_user_filepath(
+                    mock_request, "secret.txt", create_dir=False
+                )
+                assert result is None
 
 
 class TestAddUser:
