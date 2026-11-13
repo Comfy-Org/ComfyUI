@@ -252,14 +252,14 @@ class DoubleStreamBlock(nn.Module):
         txt_attn, img_attn = attn[:, : txt.shape[1]], attn[:, txt.shape[1]:]
 
         # calculate the img bloks
-        img += apply_mod(self.img_attn.proj(img_attn), img_mod1.gate, None, modulation_dims_img)
+        img = (img + apply_mod(self.img_attn.proj(img_attn), img_mod1.gate, None, modulation_dims_img)).to(img.dtype)
         del img_attn
-        img += apply_mod(self.img_mlp(modulated_norm(img, self.img_norm2, img_mod2.scale, img_mod2.shift, modulation_dims_img)), img_mod2.gate, None, modulation_dims_img)
+        img = (img + apply_mod(self.img_mlp(modulated_norm(img, self.img_norm2, img_mod2.scale, img_mod2.shift, modulation_dims_img)), img_mod2.gate, None, modulation_dims_img)).to(img.dtype)
 
         # calculate the txt bloks
-        txt += apply_mod(self.txt_attn.proj(txt_attn), txt_mod1.gate, None, modulation_dims_txt)
+        txt = (txt + apply_mod(self.txt_attn.proj(txt_attn), txt_mod1.gate, None, modulation_dims_txt)).to(txt.dtype)
         del txt_attn
-        txt += apply_mod(self.txt_mlp(modulated_norm(txt, self.txt_norm2, txt_mod2.scale, txt_mod2.shift, modulation_dims_txt)), txt_mod2.gate, None, modulation_dims_txt)
+        txt = (txt + apply_mod(self.txt_mlp(modulated_norm(txt, self.txt_norm2, txt_mod2.scale, txt_mod2.shift, modulation_dims_txt)), txt_mod2.gate, None, modulation_dims_txt)).to(txt.dtype)
 
         if txt.dtype == torch.float16:
             txt = torch.nan_to_num(txt, nan=0.0, posinf=65504, neginf=-65504)
@@ -360,7 +360,7 @@ class SingleStreamBlock(nn.Module):
         else:
             mlp = self.mlp_act(mlp)
         output = self.linear2(torch.cat((attn, mlp), 2))
-        x += apply_mod(output, mod.gate, None, modulation_dims)
+        x = (x + apply_mod(output, mod.gate, None, modulation_dims)).to(x.dtype)
         if x.dtype == torch.float16:
             x = torch.nan_to_num(x, nan=0.0, posinf=65504, neginf=-65504)
         return x
