@@ -1,0 +1,29 @@
+Ant
+Bee
+Hornet
+Wasp
+Beetle
+Grasshopper
+Butterfly
+Fly
+Dragonfly
+Cicada
+Spider
+Mosquito
+Bug
+Termite
+Flea
+Tick
+Cockroach
+Moth
+Cricket
+Crustacean
+Millipede
+Woodlouse
+Worm
+Bee Wolf
+Ladybug
+Earwig
+Praying Mantis
+Water Strider
+Cockroach
