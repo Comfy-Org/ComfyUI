@@ -13,6 +13,9 @@ class CallbacksMP:
     ON_REGISTER_ALL_HOOK_PATCHES = "on_register_all_hook_patches"
     ON_INJECT_MODEL = "on_inject_model"
     ON_EJECT_MODEL = "on_eject_model"
+    ON_SAMPLER_START = "on_sampler_start"
+    ON_SAMPLER_STEP = "on_sampler_step"
+    ON_SAMPLER_END = "on_sampler_end"
 
     # callbacks dict is in the format:
     # {"call_type": {"key": [Callable1, Callable2, ...]} }
