@@ -4,6 +4,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 import torch
+from pydantic import ValidationError
 
 from comfy.cli_args import args
 
@@ -137,14 +138,35 @@ async def test_avatar_timeout_preserves_own_task_without_resubmitting(avatar):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("task_id", [None, "", "https://example.invalid/private?token=secret", "task\nInjected", "a" * 129])
-async def test_avatar_does_not_display_unsafe_task_identifier(avatar, task_id):
-    avatar.submit.return_value = nodes_kling.TaskStatusResponse(code=0, data={"task_id": task_id})
+@pytest.mark.parametrize(
+    "data",
+    [None, {}, {"task_id": ""}, {"task_id": "https://example.invalid/private?token=secret"},
+     {"task_id": "task/other"}, {"task_id": "task?query"}, {"task_id": "task\nInjected"},
+     {"task_id": "task%2Fother"}, {"task_id": "a" * 129}],
+)
+async def test_avatar_rejects_missing_or_unsafe_task_id_before_polling(avatar, data):
+    avatar.submit.return_value = nodes_kling.TaskStatusResponse(code=0, data=data)
     with pytest.raises(RuntimeError) as caught:
         await run_avatar()
-    assert "Task ID:" not in str(caught.value)
-    assert "secret" not in str(caught.value)
-    assert "Contact support" in str(caught.value)
+    assert str(caught.value) == "Kling did not return a valid task ID."
+    avatar.submit.assert_awaited_once()
+    avatar.poll.assert_not_awaited()
+    avatar.download.assert_not_awaited()
+
+
+def test_kling_response_model_rejects_numeric_task_id():
+    with pytest.raises(ValidationError):
+        nodes_kling.TaskStatusResponse(code=0, data={"task_id": 123})
+
+
+@pytest.mark.asyncio
+async def test_avatar_rejects_nonstring_task_id_when_model_validation_is_bypassed(avatar):
+    avatar.submit.return_value = nodes_kling.TaskStatusResponse.model_construct(
+        code=0, data=SimpleNamespace(task_id=123)
+    )
+    with pytest.raises(RuntimeError, match="Kling did not return a valid task ID"):
+        await run_avatar()
+    avatar.poll.assert_not_awaited()
 
 
 @pytest.mark.asyncio

@@ -2651,20 +2651,21 @@ class KlingAvatarNode(IO.ComfyNode):
             raise RuntimeError(
                 f"Kling request failed. Code: {response.code}, Message: {response.message}, Data: {response.data}"
             )
+        task_id = response.data.task_id if response.data else None
+        if not isinstance(task_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", task_id):
+            raise RuntimeError("Kling did not return a valid task ID.")
         try:
             final_response = await poll_op(
                 cls,
-                ApiEndpoint(path=f"/proxy/kling/v1/videos/avatar/image2video/{response.data.task_id}"),
+                ApiEndpoint(path=f"/proxy/kling/v1/videos/avatar/image2video/{task_id}"),
                 response_model=TaskStatusResponse,
                 status_extractor=lambda r: (r.data.task_status if r.data else None),
                 max_poll_attempts=800,
             )
         except PollingTimeoutError as exc:
-            task_id = response.data.task_id or ""
-            task = f" Task ID: {task_id}." if re.fullmatch(r"[A-Za-z0-9_-]{1,128}", task_id) else ""
             raise RuntimeError(
                 "Timed out waiting for Kling, but the task may still complete."
-                f"{task} Contact support to check this existing task. "
+                f" Task ID: {task_id}. Contact support to check this existing task. "
                 "Running this node again creates another task and may incur another charge."
             ) from exc
         return IO.NodeOutput(await download_url_to_video_output(final_response.data.task_result.videos[0].url))
