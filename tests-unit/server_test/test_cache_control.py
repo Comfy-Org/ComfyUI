@@ -35,6 +35,13 @@ CACHE_SCENARIOS = [
         "should_have_header": True,
     },
     {
+        "name": "mjs_no_store",
+        "path": "/module.mjs",
+        "status": 200,
+        "expected_cache": "no-store",
+        "should_have_header": True,
+    },
+    {
         "name": "css_no_store",
         "path": "/styles.css",
         "status": 200,
