@@ -507,15 +507,15 @@ RAM_CACHE_OLD_WORKFLOW_OOM_MULTIPLIER = 1.3
 RAM_CACHE_LARGE_INTERMEDIATE = 512 * 1024 ** 2
 
 
-def all_outputs_dynamic(outputs):
+def all_outputs_dynamic_or_model(outputs):
     if outputs is None:
         return False
 
     for output in outputs:
         if isinstance(output, (list, tuple)):
-            if not all_outputs_dynamic(output):
+            if not all_outputs_dynamic_or_model(output):
                 return False
-        elif not hasattr(output, "is_dynamic") or not output.is_dynamic():
+        elif not is_model_patcher_output(output) and (not hasattr(output, "is_dynamic") or not output.is_dynamic()):
             return False
 
     return True
@@ -558,7 +558,7 @@ class RAMPressureCache(LRUCache):
             if not free_active and self.used_generation[key] == self.generation:
                 continue
 
-            if all_outputs_dynamic(cache_entry.outputs) and self.used_generation[key] == self.generation:
+            if all_outputs_dynamic_or_model(cache_entry.outputs) and self.used_generation[key] == self.generation:
                 continue
 
             oom_score = RAM_CACHE_OLD_WORKFLOW_OOM_MULTIPLIER ** (self.generation - self.used_generation[key])
