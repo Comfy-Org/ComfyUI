@@ -128,6 +128,23 @@ def test_video_from_file_get_duration(simple_video_file):
     assert duration == pytest.approx(0.1, abs=0.01)
 
 
+def test_video_from_file_frame_count_ignores_the_demux_flush_packet(tmp_path):
+    path = str(tmp_path / "clip.mkv")
+    with av.open(path, mode="w") as container:
+        stream = container.add_stream("h264", rate=16)
+        stream.width = stream.height = 16
+        stream.pix_fmt = "yuv420p"
+        for i in range(81):
+            frame = av.VideoFrame.from_ndarray(np.full((16, 16, 3), i, dtype=np.uint8), format="rgb24")
+            container.mux(stream.encode(frame))
+        container.mux(stream.encode(None))
+    with av.open(path) as container:
+        stream = container.streams.video[0]
+        # Matroska stores neither a frame count nor a stream duration, so frames are counted
+        assert not stream.frames and stream.duration is None
+    assert VideoFromFile(path).get_frame_count() == 81
+
+
 def test_video_from_file_get_dimensions(simple_video_file):
     """Dimensions read from stream without decoding frames"""
     video = VideoFromFile(simple_video_file)
