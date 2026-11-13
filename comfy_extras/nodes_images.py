@@ -1129,7 +1129,7 @@ class ImageMergeTileList(IO.ComfyNode):
         first_tile = image_list[0]
         b, t_h, t_w, c = first_tile.shape
         device = first_tile.device
-        dtype = first_tile.dtype
+        dtype = torch.float32 if first_tile.dtype == torch.float16 and ovlp > 0 else first_tile.dtype
 
         coords = SplitImageToTileList.get_grid_coords(w, h, t_w, t_h, ovlp)
 
@@ -1173,7 +1173,7 @@ class ImageMergeTileList(IO.ComfyNode):
         weights[weights == 0] = 1.0
         merged_image = canvas / weights
 
-        return IO.NodeOutput(merged_image)
+        return IO.NodeOutput(merged_image.to(first_tile.dtype))
 
 
 # ---------------------------------------------------------------------------
