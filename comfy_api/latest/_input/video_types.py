@@ -102,6 +102,7 @@ class VideoInput(ABC):
         from .._input_impl.video_types import VideoFromComponents
 
         cx, cy, cw, ch = rect
+        color_space = self.get_color_space()
         return VideoFromComponents(
             VideoComponents(
                 images=components.images[:, cy:cy + ch, cx:cx + cw, :].clone(),
@@ -113,6 +114,7 @@ class VideoInput(ABC):
                 else None,
             ),
             bit_depth=self.get_bit_depth(),
+            color_space="sRGB" if color_space == "auto" else color_space,
             chroma_subsampling=self.get_chroma_subsampling(),
         )
 
