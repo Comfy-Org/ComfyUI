@@ -4996,8 +4996,11 @@ paths:
                     type: string
                 - description: |
                     Maximum dimension (width or height) to resize the image to, preserving aspect ratio.
-                    The image is fit within a res x res box. Returns a JPEG thumbnail.
-                    Only applies to raster image files (PNG, JPEG, WebP, GIF).
+                    The image is fit within a res x res box and never enlarged. Returns a JPEG thumbnail,
+                    or a WebP thumbnail when preview=webp is also given.
+                    Only applies to PNG and JPEG files. The original file is returned unchanged for other
+                    files, for images that already fit (unless they have transparency or are 16-bit), for
+                    images over 40 megapixels, and for files that can't be decoded.
                   in: query
                   name: res
                   schema:
