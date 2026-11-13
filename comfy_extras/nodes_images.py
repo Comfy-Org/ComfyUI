@@ -624,8 +624,8 @@ class ResizeAndPadImage(IO.ComfyNode):
         scale_h = target_height / orig_height
         scale = min(scale_w, scale_h)
 
-        new_width = int(orig_width * scale)
-        new_height = int(orig_height * scale)
+        new_width = max(1, int(orig_width * scale))
+        new_height = max(1, int(orig_height * scale))
 
         image_permuted = image.permute(0, 3, 1, 2)
 
