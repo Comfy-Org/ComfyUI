@@ -75,7 +75,7 @@ class ImageSaveHelper:
     @staticmethod
     def _convert_tensor_to_pil(image_tensor: torch.Tensor) -> PILImage.Image:
         """Converts a single torch tensor to a PIL Image."""
-        return PILImage.fromarray(np.clip(255.0 * image_tensor.squeeze(-1).cpu().numpy(), 0, 255).astype(np.uint8))
+        return PILImage.fromarray(np.clip(255.0 * image_tensor.cpu().numpy(), 0, 255).astype(np.uint8))
 
     @staticmethod
     def _create_png_metadata(cls: type[ComfyNode] | None) -> PngInfo | None:

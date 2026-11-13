@@ -194,7 +194,7 @@ class SplitImageChannels(io.ComfyNode):
             search_aliases=["convert to grayscale", "extract channels", "grayscale", "split channels", "RGB channels"],
             display_name="Split Image Channels",
             category="image/compositing",
-            description="Splits an image into single-channel red, green, and blue images and an alpha mask.",
+            description="Splits an image into red, green, and blue images and an alpha mask.",
             inputs=[
                 io.Image.Input("image"),
             ],
@@ -211,7 +211,8 @@ class SplitImageChannels(io.ComfyNode):
         if image.shape[-1] == 1:
             image = image.expand(*image.shape[:-1], 3)
         alpha = 1.0 - image[..., 3] if image.shape[-1] > 3 else torch.zeros_like(image[..., 0])
-        return io.NodeOutput(image[..., 0:1], image[..., 1:2], image[..., 2:3], alpha)
+        shape = (*image.shape[:-1], 3)
+        return io.NodeOutput(image[..., 0:1].expand(shape), image[..., 1:2].expand(shape), image[..., 2:3].expand(shape), alpha)
 
 
 class JoinImageWithAlpha(io.ComfyNode):
