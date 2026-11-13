@@ -12,6 +12,7 @@ from comfy.ldm.lightricks.model import (
     LTXVModel,
     apply_cross_attention_adaln,
     compute_prompt_timestep,
+    gated_residual,
 )
 from comfy.ldm.lightricks.symmetric_patchifier import AudioPatchifier
 from comfy.ldm.lightricks.embeddings_connector import Embeddings1DConnector
@@ -284,9 +285,9 @@ class BasicAVTransformerBlock(nn.Module):
             del norm_vx
             # video cross-attention
             vgate_msa = self.get_ada_values(self.scale_shift_table, vx.shape[0], v_timestep, slice(2, 3))[0]
-            vx.addcmul_(attn1_out, vgate_msa)
+            vx = gated_residual(vx, attn1_out, vgate_msa)
             del vgate_msa, attn1_out
-            vx.add_(self._apply_text_cross_attention(
+            vx = gated_residual(vx, self._apply_text_cross_attention(
                 vx, v_context, self.attn2, self.scale_shift_table,
                 getattr(self, 'prompt_scale_shift_table', None),
                 v_timestep, v_prompt_timestep, attention_mask, transformer_options,)
@@ -302,9 +303,9 @@ class BasicAVTransformerBlock(nn.Module):
             del norm_ax
             # audio cross-attention
             agate_msa = self.get_ada_values(self.audio_scale_shift_table, ax.shape[0], a_timestep, slice(2, 3))[0]
-            ax.addcmul_(attn1_out, agate_msa)
+            ax = gated_residual(ax, attn1_out, agate_msa)
             del agate_msa, attn1_out
-            ax.add_(self._apply_text_cross_attention(
+            ax = gated_residual(ax, self._apply_text_cross_attention(
                 ax, a_context, self.audio_attn2, self.audio_scale_shift_table,
                 getattr(self, 'audio_prompt_scale_shift_table', None),
                 a_timestep, a_prompt_timestep, attention_mask, transformer_options,)
@@ -332,7 +333,7 @@ class BasicAVTransformerBlock(nn.Module):
                 del vx_scaled, ax_scaled
 
                 gate_out_a2v = self.get_ada_values(self.scale_shift_table_a2v_ca_video[4:, :], vx.shape[0], v_cross_gate_timestep)[0]
-                vx.addcmul_(a2v_out, gate_out_a2v)
+                vx = gated_residual(vx, a2v_out, gate_out_a2v)
                 del gate_out_a2v, a2v_out
 
             # video to audio cross attention
@@ -353,7 +354,7 @@ class BasicAVTransformerBlock(nn.Module):
                 del ax_scaled, vx_scaled
 
                 gate_out_v2a = self.get_ada_values(self.scale_shift_table_a2v_ca_audio[4:, :], ax.shape[0], a_cross_gate_timestep)[0]
-                ax.addcmul_(v2a_out, gate_out_v2a)
+                ax = gated_residual(ax, v2a_out, gate_out_v2a)
                 del gate_out_v2a, v2a_out
 
 
@@ -370,7 +371,7 @@ class BasicAVTransformerBlock(nn.Module):
             del vx_scaled
 
             vgate_mlp = self.get_ada_values(self.scale_shift_table, vx.shape[0], v_timestep, slice(5, 6))[0]
-            vx.addcmul_(ff_out, vgate_mlp)
+            vx = gated_residual(vx, ff_out, vgate_mlp)
             del vgate_mlp, ff_out
 
         # audio feedforward
@@ -383,7 +384,7 @@ class BasicAVTransformerBlock(nn.Module):
             del ax_scaled
 
             agate_mlp = self.get_ada_values(self.audio_scale_shift_table, ax.shape[0], a_timestep, slice(5, 6))[0]
-            ax.addcmul_(ff_out, agate_mlp)
+            ax = gated_residual(ax, ff_out, agate_mlp)
             del agate_mlp, ff_out
 
         return vx, ax
