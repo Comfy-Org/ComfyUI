@@ -1181,6 +1181,8 @@ class VAE:
         self.first_stage_model.current_patcher = self.patcher
 
         m, u = self.first_stage_model.load_state_dict(sd, strict=False, assign=self.patcher.is_dynamic())
+        if isinstance(self.first_stage_model, comfy.ldm.minimax.vae.MiniMaxH3VideoVAE):
+            m = [key for key in m if key not in ("latents_mean", "latents_std")]
         if not self.patcher.is_dynamic():
             # Lazy parameters only exist after loading the state dict.
             self.first_stage_model.to(self.vae_dtype)
