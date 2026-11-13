@@ -38,6 +38,7 @@ import json
 import time
 import threading
 import warnings
+import collections
 from concurrent.futures import ThreadPoolExecutor
 
 MMAP_TORCH_FILES = args.mmap_torch_files
@@ -1130,46 +1131,47 @@ def bislerp(samples, width, height):
 
 LANCZOS_MAX_THREADS = 8  # resizing is memory bound: more threads gain little and each holds a frame's buffers
 
-def _lanczos_image(image, width, height):
-    image = Image.fromarray(np.clip(255. * image.cpu().numpy(), 0, 255).astype(np.uint8))
+def _lanczos_pixels(pixels, width, height):
+    image = Image.fromarray(np.clip(255. * pixels, 0, 255).astype(np.uint8))
     image = image.resize((width, height), resample=Image.Resampling.LANCZOS)
-    t = np.array(image).astype(np.float32) / 255.0
+    return np.array(image).astype(np.float32) / 255.0
+
+def _lanczos_frame(t):
     return torch.from_numpy(t).movedim(-1, 0) if t.ndim == 3 else torch.from_numpy(t)
 
 def lanczos(samples, width, height):
     #the below API is strict and expects grayscale to be squeezed
     if samples.ndim == 4:
         samples = samples.squeeze(1) if samples.shape[1] == 1 else samples.movedim(1, -1)
-    if samples.shape[0] == 0:
+    count = samples.shape[0]
+    if count == 0:
         raise RuntimeError("lanczos: the batch is empty")
-    first = _lanczos_image(samples[0], width, height)
-    result = torch.empty((samples.shape[0],) + tuple(first.shape), dtype=first.dtype, device="cpu")
+    first = _lanczos_frame(_lanczos_pixels(samples[0].cpu().numpy(), width, height))
+    result = torch.empty((count,) + tuple(first.shape), dtype=first.dtype, device="cpu")
     result[0] = first
-    inference, grad = torch.is_inference_mode_enabled(), torch.is_grad_enabled()
-
-    def resize(i):
-        # inference and grad mode are thread local: the workers enter the caller's (to write into result, and
-        # to read frames of a tensor that requires grad under no_grad, as before)
-        with torch.inference_mode(inference), torch.set_grad_enabled(grad):
-            result[i] = _lanczos_image(samples[i], width, height)
-
-    # PIL and numpy release the GIL, so the frames of a batch (a video) are resized in parallel; every frame goes
-    # through exactly the same steps as before, so the result is unchanged, and it is written straight into result
-    # instead of a list stacked at the end
-    workers = min(samples.shape[0] - 1, max(1, torch.get_num_threads()), LANCZOS_MAX_THREADS)
+    workers = min(count - 1, max(1, torch.get_num_threads()), LANCZOS_MAX_THREADS)
     if workers > 1:
+        # only the numpy / PIL work runs in the pool (it releases the GIL, so the frames of a video are resized in
+        # parallel); every tensor operation stays on this thread, in the caller's mode, and at most two frames per
+        # worker are in flight. Each frame goes through exactly the same steps as before: the result is unchanged
+        pending = collections.deque()
         with ThreadPoolExecutor(max_workers=workers) as pool:
-            futures = [pool.submit(resize, i) for i in range(1, samples.shape[0])]
             try:
-                for future in futures:
-                    future.result()
+                for i in range(1, count):
+                    pending.append((i, pool.submit(_lanczos_pixels, samples[i].cpu().numpy(), width, height)))
+                    if len(pending) >= 2 * workers:
+                        j, future = pending.popleft()
+                        result[j] = _lanczos_frame(future.result())
+                while pending:
+                    j, future = pending.popleft()
+                    result[j] = _lanczos_frame(future.result())
             except BaseException:
-                for future in futures:  # the first error stops the frames not started yet
+                for _, future in pending:
                     future.cancel()
                 raise
     else:
-        for i in range(1, samples.shape[0]):
-            resize(i)
+        for i in range(1, count):
+            result[i] = _lanczos_frame(_lanczos_pixels(samples[i].cpu().numpy(), width, height))
     return result.to(samples.device, samples.dtype)
 
 def common_upscale(samples, width, height, upscale_method, crop):

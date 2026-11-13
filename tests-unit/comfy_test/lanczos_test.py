@@ -107,15 +107,15 @@ def test_lanczos_empty_batch_raises_as_before():
 
 def test_lanczos_error_in_a_frame_stops_the_rest(monkeypatch):
     done = []
-    real = comfy.utils._lanczos_image
+    real = comfy.utils._lanczos_pixels
 
-    def failing(image, width, height):
+    def failing(pixels, width, height):
         done.append(1)
         if len(done) == 3:
             raise ValueError("bad frame")
-        return real(image, width, height)
+        return real(pixels, width, height)
 
-    monkeypatch.setattr(comfy.utils, "_lanczos_image", failing)
+    monkeypatch.setattr(comfy.utils, "_lanczos_pixels", failing)
     with pytest.raises(ValueError, match="bad frame"), num_threads(2):
         comfy.utils.lanczos(torch.rand(200, 3, 64, 64), 128, 128)
     assert len(done) < 200
