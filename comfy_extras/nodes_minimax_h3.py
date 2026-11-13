@@ -18,6 +18,7 @@ import comfy.audio
 
 import nodes
 import comfy.model_management
+import comfy.minimax_sequence_parallel
 import comfy.model_prefetch
 import comfy.model_sampling
 import comfy.nested_tensor
@@ -788,9 +789,40 @@ class PH3ImageConditioning(io.ComfyNode):
         return io.NodeOutput(cond, _av_latent(latent_width, latent_height, 1, 2))
 
 
+class MiniMaxH3SequenceParallel(io.ComfyNode):
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="MiniMaxH3SequenceParallel",
+            category="advanced/model",
+            description="Share MiniMax H3 denoising with a second GPU. Requires peer access and memory for a second model copy. Replica weights are managed and offloaded by ComfyUI. Transformer patches and scheduled hooks are not supported.",
+            inputs=[io.Model.Input("model"), io.Int.Input("device_index", default=1, min=0, max=255)],
+            outputs=[io.Model.Output()],
+        )
+
+    @classmethod
+    def execute(cls, model, device_index) -> io.NodeOutput:
+        target = torch.device("cuda", device_index)
+        if target == model.load_device or device_index >= torch.cuda.device_count():
+            raise ValueError("Select a second available GPU for MiniMax H3 sequence parallelism")
+        patched = model.clone()
+        patched.remove_additional_models("minimax_sequence_parallel")
+        # The replica executes block callbacks, outside its own dynamic loading graph.
+        secondary = patched.clone(disable_dynamic=True, force_deepcopy=True)
+        secondary.load_device = target
+        patched.set_additional_models("minimax_sequence_parallel", [secondary])
+        patched.remove_wrappers_with_key(comfy.patcher_extension.WrappersMP.OUTER_SAMPLE, "minimax_h3_sequence_parallel")
+        patched.add_wrapper_with_key(
+            comfy.patcher_extension.WrappersMP.OUTER_SAMPLE, "minimax_h3_sequence_parallel",
+            comfy.minimax_sequence_parallel.SequenceParallelSampling(device_index),
+        )
+        return io.NodeOutput(patched)
+
+
 class MiniMaxH3Extension(ComfyExtension):
     async def get_node_list(self):
         return [
+            MiniMaxH3SequenceParallel,
             EmptyMiniMaxH3LatentAV,
             MiniMaxH3ImageToVideo,
             MiniMaxH3AddGuide,
