@@ -1465,8 +1465,9 @@ class ModelPatcher:
     def eject_model(self):
         if not self.is_injected:
             return
-        for injections in self.injections.values():
-            for inj in injections:
+        # reverse of inject_model: injections that wrap the same module unwind in order
+        for injections in reversed(list(self.injections.values())):
+            for inj in reversed(injections):
                 inj.eject(self)
         self.is_injected = False
         for callback in self.get_all_callbacks(CallbacksMP.ON_EJECT_MODEL):
