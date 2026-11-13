@@ -13,7 +13,16 @@ def perp_neg(x, noise_pred_pos, noise_pred_neg, noise_pred_nocond, neg_scale, co
     pos = noise_pred_pos - noise_pred_nocond
     neg = noise_pred_neg - noise_pred_nocond
 
-    perp = neg - ((torch.mul(neg, pos).sum())/(torch.norm(pos)**2)) * pos
+    # pos is exactly zero whenever the positive conditioning is identical to the
+    # empty one -- an empty positive prompt with the documented CLIPTextEncode("")
+    # wiring is the common case -- which makes this projection 0/0 and turns every
+    # pixel of the result into NaN. In fp16 the quotient can also overflow when pos
+    # is merely very small (two near-identical prompts). The projection of neg onto
+    # pos tends to zero in that limit, so drop it and fall back to plain CFG rather
+    # than poisoning the sample.
+    scale = (torch.mul(neg, pos).sum())/(torch.norm(pos)**2)
+    scale = torch.nan_to_num(scale, nan=0.0, posinf=0.0, neginf=0.0)
+    perp = neg - scale * pos
     perp_neg = perp * neg_scale
     cfg_result = noise_pred_nocond + cond_scale*(pos - perp_neg)
     return cfg_result
