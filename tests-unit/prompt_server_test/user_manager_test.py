@@ -3,6 +3,7 @@ import os
 from aiohttp import web
 from app.user_manager import UserManager
 from unittest.mock import patch
+import folder_paths
 
 pytestmark = (
     pytest.mark.asyncio
@@ -291,3 +292,23 @@ async def test_listuserdata_v2_url_encoded_path(aiohttp_client, app, tmp_path):
     assert entry["name"] == "file.txt"
     # Ensure the path is correctly decoded and uses forward slash
     assert entry["path"] == "my dir/file.txt"
+
+
+@pytest.fixture
+def real_app(tmp_path, monkeypatch):
+    monkeypatch.setattr(folder_paths, "user_directory", str(tmp_path / "user"))
+    um = UserManager()
+    app = web.Application()
+    routes = web.RouteTableDef()
+    um.add_routes(routes)
+    app.add_routes(routes)
+    return app
+
+
+async def test_listuserdata_missing_directory_does_not_create_directories(
+    aiohttp_client, real_app, tmp_path
+):
+    client = await aiohttp_client(real_app)
+    resp = await client.get("/userdata?dir=missing/nested")
+    assert resp.status == 404
+    assert not os.path.exists(tmp_path / "user" / "default" / "missing")
