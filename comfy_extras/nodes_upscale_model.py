@@ -30,6 +30,7 @@ class UpscaleModelLoader(io.ComfyNode):
             ],
             outputs=[
                 io.UpscaleModel.Output(),
+                io.String.Output(display_name="model_name"),
             ],
         )
 
@@ -45,7 +46,7 @@ class UpscaleModelLoader(io.ComfyNode):
             raise Exception("Upscale model must be a single-image model.")
 
         out.patcher = comfy.model_patcher.CoreModelPatcher(out.model, load_device=model_management.get_torch_device(), offload_device=model_management.unet_offload_device(), fast_disk=comfy.storage.state_dict_fast_disk(sd))
-        return io.NodeOutput(out)
+        return io.NodeOutput(out, model_name)
 
     load_model = execute  # TODO: remove
 
