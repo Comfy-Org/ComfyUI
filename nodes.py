@@ -2252,6 +2252,31 @@ def get_module_name(module_path: str) -> str:
     return base_path
 
 
+def _register_node(name: str, node_cls: type, module_path: str, module_parent: str) -> bool:
+    source = "{}.{}".format(module_parent, get_module_name(module_path))
+    source_path = os.path.realpath(module_path)
+    existing_node = NODE_CLASS_MAPPINGS.get(name)
+    if module_parent == "custom_nodes" and existing_node is not None:
+        existing_source = getattr(existing_node, "RELATIVE_PYTHON_MODULE", None)
+        existing_source_path = getattr(existing_node, "_COMFYUI_CUSTOM_NODE_PATH", None)
+        if existing_source_path != source_path:
+            logging.warning(
+                "Custom node '%s' from %s (%s) conflicts with %s (%s); keeping the existing registration",
+                name,
+                source,
+                source_path,
+                existing_source or "unknown source",
+                existing_source_path or "unknown path",
+            )
+            return False
+
+    node_cls.RELATIVE_PYTHON_MODULE = source
+    if module_parent == "custom_nodes":
+        node_cls._COMFYUI_CUSTOM_NODE_PATH = source_path
+    NODE_CLASS_MAPPINGS[name] = node_cls
+    return True
+
+
 async def load_custom_node(module_path: str, ignore=set(), module_parent="custom_nodes") -> bool:
     module_name = get_module_name(module_path)
     if os.path.isfile(module_path):
@@ -2303,13 +2328,14 @@ async def load_custom_node(module_path: str, ignore=set(), module_parent="custom
 
         # V1 node definition
         if hasattr(module, "NODE_CLASS_MAPPINGS") and getattr(module, "NODE_CLASS_MAPPINGS") is not None:
+            rejected_node_names = set()
             for name, node_cls in module.NODE_CLASS_MAPPINGS.items():
                 if name not in ignore:
-                    NODE_CLASS_MAPPINGS[name] = node_cls
-                    node_cls.RELATIVE_PYTHON_MODULE = "{}.{}".format(module_parent, get_module_name(module_path))
+                    if not _register_node(name, node_cls, module_path, module_parent):
+                        rejected_node_names.add(name)
             if hasattr(module, "NODE_DISPLAY_NAME_MAPPINGS") and getattr(module, "NODE_DISPLAY_NAME_MAPPINGS") is not None:
                 for name, display_name in module.NODE_DISPLAY_NAME_MAPPINGS.items():
-                    if name not in ignore:
+                    if name not in ignore and name not in rejected_node_names:
                         NODE_DISPLAY_NAME_MAPPINGS[name] = display_name
             return True
         # V3 Extension Definition
@@ -2335,9 +2361,7 @@ async def load_custom_node(module_path: str, ignore=set(), module_parent="custom
                     node_cls: io.ComfyNode
                     schema = node_cls.GET_SCHEMA()
                     if schema.node_id not in ignore:
-                        NODE_CLASS_MAPPINGS[schema.node_id] = node_cls
-                        node_cls.RELATIVE_PYTHON_MODULE = "{}.{}".format(module_parent, get_module_name(module_path))
-                        if schema.display_name is not None:
+                        if _register_node(schema.node_id, node_cls, module_path, module_parent) and schema.display_name is not None:
                             NODE_DISPLAY_NAME_MAPPINGS[schema.node_id] = schema.display_name
                 return True
             except Exception as e:
