@@ -6,6 +6,32 @@ import torch
 from comfy_api.latest import ComfyExtension, io
 from comfy_extras.nodes_audio import VAEEncodeAudio
 
+
+# Selector value meaning "nothing selected". Both model inputs are optional, and a restored
+# workflow that saved neither must still validate: a plain `null` is rejected by combo validation
+# before execute runs. "None" cannot be a model filename because listings are filtered by extension.
+NO_SELECTION = "None"
+
+
+def _ltxv_audio_vae_path(ckpt_name: str | None, vae_name: str | None) -> str:
+    """Resolve the selected model file, raising when it is gone.
+
+    A standalone VAE from `models/vae` wins when one is selected; otherwise the checkpoint is used,
+    so existing workflows keep loading exactly what they loaded before this node offered VAEs.
+    """
+    if vae_name and vae_name != NO_SELECTION:
+        return folder_paths.get_full_path_or_raise("vae", vae_name)
+    if ckpt_name and ckpt_name != NO_SELECTION:
+        return folder_paths.get_full_path_or_raise("checkpoints", ckpt_name)
+    raise ValueError("Select an audio VAE checkpoint or a VAE from models/vae.")
+
+
+def _accepts_combo_link(received_type: str | list) -> bool:
+    if isinstance(received_type, list):
+        return True
+    return received_type in (io.Combo.io_type, io.AnyType.io_type, io.MatchType.io_type)
+
+
 class LTXVAudioVAELoader(io.ComfyNode):
     @classmethod
     def define_schema(cls) -> io.Schema:
@@ -16,16 +42,55 @@ class LTXVAudioVAELoader(io.ComfyNode):
             inputs=[
                 io.Combo.Input(
                     "ckpt_name",
-                    options=folder_paths.get_filename_list("checkpoints"),
-                    tooltip="Audio VAE checkpoint to load.",
-                )
+                    options=[NO_SELECTION, *folder_paths.get_filename_list("checkpoints")],
+                    optional=True,
+                    default=NO_SELECTION,
+                    tooltip="Audio VAE checkpoint to load. Leave unset when a standalone VAE is selected.",
+                ),
+                io.Combo.Input(
+                    "vae_name",
+                    options=[NO_SELECTION, *folder_paths.get_filename_list("vae")],
+                    optional=True,
+                    default=NO_SELECTION,
+                    tooltip="Standalone VAE from models/vae, used instead of the checkpoint when selected.",
+                ),
             ],
             outputs=[io.Vae.Output(display_name="Audio VAE")],
         )
 
     @classmethod
-    def execute(cls, ckpt_name: str) -> io.NodeOutput:
-        ckpt_path = folder_paths.get_full_path_or_raise("checkpoints", ckpt_name)
+    def validate_inputs(cls, ckpt_name: str | None = None, vae_name: str | None = None, input_types: dict | None = None) -> bool | str:
+        """Validate only the model the loader will actually use.
+
+        ComfyUI's generic combo check rejects any value that is not in the current options, so a
+        workflow that carries a checkpoint which is no longer installed would fail before the loader
+        ran, even when a standalone VAE is selected and the checkpoint is unused.
+
+        A linked input is unresolved during prompt validation and reaches this method as `None`, so
+        `input_types` (which the executor fills only for links) is what separates a link from an empty
+        selection: a link is deferred to the load boundary, an empty selection is refused here.
+        """
+        linked = input_types or {}
+        for name, received_type in linked.items():
+            if not _accepts_combo_link(received_type):
+                return f"{name} must come from a combo output, got {received_type}"
+        if vae_name and vae_name != NO_SELECTION:
+            if vae_name in folder_paths.get_filename_list("vae"):
+                return True
+            return f"Invalid VAE file: {vae_name}"
+        if "vae_name" in linked:
+            return True
+        if ckpt_name and ckpt_name != NO_SELECTION:
+            if ckpt_name in folder_paths.get_filename_list("checkpoints"):
+                return True
+            return f"Invalid audio VAE checkpoint: {ckpt_name}"
+        if "ckpt_name" in linked:
+            return True
+        return "Select an audio VAE checkpoint or a VAE from models/vae."
+
+    @classmethod
+    def execute(cls, ckpt_name: str | None = None, vae_name: str | None = None) -> io.NodeOutput:
+        ckpt_path = _ltxv_audio_vae_path(ckpt_name, vae_name)
         sd, metadata = comfy.utils.load_torch_file(ckpt_path, return_metadata=True)
         sd = comfy.utils.state_dict_prefix_replace(sd, {"audio_vae.": "autoencoder.", "vocoder.": "vocoder."}, filter_keys=True)
         vae = comfy.sd.VAE(sd=sd, metadata=metadata)
