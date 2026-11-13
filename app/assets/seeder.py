@@ -18,17 +18,15 @@ from app.assets.event_log import emit, error_kind, error_type
 from app.assets.scanner import (
     RootType,
     build_asset_specs,
-    collect_paths_for_roots,
     enrich_assets_batch,
     get_owned_prefixes,
     get_scan_prefixes_for_root,
     get_unenriched_assets_for_roots,
     insert_asset_specs,
-    list_output_for_rescan,
+    list_root,
     live_references_safely,
     mark_missing_outside_prefixes_safely,
     mark_unlisted_references_missing_safely,
-    rescans_output_by_listing,
     sync_root_safely,
     unlisted_references,
     sync_temp_references_safely,
@@ -594,10 +592,14 @@ class _AssetSeeder:
         open while blocked. The caller is responsible for blocking on
         _check_pause_and_cancel() afterward.
         """
-        cancelled = self._cancel_event.is_set()
-        if cancelled:
+        if self._cancel_event.is_set():
             self._record_cancel_stage(_ScanStage.ENRICH)
-        return not self._run_gate.is_set() or cancelled
+        return self._pause_or_cancel_requested()
+
+    def _pause_or_cancel_requested(self) -> bool:
+        """_is_paused_or_cancelled without recording a cancel stage, for the fast scan's
+        walk, whose cancel is recorded by the _check_pause_and_cancel that follows."""
+        return not self._run_gate.is_set() or self._cancel_event.is_set()
 
     def _record_cancel_stage(self, stage: _ScanStage) -> None:
         with self._lock:
@@ -913,7 +915,12 @@ class _AssetSeeder:
         total_created = 0
         skipped_existing = 0
 
-        by_listing = rescans_output_by_listing(roots)
+        should_stop = lambda: self._check_pause_and_cancel(_ScanStage.FAST_SCAN)
+        # Every scan but the output-only rescan queued after each prompt stats every live row
+        # (sync_root). That rescan retires the rows its listings lack instead, so it misses an
+        # in-place overwrite until the next scan that isn't output-only, such as a page load;
+        # save nodes never overwrite, and their outputs are registered at save time.
+        verify = tuple(roots) != ("output",)
         live_references: dict[str, list] = {}
         existing_paths: set[str] = set()
         t_sync = time.perf_counter()
@@ -922,17 +929,13 @@ class _AssetSeeder:
         for r in roots:
             if self._check_pause_and_cancel(_ScanStage.FAST_SCAN):
                 return total_created, skipped_existing, 0
-            if by_listing:
+            if verify:
+                marked_before = scan_state.missing_marked
+                existing_paths.update(sync_root_safely(r, scan_state, should_stop))
+                self._emit_marked_missing(r, scan_state.missing_marked - marked_before)
+            else:
                 live_references = live_references_safely(r)
                 existing_paths.update(live_references)
-            else:
-                marked_before = scan_state.missing_marked
-                existing_paths.update(
-                    sync_root_safely(
-                        r, scan_state, lambda: self._check_pause_and_cancel(_ScanStage.FAST_SCAN)
-                    )
-                )
-                self._emit_marked_missing(r, scan_state.missing_marked - marked_before)
         logging.debug(
             "Fast scan: sync_root phase took %.3fs (%d existing paths)",
             time.perf_counter() - t_sync,
@@ -943,27 +946,21 @@ class _AssetSeeder:
             return total_created, skipped_existing, 0
 
         t_collect = time.perf_counter()
-        walk = list_output_for_rescan() if by_listing else None
-        should_stop = lambda: self._check_pause_and_cancel(_ScanStage.FAST_SCAN)
-        paths = walk.files if walk is not None else collect_paths_for_roots(roots, scan_state, should_stop)
-        # A cancel during the walk leaves paths partial.
-        if should_stop():
-            return total_created, skipped_existing, 0
-        logging.debug(
-            "Fast scan: collect_paths took %.3fs (%d paths found)",
-            time.perf_counter() - t_collect,
-            len(paths),
-        )
-        if walk is not None:
+        paths: list[str] = []
+        for r in ("models", "input", "output"):
+            if r not in roots:
+                continue
+            walk = list_root(r, should_stop, self._pause_or_cancel_requested, self._cancel_event.is_set)
+            # A cancel during the walk leaves it partial.
+            if should_stop():
+                return total_created, skipped_existing, 0
+            paths.extend(walk.files)
             scan_state.dirs_listed += walk.dirs_listed
+            if verify:
+                continue
             vanished, unlisted = unlisted_references(live_references, walk.listings, scan_state)
             marked_before = scan_state.missing_marked
-            mark_unlisted_references_missing_safely(
-                "output",
-                vanished,
-                scan_state,
-                lambda: self._check_pause_and_cancel(_ScanStage.FAST_SCAN),
-            )
+            mark_unlisted_references_missing_safely("output", vanished, scan_state, should_stop)
             self._emit_marked_missing("output", scan_state.missing_marked - marked_before)
             logging.debug(
                 "Fast scan: output listing: %d dirs listed, %d rows retired, "
@@ -972,6 +969,11 @@ class _AssetSeeder:
                 len(vanished),
                 unlisted,
             )
+        logging.debug(
+            "Fast scan: collect_paths took %.3fs (%d paths found)",
+            time.perf_counter() - t_collect,
+            len(paths),
+        )
         total_paths = len(paths)
         self._update_progress(total=total_paths)
 
