@@ -103,7 +103,26 @@ class CFGNorm(io.ComfyNode):
                 norm_full_cond = torch.norm(cond_p, dim=1, keepdim=True)
                 norm_pred_text = torch.norm(pred_text_, dim=1, keepdim=True)
                 scale = (norm_full_cond / (norm_pred_text + 1e-8)).clamp(min=0.0, max=1.0)
-                return pred_text_ * scale * strength
+                out = pred_text_ * scale * strength
+                # `scale` is clamped to <= 1, so while strength <= 1 this branch can
+                # only attenuate and nothing can overflow. Above 1 the multiply is an
+                # amplification of the x0 prediction applied on every sampling step,
+                # it feeds back through the latent, and well before the declared
+                # max=100 it runs off the end of the dtype (around strength 4.5 on
+                # SD1.5 fp16). The inf used to be returned as-is: the sampler turned
+                # it into NaN and the render finished as a black image with no error
+                # anywhere. Check here, where we can still name the input.
+                if strength > 1.0 and not torch.isfinite(out).all():
+                    raise RuntimeError(
+                        "CFGNorm: strength={} made the denoised prediction non-finite. "
+                        "strength multiplies the prediction on every sampling step and "
+                        "feeds back through the latent, so it compounds until it runs out "
+                        "of numeric range somewhere in the sampling loop; the render would "
+                        "have decoded to an all-NaN (black) image. Values above 1.0 "
+                        "amplify, which is what this node's clamp(max=1.0) exists to "
+                        "prevent -- strength <= 1.0 can never overflow.".format(strength)
+                    )
+                return out
 
             m.set_model_sampler_post_cfg_function(cfg_norm)
         return io.NodeOutput(m)
