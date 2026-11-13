@@ -2121,6 +2121,17 @@ class SaveImageAdvanced(IO.ComfyNode):
                         IO.DynamicCombo.Option("png", [
                             IO.Combo.Input("bit_depth", options=["8-bit", "16-bit"], default="8-bit", advanced=True),
                             IO.Combo.Input("input_color_space", options=["sRGB"], default="sRGB", advanced=True),
+                            IO.Combo.Input(
+                                "channels",
+                                options=["auto", "grayscale (1 channel)", "RGB (3 channels)", "RGBA (4 channels)"],
+                                default="auto",
+                                optional=True,
+                                tooltip=(
+                                    "Auto preserves the input channels. Grayscale converts RGB to brightness and discards alpha. "
+                                    "RGB saves color without alpha. RGBA preserves alpha, or adds fully opaque alpha if absent. "
+                                    "Applies to the saved PNG only."
+                                ),
+                            ),
                         ]),
                         IO.DynamicCombo.Option("exr", [
                             IO.Combo.Input("bit_depth", options=["32-bit float", "16-bit float"], default="16-bit float", advanced=True),
@@ -2240,7 +2251,20 @@ class SaveImageAdvanced(IO.ComfyNode):
 
         write_previews = file_format == "exr" and PromptServer.instance.asset_manager.enabled
         for batch_number, image in enumerate(images):
-            if file_format == "exr":
+            if file_format == "png":
+                channels = format.get("channels", "auto")
+                if image.ndim == 2:
+                    image = image.unsqueeze(-1)
+                if channels == "grayscale (1 channel)" and image.shape[-1] in (3, 4):
+                    image = 0.299 * image[..., :1] + 0.587 * image[..., 1:2] + 0.114 * image[..., 2:3]
+                elif channels in ("RGB (3 channels)", "RGBA (4 channels)"):
+                    if image.shape[-1] == 1:
+                        image = image.expand(-1, -1, 3)
+                    if channels == "RGB (3 channels)":
+                        image = image[..., :3]
+                    elif image.shape[-1] == 3:
+                        image = torch.cat((image, torch.ones_like(image[..., :1])), dim=-1)
+            elif file_format == "exr":
                 if image.ndim == 2:
                     image = image.unsqueeze(-1)  # before conversion, which reads a 4-wide last dim as RGBA
                 image = _to_scene_linear(image, colorspace)

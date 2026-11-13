@@ -638,7 +638,12 @@ GEMINI_TEXT_PRICE_BADGE = IO.PriceBadge(
         "usd": [0.00025, 0.0015],
         "format": { "approximate": true, "separator": "-", "suffix": " per 1K tokens" }
       }
-      : ($contains($m, "3.7 flash") or $contains($m, "3.8 flash")) ? {
+      : ($contains($m, "argon") or $contains($m, "carbon")) ? {
+        "type": "list_usd",
+        "usd": [0.00572, 0.0286],
+        "format": { "approximate": true, "separator": "-", "suffix": " per 1K tokens" }
+      }
+      : ($contains($m, "hydrogen") or $contains($m, "3.7 flash") or $contains($m, "3.8 flash")) ? {
         "type": "list_usd",
         "usd": [0.002145, 0.010725],
         "format": { "approximate": true, "separator": "-", "suffix": " per 1K tokens" }
@@ -659,6 +664,9 @@ GEMINI_TEXT_PRICE_BADGE = IO.PriceBadge(
 
 
 GEMINI_TEXT_MODELS: dict[str, str] = {
+    "Gemini 4 Hydrogen": "gemini-4-hydrogen",
+    "Gemini 4 Argon": "gemini-4-argon",
+    "Gemini 4 Carbon": "gemini-4-carbon",
     "Gemini 3.8 Flash": "gemini-3.8-flash",
     "Gemini 3.7 Flash": "gemini-3.7-flash",
     "Gemini 3.1 Pro": "gemini-3.1-pro-preview",
@@ -744,12 +752,12 @@ def _gemini_sampling_inputs(sampling: bool) -> list[Input]:
     ]
 
 
-def _gemini_max_output_tokens_input() -> Input:
+def _gemini_max_output_tokens_input(max_output_tokens: int) -> Input:
     return IO.Int.Input(
         "max_output_tokens",
         default=32768,
         min=16,
-        max=65536,
+        max=max_output_tokens,
         tooltip="Maximum tokens to generate, including the model's internal thinking. "
         "With thinking_level HIGH, a low value can leave no room for the answer; raise this if "
         "responses come back empty or truncated. The model stops early when finished, so a higher "
@@ -769,7 +777,7 @@ def _gemini_text_model_inputs(
         _gemini_files_input(),
         _gemini_thinking_input(thinking_default, thinking_options),
         *_gemini_sampling_inputs(sampling),
-        _gemini_max_output_tokens_input(),
+        _gemini_max_output_tokens_input(65536),
     ]
 
 
@@ -777,6 +785,7 @@ def _gemini_v3_model_inputs(
     thinking_default: str,
     thinking_options: list[str] | None = None,
     *,
+    max_output_tokens: int,
     sampling: bool = True,
     agentic_video: bool = False,
 ) -> list[Input]:
@@ -807,7 +816,7 @@ def _gemini_v3_model_inputs(
         _gemini_files_input(),
         _gemini_thinking_input(thinking_default, thinking_options),
         *_gemini_sampling_inputs(sampling),
-        _gemini_max_output_tokens_input(),
+        _gemini_max_output_tokens_input(max_output_tokens),
         IO.Int.Input(
             "seed",
             default=42,
@@ -991,21 +1000,61 @@ class GeminiNodeV3(IO.ComfyNode):
                     "model",
                     options=[
                         IO.DynamicCombo.Option(
+                            "Gemini 4 Hydrogen",
+                            _gemini_v3_model_inputs(
+                                "HIGH",
+                                ["LOW", "MEDIUM", "HIGH", "XHIGH"],
+                                max_output_tokens=65536,
+                                sampling=False,
+                                agentic_video=True,
+                            ),
+                        ),
+                        IO.DynamicCombo.Option(
+                            "Gemini 4 Argon",
+                            _gemini_v3_model_inputs(
+                                "MEDIUM",
+                                ["LOW", "MEDIUM", "HIGH"],
+                                max_output_tokens=32768,
+                                sampling=False,
+                                agentic_video=True,
+                            ),
+                        ),
+                        IO.DynamicCombo.Option(
+                            "Gemini 4 Carbon",
+                            _gemini_v3_model_inputs(
+                                "MEDIUM",
+                                ["LOW", "MEDIUM", "HIGH"],
+                                max_output_tokens=32768,
+                                sampling=False,
+                                agentic_video=True,
+                            ),
+                        ),
+                        IO.DynamicCombo.Option(
                             "Gemini 3.8 Flash",
                             _gemini_v3_model_inputs(
-                                "MEDIUM", ["LOW", "MEDIUM", "HIGH"], sampling=False, agentic_video=True
+                                "MEDIUM",
+                                ["LOW", "MEDIUM", "HIGH"],
+                                max_output_tokens=65536,
+                                sampling=False,
+                                agentic_video=True,
                             ),
                         ),
                         IO.DynamicCombo.Option(
                             "Gemini 3.7 Flash",
-                            _gemini_v3_model_inputs("MEDIUM", ["LOW", "MEDIUM", "HIGH"]),
+                            _gemini_v3_model_inputs("MEDIUM", ["LOW", "MEDIUM", "HIGH"], max_output_tokens=65536),
                         ),
                         IO.DynamicCombo.Option(
                             "Gemini 3.5 Flash",
-                            _gemini_v3_model_inputs("MEDIUM", ["MINIMAL", "LOW", "MEDIUM", "HIGH"]),
+                            _gemini_v3_model_inputs(
+                                "MEDIUM", ["MINIMAL", "LOW", "MEDIUM", "HIGH"], max_output_tokens=65536
+                            ),
                         ),
-                        IO.DynamicCombo.Option("Gemini 3.1 Pro", _gemini_v3_model_inputs("HIGH")),
-                        IO.DynamicCombo.Option("Gemini 3.1 Flash-Lite", _gemini_v3_model_inputs("LOW")),
+                        IO.DynamicCombo.Option(
+                            "Gemini 3.1 Pro", _gemini_v3_model_inputs("HIGH", max_output_tokens=65536)
+                        ),
+                        IO.DynamicCombo.Option(
+                            "Gemini 3.1 Flash-Lite", _gemini_v3_model_inputs("LOW", max_output_tokens=65536)
+                        ),
                     ],
                     tooltip="The Gemini model used to generate the response.",
                 ),
