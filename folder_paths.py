@@ -42,7 +42,12 @@ folder_names_and_paths["upscale_models"] = ([os.path.join(models_dir, "upscale_m
 
 folder_names_and_paths["latent_upscale_models"] = ([os.path.join(models_dir, "latent_upscale_models")], supported_pt_extensions)
 
-folder_names_and_paths["custom_nodes"] = ([os.path.join(base_path, "custom_nodes")], set())
+if args.custom_nodes_directory:
+    custom_nodes_dir = os.path.abspath(args.custom_nodes_directory)
+else:
+    custom_nodes_dir = os.path.join(base_path, "custom_nodes")
+
+folder_names_and_paths["custom_nodes"] = ([custom_nodes_dir], set())
 
 folder_names_and_paths["datasets"] = ([os.path.join(base_path, "datasets")], set())
 
