@@ -2097,6 +2097,15 @@ class ModelPatcherDynamic(ModelPatcher):
                         weight, _, _ = get_key_weight(self.model, key)
                         if key not in self.backup:
                             self.backup[key] = collections.namedtuple('Dimension', ['weight', 'inplace_update'])(weight, False)
+                        if key in self.patches:
+                            # A non-cast module has no lowvram patch hook, so the
+                            # patch has to be baked into the weight like the static
+                            # load path does; restore first so repeated loads do
+                            # not stack the patch.
+                            comfy.utils.set_attr_param(self.model, key, self.backup[key].weight)
+                            self.patch_weight_to_device(key, device_to=device_to)
+                            num_patches += 1
+                            weight, _, _ = get_key_weight(self.model, key)
                         model_dtype = getattr(m, param + "_comfy_model_dtype", None)
                         casted_weight = weight.to(dtype=model_dtype, device=device_to)
                         comfy.utils.set_attr_param(self.model, key, casted_weight)
