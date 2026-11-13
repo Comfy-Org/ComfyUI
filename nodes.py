@@ -1417,7 +1417,7 @@ class LatentRotate:
         elif rotation.startswith("270"):
             rotate_by = 3
 
-        s["samples"] = torch.rot90(samples["samples"], k=rotate_by, dims=[3, 2])
+        s["samples"] = torch.rot90(samples["samples"], k=rotate_by, dims=[-1, -2])
         return (s,)
 
 class LatentFlip:
@@ -1436,9 +1436,9 @@ class LatentFlip:
     def flip(self, samples, flip_method):
         s = samples.copy()
         if flip_method.startswith("x"):
-            s["samples"] = torch.flip(samples["samples"], dims=[2])
+            s["samples"] = torch.flip(samples["samples"], dims=[-2])
         elif flip_method.startswith("y"):
-            s["samples"] = torch.flip(samples["samples"], dims=[3])
+            s["samples"] = torch.flip(samples["samples"], dims=[-1])
 
         return (s,)
 
@@ -1552,16 +1552,16 @@ class LatentCrop:
         y = y // 8
 
         #enfonce minimum size of 64
-        if x > (samples.shape[3] - 8):
-            x = samples.shape[3] - 8
-        if y > (samples.shape[2] - 8):
-            y = samples.shape[2] - 8
+        if x > (samples.shape[-1] - 8):
+            x = samples.shape[-1] - 8
+        if y > (samples.shape[-2] - 8):
+            y = samples.shape[-2] - 8
 
         new_height = height // 8
         new_width = width // 8
         to_x = new_width + x
         to_y = new_height + y
-        s['samples'] = samples[:,:,y:to_y, x:to_x]
+        s['samples'] = samples[..., y:to_y, x:to_x]
         return (s,)
 
 class SetLatentNoiseMask:
