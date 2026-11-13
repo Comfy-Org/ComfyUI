@@ -18,6 +18,8 @@ if not has_gpu():
 
 from comfy import ops
 from comfy.quant_ops import QUANT_ALGOS, QuantizedTensor
+import comfy.model_management as mm
+import comfy.quant_ops as qops
 import comfy.utils
 
 
@@ -390,6 +392,52 @@ class TestMixedPrecisionOps(unittest.TestCase):
             self.assertFalse(mm.supports_int8_compute(None))
         finally:
             mm.cpu_state = orig_cpu_state
+
+    def test_supports_int8_compute_on_rdna2_follows_native_backend(self):
+        """hipBLASLt ships no int8 Tensile kernels for RDNA2 and older, so the eager
+        backend's _int_mm fails there. That must not mask a native backend that runs
+        the same GEMM without hipBLASLt: report int8 as usable exactly when one is
+        registered, so the Triton INT8 GEMM is reachable instead of every layer
+        silently dequantizing."""
+        orig_amd = mm.is_amd
+        orig_props = torch.cuda.get_device_properties
+        orig_probe = qops.int8_linear_available
+        mm.is_amd = lambda *args, **kwargs: True
+        torch.cuda.get_device_properties = lambda device=None: SimpleNamespace(gcnArchName="gfx1030")
+        try:
+            qops.int8_linear_available = lambda: True
+            self.assertTrue(mm.supports_int8_compute("cuda:0"))
+
+            qops.int8_linear_available = lambda: False
+            self.assertFalse(mm.supports_int8_compute("cuda:0"))
+
+            # A newer AMD arch has int8 hipBLASLt kernels and is not gated by the probe.
+            torch.cuda.get_device_properties = lambda device=None: SimpleNamespace(gcnArchName="gfx1100")
+            self.assertTrue(mm.supports_int8_compute("cuda:0"))
+        finally:
+            mm.is_amd = orig_amd
+            torch.cuda.get_device_properties = orig_props
+            qops.int8_linear_available = orig_probe
+
+    def test_int8_linear_available_follows_the_registered_backend(self):
+        """The probe is what tells supports_int8_compute whether INT8 GEMMs exist without
+        torch._int_mm. Only a non-eager backend counts as usable, and no capable backend
+        at all must report False rather than raise."""
+        if not qops._CK_AVAILABLE:
+            self.skipTest("comfy_kitchen is not installed")
+
+        registry = qops.ck.registry
+        with unittest.mock.patch.object(registry, "get_capable_backend", return_value="triton"):
+            self.assertTrue(qops.int8_linear_available())
+
+        with unittest.mock.patch.object(registry, "get_capable_backend", return_value="eager"):
+            self.assertFalse(qops.int8_linear_available())
+
+        with unittest.mock.patch.object(
+            registry, "get_capable_backend",
+            side_effect=qops.ck.exceptions.NoCapableBackendError("int8_linear", {}),
+        ):
+            self.assertFalse(qops.int8_linear_available())
 
     def test_convrot_w4a4_loads_into_params(self):
         """ConvRot W4A4 checkpoints must load as the dedicated kitchen layout."""
