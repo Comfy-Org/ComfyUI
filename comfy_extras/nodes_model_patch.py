@@ -237,7 +237,7 @@ def dit_patch_operations(sd):
     # quantized files keep their layers quantized with bf16 compute, others follow the usual bf16/fp32 dtype pick
     quant = comfy.utils.detect_layer_quantization(sd, "")
     if quant is not None:
-        return torch.bfloat16, comfy.ops.mixed_precision_ops(quant, torch.bfloat16)
+        return torch.bfloat16, comfy.ops.mixed_precision_ops(quant, torch.bfloat16, disabled=comfy.ops.get_disabled_quant_formats(comfy.model_management.get_torch_device()))
     load_device = comfy.model_management.get_torch_device()
     dtype = comfy.model_management.unet_dtype(model_params=-1, supported_dtypes=[torch.bfloat16, torch.float32], weight_dtype=comfy.utils.weight_dtype(sd))
     manual_cast_dtype = comfy.model_management.unet_manual_cast(dtype, load_device, supported_dtypes=[torch.bfloat16, torch.float32])
