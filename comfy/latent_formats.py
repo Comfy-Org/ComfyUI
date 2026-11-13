@@ -1118,6 +1118,12 @@ class YuE2(LatentFormat):
     temporal_downscale_ratio = 1920
 
 
+class MingTTS(LatentFormat):
+    latent_channels = 64
+    latent_dimensions = 1
+    temporal_downscale_ratio = 3528
+
+
 class MiniMaxMusic3(LatentFormat):
     latent_channels = 128
     latent_dimensions = 1
