@@ -257,7 +257,7 @@ class ControlNet(ControlBase):
             control_prev = self.previous_controlnet.get_control(x_noisy, t, cond, batched_number, transformer_options)
 
         if self.timestep_range is not None:
-            if t[0] > self.timestep_range[0] or t[0] < self.timestep_range[1]:
+            if t[0] > self.timestep_range[0] or t[0] <= self.timestep_range[1]:
                 if control_prev is not None:
                     return control_prev
                 else:
@@ -918,7 +918,7 @@ class T2IAdapter(ControlBase):
             control_prev = self.previous_controlnet.get_control(x_noisy, t, cond, batched_number, transformer_options)
 
         if self.timestep_range is not None:
-            if t[0] > self.timestep_range[0] or t[0] < self.timestep_range[1]:
+            if t[0] > self.timestep_range[0] or t[0] <= self.timestep_range[1]:
                 if control_prev is not None:
                     return control_prev
                 else:
