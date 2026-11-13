@@ -730,7 +730,7 @@ def linear_quadratic_schedule(model_sampling, steps, threshold_noise=0.025, line
 
 # Referenced from https://github.com/AUTOMATIC1111/stable-diffusion-webui/pull/15608
 def kl_optimal_scheduler(n: int, sigma_min: float, sigma_max: float) -> torch.Tensor:
-    adj_idxs = torch.arange(n, dtype=torch.float).div_(n - 1)
+    adj_idxs = torch.arange(n, dtype=torch.float).div_(max(n - 1, 1))
     sigmas = adj_idxs.new_zeros(n + 1)
     sigmas[:-1] = (adj_idxs * math.atan(sigma_min) + (1 - adj_idxs) * math.atan(sigma_max)).tan_()
     return sigmas
