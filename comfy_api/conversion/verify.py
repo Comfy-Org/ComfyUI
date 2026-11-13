@@ -631,6 +631,41 @@ def _child(args, timeout):
         return -1, f"no result in {timeout}s"
 
 
+def _converted_stand_ins(v2_dir, error):
+    """The conversion doesn't load with what stood in for the original (it sits in another folder, and its
+    statements aren't the original's). Find what else it needs, as for the original (standin.py), and write the
+    longer plan beside the first: the caller verifies again, in fresh processes, with it. The additions are
+    marked: the report says the conversion needed them."""
+    plan_path = os.environ.get("CONV_STANDIN_PLAN")
+    if not plan_path or plan_path.endswith(".converted"):
+        return None
+    try:
+        import standin
+        from packload import LoadedPack, module_name_for
+        plan = standin.Plan.load(plan_path)
+        known = len(plan.evidence)
+        entry = os.path.realpath(v2_dir)
+        name = module_name_for(entry)
+        for _ in range(12):
+            repair = standin.derive(error, entry, name, plan)
+            if repair is None:
+                return None
+            plan.add(repair, f"{type(error).__name__}: {error}")
+            standin.forget(entry, name)
+            try:
+                LoadedPack(v2_dir, plan)
+            except BaseException as again:
+                error = again
+                continue
+            for item in plan.evidence[known:]:
+                item["converted"] = True
+            plan.save(plan_path + ".converted")
+            return plan_path + ".converted"
+    except BaseException:
+        return None
+    return None
+
+
 def main(original_dir, converted_dir, describe_path, out_path):
     import pickle
     describe = json.load(open(describe_path))
@@ -672,6 +707,9 @@ def main(original_dir, converted_dir, describe_path, out_path):
         converted = LoadedPack(os.path.join(converted_dir, "v2"))
     except BaseException as error:
         report.update(valid=False, error=f"{type(error).__name__}: {error}"[:1500], trace=traceback.format_exc()[-2500:])
+        more = _converted_stand_ins(os.path.join(converted_dir, "v2"), error)
+        if more:  # what the conversion needs stood in to load that the original didn't: verify again with that
+            report["retry_with_plan"] = more
         json.dump(report, open(out_path, "w"))
         return
     _audited([os.path.join(converted_dir, "v2")])
