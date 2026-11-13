@@ -19,8 +19,10 @@
 import torch
 import logging
 import contextlib
+import copy
 import dataclasses
 import inspect
+import weakref
 import comfy.model_management
 from comfy.cli_args import args, PerformanceFeature
 import comfy.float
@@ -532,7 +534,20 @@ class CastWeightBiasOp:
     comfy_force_forward = False
     weight_function = []
     bias_function = []
-    _combined_linear = None
+    _combined_linear_ref = None
+
+    # The parent module owns the CombinedLinear; members only point back at it weakly. A strong
+    # back-pointer makes every member <-> group pair a reference cycle, so a model dropped by
+    # refcount frees its root module and its LoadedModel but keeps the grouped weights allocated
+    # until a full cyclic GC, where free_memory() can no longer see them.
+    @property
+    def _combined_linear(self):
+        ref = self._combined_linear_ref
+        return None if ref is None else ref()
+
+    @_combined_linear.setter
+    def _combined_linear(self, group):
+        self._combined_linear_ref = None if group is None else weakref.ref(group)
 
 class WritableWeight(torch.nn.Module, CastWeightBiasOp):
     """One runtime tensor, either realized or cast from writable file backing."""
@@ -1126,6 +1141,16 @@ class CombinedLinear:
         self._v_weight = None
         for linear in self.linears:
             linear._combined_linear = self
+
+    def __deepcopy__(self, memo):
+        # Weakrefs deepcopy as themselves, so point the copied members at the copied group.
+        new = CombinedLinear.__new__(CombinedLinear)
+        memo[id(self)] = new
+        for k, v in self.__dict__.items():
+            setattr(new, k, copy.deepcopy(v, memo))
+        for linear in new.linears:
+            linear._combined_linear = new
+        return new
 
     def prepare(self, device):
         """Concatenate the members' resident weights in place; they are gone afterwards."""
