@@ -6,6 +6,9 @@ decides what each answers: on the user's own machine the user's folder, but a ho
 pack folders of its own for one run, or a path the pack cannot open. A pack that has to run
 everywhere takes the user's files as node inputs, returns its results as node outputs, and writes
 temporary files to `get_temp_directory()`.
+
+A pack that runs in its own process gets the output, input, temp and user folders that process
+was started with.
 """
 
 import os

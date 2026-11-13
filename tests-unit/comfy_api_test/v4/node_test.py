@@ -9,25 +9,17 @@ import folder_paths
 import nodes
 from comfy_api.latest import io
 from comfy_execution.graph_utils import GraphBuilder
+from conftest import CANCEL
 from model_test import model as model_fixture
 from protocol import BinaryEventTypes
 
 model = model_fixture
 
 COMFY_ROOT = os.path.dirname(os.path.abspath(nodes.__file__))
-KEEP = """\
-from server import PromptServer
-def keep(value):
-    PromptServer.instance.sent.append(("kept", value, None))
-"""
 SCALE = (
     '"ImageScale", {{"image": torch.rand(1, 6, 8, 3), '
     '"upscale_method": "nearest-exact", "width": 4, "height": 3, "crop": "disabled"}}'
 )
-
-
-def kept(server):
-    return [data for event, data, _ in server.sent if event == "kept"]
 
 
 def error(executor):
@@ -59,12 +51,11 @@ def load_comfy_nodes(monkeypatch):
 @pytest.mark.parametrize("synchronous", [False, True])
 async def test_run_returns_a_built_in_nodes_outputs_as_a_tuple(run_node, synchronous):
     executor, server = await run_node(
-        KEEP + f"keep({{call}}.node.run({SCALE}))", synchronous
+        f"[image] = {{call}}.node.run({SCALE})\nassert image.shape == (1, 3, 4, 3)",
+        synchronous,
     )
 
     assert executor.success, executor.status_messages
-    [(image,)] = kept(server)
-    assert image.shape == (1, 3, 4, 3)
 
 
 @pytest.mark.asyncio
@@ -76,19 +67,18 @@ async def test_run_loads_an_image_by_file_name(
     Image.new("RGBA", (5, 4), (255, 0, 0, 128)).save(tmp_path / "red.png")
 
     executor, server = await run_node(
-        KEEP
-        + 'image, mask = {call}.node.run("LoadImage", {{"image": "red.png"}})\n'
-        + "keep((image, mask))",
+        'image, mask = {call}.node.run("LoadImage", {{"image": "red.png"}})\n'
+        "assert image.shape == (1, 4, 5, 3) and image[0, 0, 0, 0] == 1.0\n"
+        "assert mask.shape == (1, 4, 5) and 0.49 < mask[0, 0, 0] < 0.5",
         synchronous,
     )
 
     assert executor.success, executor.status_messages
-    [(image, mask)] = kept(server)
-    assert image.shape == (1, 4, 5, 3) and image[0, 0, 0, 0] == 1.0
-    assert mask.shape == (1, 4, 5) and 0.49 < mask[0, 0, 0] < 0.5
 
 
 @pytest.mark.asyncio
+# The body takes a model the test made in ComfyUI's memory; a pack process can only be given one.
+@pytest.mark.parametrize("run_node", ["in_process"], indirect=True)
 async def test_run_samples_with_ksampler_and_keyword_inputs(
     run_node, monkeypatch, model
 ):
@@ -97,18 +87,16 @@ async def test_run_samples_with_ksampler_and_keyword_inputs(
     )
 
     executor, server = await run_node(
-        KEEP
-        + "from node_run_test_model import model\n"
-        + "cond = [[torch.zeros(1, 1, 768), {{}}]]\n"
-        + 'keep({call}.node.run("KSampler", {{'
-        + '"model": model, "seed": 3, "steps": 1, "cfg": 2.0, '
-        + '"sampler_name": "euler", "scheduler": "normal", "positive": cond, "negative": cond, '
-        + '"latent_image": {{"samples": torch.zeros(1, 4, 8, 8)}}, "denoise": 1.0}}))'
+        "from node_run_test_model import model\n"
+        "cond = [[torch.zeros(1, 1, 768), {{}}]]\n"
+        '[latent] = {call}.node.run("KSampler", {{'
+        '"model": model, "seed": 3, "steps": 1, "cfg": 2.0, '
+        '"sampler_name": "euler", "scheduler": "normal", "positive": cond, "negative": cond, '
+        '"latent_image": {{"samples": torch.zeros(1, 4, 8, 8)}}, "denoise": 1.0}})\n'
+        'assert latent["samples"].shape == (1, 4, 8, 8) and latent["samples"].abs().sum() > 0'
     )
 
     assert executor.success, executor.status_messages
-    [(latent,)] = kept(server)
-    assert latent["samples"].shape == (1, 4, 8, 8) and latent["samples"].abs().sum() > 0
 
 
 @pytest.mark.asyncio
@@ -118,12 +106,11 @@ async def test_run_fills_a_v3_nodes_hidden_unique_id_with_the_running_node(
     await load_comfy_nodes(os.path.join(COMFY_ROOT, "comfy_extras", "nodes_images.py"))
 
     executor, server = await run_node(
-        KEEP
-        + 'keep({call}.node.run("GetImageSize", {{"image": torch.rand(2, 12, 16, 3)}}))'
+        'size = {call}.node.run("GetImageSize", {{"image": torch.rand(2, 12, 16, 3)}})\n'
+        "assert size == (16, 12, 2)"
     )
 
     assert executor.success, executor.status_messages
-    assert kept(server) == [(16, 12, 2)]
     [text] = [data for event, data, _ in server.sent if event == BinaryEventTypes.TEXT]
     assert text.startswith(b"\x00\x00\x00\x02v4width: 16")
 
@@ -135,14 +122,12 @@ async def test_run_returns_outputs_declared_as_lists_as_lists(
     await load_comfy_nodes(os.path.join(COMFY_ROOT, "comfy_extras", "nodes_images.py"))
 
     executor, server = await run_node(
-        KEEP
-        + 'keep({call}.node.run("SplitImageToTileList", {{"image": torch.rand(1, 128, 128, 3), '
-        + '"tile_width": 64, "tile_height": 64, "overlap": 0}}))'
+        '[tiles] = {call}.node.run("SplitImageToTileList", {{"image": torch.rand(1, 128, 128, 3), '
+        '"tile_width": 64, "tile_height": 64, "overlap": 0}})\n'
+        "assert [tile.shape for tile in tiles] == [(1, 64, 64, 3)] * 4"
     )
 
     assert executor.success, executor.status_messages
-    [(tiles,)] = kept(server)
-    assert [tile.shape for tile in tiles] == [(1, 64, 64, 3)] * 4
 
 
 @pytest.mark.asyncio
@@ -153,19 +138,16 @@ async def test_run_output_saves_and_returns_the_ui_without_a_workflow(
     monkeypatch.setattr(folder_paths, "output_directory", str(tmp_path))
 
     executor, server = await run_node(
-        KEEP
-        + 'keep({call}.node.run_output("SaveImage", '
-        + '{{"images": torch.rand(1, 4, 5, 3), "filename_prefix": "v4"}}))',
+        'output = {call}.node.run_output("SaveImage", '
+        '{{"images": torch.rand(1, 4, 5, 3), "filename_prefix": "v4"}})\n'
+        'assert output["ui"] == {{"images": '
+        '[{{"filename": "v4_00001_.png", "subfolder": "", "type": "output"}}]}}\n'
+        '[images] = output["result"]\n'
+        "assert images.shape == (1, 4, 5, 3)",
         synchronous,
     )
 
     assert executor.success, executor.status_messages
-    [output] = kept(server)
-    assert output["ui"] == {
-        "images": [{"filename": "v4_00001_.png", "subfolder": "", "type": "output"}]
-    }
-    [images] = output["result"]
-    assert images.shape == (1, 4, 5, 3)
     assert "executed" not in [event for event, _, _ in server.sent]
     with Image.open(tmp_path / "v4_00001_.png") as saved:
         assert saved.info["prompt"] == "{}" and "workflow" not in saved.info
@@ -179,17 +161,20 @@ async def test_run_maps_a_removed_node_to_its_registered_replacement(
         await load_comfy_nodes(os.path.join(COMFY_ROOT, "comfy_extras", module))
     monkeypatch.delitem(nodes.NODE_CLASS_MAPPINGS, "ImageBatch")
 
+    # The replacement ComfyUI registers (comfy_extras/nodes_replacements.py), through the API.
     executor, server = await run_node(
-        KEEP
-        + "from comfy_extras.nodes_replacements import register_replacements_batchimages\n"
-        + "await register_replacements_batchimages()\n"
-        + 'keep(await eng.node.run("ImageBatch", '
-        + '{{"image1": torch.zeros(1, 4, 4, 3), "image2": torch.ones(1, 4, 4, 3)}}))'
+        "{call}.node_replacement.register(io.NodeReplace(\n"
+        '    new_node_id="BatchImagesNode", old_node_id="ImageBatch", input_mapping=[\n'
+        '        {{"new_id": "images.image0", "old_id": "image1"}},\n'
+        '        {{"new_id": "images.image1", "old_id": "image2"}},\n'
+        "    ]\n"
+        "))\n"
+        '[batch] = {call}.node.run("ImageBatch", '
+        '{{"image1": torch.zeros(1, 4, 4, 3), "image2": torch.ones(1, 4, 4, 3)}})\n'
+        "assert batch.shape == (2, 4, 4, 3) and batch[1].min() == 1.0"
     )
 
     assert executor.success, executor.status_messages
-    [(batch,)] = kept(server)
-    assert batch.shape == (2, 4, 4, 3) and batch[1].min() == 1.0
 
 
 def replace_old_size(output_mapping):
@@ -217,14 +202,14 @@ async def test_run_returns_a_removed_nodes_outputs_where_a_workflows_links_would
     await load_comfy_nodes(os.path.join(COMFY_ROOT, "comfy_extras", "nodes_images.py"))
 
     executor, server = await run_node(
-        KEEP
-        + replace_old_size(output_mapping)
-        + "keep(await eng.node.run('OldSize', {{'image': image}}))\n"
-        + "keep((await eng.node.run_output('OldSize', {{'image': image}}))['result'])"
+        replace_old_size(output_mapping)
+        + "assert await eng.node.run('OldSize', {{'image': image}}) == "
+        + f"{outputs!r}\n"
+        + "output = await eng.node.run_output('OldSize', {{'image': image}})\n"
+        + f"assert output['result'] == {outputs!r}"
     )
 
     assert executor.success, executor.status_messages
-    assert kept(server) == [outputs] * 2
 
 
 @pytest.mark.asyncio
@@ -234,9 +219,8 @@ async def test_run_refuses_a_removed_node_whose_output_has_no_replacement(
     await load_comfy_nodes(os.path.join(COMFY_ROOT, "comfy_extras", "nodes_images.py"))
 
     executor, server = await run_node(
-        KEEP
-        + replace_old_size([{"old_idx": 0, "new_idx": 1}, {"old_idx": 1, "new_idx": 3}])
-        + "keep(await eng.node.run('OldSize', {{'image': image}}))"
+        replace_old_size([{"old_idx": 0, "new_idx": 1}, {"old_idx": 1, "new_idx": 3}])
+        + "await eng.node.run('OldSize', {{'image': image}})"
     )
 
     assert error(executor) == (
@@ -257,15 +241,13 @@ async def test_run_refuses_a_removed_node_whose_output_has_no_replacement(
 )
 async def test_run_rejects_inputs_a_workflow_would_reject(run_node, inputs, message):
     executor, server = await run_node(
-        KEEP
-        + 'keep({call}.node.run("ImageScale", {{"image": torch.rand(1, 6, 8, 3), '
+        '{call}.node.run("ImageScale", {{"image": torch.rand(1, 6, 8, 3), '
         + inputs
-        + ', "height": 3, "crop": "disabled"}}))'
+        + ', "height": 3, "crop": "disabled"}})'
     )
 
     exception_type, exception_message = error(executor)
     assert exception_type == "ValueError" and message in exception_message
-    assert kept(server) == []
 
 
 class TableNode:
@@ -352,13 +334,11 @@ async def test_run_runs_a_built_in_node_a_pack_also_lists(
     await load_pack(ALIAS_PACK, "alias_pack")
 
     executor, server = await run_node(
-        KEEP
-        + f'keep({{call}}.node.run("{node}", {{{{"image": torch.zeros(1, 2, 2, 3)}}}}))'
+        f'[inverted] = {{call}}.node.run("{node}", {{{{"image": torch.zeros(1, 2, 2, 3)}}}})\n'
+        "assert inverted.min() == 1.0"
     )
 
     assert executor.success, executor.status_messages
-    [(inverted,)] = kept(server)
-    assert inverted.min() == 1.0
 
 
 @pytest.mark.asyncio
@@ -422,14 +402,12 @@ async def test_run_refuses_a_node_that_expands_into_other_nodes(run_node, monkey
 @pytest.mark.parametrize("synchronous", [False, True])
 async def test_run_stops_when_the_user_cancelled(run_node, synchronous):
     executor, server = await run_node(
-        KEEP
-        + "comfy.model_management.interrupt_current_processing()\n"
-        + f"keep({{call}}.node.run({SCALE}))",
+        CANCEL + f"{{call}}.node.run({SCALE})\n" + '{call}.ui.send("ran", {{}})',
         synchronous,
     )
 
     assert "execution_interrupted" in [event for event, _ in executor.status_messages]
-    assert kept(server) == []
+    assert "ran" not in [event for event, _, _ in server.sent]
 
 
 @pytest.mark.asyncio
@@ -456,9 +434,7 @@ async def test_run_refuses_a_node_of_a_pack_in_comfyuis_custom_nodes_folder(
 
     monkeypatch.setitem(nodes.NODE_CLASS_MAPPINGS, "PackNode", PackNode)
 
-    executor, server = await run_node(
-        KEEP + "keep(await eng.node.run('PackNode', {{}}))"
-    )
+    executor, server = await run_node("await eng.node.run('PackNode', {{}})")
 
     assert error(executor) == (
         "ValueError",
@@ -473,10 +449,8 @@ async def test_run_returns_every_output_of_a_removed_node_with_more_outputs(
     await load_comfy_nodes(os.path.join(COMFY_ROOT, "comfy_extras", "nodes_images.py"))
 
     executor, server = await run_node(
-        KEEP
-        + replace_old_size([{"old_idx": 3, "new_idx": 0}])
-        + "keep(await eng.node.run('OldSize', {{'image': image}}))"
+        replace_old_size([{"old_idx": 3, "new_idx": 0}])
+        + "assert await eng.node.run('OldSize', {{'image': image}}) == (16, 12, 2, 16)"
     )
 
     assert executor.success, executor.status_messages
-    assert kept(server) == [(16, 12, 2, 16)]

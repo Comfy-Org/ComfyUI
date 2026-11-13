@@ -17,7 +17,8 @@ import folder_paths
 import node_helpers
 import nodes
 from comfy.samplers import KSampler
-from comfy_api.v4 import util
+from comfy_api.v4 import _pack_processes, util
+from conftest import wait_until
 
 FOLDER = "v4_util_test"
 
@@ -731,6 +732,10 @@ def test_comfyui_still_accepts_every_argument_a_wrapper_passes(wrapper, original
 
 @pytest.mark.asyncio
 async def test_a_node_saves_an_image_through_util_folders(run_node, comfy_folders):
+    # A pack process has the folders it was started with: start it again with the moved ones.
+    for process in _pack_processes.processes.values():
+        process.kill()
+        wait_until(lambda: not process.ready, "the pack process to stop")
     executor, _ = await run_node(
         "from comfy_api.v4 import util\n"
         "output = util.folders.get_output_directory()\n"

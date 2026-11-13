@@ -3,7 +3,11 @@ import pytest
 from comfy.model_management import interrupt_current_processing
 from comfy_api import v4
 from comfy_execution.utils import CurrentNodeContext
-from node_test import kept
+from conftest import CANCEL
+
+
+def kept(server):
+    return [data for event, data, _ in server.sent if event == "kept"]
 
 
 @pytest.mark.asyncio
@@ -12,8 +16,8 @@ async def test_check_interrupted_clears_the_cancel_that_is_interrupted_only_repo
     run_node, synchronous
 ):
     executor, server = await run_node(
-        "comfy.model_management.interrupt_current_processing()\n"
-        "seen = [{call}.execution.is_interrupted(), {call}.execution.is_interrupted()]\n"
+        CANCEL
+        + "seen = [{call}.execution.is_interrupted(), {call}.execution.is_interrupted()]\n"
         "try:\n"
         "    {call}.execution.check_interrupted()\n"
         "except InterruptProcessingException:\n"
@@ -62,9 +66,7 @@ async def test_check_interrupted_outside_a_node_raises_and_leaves_the_cancel_for
 async def test_a_cancelled_node_ends_the_prompt_as_interrupted(
     run_node, stop, synchronous
 ):
-    cancel = "comfy.model_management.interrupt_current_processing()\n"
-
-    executor, server = await run_node(cancel + stop, synchronous)
+    executor, server = await run_node(CANCEL + stop, synchronous)
 
     assert not executor.success
     assert executor.status_messages[-1][0] == "execution_interrupted"
@@ -73,10 +75,8 @@ async def test_a_cancelled_node_ends_the_prompt_as_interrupted(
 @pytest.mark.asyncio
 @pytest.mark.parametrize("synchronous", [False, True])
 async def test_a_node_can_see_a_cancel_and_finish_its_work(run_node, synchronous):
-    cancel = "comfy.model_management.interrupt_current_processing()\n"
-
     executor, server = await run_node(
-        cancel + "assert {call}.execution.is_interrupted()", synchronous
+        CANCEL + "assert {call}.execution.is_interrupted()", synchronous
     )
 
     assert executor.success, executor.status_messages
@@ -195,11 +195,11 @@ async def test_a_cancel_while_a_later_node_waits_stops_the_prompt(
 @pytest.mark.parametrize("synchronous", [False, True])
 async def test_a_cancel_passes_through_a_nodes_except_exception(run_node, synchronous):
     executor, server = await run_node(
-        "comfy.model_management.interrupt_current_processing()\n"
-        "try:\n"
-        "    {call}.execution.check_interrupted()\n"
-        "except Exception:\n"
-        "    pass",
+        CANCEL
+        + "try:\n"
+        + "    {call}.execution.check_interrupted()\n"
+        + "except Exception:\n"
+        + "    pass",
         synchronous,
     )
 

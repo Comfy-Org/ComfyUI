@@ -2,7 +2,6 @@ import importlib.util
 import json
 import logging
 import sys
-from unittest.mock import MagicMock
 
 import pytest
 from aiohttp import web
@@ -10,6 +9,7 @@ from aiohttp.test_utils import TestClient, TestServer
 
 import nodes
 import server
+from comfy_api.v4 import _packs
 from execution import validate_prompt
 
 PACK = """\
@@ -61,19 +61,6 @@ DISPLAYED = (
     " outputs=[io.Int.Output()])"
 )
 WEB = 'WEB_DIRECTORY = "./web"'
-
-
-@pytest.fixture
-def host(monkeypatch):
-    for attribute in (
-        "NODE_CLASS_MAPPINGS",
-        "NODE_DISPLAY_NAME_MAPPINGS",
-        "LOADED_MODULE_DIRS",
-        "EXTENSION_WEB_DIRS",
-    ):
-        monkeypatch.setattr(nodes, attribute, dict(getattr(nodes, attribute)))
-    monkeypatch.setattr(server.PromptServer, "instance", None, raising=False)
-    return server.PromptServer(None, MagicMock(enabled=False))
 
 
 def write_pack(pack, routes, name=None, node_id=None, schema=None, extra="", web=False):
@@ -938,3 +925,76 @@ async def test_a_route_the_pack_changes_after_loading_is_served_as_it_was_checke
 
     async with serving(host) as client:
         assert (await answer(client, "GET", "/beta/kept"))[1]["pack"] == "beta"
+
+
+@pytest.mark.asyncio
+async def test_flushing_a_pack_answers_404_to_its_routes_and_leaves_another_packs(
+    host, load
+):
+    assert await load("alpha", [("GET", "/alpha/{item}")])
+    assert await load("beta", [("GET", "/beta/list")])
+
+    async with serving(host) as client:
+        _packs.flush_pack_resources([("alpha", "alpha"), ("not-loaded", "not-loaded")])
+        flushed = [
+            (await answer(client, "GET", path))[0]
+            for path in ("/alpha/1", "/api/alpha/1")
+        ]
+        beta = await answered_by(client, "GET", "/beta/list")
+        _packs.flush_all_pack_resources()
+        all_flushed = (await answer(client, "GET", "/beta/list"))[0]
+
+    assert flushed == [404, 404] and beta == "beta" and all_flushed == 404
+
+
+@pytest.mark.asyncio
+async def test_flushing_a_pack_removes_its_nodes_and_folders_and_nothing_of_another_pack(
+    host, load
+):
+    alpha = DISPLAYED.format(node_id="AlphaNode")
+    assert await load("alpha", [("GET", "/alpha/list")], schema=alpha, web=True)
+    beta = DISPLAYED.format(node_id="BetaNode")
+    assert await load("beta", [("GET", "/beta/list")], schema=beta, web=True)
+
+    async with serving(host) as client:
+        _packs.flush_pack_resources([("alpha", "alpha")])
+
+        assert "AlphaNode" not in nodes.NODE_CLASS_MAPPINGS
+        assert "AlphaNode" not in nodes.NODE_DISPLAY_NAME_MAPPINGS
+        assert (await valid("AlphaNode"))[1]["type"] == "missing_node_type"
+        assert "alpha" not in nodes.LOADED_MODULE_DIRS
+        assert "alpha" not in nodes.EXTENSION_WEB_DIRS
+        assert (await valid("BetaNode"))[0]
+        assert nodes.NODE_DISPLAY_NAME_MAPPINGS["BetaNode"] == "Shown"
+        assert "beta" in nodes.LOADED_MODULE_DIRS and "beta" in nodes.EXTENSION_WEB_DIRS
+        listed = await (await client.get("/extensions")).json()
+        assert not any(path.startswith("/extensions/alpha/") for path in listed)
+
+        assert await load("alpha", [], schema=alpha, web=True)
+        assert (await valid("AlphaNode"))[0]
+        assert "alpha" in nodes.EXTENSION_WEB_DIRS
+
+
+@pytest.mark.asyncio
+async def test_a_flush_leaves_entries_another_pack_has_since_taken(
+    host, load, tmp_path
+):
+    assert await load("alpha", [], name="first", node_id="SharedNode")
+    assert await load("alpha", [], root="other", name="second", node_id="SharedNode")
+    second = nodes.NODE_CLASS_MAPPINGS["SharedNode"]
+
+    _packs.flush_pack_resources([("first", "alpha")])
+
+    assert nodes.NODE_CLASS_MAPPINGS["SharedNode"] is second
+    assert nodes.LOADED_MODULE_DIRS["alpha"] == str(tmp_path / "other" / "alpha")
+
+
+@pytest.mark.asyncio
+async def test_a_flush_takes_away_only_the_pack_in_the_named_folder(host, load):
+    assert await load("alpha", [], name="shared", node_id="AlphaNode")
+    assert await load("beta", [], name="shared", node_id="BetaNode")
+
+    _packs.flush_pack_resources([("shared", "alpha")])
+
+    assert "AlphaNode" not in nodes.NODE_CLASS_MAPPINGS
+    assert "BetaNode" in nodes.NODE_CLASS_MAPPINGS

@@ -7,6 +7,7 @@ import pytest
 
 from comfy import model_management
 from comfy_api import v4
+from conftest import CANCEL
 
 
 def test_exception_leaf_imports_without_engine_or_site_packages():
@@ -50,8 +51,7 @@ async def test_pack_catches_native_cancel_before_executor_handles_it(
     run_node, synchronous
 ):
     executor, server = await run_node(
-        "comfy.model_management.interrupt_current_processing()\n"
-        "try:\n"
+        CANCEL + "try:\n"
         "    {call}.execution.check_interrupted()\n"
         "except InterruptProcessingException as error:\n"
         "    assert type(error) is InterruptProcessingException\n"

@@ -32,6 +32,8 @@ from comfy_api.internal import register_versions, ComfyAPIWithVersion
 from comfy_api.version_list import supported_versions
 from comfy_api.latest import io, ComfyExtension, InputImpl
 from comfy_api.v4 import _packs as v4_packs
+from comfy_api.v4 import _pack_host as v4_pack_host
+from comfy_api.v4 import _pack_processes as v4_pack_processes
 
 import comfy.clip_vision
 
@@ -2272,9 +2274,12 @@ async def load_custom_node(module_path: str, ignore=set(), module_parent="custom
             module_spec = spec_from_file_location(sys_module_name, os.path.join(module_path, "__init__.py"))
             module_dir = module_path
 
-        module = importlib.util.module_from_spec(module_spec)
-        sys.modules[sys_module_name] = module
-        module_spec.loader.exec_module(module)
+        if module_parent == "custom_nodes" and v4_pack_processes.isolated(module_path):
+            module = await v4_pack_host.load(module_path, sys_module_name)
+        else:
+            module = importlib.util.module_from_spec(module_spec)
+            sys.modules[sys_module_name] = module
+            module_spec.loader.exec_module(module)
 
         LOADED_MODULE_DIRS[module_name] = os.path.abspath(module_dir)
 
