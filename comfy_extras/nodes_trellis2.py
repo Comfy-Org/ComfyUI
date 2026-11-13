@@ -143,7 +143,7 @@ class VaeDecodeShapeTrellis(IO.ComfyNode):
             resolution = int(vae.first_stage_model.resolution.item())
         model_frame = samples.get("model_frame", "y_up")
         sample_tensor = samples["samples"]
-        device = comfy.model_management.get_torch_device()
+        device = vae.device
         coords = samples["coords"]
         surface_point_estimate = resolution * resolution * 5 // 4
         vae.prepare_decode(
@@ -216,7 +216,7 @@ class VaeDecodeTextureTrellis(IO.ComfyNode):
     @classmethod
     def execute(cls, samples, vae, shape_subdivides):
         sample_tensor = samples["samples"]
-        device = comfy.model_management.get_torch_device()
+        device = vae.device
         coords = samples["coords"]
         vae.prepare_decode(
             sample_tensor.shape,
@@ -298,7 +298,7 @@ class VaeDecodeStructureTrellis2(IO.ComfyNode):
         sample_tensor = sample_tensor[:, :8]
         batch_number = vae.prepare_decode(sample_tensor.shape)
         shape_vae = vae.first_stage_model
-        load_device = comfy.model_management.get_torch_device()
+        load_device = vae.device
         decoded_batches = []
         for start in range(0, sample_tensor.shape[0], batch_number):
             sample_chunk = sample_tensor[start:start + batch_number].to(load_device)
@@ -354,7 +354,7 @@ class Trellis2UpsampleStage(IO.ComfyNode):
 
     @classmethod
     def execute(cls, positive, negative, shape_latent, vae, target_resolution):
-        device = comfy.model_management.get_torch_device()
+        device = vae.device
         vae.prepare_decode(shape_latent["samples"].shape)
 
         coord_counts = shape_latent.get("coord_counts")
