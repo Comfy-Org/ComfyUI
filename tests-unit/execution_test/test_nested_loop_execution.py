@@ -8,7 +8,7 @@ import comfy_extras.nodes_loop as nodes_loop
 from comfy_api.latest import io
 from comfy_execution.graph_utils import GraphBuilder
 from comfy_execution.validation import validate_loops
-from execution import PromptExecutor
+from execution import CacheType, PromptExecutor
 
 
 class Constant:
@@ -660,6 +660,31 @@ def test_iteration_cache_policy_and_end_cache(cache_iterations, expected_calls):
     assert Progress.body_call_counts == [0, 1, 2] + ([2, 2, 2] if cache_iterations else [2, 3, 4])
     assert prompt["close"]["inputs"]["output_value"] == ["increment", 0]
     assert second_prompt["close"]["inputs"]["output_value"] == ["increment", 0]
+
+
+@pytest.mark.parametrize("cache_type", [CacheType.CLASSIC, CacheType.LRU, CacheType.RAM_PRESSURE])
+def test_cached_loop_iteration_follows_a_change_in_an_upstream_loop(cache_type):
+    Capture.values = []
+
+    def prompt(value):
+        loop = {"mode": "simple", "mode.num_iterations": 1, "cache_iterations": True}
+        return {
+            "constant": {"class_type": "TestConstant", "inputs": {"value": value}},
+            "first": {"class_type": "StartLoop", "inputs": {**loop, "initial_iteration_value": ["constant", 0]}},
+            "first_increment": {"class_type": "TestIncrement", "inputs": {"value": ["first", 4]}},
+            "first_close": {"class_type": "EndLoop", "inputs": {"output_value": ["first_increment", 0], "accumulate": False}},
+            "second": {"class_type": "StartLoop", "inputs": {**loop, "initial_iteration_value": ["first_close", 0]}},
+            "second_increment": {"class_type": "TestIncrement", "inputs": {"value": ["second", 4]}},
+            "second_close": {"class_type": "EndLoop", "inputs": {"output_value": ["second_increment", 0], "accumulate": False}},
+            "capture": {"class_type": "TestCapture", "inputs": {"value": ["second_close", 0]}},
+        }
+
+    executor = PromptExecutor(Server(), cache_type=cache_type, cache_args={"lru": 10, "ram": 0, "ram_inactive": 0})
+    executor.execute(prompt(1), "upstream-loop-first", execute_outputs=["capture"])
+    executor.execute(prompt(10), "upstream-loop-second", execute_outputs=["capture"])
+
+    assert executor.success
+    assert Capture.values == [3, 12]
 
 
 def test_iteration_cache_still_expands_when_only_termination_is_requested():
