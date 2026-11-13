@@ -1021,10 +1021,10 @@ class ImageScaleToMaxDimension(IO.ComfyNode):
         width = image.shape[2]
 
         if height > width:
-            width = round((width / height) * largest_size)
+            width = max(1, round((width / height) * largest_size))
             height = largest_size
         elif width > height:
-            height = round((height / width) * largest_size)
+            height = max(1, round((height / width) * largest_size))
             width = largest_size
         else:
             height = largest_size
