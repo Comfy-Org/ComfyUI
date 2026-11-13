@@ -1,0 +1,11 @@
+services:
+  comfyui:
+    image: comfyui-sos-comfyui:h3-quality
+    build:
+      context: ./temp/h3-build/wheels
+      dockerfile: ../../../Dockerfile.h3-local
+    # 8GB H3：动态卸载与主存驻留，原生RAM压力阈值保留系统余量。
+    command:
+      - /bin/sh
+      - -lc
+      - umask 0002 && exec python main.py --listen 0.0.0.0 --port 8188 --enable-manager --disable-cuda-malloc --reserve-vram 1.5 --async-offload 1 --cache-ram 12 12 --disable-cuda-graphs
