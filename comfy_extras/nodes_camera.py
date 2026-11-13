@@ -5,6 +5,7 @@ from typing_extensions import override
 
 import comfy.model_management
 from comfy_api.latest import ComfyExtension, IO
+from comfy_extras.nodes_save_3d import get_mesh_batch_item
 
 
 def _quat_to_mat(q):
@@ -124,6 +125,15 @@ def _rotate_camera_info(camera_info, axis, angle_deg):
     return out
 
 
+def _mesh_frame_to_world(points, mesh):
+    """Points in the mesh's frame (origin at its bounding-box centre, one unit = the diameter of its bounding sphere
+    about that centre) -> world. A TRELLIS.2 / Pixal3D output keeps about the size it has in world units."""
+    vertices = get_mesh_batch_item(mesh, 0)[0].float()
+    center = (vertices.amin(0) + vertices.amax(0)) * 0.5
+    size = max(2.0 * float((vertices - center).norm(dim=-1).amax()), 1e-6)
+    return [[c + size * x for c, x in zip(center.tolist(), point)] for point in points]
+
+
 def camera_list(camera_info):
     """A camera_info is one camera or, from Create Camera Orbit / Batch Cameras, a list of them."""
     return camera_info if isinstance(camera_info, list) else [camera_info]
@@ -139,7 +149,8 @@ class CreateCameraInfo(IO.ComfyNode):
             category="3d",
             description="Build a camera_info. "
                         "Mode 'orbit' aims with yaw/pitch/distance around the target; "
-                        "'look_at' places the camera at world position. Coordinates are the viewer's world space (right-handed,Y-up).",
+                        "'look_at' places the camera at world position. Coordinates are the viewer's world space (right-handed,Y-up), "
+                        "or with a mesh connected that mesh's frame, so the same settings frame any mesh.",
             inputs=[
                 IO.DynamicCombo.Input("mode", options=[
                     IO.DynamicCombo.Option("orbit", [
@@ -180,16 +191,21 @@ class CreateCameraInfo(IO.ComfyNode):
                 IO.Combo.Input("camera_type", options=["perspective", "orthographic"],
                                tooltip="Projection used by Render Splat and Render Mesh: perspective (foreshortening) or orthographic (parallel)."),
                 IO.CameraInfoState.Input("camera_info_state", optional=True),
+                IO.Mesh.Input("mesh", optional=True,
+                              tooltip="Frame this mesh: positions, target and distance count from its bounding-box centre in "
+                                      "units of its bounding-sphere diameter, so the same settings frame any mesh."),
             ],
             outputs=[IO.Load3DCamera.Output(display_name="camera_info")],
         )
 
     @classmethod
-    def execute(cls, mode, target_x, target_y, target_z, roll, fov, zoom=1.0, camera_type="perspective", camera_info_state=None) -> IO.NodeOutput:
+    def execute(cls, mode, target_x, target_y, target_z, roll, fov, zoom=1.0, camera_type="perspective", camera_info_state=None, mesh=None) -> IO.NodeOutput:
         dev = comfy.model_management.get_torch_device()
         kind = mode["mode"]
         if kind == "quaternion":  # explicit world position + camera rotation
             position = [mode["position_x"], mode["position_y"], mode["position_z"]]
+            if mesh is not None:
+                position, = _mesh_frame_to_world([position], mesh)
             quat = [mode["quat_x"], mode["quat_y"], mode["quat_z"], mode["quat_w"]]
             return IO.NodeOutput(_quat_camera_info(position, quat, fov, dev, zoom=zoom, camera_type=camera_type))
         target = [target_x, target_y, target_z]  # orbit pivot / aim; move it to pan the whole camera
@@ -200,6 +216,8 @@ class CreateCameraInfo(IO.ComfyNode):
             position = [target_x + d * cp * sy, target_y + d * sp, target_z + d * cp * cy]
         else:  # look_at: explicit world-space camera position
             position = [mode["position_x"], mode["position_y"], mode["position_z"]]
+        if mesh is not None:
+            position, target = _mesh_frame_to_world([position, target], mesh)
         return IO.NodeOutput(_lookat_camera_info(position, target, fov, dev, zoom=zoom, camera_type=camera_type, roll=roll))
 
 
