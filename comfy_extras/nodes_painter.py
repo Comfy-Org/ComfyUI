@@ -82,21 +82,24 @@ class PainterNode(io.ComfyNode):
 
         if mask and mask.strip():
             mask_path = folder_paths.get_annotated_filepath(mask)
-            painter_img = node_helpers.pillow(Image.open, mask_path)
-            painter_img = painter_img.convert("RGBA")
+            opened_painter_img = node_helpers.pillow(Image.open, mask_path)
+            try:
+                painter_img = opened_painter_img.convert("RGBA")
 
-            if painter_img.size != (w, h):
-                painter_img = painter_img.resize((w, h), Image.LANCZOS)
+                if painter_img.size != (w, h):
+                    painter_img = painter_img.resize((w, h), Image.LANCZOS)
 
-            painter_np = np.array(painter_img).astype(np.float32) / 255.0
-            painter_rgb = painter_np[:, :, :3]
-            painter_alpha = painter_np[:, :, 3:4]
+                painter_np = np.array(painter_img).astype(np.float32) / 255.0
+                painter_rgb = painter_np[:, :, :3]
+                painter_alpha = painter_np[:, :, 3:4]
 
-            mask_tensor = torch.from_numpy(painter_np[:, :, 3]).unsqueeze(0)
+                mask_tensor = torch.from_numpy(painter_np[:, :, 3]).unsqueeze(0)
 
-            base_np = base_image[0].cpu().numpy()
-            composited = painter_rgb * painter_alpha + base_np * (1.0 - painter_alpha)
-            out_image = torch.from_numpy(composited).unsqueeze(0)
+                base_np = base_image[0].cpu().numpy()
+                composited = painter_rgb * painter_alpha + base_np * (1 - painter_alpha)
+                out_image = torch.from_numpy(composited).unsqueeze(0)
+            finally:
+                opened_painter_img.close()
         else:
             mask_tensor = torch.zeros((1, h, w), dtype=torch.float32)
             out_image = base_image
