@@ -37,15 +37,19 @@ class RemoveBackground(IO.ComfyNode):
             description="Generates a foreground mask to remove the background from an image using a background removal model.",
             inputs=[
                 IO.BackgroundRemoval.Input("bg_removal_model", tooltip="Background removal model used to generate the mask"),
-                IO.Image.Input("image", tooltip="Input image to remove the background from")
+                IO.Image.Input("image", tooltip="Input image to remove the background from"),
+                IO.Int.Input("resolution", default=1024, min=256, max=4096, step=32, optional=True, advanced=True,
+                             tooltip="Square size the image is resized to before inference. Use the size the model was trained at, e.g. 1024 for BiRefNet and 2048 for BiRefNet_HR."),
             ],
             outputs=[
                 IO.Mask.Output("mask", tooltip="Generated foreground mask")
             ]
         )
     @classmethod
-    def execute(cls, bg_removal_model, image):
-        mask = bg_removal_model.encode_image(image)
+    def execute(cls, bg_removal_model, image, resolution=None):
+        if resolution is not None and (resolution % 32 != 0 or not 256 <= resolution <= 4096):
+            raise ValueError(f"resolution must be a multiple of 32 between 256 and 4096, got {resolution}")
+        mask = bg_removal_model.encode_image(image, image_size=resolution)
         return IO.NodeOutput(mask)
 
 class BackgroundRemovalExtension(ComfyExtension):
