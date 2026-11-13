@@ -591,7 +591,11 @@ class SDTokenizer:
         tokens = []
         for weighted_segment, weight in parsed_weights:
             to_tokenize = unescape_important(weighted_segment)
-            split = re.split(r'(?<=\s){}'.format(re.escape(self.embedding_identifier)), to_tokenize)
+            # The lookbehind also matches a comma so that multiple
+            # embeddings written without spaces — `embedding:a,embedding:b`
+            # — are split into two segments instead of one and
+            # `embedding:a` is not lost. (ComfyUI issue #1354)
+            split = re.split(r'(?<=[\s,]){}'.format(re.escape(self.embedding_identifier)), to_tokenize)
             to_tokenize = [split[0]]
             for i in range(1, len(split)):
                 to_tokenize.append("{}{}".format(self.embedding_identifier, split[i]))
