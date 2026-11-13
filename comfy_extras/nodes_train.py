@@ -694,7 +694,7 @@ def _load_existing_lora(existing_lora):
 
 
 def _create_weight_adapter(
-    module, module_name, existing_weights, algorithm, lora_dtype, rank
+    module, module_name, existing_weights, algorithm, lora_dtype, rank, alpha
 ):
     """Create a weight adapter for a module with weight.
 
@@ -705,6 +705,7 @@ def _create_weight_adapter(
         algorithm: Algorithm name for new adapters
         lora_dtype: dtype for LoRA weights
         rank: Rank for new LoRA adapters
+        alpha: Alpha for new LoRA adapters
 
     Returns:
         tuple: (train_adapter, lora_params dict)
@@ -716,14 +717,14 @@ def _create_weight_adapter(
     logging.debug(f"Creating weight adapter for {key} with shape {shape}")
 
     if len(shape) >= 2:
-        alpha = float(existing_weights.get(f"{key}.alpha", 1.0))
+        existing_alpha = float(existing_weights.get(f"{module_name}.alpha", 1.0))
         dora_scale = existing_weights.get(f"{key}.dora_scale", None)
 
         # Try to load existing adapter
         existing_adapter = None
         for adapter_cls in adapters:
             existing_adapter = adapter_cls.load(
-                module_name, existing_weights, alpha, dora_scale
+                module_name, existing_weights, existing_alpha, dora_scale
             )
             if existing_adapter is not None:
                 break
@@ -734,9 +735,8 @@ def _create_weight_adapter(
         if existing_adapter is not None:
             train_adapter = existing_adapter.to_train().to(lora_dtype)
         else:
-            # Use LoRA with alpha=1.0 by default
             train_adapter = adapter_cls.create_train(
-                module.weight, rank=rank, alpha=1.0
+                module.weight, rank=rank, alpha=alpha
             ).to(lora_dtype)
 
         for name, parameter in train_adapter.named_parameters():
@@ -772,7 +772,7 @@ def _create_bias_adapter(module, module_name, lora_dtype):
     return bias_module, lora_params
 
 
-def _setup_lora_adapters(mp, existing_weights, algorithm, lora_dtype, rank):
+def _setup_lora_adapters(mp, existing_weights, algorithm, lora_dtype, rank, alpha):
     """Setup all LoRA adapters on the model.
 
     Args:
@@ -781,6 +781,7 @@ def _setup_lora_adapters(mp, existing_weights, algorithm, lora_dtype, rank):
         algorithm: Algorithm name for new adapters
         lora_dtype: dtype for LoRA weights
         rank: Rank for new LoRA adapters
+        alpha: Alpha for new LoRA adapters
 
     Returns:
         tuple: (lora_sd dict, all_weight_adapters list)
@@ -792,7 +793,7 @@ def _setup_lora_adapters(mp, existing_weights, algorithm, lora_dtype, rank):
         if hasattr(m, "weight_function"):
             if m.weight is not None:
                 adapter, params = _create_weight_adapter(
-                    m, n, existing_weights, algorithm, lora_dtype, rank
+                    m, n, existing_weights, algorithm, lora_dtype, rank, alpha
                 )
                 lora_sd.update(params)
                 key = f"{n}.weight"
@@ -809,7 +810,7 @@ def _setup_lora_adapters(mp, existing_weights, algorithm, lora_dtype, rank):
     return lora_sd, all_weight_adapters
 
 
-def _setup_lora_adapters_bypass(mp, existing_weights, algorithm, lora_dtype, rank):
+def _setup_lora_adapters_bypass(mp, existing_weights, algorithm, lora_dtype, rank, alpha):
     """Setup LoRA adapters in bypass mode.
 
     In bypass mode:
@@ -825,6 +826,7 @@ def _setup_lora_adapters_bypass(mp, existing_weights, algorithm, lora_dtype, ran
         algorithm: Algorithm name for new adapters
         lora_dtype: dtype for LoRA weights
         rank: Rank for new LoRA adapters
+        alpha: Alpha for new LoRA adapters
 
     Returns:
         tuple: (lora_sd dict, all_weight_adapters list, bypass_manager)
@@ -837,7 +839,7 @@ def _setup_lora_adapters_bypass(mp, existing_weights, algorithm, lora_dtype, ran
         if hasattr(m, "weight_function"):
             if m.weight is not None:
                 adapter, params = _create_weight_adapter(
-                    m, n, existing_weights, algorithm, lora_dtype, rank
+                    m, n, existing_weights, algorithm, lora_dtype, rank, alpha
                 )
                 lora_sd.update(params)
                 all_weight_adapters.append(adapter)
@@ -1081,6 +1083,13 @@ class TrainLoraNode(io.ComfyNode):
                     default=False,
                     tooltip="Enable bypass mode for training. When enabled, adapters are applied via forward hooks instead of weight modification. Useful for quantized models where weights cannot be directly modified.",
                 ),
+                io.Float.Input(
+                    "alpha",
+                    default=1.0,
+                    step=0.01,
+                    optional=True,
+                    tooltip="The alpha of new LoRA layers. The LoRA scale is alpha / rank. Ignored when appending to an existing LoRA.",
+                ),
             ],
             outputs=[
                 io.Custom("LORA_MODEL").Output(
@@ -1117,6 +1126,7 @@ class TrainLoraNode(io.ComfyNode):
         existing_lora,
         bucket_mode,
         bypass_mode,
+        alpha=None,
     ):
         # Extract scalars from lists (due to is_input_list=True)
         model = model[0]
@@ -1138,6 +1148,7 @@ class TrainLoraNode(io.ComfyNode):
         existing_lora = existing_lora[0]
         bucket_mode = bucket_mode[0]
         bypass_mode = bypass_mode[0]
+        alpha = alpha[0] if alpha else 1.0
 
         comfy.model_management.training_fp8_bwd = quantized_backward
 
@@ -1198,11 +1209,11 @@ class TrainLoraNode(io.ComfyNode):
             if bypass_mode:
                 logging.debug("Using bypass mode for training")
                 lora_sd, all_weight_adapters, bypass_manager = _setup_lora_adapters_bypass(
-                    mp, existing_weights, algorithm, lora_dtype, rank
+                    mp, existing_weights, algorithm, lora_dtype, rank, alpha
                 )
             else:
                 lora_sd, all_weight_adapters = _setup_lora_adapters(
-                    mp, existing_weights, algorithm, lora_dtype, rank
+                    mp, existing_weights, algorithm, lora_dtype, rank, alpha
                 )
 
             # Create optimizer and loss function
