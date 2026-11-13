@@ -310,9 +310,12 @@ def _calc_cond_batch(model: BaseModel, conds: list[list[dict]], x_in: torch.Tens
 
             transformer_options = model.current_patcher.apply_hooks(hooks=hooks)
             if 'transformer_options' in model_options:
-                transformer_options = comfy.patcher_extension.merge_nested_dicts(transformer_options,
-                                                                                 model_options['transformer_options'],
-                                                                                 copy_dict1=False)
+                # Hook-derived patches must stack on top of model patches, so
+                # model's transformer_options is dict1 (existing) and the
+                # hook-derived dict is dict2 (extends model's lists).
+                transformer_options = comfy.patcher_extension.merge_nested_dicts(model_options['transformer_options'],
+                                                                                 transformer_options,
+                                                                                 copy_dict1=True)
 
             if patches is not None:
                 transformer_options["patches"] = comfy.patcher_extension.merge_nested_dicts(
