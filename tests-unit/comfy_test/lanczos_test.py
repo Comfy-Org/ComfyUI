@@ -48,6 +48,38 @@ def test_lanczos_does_not_depend_on_the_thread_count():
     assert torch.equal(single, parallel)
 
 
+@pytest.mark.parametrize("threads", [1, 4])
+def test_lanczos_in_inference_mode(threads):
+    # nodes run inside torch.inference_mode(), which is thread local: the parallel path must work there too
+    torch.manual_seed(3)
+    samples = torch.rand(8, 3, 40, 30)
+    expected = reference_lanczos(samples, 64, 80)
+    previous = torch.get_num_threads()
+    try:
+        torch.set_num_threads(threads)
+        with torch.inference_mode():
+            result = comfy.utils.lanczos(samples, 64, 80)
+    finally:
+        torch.set_num_threads(previous)
+    assert torch.equal(result, expected)
+
+
+def test_lanczos_does_not_keep_a_float_copy_of_the_batch(monkeypatch):
+    # frames are moved to the CPU one at a time, as before, not the whole batch at once
+    torch.manual_seed(4)
+    samples = torch.rand(5, 3, 20, 20)
+    calls = []
+    original = torch.Tensor.cpu
+
+    def cpu(self, *args, **kwargs):
+        calls.append(tuple(self.shape))
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(torch.Tensor, "cpu", cpu)
+    comfy.utils.lanczos(samples, 10, 10)
+    assert calls and all(len(shape) == 3 for shape in calls)
+
+
 def test_common_upscale_lanczos_video_batch():
     # ImageScale on a video: (frames, channels, h, w) through common_upscale
     torch.manual_seed(2)
