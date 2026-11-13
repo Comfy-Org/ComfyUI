@@ -2,6 +2,7 @@ import asyncio
 import bisect
 import itertools
 import logging
+import math
 import time
 import torch
 from typing import Sequence, Mapping, Dict
@@ -504,6 +505,15 @@ RAM_CACHE_DEFAULT_RAM_USAGE = 0.05
 
 RAM_CACHE_OLD_WORKFLOW_OOM_MULTIPLIER = 1.3
 
+# A float can represent at most ~1.8e308, so a large generation gap makes
+# `multiplier ** gap` raise OverflowError (1.3 ** 2705 already overflows).
+# Cap the exponent: entries beyond the cap are all equally stale, and the
+# score is only used to order eviction, so the cap does not change behaviour.
+RAM_CACHE_MAX_AGE_GENERATIONS = (
+    int(700 / math.log(RAM_CACHE_OLD_WORKFLOW_OOM_MULTIPLIER))
+    if RAM_CACHE_OLD_WORKFLOW_OOM_MULTIPLIER > 1.0 else 10 ** 9
+)
+
 RAM_CACHE_LARGE_INTERMEDIATE = 512 * 1024 ** 2
 
 
@@ -561,7 +571,8 @@ class RAMPressureCache(LRUCache):
             if all_outputs_dynamic(cache_entry.outputs) and self.used_generation[key] == self.generation:
                 continue
 
-            oom_score = RAM_CACHE_OLD_WORKFLOW_OOM_MULTIPLIER ** (self.generation - self.used_generation[key])
+            age = self.generation - self.used_generation[key]
+            oom_score = RAM_CACHE_OLD_WORKFLOW_OOM_MULTIPLIER ** min(age, RAM_CACHE_MAX_AGE_GENERATIONS)
 
             ram_usage = RAM_CACHE_DEFAULT_RAM_USAGE
             oom_ram_usage = ram_usage
