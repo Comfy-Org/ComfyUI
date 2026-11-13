@@ -6,6 +6,7 @@ tokens; their order is significant because the checkpoint embeds them by id.
 """
 
 import os
+import re
 
 import torch
 from transformers import Qwen2Tokenizer
@@ -33,17 +34,52 @@ SYSTEM_MESSAGE = (
     "user's input language."
 )
 
+INTERLEAVE_SYSTEM_MESSAGE = (
+    "You are a multimodal assistant capable of reasoning with both text and images. "
+    "You support two modes:\n\n"
+    "Think Mode: When reasoning is needed, you MUST start with a <think></think> block "
+    "and place all reasoning inside it. You MUST interleave text with generated images "
+    "using tags like <image1>, <image2>. Images can ONLY be generated between <think> and "
+    "</think>, and may be referenced in the final answer.\n\n"
+    "Non-Think Mode: When no reasoning is needed, directly provide the answer without reasoning. "
+    "Do not use tags like <image1>, <image2>; present any images naturally alongside the text.\n\n"
+    "After the think block, always provide a concise, user-facing final answer. "
+    "The answer may include text, images, or both. Match the user's language in both reasoning "
+    "and the final answer."
+)
 
-def build_generation_prompt(text):
+
+def _generation_prompt_parts(text, thinking, mode):
+    """Separate trusted chat-template parts from user text for protocol-safe tokenization."""
+    if mode == "interleave":
+        system = INTERLEAVE_SYSTEM_MESSAGE
+        assistant = "" if thinking else "<think>\n\n</think>\n\n"
+    else:
+        system = SYSTEM_MESSAGE
+        assistant = "<think>\n" if thinking else "<think>\n\n</think>\n\n<img>"
     return (
-        f"<|im_start|>system\n{SYSTEM_MESSAGE}<|im_end|>\n"
-        f"<|im_start|>user\n{text}<|im_end|>\n"
-        "<|im_start|>assistant\n<think>\n\n</think>\n\n<img>"
+        f"<|im_start|>system\n{system}<|im_end|>\n<|im_start|>user",
+        "\n" + text,
+        f"<|im_end|>\n<|im_start|>assistant\n{assistant}",
     )
 
 
+def build_generation_prompt(text, thinking=False):
+    """Build a SenseNova image-generation chat prompt."""
+
+    return "".join(_generation_prompt_parts(text, thinking, "image"))
+
+
 def build_unconditional_prompt():
+    """Build the negative image-generation prompt."""
+
     return "<|im_start|>user\n<|im_end|>\n<|im_start|>assistant\n<img>"
+
+
+def build_interleave_unconditional_prompt():
+    """Build the negative interleave prompt."""
+
+    return "<|im_start|>user\n<|im_end|>\n<|im_start|>assistant\n"
 
 
 class SenseNovaQwen2Tokenizer:
@@ -108,16 +144,32 @@ class SenseNovaTokenizer(sd1_clip.SD1Tokenizer):
         )
 
     def tokenize_with_weights(self, text, return_word_ids=False, **kwargs):
-        prompt = build_generation_prompt(text) if text else build_unconditional_prompt()
-        tokens = super().tokenize_with_weights(
-            prompt,
-            return_word_ids=return_word_ids,
-            disable_weights=True,
-            **kwargs,
-        )
-        values = tokens["sensenova_u15"][0]
-        values = [value for value in values if int(value[0]) != 151643]
-        return {"sensenova_u15": [values]}
+        """Tokenize image/interleave prompts while keeping user-supplied markers as ordinary text."""
+        thinking = kwargs.pop("thinking", False)
+        mode = kwargs.pop("mode", "image")
+        if text or thinking:
+            parts = _generation_prompt_parts(text, thinking, mode)
+        else:
+            prompt = (
+                build_interleave_unconditional_prompt()
+                if mode == "interleave"
+                else build_unconditional_prompt()
+            )
+            parts = (prompt,)
+        values = []
+        word_id = 1
+        for index, part in enumerate(parts):
+            part = sd1_clip.unescape_important(sd1_clip.escape_important(part))
+            # Preserve SDTokenizer's segmentation even without textual-inversion embeddings.
+            segments = re.split(r"(?<=\s)(?={})".format(re.escape(self.sensenova_u15.embedding_identifier)), part)
+            for segment_index, segment in enumerate(segments):
+                word_id += int(segment_index > 0)
+                # Only the template may introduce protocol IDs; user markers remain text.
+                ids = self.sensenova_u15.tokenizer.encode(
+                    segment, add_special_tokens=False, split_special_tokens=index == 1,
+                )
+                values.extend((token, 1.0, word_id) if return_word_ids else (token, 1.0) for token in ids)
+        return {"sensenova_u15": [values], "sensenova_prompt": text}
 
 
 class SenseNovaTextEncoder(torch.nn.Module):
@@ -133,7 +185,7 @@ class SenseNovaTextEncoder(torch.nn.Module):
         return (
             input_ids.unsqueeze(-1).to(torch.float32),
             None,
-            {"text_input_ids": input_ids},
+            {"text_input_ids": input_ids, "sensenova_prompt": token_weight_pairs["sensenova_prompt"]},
         )
 
     def load_sd(self, sd):
