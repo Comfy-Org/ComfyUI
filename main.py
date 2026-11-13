@@ -580,6 +580,24 @@ ________________________________________________________________________
     )
 
 
+if os.name == "nt":
+    class IocpProactor(asyncio.IocpProactor):
+        # asyncio closes the listening socket when one accept fails (python/cpython#93821), so retry client-side errors instead.
+        ACCEPT_CLIENT_ERRORS = (64, 1236, 10053, 10054, 10057)
+
+        def accept(self, listener):
+            return self._loop.create_task(self._accept(listener))
+
+        async def _accept(self, listener):
+            while True:
+                try:
+                    return await super().accept(listener)
+                except OSError as e:
+                    if e.winerror not in self.ACCEPT_CLIENT_ERRORS:
+                        raise
+                    logging.debug("Client disconnected before its connection was accepted: {}".format(e))
+
+
 def start_comfyui(asyncio_loop=None):
     """
     Starts the ComfyUI server using the provided asyncio event loop or creates a new one.
@@ -600,7 +618,7 @@ def start_comfyui(asyncio_loop=None):
         cleanup_temp_filesystem()
 
     if not asyncio_loop:
-        asyncio_loop = asyncio.new_event_loop()
+        asyncio_loop = asyncio.ProactorEventLoop(IocpProactor()) if os.name == "nt" else asyncio.new_event_loop()
         asyncio.set_event_loop(asyncio_loop)
     prompt_server = server.PromptServer(asyncio_loop, asset_manager)
 
