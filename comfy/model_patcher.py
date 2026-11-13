@@ -1689,7 +1689,10 @@ class ModelPatcher:
                 used = memory_counter.use(weight)
                 if used:
                     target_device = weight.device
-            self.hook_backup[key] = (weight.to(device=target_device, copy=True), weight.device)
+            self.hook_backup[key] = (
+                comfy.model_management.cast_to(weight, dtype=weight.dtype, device=target_device, copy=True),
+                weight.device,
+            )
         # TODO: properly handle LowVramPatch, if it ends up an issue
         temp_weight = comfy.model_management.cast_to_device(weight, weight.device, torch.float32, copy=True)
         if convert_func is not None:
