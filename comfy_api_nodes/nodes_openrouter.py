@@ -74,6 +74,9 @@ MODELS: list[_ModelSpec] = [
     _ModelSpec("x-ai/grok-4.5", "reasoning", 0.00000286, 0.00000858, max_images=20),
     _ModelSpec("x-ai/grok-4.20", "reasoning", 0.0000017875, 0.000003575, max_images=20),
     _ModelSpec("x-ai/grok-4.3", "reasoning", 0.0000017875, 0.000003575, max_images=20),
+    _ModelSpec("meta/muse-wonder", "reasoning", 0.00000572, 0.0000286, max_images=50, max_videos=5),
+    _ModelSpec("meta/muse-spark-1.3", "reasoning", 0.0000017875, 0.0000060775, max_images=50, max_videos=5),
+    _ModelSpec("meta/muse-ember", "reasoning", 0.000000143, 0.000000715, max_images=50, max_videos=5),
     _ModelSpec("deepseek/deepseek-v4-pro", "reasoning", 0.00000062205, 0.0000012441),
     _ModelSpec("deepseek/deepseek-v4-flash", "reasoning", 0.00000016016, 0.00000032032),
     _ModelSpec("deepseek/deepseek-v3.2", "reasoning", 0.00000036036, 0.00000054054),
@@ -271,11 +274,17 @@ def _extract_text(response: OpenRouterChatResponse) -> str:
     _raise_on_error(response.error)
     if not response.choices:
         raise ValueError("Empty response from OpenRouter (no choices).")
-    message = response.choices[0].message
+    choice = response.choices[0]
+    message = choice.message
     if not message:
         raise ValueError("Empty response from OpenRouter (no message).")
     if message.refusal:
         raise ValueError(f"Model refused to respond: {message.refusal}")
+    if not message.content and choice.finish_reason == "length":
+        raise ValueError(
+            "The model used its whole output budget on reasoning and returned no text. "
+            "Lower reasoning_effort and try again."
+        )
     return message.content or ""
 
 
@@ -309,7 +318,7 @@ class OpenRouterLLMNode(IO.ComfyNode):
             essentials_category="Text Generation",
             description=(
                 "Generate text responses through OpenRouter. Routes to a curated set of popular "
-                "models from Anthropic (Claude), OpenAI (GPT), Google (Gemini), xAI (Grok), "
+                "models from Anthropic (Claude), OpenAI (GPT), Google (Gemini), xAI (Grok), Meta (Muse), "
                 "DeepSeek, Qwen, Mistral, Z.AI (GLM), Moonshot (Kimi), and Perplexity Sonar."
             ),
             inputs=[
