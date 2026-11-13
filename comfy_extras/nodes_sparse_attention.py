@@ -1,9 +1,10 @@
 """Block-sparse attention on comfy_kitchen's sparse attention kernels (Sol-Attn adaptive
-threshold, SLA-style top-k, or FastVideo's VSA). Generic models go through the
-attention override; MiniMax-H3 gets the chunked qkv producer through block patches."""
+threshold, SLA-style top-k, FastVideo's VSA, or Draft). Generic models go through
+the attention override; MiniMax-H3 gets the chunked qkv producer except in Draft mode."""
 from __future__ import annotations
 
 import logging
+import math
 import re
 import weakref
 
@@ -40,11 +41,15 @@ class SparseAttnPatch:
     resets the state when the sampling run ends."""
 
     def __init__(self, tau, topk_ratio, vsa, sigma_start, sigma_end, min_tokens,
-                 dense_blocks, sink_conditioning, extra_tokens, verbose):
+                 dense_blocks, sink_conditioning, extra_tokens, verbose, draft_sparsity=None,
+                 draft_nvfp4_ratio=0.0, draft_int8_ratio=1.0):
         self.tau = tau
         self.topk_ratio = topk_ratio
         self.extra_tokens = extra_tokens
         self.vsa = vsa
+        self.draft_sparsity = draft_sparsity
+        self.draft_nvfp4_ratio = draft_nvfp4_ratio
+        self.draft_int8_ratio = draft_int8_ratio
         self.sigma_start = sigma_start
         self.sigma_end = sigma_end
         self.min_tokens = min_tokens
@@ -168,6 +173,37 @@ def _ineligible(q, k, v, dim_head):
     return None
 
 
+def draft_layout(layout, tokens):
+    """The target video's post-patch grid and packed-prefix length, or None."""
+    if layout is None or layout.seq_len != tokens:
+        return None
+    video = next(((a, b) for a, b, kind in layout.segments if kind == "video"), None)
+    if video is None or video[1] != tokens:
+        return None
+    _, latent_t, latent_h, latent_w, _ = layout.signature
+    video_shape = (latent_t, latent_h // 2, latent_w // 2)   # patch grid is (1, 2, 2)
+    if math.prod(video_shape) != video[1] - video[0]:
+        return None
+    return video_shape, video[0]
+
+
+def _draft_ineligible(q, k, v, dim_head, layout, tokens):
+    """Why these BTHD tensors can't use the fixed Draft path, or None."""
+    if q.device.type != "cuda":
+        return "not on CUDA"
+    if not ck.draft_attention_is_available(q.device):
+        return "no compiled Draft kernel for this GPU"
+    if q.dtype not in (torch.bfloat16, torch.float16) or k.dtype != q.dtype or v.dtype != q.dtype:
+        return f"dtypes {q.dtype}/{k.dtype}/{v.dtype} (kernel takes bf16/fp16)"
+    if dim_head != HEAD_DIM:
+        return f"head_dim {dim_head} != {HEAD_DIM}"
+    if q.shape != k.shape or q.shape != v.shape:
+        return "cross-attention or GQA (kept dense)"
+    if draft_layout(layout, tokens) is None:
+        return "invalid or missing MiniMax-H3 layout"
+    return None
+
+
 def make_attention_override(patch: SparseAttnPatch, previous):
     """Attention override; declined calls run ``previous`` (the override that was
     on the hook before this one) or ``func``. Dense-only in VSA mode: a
@@ -196,17 +232,33 @@ def make_attention_override(patch: SparseAttnPatch, previous):
             b, _, dim_head = q.shape                         # B, N, heads*dim_head
             dim_head //= heads
             qs, ks, vs = (t.view(b, -1, heads, dim_head) for t in (q, k, v))
-        reason = _ineligible(qs, ks, vs, dim_head)
-        if reason is not None:
-            patch.log_once(("ineligible", tuple(qs.shape), reason), f"dense {tuple(qs.shape)}: {reason}")
-            return dense()
-        sink, sink_q = patch.sinks(transformer_options, tokens)
-        if q.dtype == torch.float32:   # the kernel quantizes to int8 anyway; bf16 keeps the fp32 range
-            qs, ks, vs = (t.to(torch.bfloat16) for t in (qs, ks, vs))
-        out = ck.sol_attn(qs, ks, vs, tau=patch.tau, scale=kwargs.get("scale"),
-                          sink_blocks=list(sink), sink_q=list(sink_q), topk_ratio=patch.topk_ratio,
-                          token_aug=patch.extra_tokens).to(q.dtype)
-        patch.log_once(("sparse", tuple(qs.shape)), f"sparse {tuple(qs.shape)}, sinks {sink}/{sink_q}")
+        if patch.draft_sparsity is None:
+            reason = _ineligible(qs, ks, vs, dim_head)
+            if reason is not None:
+                patch.log_once(("ineligible", tuple(qs.shape), reason), f"dense {tuple(qs.shape)}: {reason}")
+                return dense()
+            sink, sink_q = patch.sinks(transformer_options, tokens)
+            if q.dtype == torch.float32:   # the kernel quantizes to int8 anyway; bf16 keeps the fp32 range
+                qs, ks, vs = (t.to(torch.bfloat16) for t in (qs, ks, vs))
+            out = ck.sol_attn(qs, ks, vs, tau=patch.tau, scale=kwargs.get("scale"),
+                              sink_blocks=list(sink), sink_q=list(sink_q), topk_ratio=patch.topk_ratio,
+                              token_aug=patch.extra_tokens).to(q.dtype)
+            patch.log_once(("sparse", tuple(qs.shape)), f"sparse {tuple(qs.shape)}, sinks {sink}/{sink_q}")
+        else:
+            reason = _draft_ineligible(qs, ks, vs, dim_head,
+                                        transformer_options.get("minimax_h3_layout"), tokens)
+            if reason is None and kwargs.get("scale") is not None:
+                reason = "custom attention scale"
+            if reason is not None:
+                patch.log_once(("draft_ineligible", tuple(qs.shape), reason), f"dense {tuple(qs.shape)}: {reason}")
+                return dense()
+            video_shape, prefix_tokens = draft_layout(transformer_options["minimax_h3_layout"], tokens)
+            out = ck.draft_attention(qs, ks, vs, video_shape=video_shape, prefix_tokens=prefix_tokens,
+                                      sparsity_ratio=patch.draft_sparsity,
+                                      nvfp4_ratio=patch.draft_nvfp4_ratio,
+                                      int8_ratio=patch.draft_int8_ratio,
+                                      prefix_kv_precision="int8", prefix_query_precision="int8")
+            patch.log_once(("draft", tuple(qs.shape)), f"Draft {tuple(qs.shape)}, video {video_shape}, prefix {prefix_tokens}")
         if skip_output_reshape:
             return out.transpose(1, 2)
         return out.reshape(b, -1, heads * dim_head)
@@ -321,7 +373,8 @@ def make_h3_block_patch(block, block_index, patch: SparseAttnPatch):
 
 
 def apply_block_sparse_attention(model, *, tau, topk_ratio, vsa, start_percent, end_percent, min_tokens,
-                                 dense_blocks, sink_conditioning, extra_tokens, verbose):
+                                 dense_blocks, sink_conditioning, extra_tokens, verbose, draft_sparsity=None,
+                                 draft_nvfp4_ratio=0.0, draft_int8_ratio=1.0):
     model_sampling = model.get_model_object("model_sampling")
     if vsa and extra_tokens:
         # VSA weights were trained against their sparse pattern, don't pull the attention toward dense
@@ -331,16 +384,28 @@ def apply_block_sparse_attention(model, *, tau, topk_ratio, vsa, start_percent, 
                             sigma_start=float(model_sampling.percent_to_sigma(start_percent)),
                             sigma_end=float(model_sampling.percent_to_sigma(end_percent)),
                             min_tokens=min_tokens, dense_blocks=dense_blocks,
-                            sink_conditioning=sink_conditioning, extra_tokens=extra_tokens, verbose=verbose)
+                            sink_conditioning=sink_conditioning, extra_tokens=extra_tokens, verbose=verbose,
+                            draft_sparsity=draft_sparsity, draft_nvfp4_ratio=draft_nvfp4_ratio,
+                            draft_int8_ratio=draft_int8_ratio)
     m = model.clone()
+    diffusion_model = model.get_model_object("diffusion_model")
+    if draft_sparsity is not None and not isinstance(diffusion_model, MiniMaxH3Model):
+        logging.info("BlockSparseAttention: draft needs a MiniMax-H3 model; returning the model unchanged")
+        return m
     install_override(patch, m.model_options["transformer_options"])
     m.add_callback_with_key(comfy.patcher_extension.CallbacksMP.ON_PREPARE_STATE, "block_sparse_attention",
                             lambda model_patcher, timestep, model_options: install_override(patch, model_options["transformer_options"]))
     m.add_callback_with_key(comfy.patcher_extension.CallbacksMP.ON_CLEANUP,
                             "block_sparse_attention", lambda model_patcher: patch.reset())
 
-    diffusion_model = model.get_model_object("diffusion_model")
     if isinstance(diffusion_model, MiniMaxH3Model):
+        if draft_sparsity is not None:
+            # The chunked qkv producer replaces the whole attention call, which would
+            # bypass the Draft override, so drop any producer an earlier node installed.
+            dit_replace = m.model_options["transformer_options"].get("patches_replace", {}).get("dit", {})
+            for i in range(len(diffusion_model.blocks)):
+                dit_replace.pop(("double_block", i), None)
+            return m
         for i, block in enumerate(diffusion_model.blocks):
             m.set_model_patch_replace(make_h3_block_patch(block, i, patch), "dit", "double_block", i)
         if vsa and diffusion_model.blocks[0].attn.to_gate_compress is None:
@@ -383,10 +448,27 @@ class BlockSparseAttention(io.ComfyNode):
                                                "checkpoints are trained at 10. Uses the model's to_gate_compress "
                                                "layers for the coarse branch when present."),
                     ]),
+                    io.DynamicCombo.Option("draft", [
+                        io.Float.Input("sparsity_percent", default=80.0, min=0.0, max=95.0, step=0.5,
+                                       tooltip="Percent of global video query/key block pairs omitted by Draft's "
+                                               "fixed Q64 path. The packed prefix remains exact."),
+                        io.DynamicCombo.Input("retained_precision", display_name="retained precision", options=[
+                            io.DynamicCombo.Option("INT8", []),
+                            io.DynamicCombo.Option("NV60/INT40", []),
+                            io.DynamicCombo.Option("NV75/INT25", []),
+                            io.DynamicCombo.Option("custom", [
+                                io.Float.Input("nvfp4_percent", display_name="NVFP4 percent", default=60.0,
+                                               min=0.0, max=100.0, step=1.0,
+                                               tooltip="Percent of retained video block pairs assigned to NVFP4; "
+                                                       "the remainder uses INT8."),
+                            ]),
+                        ], tooltip="Precision split for retained video block pairs. NVFP4 requires an SM120 GPU."),
+                    ]),
                 ], tooltip="Method used to choose key blocks for full token-level attention. "
                            "sol-attn: Sparsifying Online Attention uses a training-free adaptive threshold for each attention head and query block. "
                            "sla: Sparse-Linear Attention keeps a fixed percentage of the highest-scoring key blocks; use only with model weights trained for this pattern. "
-                           "vsa: Video Sparse Attention (FastVideo) uses 3D video-cube tiling and a learned coarse attention branch; requires FastH3 model weights."),
+                           "vsa: Video Sparse Attention (FastVideo) uses 3D video-cube tiling and a learned coarse attention branch; requires FastH3 model weights. "
+                           "draft: fixed MiniMax-H3 path provided by comfy-kitchen; unsupported calls stay dense."),
                 io.Float.Input("start_percent", default=0.2, min=0.0, max=1.0, step=0.01,
                                tooltip="Percentage point when sparse attention begins. Before this point, attention stays dense."),
                 io.Float.Input("end_percent", default=1.0, min=0.0, max=1.0, step=0.01,
@@ -398,7 +480,7 @@ class BlockSparseAttention(io.ComfyNode):
                 io.Int.Input("extra_tokens", default=256, min=0, max=256, step=64, advanced=True,
                              tooltip="Extra top-scoring tokens each query block attends beyond its selected "
                                      "blocks. Closer to dense for more attention time; 256 recommended, 0 disables. "
-                                     "Ignored for VSA."),
+                                     "Ignored for VSA and Draft."),
                 io.Combo.Input("sink_conditioning", options=["exact_kv", "exact_kv_and_rows", "off"],
                                default="exact_kv_and_rows", advanced=True,
                                tooltip="MiniMax-H3 only. exact_kv: every query attends the packed text/audio/"
@@ -414,11 +496,25 @@ class BlockSparseAttention(io.ComfyNode):
     def execute(cls, model, selection, start_percent, end_percent, dense_blocks="", min_tokens=12288,
                 extra_tokens=0, sink_conditioning="exact_kv_and_rows", verbose=False) -> io.NodeOutput:
         mode = selection["selection"]
+        retained_precision = selection.get("retained_precision", {"retained_precision": "INT8"})
+        precision_mode = retained_precision["retained_precision"]
+        if precision_mode == "custom":
+            draft_nvfp4_ratio = retained_precision["nvfp4_percent"] / 100.0
+            draft_int8_ratio = 1.0 - draft_nvfp4_ratio
+        else:
+            draft_nvfp4_ratio, draft_int8_ratio = {
+                "INT8": (0.0, 1.0),
+                "NV60/INT40": (0.6, 0.4),
+                "NV75/INT25": (0.75, 0.25),
+            }[precision_mode]
         patched_model = apply_block_sparse_attention(
             model,
             tau=selection.get("tau", 1.3),
-            topk_ratio=0.0 if mode == "sol-attn" else selection["keep_percent"] / 100.0,
+            topk_ratio=0.0 if mode in ("sol-attn", "draft") else selection["keep_percent"] / 100.0,
             vsa=mode == "vsa",
+            draft_sparsity=selection["sparsity_percent"] / 100.0 if mode == "draft" else None,
+            draft_nvfp4_ratio=draft_nvfp4_ratio,
+            draft_int8_ratio=draft_int8_ratio,
             start_percent=start_percent,
             end_percent=end_percent,
             min_tokens=min_tokens,
