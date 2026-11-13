@@ -307,6 +307,10 @@ When no qualifying content exists, uploads store the bytes they received and fro
 
 When several qualifying content rows have the requested hash, choose the oldest by `created_at`, then by lexicographic `id`.
 
+### Listing by hash
+
+`GET /api/assets` takes an optional `hash` filter that keeps only records whose content has that hash: `hash=blake3:<hex>`, or a bare `<hex>` digest, since that is what a caller reading a content-addressed filename (`<hex>.png`) has at hand. The value is canonicalized, so the two forms match the same rows; anything else is rejected with `400 INVALID_QUERY` rather than quietly ignored. Unlike from-hash lookup, the filter does not care whether the content is missing or under temp, because it selects records rather than bytes. A hash that matches nothing returns an empty page and `total: 0`, which is how a caller tells "absent" from "present".
+
 ## Jobs and provenance
 
 ### Querying a job's outputs

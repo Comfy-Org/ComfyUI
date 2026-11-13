@@ -64,6 +64,9 @@ class ListAssetsQuery(BaseModel):
     tags_any: list[str] = Field(default_factory=list)
     tags_none: list[str] = Field(default_factory=list)
     name_contains: str | None = None
+    # Exact-match filter on content hash, e.g. "blake3:<hex>". A bare hex digest
+    # (what a filename like <hex>.png yields) is accepted and canonicalized.
+    hash: str | None = None
 
     limit: conint(ge=1, le=500) = 20
     offset: conint(ge=0) = 0
@@ -77,6 +80,16 @@ class ListAssetsQuery(BaseModel):
         "created_at"
     )
     order: Literal["asc", "desc"] = "desc"
+
+    @field_validator("hash")
+    @classmethod
+    def _canonical_hash(cls, v: str | None) -> str | None:
+        if v is None:
+            return None
+        v = v.strip().lower()
+        if not v:
+            return None
+        return validate_blake3_hash(v if ":" in v else f"blake3:{v}")
 
     @field_validator(
         "include_tags", "exclude_tags", "tags_all", "tags_any", "tags_none",
