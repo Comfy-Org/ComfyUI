@@ -36,6 +36,34 @@ async def test_get_workflow_templates(aiohttp_client, app, tmp_path):
     template_file = example_workflows_dir / "workflow1.json"
     template_file.write_text("")
 
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setenv("COMFY_CUSTOM_NODE_EXAMPLE_WORKFLOWS_ENABLED", "true")
+
+    try:
+        with patch(
+            "folder_paths.folder_names_and_paths",
+            {"custom_nodes": ([str(custom_nodes_dir)], None)},
+        ):
+            response = await client.get("/workflow_templates")
+            assert response.status == 200
+            workflows_dict = await response.json()
+            assert isinstance(workflows_dict, dict)
+            assert "ComfyUI-TestExtension1" in workflows_dict
+            assert isinstance(workflows_dict["ComfyUI-TestExtension1"], list)
+            assert workflows_dict["ComfyUI-TestExtension1"][0] == "workflow1"
+    finally:
+        monkeypatch.undo()
+
+
+async def test_get_workflow_templates_hidden_by_default(aiohttp_client, app, tmp_path):
+    client = await aiohttp_client(app)
+    custom_nodes_dir = tmp_path / "custom_nodes"
+    example_workflows_dir = (
+        custom_nodes_dir / "ComfyUI-TestExtension1" / "example_workflows"
+    )
+    example_workflows_dir.mkdir(parents=True)
+    (example_workflows_dir / "workflow1.json").write_text("")
+
     with patch(
         "folder_paths.folder_names_and_paths",
         {"custom_nodes": ([str(custom_nodes_dir)], None)},
@@ -43,10 +71,59 @@ async def test_get_workflow_templates(aiohttp_client, app, tmp_path):
         response = await client.get("/workflow_templates")
         assert response.status == 200
         workflows_dict = await response.json()
-        assert isinstance(workflows_dict, dict)
-        assert "ComfyUI-TestExtension1" in workflows_dict
-        assert isinstance(workflows_dict["ComfyUI-TestExtension1"], list)
-        assert workflows_dict["ComfyUI-TestExtension1"][0] == "workflow1"
+        assert workflows_dict == {}
+
+
+async def test_get_workflow_templates_disabled_by_env(
+    aiohttp_client, app, tmp_path, monkeypatch
+):
+    client = await aiohttp_client(app)
+    custom_nodes_dir = tmp_path / "custom_nodes"
+    example_workflows_dir = (
+        custom_nodes_dir / "ComfyUI-TestExtension1" / "example_workflows"
+    )
+    example_workflows_dir.mkdir(parents=True)
+    (example_workflows_dir / "workflow1.json").write_text("")
+
+    monkeypatch.setenv("COMFY_CUSTOM_NODE_EXAMPLE_WORKFLOWS_ENABLED", "false")
+
+    with patch(
+        "folder_paths.folder_names_and_paths",
+        {"custom_nodes": ([str(custom_nodes_dir)], None)},
+    ):
+        response = await client.get("/workflow_templates")
+        assert response.status == 200
+        workflows_dict = await response.json()
+        assert workflows_dict == {}
+
+
+async def test_get_workflow_templates_allowlist(
+    aiohttp_client, app, tmp_path, monkeypatch
+):
+    client = await aiohttp_client(app)
+    custom_nodes_dir = tmp_path / "custom_nodes"
+
+    ext1_dir = custom_nodes_dir / "ComfyUI-TestExtension1" / "example_workflows"
+    ext2_dir = custom_nodes_dir / "ComfyUI-TestExtension2" / "example_workflows"
+    ext1_dir.mkdir(parents=True)
+    ext2_dir.mkdir(parents=True)
+    (ext1_dir / "workflow1.json").write_text("")
+    (ext2_dir / "workflow2.json").write_text("")
+
+    monkeypatch.setenv(
+        "COMFY_CUSTOM_NODE_EXAMPLE_WORKFLOWS_ALLOWLIST",
+        "ComfyUI-TestExtension2",
+    )
+
+    with patch(
+        "folder_paths.folder_names_and_paths",
+        {"custom_nodes": ([str(custom_nodes_dir)], None)},
+    ):
+        response = await client.get("/workflow_templates")
+        assert response.status == 200
+        workflows_dict = await response.json()
+        assert "ComfyUI-TestExtension1" not in workflows_dict
+        assert workflows_dict["ComfyUI-TestExtension2"] == ["workflow2"]
 
 
 async def test_build_translations_empty_when_no_locales(custom_node_manager, tmp_path):
