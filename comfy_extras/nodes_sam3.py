@@ -214,7 +214,7 @@ class SAM3_Detect(io.ComfyNode):
                 scores = results["scores"][0]
                 masks = results["masks"][0]
 
-                probs = scores.sigmoid()
+                probs = scores.sigmoid() * results["presence"][0].sigmoid()
                 keep = probs > threshold
                 kept_boxes = pred_boxes[keep].cpu()
                 kept_scores = probs[keep].cpu()
