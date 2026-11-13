@@ -243,9 +243,7 @@ class FishAudioTextToSpeech(IO.ComfyNode):
                 expr="""
                 (
                   $t := widgets.text;
-                  $rate := widgets.model = "drama-3"
-                    ? ($now() < "2026-11-13T00:00:00.000Z" ? 14.3 : 35.75)
-                    : 21.45;
+                  $rate := widgets.model = "drama-3" ? 35.75 : 21.45;
                   $type($t) = "string"
                     ? (
                         $bytes := $length($t) + 2 * $count($match($t, /[^\\x00-\\x7F]/));
