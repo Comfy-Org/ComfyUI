@@ -441,6 +441,18 @@ def star_imports(source, path):
 _PRELOADED = {"PIL"}  # packages whose submodules ComfyUI has imported before a pack loads (PIL.Image...)
 
 
+def _preloaded_submodule(package, name):
+    """Find a real module on the trusted converter path without importing it.
+
+    Capitalized Pillow attributes also include exception classes and constants;
+    those must never become imports such as PIL.UnidentifiedImageError.
+    """
+    from importlib.machinery import PathFinder
+    parent = PathFinder.find_spec(package)
+    paths = parent.submodule_search_locations if parent else None
+    return bool(paths and PathFinder.find_spec(package + "." + name, paths))
+
+
 def _explicit_submodules(source, path):
     """``import PIL`` then ``PIL.Image.open(...)`` works in ComfyUI only because ComfyUI imported PIL.Image
     first; a pack process may not have, so the submodules used get imported beside ``import PIL``."""
@@ -455,7 +467,8 @@ def _explicit_submodules(source, path):
     have |= {f"{n.module}.{a.name}" for n in ast.walk(tree) if isinstance(n, ast.ImportFrom) and n.module for a in n.names}
     have |= {n.module for n in ast.walk(tree) if isinstance(n, ast.ImportFrom) and n.module}
     used = sorted({f"{n.value.id}.{n.attr}" for n in ast.walk(tree) if isinstance(n, ast.Attribute)
-                   and isinstance(n.value, ast.Name) and n.value.id in _PRELOADED and n.attr[:1].isupper()} - have)
+                   and isinstance(n.value, ast.Name) and n.value.id in _PRELOADED and n.attr[:1].isupper()
+                   and _preloaded_submodule(n.value.id, n.attr)} - have)
     if not used:
         return source
     lines = source.splitlines(keepends=True)
@@ -508,6 +521,63 @@ def _drop_pack_imports(source, path, unused):
         return candidate
     except SyntaxError:
         return source
+
+
+def _comfy_folder_module(name):
+    """``comfy/<name>``, which ComfyUI lets custom nodes import as ``<name>``: nodes.py puts its comfy folder at
+    the front of the import path before it loads them ("remove at some point when custom nodes don't break")."""
+    return name != "utils" and not name.startswith("_") and (  # ``utils`` is ComfyUI's own package, imported before
+        os.path.isfile(os.path.join(_COMFY_ROOT, "comfy", name + ".py"))
+        or os.path.isdir(os.path.join(_COMFY_ROOT, "comfy", name)))  # comfy/ldm has no __init__.py
+
+
+def bare_comfy_imports(source, rel, sources):
+    """``import model_management`` -> ``import comfy.model_management as model_management`` (and the ``from``
+    forms): the same modules by the names ComfyUI gives them, so what the pack does with them is converted like
+    any other use of ComfyUI. A module of the pack's own by that name (at its top, or beside the file) is left."""
+    try:
+        tree = ast.parse(source, rel)
+    except SyntaxError:
+        return source
+    here = os.path.dirname(rel)
+
+    def comfys(module):
+        top = module.split(".")[0]
+        if not _comfy_folder_module(top):
+            return False
+        return not any("/".join(x for x in (folder, top + tail) if x) in sources
+                       for folder in ("", here) for tail in (".py", "/__init__.py"))
+
+    lines = source.splitlines(keepends=True)
+    offsets = [0]
+    for line in lines:
+        offsets.append(offsets[-1] + len(line))
+
+    def pos(line, col):
+        return offsets[line - 1] + len(lines[line - 1].encode("utf-8")[:col].decode("utf-8", "ignore"))
+
+    edits = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.level == 0 and node.module and comfys(node.module):
+            new = ast.unparse(ast.ImportFrom("comfy." + node.module, node.names, 0))
+        elif isinstance(node, ast.Import) and any(comfys(a.name) for a in node.names):
+            parts = []
+            for alias in node.names:
+                if not comfys(alias.name):
+                    parts.append(ast.unparse(ast.Import([alias])))
+                elif alias.asname or "." not in alias.name:
+                    parts.append(f"import comfy.{alias.name} as {alias.asname or alias.name}")
+                else:  # ``import ldm.modules.attention`` gives the name ``ldm``
+                    top = alias.name.split(".")[0]
+                    parts.append(f"import comfy.{alias.name} as _v2_comfy_module; from comfy import {top}")
+            new = "; ".join(parts)
+        else:
+            continue
+        if node.end_lineno is not None:
+            edits.append((pos(node.lineno, node.col_offset), pos(node.end_lineno, node.end_col_offset), new))
+    for start, end, new in sorted(edits, reverse=True):
+        source = source[:start] + new + source[end:]
+    return source
 
 
 class _Module:
@@ -1568,9 +1638,9 @@ def rewrite(source, path, typed_functions, star_aliases=None, keep=frozenset(), 
                     and all(isinstance(k, ast.Constant) and isinstance(k.value, str) for k in keys) \
                     and not {k.value for k in keys} & FUNCTION_OPTIONS and not isinstance(node.value, ast.Lambda):
                 receiver = target.value.id
-                path = ", ".join(repr(k.value) for k in reversed(keys))
+                option = ", ".join(repr(k.value) for k in reversed(keys))
                 replace(*module.span(node), f"{receiver} = " + engine_call(
-                    node, f"eng.model.set_option({receiver}, [{path}], {text(node.value)})"))
+                    node, f"eng.model.set_option({receiver}, [{option}], {text(node.value)})"))
                 done.append("MODEL.model_options (set)")
         # ``m.model_options`` read (``.get("transformer_options", {})``, ``["x"]``, ``"x" in``): eng.model.options, a
         # copy. Only where nothing could be written through it: not kept in a variable, not handed on.
@@ -2252,8 +2322,10 @@ class _V2Extension(_V2ComfyExtension):
     async def _from_pack(self):
         if self._original is None and _V2_ORIGINAL_ENTRY is not None:
             original = _V2_ORIGINAL_ENTRY()
-            self._original = await original if _v2_inspect.isawaitable(original) else original
-        return self._original
+            original = await original if _v2_inspect.isawaitable(original) else original
+            # not an extension (a pack that returns its V1 tables here): ComfyUI skips it too
+            self._original = original if hasattr(original, "get_node_list") else False
+        return self._original or None
 
     async def on_load(self):
         original = await self._from_pack()
@@ -2431,7 +2503,9 @@ def load_model_gpu(model, *args, **kwargs):
 
 def add_routes(definitions):
     """``PromptServer.instance.app.add_routes(...)``: they join the pack's routes."""
-    for item in definitions:
+    if definitions is routes:
+        return  # the pack's own table (``app.add_routes(PromptServer.instance.routes)``): they're in it already
+    for item in list(definitions):
         if hasattr(item, "method"):
             routes.route(item.method, item.path, **dict(getattr(item, "kwargs", {}) or {}))(item.handler)
         else:
@@ -2528,10 +2602,27 @@ class _App(dict):
         super().__init__()
         self.router = _Router()
         self.on_startup, self.on_shutdown, self.on_cleanup, self.middlewares = [], [], [], []
+        self.cleanup_ctx, self.on_response_prepare = [], []
         self.frozen = False  # routes can always be added: they're the pack's own table
 
     def add_routes(self, definitions):
         add_routes(definitions)
+
+
+class _NotHere:
+    """A part of ComfyUI's server a pack keeps a reference to (its prompt queue, its user manager). A pack
+    process has none: holding it is fine, using it raises and says so."""
+
+    def __init__(self, name):
+        self._name = name
+
+    def __getattr__(self, attribute):
+        if attribute.startswith("__"):
+            raise AttributeError(attribute)
+        raise RuntimeError(f"{self._name}.{attribute}: this part of ComfyUI's server isn't available to a pack under pack isolation")
+
+    def __repr__(self):
+        return f"<{self._name}: not available under pack isolation>"
 
 
 class _PromptServer:
@@ -2539,6 +2630,10 @@ class _PromptServer:
     routes = routes
     app = _App()
     last_node_id = last_prompt_id = None
+    prompt_queue = _NotHere("PromptServer.instance.prompt_queue")
+    user_manager = _NotHere("PromptServer.instance.user_manager")
+    model_file_manager = _NotHere("PromptServer.instance.model_file_manager")
+    custom_node_manager = _NotHere("PromptServer.instance.custom_node_manager")
 
     @property
     def client_id(self):
@@ -2566,8 +2661,9 @@ def pack_model_folders():
     ``{folder: [extensions] or None}``."""
     from comfy_api.v4 import util
     found = {}
-    for name, (paths, extensions) in util.folders.folder_names_and_paths.items():
-        if name not in _COMFY_FOLDERS:
+    for name, entry in util.folders.folder_names_and_paths.items():
+        if name not in _COMFY_FOLDERS and len(entry) >= 2:  # (paths, extensions[, ...]) as packs write them
+            extensions = entry[1]
             extensions = sorted(e for e in extensions if e) if not isinstance(extensions, str) else [extensions]
             found[name] = extensions or None
     return found
@@ -2868,14 +2964,7 @@ class ProgressBar:
         self.update_absolute(self.current + value)
 
 
-class _IO(str):
-    """``comfy.comfy_types.IO``: the type names as strings (``IO.INT`` is ``"INT"``, ``IO.ANY`` is ``"*"``)."""
-
-    def __getattr__(self, name):
-        return "*" if name == "ANY" else name
-
-
-IO = _IO()
+# The exact pure IO enum is appended by the converter.
 
 
 def _plain_ui(saved, images=None):
@@ -3127,8 +3216,9 @@ def convert_routes(pack_dir, pack_out, v2, describe, report):
     text = open(pyproject, encoding="utf-8").read() if os.path.exists(pyproject) else ""
     try:
         project_name = (tomllib.loads(text).get("project") or {}).get("name") if text else None
-    except Exception:
+    except Exception:  # not TOML: ComfyUI can't read a pack's declarations from it, so a valid one is written
         project_name, text = None, ""
+        report["pyproject_invalid"] = True
     name = _normal_name(project_name or os.path.basename(pack_out))
     namespace = pack_namespace(name)
     report["manifest_name"], report["namespace"] = name, namespace
@@ -3147,10 +3237,15 @@ def convert_routes(pack_dir, pack_out, v2, describe, report):
         text = text.rstrip() + "\n" if text else f'[project]\nname = "{name}"\n'
         for method, path in declared:
             text += f'\n[[tool.comfy.routes]]\nmethod = "{method}"\npath = {json.dumps(path)}\nmodule = "_v2_routes"\nhandler = "handle"\n'
+    if report.get("pyproject_invalid"):
+        text = text or f'[project]\nname = "{name}"\n'
+        for folder in (pack_out, v2):
+            if os.path.exists(os.path.join(folder, "pyproject.toml")):
+                os.replace(os.path.join(folder, "pyproject.toml"), os.path.join(folder, "pyproject.toml.original"))
     if text:
         with open(os.path.join(pack_out, "pyproject.toml"), "w", encoding="utf-8") as file:
             file.write(text)
-        if declared:
+        if declared or report.get("pyproject_invalid"):
             # Registration reads v2/ first; the parent copy is retained for existing consumers.
             with open(os.path.join(v2, "pyproject.toml"), "w", encoding="utf-8") as file:
                 file.write(text)
@@ -3242,10 +3337,26 @@ def _v1_fallback(pack_dir, nodes):
             "        _V1[_v2_id] = _v2_obj\n")
 
 
+def _io_shim():
+    """Copy Core's pure IO enum, preserving names, values and wildcard comparisons.
+
+    This reads the pinned source, as _pure_shim does; it does not import Core or
+    pack code. A string facade loses enum attributes and custom __ne__ behavior.
+    """
+    path = os.path.join(_COMFY_ROOT, "comfy", "comfy_types", "node_typing.py")
+    with open(path, encoding="utf-8") as file:
+        tree = ast.parse(file.read(), path)
+    definitions = [node for node in tree.body if isinstance(node, ast.ClassDef)
+                   and node.name in {"StrEnum", "IO"}]
+    if [node.name for node in definitions] != ["StrEnum", "IO"]:
+        raise ValueError("Core IO enum definitions changed; converter update required")
+    return "\n\nfrom enum import Enum\n" + "\n\n".join(ast.unparse(node) for node in definitions) + "\n"
+
+
 def shim_text():
     """The generated ``_v2_engine.py``: the same for every pack."""
     return (ENGINE_SHIM + f"\n\n# ComfyUI's own model folders (the pack's others are reported by pack_model_folders)\n"
-            f"_COMFY_FOLDERS = frozenset({COMFY_FOLDERS!r})\n" + _pure_shim())
+            f"_COMFY_FOLDERS = frozenset({COMFY_FOLDERS!r})\n" + _io_shim() + _pure_shim())
 
 
 ENTRY_V1_TABLE = "\n\nNODE_CLASS_MAPPINGS = None\nNODE_DISPLAY_NAME_MAPPINGS = None\n"
@@ -3377,6 +3488,13 @@ def generate(pack_dir, describe, out_root, *, code_only=False):
     if not_loaded:
         report["not_loaded"] = sorted(not_loaded)
         sources = {rel: src for rel, src in sources.items() if rel not in not_loaded}
+    for rel, src in list(sources.items()):  # ComfyUI's comfy/ modules by their bare names: by their full names
+        new = bare_comfy_imports(src, rel, sources)
+        if new != src:
+            sources[rel] = new
+            with open(os.path.join(v2, rel), "w", encoding="utf-8") as file:
+                file.write(new)
+            report.setdefault("bare_comfy_imports", []).append(rel)
     # ``from X import *`` between the pack's own modules hands engine names on: follow it
     exported = {rel: module_engine_aliases(src, rel) for rel, src in sources.items()}
     named_exported = {rel: module_engine_aliases(src, rel, include_private=True) for rel, src in sources.items()}
@@ -3653,8 +3771,9 @@ def generate(pack_dir, describe, out_root, *, code_only=False):
                    "# then never calls comfy_entrypoint (an empty {} registered no node in process, 2026-11-07).\n"
                    "# --------------------------------------------------------------------------------------\n"
                    "from comfy_api.v4 import ComfyExtension as _V2ComfyExtension  # noqa: E402\n"
-                   "_V2_ORIGINAL_ENTRY = globals().get('comfy_entrypoint')\n"
-                   "_V2_ORIGINAL_MAPPINGS = dict(globals().get('NODE_CLASS_MAPPINGS') or {})\n"
+                   "import builtins as _v2_builtins  # noqa: E402 (a pack with a globals.py has it as ``globals`` here)\n"
+                   "_V2_ORIGINAL_ENTRY = _v2_builtins.globals().get('comfy_entrypoint')\n"
+                   "_V2_ORIGINAL_MAPPINGS = _v2_builtins.dict(_v2_builtins.globals().get('NODE_CLASS_MAPPINGS') or {})\n"
                    "from . import _v2_nodes as _V2_node_module  # noqa: E402\n"
                    "_V2_node_module._V1.update(_V2_ORIGINAL_MAPPINGS)\n"
                    "_V2_NODES = _V2_node_module.NODES\n"
