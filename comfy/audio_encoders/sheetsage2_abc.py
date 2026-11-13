@@ -445,13 +445,8 @@ def _notes_to_arr(notes, subbeat_times, voice_id):
         end_t = int(np.searchsorted(boundaries, note[1]))
         start_t = max(0, min(start_t, len(result) - 1))
         end_t = max(0, min(end_t, len(result) - 1))
-        if start_t == end_t == len(result) - 1:
-            continue
         if end_t <= start_t:
-            raise MelodyVoiceError(
-                f"{voice_id}: note pitch={note[2]} at {note[0]:.6f}-{note[1]:.6f} "
-                "cannot be represented on the decoded subbeat grid"
-            )
+            continue
         if np.any(result[start_t:end_t] != 0):
             raise MelodyVoiceError(
                 f"{voice_id}: overlapping quantized melody notes at subbeats {start_t}:{end_t}"
