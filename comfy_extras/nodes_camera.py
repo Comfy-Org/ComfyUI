@@ -126,9 +126,11 @@ def _rotate_camera_info(camera_info, axis, angle_deg):
 
 
 def _mesh_frame_to_world(points, mesh):
-    """Points in the mesh's frame (origin at its bounding-box centre, one unit = the diameter of its bounding sphere
-    about that centre) -> world. A TRELLIS.2 / Pixal3D output keeps about the size it has in world units."""
+    """Points in the mesh's frame -> world. The frame's origin is the mesh's bounding-box centre and its unit the
+    diameter of the bounding sphere about that centre: one distance frames the mesh from every side of an orbit,
+    poles included, and it is how the UltraTex ComfyUI wrapper normalizes meshes. Non-finite vertices are ignored."""
     vertices = get_mesh_batch_item(mesh, 0)[0].float()
+    vertices = vertices[torch.isfinite(vertices).all(-1)]
     center = (vertices.amin(0) + vertices.amax(0)) * 0.5
     size = max(2.0 * float((vertices - center).norm(dim=-1).amax()), 1e-6)
     return [[c + size * x for c, x in zip(center.tolist(), point)] for point in points]
@@ -204,10 +206,12 @@ class CreateCameraInfo(IO.ComfyNode):
         kind = mode["mode"]
         if kind == "quaternion":  # explicit world position + camera rotation
             position = [mode["position_x"], mode["position_y"], mode["position_z"]]
-            if mesh is not None:
-                position, = _mesh_frame_to_world([position], mesh)
             quat = [mode["quat_x"], mode["quat_y"], mode["quat_z"], mode["quat_w"]]
-            return IO.NodeOutput(_quat_camera_info(position, quat, fov, dev, zoom=zoom, camera_type=camera_type))
+            camera = _quat_camera_info(position, quat, fov, dev, zoom=zoom, camera_type=camera_type)
+            if mesh is not None:  # the target one unit ahead, which orbits pivot on, is in the mesh's units too
+                position, target = _mesh_frame_to_world([_xyz(camera["position"]), _xyz(camera["target"])], mesh)
+                camera = {**camera, "position": dict(zip("xyz", position)), "target": dict(zip("xyz", target))}
+            return IO.NodeOutput(camera)
         target = [target_x, target_y, target_z]  # orbit pivot / aim; move it to pan the whole camera
         if kind == "orbit":  # yaw/pitch/distance about the target (world Y-up)
             y, p = math.radians(mode["yaw"]), math.radians(mode["pitch"])
