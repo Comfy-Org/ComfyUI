@@ -1,6 +1,7 @@
 """Block-sparse attention on comfy_kitchen's sparse attention kernels (Sol-Attn adaptive
 threshold, SLA-style top-k, or FastVideo's VSA). Generic models go through the
-attention override; MiniMax-H3 gets the chunked qkv producer through block patches."""
+attention override, blocks that build their qkv projection in chunks through the
+chunked one; MiniMax-H3 gets the chunked qkv producer through block patches."""
 from __future__ import annotations
 
 import logging
@@ -64,6 +65,26 @@ class SparseAttnPatch:
         if self.verbose and key not in self._logged:
             self._logged.add(key)
             logging.info(f"BlockSparseAttention: {message}")
+
+    def sol_attn_chunked(self, key, chunks, n, heads, freqs, qk_norm_weights, **kwargs):
+        """ck.sol_attn_chunked with this key's K means and V scales of the previous step; the first call measures them."""
+        pooled = self.pooled.get(key)
+        first = pooled is None
+        if first:
+            with comfy.model_prefetch.pause_malloc_graph():   # kept across steps
+                pooled = (
+                    torch.empty((heads, HEAD_DIM), dtype=torch.float32, device=freqs.device),
+                    torch.empty((heads, HEAD_DIM), dtype=torch.float32, device=freqs.device),
+                )
+        out, kmean, vscale = ck.sol_attn_chunked(
+            chunks, n, heads, freqs, qk_norm_weights,
+            kmean=None if first else pooled[0],
+            vscale=None if first else pooled[1],
+            tau=self.tau, topk_ratio=self.topk_ratio, token_aug=self.extra_tokens, **kwargs)
+        pooled[0].copy_(kmean)
+        pooled[1].copy_(vscale)
+        self.pooled[key] = pooled
+        return out
 
     def dense_reason(self, transformer_options, tokens, block_index):
         """Why this call stays dense regardless of its tensors, or None."""
@@ -254,20 +275,12 @@ def h3_sparse_attention(attn, x, rope_freqs, transformer_options, patch: SparseA
     kw = comfy.model_management.cast_to(attn.k_norm.weight, device=x.device)
     extra, plan, gate = {}, None, None
     n, freqs = n_tokens, rope_freqs
-    with comfy.model_prefetch.pause_malloc_graph():
-        if patch.vsa:
+    if patch.vsa:
+        with comfy.model_prefetch.pause_malloc_graph():
             plan = patch.vsa_plan(transformer_options["minimax_h3_layout"], x.device)
             n = plan["n"]
             freqs = patch.vsa_rope_freqs(rope_freqs, plan)
-
-        key = (block_index, n, tuple(transformer_options.get("uuids", ())))   # statistics per conditioning branch
-        pooled = patch.pooled.get(key)
-        first = pooled is None
-        if first:
-            pooled = (
-                torch.empty((heads, head_dim), dtype=torch.float32, device=x.device),
-                torch.empty((heads, head_dim), dtype=torch.float32, device=x.device),
-            )
+    key = (block_index, n, tuple(transformer_options.get("uuids", ())))   # statistics per conditioning branch
 
     if patch.vsa:
         sink = sink_q = (0, plan["n_prefix"])
@@ -289,16 +302,8 @@ def h3_sparse_attention(attn, x, rope_freqs, transformer_options, patch: SparseA
                 extra["coarse_gate"].view(n, heads * head_dim)[i:i + xc.shape[0]] = gate(xc)
             yield attn.qkv_proj(xc)
 
-    out, kmean, vscale = ck.sol_attn_chunked(
-        chunks, n, heads, freqs, (qw, kw),
-        kmean=None if first else pooled[0],
-        vscale=None if first else pooled[1],
-        tau=patch.tau, topk_ratio=patch.topk_ratio, token_aug=patch.extra_tokens,
-        sink_blocks=list(sink), sink_q=list(sink_q),
-        rope_eps=attn.q_norm.eps, **extra)
-    pooled[0].copy_(kmean)
-    pooled[1].copy_(vscale)
-    patch.pooled[key] = pooled
+    out = patch.sol_attn_chunked(key, chunks, n, heads, freqs, (qw, kw), sink_blocks=list(sink), sink_q=list(sink_q),
+                                 rope_eps=attn.q_norm.eps, **extra)
     mode = f"VSA tiles ({n} padded rows, {sink[1]} prefix tiles)" if plan is not None else f"sinks {sink}/{sink_q}"
     patch.log_once(("producer", n), f"sparse producer path: {n_tokens} tokens, {mode}")
     out = out.view(n, heads * head_dim)
@@ -318,6 +323,25 @@ def make_h3_block_patch(block, block_index, patch: SparseAttnPatch):
         return extra["original_block"](args)
 
     return block_patch
+
+
+def make_chunked_override(patch: SparseAttnPatch):
+    """Chunked attention override, for a block that offers its q|k|v projection chunk
+    rows at a time: the chunks go straight into the kernel's int8 carriers, full Q/K/V
+    never built. q and k are normalized with the block's scales and rotated by pe as
+    apply_rope would. None declines the call, before any chunk is made."""
+    def override(qkv_chunks, heads, pe, q_scale, k_scale, eps, transformer_options):
+        n = pe.shape[2]
+        if (patch.dense_reason(transformer_options, n, transformer_options.get("block_index")) is not None
+                or q_scale.shape[-1] != HEAD_DIM or q_scale.dtype not in (torch.bfloat16, torch.float16)
+                or not ck.sol_attn_is_available(pe.device)):
+            return None
+        key = (transformer_options.get("block_type"), transformer_options.get("block_index"), n, tuple(transformer_options.get("uuids", ())))
+        out = patch.sol_attn_chunked(key, lambda: qkv_chunks(PRODUCER_CHUNK), n, heads, pe, (q_scale, k_scale), rope_eps=eps, rope_split_half=False)
+        patch.log_once(("producer", n), f"sparse producer path: {n} tokens")
+        return out.view(1, n, heads * HEAD_DIM)
+
+    return override
 
 
 def apply_block_sparse_attention(model, *, tau, topk_ratio, vsa, start_percent, end_percent, min_tokens,
@@ -347,6 +371,8 @@ def apply_block_sparse_attention(model, *, tau, topk_ratio, vsa, start_percent, 
             logging.warning("VSA: the model has no to_gate_compress layers; running the fine stage without the coarse branch")
     elif vsa:
         raise ValueError("VSA selection needs a MiniMax-H3 model")
+    else:
+        m.model_options["transformer_options"]["chunked_attention_override"] = make_chunked_override(patch)
     return m
 
 
