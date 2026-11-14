@@ -105,6 +105,8 @@ class VideoDeflicker(io.ComfyNode):
 
     @classmethod
     def execute(cls, optical_flow, images, strength, direction, threshold, guide=None) -> io.NodeOutput:
+        if strength == 0:
+            return io.NodeOutput(images)
         if guide is None:
             guide = images
         h, w = images.shape[1:3]
@@ -135,7 +137,7 @@ class VideoDeflicker(io.ComfyNode):
         def guide_frame(t, frame):
             if guide is not images:
                 frame = guide[t].to(device, torch.float32).movedim(-1, 0)[None]
-            return F.interpolate(frame, size=(fh, fw), mode="area")
+            return F.interpolate(frame[:, :3], size=(fh, fw), mode="area")
 
         def deflicker_pass(order):
             # yields each frame of order deflickered on the device

@@ -11,6 +11,7 @@ import torch
 import torch.nn.functional as F
 
 import comfy.model_management
+import comfy.model_prefetch
 
 
 def _torch_resize_chw(image, size, interp, copy=True):
@@ -283,6 +284,7 @@ class RaftOpticalFlow:
 
     def __init__(self, model):
         self.model = model
+        comfy.model_prefetch.cleanup_prefetch_queues()
         self.state = {}
 
     def _preprocess(self, image_chw, size):
