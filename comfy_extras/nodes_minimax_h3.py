@@ -172,6 +172,8 @@ class MiniMaxH3ImageToVideo(io.ComfyNode):
         tokens = clip.tokenize(prompt, images=images)
         cond = clip.encode_from_tokens_scheduled(tokens)
 
+        comfy.model_management.free_memory(1e30, comfy.model_management.get_torch_device())
+
         if keyframes:
             for kf in keyframes:
                 kf["latent"] = vae.encode(kf.pop("image"))
@@ -236,6 +238,7 @@ class MiniMaxH3AddGuide(io.ComfyNode):
         keyframe = {"resolved_frame_index": resolved_frame_index}
         if image is not None:
             frames = _resize(image[:guide_frames], width, height, "center")
+            comfy.model_management.free_memory(1e30, comfy.model_management.get_torch_device())
             keyframe["latent"] = vae.encode(frames)
 
         if audio is not None:
@@ -310,6 +313,13 @@ class MiniMaxH3ReferenceToVideo(io.ComfyNode):
         ref_items = []   # for the tokenizer presentation, in request order
         ref_blocks = []  # for the DiT payload, same order
 
+        # Defer VAE encoding until after the text encoder has run, so the video
+        # VAE is not resident in VRAM while Qwen3-VL encodes the prompt (which
+        # is the memory-heavy step). Store the resized inputs needed for it.
+        pending_images = []   # (tw, th, resized)
+        pending_videos = []   # (frames, ch, cw, soundtrack)
+        pending_audios = []   # audio tensors
+
         for img in (ref_images or {}).values():
             if img is None:
                 continue
@@ -324,8 +334,7 @@ class MiniMaxH3ReferenceToVideo(io.ComfyNode):
             resized = _resize(img[:1], tw, th, "disabled")
             ref_items.append({"type": "image", "data": resized})
             if vae is not None:
-                z = vae.encode(resized)
-                ref_blocks.append({"kind": "image", "latent_h": th // 16, "latent_w": tw // 16, "latent": z})
+                pending_images.append((tw, th, resized))
 
         ref_video_audios = ref_video_audios or {}
         for name, video_frames in (ref_videos or {}).items():
@@ -355,26 +364,41 @@ class MiniMaxH3ReferenceToVideo(io.ComfyNode):
             qwen_frames = frames[sample_idx]
             ref_items.append({"type": "video", "data": qwen_frames,
                               "timestamps": [i / 2.0 for i in range(len(sample_idx))]})
-            if vae is None:
-                continue
-            z = vae.encode(frames)
-            audio_latent, ref_audio_t = (None, 0)
-            if soundtrack is not None and audio_vae is not None:
-                audio_latent, ref_audio_t = _encode_ref_audio(audio_vae, soundtrack)
-            ref_blocks.append({"kind": "video_audio" if ref_audio_t else "video",
-                               "latent_t": z.shape[2], "latent_h": ch // 16, "latent_w": cw // 16,
-                               "ref_audio_t": ref_audio_t, "latent": z, "audio_latent": audio_latent})
+            if vae is not None:
+                pending_videos.append((frames, ch, cw, soundtrack))
 
         for audio in (ref_audios or {}).values():
             if audio is None:
                 continue
             ref_items.append({"type": "audio"})
             if audio_vae is not None:
-                audio_latent, ref_audio_t = _encode_ref_audio(audio_vae, audio)
-                ref_blocks.append({"kind": "audio", "ref_audio_t": ref_audio_t, "audio_latent": audio_latent})
+                pending_audios.append(audio)
 
         tokens = clip.tokenize(prompt, minimax_ref_items=ref_items)
         cond = clip.encode_from_tokens_scheduled(tokens)
+
+        # Release the text encoder's VRAM before encoding references with the VAE.
+        comfy.model_management.free_memory(1e30, comfy.model_management.get_torch_device())
+
+        # VAE encoding now happens after the text encoder has released its VRAM.
+        if vae is not None:
+            for tw, th, resized in pending_images:
+                z = vae.encode(resized)
+                ref_blocks.append({"kind": "image", "latent_h": th // 16, "latent_w": tw // 16, "latent": z})
+            for frames, ch, cw, soundtrack in pending_videos:
+                z = vae.encode(frames)
+                audio_latent, ref_audio_t = (None, 0)
+                if soundtrack is not None and audio_vae is not None:
+                    audio_latent, ref_audio_t = _encode_ref_audio(audio_vae, soundtrack)
+                ref_blocks.append({"kind": "video_audio" if ref_audio_t else "video",
+                                   "latent_t": z.shape[2], "latent_h": ch // 16, "latent_w": cw // 16,
+                                   "ref_audio_t": ref_audio_t, "latent": z, "audio_latent": audio_latent})
+
+        if audio_vae is not None:
+            for audio in pending_audios:
+                audio_latent, ref_audio_t = _encode_ref_audio(audio_vae, audio)
+                ref_blocks.append({"kind": "audio", "ref_audio_t": ref_audio_t, "audio_latent": audio_latent})
+
         if ref_blocks:
             cond = node_helpers.conditioning_set_values(cond, {"minimax_refs": ref_blocks})
         return io.NodeOutput(cond, latent)
