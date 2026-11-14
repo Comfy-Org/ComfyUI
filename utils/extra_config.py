@@ -6,6 +6,12 @@ import logging
 def load_extra_path_config(yaml_path):
     with open(yaml_path, 'r', encoding='utf-8') as stream:
         config = yaml.safe_load(stream)
+    if config is None:
+        # yaml.safe_load() gives back None for a file that holds nothing but comments,
+        # which is what Comfy Desktop writes (one header line). Nothing to load here,
+        # and looping over None used to take the whole startup down.
+        logging.warning("Extra model paths config {} has no entries, ignoring it".format(yaml_path))
+        return
     yaml_dir = os.path.dirname(os.path.abspath(yaml_path))
     for c in config:
         conf = config[c]
