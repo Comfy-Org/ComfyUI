@@ -23,7 +23,7 @@ def preview_to_image(latent_image, do_scale=True):
             latents_ubyte = (latent_image.clamp(0, 1)
                                 .mul(0xFF)  # to 0..255
                                 )
-        latents_ubyte = latents_ubyte.to(device="cpu", dtype=torch.uint8, non_blocking=comfy.model_management.device_supports_non_blocking(latent_image.device))
+        latents_ubyte = latents_ubyte.to(device="cpu", dtype=torch.uint8)
 
         return Image.fromarray(latents_ubyte.numpy())
 
