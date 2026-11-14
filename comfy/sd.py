@@ -97,6 +97,7 @@ import comfy.text_encoders.gpt_oss
 import comfy.text_encoders.joyimage
 import comfy.text_encoders.moss_image
 import comfy.text_encoders.fibo2
+import comfy.text_encoders.pan2
 
 import comfy.model_patcher
 import comfy.lora
@@ -1707,6 +1708,7 @@ class CLIPType(Enum):
     FLUX3 = 37
     MOSS_IMAGE = 38
     FIBO2 = 39
+    PAN2 = 40
 
 
 
@@ -2068,6 +2070,9 @@ def load_text_encoder_state_dicts(state_dicts=[], embedding_directory=None, clip
             if clip_type == CLIPType.MOSS_IMAGE and te_model == TEModel.QWEN35_9B:  # MOSS-Image: stock Qwen3.5-9B, last hidden state, open think block.
                 clip_target.clip = comfy.text_encoders.moss_image.te(**llama_detect(clip_data), mtp="mtp.fc.weight" in clip_data[0])
                 clip_target.tokenizer = comfy.text_encoders.moss_image.MOSSImageTokenizer
+            elif clip_type == CLIPType.PAN2 and te_model == TEModel.QWEN35_9B:  # PAN 2: stock Qwen3.5-9B, layer 30 of 32, the caption span after the system turn.
+                clip_target.clip = comfy.text_encoders.pan2.te(**llama_detect(clip_data), mtp="mtp.fc.weight" in clip_data[0])
+                clip_target.tokenizer = comfy.text_encoders.pan2.PAN2Tokenizer
             else:
                 qwen35_type = {TEModel.QWEN35_08B: "qwen35_08b", TEModel.QWEN35_2B: "qwen35_2b", TEModel.QWEN35_4B: "qwen35_4b", TEModel.QWEN35_9B: "qwen35_9b", TEModel.QWEN35_27B: "qwen35_27b"}[te_model]
                 clip_target.clip = comfy.text_encoders.qwen35.te(**llama_detect(clip_data), model_type=qwen35_type, mtp="mtp.fc.weight" in clip_data[0])
