@@ -1562,6 +1562,24 @@ def cast_to(weight, dtype=None, device=None, non_blocking=False, copy=False, str
         return weight.to(dtype=dtype, copy=copy)
 
 
+    if (sys.platform == "linux" and is_amd() and weight.device.type == "cpu"
+            and torch.device(device).type == "cuda" and isinstance(weight, comfy.quant_ops.QuantizedTensor)):
+        pointer = weight._qdata.data_ptr()
+        with open("/proc/self/maps") as maps:
+            for line in maps:
+                parts = line.split(maxsplit=5)
+                low, high = (int(value, 16) for value in parts[0].split("-"))
+                if low <= pointer < high:
+                    if parts[1] == "rw-p" and parts[4] != "0":
+                        # shortcut: cap each staging copy; larger weights need chunked uploads.
+                        if comfy.memory_management.vram_aligned_size(weight) > 512 * 1024 * 1024:
+                            logging.warning("ROCm mmap staging skipped for a weight larger than 512 MiB; host RAM use may increase.")
+                        else:
+                            # Torch 2.11 / ROCm 7.2 dirties private mmap pages during upload.
+                            weight = weight.clone()
+                            non_blocking = False  # Keep the temporary alive until its stream's copy completes.
+                    break
+
     if stream is not None:
         wf_context = stream
         if hasattr(wf_context, "as_context"):
