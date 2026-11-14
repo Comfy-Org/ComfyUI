@@ -42,7 +42,7 @@ OPENROUTER_CHAT_ENDPOINT = "/proxy/openrouter/api/v1/chat/completions"
 OPENROUTER_IMAGES_ENDPOINT = "/proxy/openrouter/api/v1/images"
 
 
-Profile = Literal["standard", "reasoning", "frontier_reasoning", "perplexity", "perplexity_reasoning"]
+Profile = Literal["standard", "reasoning", "frontier_reasoning", "always_reasoning", "perplexity", "perplexity_reasoning"]
 
 
 @dataclass(frozen=True)
@@ -74,9 +74,9 @@ MODELS: list[_ModelSpec] = [
     _ModelSpec("x-ai/grok-4.5", "reasoning", 0.00000286, 0.00000858, max_images=20),
     _ModelSpec("x-ai/grok-4.20", "reasoning", 0.0000017875, 0.000003575, max_images=20),
     _ModelSpec("x-ai/grok-4.3", "reasoning", 0.0000017875, 0.000003575, max_images=20),
-    _ModelSpec("meta/muse-wonder", "reasoning", 0.00000572, 0.0000286, max_images=50, max_videos=5),
-    _ModelSpec("meta/muse-spark-1.3", "reasoning", 0.0000017875, 0.0000060775, max_images=50, max_videos=5),
-    _ModelSpec("meta/muse-ember", "reasoning", 0.000000143, 0.000000715, max_images=50, max_videos=5),
+    _ModelSpec("meta/muse-wonder", "always_reasoning", 0.00000572, 0.0000286, max_images=50, max_videos=5),
+    _ModelSpec("meta/muse-spark-1.3", "always_reasoning", 0.0000017875, 0.0000060775, max_images=50, max_videos=5),
+    _ModelSpec("meta/muse-ember", "always_reasoning", 0.000000143, 0.000000715, max_images=50, max_videos=5),
     _ModelSpec("deepseek/deepseek-v4-pro", "reasoning", 0.00000062205, 0.0000012441),
     _ModelSpec("deepseek/deepseek-v4-flash", "reasoning", 0.00000016016, 0.00000032032),
     _ModelSpec("deepseek/deepseek-v3.2", "reasoning", 0.00000036036, 0.00000054054),
@@ -96,6 +96,7 @@ MODELS: list[_ModelSpec] = [
 
 _MODELS_BY_SLUG: dict[str, _ModelSpec] = {m.slug: m for m in MODELS}
 _REASONING_EFFORTS = ["off", "low", "medium", "high"]
+_ALWAYS_REASONING_EFFORTS = ["minimal", "low", "medium", "high"]
 _SEARCH_CONTEXT_SIZES = ["low", "medium", "high"]
 
 
@@ -106,6 +107,18 @@ def _reasoning_extra_inputs() -> list:
             options=_REASONING_EFFORTS,
             default="off",
             tooltip="Reasoning effort. 'off' disables reasoning entirely.",
+            advanced=True,
+        ),
+    ]
+
+
+def _always_reasoning_extra_inputs() -> list:
+    return [
+        IO.Combo.Input(
+            "reasoning_effort",
+            options=_ALWAYS_REASONING_EFFORTS,
+            default="minimal",
+            tooltip="Reasoning effort. These models always reason; 'minimal' is the lowest level.",
             advanced=True,
         ),
     ]
@@ -128,6 +141,8 @@ def _profile_inputs(profile: Profile) -> list:
         return []
     if profile in ("reasoning", "frontier_reasoning"):
         return _reasoning_extra_inputs()
+    if profile == "always_reasoning":
+        return _always_reasoning_extra_inputs()
     if profile == "perplexity":
         return _perplexity_extra_inputs()
     if profile == "perplexity_reasoning":
@@ -283,7 +298,7 @@ def _extract_text(response: OpenRouterChatResponse) -> str:
     if not message.content and choice.finish_reason == "length":
         raise ValueError(
             "The model used its whole output budget on reasoning and returned no text. "
-            "Lower reasoning_effort and try again."
+            "Try a lower reasoning_effort, a simpler prompt, or a stronger model."
         )
     return message.content or ""
 
