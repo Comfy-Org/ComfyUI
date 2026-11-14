@@ -379,8 +379,9 @@ lora = ({call}.models.read("loras", names[0]))["sd"]
 patched, _ = {call}.model.load_lora(unet, None, lora, 0.5, 1.0)
 before = {call}.model.read_weight(unet, "diffusion_model.img_in.weight")
 after = {call}.model.read_weight(patched, "diffusion_model.img_in.weight")
-assert names == ["diff.safetensors"] and clip is None and vae.latent_channels == 4
-assert fp8.model_dtype() == torch.float8_e4m3fn
+assert names == ["diff.safetensors"] and clip is None
+assert ({call}.vae.info(vae))["latent_channels"] == 4
+assert ({call}.model.info(fp8))["dtype"] == "float8_e4m3fn"
 torch.testing.assert_close(after, before + 0.5)
 """,
         synchronous,
