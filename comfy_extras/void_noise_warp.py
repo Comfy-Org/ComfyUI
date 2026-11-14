@@ -1,18 +1,7 @@
-"""
-Optical-flow-warped noise for VOID Pass 2 refinement.
+"""Optical-flow-warped noise for VOID pass 2.
 
-Adapted from RyannDaGreat/CommonSource (MIT License, Ryan Burgert):
-  https://github.com/RyannDaGreat/CommonSource
-  - noise_warp.py  (NoiseWarper / warp_xyωc / regaussianize / get_noise_from_video)
-  - raft.py        (RaftOpticalFlow)
-
-Only the code paths that ``comfy_extras/nodes_void.py::VOIDWarpedNoise`` actually
-uses (torch THWC uint8 input, no background removal, no visualization, no disk
-I/O, default warp/noise params) have been inlined.  External ``rp`` utilities
-have been replaced with equivalents from torch.nn.functional / einops.  The
-RAFT optical-flow model itself is loaded offline via ``OpticalFlowLoader`` in
-``nodes_void.py`` and passed into ``get_noise_from_video`` by the caller; this
-module never downloads weights at runtime.
+Adapted from noise_warp.py and raft.py of RyannDaGreat/CommonSource (MIT License, Ryan Burgert):
+https://github.com/RyannDaGreat/CommonSource
 """
 
 import logging
@@ -20,23 +9,12 @@ from typing import Optional
 
 import torch
 import torch.nn.functional as F
-from einops import rearrange
 
 import comfy.model_management
 
 
-# ---------------------------------------------------------------------------
-# Low-level torch image helpers (drop-in replacements for rp.torch_* primitives)
-# ---------------------------------------------------------------------------
-
 def _torch_resize_chw(image, size, interp, copy=True):
-    """Resize a CHW tensor.
-
-    ``size`` is either a scalar factor or a (h, w) tuple.  ``interp`` is one
-    of ``"bilinear"``, ``"nearest"``, ``"area"``.  When ``copy`` is False and
-    the requested size matches the input, returns the input tensor as is
-    (faster but callers must not mutate the result).
-    """
+    """Resize a CHW tensor by a scalar factor or to an (h, w) tuple; copy=False may return the input itself."""
     if image.ndim != 3:
         raise ValueError(
             f"_torch_resize_chw expects a 3D CHW tensor, got shape {tuple(image.shape)}"
@@ -59,11 +37,7 @@ def _torch_resize_chw(image, size, interp, copy=True):
 
 
 def _torch_remap_relative(image, dx, dy, interp="bilinear"):
-    """Relative remap of a CHW image via ``F.grid_sample``.
-
-    Equivalent to ``rp.torch_remap_image(image, dx, dy, relative=True, interp=interp)``
-    for ``interp`` in {"bilinear", "nearest"}.  Out-of-bounds samples are 0.
-    """
+    """Backward-warp a CHW image by per-pixel offsets (dx, dy), zero outside the image."""
     if image.ndim != 3:
         raise ValueError(
             f"_torch_remap_relative expects a 3D CHW tensor, got shape {tuple(image.shape)}"
@@ -88,11 +62,7 @@ def _torch_remap_relative(image, dx, dy, interp="bilinear"):
 
 
 def _torch_scatter_add_relative(image, dx, dy):
-    """Scatter-add a CHW image using relative floor-rounded (dx, dy) offsets.
-
-    Equivalent to ``rp.torch_scatter_add_image(image, dx, dy, relative=True,
-    interp='floor')``.  Out-of-bounds targets are dropped.
-    """
+    """Scatter-add a CHW image to its floor(dx, dy)-offset positions, dropping out-of-bounds targets."""
     if image.ndim != 3:
         raise ValueError(
             f"_torch_scatter_add_relative expects a 3D CHW tensor, got shape {tuple(image.shape)}"
@@ -110,36 +80,27 @@ def _torch_scatter_add_relative(image, dx, dy):
     valid = ((y >= 0) & (y < in_h) & (x >= 0) & (x < in_w)).reshape(-1)
     indices = (y * in_w + x).reshape(-1)[valid]
 
-    flat_image = rearrange(image, "c h w -> (h w) c")[valid]
+    flat_image = image.reshape(in_c, -1).t()[valid]
     out = torch.zeros((in_h * in_w, in_c), dtype=image.dtype, device=image.device)
     out.index_add_(0, indices, flat_image)
-    return rearrange(out, "(h w) c -> c h w", h=in_h, w=in_w)
+    return out.t().reshape(in_c, in_h, in_w)
 
-
-# ---------------------------------------------------------------------------
-# Noise warping primitives (ported from noise_warp.py)
-# ---------------------------------------------------------------------------
 
 def unique_pixels(image):
-    """Find unique pixel values in a CHW tensor.
-
-    Returns ``(unique_colors [U, C], counts [U], index_matrix [H, W])`` where
-    ``index_matrix[i, j]`` is the index of the unique color at that pixel.
-    """
-    _, h, w = image.shape
-    flat = rearrange(image, "c h w -> (h w) c")
+    """Unique colors (U, C), their counts (U) and the per-pixel color index (H, W) of a CHW tensor."""
+    c, h, w = image.shape
+    flat = image.reshape(c, -1).t()
     unique_colors, inverse_indices, counts = torch.unique(
         flat, dim=0, return_inverse=True, return_counts=True, sorted=False,
     )
-    index_matrix = rearrange(inverse_indices, "(h w) -> h w", h=h, w=w)
+    index_matrix = inverse_indices.view(h, w)
     return unique_colors, counts, index_matrix
 
 
 def sum_indexed_values(image, index_matrix):
     """For each unique index, sum the CHW image values at its pixels."""
-    _, h, w = image.shape
     u = int(index_matrix.max().item()) + 1
-    flat = rearrange(image, "c h w -> (h w) c")
+    flat = image.reshape(image.shape[0], -1).t()
     out = torch.zeros((u, flat.shape[1]), dtype=flat.dtype, device=flat.device)
     out.index_add_(0, index_matrix.view(-1), flat)
     return out
@@ -149,26 +110,20 @@ def indexed_to_image(index_matrix, unique_colors):
     """Build a CHW image from an index matrix and a (U, C) color table."""
     h, w = index_matrix.shape
     flat = unique_colors[index_matrix.view(-1)]
-    return rearrange(flat, "(h w) c -> c h w", h=h, w=w)
+    return flat.t().reshape(-1, h, w)
 
 
 def regaussianize(noise):
-    """Variance-preserving re-sampling of a CHW noise tensor.
-
-    Wherever the noise contains groups of identical pixel values (e.g. after
-    a nearest-neighbor warp that duplicated source pixels), adds zero-mean
-    foreign noise within each group and scales by ``1/sqrt(count)`` so the
-    output is unit-variance gaussian again.
-    """
+    """Re-whiten groups of duplicated pixels: scale by 1/sqrt(count) and add zero-mean noise within each group."""
     _, hs, ws = noise.shape
     _, counts, index_matrix = unique_pixels(noise[:1])
 
     foreign_noise = torch.randn_like(noise)
     summed = sum_indexed_values(foreign_noise, index_matrix)
-    meaned = indexed_to_image(index_matrix, summed / rearrange(counts, "u -> u 1"))
+    meaned = indexed_to_image(index_matrix, summed / counts[:, None])
     zeroed_foreign = foreign_noise - meaned
 
-    counts_image = indexed_to_image(index_matrix, rearrange(counts, "u -> u 1"))
+    counts_image = indexed_to_image(index_matrix, counts[:, None])
 
     output = noise / counts_image ** 0.5 + zeroed_foreign
     return output, counts_image
@@ -198,11 +153,7 @@ def state_to_noise(state):
 
 
 def warp_state(state, flow):
-    """Warp a noise-warper state tensor along the given optical flow.
-
-    ``state`` has shape ``(3+c, h, w)`` (= dx, dy, ω, c noise channels).
-    ``flow`` has shape ``(2, h, w)`` (= dx, dy).
-    """
+    """Warp a (3+C, H, W) state of [dx, dy, ω, noise] along a (2, H, W) flow."""
     if flow.device != state.device:
         raise ValueError(
             f"warp_state: flow and state must be on the same device, "
@@ -220,9 +171,9 @@ def warp_state(state, flow):
     device = state.device
 
     x_ch, y_ch = 0, 1
-    xy = 2         # state[:xy]  = [dx, dy]
-    xyw = 3        # state[:xyw] = [dx, dy, ω]
-    w_ch = 2       # state[w_ch] = ω
+    xy = 2
+    xyw = 3
+    w_ch = 2
     c = xyoc - xyw
     oc = xyoc - xy
     if c <= 0:
@@ -239,13 +190,13 @@ def warp_state(state, flow):
     init[w_ch] = 1
     init[-c:] = 0
 
-    # --- Expansion branch: nearest-neighbor remap with negated flow ---
+    # expansion: nearest remap along the negated flow
     pre_expand = torch.empty_like(state)
     pre_expand[:xy] = _torch_remap_relative(state[:xy], -flow[0], -flow[1], "nearest")
     pre_expand[-oc:] = _torch_remap_relative(state[-oc:], -flow[0], -flow[1], "nearest")
     pre_expand[w_ch][pre_expand[w_ch] == 0] = 1
 
-    # --- Shrink branch: scatter-add state into new positions ---
+    # shrink: scatter-add the state into its new positions
     pre_shrink = state.clone()
     pre_shrink[:xy] += flow
 
@@ -255,21 +206,17 @@ def warp_state(state, flow):
 
     scat_xy = pre_shrink[:xy].round()
     pre_shrink[:xy] -= scat_xy
-    pre_shrink[:xy] = 0  # xy_mode='none' in upstream
+    pre_shrink[:xy] = 0
 
     def scat(tensor):
         return _torch_scatter_add_relative(tensor, scat_xy[0], scat_xy[1])
 
-    # rp.torch_scatter_add_image on a bool tensor errors on modern torch;
-    # scatter-sum a float ones tensor and threshold to get the mask instead.
     shrink_mask = scat(torch.ones(1, h, w, dtype=state.dtype, device=device)) > 0
 
-    # Drop expansion samples at positions that will be filled by shrink.
     pre_expand = torch.where(shrink_mask, init, pre_expand)
 
-    # Regaussianize both branches together so duplicated-source groups are
-    # counted globally, then split back apart.
-    concat = torch.cat([pre_shrink, pre_expand], dim=2)  # along width
+    # regaussianize both branches together so duplicate groups are counted across them
+    concat = torch.cat([pre_shrink, pre_expand], dim=2)
     concat[-c:], counts_image = regaussianize(concat[-c:])
     concat[w_ch] = concat[w_ch] / counts_image[0]
     concat[w_ch] = concat[w_ch].nan_to_num()
@@ -290,12 +237,7 @@ def warp_state(state, flow):
 
 
 class NoiseWarper:
-    """Maintain a warpable noise state and emit gaussian noise per frame.
-
-    Simplified from RyannDaGreat/CommonSource/noise_warp.py::NoiseWarper:
-    ``scale_factor``, ``post_noise_alpha``, ``progressive_noise_alpha``, and
-    ``warp_kwargs`` are all dropped since VOIDWarpedNoise always uses defaults.
-    """
+    """Warpable noise state that emits gaussian noise per frame."""
 
     def __init__(self, c, h, w, device, dtype=torch.float32):
         if c <= 0 or h <= 0 or w <= 0:
@@ -313,9 +255,6 @@ class NoiseWarper:
 
     @property
     def noise(self):
-        # With scale_factor=1 the "downsample to respect weights" step is a
-        # size-preserving no-op; the weight-variance correction math still
-        # runs to stay faithful to upstream.
         n = state_to_noise(self._state)
         weights = self._state[2:3]
         return n * weights / (weights ** 2).sqrt()
@@ -331,9 +270,7 @@ class NoiseWarper:
         flow = _torch_resize_chw(flow, (self.h, self.w), "bilinear", copy=True)
         flowh, floww = flow.shape[-2:]
 
-        # Upstream scales flow[0] by flowh/oflowh and flow[1] by floww/ofloww
-        # (channel-order appears swapped but harmless when H and W are scaled
-        # by the same factor, which is always the case for our callers).
+        # upstream scales dx by the height ratio and dy by the width ratio; both ratios are equal here
         flow[0] *= flowh / oflowh
         flow[1] *= floww / ofloww
 
@@ -341,59 +278,29 @@ class NoiseWarper:
         return self
 
 
-# ---------------------------------------------------------------------------
-# RAFT optical flow wrapper (ported from raft.py)
-# ---------------------------------------------------------------------------
-
 class RaftOpticalFlow:
-    """RAFT-large wrapper around a pre-loaded torchvision model.
+    """Runs a loaded RAFT model on the frames of one video; __call__ returns a (2, H, W) flow."""
 
-    ``model`` must be the ``torchvision.models.optical_flow.raft_large`` module
-    with its weights already populated; this class is load-agnostic so the
-    caller owns downloading/offload concerns (see ``OpticalFlowLoader`` in
-    ``nodes_void.py``).  ``__call__`` returns a ``(2, H, W)`` flow.
-    """
-
-    def __init__(self, model, device=None):
-        if device is None:
-            device = comfy.model_management.get_torch_device()
-        device = torch.device(device) if not isinstance(device, torch.device) else device
-
-        model = model.to(device)
-        model.eval()
-        self.device = device
+    def __init__(self, model):
         self.model = model
+        self.state = {}
 
-    def _preprocess(self, image_chw):
-        image = image_chw.to(self.device, torch.float32)
-        _, h, w = image.shape
-        new_h = (h // 8) * 8
-        new_w = (w // 8) * 8
-        image = _torch_resize_chw(image, (new_h, new_w), "bilinear", copy=False)
-        image = image * 2 - 1
-        return image[None]
+    def _preprocess(self, image_chw, size):
+        image = _torch_resize_chw(image_chw, size, "bilinear", copy=False)
+        return (image[None] * 2 - 1).to(self.model.dtype)
 
     def __call__(self, from_image, to_image):
-        """``from_image``, ``to_image``: CHW float tensors in [0, 1]."""
-        if from_image.shape != to_image.shape:
-            raise ValueError(
-                f"RaftOpticalFlow: from_image and to_image must match, "
-                f"got {tuple(from_image.shape)} vs {tuple(to_image.shape)}"
-            )
+        """``from_image``, ``to_image``: CHW float tensors in [0, 1] on the model's device."""
         _, h, w = from_image.shape
-        with torch.no_grad():
-            img1 = self._preprocess(from_image)
-            img2 = self._preprocess(to_image)
-            list_of_flows = self.model(img1, img2)
-            flow = list_of_flows[-1][0]  # (2, new_h, new_w)
-            if flow.shape[-2:] != (h, w):
-                flow = _torch_resize_chw(flow, (h, w), "bilinear", copy=False)
+        # multiples of 8, and at least 128 px so the coarsest of the four correlation levels is 2 px wide
+        size = (max(128, h // 8 * 8), max(128, w // 8 * 8))
+        flow = self.model(self._preprocess(from_image, size), self._preprocess(to_image, size), self.state)[0]
+        if size != (h, w):
+            flow = _torch_resize_chw(flow, (h, w), "bilinear", copy=False)
+            flow[0] *= w / size[1]
+            flow[1] *= h / size[0]
         return flow
 
-
-# ---------------------------------------------------------------------------
-# Narrow entry point used by VOIDWarpedNoise
-# ---------------------------------------------------------------------------
 
 def get_noise_from_video(
     video_frames: torch.Tensor,
@@ -405,22 +312,10 @@ def get_noise_from_video(
     downscale_factor: int = 32,
     device: Optional[torch.device] = None,
 ) -> torch.Tensor:
-    """Produce optical-flow-warped gaussian noise from a video.
+    """Flow-warped gaussian noise for a (T, H, W, 3) uint8 video, as (T, H', W', noise_channels) float32.
 
-    Args:
-        video_frames: ``(T, H, W, 3)`` uint8 torch tensor.
-        raft: Pre-loaded RAFT optical-flow wrapper (see ``RaftOpticalFlow``).
-        noise_channels: Channels in the output noise.
-        resize_frames: Pre-RAFT frame scale factor.
-        resize_flow: Post-flow up-scale factor applied to the optical flow;
-            the internal noise state is allocated at
-            ``(resize_flow * resize_frames * H, resize_flow * resize_frames * W)``.
-        downscale_factor: Area-pool factor applied to the noise before return;
-            should evenly divide the internal noise resolution.
-        device: Target device.  Defaults to ``comfy.model_management.get_torch_device()``.
-
-    Returns:
-        ``(T, H', W', noise_channels)`` float32 noise tensor on ``device``.
+    Frames are scaled by resize_frames before RAFT, the noise state lives at resize_flow times that size
+    and is area-pooled by downscale_factor on output.
     """
     if not isinstance(resize_flow, int) or resize_flow < 1:
         raise ValueError(
@@ -464,31 +359,28 @@ def get_noise_from_video(
             internal_h, internal_w, downscale_factor,
         )
 
-    with torch.no_grad():
-        warper = NoiseWarper(
-            c=noise_channels, h=internal_h, w=internal_w, device=device,
-        )
-        down_h = warper.h // downscale_factor
-        down_w = warper.w // downscale_factor
-        output = torch.empty(
-            (T, down_h, down_w, noise_channels), dtype=torch.float32, device=device,
-        )
+    warper = NoiseWarper(
+        c=noise_channels, h=internal_h, w=internal_w, device=device,
+    )
+    down_h = warper.h // downscale_factor
+    down_w = warper.w // downscale_factor
+    output = torch.empty(
+        (T, down_h, down_w, noise_channels), dtype=torch.float32, device=device,
+    )
 
-        def downscale(noise_chw):
-            # Area-pool to 1/downscale_factor then multiply by downscale_factor
-            # to adjust std (sqrt of pool area == downscale_factor for a
-            # square pool).
-            down = _torch_resize_chw(noise_chw, 1.0 / downscale_factor, "area", copy=False)
-            return down * downscale_factor
+    def downscale(noise_chw):
+        # area pooling divides the std by downscale_factor
+        down = _torch_resize_chw(noise_chw, 1.0 / downscale_factor, "area", copy=False)
+        return down * downscale_factor
 
-        output[0] = downscale(warper.noise).permute(1, 2, 0)
+    output[0] = downscale(warper.noise).permute(1, 2, 0)
 
-        prev = frames[0]
-        for i in range(1, T):
-            curr = frames[i]
-            flow = raft(prev, curr).to(device)
-            warper(flow[0], flow[1])
-            output[i] = downscale(warper.noise).permute(1, 2, 0)
-            prev = curr
+    prev = frames[0]
+    for i in range(1, T):
+        curr = frames[i]
+        flow = raft(prev, curr)
+        warper(flow[0], flow[1])
+        output[i] = downscale(warper.noise).permute(1, 2, 0)
+        prev = curr
 
     return output

@@ -2544,6 +2544,7 @@ async def init_builtin_extra_nodes():
         "nodes_bg_removal.py",
         "nodes_rtdetr.py",
         "nodes_frame_interpolation.py",
+        "nodes_video_deflicker.py",
         "nodes_sam3.py",
         "nodes_wevisone.py",
         "nodes_scail.py",

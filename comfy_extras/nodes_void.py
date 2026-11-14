@@ -5,6 +5,7 @@ import torch
 import comfy
 import comfy.model_management
 import comfy.model_patcher
+import comfy.ops
 import comfy.storage
 import comfy.samplers
 import comfy.utils
@@ -12,8 +13,8 @@ import folder_paths
 import node_helpers
 import nodes
 from comfy.utils import model_trange as trange
+from comfy.ldm.raft.model import RAFT
 from comfy_api.latest import ComfyExtension, io
-from torchvision.models.optical_flow import raft_large
 from typing_extensions import override
 
 
@@ -94,14 +95,18 @@ class OpticalFlowLoader(io.ComfyNode):
                 "and 'update_block.' prefixes."
             )
 
-        model = raft_large(weights=None, progress=False)
+        load_device = comfy.model_management.get_torch_device()
+        offload_device = comfy.model_management.unet_offload_device()
+        # bf16 costs several times the flow error of fp16
+        dtype = torch.float16 if comfy.model_management.should_use_fp16(load_device) else torch.float32
+        model = RAFT(device=offload_device, dtype=dtype, operations=comfy.ops.manual_cast)
         model.load_state_dict(sd)
-        model.eval().to(torch.float32)
+        model.eval()
 
-        patcher = comfy.model_patcher.ModelPatcher(
+        patcher = comfy.model_patcher.CoreModelPatcher(
             model,
-            load_device=comfy.model_management.get_torch_device(),
-            offload_device=comfy.model_management.unet_offload_device(),
+            load_device=load_device,
+            offload_device=offload_device,
             fast_disk=comfy.storage.state_dict_fast_disk(sd),
         )
         return io.NodeOutput(patcher)
@@ -332,7 +337,7 @@ class VOIDWarpedNoise(io.ComfyNode):
         device = comfy.model_management.get_torch_device()
 
         comfy.model_management.load_model_gpu(optical_flow)
-        raft = RaftOpticalFlow(optical_flow.model, device=device)
+        raft = RaftOpticalFlow(optical_flow.model)
 
         vid = video[:length].to(device)
         vid = comfy.utils.common_upscale(
