@@ -7,9 +7,12 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-import safetensors.torch
 import torch
 
+if not (sys.platform == 'linux' and torch.version.hip and torch.cuda.is_available()):
+    raise unittest.SkipTest('Linux ROCm GPU required')
+
+import safetensors.torch
 from comfy import model_management as mm
 from comfy_kitchen.tensor.base import BaseLayoutParams, QuantizedTensor
 
@@ -26,7 +29,6 @@ def anonymous_bytes(path):
     return total
 
 
-@unittest.skipUnless(sys.platform == 'linux' and torch.version.hip and torch.cuda.is_available(), 'Linux ROCm GPU required')
 class MmapUploadTest(unittest.TestCase):
     def transfer(self, *, transpose=False, stream=None, preallocated=False):
         with tempfile.TemporaryDirectory() as directory:
