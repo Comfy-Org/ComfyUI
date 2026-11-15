@@ -80,6 +80,26 @@ def test_qwen_uses_embedded_special_ids_and_reduced_geometry():
     assert inner.transformer.model.config.stop_tokens == [2, 3]
 
 
+@pytest.mark.parametrize("embedded", [False, True])
+def test_qwen_video_frames_survive_tokenization(embedded):
+    tokenizer_data = {}
+    if embedded:
+        vocab = {"[UNK]": 0, "<|endoftext|>": 1, "<|im_end|>": 2, "<|image_pad|>": 3, "<|im_start|>": 4,
+                 "<|video_pad|>": 5, "<|vision_start|>": 6, "<|vision_end|>": 7}
+        tokenizer = Tokenizer(models.WordLevel(vocab, unk_token="[UNK]"))
+        tokenizer.pre_tokenizer = pre_tokenizers.WhitespaceSplit()
+        tokenizer.add_special_tokens([AddedToken(t, special=True) for t in vocab if t.startswith("<|")])
+        tokenizer_data["qwen35_2b_tokenizer_json"] = tokenizer.to_str()
+    wrapped = qwen35.Qwen35ImageTokenizer(tokenizer_data=tokenizer_data)
+    frames = torch.rand(4, 28, 28, 3)
+    tokens = wrapped.tokenize_with_weights("Describe this video", video=frames, fps=2)["qwen35_2b"]
+    embeds = [token[0] for batch in tokens for token in batch if isinstance(token[0], dict)]
+    assert len(embeds) == 2
+    for i, embed in enumerate(embeds):
+        assert embed["type"] == "video"
+        torch.testing.assert_close(embed["data"], frames[2 * i:2 * i + 2])
+
+
 def test_bundled_qwen_tokenizer_stays_unchanged():
     tokenizer = qwen35.Qwen35Tokenizer()
     assert tokenizer.tokenize_with_weights("Hello world") == [[(9419, 1.0), (1814, 1.0)]]
