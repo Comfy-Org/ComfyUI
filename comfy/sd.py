@@ -2183,6 +2183,8 @@ def load_state_dict_guess_config(sd, output_vae=True, output_clip=True, output_c
         clip_target = model_config.clip_target(state_dict=sd)
         if clip_target is not None:
             clip_sd = model_config.process_clip_state_dict(sd)
+            if te_model_options.get("custom_operations", None) is None:
+                clip_sd, _ = comfy.utils.convert_old_quants(clip_sd)
             if len(clip_sd) > 0:
                 parameters = comfy.utils.calculate_parameters(clip_sd)
                 clip = CLIP(clip_target, embedding_directory=embedding_directory, tokenizer_data=clip_sd, parameters=parameters, state_dict=clip_sd, model_options=te_model_options, disable_dynamic=disable_dynamic)
