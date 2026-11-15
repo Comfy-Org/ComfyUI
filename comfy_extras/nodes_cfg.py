@@ -57,24 +57,55 @@ class CFGNorm(io.ComfyNode):
             inputs=[
                 io.Model.Input("model"),
                 io.Float.Input("strength", default=1.0, min=0.0, max=100.0, step=0.01),
+                io.Boolean.Input(
+                    "pre_cfg",
+                    default=False,
+                    optional=True,
+                    tooltip=(
+                        "If true, rescale the combined noise BEFORE the sampler's CFG combine, "
+                        "without clamping (can amplify). Matches the norm-scaled CFG used by "
+                        "models like Lens. Default false keeps the original post-CFG x0-space "
+                        "attenuate-only behavior."
+                    ),
+                ),
             ],
             outputs=[io.Model.Output(display_name="patched_model")],
             is_experimental=True,
         )
 
     @classmethod
-    def execute(cls, model, strength) -> io.NodeOutput:
+    def execute(cls, model, strength, pre_cfg=False) -> io.NodeOutput:
         m = model.clone()
-        def cfg_norm(args):
-            cond_p = args['cond_denoised']
-            pred_text_ = args["denoised"]
+        if pre_cfg:
+            def cfg_norm_pre(args):
+                cond = args["cond"]
+                uncond = args["uncond"]
+                cond_scale = args["cond_scale"]
+                comb = uncond + cond_scale * (cond - uncond)
+                cond_norm = torch.linalg.vector_norm(cond, dim=1, keepdim=True)
+                comb_norm = torch.linalg.vector_norm(comb, dim=1, keepdim=True)
+                rescale = torch.where(
+                    comb_norm > 0,
+                    cond_norm / comb_norm.clamp_min(1e-12),
+                    torch.ones_like(comb_norm),
+                )
+                rescaled = comb * rescale
+                # strength blends back toward standard linear CFG (1.0 = full rescale).
+                if strength != 1.0:
+                    rescaled = strength * rescaled + (1.0 - strength) * comb
+                return rescaled
+            m.set_model_sampler_cfg_function(cfg_norm_pre)
+        else:
+            def cfg_norm(args):
+                cond_p = args['cond_denoised']
+                pred_text_ = args["denoised"]
 
-            norm_full_cond = torch.norm(cond_p, dim=1, keepdim=True)
-            norm_pred_text = torch.norm(pred_text_, dim=1, keepdim=True)
-            scale = (norm_full_cond / (norm_pred_text + 1e-8)).clamp(min=0.0, max=1.0)
-            return pred_text_ * scale * strength
+                norm_full_cond = torch.norm(cond_p, dim=1, keepdim=True)
+                norm_pred_text = torch.norm(pred_text_, dim=1, keepdim=True)
+                scale = (norm_full_cond / (norm_pred_text + 1e-8)).clamp(min=0.0, max=1.0)
+                return pred_text_ * scale * strength
 
-        m.set_model_sampler_post_cfg_function(cfg_norm)
+            m.set_model_sampler_post_cfg_function(cfg_norm)
         return io.NodeOutput(m)
 
 

@@ -1,10 +1,9 @@
-comfyui-frontend-package==1.42.8
-comfyui-workflow-templates==0.9.43
-comfyui-embedded-docs==0.4.3
+comfyui-frontend-package==1.59.1
+comfyui-workflow-templates==0.11.107
+comfyui-embedded-docs==0.5.16
 torch
 torchsde
 torchvision
-torchaudio
 numpy>=1.25.0
 einops
 transformers>=4.50.3
@@ -14,16 +13,16 @@ safetensors>=0.4.2
 aiohttp>=3.11.8
 yarl>=1.18.0
 pyyaml
-Pillow
+Pillow>=10.1.0
 scipy
 tqdm
 psutil
 alembic
-SQLAlchemy
+SQLAlchemy>=2.0.0
 filelock
-av>=14.2.0
-comfy-kitchen>=0.2.8
-comfy-aimdo>=0.2.12
+av>=17.0.0
+comfy-aimdo==0.6.0
+comfy-kitchen==0.2.41
 requests
 simpleeval>=1.0.0
 blake3
@@ -33,8 +32,6 @@ kornia>=0.7.1
 spandrel
 pydantic~=2.0
 pydantic-settings~=2.0
-PyOpenGL
+PyOpenGL>=3.1.8
+comfy-angle
 glfw
-
-
-# xformers==0.0.35

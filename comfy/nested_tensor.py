@@ -51,6 +51,9 @@ class NestedTensor:
     def float(self):
         return self.to(dtype=torch.float)
 
+    def cpu(self):
+        return self.to(device="cpu")
+
     def chunk(self, *args, **kwargs):
         return self.apply_operation(None, lambda x, y: x.chunk(*args, **kwargs))
 
@@ -79,6 +82,9 @@ class NestedTensor:
     @property
     def layout(self):
         return self.tensors[0].layout
+
+    def __repr__(self):
+        return f"{type(self).__name__}({self.tensors!r})"
 
 
 def cat_nested(tensors, *args, **kwargs):

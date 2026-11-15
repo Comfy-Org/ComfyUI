@@ -13,7 +13,7 @@ class EmptyChromaRadianceLatentImage(io.ComfyNode):
     def define_schema(cls) -> io.Schema:
         return io.Schema(
             node_id="EmptyChromaRadianceLatentImage",
-            category="latent/chroma_radiance",
+            category="model/latent/chroma radiance",
             inputs=[
                 io.Int.Input(id="width", default=1024, min=16, max=nodes.MAX_RESOLUTION, step=16),
                 io.Int.Input(id="height", default=1024, min=16, max=nodes.MAX_RESOLUTION, step=16),
@@ -33,7 +33,7 @@ class ChromaRadianceOptions(io.ComfyNode):
     def define_schema(cls) -> io.Schema:
         return io.Schema(
             node_id="ChromaRadianceOptions",
-            category="model_patches/chroma_radiance",
+            category="model/patch/chroma radiance",
             description="Allows setting advanced options for the Chroma Radiance model.",
             inputs=[
                 io.Model.Input(id="model"),
@@ -65,6 +65,12 @@ class ChromaRadianceOptions(io.ComfyNode):
                     tooltip="Allows overriding the default NeRF tile size. -1 means use the default (32). 0 means use non-tiling mode (may require a lot of VRAM).",
                     advanced=True,
                 ),
+                io.Boolean.Input(
+                    id="force_sequential_txt_ids",
+                    default=False,
+                    tooltip="Force usage of sequential text token IDs instead of zeroes. Should be used for checkpoints from 2026-05-22 to 2026-06-01 that are trained in this way but do not contain the __sequential__ key in the state dict.",
+                    advanced=True,
+                ),
             ],
             outputs=[io.Model.Output()],
         )
@@ -78,10 +84,14 @@ class ChromaRadianceOptions(io.ComfyNode):
         start_sigma: float,
         end_sigma: float,
         nerf_tile_size: int,
+        force_sequential_txt_ids: bool,
     ) -> io.NodeOutput:
         radiance_options = {}
         if nerf_tile_size >= 0:
             radiance_options["nerf_tile_size"] = nerf_tile_size
+
+        if force_sequential_txt_ids:
+            radiance_options["use_sequential_txt_ids"] = True
 
         if not radiance_options:
             return io.NodeOutput(model)

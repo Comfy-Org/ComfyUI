@@ -16,31 +16,33 @@ from comfy.ldm.lightricks.model import (
 from comfy.ldm.lightricks.symmetric_patchifier import AudioPatchifier
 from comfy.ldm.lightricks.embeddings_connector import Embeddings1DConnector
 import comfy.ldm.common_dit
+import comfy.model_management
+import comfy.model_prefetch
+import comfy.quant_ops
 
 class CompressedTimestep:
     """Store video timestep embeddings in compressed form using per-frame indexing."""
     __slots__ = ('data', 'batch_size', 'num_frames', 'patches_per_frame', 'feature_dim')
 
-    def __init__(self, tensor: torch.Tensor, patches_per_frame: int):
+    def __init__(self, tensor: torch.Tensor, patches_per_frame: int, per_frame: bool = False):
         """
-        tensor: [batch_size, num_tokens, feature_dim] tensor where num_tokens = num_frames * patches_per_frame
-        patches_per_frame: Number of spatial patches per frame (height * width in latent space), or None to disable compression
+        tensor: [batch, num_tokens, feature_dim] (per-token, default) or
+                [batch, num_frames, feature_dim] (per_frame=True, already compressed).
+        patches_per_frame: spatial patches per frame; pass None to disable compression.
         """
-        self.batch_size, num_tokens, self.feature_dim = tensor.shape
-
-        # Check if compression is valid (num_tokens must be divisible by patches_per_frame)
-        if patches_per_frame is not None and num_tokens % patches_per_frame == 0 and num_tokens >= patches_per_frame:
+        self.batch_size, n, self.feature_dim = tensor.shape
+        if per_frame:
             self.patches_per_frame = patches_per_frame
-            self.num_frames = num_tokens // patches_per_frame
-
-            # Reshape to [batch, frames, patches_per_frame, feature_dim] and store one value per frame
-            # All patches in a frame are identical, so we only keep the first one
-            reshaped = tensor.view(self.batch_size, self.num_frames, patches_per_frame, self.feature_dim)
-            self.data = reshaped[:, :, 0, :].contiguous()  # [batch, frames, feature_dim]
+            self.num_frames = n
+            self.data = tensor
+        elif patches_per_frame is not None and n >= patches_per_frame and n % patches_per_frame == 0:
+            self.patches_per_frame = patches_per_frame
+            self.num_frames = n // patches_per_frame
+            # All patches in a frame are identical — keep only the first.
+            self.data = tensor.view(self.batch_size, self.num_frames, patches_per_frame, self.feature_dim)[:, :, 0, :].contiguous()
         else:
-            # Not divisible or too small - store directly without compression
             self.patches_per_frame = 1
-            self.num_frames = num_tokens
+            self.num_frames = n
             self.data = tensor
 
     def expand(self):
@@ -94,6 +96,8 @@ class BasicAVTransformerBlock(nn.Module):
         attn_precision=None,
         apply_gated_attention=False,
         cross_attention_adaln=False,
+        ff_bias=True,
+        audio_ff_bias=True,
         dtype=None,
         device=None,
         operations=None,
@@ -176,10 +180,10 @@ class BasicAVTransformerBlock(nn.Module):
         )
 
         self.ff = FeedForward(
-            v_dim, dim_out=v_dim, glu=True, dtype=dtype, device=device, operations=operations
+            v_dim, dim_out=v_dim, glu=True, ff_bias=ff_bias, dtype=dtype, device=device, operations=operations
         )
         self.audio_ff = FeedForward(
-            a_dim, dim_out=a_dim, glu=True, dtype=dtype, device=device, operations=operations
+            a_dim, dim_out=a_dim, glu=True, ff_bias=audio_ff_bias, dtype=dtype, device=device, operations=operations
         )
 
         num_ada_params = ADALN_CROSS_ATTN_PARAMS_COUNT if cross_attention_adaln else ADALN_BASE_PARAMS_COUNT
@@ -271,7 +275,10 @@ class BasicAVTransformerBlock(nn.Module):
         if run_vx:
             # video self-attention
             vshift_msa, vscale_msa = (self.get_ada_values(self.scale_shift_table, vx.shape[0], v_timestep, slice(0, 2)))
-            norm_vx = comfy.ldm.common_dit.rms_norm(vx) * (1 + vscale_msa) + vshift_msa
+            if comfy.model_management.in_training:
+                norm_vx = comfy.ldm.common_dit.rms_norm(vx) * (1 + vscale_msa) + vshift_msa
+            else:
+                norm_vx = comfy.quant_ops.ck.rms_adaln(vx, vscale_msa, vshift_msa)
             del vshift_msa, vscale_msa
             attn1_out = self.attn1(norm_vx, pe=v_pe, mask=self_attention_mask, transformer_options=transformer_options)
             del norm_vx
@@ -305,7 +312,6 @@ class BasicAVTransformerBlock(nn.Module):
 
         # video - audio cross attention.
         if run_a2v or run_v2a:
-            vx_norm3 = comfy.ldm.common_dit.rms_norm(vx)
             ax_norm3 = comfy.ldm.common_dit.rms_norm(ax)
 
             # audio to video cross attention
@@ -315,7 +321,10 @@ class BasicAVTransformerBlock(nn.Module):
                 scale_ca_video_hidden_states_a2v_v, shift_ca_video_hidden_states_a2v_v = self.get_ada_values(
                     self.scale_shift_table_a2v_ca_video[:4, :], vx.shape[0], v_cross_scale_shift_timestep)[:2]
 
-                vx_scaled = vx_norm3 * (1 + scale_ca_video_hidden_states_a2v_v) + shift_ca_video_hidden_states_a2v_v
+                if comfy.model_management.in_training:
+                    vx_scaled = comfy.ldm.common_dit.rms_norm(vx) * (1 + scale_ca_video_hidden_states_a2v_v) + shift_ca_video_hidden_states_a2v_v
+                else:
+                    vx_scaled = comfy.quant_ops.ck.rms_adaln(vx, scale_ca_video_hidden_states_a2v_v, shift_ca_video_hidden_states_a2v_v)
                 ax_scaled = ax_norm3 * (1 + scale_ca_audio_hidden_states_a2v) + shift_ca_audio_hidden_states_a2v
                 del scale_ca_video_hidden_states_a2v_v, shift_ca_video_hidden_states_a2v_v, scale_ca_audio_hidden_states_a2v, shift_ca_audio_hidden_states_a2v
 
@@ -334,7 +343,10 @@ class BasicAVTransformerBlock(nn.Module):
                     self.scale_shift_table_a2v_ca_video[:4, :], vx.shape[0], v_cross_scale_shift_timestep)[2:4]
 
                 ax_scaled = ax_norm3 * (1 + scale_ca_audio_hidden_states_v2a) + shift_ca_audio_hidden_states_v2a
-                vx_scaled = vx_norm3 * (1 + scale_ca_video_hidden_states_v2a) + shift_ca_video_hidden_states_v2a
+                if comfy.model_management.in_training:
+                    vx_scaled = comfy.ldm.common_dit.rms_norm(vx) * (1 + scale_ca_video_hidden_states_v2a) + shift_ca_video_hidden_states_v2a
+                else:
+                    vx_scaled = comfy.quant_ops.ck.rms_adaln(vx, scale_ca_video_hidden_states_v2a, shift_ca_video_hidden_states_v2a)
                 del scale_ca_video_hidden_states_v2a, shift_ca_video_hidden_states_v2a, scale_ca_audio_hidden_states_v2a, shift_ca_audio_hidden_states_v2a
 
                 v2a_out = self.video_to_audio_attn(ax_scaled, context=vx_scaled, pe=a_cross_pe, k_pe=v_cross_pe, transformer_options=transformer_options)
@@ -344,12 +356,14 @@ class BasicAVTransformerBlock(nn.Module):
                 ax.addcmul_(v2a_out, gate_out_v2a)
                 del gate_out_v2a, v2a_out
 
-            del vx_norm3, ax_norm3
 
         # video feedforward
         if run_vx:
             vshift_mlp, vscale_mlp = self.get_ada_values(self.scale_shift_table, vx.shape[0], v_timestep, slice(3, 5))
-            vx_scaled = comfy.ldm.common_dit.rms_norm(vx) * (1 + vscale_mlp) + vshift_mlp
+            if comfy.model_management.in_training:
+                vx_scaled = comfy.ldm.common_dit.rms_norm(vx) * (1 + vscale_mlp) + vshift_mlp
+            else:
+                vx_scaled = comfy.quant_ops.ck.rms_adaln(vx, vscale_mlp, vshift_mlp)
             del vshift_mlp, vscale_mlp
 
             ff_out = self.ff(vx_scaled)
@@ -401,12 +415,16 @@ class LTXAVModel(LTXVModel):
         apply_gated_attention=False,
         caption_proj_before_connector=False,
         cross_attention_adaln=False,
+        ff_bias=True,
+        audio_ff_bias=True,
+        use_prompt_adaln_single=True,
         dtype=None,
         device=None,
         operations=None,
         **kwargs,
     ):
         # Store audio-specific parameters
+        self.audio_ff_bias = audio_ff_bias
         self.audio_in_channels = audio_in_channels
         self.audio_cross_attention_dim = audio_cross_attention_dim
         self.audio_attention_head_dim = audio_attention_head_dim
@@ -439,6 +457,8 @@ class LTXAVModel(LTXVModel):
             timestep_scale_multiplier=timestep_scale_multiplier,
             caption_proj_before_connector=caption_proj_before_connector,
             cross_attention_adaln=cross_attention_adaln,
+            ff_bias=ff_bias,
+            use_prompt_adaln_single=use_prompt_adaln_single,
             dtype=dtype,
             device=device,
             operations=operations,
@@ -463,7 +483,7 @@ class LTXAVModel(LTXVModel):
             operations=self.operations,
         )
 
-        if self.cross_attention_adaln:
+        if self.cross_attention_adaln and self.use_prompt_adaln_single:
             self.audio_prompt_adaln_single = AdaLayerNormSingle(
                 self.audio_inner_dim,
                 embedding_coefficient=2,
@@ -594,6 +614,8 @@ class LTXAVModel(LTXVModel):
                     a_context_dim=self.audio_cross_attention_dim,
                     apply_gated_attention=self.apply_gated_attention,
                     cross_attention_adaln=self.cross_attention_adaln,
+                    ff_bias=self.ff_bias,
+                    audio_ff_bias=self.audio_ff_bias,
                     dtype=dtype,
                     device=device,
                     operations=self.operations,
@@ -715,32 +737,35 @@ class LTXAVModel(LTXVModel):
 
     def _prepare_timestep(self, timestep, batch_size, hidden_dtype, **kwargs):
         """Prepare timestep embeddings."""
-        # TODO: some code reuse is needed here.
         grid_mask = kwargs.get("grid_mask", None)
-        if grid_mask is not None:
-            timestep = timestep[:, grid_mask]
-
-        timestep_scaled = timestep * self.timestep_scale_multiplier
-
-        v_timestep, v_embedded_timestep = self.adaln_single(
-            timestep_scaled.flatten(),
-            {"resolution": None, "aspect_ratio": None},
-            batch_size=batch_size,
-            hidden_dtype=hidden_dtype,
-        )
-
-        # Calculate patches_per_frame from orig_shape: [batch, channels, frames, height, width]
-        # Video tokens are arranged as (frames * height * width), so patches_per_frame = height * width
         orig_shape = kwargs.get("orig_shape")
         has_spatial_mask = kwargs.get("has_spatial_mask", None)
         v_patches_per_frame = None
         if not has_spatial_mask and orig_shape is not None and len(orig_shape) == 5:
-            # orig_shape[3] = height, orig_shape[4] = width (in latent space)
             v_patches_per_frame = orig_shape[3] * orig_shape[4]
 
-        # Reshape to [batch_size, num_tokens, dim] and compress for storage
-        v_timestep = CompressedTimestep(v_timestep.view(batch_size, -1, v_timestep.shape[-1]), v_patches_per_frame)
-        v_embedded_timestep = CompressedTimestep(v_embedded_timestep.view(batch_size, -1, v_embedded_timestep.shape[-1]), v_patches_per_frame)
+        # Used by compute_prompt_timestep and the audio cross-attention paths.
+        timestep_scaled = (timestep[:, grid_mask] if grid_mask is not None else timestep) * self.timestep_scale_multiplier
+
+        # When patches in a frame share a timestep (no spatial mask), project one row per frame instead of one per token
+        per_frame_path = v_patches_per_frame is not None and (timestep.numel() // batch_size) % v_patches_per_frame == 0
+        if per_frame_path:
+            per_frame = timestep.reshape(batch_size, -1, v_patches_per_frame)[:, :, 0]
+            if grid_mask is not None:
+                # All-or-nothing per frame when has_spatial_mask=False.
+                per_frame = per_frame[:, grid_mask[::v_patches_per_frame]]
+            ts_input = per_frame * self.timestep_scale_multiplier
+        else:
+            ts_input = timestep_scaled
+
+        v_timestep, v_embedded_timestep = self.adaln_single(
+            ts_input.flatten(),
+            {"resolution": None, "aspect_ratio": None},
+            batch_size=batch_size,
+            hidden_dtype=hidden_dtype,
+        )
+        v_timestep = CompressedTimestep(v_timestep.view(batch_size, -1, v_timestep.shape[-1]), v_patches_per_frame, per_frame=per_frame_path)
+        v_embedded_timestep = CompressedTimestep(v_embedded_timestep.view(batch_size, -1, v_embedded_timestep.shape[-1]), v_patches_per_frame, per_frame=per_frame_path)
 
         v_prompt_timestep = compute_prompt_timestep(
             self.prompt_adaln_single, timestep_scaled, batch_size, hidden_dtype
@@ -764,25 +789,25 @@ class LTXAVModel(LTXVModel):
 
             # Cross-attention timesteps - compress these too
             av_ca_audio_scale_shift_timestep, _ = self.av_ca_audio_scale_shift_adaln_single(
-                timestep.max().expand_as(a_timestep_flat),
+                a_timestep_flat,
                 {"resolution": None, "aspect_ratio": None},
                 batch_size=batch_size,
                 hidden_dtype=hidden_dtype,
             )
             av_ca_video_scale_shift_timestep, _ = self.av_ca_video_scale_shift_adaln_single(
-                a_timestep.max().expand_as(timestep_flat),
+                timestep_flat,
                 {"resolution": None, "aspect_ratio": None},
                 batch_size=batch_size,
                 hidden_dtype=hidden_dtype,
             )
             av_ca_a2v_gate_noise_timestep, _ = self.av_ca_a2v_gate_adaln_single(
-                a_timestep.max().expand_as(timestep_flat) * av_ca_factor,
+                a_timestep_scaled.max().expand_as(timestep_flat) * av_ca_factor,
                 {"resolution": None, "aspect_ratio": None},
                 batch_size=batch_size,
                 hidden_dtype=hidden_dtype,
             )
             av_ca_v2a_gate_noise_timestep, _ = self.av_ca_v2a_gate_adaln_single(
-                timestep.max().expand_as(a_timestep_flat) * av_ca_factor,
+                timestep_scaled.max().expand_as(a_timestep_flat) * av_ca_factor,
                 {"resolution": None, "aspect_ratio": None},
                 batch_size=batch_size,
                 hidden_dtype=hidden_dtype,
@@ -907,9 +932,20 @@ class LTXAVModel(LTXVModel):
         """Process transformer blocks for LTXAV."""
         patches_replace = transformer_options.get("patches_replace", {})
         blocks_replace = patches_replace.get("dit", {})
+        prefetch_queue = comfy.model_prefetch.make_prefetch_queue(list(self.transformer_blocks), vx.device, transformer_options)
+
+        # Blocks whose self-attention should be perturbed to a value-passthrough (STG).
+        stg_self_attn_blocks = transformer_options.get("stg_self_attn_blocks", ())
 
         # Process transformer blocks
+        comfy.model_prefetch.malloc_graph_begin(vx.device)
         for i, block in enumerate(self.transformer_blocks):
+            comfy.model_prefetch.prefetch_queue_pop(
+                prefetch_queue, vx.device, block, malloc_scope="block"
+            )
+            block_transformer_options = transformer_options
+            if i in stg_self_attn_blocks:
+                block_transformer_options = {**transformer_options, "stg_skip_self_attn": True}
             if ("double_block", i) in blocks_replace:
 
                 def block_wrap(args):
@@ -952,7 +988,7 @@ class LTXAVModel(LTXVModel):
                         "a_cross_scale_shift_timestep": av_ca_audio_scale_shift_timestep,
                         "v_cross_gate_timestep": av_ca_a2v_gate_noise_timestep,
                         "a_cross_gate_timestep": av_ca_v2a_gate_noise_timestep,
-                        "transformer_options": transformer_options,
+                        "transformer_options": block_transformer_options,
                         "self_attention_mask": self_attention_mask,
                         "v_prompt_timestep": v_prompt_timestep,
                         "a_prompt_timestep": a_prompt_timestep,
@@ -976,11 +1012,16 @@ class LTXAVModel(LTXVModel):
                     a_cross_scale_shift_timestep=av_ca_audio_scale_shift_timestep,
                     v_cross_gate_timestep=av_ca_a2v_gate_noise_timestep,
                     a_cross_gate_timestep=av_ca_v2a_gate_noise_timestep,
-                    transformer_options=transformer_options,
+                    transformer_options=block_transformer_options,
                     self_attention_mask=self_attention_mask,
                     v_prompt_timestep=v_prompt_timestep,
                     a_prompt_timestep=a_prompt_timestep,
                 )
+
+        comfy.model_prefetch.prefetch_queue_pop(
+            prefetch_queue, vx.device, None, malloc_scope="block"
+        )
+        comfy.model_prefetch.malloc_graph_end()
 
         return [vx, ax]
 

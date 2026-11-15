@@ -1,0 +1,1266 @@
+{
+  "revision": 0,
+  "last_node_id": 67,
+  "last_link_id": 0,
+  "nodes": [
+    {
+      "id": 67,
+      "type": "936dfaf2-575a-48b5-9e0c-df391319d11f",
+      "pos": [
+        -3950,
+        5000
+      ],
+      "size": [
+        430,
+        480
+      ],
+      "flags": {},
+      "order": 3,
+      "mode": 0,
+      "inputs": [
+        {
+          "localized_name": "source_image",
+          "name": "source_image",
+          "type": "IMAGE",
+          "link": null
+        },
+        {
+          "localized_name": "inference_resolution",
+          "name": "inference_resolution",
+          "type": "INT",
+          "widget": {
+            "name": "inference_resolution"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "inference_batch_size",
+          "name": "inference_batch_size",
+          "type": "INT",
+          "widget": {
+            "name": "inference_batch_size"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "mesh_frame_index",
+          "name": "mesh_frame_index",
+          "type": "INT",
+          "widget": {
+            "name": "mesh_frame_index"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "mesh_decimation",
+          "name": "mesh_decimation",
+          "type": "INT",
+          "widget": {
+            "name": "mesh_decimation"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "mesh_gap_threshold",
+          "name": "mesh_gap_threshold",
+          "type": "FLOAT",
+          "widget": {
+            "name": "mesh_gap_threshold"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "mesh_texture",
+          "name": "mesh_texture",
+          "type": "BOOLEAN",
+          "widget": {
+            "name": "mesh_texture"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "moge_model",
+          "name": "moge_model",
+          "type": "COMBO",
+          "widget": {
+            "name": "moge_model"
+          },
+          "link": null
+        },
+        {
+          "label": "auto_resize_input",
+          "name": "switch",
+          "type": "BOOLEAN",
+          "widget": {
+            "name": "switch"
+          },
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "localized_name": "mesh",
+          "name": "mesh",
+          "type": "MESH",
+          "links": []
+        },
+        {
+          "localized_name": "normal_opengl",
+          "name": "normal_opengl",
+          "type": "IMAGE",
+          "links": []
+        },
+        {
+          "localized_name": "normal_directx",
+          "name": "normal_directx",
+          "type": "IMAGE",
+          "links": []
+        }
+      ],
+      "properties": {
+        "proxyWidgets": [
+          [
+            "55",
+            "resolution_level"
+          ],
+          [
+            "55",
+            "batch_size"
+          ],
+          [
+            "54",
+            "batch_index"
+          ],
+          [
+            "54",
+            "decimation"
+          ],
+          [
+            "54",
+            "discontinuity_threshold"
+          ],
+          [
+            "54",
+            "texture"
+          ],
+          [
+            "58",
+            "model_name"
+          ],
+          [
+            "66",
+            "switch"
+          ]
+        ],
+        "cnr_id": "comfy-core",
+        "ver": "0.21.1",
+        "enableTabs": false,
+        "tabWidth": 65,
+        "tabXOffset": 10,
+        "hasSecondTab": false,
+        "secondTabText": "Send Back",
+        "secondTabOffset": 80,
+        "secondTabWidth": 65
+      },
+      "widgets_values": [],
+      "title": "Geometry Estimation (MoGe)"
+    }
+  ],
+  "links": [],
+  "version": 0.4,
+  "definitions": {
+    "subgraphs": [
+      {
+        "id": "936dfaf2-575a-48b5-9e0c-df391319d11f",
+        "version": 1,
+        "state": {
+          "lastGroupId": 1,
+          "lastNodeId": 69,
+          "lastLinkId": 91,
+          "lastRerouteId": 0
+        },
+        "revision": 0,
+        "config": {},
+        "name": "Geometry Estimation (MoGe)",
+        "inputNode": {
+          "id": -10,
+          "bounding": [
+            -5130,
+            5320,
+            167.337890625,
+            228
+          ]
+        },
+        "outputNode": {
+          "id": -20,
+          "bounding": [
+            -3090,
+            4966,
+            131.51953125,
+            108
+          ]
+        },
+        "inputs": [
+          {
+            "id": "cc8ce79d-ba20-4a25-a51c-c2afcd35e520",
+            "name": "source_image",
+            "type": "IMAGE",
+            "linkIds": [
+              48,
+              55,
+              56,
+              82
+            ],
+            "localized_name": "source_image",
+            "pos": [
+              -4986.662109375,
+              5344
+            ]
+          },
+          {
+            "id": "06eefa21-8e60-49f3-9a34-35b081f4ae52",
+            "name": "inference_resolution",
+            "type": "INT",
+            "linkIds": [
+              73
+            ],
+            "localized_name": "inference_resolution",
+            "pos": [
+              -4986.662109375,
+              5364
+            ]
+          },
+          {
+            "id": "616638fe-f603-4d10-bae9-fc87c134380f",
+            "name": "inference_batch_size",
+            "type": "INT",
+            "linkIds": [
+              74
+            ],
+            "localized_name": "inference_batch_size",
+            "pos": [
+              -4986.662109375,
+              5384
+            ]
+          },
+          {
+            "id": "fcacfca9-7927-4c38-94da-8ab22256325f",
+            "name": "mesh_frame_index",
+            "type": "INT",
+            "linkIds": [
+              75
+            ],
+            "localized_name": "mesh_frame_index",
+            "pos": [
+              -4986.662109375,
+              5404
+            ]
+          },
+          {
+            "id": "acbfe7f9-1b69-42c1-8614-4ccf54b28d4e",
+            "name": "mesh_decimation",
+            "type": "INT",
+            "linkIds": [
+              76
+            ],
+            "localized_name": "mesh_decimation",
+            "pos": [
+              -4986.662109375,
+              5424
+            ]
+          },
+          {
+            "id": "cd20f9a7-3a0a-4c4c-98d7-96f423867b87",
+            "name": "mesh_gap_threshold",
+            "type": "FLOAT",
+            "linkIds": [
+              77
+            ],
+            "localized_name": "mesh_gap_threshold",
+            "pos": [
+              -4986.662109375,
+              5444
+            ]
+          },
+          {
+            "id": "6f5c15f7-7f77-4fc9-b47b-3514467b06b6",
+            "name": "mesh_texture",
+            "type": "BOOLEAN",
+            "linkIds": [
+              78
+            ],
+            "localized_name": "mesh_texture",
+            "pos": [
+              -4986.662109375,
+              5464
+            ]
+          },
+          {
+            "id": "65694805-186e-4181-a721-df8b5af49d31",
+            "name": "moge_model",
+            "type": "COMBO",
+            "linkIds": [
+              79
+            ],
+            "localized_name": "moge_model",
+            "pos": [
+              -4986.662109375,
+              5484
+            ]
+          },
+          {
+            "id": "badf1be1-53c6-4fc1-b5cd-79ad3daf1674",
+            "name": "switch",
+            "type": "BOOLEAN",
+            "linkIds": [
+              83
+            ],
+            "label": "auto_resize_input",
+            "pos": [
+              -4986.662109375,
+              5504
+            ]
+          }
+        ],
+        "outputs": [
+          {
+            "id": "3c616ea0-9a4c-4cff-a405-662320229df0",
+            "name": "mesh",
+            "type": "MESH",
+            "linkIds": [
+              34
+            ],
+            "localized_name": "mesh",
+            "pos": [
+              -3066,
+              4990
+            ]
+          },
+          {
+            "id": "ff85a763-b7f7-4bcc-9b1d-a4eaf55ad2f9",
+            "name": "normal_opengl",
+            "type": "IMAGE",
+            "linkIds": [
+              62
+            ],
+            "localized_name": "normal_opengl",
+            "pos": [
+              -3066,
+              5010
+            ]
+          },
+          {
+            "id": "26b3f88a-0ba0-4d4d-9c7d-0ad76106c844",
+            "name": "normal_directx",
+            "type": "IMAGE",
+            "linkIds": [
+              63
+            ],
+            "localized_name": "normal_directx",
+            "pos": [
+              -3066,
+              5030
+            ]
+          }
+        ],
+        "widgets": [],
+        "nodes": [
+          {
+            "id": 54,
+            "type": "MoGePointMapToMesh",
+            "pos": [
+              -3440,
+              5220
+            ],
+            "size": [
+              290,
+              200
+            ],
+            "flags": {},
+            "order": 0,
+            "mode": 0,
+            "inputs": [
+              {
+                "localized_name": "moge_geometry",
+                "name": "moge_geometry",
+                "type": "MOGE_GEOMETRY",
+                "link": 33
+              },
+              {
+                "localized_name": "batch_index",
+                "name": "batch_index",
+                "type": "INT",
+                "widget": {
+                  "name": "batch_index"
+                },
+                "link": 75
+              },
+              {
+                "localized_name": "decimation",
+                "name": "decimation",
+                "type": "INT",
+                "widget": {
+                  "name": "decimation"
+                },
+                "link": 76
+              },
+              {
+                "localized_name": "discontinuity_threshold",
+                "name": "discontinuity_threshold",
+                "type": "FLOAT",
+                "widget": {
+                  "name": "discontinuity_threshold"
+                },
+                "link": 77
+              },
+              {
+                "localized_name": "texture",
+                "name": "texture",
+                "type": "BOOLEAN",
+                "widget": {
+                  "name": "texture"
+                },
+                "link": 78
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "MESH",
+                "name": "MESH",
+                "type": "MESH",
+                "links": [
+                  34
+                ]
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "MoGePointMapToMesh",
+              "cnr_id": "comfy-core",
+              "ver": "0.21.1",
+              "enableTabs": false,
+              "tabWidth": 65,
+              "tabXOffset": 10,
+              "hasSecondTab": false,
+              "secondTabText": "Send Back",
+              "secondTabOffset": 80,
+              "secondTabWidth": 65
+            },
+            "widgets_values": [
+              0,
+              1,
+              0.04,
+              true
+            ]
+          },
+          {
+            "id": 55,
+            "type": "MoGeInference",
+            "pos": [
+              -3790,
+              5180
+            ],
+            "size": [
+              270,
+              230
+            ],
+            "flags": {},
+            "order": 1,
+            "mode": 0,
+            "inputs": [
+              {
+                "localized_name": "moge_model",
+                "name": "moge_model",
+                "type": "MOGE_MODEL",
+                "link": 58
+              },
+              {
+                "localized_name": "image",
+                "name": "image",
+                "type": "IMAGE",
+                "link": 81
+              },
+              {
+                "localized_name": "resolution_level",
+                "name": "resolution_level",
+                "type": "INT",
+                "widget": {
+                  "name": "resolution_level"
+                },
+                "link": 73
+              },
+              {
+                "localized_name": "fov_x_degrees",
+                "name": "fov_x_degrees",
+                "type": "FLOAT",
+                "widget": {
+                  "name": "fov_x_degrees"
+                },
+                "link": null
+              },
+              {
+                "localized_name": "batch_size",
+                "name": "batch_size",
+                "type": "INT",
+                "widget": {
+                  "name": "batch_size"
+                },
+                "link": 74
+              },
+              {
+                "localized_name": "force_projection",
+                "name": "force_projection",
+                "type": "BOOLEAN",
+                "widget": {
+                  "name": "force_projection"
+                },
+                "link": null
+              },
+              {
+                "localized_name": "apply_mask",
+                "name": "apply_mask",
+                "type": "BOOLEAN",
+                "widget": {
+                  "name": "apply_mask"
+                },
+                "link": null
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "moge_geometry",
+                "name": "moge_geometry",
+                "type": "MOGE_GEOMETRY",
+                "links": [
+                  33,
+                  59,
+                  60
+                ]
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "MoGeInference",
+              "cnr_id": "comfy-core",
+              "ver": "0.21.1",
+              "enableTabs": false,
+              "tabWidth": 65,
+              "tabXOffset": 10,
+              "hasSecondTab": false,
+              "secondTabText": "Send Back",
+              "secondTabOffset": 80,
+              "secondTabWidth": 65
+            },
+            "widgets_values": [
+              9,
+              0,
+              4,
+              true,
+              true
+            ]
+          },
+          {
+            "id": 58,
+            "type": "LoadMoGeModel",
+            "pos": [
+              -4180,
+              4910
+            ],
+            "size": [
+              270,
+              140
+            ],
+            "flags": {},
+            "order": 2,
+            "mode": 0,
+            "inputs": [
+              {
+                "localized_name": "model_name",
+                "name": "model_name",
+                "type": "COMBO",
+                "widget": {
+                  "name": "model_name"
+                },
+                "link": 79
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "MOGE_MODEL",
+                "name": "MOGE_MODEL",
+                "type": "MOGE_MODEL",
+                "links": [
+                  58
+                ]
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "LoadMoGeModel",
+              "cnr_id": "comfy-core",
+              "ver": "0.21.1",
+              "models": [
+                {
+                  "name": "moge_2_vitl_normal_fp16.safetensors",
+                  "url": "https://huggingface.co/Comfy-Org/MoGe/resolve/main/geometry_estimation/moge_2_vitl_normal_fp16.safetensors",
+                  "directory": "geometry_estimation"
+                }
+              ],
+              "enableTabs": false,
+              "tabWidth": 65,
+              "tabXOffset": 10,
+              "hasSecondTab": false,
+              "secondTabText": "Send Back",
+              "secondTabOffset": 80,
+              "secondTabWidth": 65
+            },
+            "widgets_values": [
+              "moge_2_vitl_normal_fp16.safetensors"
+            ]
+          },
+          {
+            "id": 59,
+            "type": "ComfyMathExpression",
+            "pos": [
+              -4720,
+              4910
+            ],
+            "size": [
+              400,
+              200
+            ],
+            "flags": {},
+            "order": 3,
+            "mode": 0,
+            "inputs": [
+              {
+                "label": "a",
+                "localized_name": "values.a",
+                "name": "values.a",
+                "type": "FLOAT,INT,BOOLEAN",
+                "link": 49
+              },
+              {
+                "label": "b",
+                "localized_name": "values.b",
+                "name": "values.b",
+                "shape": 7,
+                "type": "FLOAT,INT,BOOLEAN",
+                "link": null
+              },
+              {
+                "localized_name": "expression",
+                "name": "expression",
+                "type": "STRING",
+                "widget": {
+                  "name": "expression"
+                },
+                "link": null
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "FLOAT",
+                "name": "FLOAT",
+                "type": "FLOAT",
+                "links": null
+              },
+              {
+                "localized_name": "INT",
+                "name": "INT",
+                "type": "INT",
+                "links": null
+              },
+              {
+                "localized_name": "BOOL",
+                "name": "BOOL",
+                "type": "BOOLEAN",
+                "links": [
+                  53
+                ]
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "ComfyMathExpression",
+              "cnr_id": "comfy-core",
+              "ver": "0.21.1",
+              "enableTabs": false,
+              "tabWidth": 65,
+              "tabXOffset": 10,
+              "hasSecondTab": false,
+              "secondTabText": "Send Back",
+              "secondTabOffset": 80,
+              "secondTabWidth": 65
+            },
+            "widgets_values": [
+              "a > 2048"
+            ]
+          },
+          {
+            "id": 60,
+            "type": "GetImageSize",
+            "pos": [
+              -4980,
+              4910
+            ],
+            "size": [
+              230,
+              160
+            ],
+            "flags": {},
+            "order": 4,
+            "mode": 0,
+            "inputs": [
+              {
+                "localized_name": "image",
+                "name": "image",
+                "type": "IMAGE",
+                "link": 48
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "width",
+                "name": "width",
+                "type": "INT",
+                "links": [
+                  49
+                ]
+              },
+              {
+                "localized_name": "height",
+                "name": "height",
+                "type": "INT",
+                "links": null
+              },
+              {
+                "localized_name": "batch_size",
+                "name": "batch_size",
+                "type": "INT",
+                "links": null
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "GetImageSize",
+              "cnr_id": "comfy-core",
+              "ver": "0.21.1",
+              "enableTabs": false,
+              "tabWidth": 65,
+              "tabXOffset": 10,
+              "hasSecondTab": false,
+              "secondTabText": "Send Back",
+              "secondTabOffset": 80,
+              "secondTabWidth": 65
+            }
+          },
+          {
+            "id": 61,
+            "type": "ResizeImagesByLongerEdge",
+            "pos": [
+              -4650,
+              5210
+            ],
+            "size": [
+              310,
+              110
+            ],
+            "flags": {},
+            "order": 5,
+            "mode": 0,
+            "inputs": [
+              {
+                "localized_name": "images",
+                "name": "images",
+                "type": "IMAGE",
+                "link": 55
+              },
+              {
+                "localized_name": "longer_edge",
+                "name": "longer_edge",
+                "type": "INT",
+                "widget": {
+                  "name": "longer_edge"
+                },
+                "link": null
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "images",
+                "name": "images",
+                "type": "IMAGE",
+                "links": [
+                  54
+                ]
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "ResizeImagesByLongerEdge",
+              "cnr_id": "comfy-core",
+              "ver": "0.21.1",
+              "enableTabs": false,
+              "tabWidth": 65,
+              "tabXOffset": 10,
+              "hasSecondTab": false,
+              "secondTabText": "Send Back",
+              "secondTabOffset": 80,
+              "secondTabWidth": 65
+            },
+            "widgets_values": [
+              2048
+            ]
+          },
+          {
+            "id": 62,
+            "type": "ComfySwitchNode",
+            "pos": [
+              -4180,
+              5120
+            ],
+            "size": [
+              270,
+              130
+            ],
+            "flags": {},
+            "order": 6,
+            "mode": 0,
+            "inputs": [
+              {
+                "localized_name": "on_false",
+                "name": "on_false",
+                "type": "*",
+                "link": 56
+              },
+              {
+                "localized_name": "on_true",
+                "name": "on_true",
+                "type": "*",
+                "link": 54
+              },
+              {
+                "localized_name": "switch",
+                "name": "switch",
+                "type": "BOOLEAN",
+                "widget": {
+                  "name": "switch"
+                },
+                "link": 53
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "output",
+                "name": "output",
+                "type": "*",
+                "links": [
+                  80
+                ]
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "ComfySwitchNode",
+              "cnr_id": "comfy-core",
+              "ver": "0.21.1",
+              "enableTabs": false,
+              "tabWidth": 65,
+              "tabXOffset": 10,
+              "hasSecondTab": false,
+              "secondTabText": "Send Back",
+              "secondTabOffset": 80,
+              "secondTabWidth": 65
+            },
+            "widgets_values": [
+              false
+            ]
+          },
+          {
+            "id": 63,
+            "type": "MoGeRender",
+            "pos": [
+              -3430,
+              4890
+            ],
+            "size": [
+              270,
+              110
+            ],
+            "flags": {},
+            "order": 7,
+            "mode": 0,
+            "inputs": [
+              {
+                "localized_name": "moge_geometry",
+                "name": "moge_geometry",
+                "type": "MOGE_GEOMETRY",
+                "link": 59
+              },
+              {
+                "localized_name": "output",
+                "name": "output",
+                "type": "COMBO",
+                "widget": {
+                  "name": "output"
+                },
+                "link": null
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "IMAGE",
+                "name": "IMAGE",
+                "type": "IMAGE",
+                "links": [
+                  62
+                ]
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "MoGeRender",
+              "cnr_id": "comfy-core",
+              "ver": "0.21.1",
+              "enableTabs": false,
+              "tabWidth": 65,
+              "tabXOffset": 10,
+              "hasSecondTab": false,
+              "secondTabText": "Send Back",
+              "secondTabOffset": 80,
+              "secondTabWidth": 65
+            },
+            "widgets_values": [
+              "normal_opengl"
+            ]
+          },
+          {
+            "id": 64,
+            "type": "MoGeRender",
+            "pos": [
+              -3430,
+              5050
+            ],
+            "size": [
+              270,
+              110
+            ],
+            "flags": {},
+            "order": 8,
+            "mode": 0,
+            "inputs": [
+              {
+                "localized_name": "moge_geometry",
+                "name": "moge_geometry",
+                "type": "MOGE_GEOMETRY",
+                "link": 60
+              },
+              {
+                "localized_name": "output",
+                "name": "output",
+                "type": "COMBO",
+                "widget": {
+                  "name": "output"
+                },
+                "link": null
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "IMAGE",
+                "name": "IMAGE",
+                "type": "IMAGE",
+                "links": [
+                  63
+                ]
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "MoGeRender",
+              "cnr_id": "comfy-core",
+              "ver": "0.21.1",
+              "enableTabs": false,
+              "tabWidth": 65,
+              "tabXOffset": 10,
+              "hasSecondTab": false,
+              "secondTabText": "Send Back",
+              "secondTabOffset": 80,
+              "secondTabWidth": 65
+            },
+            "widgets_values": [
+              "normal_directx"
+            ]
+          },
+          {
+            "id": 66,
+            "type": "ComfySwitchNode",
+            "pos": [
+              -4160,
+              5340
+            ],
+            "size": [
+              270,
+              130
+            ],
+            "flags": {},
+            "order": 9,
+            "mode": 0,
+            "inputs": [
+              {
+                "localized_name": "on_false",
+                "name": "on_false",
+                "type": "*",
+                "link": 82
+              },
+              {
+                "localized_name": "on_true",
+                "name": "on_true",
+                "type": "*",
+                "link": 80
+              },
+              {
+                "localized_name": "switch",
+                "name": "switch",
+                "type": "BOOLEAN",
+                "widget": {
+                  "name": "switch"
+                },
+                "link": 83
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "output",
+                "name": "output",
+                "type": "*",
+                "links": [
+                  81
+                ]
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "ComfySwitchNode",
+              "cnr_id": "comfy-core",
+              "ver": "0.21.1",
+              "enableTabs": false,
+              "tabWidth": 65,
+              "tabXOffset": 10,
+              "hasSecondTab": false,
+              "secondTabText": "Send Back",
+              "secondTabOffset": 80,
+              "secondTabWidth": 65
+            },
+            "widgets_values": [
+              true
+            ]
+          }
+        ],
+        "groups": [
+          {
+            "id": 1,
+            "title": "auto_resize_if_width_gt_2048",
+            "bounding": [
+              -5000,
+              4840,
+              690,
+              280
+            ],
+            "color": "#3f789e",
+            "flags": {}
+          }
+        ],
+        "links": [
+          {
+            "id": 33,
+            "origin_id": 55,
+            "origin_slot": 0,
+            "target_id": 54,
+            "target_slot": 0,
+            "type": "MOGE_GEOMETRY"
+          },
+          {
+            "id": 58,
+            "origin_id": 58,
+            "origin_slot": 0,
+            "target_id": 55,
+            "target_slot": 0,
+            "type": "MOGE_MODEL"
+          },
+          {
+            "id": 49,
+            "origin_id": 60,
+            "origin_slot": 0,
+            "target_id": 59,
+            "target_slot": 0,
+            "type": "INT"
+          },
+          {
+            "id": 54,
+            "origin_id": 61,
+            "origin_slot": 0,
+            "target_id": 62,
+            "target_slot": 1,
+            "type": "IMAGE"
+          },
+          {
+            "id": 53,
+            "origin_id": 59,
+            "origin_slot": 2,
+            "target_id": 62,
+            "target_slot": 2,
+            "type": "BOOLEAN"
+          },
+          {
+            "id": 59,
+            "origin_id": 55,
+            "origin_slot": 0,
+            "target_id": 63,
+            "target_slot": 0,
+            "type": "MOGE_GEOMETRY"
+          },
+          {
+            "id": 60,
+            "origin_id": 55,
+            "origin_slot": 0,
+            "target_id": 64,
+            "target_slot": 0,
+            "type": "MOGE_GEOMETRY"
+          },
+          {
+            "id": 48,
+            "origin_id": -10,
+            "origin_slot": 0,
+            "target_id": 60,
+            "target_slot": 0,
+            "type": "IMAGE"
+          },
+          {
+            "id": 55,
+            "origin_id": -10,
+            "origin_slot": 0,
+            "target_id": 61,
+            "target_slot": 0,
+            "type": "IMAGE"
+          },
+          {
+            "id": 56,
+            "origin_id": -10,
+            "origin_slot": 0,
+            "target_id": 62,
+            "target_slot": 0,
+            "type": "IMAGE"
+          },
+          {
+            "id": 34,
+            "origin_id": 54,
+            "origin_slot": 0,
+            "target_id": -20,
+            "target_slot": 0,
+            "type": "MESH"
+          },
+          {
+            "id": 62,
+            "origin_id": 63,
+            "origin_slot": 0,
+            "target_id": -20,
+            "target_slot": 1,
+            "type": "IMAGE"
+          },
+          {
+            "id": 63,
+            "origin_id": 64,
+            "origin_slot": 0,
+            "target_id": -20,
+            "target_slot": 2,
+            "type": "IMAGE"
+          },
+          {
+            "id": 73,
+            "origin_id": -10,
+            "origin_slot": 1,
+            "target_id": 55,
+            "target_slot": 2,
+            "type": "INT"
+          },
+          {
+            "id": 74,
+            "origin_id": -10,
+            "origin_slot": 2,
+            "target_id": 55,
+            "target_slot": 4,
+            "type": "INT"
+          },
+          {
+            "id": 75,
+            "origin_id": -10,
+            "origin_slot": 3,
+            "target_id": 54,
+            "target_slot": 1,
+            "type": "INT"
+          },
+          {
+            "id": 76,
+            "origin_id": -10,
+            "origin_slot": 4,
+            "target_id": 54,
+            "target_slot": 2,
+            "type": "INT"
+          },
+          {
+            "id": 77,
+            "origin_id": -10,
+            "origin_slot": 5,
+            "target_id": 54,
+            "target_slot": 3,
+            "type": "FLOAT"
+          },
+          {
+            "id": 78,
+            "origin_id": -10,
+            "origin_slot": 6,
+            "target_id": 54,
+            "target_slot": 4,
+            "type": "BOOLEAN"
+          },
+          {
+            "id": 79,
+            "origin_id": -10,
+            "origin_slot": 7,
+            "target_id": 58,
+            "target_slot": 0,
+            "type": "COMBO"
+          },
+          {
+            "id": 80,
+            "origin_id": 62,
+            "origin_slot": 0,
+            "target_id": 66,
+            "target_slot": 1,
+            "type": "IMAGE"
+          },
+          {
+            "id": 81,
+            "origin_id": 66,
+            "origin_slot": 0,
+            "target_id": 55,
+            "target_slot": 1,
+            "type": "IMAGE"
+          },
+          {
+            "id": 82,
+            "origin_id": -10,
+            "origin_slot": 0,
+            "target_id": 66,
+            "target_slot": 0,
+            "type": "IMAGE"
+          },
+          {
+            "id": 83,
+            "origin_id": -10,
+            "origin_slot": 8,
+            "target_id": 66,
+            "target_slot": 2,
+            "type": "BOOLEAN"
+          }
+        ],
+        "category": "3D/Geometry Estimation",
+        "description": "Estimates 3D scene geometry from an input image using MoGe, outputting a mesh plus OpenGL and DirectX normal maps.",
+        "extra": {}
+      }
+    ]
+  },
+  "extra": {}
+}

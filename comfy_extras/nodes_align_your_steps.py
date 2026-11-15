@@ -29,7 +29,7 @@ class AlignYourStepsScheduler(io.ComfyNode):
         return io.Schema(
             node_id="AlignYourStepsScheduler",
             search_aliases=["AYS scheduler"],
-            category="sampling/custom_sampling/schedulers",
+            category="model/sampling/schedulers",
             inputs=[
                 io.Combo.Input("model_type", options=["SD1", "SDXL", "SVD"]),
                 io.Int.Input("steps", default=10, min=1, max=10000),

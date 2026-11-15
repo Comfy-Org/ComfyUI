@@ -153,7 +153,7 @@ class WanCameraEmbedding(io.ComfyNode):
     def define_schema(cls):
         return io.Schema(
             node_id="WanCameraEmbedding",
-            category="camera",
+            category="model/conditioning/wan/camera",
             inputs=[
                 io.Combo.Input(
                     "camera_pose",

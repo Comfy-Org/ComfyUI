@@ -4,7 +4,7 @@ from fractions import Fraction
 from typing import Optional, Union, IO
 import io
 import av
-from .._util import VideoContainer, VideoCodec, VideoComponents
+from .._util import VideoContainer, VideoCodec, VideoComponents, normalize_crop_rect
 
 class VideoInput(ABC):
     """
@@ -27,12 +27,39 @@ class VideoInput(ABC):
         path: Union[str, IO[bytes]],
         format: VideoContainer = VideoContainer.AUTO,
         codec: VideoCodec = VideoCodec.AUTO,
-        metadata: Optional[dict] = None
+        metadata: Optional[dict] = None,
+        bit_depth: int | None = None,
+        crf: float | None = None,
+        color_space: str | None = None,
+        preset: str | None = None,
+        chroma_subsampling: str | None = None,
     ):
         """
         Abstract method to save the video input to a file.
+
+        bit_depth requests the encoded bit depth; unsupported depths use the encoder's highest
+        supported depth with a warning. None keeps the video's native depth where supported.
+        crf selects the H.264 or AV1 constant rate factor; None uses 18 for H.264 or 24 for AV1 when encoding.
+        preset selects the H.264 encoder speed/compression trade-off (e.g. "ultrafast");
+        None uses the encoder default. Ignored for other codecs.
+        chroma_subsampling selects 444, 422, or 420. None keeps the video's requested or native
+        subsampling; unspecified tensor inputs use 444 for ProRes and 420 for H.264/AV1.
+        An explicit choice forces re-encoding. Unsupported choices use the closest supported mode
+        with a warning.
+        color_space="sRGB" selects SDR BT.709/sRGB, "HDR" selects BT.2020/HLG, and "HDR PQ"
+        selects BT.2020/PQ. Bit depth is selected independently.
+        Tensor-created videos default to sRGB when color_space is None. Loaded videos keep matching recognized native color
+        properties; other input pixels must already use the selected color space.
         """
         pass
+
+    def get_color_space(self) -> str:
+        """Return the video's color space as sRGB, HDR, HDR PQ, or auto when unspecified."""
+        return "auto"
+
+    def get_chroma_subsampling(self) -> str | None:
+        """Return requested or native chroma subsampling, or None for codec defaults."""
+        return None
 
     @abstractmethod
     def as_trimmed(
@@ -48,6 +75,46 @@ class VideoInput(ABC):
             A new VideoInput, or None if the result would have negative duration
         """
         pass
+
+    def as_cropped(
+        self,
+        x: int = 0,
+        y: int = 0,
+        width: int = 0,
+        height: int = 0,
+    ) -> VideoInput:
+        """
+        Create a new VideoInput spatially cropped to the given pixel rectangle.
+
+        The rectangle is clamped to the frame and even-aligned for encoder
+        compatibility. An empty or full-frame rectangle returns the input
+        unchanged.
+
+        Default implementation materializes the video via get_components();
+        subclasses should override with lazier strategies when possible.
+        """
+        components = self.get_components()
+        rect = normalize_crop_rect(
+            x, y, width, height, components.images.shape[2], components.images.shape[1]
+        )
+        if rect is None:
+            return self
+        from .._input_impl.video_types import VideoFromComponents
+
+        cx, cy, cw, ch = rect
+        return VideoFromComponents(
+            VideoComponents(
+                images=components.images[:, cy:cy + ch, cx:cx + cw, :].clone(),
+                audio=components.audio,
+                frame_rate=components.frame_rate,
+                metadata=components.metadata,
+                alpha=components.alpha[:, cy:cy + ch, cx:cx + cw].clone()
+                if components.alpha is not None
+                else None,
+            ),
+            bit_depth=self.get_bit_depth(),
+            chroma_subsampling=self.get_chroma_subsampling(),
+        )
 
     def get_stream_source(self) -> Union[str, io.BytesIO]:
         """
@@ -65,6 +132,12 @@ class VideoInput(ABC):
         buffer.seek(0)
         return buffer
 
+    def get_active_trim_window(self) -> tuple[float, float]:
+        """Return the active trim as ``(start_time, duration)`` in seconds (start_time normalized
+        to ``>= 0``; ``duration == 0`` means "until the end"). Default: no trim; trimmable subclasses override.
+        """
+        return 0.0, 0.0
+
     # Provide a default implementation, but subclasses can provide optimized versions
     # if possible.
     def get_dimensions(self) -> tuple[int, int]:
@@ -76,6 +149,14 @@ class VideoInput(ABC):
         """
         components = self.get_components()
         return components.images.shape[2], components.images.shape[1]
+
+    def get_bit_depth(self) -> int:
+        """
+        Returns the bit depth of the video (e.g. 8 or 10).
+
+        Default implementation returns 8; subclasses report their real depth.
+        """
+        return 8
 
     def get_duration(self) -> float:
         """

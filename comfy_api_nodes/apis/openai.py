@@ -26,6 +26,7 @@ class OpenAIImageGenerationResponse(BaseModel):
 
 class OpenAIImageEditRequest(BaseModel):
     background: str | None = Field(None, description="Background transparency")
+    complexity: str | None = Field(None)
     model: str = Field(...)
     moderation: str | None = Field(None)
     n: int | None = Field(None, description="The number of images to generate")
@@ -36,8 +37,15 @@ class OpenAIImageEditRequest(BaseModel):
     size: str | None = Field(None, description="Size of the output image")
 
 
+class OpenAIImageSVGOptions(BaseModel):
+    model: str = Field(...)
+
+
 class OpenAIImageGenerationRequest(BaseModel):
     background: str | None = Field(None, description="Background transparency")
+    complexity: str | None = Field(None)
+    frame_count: int | None = Field(None)
+    frame_duration_ms: int | None = Field(None)
     model: str | None = Field(None)
     moderation: str | None = Field(None)
     n: int | None = Field(
@@ -49,21 +57,26 @@ class OpenAIImageGenerationRequest(BaseModel):
     prompt: str = Field(...)
     quality: str | None = Field(None, description="The quality of the generated image")
     size: str | None = Field(None, description="Size of the image (e.g., 1024x1024, 1536x1024, auto)")
-    style: str | None = Field(None, description="Style of the image (only for dall-e-3)")
+    svg: OpenAIImageSVGOptions | None = Field(None)
+
+
+class Reasoning(BaseModel):
+    effort: str | None = Field(None)
 
 
 class ModelResponseProperties(BaseModel):
     instructions: str | None = Field(None)
     max_output_tokens: int | None = Field(None)
     model: str | None = Field(None)
-    temperature: float | None = Field(1, description="Controls randomness in the response", ge=0.0, le=2.0)
+    reasoning: Reasoning | None = Field(None)
+    temperature: float | None = Field(None, description="Controls randomness in the response", ge=0.0, le=2.0)
     top_p: float | None = Field(
-        1,
+        None,
         description="Controls diversity of the response via nucleus sampling",
         ge=0.0,
         le=1.0,
     )
-    truncation: str | None = Field("disabled", description="Allowed values: 'auto' or 'disabled'")
+    truncation: str | None = Field(None, description="Allowed values: 'auto' or 'disabled'")
 
 
 class ResponseProperties(BaseModel):
@@ -128,7 +141,7 @@ class OpenAIResponse(ModelResponseProperties, ResponseProperties):
     parallel_tool_calls: bool | None = Field(True)
     status: str | None = Field(
         None,
-        description="One of `completed`, `failed`, `in_progress`, or `incomplete`.",
+        description="One of `completed`, `failed`, `in_progress`, `incomplete`, `queued`, or `cancelled`.",
     )
     usage: ResponseUsage | None = Field(None)
 

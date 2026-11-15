@@ -23,7 +23,9 @@ from einops import rearrange, repeat
 from einops.layers.torch import Rearrange
 from torch import nn
 
-from comfy.ldm.modules.attention import optimized_attention
+from comfy.ldm.modules.attention import AttentionTensorContainer, ComfyAttention, optimized_attention
+import comfy.model_management
+import comfy.quant_ops
 
 
 def get_normalization(name: str, channels: int, weight_args={}, operations=None):
@@ -89,6 +91,7 @@ class Attention(nn.Module):
         operations=None,
     ) -> None:
         super().__init__()
+        self.comfy_attention = ComfyAttention()
 
         self.is_selfattn = context_dim is None  # self attention
 
@@ -157,17 +160,20 @@ class Attention(nn.Module):
         k = self.to_k[1](k)
         v = self.to_v[1](v)
         if self.is_selfattn and rope_emb is not None:  # only apply to self-attention!
-            # apply_rotary_pos_emb inlined
-            q_shape = q.shape
-            q = q.reshape(*q.shape[:-1], 2, -1).movedim(-2, -1).unsqueeze(-2)
-            q = rope_emb[..., 0] * q[..., 0] + rope_emb[..., 1] * q[..., 1]
-            q = q.movedim(-1, -2).reshape(*q_shape).to(x.dtype)
+            if not comfy.model_management.in_training:
+                q, k = comfy.quant_ops.ck.apply_rope_split_half(q, k, rope_emb)
+            else:
+                # apply_rotary_pos_emb inlined
+                q_shape = q.shape
+                q = q.reshape(*q.shape[:-1], 2, -1).movedim(-2, -1).unsqueeze(-2)
+                q = rope_emb[..., 0] * q[..., 0] + rope_emb[..., 1] * q[..., 1]
+                q = q.movedim(-1, -2).reshape(*q_shape).to(x.dtype)
 
-            # apply_rotary_pos_emb inlined
-            k_shape = k.shape
-            k = k.reshape(*k.shape[:-1], 2, -1).movedim(-2, -1).unsqueeze(-2)
-            k = rope_emb[..., 0] * k[..., 0] + rope_emb[..., 1] * k[..., 1]
-            k = k.movedim(-1, -2).reshape(*k_shape).to(x.dtype)
+                # apply_rotary_pos_emb inlined
+                k_shape = k.shape
+                k = k.reshape(*k.shape[:-1], 2, -1).movedim(-2, -1).unsqueeze(-2)
+                k = rope_emb[..., 0] * k[..., 0] + rope_emb[..., 1] * k[..., 1]
+                k = k.movedim(-1, -2).reshape(*k_shape).to(x.dtype)
         return q, k, v
 
     def forward(
@@ -185,7 +191,8 @@ class Attention(nn.Module):
             context (Optional[Tensor]): The key tensor of shape [B, Mk, K] or use x as context [self attention] if None
         """
         q, k, v = self.cal_qkv(x, context, mask, rope_emb=rope_emb, **kwargs)
-        out = optimized_attention(q, k, v, self.heads, skip_reshape=True, mask=mask, skip_output_reshape=True, transformer_options=transformer_options)
+        q, k, v = AttentionTensorContainer(q), AttentionTensorContainer(k), AttentionTensorContainer(v)
+        out = optimized_attention(q, k, v, self.heads, skip_reshape=True, mask=mask, skip_output_reshape=True, preferred_attention=self.comfy_attention, transformer_options=transformer_options)
         del q, k, v
         out = rearrange(out, " b n s c -> s b (n c)")
         return self.to_out(out)

@@ -3,7 +3,6 @@
 #   timestamp: 2025-07-30T08:54:00+00:00
 
 # pylint: disable
-from __future__ import annotations
 
 from datetime import date, datetime
 from enum import Enum
@@ -1309,13 +1308,6 @@ class KlingTaskStatus(str, Enum):
     processing = 'processing'
     succeed = 'succeed'
     failed = 'failed'
-
-
-class KlingTextToVideoModelName(str, Enum):
-    kling_v1 = 'kling-v1'
-    kling_v1_6 = 'kling-v1-6'
-    kling_v2_1_master = 'kling-v2-1-master'
-    kling_v2_5_turbo = 'kling-v2-5-turbo'
 
 
 class KlingVideoGenAspectRatio(str, Enum):
@@ -5180,7 +5172,7 @@ class KlingText2VideoRequest(BaseModel):
     duration: Optional[KlingVideoGenDuration] = '5'
     external_task_id: Optional[str] = Field(None, description='Customized Task ID')
     mode: Optional[KlingVideoGenMode] = 'std'
-    model_name: Optional[KlingTextToVideoModelName] = 'kling-v1'
+    model_name: Optional[str] = 'kling-v1'
     negative_prompt: Optional[str] = Field(
         None, description='Negative text prompt', max_length=2500
     )
@@ -5367,7 +5359,7 @@ class NodeVersion(BaseModel):
     )
     supported_accelerators: Optional[List[str]] = Field(
         None,
-        description='List of accelerators (e.g. CUDA, DirectML, ROCm) that this node supports',
+        description='List of accelerators (e.g. CUDA, ROCm) that this node supports',
     )
     supported_comfyui_frontend_version: Optional[str] = Field(
         None, description='Supported versions of ComfyUI frontend'
@@ -6019,7 +6011,7 @@ class Node(BaseModel):
     )
     supported_accelerators: Optional[List[str]] = Field(
         None,
-        description='List of accelerators (e.g. CUDA, DirectML, ROCm) that this node supports',
+        description='List of accelerators (e.g. CUDA, ROCm) that this node supports',
     )
     supported_comfyui_frontend_version: Optional[str] = Field(
         None, description='Supported versions of ComfyUI frontend'

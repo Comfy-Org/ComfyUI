@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+
 from aiohttp import web
 
 from typing import TYPE_CHECKING, TypedDict
@@ -20,7 +22,7 @@ def copy_node_struct(node_struct: NodeStruct, empty_inputs: bool = False) -> Nod
         new_node_struct["inputs"] = {}
     else:
         new_node_struct["inputs"] = node_struct["inputs"].copy()
-    new_node_struct["_meta"] = node_struct["_meta"].copy()
+    new_node_struct["_meta"] = node_struct.get("_meta", {}).copy()
     return new_node_struct
 
 
@@ -31,8 +33,22 @@ class NodeReplaceManager:
         self._replacements: dict[str, list[NodeReplace]] = {}
 
     def register(self, node_replace: NodeReplace):
-        """Register a node replacement mapping."""
-        self._replacements.setdefault(node_replace.old_node_id, []).append(node_replace)
+        """Register a node replacement mapping.
+
+        Idempotent: if a replacement with the same (old_node_id, new_node_id)
+        is already registered, the duplicate is ignored. This prevents stale
+        entries from accumulating when custom nodes are reloaded in the same
+        process (e.g. via ComfyUI-Manager).
+        """
+        existing = self._replacements.setdefault(node_replace.old_node_id, [])
+        for entry in existing:
+            if entry.new_node_id == node_replace.new_node_id:
+                logging.debug(
+                    "Node replacement %s -> %s already registered, ignoring duplicate.",
+                    node_replace.old_node_id, node_replace.new_node_id,
+                )
+                return
+        existing.append(node_replace)
 
     def get_replacement(self, old_node_id: str) -> list[NodeReplace] | None:
         """Get replacements for an old node ID."""
@@ -78,7 +94,7 @@ class NodeReplaceManager:
                 for input_map in replacement.input_mapping:
                     if "set_value" in input_map:
                         new_node_struct["inputs"][input_map["new_id"]] = input_map["set_value"]
-                    elif "old_id" in input_map:
+                    elif "old_id" in input_map and input_map["old_id"] in node_struct["inputs"]:
                         new_node_struct["inputs"][input_map["new_id"]] = node_struct["inputs"][input_map["old_id"]]
             # finalize input replacement
             prompt[node_number] = new_node_struct

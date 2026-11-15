@@ -1,7 +1,9 @@
 from __future__ import annotations
+
+import comfy.model_management
 from .k_diffusion import sampling as k_diffusion_sampling
 from .extra_samplers import uni_pc
-from typing import TYPE_CHECKING, Callable, NamedTuple
+from typing import TYPE_CHECKING, Callable, NamedTuple, Any
 if TYPE_CHECKING:
     from comfy.model_patcher import ModelPatcher
     from comfy.model_base import BaseModel
@@ -16,7 +18,9 @@ import comfy.model_patcher
 import comfy.patcher_extension
 import comfy.hooks
 import comfy.context_windows
+import comfy.multigpu
 import comfy.utils
+from comfy.internal_logging import detail
 import scipy.stats
 import numpy
 
@@ -141,7 +145,7 @@ def can_concat_cond(c1, c2):
 
     return cond_equal_size(c1.conditioning, c2.conditioning)
 
-def cond_cat(c_list):
+def cond_cat(c_list, device=None):
     temp = {}
     for x in c_list:
         for k in x:
@@ -153,6 +157,8 @@ def cond_cat(c_list):
     for k in temp:
         conds = temp[k]
         out[k] = conds[0].concat(conds[1:])
+        if device is not None and hasattr(out[k], 'to'):
+            out[k] = out[k].to(device)
 
     return out
 
@@ -212,7 +218,12 @@ def _calc_cond_batch_outer(model: BaseModel, conds: list[list[dict]], x_in: torc
     )
     return executor.execute(model, conds, x_in, timestep, model_options)
 
-def _calc_cond_batch(model: BaseModel, conds: list[list[dict]], x_in: torch.Tensor, timestep, model_options):
+def _calc_cond_batch(model: BaseModel, conds: list[list[dict]], x_in: torch.Tensor, timestep: torch.Tensor, model_options: dict[str]):
+    # NOTE: keep in sync with _calc_cond_batch_multigpu below. Shared logic
+    # (hooked_to_run accumulation, memory-fit batching, per-chunk output
+    # aggregation) is duplicated there with per-device scheduling layered on top.
+    if 'multigpu_clones' in model_options:
+        return _calc_cond_batch_multigpu(model, conds, x_in, timestep, model_options)
     out_conds = []
     out_counts = []
     # separate conds by matching hooks
@@ -244,7 +255,7 @@ def _calc_cond_batch(model: BaseModel, conds: list[list[dict]], x_in: torch.Tens
     if has_default_conds:
         finalize_default_conds(model, hooked_to_run, default_conds, x_in, timestep, model_options)
 
-    model.current_patcher.prepare_state(timestep)
+    model.current_patcher.prepare_state(timestep, model_options)
 
     # run every hooked_to_run separately
     for hooks, to_run in hooked_to_run.items():
@@ -265,7 +276,6 @@ def _calc_cond_batch(model: BaseModel, conds: list[list[dict]], x_in: torch.Tens
                 input_shape = [len(batch_amount) * first_shape[0]] + list(first_shape)[1:]
                 cond_shapes = collections.defaultdict(list)
                 for tt in batch_amount:
-                    cond = {k: v.size() for k, v in to_run[tt][0].conditioning.items()}
                     for k, v in to_run[tt][0].conditioning.items():
                         cond_shapes[k].append(v.size())
 
@@ -345,6 +355,236 @@ def _calc_cond_batch(model: BaseModel, conds: list[list[dict]], x_in: torch.Tens
 
     return out_conds
 
+def _calc_cond_batch_multigpu(model: BaseModel, conds: list[list[dict]], x_in: torch.Tensor, timestep: torch.Tensor, model_options: dict[str]):
+    # NOTE: keep in sync with _calc_cond_batch above. Same conds-by-hooks
+    # accumulation, memory-fit batching, and output aggregation, but adds a
+    # per-device scheduler, per-device patcher/control lookup, tensor .to(device)
+    # placement, and MultiGPUThreadPool dispatch around the inner loop.
+    out_conds = []
+    out_counts = []
+    # separate conds by matching hooks
+    hooked_to_run: dict[comfy.hooks.HookGroup,list[tuple[tuple,int]]] = {}
+    default_conds = []
+    has_default_conds = False
+
+    output_device = x_in.device
+
+    for i in range(len(conds)):
+        out_conds.append(torch.zeros_like(x_in))
+        out_counts.append(torch.ones_like(x_in) * 1e-37)
+
+        cond = conds[i]
+        default_c = []
+        if cond is not None:
+            for x in cond:
+                if 'default' in x:
+                    default_c.append(x)
+                    has_default_conds = True
+                    continue
+                p = get_area_and_mult(x, x_in, timestep)
+                if p is None:
+                    continue
+                if p.hooks is not None:
+                    model.current_patcher.prepare_hook_patches_current_keyframe(timestep, p.hooks, model_options)
+                hooked_to_run.setdefault(p.hooks, list())
+                hooked_to_run[p.hooks] += [(p, i)]
+        default_conds.append(default_c)
+
+    if has_default_conds:
+        finalize_default_conds(model, hooked_to_run, default_conds, x_in, timestep, model_options)
+
+    model.current_patcher.prepare_state(timestep, model_options)
+
+    devices = list(model_options['multigpu_clones'].keys())
+    device_batched_hooked_to_run: dict[torch.device, list[tuple[comfy.hooks.HookGroup, tuple]]] = {}
+    # Track conds currently scheduled per device; single source of truth for capacity checks.
+    device_load: dict[torch.device, int] = {d: 0 for d in devices}
+
+    total_conds = sum(len(to_run) for to_run in hooked_to_run.values())
+    conds_per_device = max(1, math.ceil(total_conds / len(devices)))
+
+    def next_available_device(start: int) -> tuple[int, torch.device]:
+        """Return (index, device) for the next device with remaining capacity, starting at `start`.
+
+        Scans at most len(devices) positions, so this always terminates. Raises if no device
+        has remaining capacity, which would indicate a bug in conds_per_device accounting.
+        """
+        for offset in range(len(devices)):
+            i = (start + offset) % len(devices)
+            if device_load[devices[i]] < conds_per_device:
+                return i, devices[i]
+        raise RuntimeError(
+            f"MultiGPU scheduler: all {len(devices)} devices at capacity "
+            f"({conds_per_device}) but conds remain to schedule"
+        )
+
+    # run every hooked_to_run separately
+    index_device = 0
+    for hooks, to_run in hooked_to_run.items():
+        while len(to_run) > 0:
+            index_device, current_device = next_available_device(index_device)
+            remaining_capacity = conds_per_device - device_load[current_device]
+
+            first = to_run[0]
+            first_shape = first[0][0].shape
+            # collect candidate indices that can be concatenated with `first`, up to remaining capacity
+            to_batch_temp = []
+            for x in range(len(to_run)):
+                if can_concat_cond(to_run[x][0], first[0]) and len(to_batch_temp) < remaining_capacity:
+                    to_batch_temp += [x]
+
+            to_batch_temp.reverse()
+            to_batch = to_batch_temp[:1]
+
+            free_memory = comfy.model_management.get_free_memory(current_device)
+            for i in range(1, len(to_batch_temp) + 1):
+                batch_amount = to_batch_temp[:len(to_batch_temp)//i]
+                input_shape = [len(batch_amount) * first_shape[0]] + list(first_shape)[1:]
+                cond_shapes = collections.defaultdict(list)
+                for tt in batch_amount:
+                    for k, v in to_run[tt][0].conditioning.items():
+                        cond_shapes[k].append(v.size())
+                if model.memory_required(input_shape, cond_shapes=cond_shapes) * 1.5 < free_memory:
+                    to_batch = batch_amount
+                    break
+
+            conds_to_batch = [to_run.pop(x) for x in to_batch]
+            device_load[current_device] += len(conds_to_batch)
+            device_batched_hooked_to_run.setdefault(current_device, []).append((hooks, conds_to_batch))
+
+            if device_load[current_device] >= conds_per_device:
+                index_device += 1
+
+    class thread_result(NamedTuple):
+        output: Any
+        mult: Any
+        area: Any
+        batch_chunks: int
+        cond_or_uncond: Any
+        error: Exception = None
+
+    def _handle_batch(device: torch.device, batch_tuple: tuple[comfy.hooks.HookGroup, tuple], results: list[thread_result]):
+        try:
+            comfy.model_management.set_torch_device(device)
+            model_current: BaseModel = model_options["multigpu_clones"][device].model
+            # run every hooked_to_run separately
+            with torch.no_grad():
+                for hooks, to_batch in batch_tuple:
+                    input_x = []
+                    mult = []
+                    c = []
+                    cond_or_uncond = []
+                    uuids = []
+                    area = []
+                    control: ControlBase = None
+                    patches = None
+                    for x in to_batch:
+                        o = x
+                        p = o[0]
+                        input_x.append(p.input_x)
+                        mult.append(p.mult)
+                        c.append(p.conditioning)
+                        area.append(p.area)
+                        cond_or_uncond.append(o[1])
+                        uuids.append(p.uuid)
+                        control = p.control
+                        patches = p.patches
+
+                    batch_chunks = len(cond_or_uncond)
+                    input_x = torch.cat(input_x).to(device)
+                    c = cond_cat(c, device=device)
+                    timestep_ = torch.cat([timestep.to(device)] * batch_chunks)
+
+                    transformer_options = model_current.current_patcher.apply_hooks(hooks=hooks)
+                    if 'transformer_options' in model_options:
+                        transformer_options = comfy.patcher_extension.merge_nested_dicts(transformer_options,
+                                                                                        model_options['transformer_options'],
+                                                                                        copy_dict1=False)
+
+                    if patches is not None:
+                        transformer_options["patches"] = comfy.patcher_extension.merge_nested_dicts(
+                            transformer_options.get("patches", {}),
+                            patches
+                        )
+
+                    transformer_options["cond_or_uncond"] = cond_or_uncond[:]
+                    transformer_options["uuids"] = uuids[:]
+                    transformer_options["sigmas"] = timestep.to(device)
+                    transformer_options["sample_sigmas"] = transformer_options["sample_sigmas"].to(device)
+                    transformer_options["multigpu_thread_device"] = device
+
+                    cast_transformer_options(transformer_options, device=device)
+                    c['transformer_options'] = transformer_options
+
+                    if control is not None:
+                        device_control = control.get_instance_for_device(device)
+                        c['control'] = device_control.get_control(input_x, timestep_, c, len(cond_or_uncond), transformer_options)
+
+                    if 'model_function_wrapper' in model_options:
+                        output = model_options['model_function_wrapper'](model_current.apply_model, {"input": input_x, "timestep": timestep_, "c": c, "cond_or_uncond": cond_or_uncond}).to(output_device).chunk(batch_chunks)
+                    else:
+                        output = model_current.apply_model(input_x, timestep_, **c).to(output_device).chunk(batch_chunks)
+                    # TODO: non-NVIDIA support -- the `.to(output_device)` copies
+                    # above are async on CUDA, so the main thread's aggregation
+                    # could race with in-flight transfers. CUDA-only QA has not
+                    # surfaced this in practice, but before extending multigpu
+                    # beyond NVIDIA add a `torch.cuda.synchronize(output_device)`
+                    # here (guarded by `output_device.type == "cuda"`).
+                    results.append(thread_result(output, mult, area, batch_chunks, cond_or_uncond))
+        except Exception as e:
+            results.append(thread_result(None, None, None, None, None, error=e))
+            raise
+
+
+    def _handle_batch_pooled(device, batch_tuple):
+        worker_results = []
+        _handle_batch(device, batch_tuple, worker_results)
+        return worker_results
+
+    results: list[thread_result] = []
+    thread_pool: comfy.multigpu.MultiGPUThreadPool = model_options.get("multigpu_thread_pool")
+
+    # Submit all GPU work to pool threads
+    pool_devices = []
+    for device, batch_tuple in device_batched_hooked_to_run.items():
+        if thread_pool is not None:
+            thread_pool.submit(device, _handle_batch_pooled, device, batch_tuple)
+            pool_devices.append(device)
+        else:
+            # Fallback: no pool, run everything on main thread
+            _handle_batch(device, batch_tuple, results)
+
+    # Collect results from pool workers
+    for device in pool_devices:
+        worker_results, error = thread_pool.get_result(device)
+        if error is not None:
+            raise error
+        results.extend(worker_results)
+
+    for output, mult, area, batch_chunks, cond_or_uncond, error in results:
+        if error is not None:
+            raise error
+        for o in range(batch_chunks):
+            cond_index = cond_or_uncond[o]
+            a = area[o]
+            if a is None:
+                out_conds[cond_index] += output[o] * mult[o]
+                out_counts[cond_index] += mult[o]
+            else:
+                out_c = out_conds[cond_index]
+                out_cts = out_counts[cond_index]
+                dims = len(a) // 2
+                for i in range(dims):
+                    out_c = out_c.narrow(i + 2, a[i + dims], a[i])
+                    out_cts = out_cts.narrow(i + 2, a[i + dims], a[i])
+                out_c += output[o] * mult[o]
+                out_cts += mult[o]
+
+    for i in range(len(out_conds)):
+        out_conds[i] /= out_counts[i]
+
+    return out_conds
+
 def calc_cond_uncond_batch(model, cond, uncond, x_in, timestep, model_options): #TODO: remove
     logging.warning("WARNING: The comfy.samplers.calc_cond_uncond_batch function is deprecated please use the calc_cond_batch one instead.")
     return tuple(calc_cond_batch(model, [cond, uncond], x_in, timestep, model_options))
@@ -396,7 +636,7 @@ class KSamplerX0Inpaint:
             if "denoise_mask_function" in model_options:
                 denoise_mask = model_options["denoise_mask_function"](sigma, denoise_mask, extra_options={"model": self.inner_model, "sigmas": self.sigmas})
             latent_mask = 1. - denoise_mask
-            x = x * denoise_mask + self.inner_model.inner_model.scale_latent_inpaint(x=x, sigma=sigma, noise=self.noise, latent_image=self.latent_image) * latent_mask
+            x = x * denoise_mask + self.inner_model.inner_model.scale_latent_inpaint(x=x, sigma=sigma, noise=self.noise, latent_image=self.latent_image, denoise_mask=denoise_mask) * latent_mask
         out = self.inner_model(x, sigma, model_options=model_options, seed=seed)
         if denoise_mask is not None:
             out = out * denoise_mask + self.latent_image * latent_mask
@@ -643,12 +883,21 @@ def calculate_start_end_timesteps(model, conds):
 
 def pre_run_control(model, conds):
     s = model.model_sampling
+    # Per-device model lookup so multigpu control clones get the matching
+    # diffusion_model (e.g. QwenFunControlNet stashes it into extra_args).
+    device_models: dict = {}
+    patcher = getattr(model, "current_patcher", None)
+    if patcher is not None:
+        for p in patcher.get_additional_models_with_key("multigpu"):
+            device_models[p.load_device] = p.model
     for t in range(len(conds)):
         x = conds[t]
 
         percent_to_timestep_function = lambda a: s.percent_to_sigma(a)
         if 'control' in x:
             x['control'].pre_run(model, percent_to_timestep_function)
+            for device, device_cnet in x['control'].multigpu_clones.items():
+                device_cnet.pre_run(device_models.get(device, model), percent_to_timestep_function)
 
 def apply_empty_x_to_equal_area(conds, uncond, name, uncond_fill_func):
     cond_cnets = []
@@ -722,7 +971,7 @@ class Sampler:
 KSAMPLER_NAMES = ["euler", "euler_cfg_pp", "euler_ancestral", "euler_ancestral_cfg_pp", "heun", "heunpp2", "exp_heun_2_x0", "exp_heun_2_x0_sde", "dpm_2", "dpm_2_ancestral",
                   "lms", "dpm_fast", "dpm_adaptive", "dpmpp_2s_ancestral", "dpmpp_2s_ancestral_cfg_pp", "dpmpp_sde", "dpmpp_sde_gpu",
                   "dpmpp_2m", "dpmpp_2m_cfg_pp", "dpmpp_2m_sde", "dpmpp_2m_sde_gpu", "dpmpp_2m_sde_heun", "dpmpp_2m_sde_heun_gpu", "dpmpp_3m_sde", "dpmpp_3m_sde_gpu", "ddpm", "lcm",
-                  "ipndm", "ipndm_v", "deis", "res_multistep", "res_multistep_cfg_pp", "res_multistep_ancestral", "res_multistep_ancestral_cfg_pp",
+                  "ipndm", "ipndm_v", "deis", "cfgpp_ud10_ab", "res_multistep", "res_multistep_cfg_pp", "res_multistep_ancestral", "res_multistep_ancestral_cfg_pp",
                   "gradient_estimation", "gradient_estimation_cfg_pp", "er_sde", "seeds_2", "seeds_3", "sa_solver", "sa_solver_pece"]
 
 class KSAMPLER(Sampler):
@@ -743,10 +992,15 @@ class KSAMPLER(Sampler):
 
         noise = model_wrap.inner_model.model_sampling.noise_scaling(sigmas[0], noise, latent_image, self.max_denoise(model_wrap, sigmas))
 
-        k_callback = None
         total_steps = len(sigmas) - 1
-        if callback is not None:
-            k_callback = lambda x: callback(x["i"], x["denoised"], x["x"], total_steps)
+        first_step = True
+        def k_callback(x):
+            nonlocal first_step
+            if first_step:
+                detail("First sampler step: model=%s sampler=%s step=%s total_steps=%s cfg=%s seed=%s sigma=%s sigma_hat=%s latent_shape=%s denoised_shape=%s", model_wrap.model_patcher.model.__class__.__name__, getattr(self.sampler_function, "__name__", "unknown"), x["i"], total_steps, model_wrap.cfg, extra_args.get("seed"), x.get("sigma"), x.get("sigma_hat"), tuple(x["x"].shape), tuple(x["denoised"].shape))
+                first_step = False
+            if callback is not None:
+                callback(x["i"], x["denoised"], x["x"], total_steps)
 
         samples = self.sampler_function(model_k, noise, sigmas, extra_args=extra_args, callback=k_callback, disable=disable_pbar, **self.extra_options)
         samples = model_wrap.inner_model.model_sampling.inverse_noise_scaling(sigmas[-1], samples)
@@ -891,7 +1145,9 @@ def cast_to_load_options(model_options: dict[str], device=None, dtype=None):
     to_load_options = model_options.get("to_load_options", None)
     if to_load_options is None:
         return
+    cast_transformer_options(to_load_options, device, dtype)
 
+def cast_transformer_options(transformer_options: dict[str], device=None, dtype=None):
     casts = []
     if device is not None:
         casts.append(device)
@@ -900,18 +1156,17 @@ def cast_to_load_options(model_options: dict[str], device=None, dtype=None):
     # if nothing to apply, do nothing
     if len(casts) == 0:
         return
-
     # try to call .to on patches
-    if "patches" in to_load_options:
-        patches = to_load_options["patches"]
+    if "patches" in transformer_options:
+        patches = transformer_options["patches"]
         for name in patches:
             patch_list = patches[name]
             for i in range(len(patch_list)):
                 if hasattr(patch_list[i], "to"):
                     for cast in casts:
                         patch_list[i] = patch_list[i].to(cast)
-    if "patches_replace" in to_load_options:
-        patches = to_load_options["patches_replace"]
+    if "patches_replace" in transformer_options:
+        patches = transformer_options["patches_replace"]
         for name in patches:
             patch_list = patches[name]
             for k in patch_list:
@@ -921,15 +1176,14 @@ def cast_to_load_options(model_options: dict[str], device=None, dtype=None):
     # try to call .to on any wrappers/callbacks
     wrappers_and_callbacks = ["wrappers", "callbacks"]
     for wc_name in wrappers_and_callbacks:
-        if wc_name in to_load_options:
-            wc: dict[str, list] = to_load_options[wc_name]
+        if wc_name in transformer_options:
+            wc: dict[str, list] = transformer_options[wc_name]
             for wc_dict in wc.values():
                 for wc_list in wc_dict.values():
                     for i in range(len(wc_list)):
                         if hasattr(wc_list[i], "to"):
                             for cast in casts:
                                 wc_list[i] = wc_list[i].to(cast)
-
 
 class CFGGuider:
     def __init__(self, model_patcher: ModelPatcher):
@@ -964,6 +1218,8 @@ class CFGGuider:
         return sampling_function(self.inner_model, x, timestep, self.conds.get("negative", None), self.conds.get("positive", None), self.cfg, model_options=model_options, seed=seed)
 
     def inner_sample(self, noise, latent_image, device, sampler, sigmas, denoise_mask, callback, disable_pbar, seed, latent_shapes=None):
+        self.inner_model.latent_shapes = latent_shapes
+
         if latent_image is not None and torch.count_nonzero(latent_image) > 0: #Don't shift the empty latent image.
             latent_image = self.inner_model.process_latent_in(latent_image)
 
@@ -978,23 +1234,40 @@ class CFGGuider:
             sampler,
             comfy.patcher_extension.get_all_wrappers(comfy.patcher_extension.WrappersMP.SAMPLER_SAMPLE, extra_args["model_options"], is_model_options=True)
         )
-        samples = executor.execute(self, sigmas, extra_args, callback, noise, latent_image, denoise_mask, disable_pbar)
+        with self.model_patcher.writable_models(self.conds, noise.shape, self.model_options):
+            samples = executor.execute(self, sigmas, extra_args, callback, noise, latent_image, denoise_mask, disable_pbar)
         return self.inner_model.process_latent_out(samples.to(torch.float32))
 
     def outer_sample(self, noise, latent_image, sampler, sigmas, denoise_mask=None, callback=None, disable_pbar=False, seed=None, latent_shapes=None):
         self.inner_model, self.conds, self.loaded_models = comfy.sampler_helpers.prepare_sampling(self.model_patcher, noise.shape, self.conds, self.model_options)
         device = self.model_patcher.load_device
 
-        noise = noise.to(device=device, dtype=torch.float32)
-        latent_image = latent_image.to(device=device, dtype=torch.float32)
-        sigmas = sigmas.to(device)
-        cast_to_load_options(self.model_options, device=device, dtype=self.model_patcher.model_dtype())
+        multigpu_patchers = comfy.sampler_helpers.prepare_model_patcher_multigpu_clones(self.model_patcher, self.loaded_models, self.model_options)
 
-        try:
-            self.model_patcher.pre_run()
-            output = self.inner_sample(noise, latent_image, device, sampler, sigmas, denoise_mask, callback, disable_pbar, seed, latent_shapes=latent_shapes)
-        finally:
-            self.model_patcher.cleanup()
+        # Create persistent thread pool for all GPU devices (main + extras)
+        if multigpu_patchers:
+            extra_devices = [p.load_device for p in multigpu_patchers]
+            all_devices = [device] + extra_devices
+            self.model_options["multigpu_thread_pool"] = comfy.multigpu.MultiGPUThreadPool(all_devices)
+
+        with comfy.model_management.cuda_device_context(device):
+            try:
+                noise = noise.to(device=device, dtype=torch.float32)
+                latent_image = latent_image.to(device=device, dtype=torch.float32)
+                sigmas = sigmas.to(device)
+                cast_to_load_options(self.model_options, device=device, dtype=self.model_patcher.model_dtype())
+
+                self.model_patcher.pre_run()
+                for multigpu_patcher in multigpu_patchers:
+                    multigpu_patcher.pre_run()
+                output = self.inner_sample(noise, latent_image, device, sampler, sigmas, denoise_mask, callback, disable_pbar, seed, latent_shapes=latent_shapes)
+            finally:
+                thread_pool = self.model_options.pop("multigpu_thread_pool", None)
+                if thread_pool is not None:
+                    thread_pool.shutdown()
+                self.model_patcher.cleanup()
+                for multigpu_patcher in multigpu_patchers:
+                    multigpu_patcher.cleanup()
 
         comfy.sampler_helpers.cleanup_models(self.conds, self.loaded_models)
         del self.inner_model
@@ -1006,10 +1279,21 @@ class CFGGuider:
             return latent_image
 
         if latent_image.is_nested:
+            sampler_shapes = [tuple(x.shape) for x in latent_image.unbind()]
             latent_image, latent_shapes = comfy.utils.pack_latents(latent_image.unbind())
             noise, _ = comfy.utils.pack_latents(noise.unbind())
         else:
             latent_shapes = [latent_image.shape]
+            sampler_shapes = [tuple(latent_image.shape)]
+        detail("Sampler: model=%s latent_shapes=%s", self.model_patcher.model.__class__.__name__, sampler_shapes)
+
+        if len(latent_shapes) > 1 and callback is not None:
+            # samplers run on the flat pack, hand callbacks (previews, x0 output) the nested view
+            packed_callback = callback
+            def callback(step, x0, x, total_steps):
+                x0 = comfy.nested_tensor.NestedTensor(comfy.utils.unpack_latents(x0, latent_shapes))
+                x = comfy.nested_tensor.NestedTensor(comfy.utils.unpack_latents(x, latent_shapes))
+                return packed_callback(step, x0, x, total_steps)
 
         if denoise_mask is not None:
             if denoise_mask.is_nested:

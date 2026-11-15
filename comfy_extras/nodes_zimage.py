@@ -10,7 +10,7 @@ class TextEncodeZImageOmni(io.ComfyNode):
     def define_schema(cls):
         return io.Schema(
             node_id="TextEncodeZImageOmni",
-            category="advanced/conditioning",
+            category="model/conditioning/z-image",
             is_experimental=True,
             inputs=[
                 io.Clip.Input("clip"),

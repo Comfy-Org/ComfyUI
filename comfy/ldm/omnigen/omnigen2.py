@@ -8,7 +8,8 @@ import torch.nn.functional as F
 from einops import rearrange, repeat
 from comfy.ldm.lightricks.model import Timesteps
 from comfy.ldm.flux.layers import EmbedND
-from comfy.ldm.modules.attention import optimized_attention_masked
+from comfy.ldm.flux.math import apply_rope1
+from comfy.ldm.modules.attention import AttentionTensorContainer, ComfyAttention, optimized_attention_masked
 import comfy.model_management
 import comfy.ldm.common_dit
 
@@ -17,13 +18,11 @@ def apply_rotary_emb(x, freqs_cis):
     if x.shape[1] == 0:
         return x
 
-    t_ = x.reshape(*x.shape[:-1], -1, 1, 2)
-    t_out = freqs_cis[..., 0] * t_[..., 0] + freqs_cis[..., 1] * t_[..., 1]
-    return t_out.reshape(*x.shape).to(dtype=x.dtype)
+    return apply_rope1(x, freqs_cis)
 
 
 def swiglu(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
-    return F.silu(x) * y
+    return F.silu(x, inplace=True).mul_(y)
 
 
 class TimestepEmbedding(nn.Module):
@@ -103,6 +102,7 @@ class Lumina2CombinedTimestepCaptionEmbedding(nn.Module):
 class Attention(nn.Module):
     def __init__(self, query_dim: int, dim_head: int, heads: int, kv_heads: int, eps: float = 1e-5, bias: bool = False, dtype=None, device=None, operations=None):
         super().__init__()
+        self.comfy_attention = ComfyAttention()
         self.heads = heads
         self.kv_heads = kv_heads
         self.dim_head = dim_head
@@ -138,15 +138,12 @@ class Attention(nn.Module):
             query = apply_rotary_emb(query, image_rotary_emb)
             key = apply_rotary_emb(key, image_rotary_emb)
 
-        query = query.transpose(1, 2)
-        key = key.transpose(1, 2)
-        value = value.transpose(1, 2)
+        query = AttentionTensorContainer(query.transpose(1, 2))
+        key = AttentionTensorContainer(key.transpose(1, 2))
+        value = AttentionTensorContainer(value.transpose(1, 2))
 
-        if self.kv_heads < self.heads:
-            key = key.repeat_interleave(self.heads // self.kv_heads, dim=1)
-            value = value.repeat_interleave(self.heads // self.kv_heads, dim=1)
-
-        hidden_states = optimized_attention_masked(query, key, value, self.heads, attention_mask, skip_reshape=True, transformer_options=transformer_options)
+        gqa_kwargs = {"enable_gqa": True} if self.kv_heads < self.heads else {}
+        hidden_states = optimized_attention_masked(query, key, value, self.heads, attention_mask, skip_reshape=True, preferred_attention=self.comfy_attention, transformer_options=transformer_options, **gqa_kwargs)
         hidden_states = self.to_out[0](hidden_states)
         return hidden_states
 

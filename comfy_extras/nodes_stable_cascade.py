@@ -29,7 +29,8 @@ class StableCascade_EmptyLatentImage(io.ComfyNode):
     def define_schema(cls):
         return io.Schema(
             node_id="StableCascade_EmptyLatentImage",
-            category="latent/stable_cascade",
+            display_name="Empty Stable Cascade Latent Image",
+            category="model/latent/stable cascade",
             inputs=[
                 io.Int.Input("width", default=1024, min=256, max=nodes.MAX_RESOLUTION, step=8),
                 io.Int.Input("height", default=1024, min=256, max=nodes.MAX_RESOLUTION, step=8),
@@ -58,7 +59,8 @@ class StableCascade_StageC_VAEEncode(io.ComfyNode):
     def define_schema(cls):
         return io.Schema(
             node_id="StableCascade_StageC_VAEEncode",
-            category="latent/stable_cascade",
+            display_name="Stable Cascade Stage C VAE Encode",
+            category="model/latent/stable cascade",
             inputs=[
                 io.Image.Input("image"),
                 io.Vae.Input("vae"),
@@ -93,7 +95,7 @@ class StableCascade_StageB_Conditioning(io.ComfyNode):
     def define_schema(cls):
         return io.Schema(
             node_id="StableCascade_StageB_Conditioning",
-            category="conditioning/stable_cascade",
+            category="model/conditioning/stable cascade",
             inputs=[
                 io.Conditioning.Input("conditioning"),
                 io.Latent.Input("stage_c"),
@@ -119,7 +121,7 @@ class StableCascade_SuperResolutionControlnet(io.ComfyNode):
     def define_schema(cls):
         return io.Schema(
             node_id="StableCascade_SuperResolutionControlnet",
-            category="_for_testing/stable_cascade",
+            category="experimental/stable cascade",
             is_experimental=True,
             inputs=[
                 io.Image.Input("image"),

@@ -1,9 +1,13 @@
+import logging
+
 import comfy.sd
 import comfy.model_sampling
 import comfy.latent_formats
+import comfy.ldm.modules.attention
 import nodes
 import torch
 import node_helpers
+from comfy_api.latest import io
 
 
 class LCM(comfy.model_sampling.EPS):
@@ -59,7 +63,7 @@ class ModelSamplingDiscrete:
     RETURN_TYPES = ("MODEL",)
     FUNCTION = "patch"
 
-    CATEGORY = "advanced/model"
+    CATEGORY = "model/patch"
 
     def patch(self, model, sampling, zsnr):
         m = model.clone()
@@ -97,7 +101,7 @@ class ModelSamplingStableCascade:
     RETURN_TYPES = ("MODEL",)
     FUNCTION = "patch"
 
-    CATEGORY = "advanced/model"
+    CATEGORY = "model/patch/stable cascade"
 
     def patch(self, model, shift):
         m = model.clone()
@@ -123,19 +127,24 @@ class ModelSamplingSD3:
     RETURN_TYPES = ("MODEL",)
     FUNCTION = "patch"
 
-    CATEGORY = "advanced/model"
+    CATEGORY = "model/patch/stable diffusion"
 
-    def patch(self, model, shift, multiplier=1000):
+    def patch(self, model, shift, multiplier=1000, sampling="flow"):
         m = model.clone()
 
         sampling_base = comfy.model_sampling.ModelSamplingDiscreteFlow
         sampling_type = comfy.model_sampling.CONST
+        if sampling == "img_to_img_velocity":
+            sampling_type = comfy.model_sampling.IMG_TO_IMG_VELOCITY
 
         class ModelSamplingAdvanced(sampling_base, sampling_type):
             pass
 
+        original = m.get_model_object("model_sampling")
         model_sampling = ModelSamplingAdvanced(model.model.model_config)
         model_sampling.set_parameters(shift=shift, multiplier=multiplier)
+        if hasattr(original, "noise_scale"):
+            model_sampling.set_noise_scale(original.noise_scale)
         m.add_object_patch("model_sampling", model_sampling)
         return (m, )
 
@@ -144,12 +153,15 @@ class ModelSamplingAuraFlow(ModelSamplingSD3):
     def INPUT_TYPES(s):
         return {"required": { "model": ("MODEL",),
                               "shift": ("FLOAT", {"default": 1.73, "min": 0.0, "max": 100.0, "step":0.01}),
+                              },
+                "optional": { "sampling": (["flow", "img_to_img_velocity"], {"default": "flow", "advanced": True}),
                               }}
 
     FUNCTION = "patch_aura"
+    CATEGORY = "model/patch"
 
-    def patch_aura(self, model, shift):
-        return self.patch(model, shift, multiplier=1.0)
+    def patch_aura(self, model, shift, sampling="flow"):
+        return self.patch(model, shift, multiplier=1.0, sampling=sampling)
 
 class ModelSamplingFlux:
     @classmethod
@@ -164,7 +176,7 @@ class ModelSamplingFlux:
     RETURN_TYPES = ("MODEL",)
     FUNCTION = "patch"
 
-    CATEGORY = "advanced/model"
+    CATEGORY = "model/patch/flux"
 
     def patch(self, model, max_shift, base_shift, width, height):
         m = model.clone()
@@ -199,7 +211,7 @@ class ModelSamplingContinuousEDM:
     RETURN_TYPES = ("MODEL",)
     FUNCTION = "patch"
 
-    CATEGORY = "advanced/model"
+    CATEGORY = "model/patch"
 
     def patch(self, model, sampling, sigma_max, sigma_min):
         m = model.clone()
@@ -244,7 +256,7 @@ class ModelSamplingContinuousV:
     RETURN_TYPES = ("MODEL",)
     FUNCTION = "patch"
 
-    CATEGORY = "advanced/model"
+    CATEGORY = "model/patch"
 
     def patch(self, model, sampling, sigma_max, sigma_min):
         m = model.clone()
@@ -270,16 +282,33 @@ class RescaleCFG:
     RETURN_TYPES = ("MODEL",)
     FUNCTION = "patch"
 
-    CATEGORY = "advanced/model"
+    CATEGORY = "model/patch"
 
     def patch(self, model, multiplier):
+        model_sampling = model.get_model_object("model_sampling")
+        is_flow = isinstance(model_sampling, comfy.model_sampling.CONST)
+
         def rescale_cfg(args):
+            x_orig = args["input"]
+            cond_scale = args["cond_scale"]
+
+            if is_flow:
+                # Flow-matching models: cond_denoised/uncond_denoised are x_0 estimates,
+                # so the eps↔v conversion below would be wrong. Rescale directly in x_0 space.
+                x_0_cond = args["cond_denoised"]
+                x_0_uncond = args["uncond_denoised"]
+                x_0_cfg = x_0_uncond + cond_scale * (x_0_cond - x_0_uncond)
+                dims = tuple(range(1, x_0_cond.ndim))
+                ro_pos = x_0_cond.std(dim=dims, keepdim=True)
+                ro_cfg = x_0_cfg.std(dim=dims, keepdim=True).clamp(min=1e-8)
+                x_0_rescaled = x_0_cfg * (ro_pos / ro_cfg)
+                x_0_final = multiplier * x_0_rescaled + (1.0 - multiplier) * x_0_cfg
+                return x_orig - x_0_final
+
             cond = args["cond"]
             uncond = args["uncond"]
-            cond_scale = args["cond_scale"]
             sigma = args["sigma"]
             sigma = sigma.view(sigma.shape[:1] + (1,) * (cond.ndim - 1))
-            x_orig = args["input"]
 
             #rescale cfg has to be done on v-pred model output
             x = x_orig / (sigma * sigma + 1.0)
@@ -300,6 +329,29 @@ class RescaleCFG:
         m.set_model_sampler_cfg_function(rescale_cfg)
         return (m, )
 
+class ModelNoiseScale:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {"required": { "model": ("MODEL",),
+                              "noise_scale": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 64.0, "step": 0.01,
+                                                       "tooltip": "Absolute training noise scale. For example HiDream-O1 base: 8.0, dev: 7.5."}),
+                              }}
+
+    RETURN_TYPES = ("MODEL",)
+    FUNCTION = "patch"
+
+    CATEGORY = "model/patch"
+
+    def patch(self, model, noise_scale):
+        m = model.clone()
+        original = m.get_model_object("model_sampling")
+        ms = type(original)(m.model.model_config)
+        ms.set_parameters(shift=original.shift, multiplier=original.multiplier)
+        ms.set_noise_scale(noise_scale)
+        m.add_object_patch("model_sampling", ms)
+        return (m, )
+
+
 class ModelComputeDtype:
     SEARCH_ALIASES = ["model precision", "change dtype"]
     @classmethod
@@ -311,12 +363,81 @@ class ModelComputeDtype:
     RETURN_TYPES = ("MODEL",)
     FUNCTION = "patch"
 
-    CATEGORY = "advanced/debug/model"
+    CATEGORY = "advanced/debug"
 
     def patch(self, model, dtype):
         m = model.clone()
         m.set_model_compute_dtype(node_helpers.string_to_torch_dtype(dtype))
         return (m, )
+
+
+class VAEComputeDtype(io.ComfyNode):
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="VAEComputeDtype",
+            display_name="VAE Compute Dtype",
+            search_aliases=["vae precision", "vae fp32", "vae fp16", "vae bf16"],
+            category="advanced/debug",
+            description="Sets the compute dtype for VAE encoding and decoding without affecting other branches.",
+            inputs=[
+                io.Vae.Input("vae"),
+                io.Combo.Input("dtype", options=["default", "fp32", "fp16", "bf16"], default="default", advanced=True,
+                               tooltip="Default keeps the input VAE's compute dtype."),
+            ],
+            outputs=[io.Vae.Output()],
+        )
+
+    @classmethod
+    def execute(cls, vae, dtype):
+        vae = vae.clone()
+        compute_dtype = node_helpers.string_to_torch_dtype(dtype)
+        if compute_dtype is not None:
+            vae.vae_dtype = compute_dtype
+            vae.patcher.set_model_compute_dtype(compute_dtype)
+        return io.NodeOutput(vae)
+
+
+class ModelAttentionBackend(io.ComfyNode):
+    @classmethod
+    def define_schema(cls):
+        backends = ["pytorch attention"]
+        if comfy.ldm.modules.attention.COMFY_KITCHEN_INT8_ATTENTION_IS_AVAILABLE:
+            backends.append("comfy kitchen attention")
+        return io.Schema(
+            node_id="ModelAttentionBackend",
+            display_name="Model Attention Backend",
+            search_aliases=["comfy kitchen", "attention", "pytorch", "kitchen attention"],
+            category="model/patch",
+            is_experimental=True,
+            description="Selects the dense attention implementation for the model. When used with Block Sparse Attention, this backend is used whenever sparse attention is inactive or unsupported.",
+            inputs=[
+                io.Model.Input("model", tooltip="The model to patch."),
+                io.Combo.Input("attention", display_name="backend", options=backends, default="pytorch attention",
+                               tooltip="The dense attention backend. Comfy Kitchen attention uses quantized INT8 attention and is available only on Nvidia and AMD GPUs."),
+            ],
+            outputs=[
+                io.Model.Output(display_name="model", tooltip="The model with the selected attention backend."),
+            ],
+        )
+
+    @classmethod
+    def validate_inputs(cls, attention):
+        return True
+
+    @classmethod
+    def execute(cls, model, attention):
+        attention_name = {
+            "comfy kitchen attention": "comfy_kitchen_int8",
+            "pytorch attention": "pytorch",
+        }.get(attention)
+        attention_function = comfy.ldm.modules.attention.get_attention_function(attention_name, None)
+        if attention_function is None:
+            logging.warning("Attention backend '%s' is unavailable; using PyTorch attention.", attention)
+            attention_function = comfy.ldm.modules.attention.get_attention_function("pytorch")
+        m = model.clone()
+        m.set_model_optimized_attention(attention_function)
+        return io.NodeOutput(m)
 
 
 NODE_CLASS_MAPPINGS = {
@@ -327,6 +448,9 @@ NODE_CLASS_MAPPINGS = {
     "ModelSamplingSD3": ModelSamplingSD3,
     "ModelSamplingAuraFlow": ModelSamplingAuraFlow,
     "ModelSamplingFlux": ModelSamplingFlux,
+    "ModelNoiseScale": ModelNoiseScale,
     "RescaleCFG": RescaleCFG,
     "ModelComputeDtype": ModelComputeDtype,
+    "VAEComputeDtype": VAEComputeDtype,
+    "ModelAttentionBackend": ModelAttentionBackend,
 }

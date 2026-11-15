@@ -1,6 +1,7 @@
 import os
 
-from transformers import CLIPTokenizer
+from tokenizers import Tokenizer
+from transformers import CLIPTokenizer, PreTrainedTokenizerFast
 import comfy.ops
 import torch
 import traceback
@@ -308,7 +309,7 @@ class SDClipModel(torch.nn.Module, ClipTokenWeightEncoder):
     def load_sd(self, sd):
         return self.transformer.load_state_dict(sd, strict=False, assign=getattr(self, "can_assign_sd", False))
 
-    def generate(self, tokens, do_sample, max_length, temperature, top_k, top_p, min_p, repetition_penalty, seed, presence_penalty=0.0):
+    def generate(self, tokens, do_sample, max_length, temperature, top_k, top_p, min_p, repetition_penalty, seed, presence_penalty=0.0, mtp=True):
         if isinstance(tokens, dict):
             tokens_only = next(iter(tokens.values())) # todo: get this better?
         else:
@@ -487,7 +488,11 @@ class SDTokenizer:
     def __init__(self, tokenizer_path=None, max_length=77, pad_with_end=True, embedding_directory=None, embedding_size=768, embedding_key='clip_l', tokenizer_class=CLIPTokenizer, has_start_token=True, has_end_token=True, pad_to_max_length=True, min_length=None, pad_token=None, end_token=None, start_token=None, min_padding=None, pad_left=False, disable_weights=False, tokenizer_data={}, tokenizer_args={}):
         if tokenizer_path is None:
             tokenizer_path = os.path.join(os.path.dirname(os.path.realpath(__file__)), "sd1_tokenizer")
-        self.tokenizer = tokenizer_class.from_pretrained(tokenizer_path, **tokenizer_args)
+        tokenizer_json = tokenizer_data.get("{}_tokenizer_json".format(embedding_key))
+        if tokenizer_json is not None:
+            self.tokenizer = PreTrainedTokenizerFast(tokenizer_object=Tokenizer.from_str(tokenizer_json))
+        else:
+            self.tokenizer = tokenizer_class.from_pretrained(tokenizer_path, **tokenizer_args)
         self.max_length = tokenizer_data.get("{}_max_length".format(embedding_key), max_length)
         self.min_length = tokenizer_data.get("{}_min_length".format(embedding_key), min_length)
         self.end_token = None
@@ -543,18 +548,24 @@ class SDTokenizer:
     def _try_get_embedding(self, embedding_name:str):
         '''
         Takes a potential embedding name and tries to retrieve it.
-        Returns a Tuple consisting of the embedding and any leftover string, embedding can be None.
+        Returns a Tuple consisting of the embedding, the cleaned embedding name, and any leftover string, embedding can be None.
         '''
         split_embed = embedding_name.split()
         embedding_name = split_embed[0]
         leftover = ' '.join(split_embed[1:])
+
+        match = re.search(r'[<\[]', embedding_name)
+        if match is not None:
+            leftover = embedding_name[match.start():] + (" " + leftover if leftover else "")
+            embedding_name = embedding_name[:match.start()]
+
         embed = load_embed(embedding_name, self.embedding_directory, self.embedding_size, self.embedding_key)
         if embed is None:
             stripped = embedding_name.strip(',')
             if len(stripped) < len(embedding_name):
                 embed = load_embed(stripped, self.embedding_directory, self.embedding_size, self.embedding_key)
-                return (embed, "{} {}".format(embedding_name[len(stripped):], leftover))
-        return (embed, leftover)
+                return (embed, embedding_name, "{} {}".format(embedding_name[len(stripped):], leftover))
+        return (embed, embedding_name, leftover)
 
     def pad_tokens(self, tokens, amount):
         if self.pad_left:
@@ -585,7 +596,7 @@ class SDTokenizer:
         tokens = []
         for weighted_segment, weight in parsed_weights:
             to_tokenize = unescape_important(weighted_segment)
-            split = re.split(' {0}|\n{0}'.format(self.embedding_identifier), to_tokenize)
+            split = re.split(r'(?<=\s){}'.format(re.escape(self.embedding_identifier)), to_tokenize)
             to_tokenize = [split[0]]
             for i in range(1, len(split)):
                 to_tokenize.append("{}{}".format(self.embedding_identifier, split[i]))
@@ -595,7 +606,7 @@ class SDTokenizer:
                 # if we find an embedding, deal with the embedding
                 if word.startswith(self.embedding_identifier) and self.embedding_directory is not None:
                     embedding_name = word[len(self.embedding_identifier):].strip('\n')
-                    embed, leftover = self._try_get_embedding(embedding_name)
+                    embed, embedding_name, leftover = self._try_get_embedding(embedding_name)
                     if embed is None:
                         logging.warning(f"warning, embedding:{embedding_name} does not exist, ignoring")
                     else:
@@ -740,5 +751,11 @@ class SD1ClipModel(torch.nn.Module):
     def load_sd(self, sd):
         return getattr(self, self.clip).load_sd(sd)
 
-    def generate(self, tokens, do_sample=True, max_length=256, temperature=1.0, top_k=50, top_p=0.95, min_p=0.0, repetition_penalty=1.0, seed=None, presence_penalty=0.0):
-        return getattr(self, self.clip).generate(tokens, do_sample=do_sample, max_length=max_length, temperature=temperature, top_k=top_k, top_p=top_p, min_p=min_p, repetition_penalty=repetition_penalty, seed=seed, presence_penalty=presence_penalty)
+    def generate(self, tokens, do_sample=True, max_length=256, temperature=1.0, top_k=50, top_p=0.95, min_p=0.0, repetition_penalty=1.0, seed=None, presence_penalty=0.0, mtp=True):
+        return getattr(self, self.clip).generate(tokens, do_sample=do_sample, max_length=max_length, temperature=temperature, top_k=top_k, top_p=top_p, min_p=min_p, repetition_penalty=repetition_penalty, seed=seed, presence_penalty=presence_penalty, mtp=mtp)
+
+    def get_dynamic_vram__units(self):
+        # forward to the inner transformer so ModelPatcher can register vbar units (graph decode)
+        transformer = getattr(getattr(self, self.clip), "transformer", None)
+        get_units = getattr(transformer, "get_dynamic_vram__units", None) or getattr(getattr(transformer, "model", None), "get_dynamic_vram__units", None)
+        return get_units() if get_units is not None else ([], [])

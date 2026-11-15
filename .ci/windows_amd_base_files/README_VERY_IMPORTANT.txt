@@ -1,5 +1,4 @@
-As of the time of writing this you need this driver for best results:
-https://www.amd.com/en/resources/support-articles/release-notes/RN-AMDGPU-WINDOWS-PYTORCH-7-1-1.html
+As of the time of writing this you need a recent driver. Updating to the latest driver is recommended.
 
 HOW TO RUN:
 
@@ -7,9 +6,9 @@ If you have a AMD gpu:
 
 run_amd_gpu.bat
 
-If you have memory issues you can try disabling the smart memory management by running comfyui with:
+If you have memory issues you can try enabling the new dynamic memory management by running comfyui with:
 
-run_amd_gpu_disable_smart_memory.bat
+run_amd_gpu_enable_dynamic_vram.bat
 
 IF YOU GET A RED ERROR IN THE UI MAKE SURE YOU HAVE A MODEL/CHECKPOINT IN: ComfyUI\models\checkpoints
 

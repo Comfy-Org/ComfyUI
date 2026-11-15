@@ -1,1 +1,604 @@
-{"revision": 0, "last_node_id": 14, "last_link_id": 0, "nodes": [{"id": 14, "type": "36677b92-5dd8-47a5-9380-4da982c1894f", "pos": [3610, -2630], "size": [270, 150], "flags": {}, "order": 3, "mode": 0, "inputs": [{"label": "image", "localized_name": "images.image0", "name": "images.image0", "type": "IMAGE", "link": null}], "outputs": [{"label": "IMAGE", "localized_name": "IMAGE0", "name": "IMAGE0", "type": "IMAGE", "links": []}], "properties": {"proxyWidgets": [["4", "value"], ["5", "value"], ["7", "value"], ["6", "value"]]}, "widgets_values": [], "title": "Color Adjustment"}], "links": [], "version": 0.4, "definitions": {"subgraphs": [{"id": "36677b92-5dd8-47a5-9380-4da982c1894f", "version": 1, "state": {"lastGroupId": 0, "lastNodeId": 16, "lastLinkId": 36, "lastRerouteId": 0}, "revision": 0, "config": {}, "name": "Color Adjustment", "inputNode": {"id": -10, "bounding": [3110, -3560, 120, 60]}, "outputNode": {"id": -20, "bounding": [4070, -3560, 120, 60]}, "inputs": [{"id": "0431d493-5f28-4430-bd00-84733997fc08", "name": "images.image0", "type": "IMAGE", "linkIds": [29], "localized_name": "images.image0", "label": "image", "pos": [3210, -3540]}], "outputs": [{"id": "bee8ea06-a114-4612-8937-939f2c927bdb", "name": "IMAGE0", "type": "IMAGE", "linkIds": [28], "localized_name": "IMAGE0", "label": "IMAGE", "pos": [4090, -3540]}], "widgets": [], "nodes": [{"id": 15, "type": "GLSLShader", "pos": [3590, -3940], "size": [420, 252], "flags": {}, "order": 4, "mode": 0, "inputs": [{"label": "image0", "localized_name": "images.image0", "name": "images.image0", "type": "IMAGE", "link": 29}, {"label": "image1", "localized_name": "images.image1", "name": "images.image1", "shape": 7, "type": "IMAGE", "link": null}, {"label": "u_float0", "localized_name": "floats.u_float0", "name": "floats.u_float0", "shape": 7, "type": "FLOAT", "link": 34}, {"label": "u_float1", "localized_name": "floats.u_float1", "name": "floats.u_float1", "shape": 7, "type": "FLOAT", "link": 30}, {"label": "u_float2", "localized_name": "floats.u_float2", "name": "floats.u_float2", "shape": 7, "type": "FLOAT", "link": 31}, {"label": "u_float3", "localized_name": "floats.u_float3", "name": "floats.u_float3", "shape": 7, "type": "FLOAT", "link": 33}, {"label": "u_float4", "localized_name": "floats.u_float4", "name": "floats.u_float4", "shape": 7, "type": "FLOAT", "link": null}, {"label": "u_int0", "localized_name": "ints.u_int0", "name": "ints.u_int0", "shape": 7, "type": "INT", "link": null}, {"localized_name": "fragment_shader", "name": "fragment_shader", "type": "STRING", "widget": {"name": "fragment_shader"}, "link": null}, {"localized_name": "size_mode", "name": "size_mode", "type": "COMFY_DYNAMICCOMBO_V3", "widget": {"name": "size_mode"}, "link": null}], "outputs": [{"localized_name": "IMAGE0", "name": "IMAGE0", "type": "IMAGE", "links": [28]}, {"localized_name": "IMAGE1", "name": "IMAGE1", "type": "IMAGE", "links": null}, {"localized_name": "IMAGE2", "name": "IMAGE2", "type": "IMAGE", "links": null}, {"localized_name": "IMAGE3", "name": "IMAGE3", "type": "IMAGE", "links": null}], "properties": {"Node name for S&R": "GLSLShader"}, "widgets_values": ["#version 300 es\nprecision highp float;\n\nuniform sampler2D u_image0;\nuniform float u_float0; // temperature (-100 to 100)\nuniform float u_float1; // tint (-100 to 100)\nuniform float u_float2; // vibrance (-100 to 100)\nuniform float u_float3; // saturation (-100 to 100)\n\nin vec2 v_texCoord;\nout vec4 fragColor;\n\nconst float INPUT_SCALE = 0.01;\nconst float TEMP_TINT_PRIMARY = 0.3;\nconst float TEMP_TINT_SECONDARY = 0.15;\nconst float VIBRANCE_BOOST = 2.0;\nconst float SATURATION_BOOST = 2.0;\nconst float SKIN_PROTECTION = 0.5;\nconst float EPSILON = 0.001;\nconst vec3 LUMA_WEIGHTS = vec3(0.299, 0.587, 0.114);\n\nvoid main() {\n    vec4 tex = texture(u_image0, v_texCoord);\n    vec3 color = tex.rgb;\n    \n    // Scale inputs: -100/100 \u2192 -1/1\n    float temperature = u_float0 * INPUT_SCALE;\n    float tint = u_float1 * INPUT_SCALE;\n    float vibrance = u_float2 * INPUT_SCALE;\n    float saturation = u_float3 * INPUT_SCALE;\n    \n    // Temperature (warm/cool): positive = warm, negative = cool\n    color.r += temperature * TEMP_TINT_PRIMARY;\n    color.b -= temperature * TEMP_TINT_PRIMARY;\n    \n    // Tint (green/magenta): positive = green, negative = magenta\n    color.g += tint * TEMP_TINT_PRIMARY;\n    color.r -= tint * TEMP_TINT_SECONDARY;\n    color.b -= tint * TEMP_TINT_SECONDARY;\n    \n    // Single clamp after temperature/tint\n    color = clamp(color, 0.0, 1.0);\n    \n    // Vibrance with skin protection\n    if (vibrance != 0.0) {\n        float maxC = max(color.r, max(color.g, color.b));\n        float minC = min(color.r, min(color.g, color.b));\n        float sat = maxC - minC;\n        float gray = dot(color, LUMA_WEIGHTS);\n        \n        if (vibrance < 0.0) {\n            // Desaturate: -100 \u2192 gray\n            color = mix(vec3(gray), color, 1.0 + vibrance);\n        } else {\n            // Boost less saturated colors more\n            float vibranceAmt = vibrance * (1.0 - sat);\n            \n            // Branchless skin tone protection\n            float isWarmTone = step(color.b, color.g) * step(color.g, color.r);\n            float warmth = (color.r - color.b) / max(maxC, EPSILON);\n            float skinTone = isWarmTone * warmth * sat * (1.0 - sat);\n            vibranceAmt *= (1.0 - skinTone * SKIN_PROTECTION);\n            \n            color = mix(vec3(gray), color, 1.0 + vibranceAmt * VIBRANCE_BOOST);\n        }\n    }\n    \n    // Saturation\n    if (saturation != 0.0) {\n        float gray = dot(color, LUMA_WEIGHTS);\n        float satMix = saturation < 0.0\n            ? 1.0 + saturation                      // -100 \u2192 gray\n            : 1.0 + saturation * SATURATION_BOOST;  // +100 \u2192 3x boost\n        color = mix(vec3(gray), color, satMix);\n    }\n    \n    fragColor = vec4(clamp(color, 0.0, 1.0), tex.a);\n}", "from_input"]}, {"id": 6, "type": "PrimitiveFloat", "pos": [3290, -3610], "size": [270, 58], "flags": {}, "order": 0, "mode": 0, "inputs": [{"label": "vibrance", "localized_name": "value", "name": "value", "type": "FLOAT", "widget": {"name": "value"}, "link": null}], "outputs": [{"localized_name": "FLOAT", "name": "FLOAT", "type": "FLOAT", "links": [26, 31]}], "title": "Vibrance", "properties": {"Node name for S&R": "PrimitiveFloat", "max": 100, "min": -100, "step": 1, "display": "gradientslider", "gradient_stops": [{"offset": 0, "color": [128, 128, 128]}, {"offset": 1, "color": [255, 0, 0]}]}, "widgets_values": [0]}, {"id": 7, "type": "PrimitiveFloat", "pos": [3290, -3720], "size": [270, 58], "flags": {}, "order": 1, "mode": 0, "inputs": [{"label": "saturation", "localized_name": "value", "name": "value", "type": "FLOAT", "widget": {"name": "value"}, "link": null}], "outputs": [{"localized_name": "FLOAT", "name": "FLOAT", "type": "FLOAT", "links": [33]}], "title": "Saturation", "properties": {"Node name for S&R": "PrimitiveFloat", "max": 100, "min": -100, "step": 1, "display": "gradientslider", "gradient_stops": [{"offset": 0, "color": [128, 128, 128]}, {"offset": 1, "color": [255, 0, 0]}]}, "widgets_values": [0]}, {"id": 5, "type": "PrimitiveFloat", "pos": [3290, -3830], "size": [270, 58], "flags": {}, "order": 2, "mode": 0, "inputs": [{"label": "tint", "localized_name": "value", "name": "value", "type": "FLOAT", "widget": {"name": "value"}, "link": null}], "outputs": [{"localized_name": "FLOAT", "name": "FLOAT", "type": "FLOAT", "links": [30]}], "title": "Tint", "properties": {"Node name for S&R": "PrimitiveFloat", "max": 100, "min": -100, "step": 1, "display": "gradientslider", "gradient_stops": [{"offset": 0, "color": [0, 255, 0]}, {"offset": 0.5, "color": [255, 255, 255]}, {"offset": 1, "color": [255, 0, 255]}]}, "widgets_values": [0]}, {"id": 4, "type": "PrimitiveFloat", "pos": [3290, -3940], "size": [270, 58], "flags": {}, "order": 3, "mode": 0, "inputs": [{"label": "temperature", "localized_name": "value", "name": "value", "type": "FLOAT", "widget": {"name": "value"}, "link": null}], "outputs": [{"localized_name": "FLOAT", "name": "FLOAT", "type": "FLOAT", "links": [34]}], "title": "Temperature", "properties": {"Node name for S&R": "PrimitiveFloat", "max": 100, "min": -100, "step": 1, "display": "gradientslider", "gradient_stops": [{"offset": 0, "color": [68, 136, 255]}, {"offset": 0.5, "color": [255, 255, 255]}, {"offset": 1, "color": [255, 136, 0]}]}, "widgets_values": [0]}], "groups": [], "links": [{"id": 34, "origin_id": 4, "origin_slot": 0, "target_id": 15, "target_slot": 2, "type": "FLOAT"}, {"id": 30, "origin_id": 5, "origin_slot": 0, "target_id": 15, "target_slot": 3, "type": "FLOAT"}, {"id": 31, "origin_id": 6, "origin_slot": 0, "target_id": 15, "target_slot": 4, "type": "FLOAT"}, {"id": 33, "origin_id": 7, "origin_slot": 0, "target_id": 15, "target_slot": 5, "type": "FLOAT"}, {"id": 29, "origin_id": -10, "origin_slot": 0, "target_id": 15, "target_slot": 0, "type": "IMAGE"}, {"id": 28, "origin_id": 15, "origin_slot": 0, "target_id": -20, "target_slot": 0, "type": "IMAGE"}], "extra": {"workflowRendererVersion": "LG"}, "category": "Image Tools/Color adjust"}]}}
+{
+  "revision": 0,
+  "last_node_id": 14,
+  "last_link_id": 0,
+  "nodes": [
+    {
+      "id": 14,
+      "type": "36677b92-5dd8-47a5-9380-4da982c1894f",
+      "pos": [
+        3610,
+        -2630
+      ],
+      "size": [
+        270,
+        150
+      ],
+      "flags": {},
+      "order": 3,
+      "mode": 0,
+      "inputs": [
+        {
+          "label": "image",
+          "localized_name": "images.image0",
+          "name": "images.image0",
+          "type": "IMAGE",
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "label": "IMAGE",
+          "localized_name": "IMAGE0",
+          "name": "IMAGE0",
+          "type": "IMAGE",
+          "links": []
+        }
+      ],
+      "properties": {
+        "proxyWidgets": [
+          [
+            "4",
+            "value"
+          ],
+          [
+            "5",
+            "value"
+          ],
+          [
+            "7",
+            "value"
+          ],
+          [
+            "6",
+            "value"
+          ]
+        ]
+      },
+      "widgets_values": [],
+      "title": "Color Adjustment"
+    }
+  ],
+  "links": [],
+  "version": 0.4,
+  "definitions": {
+    "subgraphs": [
+      {
+        "id": "36677b92-5dd8-47a5-9380-4da982c1894f",
+        "version": 1,
+        "state": {
+          "lastGroupId": 0,
+          "lastNodeId": 16,
+          "lastLinkId": 36,
+          "lastRerouteId": 0
+        },
+        "revision": 0,
+        "config": {},
+        "name": "Color Adjustment",
+        "inputNode": {
+          "id": -10,
+          "bounding": [
+            3110,
+            -3560,
+            120,
+            60
+          ]
+        },
+        "outputNode": {
+          "id": -20,
+          "bounding": [
+            4070,
+            -3560,
+            120,
+            60
+          ]
+        },
+        "inputs": [
+          {
+            "id": "0431d493-5f28-4430-bd00-84733997fc08",
+            "name": "images.image0",
+            "type": "IMAGE",
+            "linkIds": [
+              29
+            ],
+            "localized_name": "images.image0",
+            "label": "image",
+            "pos": [
+              3210,
+              -3540
+            ]
+          }
+        ],
+        "outputs": [
+          {
+            "id": "bee8ea06-a114-4612-8937-939f2c927bdb",
+            "name": "IMAGE0",
+            "type": "IMAGE",
+            "linkIds": [
+              28
+            ],
+            "localized_name": "IMAGE0",
+            "label": "IMAGE",
+            "pos": [
+              4090,
+              -3540
+            ]
+          }
+        ],
+        "widgets": [],
+        "nodes": [
+          {
+            "id": 15,
+            "type": "GLSLShader",
+            "pos": [
+              3590,
+              -3940
+            ],
+            "size": [
+              420,
+              252
+            ],
+            "flags": {},
+            "order": 4,
+            "mode": 0,
+            "inputs": [
+              {
+                "label": "image0",
+                "localized_name": "images.image0",
+                "name": "images.image0",
+                "type": "IMAGE",
+                "link": 29
+              },
+              {
+                "label": "image1",
+                "localized_name": "images.image1",
+                "name": "images.image1",
+                "shape": 7,
+                "type": "IMAGE",
+                "link": null
+              },
+              {
+                "label": "u_float0",
+                "localized_name": "floats.u_float0",
+                "name": "floats.u_float0",
+                "shape": 7,
+                "type": "FLOAT",
+                "link": 34
+              },
+              {
+                "label": "u_float1",
+                "localized_name": "floats.u_float1",
+                "name": "floats.u_float1",
+                "shape": 7,
+                "type": "FLOAT",
+                "link": 30
+              },
+              {
+                "label": "u_float2",
+                "localized_name": "floats.u_float2",
+                "name": "floats.u_float2",
+                "shape": 7,
+                "type": "FLOAT",
+                "link": 31
+              },
+              {
+                "label": "u_float3",
+                "localized_name": "floats.u_float3",
+                "name": "floats.u_float3",
+                "shape": 7,
+                "type": "FLOAT",
+                "link": 33
+              },
+              {
+                "label": "u_float4",
+                "localized_name": "floats.u_float4",
+                "name": "floats.u_float4",
+                "shape": 7,
+                "type": "FLOAT",
+                "link": null
+              },
+              {
+                "label": "u_int0",
+                "localized_name": "ints.u_int0",
+                "name": "ints.u_int0",
+                "shape": 7,
+                "type": "INT",
+                "link": null
+              },
+              {
+                "localized_name": "fragment_shader",
+                "name": "fragment_shader",
+                "type": "STRING",
+                "widget": {
+                  "name": "fragment_shader"
+                },
+                "link": null
+              },
+              {
+                "localized_name": "size_mode",
+                "name": "size_mode",
+                "type": "COMFY_DYNAMICCOMBO_V3",
+                "widget": {
+                  "name": "size_mode"
+                },
+                "link": null
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "IMAGE0",
+                "name": "IMAGE0",
+                "type": "IMAGE",
+                "links": [
+                  28
+                ]
+              },
+              {
+                "localized_name": "IMAGE1",
+                "name": "IMAGE1",
+                "type": "IMAGE",
+                "links": null
+              },
+              {
+                "localized_name": "IMAGE2",
+                "name": "IMAGE2",
+                "type": "IMAGE",
+                "links": null
+              },
+              {
+                "localized_name": "IMAGE3",
+                "name": "IMAGE3",
+                "type": "IMAGE",
+                "links": null
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "GLSLShader"
+            },
+            "widgets_values": [
+              "#version 300 es\nprecision highp float;\n\nuniform sampler2D u_image0;\nuniform float u_float0; // temperature (-100 to 100)\nuniform float u_float1; // tint (-100 to 100)\nuniform float u_float2; // vibrance (-100 to 100)\nuniform float u_float3; // saturation (-100 to 100)\n\nin vec2 v_texCoord;\nout vec4 fragColor;\n\nconst float INPUT_SCALE = 0.01;\nconst float TEMP_TINT_PRIMARY = 0.3;\nconst float TEMP_TINT_SECONDARY = 0.15;\nconst float VIBRANCE_BOOST = 2.0;\nconst float SATURATION_BOOST = 2.0;\nconst float SKIN_PROTECTION = 0.5;\nconst float EPSILON = 0.001;\nconst vec3 LUMA_WEIGHTS = vec3(0.299, 0.587, 0.114);\n\nvoid main() {\n    vec4 tex = texture(u_image0, v_texCoord);\n    vec3 color = tex.rgb;\n    \n    // Scale inputs: -100/100 \u2192 -1/1\n    float temperature = u_float0 * INPUT_SCALE;\n    float tint = u_float1 * INPUT_SCALE;\n    float vibrance = u_float2 * INPUT_SCALE;\n    float saturation = u_float3 * INPUT_SCALE;\n    \n    // Temperature (warm/cool): positive = warm, negative = cool\n    color.r += temperature * TEMP_TINT_PRIMARY;\n    color.b -= temperature * TEMP_TINT_PRIMARY;\n    \n    // Tint (green/magenta): positive = green, negative = magenta\n    color.g += tint * TEMP_TINT_PRIMARY;\n    color.r -= tint * TEMP_TINT_SECONDARY;\n    color.b -= tint * TEMP_TINT_SECONDARY;\n    \n    // Single clamp after temperature/tint\n    color = clamp(color, 0.0, 1.0);\n    \n    // Vibrance with skin protection\n    if (vibrance != 0.0) {\n        float maxC = max(color.r, max(color.g, color.b));\n        float minC = min(color.r, min(color.g, color.b));\n        float sat = maxC - minC;\n        float gray = dot(color, LUMA_WEIGHTS);\n        \n        if (vibrance < 0.0) {\n            // Desaturate: -100 \u2192 gray\n            color = mix(vec3(gray), color, 1.0 + vibrance);\n        } else {\n            // Boost less saturated colors more\n            float vibranceAmt = vibrance * (1.0 - sat);\n            \n            // Branchless skin tone protection\n            float isWarmTone = step(color.b, color.g) * step(color.g, color.r);\n            float warmth = (color.r - color.b) / max(maxC, EPSILON);\n            float skinTone = isWarmTone * warmth * sat * (1.0 - sat);\n            vibranceAmt *= (1.0 - skinTone * SKIN_PROTECTION);\n            \n            color = mix(vec3(gray), color, 1.0 + vibranceAmt * VIBRANCE_BOOST);\n        }\n    }\n    \n    // Saturation\n    if (saturation != 0.0) {\n        float gray = dot(color, LUMA_WEIGHTS);\n        float satMix = saturation < 0.0\n            ? 1.0 + saturation                      // -100 \u2192 gray\n            : 1.0 + saturation * SATURATION_BOOST;  // +100 \u2192 3x boost\n        color = mix(vec3(gray), color, satMix);\n    }\n    \n    fragColor = vec4(clamp(color, 0.0, 1.0), tex.a);\n}",
+              "from_input"
+            ]
+          },
+          {
+            "id": 6,
+            "type": "PrimitiveFloat",
+            "pos": [
+              3290,
+              -3610
+            ],
+            "size": [
+              270,
+              58
+            ],
+            "flags": {},
+            "order": 0,
+            "mode": 0,
+            "inputs": [
+              {
+                "label": "vibrance",
+                "localized_name": "value",
+                "name": "value",
+                "type": "FLOAT",
+                "widget": {
+                  "name": "value"
+                },
+                "link": null
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "FLOAT",
+                "name": "FLOAT",
+                "type": "FLOAT",
+                "links": [
+                  26,
+                  31
+                ]
+              }
+            ],
+            "title": "Vibrance",
+            "properties": {
+              "Node name for S&R": "PrimitiveFloat",
+              "max": 100,
+              "min": -100,
+              "step": 1,
+              "display": "gradientslider",
+              "gradient_stops": [
+                {
+                  "offset": 0,
+                  "color": [
+                    128,
+                    128,
+                    128
+                  ]
+                },
+                {
+                  "offset": 1,
+                  "color": [
+                    255,
+                    0,
+                    0
+                  ]
+                }
+              ]
+            },
+            "widgets_values": [
+              0
+            ]
+          },
+          {
+            "id": 7,
+            "type": "PrimitiveFloat",
+            "pos": [
+              3290,
+              -3720
+            ],
+            "size": [
+              270,
+              58
+            ],
+            "flags": {},
+            "order": 1,
+            "mode": 0,
+            "inputs": [
+              {
+                "label": "saturation",
+                "localized_name": "value",
+                "name": "value",
+                "type": "FLOAT",
+                "widget": {
+                  "name": "value"
+                },
+                "link": null
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "FLOAT",
+                "name": "FLOAT",
+                "type": "FLOAT",
+                "links": [
+                  33
+                ]
+              }
+            ],
+            "title": "Saturation",
+            "properties": {
+              "Node name for S&R": "PrimitiveFloat",
+              "max": 100,
+              "min": -100,
+              "step": 1,
+              "display": "gradientslider",
+              "gradient_stops": [
+                {
+                  "offset": 0,
+                  "color": [
+                    128,
+                    128,
+                    128
+                  ]
+                },
+                {
+                  "offset": 1,
+                  "color": [
+                    255,
+                    0,
+                    0
+                  ]
+                }
+              ]
+            },
+            "widgets_values": [
+              0
+            ]
+          },
+          {
+            "id": 5,
+            "type": "PrimitiveFloat",
+            "pos": [
+              3290,
+              -3830
+            ],
+            "size": [
+              270,
+              58
+            ],
+            "flags": {},
+            "order": 2,
+            "mode": 0,
+            "inputs": [
+              {
+                "label": "tint",
+                "localized_name": "value",
+                "name": "value",
+                "type": "FLOAT",
+                "widget": {
+                  "name": "value"
+                },
+                "link": null
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "FLOAT",
+                "name": "FLOAT",
+                "type": "FLOAT",
+                "links": [
+                  30
+                ]
+              }
+            ],
+            "title": "Tint",
+            "properties": {
+              "Node name for S&R": "PrimitiveFloat",
+              "max": 100,
+              "min": -100,
+              "step": 1,
+              "display": "gradientslider",
+              "gradient_stops": [
+                {
+                  "offset": 0,
+                  "color": [
+                    0,
+                    255,
+                    0
+                  ]
+                },
+                {
+                  "offset": 0.5,
+                  "color": [
+                    255,
+                    255,
+                    255
+                  ]
+                },
+                {
+                  "offset": 1,
+                  "color": [
+                    255,
+                    0,
+                    255
+                  ]
+                }
+              ]
+            },
+            "widgets_values": [
+              0
+            ]
+          },
+          {
+            "id": 4,
+            "type": "PrimitiveFloat",
+            "pos": [
+              3290,
+              -3940
+            ],
+            "size": [
+              270,
+              58
+            ],
+            "flags": {},
+            "order": 3,
+            "mode": 0,
+            "inputs": [
+              {
+                "label": "temperature",
+                "localized_name": "value",
+                "name": "value",
+                "type": "FLOAT",
+                "widget": {
+                  "name": "value"
+                },
+                "link": null
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "FLOAT",
+                "name": "FLOAT",
+                "type": "FLOAT",
+                "links": [
+                  34
+                ]
+              }
+            ],
+            "title": "Temperature",
+            "properties": {
+              "Node name for S&R": "PrimitiveFloat",
+              "max": 100,
+              "min": -100,
+              "step": 1,
+              "display": "gradientslider",
+              "gradient_stops": [
+                {
+                  "offset": 0,
+                  "color": [
+                    68,
+                    136,
+                    255
+                  ]
+                },
+                {
+                  "offset": 0.5,
+                  "color": [
+                    255,
+                    255,
+                    255
+                  ]
+                },
+                {
+                  "offset": 1,
+                  "color": [
+                    255,
+                    136,
+                    0
+                  ]
+                }
+              ]
+            },
+            "widgets_values": [
+              0
+            ]
+          }
+        ],
+        "groups": [],
+        "links": [
+          {
+            "id": 34,
+            "origin_id": 4,
+            "origin_slot": 0,
+            "target_id": 15,
+            "target_slot": 2,
+            "type": "FLOAT"
+          },
+          {
+            "id": 30,
+            "origin_id": 5,
+            "origin_slot": 0,
+            "target_id": 15,
+            "target_slot": 3,
+            "type": "FLOAT"
+          },
+          {
+            "id": 31,
+            "origin_id": 6,
+            "origin_slot": 0,
+            "target_id": 15,
+            "target_slot": 4,
+            "type": "FLOAT"
+          },
+          {
+            "id": 33,
+            "origin_id": 7,
+            "origin_slot": 0,
+            "target_id": 15,
+            "target_slot": 5,
+            "type": "FLOAT"
+          },
+          {
+            "id": 29,
+            "origin_id": -10,
+            "origin_slot": 0,
+            "target_id": 15,
+            "target_slot": 0,
+            "type": "IMAGE"
+          },
+          {
+            "id": 28,
+            "origin_id": 15,
+            "origin_slot": 0,
+            "target_id": -20,
+            "target_slot": 0,
+            "type": "IMAGE"
+          }
+        ],
+        "extra": {
+          "workflowRendererVersion": "LG"
+        },
+        "category": "Image Tools/Color adjust",
+        "description": "Adjusts saturation, temperature, tint, and vibrance using a real-time GPU fragment shader."
+      }
+    ]
+  }
+}

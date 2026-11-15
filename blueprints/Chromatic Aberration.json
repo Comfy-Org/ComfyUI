@@ -1,1 +1,385 @@
-{"revision": 0, "last_node_id": 19, "last_link_id": 0, "nodes": [{"id": 19, "type": "2c5ef154-2bde-496d-bc8b-9dcf42f2913f", "pos": [3710, -2070], "size": [260, 82], "flags": {}, "order": 4, "mode": 0, "inputs": [{"label": "image", "localized_name": "images.image0", "name": "images.image0", "type": "IMAGE", "link": null}], "outputs": [{"label": "IMAGE", "localized_name": "IMAGE0", "name": "IMAGE0", "type": "IMAGE", "links": []}], "title": "Chromatic Aberration", "properties": {"proxyWidgets": [["17", "choice"], ["18", "value"]]}, "widgets_values": []}], "links": [], "version": 0.4, "definitions": {"subgraphs": [{"id": "2c5ef154-2bde-496d-bc8b-9dcf42f2913f", "version": 1, "state": {"lastGroupId": 0, "lastNodeId": 18, "lastLinkId": 23, "lastRerouteId": 0}, "revision": 0, "config": {}, "name": "Chromatic Aberration", "inputNode": {"id": -10, "bounding": [3270, -2050, 120, 60]}, "outputNode": {"id": -20, "bounding": [4260, -2050, 120, 60]}, "inputs": [{"id": "3b33ac46-93a6-4b1c-896a-ed6fbd24e59c", "name": "images.image0", "type": "IMAGE", "linkIds": [20], "localized_name": "images.image0", "label": "image", "pos": [3370, -2030]}], "outputs": [{"id": "abe7cd79-a87b-4bd0-8923-d79a57d81a6e", "name": "IMAGE0", "type": "IMAGE", "linkIds": [23], "localized_name": "IMAGE0", "label": "IMAGE", "pos": [4280, -2030]}], "widgets": [], "nodes": [{"id": 16, "type": "GLSLShader", "pos": [3810, -2320], "size": [390, 212], "flags": {}, "order": 2, "mode": 0, "inputs": [{"label": "image0", "localized_name": "images.image0", "name": "images.image0", "type": "IMAGE", "link": 20}, {"label": "image1", "localized_name": "images.image1", "name": "images.image1", "shape": 7, "type": "IMAGE", "link": null}, {"label": "u_float0", "localized_name": "floats.u_float0", "name": "floats.u_float0", "shape": 7, "type": "FLOAT", "link": 22}, {"label": "u_float1", "localized_name": "floats.u_float1", "name": "floats.u_float1", "shape": 7, "type": "FLOAT", "link": null}, {"label": "u_int0", "localized_name": "ints.u_int0", "name": "ints.u_int0", "shape": 7, "type": "INT", "link": 21}, {"label": "u_int1", "localized_name": "ints.u_int1", "name": "ints.u_int1", "shape": 7, "type": "INT", "link": null}, {"localized_name": "fragment_shader", "name": "fragment_shader", "type": "STRING", "widget": {"name": "fragment_shader"}, "link": null}, {"localized_name": "size_mode", "name": "size_mode", "type": "COMFY_DYNAMICCOMBO_V3", "widget": {"name": "size_mode"}, "link": null}], "outputs": [{"localized_name": "IMAGE0", "name": "IMAGE0", "type": "IMAGE", "links": [23]}, {"localized_name": "IMAGE1", "name": "IMAGE1", "type": "IMAGE", "links": null}, {"localized_name": "IMAGE2", "name": "IMAGE2", "type": "IMAGE", "links": null}, {"localized_name": "IMAGE3", "name": "IMAGE3", "type": "IMAGE", "links": null}], "properties": {"Node name for S&R": "GLSLShader"}, "widgets_values": ["#version 300 es\nprecision highp float;\n\nuniform sampler2D u_image0;\nuniform vec2 u_resolution;\nuniform int u_int0;      // Mode\nuniform float u_float0;  // Amount (0 to 100)\n\nin vec2 v_texCoord;\nout vec4 fragColor;\n\nconst int MODE_LINEAR   = 0;\nconst int MODE_RADIAL   = 1;\nconst int MODE_BARREL   = 2;\nconst int MODE_SWIRL    = 3;\nconst int MODE_DIAGONAL = 4;\n\nconst float AMOUNT_SCALE = 0.0005;\nconst float RADIAL_MULT = 4.0;\nconst float BARREL_MULT = 8.0;\nconst float INV_SQRT2 = 0.70710678118;\n\nvoid main() {\n    vec2 uv = v_texCoord;\n    vec4 original = texture(u_image0, uv);\n\n    float amount = u_float0 * AMOUNT_SCALE;\n\n    if (amount < 0.000001) {\n        fragColor = original;\n        return;\n    }\n\n    // Aspect-corrected coordinates for circular effects\n    float aspect = u_resolution.x / u_resolution.y;\n    vec2 centered = uv - 0.5;\n    vec2 corrected = vec2(centered.x * aspect, centered.y);\n    float r = length(corrected);\n    vec2 dir = r > 0.0001 ? corrected / r : vec2(0.0);\n    vec2 offset = vec2(0.0);\n\n    if (u_int0 == MODE_LINEAR) {\n        // Horizontal shift (no aspect correction needed)\n        offset = vec2(amount, 0.0);\n    }\n    else if (u_int0 == MODE_RADIAL) {\n        // Outward from center, stronger at edges\n        offset = dir * r * amount * RADIAL_MULT;\n        offset.x /= aspect;  // Convert back to UV space\n    }\n    else if (u_int0 == MODE_BARREL) {\n        // Lens distortion simulation (r² falloff)\n        offset = dir * r * r * amount * BARREL_MULT;\n        offset.x /= aspect;  // Convert back to UV space\n    }\n    else if (u_int0 == MODE_SWIRL) {\n        // Perpendicular to radial (rotational aberration)\n        vec2 perp = vec2(-dir.y, dir.x);\n        offset = perp * r * amount * RADIAL_MULT;\n        offset.x /= aspect;  // Convert back to UV space\n    }\n    else if (u_int0 == MODE_DIAGONAL) {\n        // 45° offset (no aspect correction needed)\n        offset = vec2(amount, amount) * INV_SQRT2;\n    }\n    \n    float red = texture(u_image0, uv + offset).r;\n    float green = original.g;\n    float blue = texture(u_image0, uv - offset).b;\n    \n    fragColor = vec4(red, green, blue, original.a);\n}", "from_input"]}, {"id": 18, "type": "PrimitiveFloat", "pos": [3810, -2430], "size": [270, 58], "flags": {}, "order": 0, "mode": 0, "inputs": [{"label": "amount", "localized_name": "value", "name": "value", "type": "FLOAT", "widget": {"name": "value"}, "link": null}], "outputs": [{"localized_name": "FLOAT", "name": "FLOAT", "type": "FLOAT", "links": [22]}], "properties": {"Node name for S&R": "PrimitiveFloat", "min": 0, "max": 100, "step": 1}, "widgets_values": [30]}, {"id": 17, "type": "CustomCombo", "pos": [3520, -2320], "size": [270, 222], "flags": {}, "order": 1, "mode": 0, "inputs": [{"label": "mode", "localized_name": "choice", "name": "choice", "type": "COMBO", "widget": {"name": "choice"}, "link": null}], "outputs": [{"localized_name": "STRING", "name": "STRING", "type": "STRING", "links": null}, {"localized_name": "INDEX", "name": "INDEX", "type": "INT", "links": [21]}], "properties": {"Node name for S&R": "CustomCombo"}, "widgets_values": ["Linear", 0, "Linear", "Radial", "Barrel", "Swirl", "Diagonal", ""]}], "groups": [], "links": [{"id": 22, "origin_id": 18, "origin_slot": 0, "target_id": 16, "target_slot": 2, "type": "FLOAT"}, {"id": 21, "origin_id": 17, "origin_slot": 1, "target_id": 16, "target_slot": 4, "type": "INT"}, {"id": 20, "origin_id": -10, "origin_slot": 0, "target_id": 16, "target_slot": 0, "type": "IMAGE"}, {"id": 23, "origin_id": 16, "origin_slot": 0, "target_id": -20, "target_slot": 0, "type": "IMAGE"}], "extra": {"workflowRendererVersion": "LG"}, "category": "Image Tools/Color adjust"}]}}
+{
+  "revision": 0,
+  "last_node_id": 19,
+  "last_link_id": 0,
+  "nodes": [
+    {
+      "id": 19,
+      "type": "2c5ef154-2bde-496d-bc8b-9dcf42f2913f",
+      "pos": [
+        3710,
+        -2070
+      ],
+      "size": [
+        260,
+        82
+      ],
+      "flags": {},
+      "order": 4,
+      "mode": 0,
+      "inputs": [
+        {
+          "label": "image",
+          "localized_name": "images.image0",
+          "name": "images.image0",
+          "type": "IMAGE",
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "label": "IMAGE",
+          "localized_name": "IMAGE0",
+          "name": "IMAGE0",
+          "type": "IMAGE",
+          "links": []
+        }
+      ],
+      "title": "Chromatic Aberration",
+      "properties": {
+        "proxyWidgets": [
+          [
+            "17",
+            "choice"
+          ],
+          [
+            "18",
+            "value"
+          ]
+        ]
+      },
+      "widgets_values": []
+    }
+  ],
+  "links": [],
+  "version": 0.4,
+  "definitions": {
+    "subgraphs": [
+      {
+        "id": "2c5ef154-2bde-496d-bc8b-9dcf42f2913f",
+        "version": 1,
+        "state": {
+          "lastGroupId": 0,
+          "lastNodeId": 18,
+          "lastLinkId": 23,
+          "lastRerouteId": 0
+        },
+        "revision": 0,
+        "config": {},
+        "name": "Chromatic Aberration",
+        "inputNode": {
+          "id": -10,
+          "bounding": [
+            3270,
+            -2050,
+            120,
+            60
+          ]
+        },
+        "outputNode": {
+          "id": -20,
+          "bounding": [
+            4260,
+            -2050,
+            120,
+            60
+          ]
+        },
+        "inputs": [
+          {
+            "id": "3b33ac46-93a6-4b1c-896a-ed6fbd24e59c",
+            "name": "images.image0",
+            "type": "IMAGE",
+            "linkIds": [
+              20
+            ],
+            "localized_name": "images.image0",
+            "label": "image",
+            "pos": [
+              3370,
+              -2030
+            ]
+          }
+        ],
+        "outputs": [
+          {
+            "id": "abe7cd79-a87b-4bd0-8923-d79a57d81a6e",
+            "name": "IMAGE0",
+            "type": "IMAGE",
+            "linkIds": [
+              23
+            ],
+            "localized_name": "IMAGE0",
+            "label": "IMAGE",
+            "pos": [
+              4280,
+              -2030
+            ]
+          }
+        ],
+        "widgets": [],
+        "nodes": [
+          {
+            "id": 16,
+            "type": "GLSLShader",
+            "pos": [
+              3810,
+              -2320
+            ],
+            "size": [
+              390,
+              212
+            ],
+            "flags": {},
+            "order": 2,
+            "mode": 0,
+            "inputs": [
+              {
+                "label": "image0",
+                "localized_name": "images.image0",
+                "name": "images.image0",
+                "type": "IMAGE",
+                "link": 20
+              },
+              {
+                "label": "image1",
+                "localized_name": "images.image1",
+                "name": "images.image1",
+                "shape": 7,
+                "type": "IMAGE",
+                "link": null
+              },
+              {
+                "label": "u_float0",
+                "localized_name": "floats.u_float0",
+                "name": "floats.u_float0",
+                "shape": 7,
+                "type": "FLOAT",
+                "link": 22
+              },
+              {
+                "label": "u_float1",
+                "localized_name": "floats.u_float1",
+                "name": "floats.u_float1",
+                "shape": 7,
+                "type": "FLOAT",
+                "link": null
+              },
+              {
+                "label": "u_int0",
+                "localized_name": "ints.u_int0",
+                "name": "ints.u_int0",
+                "shape": 7,
+                "type": "INT",
+                "link": 21
+              },
+              {
+                "label": "u_int1",
+                "localized_name": "ints.u_int1",
+                "name": "ints.u_int1",
+                "shape": 7,
+                "type": "INT",
+                "link": null
+              },
+              {
+                "localized_name": "fragment_shader",
+                "name": "fragment_shader",
+                "type": "STRING",
+                "widget": {
+                  "name": "fragment_shader"
+                },
+                "link": null
+              },
+              {
+                "localized_name": "size_mode",
+                "name": "size_mode",
+                "type": "COMFY_DYNAMICCOMBO_V3",
+                "widget": {
+                  "name": "size_mode"
+                },
+                "link": null
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "IMAGE0",
+                "name": "IMAGE0",
+                "type": "IMAGE",
+                "links": [
+                  23
+                ]
+              },
+              {
+                "localized_name": "IMAGE1",
+                "name": "IMAGE1",
+                "type": "IMAGE",
+                "links": null
+              },
+              {
+                "localized_name": "IMAGE2",
+                "name": "IMAGE2",
+                "type": "IMAGE",
+                "links": null
+              },
+              {
+                "localized_name": "IMAGE3",
+                "name": "IMAGE3",
+                "type": "IMAGE",
+                "links": null
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "GLSLShader"
+            },
+            "widgets_values": [
+              "#version 300 es\nprecision highp float;\n\nuniform sampler2D u_image0;\nuniform vec2 u_resolution;\nuniform int u_int0;      // Mode\nuniform float u_float0;  // Amount (0 to 100)\n\nin vec2 v_texCoord;\nout vec4 fragColor;\n\nconst int MODE_LINEAR   = 0;\nconst int MODE_RADIAL   = 1;\nconst int MODE_BARREL   = 2;\nconst int MODE_SWIRL    = 3;\nconst int MODE_DIAGONAL = 4;\n\nconst float AMOUNT_SCALE = 0.0005;\nconst float RADIAL_MULT = 4.0;\nconst float BARREL_MULT = 8.0;\nconst float INV_SQRT2 = 0.70710678118;\n\nvoid main() {\n    vec2 uv = v_texCoord;\n    vec4 original = texture(u_image0, uv);\n\n    float amount = u_float0 * AMOUNT_SCALE;\n\n    if (amount < 0.000001) {\n        fragColor = original;\n        return;\n    }\n\n    // Aspect-corrected coordinates for circular effects\n    float aspect = u_resolution.x / u_resolution.y;\n    vec2 centered = uv - 0.5;\n    vec2 corrected = vec2(centered.x * aspect, centered.y);\n    float r = length(corrected);\n    vec2 dir = r > 0.0001 ? corrected / r : vec2(0.0);\n    vec2 offset = vec2(0.0);\n\n    if (u_int0 == MODE_LINEAR) {\n        // Horizontal shift (no aspect correction needed)\n        offset = vec2(amount, 0.0);\n    }\n    else if (u_int0 == MODE_RADIAL) {\n        // Outward from center, stronger at edges\n        offset = dir * r * amount * RADIAL_MULT;\n        offset.x /= aspect;  // Convert back to UV space\n    }\n    else if (u_int0 == MODE_BARREL) {\n        // Lens distortion simulation (r² falloff)\n        offset = dir * r * r * amount * BARREL_MULT;\n        offset.x /= aspect;  // Convert back to UV space\n    }\n    else if (u_int0 == MODE_SWIRL) {\n        // Perpendicular to radial (rotational aberration)\n        vec2 perp = vec2(-dir.y, dir.x);\n        offset = perp * r * amount * RADIAL_MULT;\n        offset.x /= aspect;  // Convert back to UV space\n    }\n    else if (u_int0 == MODE_DIAGONAL) {\n        // 45° offset (no aspect correction needed)\n        offset = vec2(amount, amount) * INV_SQRT2;\n    }\n    \n    float red = texture(u_image0, uv + offset).r;\n    float green = original.g;\n    float blue = texture(u_image0, uv - offset).b;\n    \n    fragColor = vec4(red, green, blue, original.a);\n}",
+              "from_input"
+            ]
+          },
+          {
+            "id": 18,
+            "type": "PrimitiveFloat",
+            "pos": [
+              3810,
+              -2430
+            ],
+            "size": [
+              270,
+              58
+            ],
+            "flags": {},
+            "order": 0,
+            "mode": 0,
+            "inputs": [
+              {
+                "label": "amount",
+                "localized_name": "value",
+                "name": "value",
+                "type": "FLOAT",
+                "widget": {
+                  "name": "value"
+                },
+                "link": null
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "FLOAT",
+                "name": "FLOAT",
+                "type": "FLOAT",
+                "links": [
+                  22
+                ]
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "PrimitiveFloat",
+              "min": 0,
+              "max": 100,
+              "step": 1
+            },
+            "widgets_values": [
+              30
+            ]
+          },
+          {
+            "id": 17,
+            "type": "CustomCombo",
+            "pos": [
+              3520,
+              -2320
+            ],
+            "size": [
+              270,
+              222
+            ],
+            "flags": {},
+            "order": 1,
+            "mode": 0,
+            "inputs": [
+              {
+                "label": "mode",
+                "localized_name": "choice",
+                "name": "choice",
+                "type": "COMBO",
+                "widget": {
+                  "name": "choice"
+                },
+                "link": null
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "STRING",
+                "name": "STRING",
+                "type": "STRING",
+                "links": null
+              },
+              {
+                "localized_name": "INDEX",
+                "name": "INDEX",
+                "type": "INT",
+                "links": [
+                  21
+                ]
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "CustomCombo"
+            },
+            "widgets_values": [
+              "Linear",
+              0,
+              "Linear",
+              "Radial",
+              "Barrel",
+              "Swirl",
+              "Diagonal",
+              ""
+            ]
+          }
+        ],
+        "groups": [],
+        "links": [
+          {
+            "id": 22,
+            "origin_id": 18,
+            "origin_slot": 0,
+            "target_id": 16,
+            "target_slot": 2,
+            "type": "FLOAT"
+          },
+          {
+            "id": 21,
+            "origin_id": 17,
+            "origin_slot": 1,
+            "target_id": 16,
+            "target_slot": 4,
+            "type": "INT"
+          },
+          {
+            "id": 20,
+            "origin_id": -10,
+            "origin_slot": 0,
+            "target_id": 16,
+            "target_slot": 0,
+            "type": "IMAGE"
+          },
+          {
+            "id": 23,
+            "origin_id": 16,
+            "origin_slot": 0,
+            "target_id": -20,
+            "target_slot": 0,
+            "type": "IMAGE"
+          }
+        ],
+        "extra": {
+          "workflowRendererVersion": "LG"
+        },
+        "category": "Image Tools/Color adjust",
+        "description": "Adds lens-style chromatic aberration (color fringing) using a real-time GPU fragment shader."
+      }
+    ]
+  }
+}

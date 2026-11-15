@@ -1,0 +1,7 @@
+{
+    "model_type": "birefnet",
+    "image_std": [1.0, 1.0, 1.0],
+    "image_mean": [0.0, 0.0, 0.0],
+    "image_size": 1024,
+    "resize_to_original": true
+}

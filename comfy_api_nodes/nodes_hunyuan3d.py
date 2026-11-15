@@ -123,7 +123,7 @@ class TencentTextToModelNode(IO.ComfyNode):
         return IO.Schema(
             node_id="TencentTextToModelNode",
             display_name="Hunyuan3D: Text to Model",
-            category="api node/3d/Tencent",
+            category="partner/3d/Tencent",
             essentials_category="3D",
             inputs=[
                 IO.Combo.Input(
@@ -221,14 +221,17 @@ class TencentTextToModelNode(IO.ComfyNode):
             response_model=To3DProTaskResultResponse,
             status_extractor=lambda r: r.Status,
         )
-        obj_result = await download_and_extract_obj_zip(get_file_from_response(result.ResultFile3Ds, "obj").Url)
+        obj_file_response = get_file_from_response(result.ResultFile3Ds, "obj", raise_if_not_found=False)
+        obj_result = None
+        if obj_file_response:
+            obj_result = await download_and_extract_obj_zip(obj_file_response.Url)
         return IO.NodeOutput(
             f"{task_id}.glb",
             await download_url_to_file_3d(
                 get_file_from_response(result.ResultFile3Ds, "glb").Url, "glb", task_id=task_id
             ),
-            obj_result.obj,
-            obj_result.texture,
+            obj_result.obj if obj_result else None,
+            obj_result.texture if obj_result else None,
         )
 
 
@@ -239,7 +242,7 @@ class TencentImageToModelNode(IO.ComfyNode):
         return IO.Schema(
             node_id="TencentImageToModelNode",
             display_name="Hunyuan3D: Image(s) to Model",
-            category="api node/3d/Tencent",
+            category="partner/3d/Tencent",
             essentials_category="3D",
             inputs=[
                 IO.Combo.Input(
@@ -378,17 +381,30 @@ class TencentImageToModelNode(IO.ComfyNode):
             response_model=To3DProTaskResultResponse,
             status_extractor=lambda r: r.Status,
         )
-        obj_result = await download_and_extract_obj_zip(get_file_from_response(result.ResultFile3Ds, "obj").Url)
+        obj_file_response = get_file_from_response(result.ResultFile3Ds, "obj", raise_if_not_found=False)
+        if obj_file_response:
+            obj_result = await download_and_extract_obj_zip(obj_file_response.Url)
+            return IO.NodeOutput(
+                f"{task_id}.glb",
+                await download_url_to_file_3d(
+                    get_file_from_response(result.ResultFile3Ds, "glb").Url, "glb", task_id=task_id
+                ),
+                obj_result.obj,
+                obj_result.texture,
+                obj_result.metallic if obj_result.metallic is not None else torch.zeros(1, 1, 1, 3),
+                obj_result.normal if obj_result.normal is not None else torch.zeros(1, 1, 1, 3),
+                obj_result.roughness if obj_result.roughness is not None else torch.zeros(1, 1, 1, 3),
+            )
         return IO.NodeOutput(
             f"{task_id}.glb",
             await download_url_to_file_3d(
                 get_file_from_response(result.ResultFile3Ds, "glb").Url, "glb", task_id=task_id
             ),
-            obj_result.obj,
-            obj_result.texture,
-            obj_result.metallic if obj_result.metallic is not None else torch.zeros(1, 1, 1, 3),
-            obj_result.normal if obj_result.normal is not None else torch.zeros(1, 1, 1, 3),
-            obj_result.roughness if obj_result.roughness is not None else torch.zeros(1, 1, 1, 3),
+            None,
+            None,
+            None,
+            None,
+            None,
         )
 
 
@@ -399,7 +415,7 @@ class TencentModelTo3DUVNode(IO.ComfyNode):
         return IO.Schema(
             node_id="TencentModelTo3DUVNode",
             display_name="Hunyuan3D: Model to UV",
-            category="api node/3d/Tencent",
+            category="partner/3d/Tencent",
             description="Perform UV unfolding on a 3D model to generate UV texture. "
             "Input model must have less than 30000 faces.",
             inputs=[
@@ -489,7 +505,7 @@ class Tencent3DTextureEditNode(IO.ComfyNode):
         return IO.Schema(
             node_id="Tencent3DTextureEditNode",
             display_name="Hunyuan3D: 3D Texture Edit",
-            category="api node/3d/Tencent",
+            category="partner/3d/Tencent",
             description="After inputting the 3D model, perform 3D model texture redrawing.",
             inputs=[
                 IO.MultiType.Input(
@@ -578,7 +594,7 @@ class Tencent3DPartNode(IO.ComfyNode):
         return IO.Schema(
             node_id="Tencent3DPartNode",
             display_name="Hunyuan3D: 3D Part",
-            category="api node/3d/Tencent",
+            category="partner/3d/Tencent",
             description="Automatically perform component identification and generation based on the model structure.",
             inputs=[
                 IO.MultiType.Input(
@@ -626,6 +642,7 @@ class Tencent3DPartNode(IO.ComfyNode):
             response_model=To3DProTaskCreateResponse,
             data=To3DPartTaskRequest(
                 File=TaskFile3DInput(Type=file_format.upper(), Url=model_url),
+                EnableStagedGeneration=True,
             ),
             is_rate_limited=_is_tencent_rate_limited,
         )
@@ -650,7 +667,7 @@ class TencentSmartTopologyNode(IO.ComfyNode):
         return IO.Schema(
             node_id="TencentSmartTopologyNode",
             display_name="Hunyuan3D: Smart Topology",
-            category="api node/3d/Tencent",
+            category="partner/3d/Tencent",
             description="Perform smart retopology on a 3D model. "
             "Supports GLB/OBJ formats; max 200MB; recommended for high-poly models.",
             inputs=[

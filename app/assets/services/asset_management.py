@@ -1,65 +1,92 @@
-import contextlib
+"""Serves the per-asset operations behind the API: reading an asset's detail,
+updating its name, tags, metadata and preview, deleting a record, resolving
+a hash to a servable path, and looking up the files an export zips. Name and
+tag updates move ``updated_at`` only when the requested values differ. Other
+supplied metadata fields record a write.
+"""
+
+import logging
 import mimetypes
 import os
+from pathlib import Path
 from typing import Sequence
 
+from sqlalchemy import delete, select, update
 
-from app.assets.database.models import Asset
+import folder_paths
+
+from app.assets.database.models import Asset, AssetContent, AssetTag
 from app.assets.database.queries import (
-    asset_exists_by_hash,
-    reference_exists_for_asset_id,
-    delete_reference_by_id,
-    fetch_reference_and_asset,
-    soft_delete_reference_by_id,
-    fetch_reference_asset_and_tags,
-    get_asset_by_hash as queries_get_asset_by_hash,
-    get_reference_by_id,
-    get_reference_with_owner_check,
-    list_references_page,
-    list_all_file_paths_by_asset_id,
-    list_references_by_asset_id,
-    set_reference_metadata,
-    set_reference_preview,
-    set_reference_tags,
-    update_asset_hash_and_mime,
-    update_reference_access_time,
-    update_reference_name,
-    update_reference_updated_at,
+    delete_record,
+    fetch_record_tags,
+    get_record_by_id,
+    update_record_access_time,
 )
-from app.assets.helpers import select_best_live_path
-from app.assets.services.path_utils import compute_relative_filename
+from app.assets.database.queries.records import (
+    bump_record_updated_at,
+    ensure_tag,
+    ensure_tag_link,
+    get_preview_file_paths_by_ids,
+    rename_record,
+)
+from app.assets.helpers import get_utc_now, normalize_tags, validate_blake3_hash
+from app.assets.services.lookup import lookup_for_view
 from app.assets.services.schemas import (
     AssetData,
     AssetDetailResult,
-    AssetSummaryData,
     DownloadResolutionResult,
-    ListAssetsResult,
+    ExportableAssetFile,
+    ReferenceData,
     UserMetadata,
-    extract_asset_data,
-    extract_reference_data,
 )
-from app.database.db import create_session
+from app.database.db import create_session, create_write_session
+
+
+def _record_to_detail_result(session, record) -> AssetDetailResult:
+    content = session.get(AssetContent, record.content_id)
+    tags = fetch_record_tags(session, record.id)
+    api_hash = content.hash if content else None
+    ref = ReferenceData(
+        id=record.id,
+        name=record.name,
+        file_path=content.path if content else None,
+        loader_path=record.loader_path,
+        user_metadata=record.user_metadata,
+        preview_id=record.preview_id,
+        system_metadata=record.system_metadata,
+        job_id=record.job_id,
+        created_at=record.created_at,
+        updated_at=record.updated_at,
+        last_access_time=record.last_access_time,
+    )
+    asset = AssetData(
+        hash=api_hash,
+        size_bytes=content.size_bytes if content else None,
+        mime_type=record.mime_type,
+        is_missing=bool(content and content.is_missing),
+    )
+    return AssetDetailResult(ref=ref, asset=asset, tags=tags)
 
 
 def get_asset_detail(
     reference_id: str,
-    owner_id: str = "",
 ) -> AssetDetailResult | None:
     with create_session() as session:
-        result = fetch_reference_asset_and_tags(
-            session,
-            reference_id=reference_id,
-            owner_id=owner_id,
-        )
-        if not result:
+        record = get_record_by_id(session, reference_id)
+        if record is None:
             return None
+        return _record_to_detail_result(session, record)
 
-        ref, asset, tags = result
-        return AssetDetailResult(
-            ref=extract_reference_data(ref),
-            asset=extract_asset_data(asset),
-            tags=tags,
+
+def _fetch_manual_tags(session, reference_id: str) -> set[str]:
+    return set(
+        session.scalars(
+            select(AssetTag.tag_name).where(
+                AssetTag.asset_id == reference_id,
+                AssetTag.origin != "automatic",
+            )
         )
+    )
 
 
 def update_asset_metadata(
@@ -68,250 +95,180 @@ def update_asset_metadata(
     tags: Sequence[str] | None = None,
     user_metadata: UserMetadata = None,
     tag_origin: str = "manual",
-    owner_id: str = "",
     mime_type: str | None = None,
     preview_id: str | None = None,
 ) -> AssetDetailResult:
-    with create_session() as session:
-        ref = get_reference_with_owner_check(session, reference_id, owner_id)
+    # A write session: reclaiming a replaced preview can't interleave with a registration linking it.
+    with create_write_session() as session:
+        record = get_record_by_id(session, reference_id)
+        if record is None:
+            raise ValueError(f"Asset {reference_id} not found")
+        replaced_preview_id = record.preview_id
 
-        touched = False
-        if name is not None and name != ref.name:
-            update_reference_name(session, reference_id=reference_id, name=name)
-            touched = True
-
-        computed_filename = compute_relative_filename(ref.file_path) if ref.file_path else None
-
-        new_meta: dict | None = None
+        if name is not None:
+            rename_record(session, reference_id, name)
         if user_metadata is not None:
-            new_meta = dict(user_metadata)
-        elif computed_filename:
-            current_meta = ref.user_metadata or {}
-            if current_meta.get("filename") != computed_filename:
-                new_meta = dict(current_meta)
-
-        if new_meta is not None:
-            if computed_filename:
-                new_meta["filename"] = computed_filename
-            set_reference_metadata(
-                session, reference_id=reference_id, user_metadata=new_meta
+            session.execute(
+                update(Asset)
+                .where(Asset.id == reference_id)
+                .values(user_metadata=dict(user_metadata), updated_at=get_utc_now())
             )
-            touched = True
-
+        manual_tags_before: set[str] = set()
         if tags is not None:
-            set_reference_tags(
-                session,
-                reference_id=reference_id,
-                tags=tags,
-                origin=tag_origin,
+            manual_tags_before = _fetch_manual_tags(session, reference_id)
+            session.execute(
+                delete(AssetTag).where(
+                    AssetTag.asset_id == reference_id,
+                    AssetTag.origin != "automatic",
+                )
             )
-            touched = True
-
         if mime_type is not None:
-            updated = update_asset_hash_and_mime(
-                session, asset_id=ref.asset_id, mime_type=mime_type
+            session.execute(
+                update(Asset)
+                .where(Asset.id == reference_id)
+                .values(mime_type=mime_type, updated_at=get_utc_now())
             )
-            if updated:
-                touched = True
-
         if preview_id is not None:
-            set_reference_preview(
-                session,
-                reference_id=reference_id,
-                preview_reference_id=preview_id,
+            if session.get(Asset, preview_id) is None:
+                raise ValueError(
+                    f"preview_id {preview_id!r} does not reference an existing asset"
+                )
+            session.execute(
+                update(Asset)
+                .where(Asset.id == reference_id)
+                .values(preview_id=preview_id, updated_at=get_utc_now())
             )
-            touched = True
-
-        if touched and user_metadata is None:
-            update_reference_updated_at(session, reference_id=reference_id)
-
-        result = fetch_reference_asset_and_tags(
-            session,
-            reference_id=reference_id,
-            owner_id=owner_id,
-        )
-        if not result:
-            raise RuntimeError("State changed during update")
-
-        ref, asset, tag_list = result
-        detail = AssetDetailResult(
-            ref=extract_reference_data(ref),
-            asset=extract_asset_data(asset),
-            tags=tag_list,
-        )
+            if replaced_preview_id and replaced_preview_id != preview_id:
+                session.flush()
+                reclaim_preview(session, replaced_preview_id)
+        if tags is not None:
+            for tag_name in normalize_tags(list(tags)):
+                ensure_tag(session, tag_name)
+                ensure_tag_link(
+                    session,
+                    asset_id=reference_id,
+                    tag_name=tag_name,
+                    origin=tag_origin,
+                )
+            session.flush()
+            if _fetch_manual_tags(session, reference_id) != manual_tags_before:
+                bump_record_updated_at(session, reference_id)
         session.commit()
 
-        return detail
+    detail = get_asset_detail(reference_id)
+    if detail is None:
+        raise RuntimeError("Asset deleted during update")
+    return detail
+
+
+def _is_core_preview(session, record: Asset) -> bool:
+    """A preview Core made: tagged ``preview`` and stored under previews/."""
+    if "preview" not in fetch_record_tags(session, record.id):
+        return False
+    path = session.get(AssetContent, record.content_id).path
+    return Path(os.path.realpath(path)).is_relative_to(os.path.realpath(folder_paths.get_previews_directory()))
+
+
+def _drop_unused_content(session, content_id: str) -> None:
+    """Remove a preview's content row and file once no record uses them."""
+    if session.scalar(select(Asset.id).where(Asset.content_id == content_id).limit(1)) is not None:
+        return
+    content = session.get(AssetContent, content_id)
+    session.delete(content)
+    session.flush()
+    # A missing row's path may since belong to a live row: an identical preview saved again.
+    if content.is_missing or session.scalar(select(AssetContent.id).where(AssetContent.path == content.path).limit(1)):
+        return
+    try:
+        os.remove(content.path)
+    except OSError:
+        logging.warning("Could not remove preview file %s", content.path, exc_info=True)
+
+
+def reclaim_preview(session, preview_id: str) -> None:
+    """Delete a Core preview, and its file, once no record links or uses them."""
+    preview = session.get(Asset, preview_id)
+    if preview is None or session.scalar(select(Asset.id).where(Asset.preview_id == preview_id).limit(1)) is not None:
+        return
+    if _is_core_preview(session, preview):
+        content_id = preview.content_id
+        delete_record(session, preview_id)
+        _drop_unused_content(session, content_id)
 
 
 def delete_asset_reference(
     reference_id: str,
-    owner_id: str,
-    delete_content_if_orphan: bool = True,
 ) -> bool:
-    with create_session() as session:
-        if not delete_content_if_orphan:
-            # Soft delete: mark the reference as deleted but keep everything
-            deleted = soft_delete_reference_by_id(
-                session, reference_id=reference_id, owner_id=owner_id
-            )
-            session.commit()
-            return deleted
-
-        ref_row = get_reference_by_id(session, reference_id=reference_id)
-        asset_id = ref_row.asset_id if ref_row else None
-        file_path = ref_row.file_path if ref_row else None
-
-        deleted = delete_reference_by_id(
-            session, reference_id=reference_id, owner_id=owner_id
-        )
-        if not deleted:
-            session.commit()
+    # A write session: a registration linking the same preview file can't interleave.
+    with create_write_session() as session:
+        record = get_record_by_id(session, reference_id)
+        if record is None:
             return False
-
-        if not asset_id:
-            session.commit()
-            return True
-
-        still_exists = reference_exists_for_asset_id(session, asset_id=asset_id)
-        if still_exists:
-            session.commit()
-            return True
-
-        # Orphaned asset - gather ALL file paths (including
-        # soft-deleted / missing refs) so their on-disk files get cleaned up.
-        file_paths = list_all_file_paths_by_asset_id(session, asset_id=asset_id)
-        # Also include the just-deleted file path
-        if file_path:
-            file_paths.append(file_path)
-
-        asset_row = session.get(Asset, asset_id)
-        if asset_row is not None:
-            session.delete(asset_row)
-
+        content_id, preview_id = record.content_id, record.preview_id
+        is_core_preview = _is_core_preview(session, record)
+        delete_record(session, reference_id)
+        if is_core_preview:
+            _drop_unused_content(session, content_id)
+        if preview_id:
+            reclaim_preview(session, preview_id)
         session.commit()
-
-        # Delete files after commit
-        for p in file_paths:
-            with contextlib.suppress(Exception):
-                if p and os.path.isfile(p):
-                    os.remove(p)
-
-    return True
-
-
-def set_asset_preview(
-    reference_id: str,
-    preview_reference_id: str | None = None,
-    owner_id: str = "",
-) -> AssetDetailResult:
-    with create_session() as session:
-        get_reference_with_owner_check(session, reference_id, owner_id)
-
-        set_reference_preview(
-            session,
-            reference_id=reference_id,
-            preview_reference_id=preview_reference_id,
-        )
-
-        result = fetch_reference_asset_and_tags(
-            session, reference_id=reference_id, owner_id=owner_id
-        )
-        if not result:
-            raise RuntimeError("State changed during preview update")
-
-        ref, asset, tags = result
-        detail = AssetDetailResult(
-            ref=extract_reference_data(ref),
-            asset=extract_asset_data(asset),
-            tags=tags,
-        )
-        session.commit()
-
-        return detail
+        return True
 
 
 def asset_exists(asset_hash: str) -> bool:
+    try:
+        canonical = validate_blake3_hash(asset_hash)
+    except ValueError:
+        return False
     with create_session() as session:
-        return asset_exists_by_hash(session, asset_hash=asset_hash)
-
-
-def get_asset_by_hash(asset_hash: str) -> AssetData | None:
-    with create_session() as session:
-        asset = queries_get_asset_by_hash(session, asset_hash=asset_hash)
-        return extract_asset_data(asset)
-
-
-def list_assets_page(
-    owner_id: str = "",
-    include_tags: Sequence[str] | None = None,
-    exclude_tags: Sequence[str] | None = None,
-    name_contains: str | None = None,
-    metadata_filter: dict | None = None,
-    limit: int = 20,
-    offset: int = 0,
-    sort: str = "created_at",
-    order: str = "desc",
-) -> ListAssetsResult:
-    with create_session() as session:
-        refs, tag_map, total = list_references_page(
-            session,
-            owner_id=owner_id,
-            include_tags=include_tags,
-            exclude_tags=exclude_tags,
-            name_contains=name_contains,
-            metadata_filter=metadata_filter,
-            limit=limit,
-            offset=offset,
-            sort=sort,
-            order=order,
-        )
-
-        items: list[AssetSummaryData] = []
-        for ref in refs:
-            items.append(
-                AssetSummaryData(
-                    ref=extract_reference_data(ref),
-                    asset=extract_asset_data(ref.asset),
-                    tags=tag_map.get(ref.id, []),
-                )
-            )
-
-        return ListAssetsResult(items=items, total=total)
+        return lookup_for_view(session, canonical) is not None
 
 
 def resolve_hash_to_path(
     asset_hash: str,
-    owner_id: str = "",
 ) -> DownloadResolutionResult | None:
-    """Resolve a blake3 hash to an on-disk file path.
+    """Resolve a blake3 hash to an on-disk file path via lookup_for_view.
 
-    Only references visible to *owner_id* are considered (owner-less
-    references are always visible).
+    Uses the first qualified live content row. Temp paths are excluded from all
+    hash lookups inside qualified_content_iterator, so a hash resolving only to
+    temp content returns None. Updates last_access_time on every record pointing
+    at the served content.
 
-    Returns a DownloadResolutionResult with abs_path, content_type, and
-    download_name, or None if no asset or live path is found.
+    Filename and Content-Type both come from the newest record so they never
+    describe different records. Deleting the last record preserves its content,
+    so content with zero records stays servable off the content path alone.
     """
+    try:
+        canonical = validate_blake3_hash(asset_hash)
+    except ValueError:
+        return None
     with create_session() as session:
-        asset = queries_get_asset_by_hash(session, asset_hash)
-        if not asset:
+        content = lookup_for_view(session, canonical)
+        if content is None:
             return None
-        refs = list_references_by_asset_id(session, asset_id=asset.id)
-        visible = [
-            r for r in refs
-            if r.owner_id == "" or r.owner_id == owner_id
-        ]
-        abs_path = select_best_live_path(visible)
-        if not abs_path:
-            return None
-        display_name = os.path.basename(abs_path)
-        for ref in visible:
-            if ref.file_path == abs_path and ref.name:
-                display_name = ref.name
-                break
+
+        records = list(
+            session.scalars(
+                select(Asset)
+                .where(Asset.content_id == content.id)
+                .order_by(Asset.created_at, Asset.id)
+            )
+        )
+        display_name = os.path.basename(content.path)
+        mime_type = None
+        if records:
+            latest_record = records[-1]
+            display_name = latest_record.name or display_name
+            mime_type = latest_record.mime_type
+        for record in records:
+            update_record_access_time(session, record.id)
+        abs_path = content.path
+        session.commit()
+
         ctype = (
-            asset.mime_type
+            mime_type
             or mimetypes.guess_type(display_name)[0]
+            or mimetypes.guess_type(abs_path)[0]
             or "application/octet-stream"
         )
     return DownloadResolutionResult(
@@ -321,38 +278,41 @@ def resolve_hash_to_path(
     )
 
 
+def get_preview_file_paths(preview_ids: list[str]) -> dict[str, str]:
+    """Map preview reference id -> file_path, in one query for the whole page."""
+    if not preview_ids:
+        return {}
+    with create_session() as session:
+        return get_preview_file_paths_by_ids(session, preview_ids=preview_ids)
+
+
 def resolve_asset_for_download(
     reference_id: str,
-    owner_id: str = "",
+    record_access: bool = True,
 ) -> DownloadResolutionResult:
     with create_session() as session:
-        pair = fetch_reference_and_asset(
-            session, reference_id=reference_id, owner_id=owner_id
-        )
-        if not pair:
+        record = get_record_by_id(session, reference_id)
+        if record is None:
             raise ValueError(f"AssetReference {reference_id} not found")
 
-        ref, asset = pair
+        content = session.get(AssetContent, record.content_id)
+        if (
+            content is None
+            or content.is_missing
+            or not os.path.isfile(content.path)
+        ):
+            raise FileNotFoundError(
+                f"No live content for AssetReference {reference_id} "
+                f"(content id={record.content_id}, name={record.name})"
+            )
 
-        # For references with file_path, use that directly
-        if ref.file_path and os.path.isfile(ref.file_path):
-            abs_path = ref.file_path
-        else:
-            # For API-created refs without file_path, find a path from other refs
-            refs = list_references_by_asset_id(session, asset_id=asset.id)
-            abs_path = select_best_live_path(refs)
-            if not abs_path:
-                raise FileNotFoundError(
-                    f"No live path for AssetReference {reference_id} "
-                    f"(asset id={asset.id}, name={ref.name})"
-                )
+        ref_name = record.name
+        asset_mime = record.mime_type
+        abs_path = content.path
 
-        # Capture ORM attributes before commit (commit expires loaded objects)
-        ref_name = ref.name
-        asset_mime = asset.mime_type
-
-        update_reference_access_time(session, reference_id=reference_id)
-        session.commit()
+        if record_access:
+            update_record_access_time(session, reference_id)
+            session.commit()
 
         ctype = (
             asset_mime
@@ -364,4 +324,63 @@ def resolve_asset_for_download(
             abs_path=abs_path,
             content_type=ctype,
             download_name=download_name,
+        )
+
+
+def list_job_export_files(
+    job_ids: Sequence[str], include_previews: bool
+) -> list[ExportableAssetFile]:
+    """Live output records of the given jobs, plus their temp records when previews are requested."""
+    if not job_ids:
+        return []
+    tags = ["output", "temp"] if include_previews else ["output"]
+    with create_session() as session:
+        rows = session.execute(
+            select(
+                Asset.id,
+                Asset.name,
+                Asset.job_id,
+                Asset.created_at,
+                AssetContent.path,
+                AssetContent.hash,
+            )
+            .join(AssetContent, Asset.content_id == AssetContent.id)
+            .where(
+                Asset.job_id.in_(list(job_ids)),
+                AssetContent.is_missing.is_(False),
+                Asset.id.in_(
+                    select(AssetTag.asset_id).where(AssetTag.tag_name.in_(tags))
+                ),
+            )
+        ).all()
+    return [
+        ExportableAssetFile(
+            id=row.id,
+            name=row.name,
+            path=row.path,
+            hash=row.hash,
+            job_id=row.job_id,
+            created_at=row.created_at,
+        )
+        for row in rows
+    ]
+
+
+def get_export_file(reference_id: str) -> ExportableAssetFile:
+    with create_session() as session:
+        record = get_record_by_id(session, reference_id)
+        if record is None:
+            raise ValueError(f"AssetReference {reference_id} not found")
+        content = session.get(AssetContent, record.content_id)
+        if content is None or content.is_missing:
+            raise FileNotFoundError(
+                f"No live content for AssetReference {reference_id}"
+            )
+        return ExportableAssetFile(
+            id=record.id,
+            name=record.name,
+            path=content.path,
+            hash=content.hash,
+            job_id=record.job_id,
+            created_at=record.created_at,
         )

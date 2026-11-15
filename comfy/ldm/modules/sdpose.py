@@ -90,7 +90,7 @@ class HeatmapHead(torch.nn.Module):
                 origin_max = np.max(hm[k])
                 dr = np.zeros((H + 2 * border, W + 2 * border), dtype=np.float32)
                 dr[border:-border, border:-border] = hm[k].copy()
-                dr = gaussian_filter(dr, sigma=2.0)
+                dr = gaussian_filter(dr, sigma=2.0, truncate=2.5)
                 hm[k] = dr[border:-border, border:-border].copy()
                 cur_max = np.max(hm[k])
                 if cur_max > 0:

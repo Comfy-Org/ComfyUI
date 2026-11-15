@@ -9,6 +9,7 @@ from comfy_api.latest._input import (
     CurveInput,
     MonotoneCubicCurve,
     LinearCurve,
+    RangeInput,
 )
 
 __all__ = [
@@ -21,4 +22,5 @@ __all__ = [
     "CurveInput",
     "MonotoneCubicCurve",
     "LinearCurve",
+    "RangeInput",
 ]

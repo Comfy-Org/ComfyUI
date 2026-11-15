@@ -1,1 +1,1 @@
-comfyui_manager==4.1
+comfyui_manager==4.2.2
