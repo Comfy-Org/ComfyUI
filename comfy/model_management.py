@@ -432,6 +432,7 @@ def cuda_version_warning():
                 "Update your NVIDIA driver if needed to use that build.\n"
                 "========================================================================",
                 *capability, cuda_version,
+                extra={'color': 'yellow'},
             )
 
 def amd_min_version(device=None, min_rdna_version=0):
