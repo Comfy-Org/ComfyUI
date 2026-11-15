@@ -1469,7 +1469,7 @@ def _surfel_interior(xyz, scale, quat, opacity, verts, faces, res, voxel, origin
     del density
     comfy.model_management.soft_empty_cache()                            # cuFFT's work area is outside torch's allocator
 
-    # the solve peaks at ~20 bytes per voxel; DirectML and older MPS can't run torch.fft, so anything but CUDA stays on the CPU
+    # the solve peaks at ~20 bytes per voxel; older MPS can't run torch.fft, so anything but CUDA stays on the CPU
     numel = shape[0] * shape[1] * shape[2]
     fft_dev = device if device.type == "cuda" and comfy.model_management.get_free_memory(device) > 6 * numel * 4 else torch.device("cpu")
     chi = _poisson_indicator(field, fft_dev)
