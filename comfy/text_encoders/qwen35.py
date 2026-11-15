@@ -1218,7 +1218,9 @@ class Qwen35ImageTokenizer(sd1_clip.SD1Tokenizer):
         embedding_size = QWEN35_MODELS.get(model_type, {}).get("hidden_size", 2048)
         tokenizer = lambda *a, **kw: Qwen35Tokenizer(*a, **kw, embedding_size=embedding_size, embedding_key=model_type)
         super().__init__(embedding_directory=embedding_directory, tokenizer_data=tokenizer_data, name=model_type, tokenizer=tokenizer)
-        self.image_token_id = getattr(self, self.clip).tokenizer.get_vocab()["<|image_pad|>"]
+        vocab = getattr(self, self.clip).tokenizer.get_vocab()
+        self.image_token_id = vocab["<|image_pad|>"]
+        self.video_token_id = vocab.get("<|video_pad|>")
         self.llama_template = "<|im_start|>user\n{}<|im_end|>\n<|im_start|>assistant\n"
         self.llama_template_images = "<|im_start|>user\n<|vision_start|><|image_pad|><|vision_end|>{}<|im_end|>\n<|im_start|>assistant\n"
 
@@ -1287,7 +1289,7 @@ class Qwen35ImageTokenizer(sd1_clip.SD1Tokenizer):
                     if len(images) > embed_count:
                         r[i] = ({"type": "image", "data": images[embed_count], "original_type": "image"},) + r[i][1:]
                         embed_count += 1
-                elif isinstance(r[i][0], (int, float)) and r[i][0] == 248057:  # <|video_pad|>
+                elif isinstance(r[i][0], (int, float)) and r[i][0] == self.video_token_id:
                     if len(video_embeds) > video_count:
                         r[i] = (video_embeds[video_count],) + r[i][1:]
                         video_count += 1
