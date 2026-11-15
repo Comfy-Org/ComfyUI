@@ -3,9 +3,20 @@ import torch
 
 from comfy.cli_args import args as cli_args
 
-cli_args.cpu = True
+_original_cpu = cli_args.cpu
+try:
+    if not torch.cuda.is_available() and not torch.backends.mps.is_available():
+        cli_args.cpu = True
+    import comfy.model_management
+    from comfy_extras.nodes_post_processing import Blur, Sharpen
+finally:
+    cli_args.cpu = _original_cpu
 
-from comfy_extras.nodes_post_processing import Blur, Sharpen  # noqa: E402
+
+@pytest.fixture(autouse=True)
+def cpu_device(monkeypatch):
+    monkeypatch.setattr(cli_args, "cpu", True)
+    monkeypatch.setattr(comfy.model_management, "cpu_state", comfy.model_management.CPUState.CPU)
 
 
 @pytest.mark.parametrize("node, kwargs", [
