@@ -1151,7 +1151,10 @@ def _load_quantized_module(module, super_load, state_dict, prefix, local_metadat
         # back a plain compute_dtype weight instead of a QuantizedTensor. Costs the
         # memory saving but is the difference between running and not.
         scale = pop_scale("weight_scale")
-        weight = weight.cpu().to(dtype=compute_dtype)
+        weight = weight.cpu()
+        if weight.dtype == torch.uint8:
+            weight = weight.view(getattr(torch, layer_conf["format"]))
+        weight = weight.to(dtype=compute_dtype)
         if scale is not None:
             weight = weight * scale.cpu().to(dtype=compute_dtype)
         layer_conf = None

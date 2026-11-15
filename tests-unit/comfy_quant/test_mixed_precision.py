@@ -129,41 +129,44 @@ class TestMixedPrecisionOps(unittest.TestCase):
         (e.g. MPS), fp8 layers must load as plain compute_dtype weights
         instead of QuantizedTensor, since the emulated dequant path needs
         exactly the fp8 -> compute_dtype cast such devices lack."""
-        layer_quant_config = {
-            "layer1": {
-                "format": "float8_e4m3fn",
-                "params": {}
-            }
-        }
-        fp8_weight = torch.randn(20, 10, dtype=torch.float32).to(torch.float8_e4m3fn)
-        scale = torch.tensor(2.0, dtype=torch.float32)
-        state_dict = {
-            "layer1.weight": fp8_weight,
-            "layer1.bias": torch.randn(20, dtype=torch.bfloat16),
-            "layer1.weight_scale": scale,
-            "layer2.weight": torch.randn(30, 20, dtype=torch.bfloat16),
-            "layer2.bias": torch.randn(30, dtype=torch.bfloat16),
-            "layer3.weight": torch.randn(40, 30, dtype=torch.bfloat16),
-            "layer3.bias": torch.randn(40, dtype=torch.bfloat16),
-        }
-        state_dict, _ = comfy.utils.convert_old_quants(state_dict, metadata={"_quantization_metadata": json.dumps({"layers": layer_quant_config})})
+        for format_name in ("float8_e4m3fn", "float8_e5m2"):
+            for legacy_storage in (False, True):
+                with self.subTest(format=format_name, legacy_storage=legacy_storage):
+                    layer_quant_config = {
+                        "layer1": {
+                            "format": format_name,
+                            "params": {}
+                        }
+                    }
+                    fp8_weight = torch.randn(20, 10, dtype=torch.float32).to(getattr(torch, format_name))
+                    scale = torch.tensor(2.0, dtype=torch.float32)
+                    state_dict = {
+                        "layer1.weight": fp8_weight.view(torch.uint8) if legacy_storage else fp8_weight,
+                        "layer1.bias": torch.randn(20, dtype=torch.bfloat16),
+                        "layer1.weight_scale": scale,
+                        "layer2.weight": torch.randn(30, 20, dtype=torch.bfloat16),
+                        "layer2.bias": torch.randn(30, dtype=torch.bfloat16),
+                        "layer3.weight": torch.randn(40, 30, dtype=torch.bfloat16),
+                        "layer3.bias": torch.randn(40, dtype=torch.bfloat16),
+                    }
+                    state_dict, _ = comfy.utils.convert_old_quants(state_dict, metadata={"_quantization_metadata": json.dumps({"layers": layer_quant_config})})
 
-        model = SimpleModel(operations=ops.mixed_precision_ops({}))
-        with unittest.mock.patch("comfy.model_management.supports_fp8_cast", return_value=False):
-            model.load_state_dict(state_dict, strict=False)
+                    model = SimpleModel(operations=ops.mixed_precision_ops({}))
+                    with unittest.mock.patch("comfy.model_management.supports_fp8_cast", return_value=False):
+                        model.load_state_dict(state_dict, strict=False)
 
-        self.assertNotIsInstance(model.layer1.weight, QuantizedTensor)
-        self.assertEqual(model.layer1.weight.dtype, torch.bfloat16)
-        expected = fp8_weight.to(torch.bfloat16) * scale.to(torch.bfloat16)
-        self.assertTrue(torch.equal(model.layer1.weight.data, expected))
+                    self.assertNotIsInstance(model.layer1.weight, QuantizedTensor)
+                    self.assertEqual(model.layer1.weight.dtype, torch.bfloat16)
+                    expected = fp8_weight.to(torch.bfloat16) * scale.to(torch.bfloat16)
+                    self.assertTrue(torch.equal(model.layer1.weight.data, expected))
 
-        # Layers without an fp8 format are unaffected
-        self.assertNotIsInstance(model.layer2.weight, QuantizedTensor)
+                    # Layers without an fp8 format are unaffected
+                    self.assertNotIsInstance(model.layer2.weight, QuantizedTensor)
 
-        input_tensor = torch.randn(5, 10, dtype=torch.bfloat16)
-        with torch.inference_mode():
-            output = model(input_tensor)
-        self.assertEqual(output.shape, (5, 40))
+                    input_tensor = torch.randn(5, 10, dtype=torch.bfloat16)
+                    with torch.inference_mode():
+                        output = model(input_tensor)
+                    self.assertEqual(output.shape, (5, 40))
 
     def test_state_dict_quantized_preserved(self):
         """Test that quantized weights are preserved in state_dict()"""
