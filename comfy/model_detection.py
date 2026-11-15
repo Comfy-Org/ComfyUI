@@ -44,6 +44,11 @@ def calculate_transformer_depth(prefix, state_dict_keys, state_dict):
 def detect_unet_config(state_dict, key_prefix, metadata=None):
     state_dict_keys = list(state_dict.keys())
 
+    if (metadata is not None and "ming_config" in metadata
+            and key_prefix + "t_embedder.time_mlp.0.weight" in state_dict
+            and key_prefix + "c_embedder.cond_embedder.weight" in state_dict):
+        return {"audio_model": "ming_tts", "ming_config": json.loads(metadata["ming_config"])}
+
     if (
         '{}cond_layer_logits'.format(key_prefix) in state_dict_keys
         and '{}latent_conditioners.0.weight'.format(key_prefix) in state_dict_keys
