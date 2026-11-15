@@ -689,6 +689,7 @@ if __name__ == "__main__":
         x = start_all_func()
         if product_tips.tips_enabled(args, os.environ):
             logging.info(product_tips.COMFY_API_STARTUP_TIP)
+        comfy.model_management.cuda_version_warning()
         app.logger.print_startup_warnings()
         event_loop.run_until_complete(x)
     except KeyboardInterrupt:
