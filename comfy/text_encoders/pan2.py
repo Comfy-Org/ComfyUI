@@ -25,9 +25,9 @@ class PAN2TEModel(sd1_clip.SD1ClipModel):
 
     def encode_token_weights(self, token_weight_pairs):
         out, pooled, extra = super().encode_token_weights(token_weight_pairs)
-        # the DiT sees the tokens after <|im_start|>user\n: the caption and the rest of the template
+        # the DiT sees the tokens after <|im_start|>user\n: the caption and the rest of the template, all tokens for a template without a user turn
         tokens = [t[0] for t in token_weight_pairs["qwen35_9b"][0]]
-        start = next(i + 3 for i in range(len(tokens) - 2) if tokens[i:i + 3] == [248045, 846, 198])
+        start = next((i + 3 for i in range(len(tokens) - 2) if tokens[i:i + 3] == [248045, 846, 198]), 0)
         extra.pop("attention_mask", None)
         return out[:, start:], pooled, extra
 
