@@ -49,3 +49,7 @@ pip install -r RES4LYF/requirements.txt
 # 13. RESPaddleOCR4LYF
 git clone https://github.com/QuangHoang059/ComfyUI_PaddleOCR
 pip install -r ComfyUI_PaddleOCR/requirements.txt
+
+# 14. ComfyUI-GGUF (UnetLoaderGGUF / CLIPLoaderGGUF - load .gguf)
+git clone https://github.com/city96/ComfyUI-GGUF
+pip install -r ComfyUI-GGUF/requirements.txt
