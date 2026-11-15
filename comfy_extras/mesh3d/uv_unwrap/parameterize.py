@@ -16,15 +16,6 @@ from . import mesh as _mesh
 LSCM_BATCH_MAX_VERTS = 256      # charts above this solve per-chart sparse (lscm_chart)
 
 
-def _lscm_solve_on_gpu(device: "torch.device | None") -> bool:
-    """True if the dense batched normal-equations solve should run on device rather
-    than CPU. Excludes ROCm: hipBLAS's batched getrf (torch.linalg.solve's backing
-    call) raises HIPBLAS_STATUS_ALLOC_FAILED on these chart batches even with plenty
-    of free VRAM, and PyTorch reports a ROCm device's .type as "cuda", so the type
-    check alone can't tell AMD and NVIDIA apart."""
-    return device is not None and device.type == "cuda" and not comfy.model_management.is_amd()
-
-
 def solve_least_squares(A: sp.csr_matrix, b: np.ndarray) -> np.ndarray:
     """Solve ||Ax - b||^2 by factorizing AtA."""
     At = A.T.tocsr()
@@ -329,7 +320,7 @@ def lscm_charts_batch(
         np.put_along_axis(cval, pin_cols, pin_vals, axis=1)
 
         # normal equations + batched solve; the fp64 dense algebra goes to the GPU when available
-        use_gpu = _lscm_solve_on_gpu(device)
+        use_gpu = device is not None and device.type == "cuda"
         if use_gpu:
             A_t = torch.from_numpy(A).to(device)
             At = A_t.transpose(1, 2)
@@ -345,7 +336,13 @@ def lscm_charts_batch(
             dsc = 1e-12 * torch.nan_to_num(dpos.nanmedian(dim=1).values, nan=1e-8).clamp_min(1e-20)
             diag += torch.where(con_t, torch.ones_like(diag), dsc[:, None].expand_as(diag))
             Atb = torch.where(con_t, torch.from_numpy(cval).to(device), Atb)
-            x = torch.linalg.solve(AtA, Atb).cpu().numpy()
+            try:
+                x = torch.linalg.solve(AtA, Atb).cpu().numpy()
+            except RuntimeError as exc:
+                if not comfy.model_management.is_amd() or "HIPBLAS_STATUS_ALLOC_FAILED" not in str(exc):
+                    raise
+                # PyTorch 2.9/2.10 with ROCm 7.x can exhaust hipBLAS's batched LU workspace.
+                x = np.linalg.solve(AtA.cpu().numpy(), Atb.cpu().numpy()[..., None])[..., 0]
         else:
             At = A.transpose(0, 2, 1)
             AtA = At @ A                             # batched BLAS dgemm
