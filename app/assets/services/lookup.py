@@ -16,7 +16,8 @@ from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
 from app.assets import mode
-from app.assets.database.models import AssetContent
+from app.assets.database.models import Asset, AssetContent
+from app.database.db import create_session
 
 
 def is_temp_path(path: str) -> bool:
@@ -94,3 +95,21 @@ def lookup_for_from_hash(session: Session, hash: str) -> AssetContent | None:
 
 def lookup_for_view(session: Session, hash: str) -> AssetContent | None:
     return next(qualified_content_iterator(session, hash), None)
+
+
+def find_live_reference_by_hash(hash: str) -> str | None:
+    """Id of the oldest record on the first qualifying content row for ``hash``.
+
+    Independent of the hashing flag: the caller computed ``hash`` from bytes it holds.
+    """
+    with create_session() as session:
+        for content in qualified_content_iterator(session, hash):
+            record_id = session.scalar(
+                select(Asset.id)
+                .where(Asset.content_id == content.id)
+                .order_by(Asset.created_at, Asset.id)
+                .limit(1)
+            )
+            if record_id is not None:
+                return record_id
+    return None

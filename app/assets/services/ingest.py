@@ -33,7 +33,7 @@ from app.assets.services.file_utils import get_mtime_ns, get_size_and_mtime_ns
 from app.assets.services.lookup import (
     claim_qualified_content,
     lookup_for_from_hash,
-    lookup_for_view,
+    qualified_content_iterator,
     refresh_qualified_content,
 )
 from app.assets.services.media_metadata import extract_media_metadata
@@ -306,7 +306,7 @@ def _create_upload_record(
 
 
 def _record_to_upload_result(
-    session: Session, record: Asset, *, created_new: bool
+    session: Session, record: Asset, *, created_new: bool, content_reused: bool = False
 ) -> UploadResult:
     content = session.get(AssetContent, record.content_id)
     tag_names = list(
@@ -341,6 +341,7 @@ def _record_to_upload_result(
         asset=asset,
         tags=tag_names,
         created_new=created_new,
+        content_reused=content_reused,
     )
 
 
@@ -440,7 +441,7 @@ def _settle_destination_before_write(session: Session, dest_abs: str) -> None:
     post-move reconciliation with a known hash to compare, so it never has to
     read equal sizes as equal bytes.
 
-    Running before ``lookup_for_view`` is what keeps a merely stale row from
+    Running before the reuse lookup is what keeps a merely stale row from
     being skipped as stat-inconsistent and duplicated.
     """
     if not os.path.isfile(dest_abs):
@@ -487,9 +488,18 @@ class _UploadRecordSpec(NamedTuple):
 
 
 def _reuse_qualified_content(
-    session: Session, stored_hash: str, spec: _UploadRecordSpec
+    session: Session, stored_hash: str, spec: _UploadRecordSpec, dest_dir: str | None
 ) -> UploadResult | None:
-    content = lookup_for_view(session, stored_hash)
+    """Only bytes already inside ``dest_dir`` are reused, so an upload never resolves
+    to a file in another folder (an output for a checkpoint). ``dest_dir=None``
+    (no routable destination tags) reuses content from any folder."""
+    content = next(
+        (
+            c for c in qualified_content_iterator(session, stored_hash)
+            if dest_dir is None or folder_paths.is_within_directory(dest_dir, c.path)
+        ),
+        None,
+    )
     if content is None:
         return None
     content_id = content.id
@@ -514,7 +524,7 @@ def _reuse_qualified_content(
         system_metadata,
     )
     session.commit()
-    return _record_to_upload_result(session, record, created_new=True)
+    return _record_to_upload_result(session, record, created_new=True, content_reused=True)
 
 
 def upload_from_temp_path(
@@ -526,7 +536,10 @@ def upload_from_temp_path(
     expected_hash: str | None = None,
     mime_type: str | None = None,
     preview_id: str | None = None,
+    reuse_content: bool = True,
 ) -> UploadResult:
+    """``reuse_content=False`` skips content reuse and always writes the bytes to their
+    destination; identical bytes already there keep their content row and records."""
     display_name = _sanitize_filename(name or client_filename, fallback="upload")
     user_metadata = user_metadata or {}
 
@@ -555,7 +568,8 @@ def upload_from_temp_path(
                 user_metadata,
                 preview_id,
             ),
-        )
+            settle_target and os.path.dirname(settle_target),
+        ) if reuse_content else None
     if reused is not None:
         _remove_temp_path(temp_path)
         return reused

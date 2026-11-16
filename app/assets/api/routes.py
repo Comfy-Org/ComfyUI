@@ -12,7 +12,6 @@ import functools
 import json
 import logging
 import os
-import urllib.parse
 import uuid
 from datetime import timezone
 from typing import Any
@@ -20,10 +19,10 @@ from typing import Any
 from aiohttp import web
 from pydantic import ValidationError
 
-import folder_paths
 from app import user_manager
 from app.assets import mode
 from app.assets.api import schemas_in, schemas_out
+from app.assets.api.download import download_headers
 from app.assets.services import schemas
 from app.assets.api.schemas_in import (
     AssetValidationError,
@@ -571,33 +570,7 @@ async def download_asset_content(request: web.Request) -> web.Response:
             404, "FILE_NOT_FOUND", "Underlying file not found on disk."
         )
 
-    # User-controlled asset content must not render inline in the app origin
-    # (stored XSS via SVG/HTML/XML). Force dangerous types to download and
-    # override any requested inline disposition; SVG loaded into an <img> is
-    # exempt, see renders_safely_as_image. Centralised through folder_paths so
-    # this can't drift from /view and /userdata (the previous inline set here
-    # omitted image/svg+xml and missed the charset/casing/+xml-dialect bypasses).
-    extra_headers = {}
-    sec_fetch_dest = request.headers.get("Sec-Fetch-Dest")
-    if folder_paths.is_dangerous_content_type(content_type):
-        # This response now depends on a request header, so it must not be
-        # reused across destinations by a browser or intermediary cache: an
-        # inline SVG primed by an <img> fetch and replayed to a document
-        # navigation of the same URL would re-enable the stored XSS.
-        extra_headers["Vary"] = "Sec-Fetch-Dest"
-        extra_headers["Cache-Control"] = "no-store"
-        if not folder_paths.renders_safely_as_image(content_type, sec_fetch_dest):
-            content_type = "application/octet-stream"
-            disposition = "attachment"
-
-    # mime_type is uploader-supplied and unvalidated, so it can carry
-    # parameters. aiohttp rejects a charset in the content_type argument with
-    # ValueError, which would turn a valid inline SVG into a 500.
-    content_type = content_type.split(";", 1)[0].strip() or "application/octet-stream"
-
-    safe_name = (filename or "").replace("\r", "").replace("\n", "")
-    encoded = urllib.parse.quote(safe_name)
-    cd = f"{disposition}; filename*=UTF-8''{encoded}"
+    content_type, headers = download_headers(content_type, filename, disposition, request.headers.get("Sec-Fetch-Dest"))
 
     # debug, not info: preview_url points here, so every thumbnail render is a fetch.
     logging.debug("download_asset_content: path=%s, type=%s, name=%s", abs_path, content_type, filename)
@@ -616,12 +589,7 @@ async def download_asset_content(request: web.Request) -> web.Response:
     return web.Response(
         body=stream_file_chunks(),
         content_type=content_type,
-        headers={
-            "Content-Disposition": cd,
-            "Content-Length": str(file_size),
-            "X-Content-Type-Options": "nosniff",
-            **extra_headers,
-        },
+        headers={"Content-Length": str(file_size), **headers},
     )
 
 

@@ -72,6 +72,26 @@ def _write_temp(content: bytes) -> str:
     return path
 
 
+def test_upload_without_content_reuse_stores_again_and_keeps_earlier_record(
+    mock_create_session, roots, monkeypatch
+):
+    monkeypatch.setattr(folder_paths, "temp_directory", str(roots / "temp"))
+    content = b"store-again-bytes"
+    r1 = upload_from_temp_path(temp_path=_write_temp(content), name="a.png", tags=["input"], client_filename="a.png", reuse_content=False)
+    first_inode = os.stat(r1.ref.file_path).st_ino
+    r2 = upload_from_temp_path(temp_path=_write_temp(content), name="b.png", tags=["input"], client_filename="b.png", reuse_content=False)
+    assert (r1.content_reused, r2.content_reused, r2.created_new) == (False, False, True)
+    assert r2.ref.id != r1.ref.id and r2.ref.file_path == r1.ref.file_path
+    assert os.stat(r1.ref.file_path).st_ino != first_inode, "the bytes were written again"
+    with open(r1.ref.file_path, "rb") as file:
+        assert file.read() == content
+    with mock_create_session() as session:
+        live = session.scalars(select(AssetContent).where(AssetContent.is_missing.is_(False))).all()
+        assert [c.id for c in live] == [r1.content_id] == [r2.content_id]
+        assert session.scalar(select(func.count()).select_from(Asset)) == 2
+    assert os.listdir(roots / "input") == [os.path.basename(r1.ref.file_path)]
+
+
 def test_hash_mode_multipart_reuses_content_but_in_place_keeps_its_own_path(
     mock_create_session, hashing_on
 ):
@@ -113,6 +133,7 @@ def test_hash_mode_multipart_reuses_content_but_in_place_keeps_its_own_path(
         )
         assert r3.ref.id != r1.ref.id
         assert r3.created_new is True
+        assert (r1.content_reused, r2.content_reused, r3.content_reused) == (False, True, False)
         assert r3.ref.file_path == os.path.abspath(image_path)
 
         with mock_create_session() as session:
@@ -1161,9 +1182,9 @@ def test_off_mode_upload_calls_content_lookup(mock_create_session, hashing_off):
     temp = _write_temp(b"off-mode")
     try:
         with patch(
-            "app.assets.services.ingest.lookup_for_view"
+            "app.assets.services.ingest.qualified_content_iterator"
         ) as mock_dedup:
-            mock_dedup.return_value = None
+            mock_dedup.return_value = iter(())
             upload_from_temp_path(
                 temp_path=temp,
                 name="off.bin",

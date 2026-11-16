@@ -121,3 +121,5 @@ class UploadResult:
     asset: AssetData
     tags: list[str]
     created_new: bool
+    # True when the record was attached to stored content that matched the bytes, rather than to a newly written file.
+    content_reused: bool = False

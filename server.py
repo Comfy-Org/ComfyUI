@@ -60,13 +60,14 @@ if dependencies_available():
     from app.asset_export import AssetExportManager
 
 from app import agent_host
+import app.api_v2 as api_v2
 from app.user_manager import UserManager
 from app.model_manager import ModelFileManager
 from app.custom_node_manager import CustomNodeManager
 from app.subgraph_manager import SubgraphManager
 from app import deploy_to_cloud
 from app.node_replace_manager import NodeReplaceManager
-from typing import TYPE_CHECKING, Optional, Union
+from typing import TYPE_CHECKING, Callable, Optional, Union
 from api_server.routes.internal.internal_routes import InternalRoutes
 from protocol import BinaryEventTypes
 
@@ -157,22 +158,24 @@ async def compress_body(request: web.Request, handler):
     return response
 
 
-def create_cors_middleware(allowed_origin: str):
+def create_cors_middleware():
     @web.middleware
     async def cors_middleware(request: web.Request, handler):
         if request.method == "OPTIONS":
             # Pre-flight request. Reply successfully:
-            response = web.Response()
-        else:
-            response = await handler(request)
-
-        response.headers['Access-Control-Allow-Origin'] = allowed_origin
-        response.headers['Access-Control-Allow-Methods'] = 'POST, GET, DELETE, PUT, OPTIONS, PATCH'
-        response.headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization'
-        response.headers['Access-Control-Allow-Credentials'] = 'true'
-        return response
+            return web.Response()
+        return await handler(request)
 
     return cors_middleware
+
+
+async def _cors_on_prepare(request: web.Request, response: web.StreamResponse):
+    # Runs on every response as it is prepared, including streams a handler prepares itself (SSE), which a middleware sees too late.
+    response.headers['Access-Control-Allow-Origin'] = args.enable_cors_header
+    response.headers['Access-Control-Allow-Methods'] = 'POST, GET, DELETE, PUT, OPTIONS, PATCH, HEAD'
+    response.headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization, Idempotency-Key, Range, Comfy-User'
+    response.headers['Access-Control-Expose-Headers'] = 'Retry-After, Content-Range, Accept-Ranges, Content-Length, Location, No-Log-Reason'
+    response.headers['Access-Control-Allow-Credentials'] = 'true'
 
 
 def is_loopback(host):
@@ -281,7 +284,7 @@ class PromptServer():
             middlewares.append(compress_body)
 
         if args.enable_cors_header:
-            middlewares.append(create_cors_middleware(args.enable_cors_header))
+            middlewares.append(create_cors_middleware())
         else:
             middlewares.append(create_origin_only_middleware())
 
@@ -293,6 +296,8 @@ class PromptServer():
 
         max_upload_size = round(args.max_upload_size * 1024 * 1024)
         self.app = web.Application(client_max_size=max_upload_size, middlewares=middlewares)
+        if args.enable_cors_header:
+            self.app.on_response_prepare.append(_cors_on_prepare)
         self.sockets = dict()
         self.sockets_metadata = dict()
         self.web_root = (
@@ -301,8 +306,11 @@ class PromptServer():
             else args.front_end_root
         )
         logging.info(f"[Prompt Server] web root: {self.web_root}")
+        self.sid_listeners: dict[str, Callable[[object, object, bool], None]] = {}
         self.asset_manager.register_routes(self.app, self.user_manager)
         self.asset_manager.set_event_sink(self.send_sync)
+        if self.asset_manager.enabled:
+            api_v2.register(self.app, self)
 
         def _job_create_times(prompt_ids):
             """Creation times of the given jobs, from the queue and history."""
@@ -1033,33 +1041,6 @@ class PromptServer():
 
             return web.json_response(job)
 
-        def _cancel_job_by_id(job_id):
-            """Cancel a single job by id using the queue's existing mechanics.
-
-            Running jobs are interrupted (same mechanism as /interrupt); pending
-            jobs are dequeued (same mechanism as /queue {"delete": [...]}).
-            Already-finished or unknown ids are no-ops. State-agnostic.
-
-            Returns True when a cancel was actually dispatched (running or
-            pending job), False when the call was a no-op (terminal/unknown id).
-            """
-            running, queued = self.prompt_queue.get_current_queue()
-            history = self.prompt_queue.get_history()
-
-            def interrupt(prompt_id):
-                logging.info(f"Cancelling running prompt {prompt_id}")
-                # Atomic: only interrupts if the job is still the one running,
-                # so a cancel can't land on a prompt that started in the gap
-                # since the snapshot above. Returns whether it actually fired.
-                return self.prompt_queue.interrupt_if_running(prompt_id)
-
-            def dequeue(prompt_id):
-                logging.info(f"Cancelling pending prompt {prompt_id}")
-                return self.prompt_queue.delete_queue_item(lambda a: a[1] == prompt_id)
-
-            classification = cancel_job(job_id, running, queued, history, interrupt, dequeue)
-            return classification in (CANCEL_RUNNING, CANCEL_PENDING)
-
         @routes.post("/api/jobs/{job_id}/cancel")
         async def cancel_job_by_id(request):
             """Cancel a single job by id, regardless of state.
@@ -1075,7 +1056,7 @@ class PromptServer():
                     status=400
                 )
 
-            cancelled = _cancel_job_by_id(job_id)
+            cancelled = self.cancel_job_by_id(job_id) in (CANCEL_RUNNING, CANCEL_PENDING)
             return web.json_response({"cancelled": cancelled})
 
         @routes.post("/api/jobs/cancel")
@@ -1129,7 +1110,7 @@ class PromptServer():
             # to fail the whole batch.
             cancelled = False
             for jid in job_ids:
-                if _cancel_job_by_id(jid):
+                if self.cancel_job_by_id(jid) in (CANCEL_RUNNING, CANCEL_PENDING):
                     cancelled = True
 
             return web.json_response({"cancelled": cancelled})
@@ -1165,85 +1146,8 @@ class PromptServer():
         async def post_prompt(request):
             logging.info("got prompt")
             json_data =  await request.json()
-            json_data = self.trigger_on_prompt(json_data)
-
-            if "number" in json_data:
-                number = float(json_data['number'])
-            else:
-                number = self.number
-                if "front" in json_data:
-                    if json_data['front']:
-                        number = -number
-
-                self.number += 1
-
-            if "prompt" in json_data:
-                prompt = json_data["prompt"]
-                client_prompt_id = json_data.get("prompt_id")
-                if client_prompt_id is None:
-                    # Absent or explicit null: the server mints the id.
-                    prompt_id = str(uuid.uuid4())
-                else:
-                    try:
-                        prompt_id = validate_job_id(client_prompt_id)
-                    except ValueError:
-                        error = {
-                            "type": "invalid_prompt_id",
-                            "message": "prompt_id must be a valid UUID",
-                            "details": "prompt_id must be a UUID string in canonical lowercase hyphenated form; omit it to let the server generate one",
-                            "extra_info": {}
-                        }
-                        return web.json_response({"error": error, "node_errors": {}}, status=400)
-
-                partial_execution_targets = None
-                if "partial_execution_targets" in json_data:
-                    partial_execution_targets = json_data["partial_execution_targets"]
-
-                self.node_replace_manager.apply_replacements(prompt)
-
-                valid = await execution.validate_prompt(prompt_id, prompt, partial_execution_targets)
-                extra_data = {}
-                if "extra_data" in json_data:
-                    extra_data = json_data["extra_data"]
-
-                if "client_id" in json_data:
-                    extra_data["client_id"] = json_data["client_id"]
-
-                extra_data.pop("workflow_metadata", None)
-                metadata = valid_workflow_metadata(json_data)
-                if metadata is None:
-                    metadata = workflow_metadata_from_prompt(extra_data)
-                if metadata is not None:
-                    extra_data["workflow_metadata"] = metadata
-
-                if "comfy_usage_source" not in extra_data:
-                    usage_source = request.headers.get("Comfy-Usage-Source")
-                    if usage_source:
-                        extra_data["comfy_usage_source"] = usage_source
-                if valid[0]:
-                    outputs_to_execute = valid[2]
-                    sensitive = {}
-                    for sensitive_val in execution.SENSITIVE_EXTRA_DATA_KEYS:
-                        if sensitive_val in extra_data:
-                            sensitive[sensitive_val] = extra_data.pop(sensitive_val)
-                    extra_data["create_time"] = int(time.time() * 1000)  # timestamp in milliseconds
-                    self.prompt_queue.put((number, prompt_id, prompt, extra_data, outputs_to_execute, sensitive))
-                    # The frontend can queue with an empty client_id before its socket id arrives.
-                    if not json_data.get("client_id") and extra_data.get("comfy_usage_source") != "comfyui-frontend":
-                        deploy_to_cloud.mark_used_headlessly()
-                    response = {"prompt_id": prompt_id, "number": number, "node_errors": valid[3]}
-                    return web.json_response(response)
-                else:
-                    logging.warning("invalid prompt: {}".format(valid[1]))
-                    return web.json_response({"error": valid[1], "node_errors": valid[3]}, status=400)
-            else:
-                error = {
-                    "type": "no_prompt",
-                    "message": "No prompt provided",
-                    "details": "No prompt provided",
-                    "extra_info": {}
-                }
-                return web.json_response({"error": error, "node_errors": {}}, status=400)
+            status, body = await self.enqueue_prompt(json_data, request.headers.get("Comfy-Usage-Source"))
+            return web.json_response(body, status=status)
 
         @routes.post("/queue")
         async def post_queue(request):
@@ -1479,6 +1383,112 @@ class PromptServer():
 
         await self.send_bytes(BinaryEventTypes.PREVIEW_IMAGE_WITH_METADATA, combined_data, sid=sid)
 
+    async def enqueue_prompt(self, json_data, usage_source=None) -> tuple[int, dict]:
+        json_data = self.trigger_on_prompt(json_data)
+
+        if "number" in json_data:
+            number = float(json_data['number'])
+        else:
+            number = self.number
+            if "front" in json_data:
+                if json_data['front']:
+                    number = -number
+
+            self.number += 1
+
+        if "prompt" in json_data:
+            prompt = json_data["prompt"]
+            client_prompt_id = json_data.get("prompt_id")
+            if client_prompt_id is None:
+                # Absent or explicit null: the server mints the id.
+                prompt_id = str(uuid.uuid4())
+            else:
+                try:
+                    prompt_id = validate_job_id(client_prompt_id)
+                except ValueError:
+                    error = {
+                        "type": "invalid_prompt_id",
+                        "message": "prompt_id must be a valid UUID",
+                        "details": "prompt_id must be a UUID string in canonical lowercase hyphenated form; omit it to let the server generate one",
+                        "extra_info": {}
+                    }
+                    return 400, {"error": error, "node_errors": {}}
+
+            partial_execution_targets = None
+            if "partial_execution_targets" in json_data:
+                partial_execution_targets = json_data["partial_execution_targets"]
+
+            self.node_replace_manager.apply_replacements(prompt)
+
+            valid = await execution.validate_prompt(prompt_id, prompt, partial_execution_targets)
+            extra_data = {}
+            if "extra_data" in json_data:
+                extra_data = json_data["extra_data"]
+
+            if "client_id" in json_data:
+                extra_data["client_id"] = json_data["client_id"]
+
+            extra_data.pop("workflow_metadata", None)
+            metadata = valid_workflow_metadata(json_data)
+            if metadata is None:
+                metadata = workflow_metadata_from_prompt(extra_data)
+            if metadata is not None:
+                extra_data["workflow_metadata"] = metadata
+
+            if usage_source and "comfy_usage_source" not in extra_data:
+                extra_data["comfy_usage_source"] = usage_source
+            if valid[0]:
+                outputs_to_execute = valid[2]
+                sensitive = {}
+                for sensitive_val in execution.SENSITIVE_EXTRA_DATA_KEYS:
+                    if sensitive_val in extra_data:
+                        sensitive[sensitive_val] = extra_data.pop(sensitive_val)
+                extra_data["create_time"] = int(time.time() * 1000)  # timestamp in milliseconds
+                self.prompt_queue.put((number, prompt_id, prompt, extra_data, outputs_to_execute, sensitive))
+                # The frontend can queue with an empty client_id before its socket id arrives.
+                if not json_data.get("client_id") and extra_data.get("comfy_usage_source") != "comfyui-frontend":
+                    deploy_to_cloud.mark_used_headlessly()
+                response = {"prompt_id": prompt_id, "number": number, "node_errors": valid[3]}
+                return 200, response
+            else:
+                logging.warning("invalid prompt: {}".format(valid[1]))
+                return 400, {"error": valid[1], "node_errors": valid[3]}
+        else:
+            error = {
+                "type": "no_prompt",
+                "message": "No prompt provided",
+                "details": "No prompt provided",
+                "extra_info": {}
+            }
+            return 400, {"error": error, "node_errors": {}}
+
+    def cancel_job_by_id(self, job_id) -> str:
+        """Cancel a single job by id using the queue's existing mechanics.
+
+        Running jobs are interrupted (same mechanism as /interrupt); pending
+        jobs are dequeued (same mechanism as /queue {"delete": [...]}).
+        Already-finished or unknown ids are no-ops. State-agnostic.
+
+        Returns the comfy_execution.jobs.cancel_job classification: CANCEL_RUNNING
+        or CANCEL_PENDING when a cancel was dispatched, CANCEL_TERMINAL or
+        CANCEL_UNKNOWN when the call was a no-op.
+        """
+        running, queued = self.prompt_queue.get_current_queue()
+        history = self.prompt_queue.get_history()
+
+        def interrupt(prompt_id):
+            logging.info(f"Cancelling running prompt {prompt_id}")
+            # Atomic: only interrupts if the job is still the one running,
+            # so a cancel can't land on a prompt that started in the gap
+            # since the snapshot above. Returns whether it actually fired.
+            return self.prompt_queue.interrupt_if_running(prompt_id)
+
+        def dequeue(prompt_id):
+            logging.info(f"Cancelling pending prompt {prompt_id}")
+            return self.prompt_queue.delete_queue_item(lambda a: a[1] == prompt_id)
+
+        return cancel_job(job_id, running, queued, history, interrupt, dequeue)
+
     async def send_bytes(self, event, data, sid=None):
         message = self.encode_bytes(event, data)
 
@@ -1488,6 +1498,7 @@ class PromptServer():
                 await send_socket_catch_exception(ws.send_bytes, message)
         elif sid in self.sockets:
             await send_socket_catch_exception(self.sockets[sid].send_bytes, message)
+        self.notify_sid_listeners(event, data, sid)
 
     async def send_json(self, event, data, sid=None):
         message = {"type": event, "data": data}
@@ -1498,6 +1509,20 @@ class PromptServer():
                 await send_socket_catch_exception(ws.send_json, message)
         elif sid in self.sockets:
             await send_socket_catch_exception(self.sockets[sid].send_json, message)
+        self.notify_sid_listeners(event, data, sid)
+
+    def notify_sid_listeners(self, event, data, sid):
+        if sid is None:
+            listeners = [(listener, False) for listener in list(self.sid_listeners.values())]
+        elif sid in self.sid_listeners:
+            listeners = [(self.sid_listeners[sid], True)]
+        else:
+            return
+        for listener, targeted in listeners:
+            try:
+                listener(event, data, targeted)
+            except Exception:
+                logging.exception(f"sid listener failed for event {event}")
 
     def send_sync(self, event, data, sid=None):
         if self.workflow_metadata:

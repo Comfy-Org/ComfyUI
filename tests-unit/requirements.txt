@@ -3,3 +3,4 @@ pytest-aiohttp
 pytest-asyncio
 websocket-client
 cryptography
+jsonschema

@@ -1,0 +1,1820 @@
+# Comfy API v2 — public specification.
+#
+# GENERATED ONE-WAY — DO NOT HAND-EDIT.
+# Projected automatically from the canonical Comfy API v2 contract and
+# synced by CI. Change the upstream contract, not this public copy.
+
+openapi: 3.0.3
+info:
+  title: Comfy API v2
+  version: 2.0.0
+  description: "The official, versioned HTTP API for running ComfyUI workflows from\nexternal applications: upload inputs, submit a workflow, observe\nexecution, retrieve results.\n\nDesign principles:\n- **Poll-first.** Every capability is reachable via plain GET polling;\n  the SSE stream is a live enhancement, never the source of truth.\n- **Everything is resumable.** Submission is idempotent; job state and\n  outputs are retrievable by ID until `expires_at`.\n- **UUID identity, content-addressed dedup.** Assets are UUID-identified\n  records over blobs keyed by a server-computed blake3 hash. The hash is\n  nullable and may be computed lazily.\n- **Follow links, don't build URLs.** Responses embed follow-up URLs.\n\nAdditive changes only within v2; breaking changes require v3.\n"
+servers:
+- url: http://127.0.0.1:8189
+  description: Self-hosted (comfy-api-proxy)
+- url: https://cloud.comfy.org
+  description: Comfy Cloud
+- url: https://{deployment}.run.comfy.app
+  description: Serverless deployment
+  variables:
+    deployment:
+      description: DNS-safe deployment id (subdomain label). Staging uses {deployment}.stg.run.comfy.app.
+      default: dep-1234abcd-56ef-7890-abcd-ef1234567890
+security:
+- bearerAuth: []
+- {}
+tags:
+- name: assets
+  description: UUID-identified records over content-addressed blobs.
+- name: jobs
+  description: One execution of a workflow — durable, pollable, cancelable.
+- name: service
+  description: Service-level operations.
+paths:
+  /api/v2/assets:
+    post:
+      operationId: postAssets
+      tags:
+      - assets
+      summary: Upload an asset (single-call multipart)
+      description: 'Single-call `multipart/form-data` upload. The platform streams the
+
+        bytes through its trusted byte-path, dedups by the server-computed
+
+        hash, and mints the asset record.
+
+
+        The blake3 hash is always computed server-side from the received
+
+        bytes — a client-declared `expected_hash` is verified, never trusted
+
+        (on Comfy Cloud and serverless, only when sent before `file` — see below).
+
+        If location metadata (GPS, XMP, IPTC) is removed from an image before
+
+        it is stored, the asset''s `hash` is the hash of the stored bytes and
+
+        can differ from `expected_hash`. On Comfy Cloud, an upload whose
+
+        bytes open as a JPEG, PNG, WebP or classic TIFF (including TIFF-based
+
+        camera RAW such as DNG, NEF, ARW and CR2, but not BigTIFF) and that
+
+        is over 50 MiB is refused with 422 `validation_error`, whatever its
+
+        `content_type` and whether or not it carries location metadata. A
+
+        request that declares a `Content-Length` over Comfy Cloud''s 200 MB
+
+        (200,000,000-byte) body limit is refused before that check with a
+
+        plain 413 that does not use the `ErrorEnvelope` shape. A body sent
+
+        without a declared length is cut off when it passes that limit, and
+
+        no 413 is sent: a cut-off while the fields before `file` are read
+
+        fails with 422 `invalid_body`, and a cut-off inside the file usually
+
+        fails with 500 `upstream_error`. Nothing after the `file` field is
+
+        read, so a body that only passes the limit there is uploaded
+
+        normally.
+
+        Deployment-scoped surfaces neither strip location metadata nor apply
+
+        the 50 MiB image cap; they limit the request body to 110 MB
+
+        (110,000,000 bytes). A request that declares a `Content-Length` over
+
+        that limit is refused with the same plain 413; a body sent without a
+
+        declared length is cut off when it passes the limit, and the upload
+
+        then fails with an error response that is not guaranteed to be a 413.
+
+        The uploaded asset is referenceable immediately; any content scanning
+
+        runs in the background and does not block the response.
+
+
+        Send `file` as the last part. Comfy Cloud and serverless deployments
+
+        stream it straight into storage and read the other fields only up to
+
+        it, so a part sent after `file` is never read: a `content_type` or
+
+        `file_path` sent only after it is refused as missing (422); an
+
+        optional field (`expected_hash` or `tags`) is silently ignored — the
+
+        upload succeeds without the hash check or the caller''s tags; on
+
+        serverless deployments, a trailing `expires_in` is likewise ignored,
+
+        losing the retention override; and a second `file` part is dropped,
+
+        so only the first part''s bytes are stored. Comfy Cloud ignores
+
+        `expires_in` wherever it is sent, before or after `file`. The
+
+        response does not say any of these were skipped.
+
+
+        An upload is a single request. v1 expects files of up to ~100 MB;
+
+        the hard cap is the body limit of the surface it is sent to (above).
+
+        Chunked/resumable large uploads are a deliberate open question.
+
+
+        Cloud''s hosted API caps every part sent before `file` at 8 KiB,
+
+        including a part it does not recognise (which it otherwise
+
+        ignores), so an extra field over 8 KiB, such as file bytes sent
+
+        under a misspelled name, is refused with 422 `invalid_body`. Parts
+
+        sent after `file` are never read: the 8 KiB cap does not apply to
+
+        them, and a metadata field sent there is treated as absent, so send
+
+        every metadata field before `file`. A declared `Content-Length`
+
+        still counts those bytes toward the size limit above; without one,
+
+        a body that only exceeds the limit there is uploaded normally,
+
+        since nothing after `file` is read.
+
+
+        On Comfy Cloud an upload fails with 422 `upload_timed_out` when no
+
+        request bytes arrive for 30 seconds, or when the whole request takes
+
+        longer than 10 minutes, however steadily bytes keep arriving.
+
+        On Comfy Cloud an upload can also be refused with 503 `upload_busy`
+
+        and `Retry-After` when the server is busy with other uploads: nothing
+
+        was stored, so the same upload can be sent again after `Retry-After`.
+
+        On a Developer Platform deployment the same 422 `upload_timed_out`
+
+        applies when no request bytes arrive for 30 seconds, or when the whole
+
+        request takes longer than 20 minutes.
+
+        '
+      x-streaming-upload: true
+      x-idempotency-key: recommended
+      parameters:
+      - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required:
+              - file
+              - content_type
+              - file_path
+              properties:
+                content_type:
+                  type: string
+                  example: image/png
+                  description: The asset's media type. On Comfy Cloud it must be valid UTF-8, not blank, at most 255 bytes, must not start or end with whitespace, and must not contain control characters (C0, DEL, C1, U+2028, U+2029) or any invisible format or default-ignorable character (every Unicode general category Cf character, including the zero-width joiners and direction marks, and the other default-ignorable code points); otherwise the request is refused with 422 `invalid_body` before anything is stored. An accepted value is stored as sent. A deployment refuses a `content_type` that is blank, is not valid UTF-8 or contains a control character (C0 other than tab, DEL, C1) or a bidi embedding, override or isolate (U+202A-U+202E, U+2066-U+2069), has a tab outside the whitespace that opens a parameter after a `;`, or whose part before its first `;` is not `type/subtype` (two RFC 9110 tokens, optionally followed by spaces), with 422 `invalid_request` before anything is stored.
+                file_path:
+                  type: string
+                  description: 'Placement path / filename (global-namespace-root form, e.g. `photo.png` or `models/checkpoints/x.safetensors`). On Comfy Cloud the last segment becomes the asset name, so it must be valid UTF-8, at most 255 bytes, must not start with `.`, and must not contain control characters (C0, DEL, C1, U+2028, U+2029) or invisible format and default-ignorable characters (Unicode general category Cf, which includes the bidi embedding, override and isolate controls, soft hyphen, zero-width space, word joiner, BOM and tag characters, plus the other default-ignorable code points such as U+034F, U+2065 and the Hangul fillers); otherwise the request is refused with 422 `invalid_body` before anything is stored. ZWNJ/ZWJ (U+200C, U+200D) are allowed only between two visible non-ASCII characters (so not first, last, next to ASCII or next to another of these invisible characters, though one may follow an allowed variation selector, one right after an Indic virama on a letter of the same script may end a word, and a ZWJ after an Arabic-script letter that joins on both sides, or after that letter''s marks, may precede ASCII such as a ''.'' or end the name), for Persian, Indic and emoji names. The direction marks U+200E, U+200F and U+061C are allowed, for right-to-left names, and so are the visible Arabic number signs (prepended concatenation marks such as U+0600, but not U+070F); the direction marks can still change how a name is displayed. The emoji presentation selectors U+FE0E and U+FE0F are allowed only after an ASCII digit, `#` or `*` that U+20E3 (the keycap) follows, after U+2139, the punctuation emoji U+203C, U+2049, U+3030 and U+303D or the math symbols U+2194, U+25FB-U+25FE, U+2934 and U+2935, and after any other symbol of category So except a regional indicator, a skin-tone modifier, a hair component or U+2800. Other variation selectors are allowed only after a base that can have variants: the Mongolian ones after a Mongolian letter, the rest after a unified Han ideograph, plus U+FE00 after the Myanmar and Phags-pa characters it is registered for. The Mongolian and Han rules follow scripts, not the registered sequence list. The tag characters are allowed only as the tag run of the England, Scotland and Wales flag emoji. These allowed invisible characters, white space, U+2800 and combining marks must not make up the whole segment or come before a leading `.`. A deployment keeps the whole `file_path` as the asset name, so it must be valid UTF-8 and must not contain a control character (C0 U+0000-U+001F, including tab, CR and LF; DEL U+007F; C1 U+0080-U+009F) or a bidi embedding, override or isolate (U+202A-U+202E, U+2066-U+2069); otherwise the request is refused with 422 `invalid_request` before anything is stored. Directory segments and other characters stay allowed there.'
+                  example: photo.png
+                expected_hash:
+                  type: string
+                  description: 'Optional client-computed blake3 (`blake3:<hex>`) of the bytes sent. Omit the part to skip verification: on Comfy Cloud and on a deployment a part sent empty is refused with 422 as malformed. Send it before `file`: nothing after the `file` field is read, so a trailing `expected_hash` is neither verified nor refused, and the response does not say the check was skipped. Verified against the server-computed blake3 of the received bytes, not of the stored bytes; mismatch is rejected with 409 `hash_mismatch`. On serverless deployments no asset is minted and no existing asset''s retention is changed; elsewhere the upload is stored before the check, so the 409 returns no asset and a retry with the corrected expectation (and the same file extension) dedups onto it. On Comfy Cloud nothing removes that asset, so when the bytes themselves were wrong they stay stored: as an asset named after the last segment of `file_path` (`x.safetensors` for `models/checkpoints/x.safetensors`), or, when the bytes deduped onto an asset you already had, as that asset under its earlier name. The rest of `file_path` is not recorded. On Comfy Cloud and on a deployment, when `expected_hash` is sent more than once before `file` only the last value is checked, but an empty one among them is still refused with 422.'
+                  example: blake3:9f8a1c0d...
+                tags:
+                  type: array
+                  items:
+                    type: string
+                  description: 'Category tags (e.g. `input`). A create carries at most 64 tags, each a non-empty UTF-8 string of at most 256 bytes (surrounding whitespace included) with no NUL byte. A deployment adds `input` to every asset and counts it, so it takes at most 63 of the caller''s own; the `model_type:` tags derived for a model asset are not counted. A tag set breaking a limit is refused with 422. The rest of this paragraph describes Cloud''s hosted API and a deployment, not the self-hosted proxy. Both cap the bytes of all `tags` parts sent before `file` combined: 8 KiB on Cloud''s hosted API (422 `invalid_body`) and 64 KiB on a deployment (422 `invalid_request`). The cap counts duplicates before they are removed and JSON escapes before they are decoded, and is checked before the count and 256-byte limits above, so a tag set within them can still be refused. A `quoted-printable` part is counted and read after it is decoded; a part in any other `Content-Transfer-Encoding` is read as sent, so a `base64` part is stored as one tag holding its encoded text, while a `7bit`, `8bit` or `binary` part is read like a part with no encoding. A part is read as a JSON array when it starts with `[` (after leading whitespace) and is valid JSON or continues, after optional whitespace, with `"`: `["a","b"]` is two tags, `[]` adds no tags (nor does an empty part), and a malformed array such as `[1]` or `["a` is refused with 422. Any other non-empty part is one bare tag, kept as literal text, so `foo\ud800` sent as a bare part is stored as written. Invalid UTF-8 in a `tags` part, or a lone surrogate escape (e.g. `\ud800`) in a JSON-array `tags` part, is refused with 422 (`invalid_body` on Cloud, `invalid_request` on a deployment).'
+                expires_in:
+                  type: integer
+                  minimum: 60
+                  maximum: 604800
+                  description: 'Optional retention override in seconds (60s–7d): the asset''s `expires_at` becomes now + `expires_in`, replacing the platform''s default retention. Implementations without configurable retention ignore it. The bounds apply to this override only — the platform default is operator-configured and may lie outside them.'
+                  example: 86400
+                file:
+                  type: string
+                  format: binary
+                  description: 'The raw bytes. The order of properties in this schema does not set the order of parts on the wire: `file` must be the last part sent (see the field-order rule above).'
+      responses:
+        '201':
+          description: New blob stored; asset minted.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Asset'
+        '200':
+          description: Bytes deduped to an existing blob; asset minted over it.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Asset'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          description: '`hash_mismatch`.'
+          headers:
+            Retry-After:
+              $ref: '#/components/headers/RetryAfter'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '413':
+          description: The upload is over the body limit. On Comfy Cloud (200 MB, 200,000,000 bytes) and on deployment-scoped surfaces (110 MB, 110,000,000 bytes) the request declared a `Content-Length` over it; the server's body limit sends this before the upload is handled, so the body is not an `ErrorEnvelope` and its shape is not part of this contract. The self-hosted proxy instead refuses a file over its configured cap (100 MiB by default) with an `ErrorEnvelope` whose code is `payload_too_large`.
+        '422':
+          description: '`idempotency_key_reuse`, `input_blocked` (the bytes are already stored and flagged by content moderation, so `file_path` is not registered for them), `upload_timed_out` (the client stopped sending or sent too slowly; the server cannot recover the upload, so retry it from a faster connection), or validation failure — including a `tags` set over the limits above or a disallowed tag (`invalid_request` on a deployment or the self-hosted proxy; a deployment answers a body that is not `multipart/form-data` with a boundary with a plain 500 instead). On a deployment that includes a truncated `file` part: the body ends inside the part, before the delimiter that ends it. A body that stops right at that delimiter, without the final `--`, is not rejected: the part reads as complete and is stored. Comfy Cloud''s asset upload answers validation failure instead with `invalid_content_type` (the request is not `multipart/form-data` with a boundary), `invalid_body` (a malformed multipart body or upload field) or `validation_error` (the platform refused the upload, for example an image over the size cap or a disallowed tag). Cloud refuses a malformed multipart body with `invalid_body` when the fault is found before the `file` part. Cloud stops parsing at `file`, so parts after it are never read, and a body that ends inside the streamed file currently gets 500 `upstream_error` instead. The exception is an upload with `expected_hash`: if Cloud accepts the upload before the whole file is read, it reads the rest. A body that ends inside the `file` part, before its delimiter, then gets `invalid_body`, and a complete body gets 500 `upstream_error` instead of 201 or 409; in both cases the asset is already stored, holding only the part of the file read before the upload was accepted. `invalid_body` also covers `tags` parts over the 8 KiB combined cap described under `tags`, and a body sent without a declared length that is cut off at the body limit, as described for this operation. Cloud uses the same code for a missing `file`; a missing `content_type`, or one that breaks the rules under `content_type`; a missing `file_path`, or one that is absolute, starts with `.`, contains `..`, is not already in clean form (no `//`, no `.` segment such as `/./`, and no trailing `/`) or breaks the rules under `file_path`; a `content_type`, `file_path` or `expected_hash` part over 8 KiB; and a non-empty `expected_hash` that is not `blake3:` followed by 64 lowercase hex characters. A `content_type` or `file_path` sent only after `file` counts as missing (see the field-order rule above). Any Content-Type other than `multipart/form-data` with a `boundary` (including a missing or unparseable one) gets `invalid_content_type` on Cloud. On Comfy Cloud and on a deployment, an `expected_hash` part that is present but empty is a malformed field (`invalid_body` on Comfy Cloud, `invalid_request` on a deployment), not an omitted hash.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '503':
+          $ref: '#/components/responses/DeploymentLookupUnavailable'
+        '500':
+          $ref: '#/components/responses/UpstreamError'
+  /api/v2/assets/from-hash:
+    post:
+      operationId: assetFromHash
+      tags:
+      - assets
+      summary: Create or reuse an asset over existing bytes
+      description: 'Zero-byte fast-path: creates or reuses an asset over a blob the
+
+        platform already has, identified by its blake3 hash.
+
+
+        On Comfy Cloud, the caller must already own the content in the
+
+        current workspace. Content owned only by another member of that
+
+        workspace does not satisfy the ownership check and returns `404`
+
+        `blob_not_found`, just like an absent hash. A matching caller-owned
+
+        Cloud asset is reused with `200`, `created_new: false` and its UUID,
+
+        name and tags, even when the request supplies a different valid
+
+        `file_path` or `tags`.
+
+
+        On a deployment, reuse matches both the hash and the exact path in
+
+        the build''s scope. A match returns `200` with `created_new: false`;
+
+        a different path over content the caller may use creates a new
+
+        reference with `201` and `created_new: true`. The self-hosted proxy
+
+        returns its existing hash-indexed record with `200` and
+
+        `created_new: false`, without applying the requested path or tags.
+
+
+        Reuse keeps the existing name and tags. Cloud and deployment
+
+        validation still applies to submitted metadata before reuse;
+
+        metadata is not exempt from validation because it will not replace
+
+        stored values. Retention may refresh, and content URLs are generated
+
+        for the response, so reuse does not promise an unchanged response.
+
+
+        Trust boundary: resolves only against blobs the platform itself
+
+        ingested and hashed, and only those the calling account is authorized
+
+        to use — the client hash is a lookup key, never an authority to
+
+        register new content. A miss and "exists but not yours" are
+
+        deliberately indistinguishable (`404` `blob_not_found`).
+
+
+        The lookup key is the `hash` an upload returned, which is the hash of
+
+        the stored bytes. When location metadata was removed from an image
+
+        before it was stored, that differs from the client''s digest of the
+
+        file it sent, and the client''s digest finds nothing.
+
+        '
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+              - hash
+              properties:
+                hash:
+                  type: string
+                  example: blake3:9f8a1c0d...
+                file_path:
+                  type: string
+                  description: 'Placement path / filename for a new reference. Comfy Cloud uses its last segment as the name; a deployment uses the full path. Both default to the bare hash digest when omitted or empty. Cloud reuse keeps the existing name even if a different valid path is supplied; a deployment also matches the path when deciding reuse. The self-hosted proxy keeps its indexed record''s path. On Comfy Cloud a `file_path` that fails path validation, or whose last segment breaks the `file_path` rules of `POST /api/v2/assets`, is answered with 404 `blob_not_found`, the same as an unknown hash. The UTF-8 rule cannot fire here: invalid UTF-8 bytes and lone surrogate escapes (`\ud800`) are replaced with U+FFFD when the JSON body is decoded, so such a name is stored with U+FFFD in their place. A deployment answers a `file_path` that fails path validation or holds a control character (C0, DEL, C1) or a bidi embedding, override or isolate (U+202A-U+202E, U+2066-U+2069) with 422 `invalid_request`; the same U+FFFD replacement applies there.'
+                  example: photo.png
+                tags:
+                  type: array
+                  items:
+                    type: string
+                  description: 'Tags for a new reference; reuse keeps the existing tags. Comfy Cloud defaults an omitted or empty set to `input`. Cloud and deployment validation still applies on reuse; the self-hosted proxy does not apply submitted tags. A create carries at most 64 tags, each a non-empty UTF-8 string of at most 256 bytes (surrounding whitespace included) with no NUL byte. A deployment adds `input` to every asset and counts it, so it takes at most 63 of the caller''s own; the `model_type:` tags derived for a model asset are not counted. A tag set breaking a limit is refused with 422. Invalid UTF-8 or a lone surrogate escape (e.g. `\ud800`) inside a JSON-encoded tag is not refused: JSON decoding replaces it with U+FFFD (3 bytes each), and the 256-byte limit applies to the replaced value.'
+                expires_in:
+                  type: integer
+                  minimum: 60
+                  maximum: 604800
+                  description: 'Optional retention override in seconds (60s–7d): the asset''s `expires_at` becomes now + `expires_in`, replacing the platform''s default retention. Implementations without configurable retention ignore it. The bounds apply to this override only — the platform default is operator-configured and may lie outside them.'
+                  example: 86400
+      responses:
+        '201':
+          description: A new asset reference with a new UUID was created over existing bytes; `created_new` is true. Supplied metadata and defaults apply as described above.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Asset'
+        '200':
+          description: An existing asset was reused under the serving surface's rules above; `created_new` is false. Its UUID, name and tags are kept; retention may refresh and content URLs are generated for this response.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Asset'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          description: '`blob_not_found` — no blob the caller may mint from.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '422':
+          description: 'The `tags` or `expires_in` is malformed, `tags` breaks the limits above or holds a disallowed tag, or (on a deployment) the `file_path` is malformed: `invalid_request` on a deployment. On Cloud a tag with a malformed shape is `invalid_body`, and a refusal by the platform (for example a disallowed tag) is `validation_error`. Cloud answers a malformed `file_path` with 404 `blob_not_found` instead (see `file_path`). A deployment checks the tags even when an identical reference exists.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '503':
+          $ref: '#/components/responses/DeploymentLookupUnavailable'
+        '500':
+          $ref: '#/components/responses/UpstreamError'
+  /api/v2/assets/from-path:
+    post:
+      operationId: assetFromPath
+      tags:
+      - assets
+      summary: Register a file already on the serving host (reserved)
+      description: 'Reserved for registering a file that already exists on the serving host without uploading it. No surface implements registration yet: self-hosted ComfyUI answers `501` `not_implemented`; Comfy Cloud and serverless deployments do not serve this operation. Success responses will be added, additively, when a surface implements it. Upload with `POST /api/v2/assets` instead.'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AssetFromPathRequest'
+      responses:
+        '501':
+          description: '`not_implemented` — this surface does not register host files.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '500':
+          $ref: '#/components/responses/UpstreamError'
+  /api/v2/assets/by-hash/{hash}:
+    head:
+      operationId: headAssetByHash
+      tags:
+      - assets
+      summary: Existence check for a blob by blake3 hash
+      description: '`200` if the calling account can mint from this blob, `404` otherwise. Same account-scoping as `from-hash`; lets a client decide between the dedup fast-path and a full upload before sending bytes. Use the `hash` an upload returned: for an image whose location metadata was removed before storage, the client''s digest of the file it sent names no stored blob. A refusal answers its status with no body, so a `403`''s code is not readable here.'
+      parameters:
+      - $ref: '#/components/parameters/BlakeHash'
+      responses:
+        '200':
+          description: Blob present and mintable by the caller.
+        '404':
+          description: No blob the caller may mint from.
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '503':
+          $ref: '#/components/responses/DeploymentLookupUnavailable'
+        '500':
+          $ref: '#/components/responses/UpstreamError'
+  /api/v2/assets/{id}:
+    get:
+      operationId: getAsset
+      tags:
+      - assets
+      summary: Asset metadata
+      description: Returns the asset object with a fresh short-lived `url` for the content. Re-fetching always yields fresh URLs.
+      parameters:
+      - $ref: '#/components/parameters/AssetId'
+      responses:
+        '200':
+          description: The asset.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Asset'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '503':
+          $ref: '#/components/responses/DeploymentLookupUnavailable'
+        '500':
+          $ref: '#/components/responses/UpstreamError'
+    delete:
+      operationId: deleteAsset
+      tags:
+      - assets
+      summary: Delete an asset record
+      description: 'Deletes the asset RECORD. The underlying content-addressed blob is
+
+        untouched while any other asset still references it (hash dedup means
+
+        blobs are shared) — deleting an asset never destroys another asset''s
+
+        bytes.
+
+
+        A second delete of the same id returns `404`, indistinguishable from
+
+        an id that never existed or belongs to another account.
+
+        '
+      parameters:
+      - $ref: '#/components/parameters/AssetId'
+      responses:
+        '204':
+          description: Record deleted.
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: '`asset_in_use` — the record cannot be deleted while the platform still depends on it. Each surface defines its own holds (for example: a job''s outputs reference the record, or a content-moderation workflow requires it to be preserved); the response body deliberately never says which hold applies.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '503':
+          $ref: '#/components/responses/DeploymentLookupUnavailable'
+        '500':
+          $ref: '#/components/responses/UpstreamError'
+  /api/v2/assets/{id}/content:
+    get:
+      operationId: getAssetContent
+      tags:
+      - assets
+      summary: Asset bytes
+      description: 'Serves the bytes directly on surfaces where the platform stores blobs
+
+        itself (self-hosted); on Cloud and serverless issues a `302` to a
+
+        fresh signed URL. Range requests are supported for resumable
+
+        downloads of large outputs.
+
+        '
+      parameters:
+      - $ref: '#/components/parameters/AssetId'
+      - name: Range
+        in: header
+        required: false
+        schema:
+          type: string
+        description: Standard HTTP range, e.g. `bytes=0-1048575`.
+      responses:
+        '200':
+          description: The full content.
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        '206':
+          description: Partial content for a ranged request.
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        '302':
+          description: Redirect to a fresh signed URL (Cloud / serverless).
+          headers:
+            Location:
+              schema:
+                type: string
+                format: uri
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '416':
+          description: Range not satisfiable.
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '451':
+          description: '`content_blocked` on a deployment: content moderation flagged these bytes, so they are not served.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '503':
+          $ref: '#/components/responses/DeploymentLookupUnavailable'
+        '500':
+          $ref: '#/components/responses/UpstreamError'
+  /api/v2/jobs:
+    post:
+      operationId: postJobs
+      tags:
+      - jobs
+      summary: Submit a workflow for execution
+      description: 'Accepts the API-format workflow graph verbatim. Validation is
+
+        synchronous: graph structure, unknown node classes, and asset
+
+        references (`core/ASSET` objects — every referenced `id` must exist
+
+        and be owned by the caller). A `201` means the job is durably
+
+        recorded and queued.
+
+
+        UI-format workflow JSON (the export with `nodes`/`links`) is
+
+        rejected with `workflow_format_ui`.
+
+
+        `Idempotency-Key` is single-use (reject-on-duplicate, NOT
+
+        record-and-replay): the first request to present a given key is
+
+        processed normally; ANY later request presenting the same key — a
+
+        retry, a concurrent duplicate, or a same-key request with a different
+
+        body — is rejected `422` `idempotency_key_reuse` and is never
+
+        re-executed. The key is claimed only for a request that actually
+
+        reaches submission and is released if that submission definitively
+
+        fails without creating a job (a validation error, or an upstream
+
+        reject such as out-of-credits or queue-full), so a legitimate retry
+
+        with the same key can proceed. If a submission''s outcome is unknown
+
+        (an upstream timeout or 5xx where the job may or may not have been
+
+        created), the key stays claimed and the retry is rejected: poll or
+
+        list your jobs to find the possibly-created job rather than
+
+        resubmitting. Keys expire after 24h. There is no response replay and
+
+        no `Idempotency-Replayed` header.
+
+
+        Reserved for post-MVP and rejected if present today: `webhook_url`,
+
+        `inputs`.
+
+        '
+      x-idempotency-key: recommended
+      parameters:
+      - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+              - workflow
+              properties:
+                workflow:
+                  type: object
+                  description: API-format workflow graph, verbatim.
+                  additionalProperties: true
+                extra_data:
+                  type: object
+                  description: 'Per-prompt ComfyUI `extra_data`, same shape as Comfy Cloud and local ComfyUI. Closed object: only the enumerated keys are accepted, keeping the contract fully typed. Forwarded to the worker per-prompt and excluded from idempotency comparison. On a deployment it is dispatch-only and never stored; on Comfy Cloud it is persisted with the prompt, because the worker needs it, and redacted on every path that returns a workflow to a caller.
+
+
+                    Send the one credential you hold: an API key as `api_key_comfy_org`, or the session token an interactively signed-in client has instead as `auth_token_comfy_org`. Sending both is accepted and both are forwarded, but it is not a supported combination and which one a node uses is not defined here. Note a session token is short-lived and is not re-minted for you, so one submitted long before it executes may expire in the queue.'
+                  additionalProperties: false
+                  properties:
+                    api_key_comfy_org:
+                      type: string
+                      description: API key for partner (API) nodes.
+                    auth_token_comfy_org:
+                      type: string
+                      description: Session bearer token for partner (API) nodes — the equivalent of `api_key_comfy_org` for a caller authenticated by session rather than by key.
+                    preview_method:
+                      type: string
+                      description: ComfyUI's preview method for this prompt, passed to ComfyUI as sent, which validates it. Used only for jobs sent by Comfy Cloud's editor; ignored for other callers.
+                    extra_pnginfo:
+                      type: object
+                      description: ComfyUI's `extra_pnginfo` for this prompt, which carries the editor's workflow into saved outputs. Used only for jobs sent by Comfy Cloud's editor; ignored for other callers.
+                      additionalProperties: true
+                metadata:
+                  type: object
+                  description: 'Your own labels for the job, such as which of your customers it ran for. At most 16 pairs. A key is 1 to 40 characters from `A-Z a-z 0-9 _ - .`; a value is a string of at most 256 bytes in UTF-8 (bytes, not characters: 200 `é` is 400 bytes) with no control character (U+0000 to U+001F, tab and newline included, and U+007F to U+009F) and no bidirectional embedding, override or isolate (U+202A to U+202E, U+2066 to U+2069). Anything else is refused `422` `metadata_invalid` and no job is created: a bad key or value is named in the message and in `details.key`, while more than 16 pairs is refused with the count and no `details`. A `metadata` that is not an object is refused `400` `invalid_request`; `null` is the same as none. Stored with the job, returned on it, and filterable on `GET /api/v2/jobs`. Set once, here: nothing changes it later. Only jobs sent to a deployment keep it today: Comfy Cloud refuses a non-empty `metadata` with `422` `metadata_not_supported`, and runs a job with empty or absent `metadata` as before.'
+                  maxProperties: 16
+                  additionalProperties:
+                    type: string
+                    description: 'At most 256 bytes in UTF-8, which is what the server counts. `maxLength` counts characters, so it is only an upper bound: a shorter value with multi-byte characters can still be refused.'
+                    maxLength: 256
+                  x-go-type: interface{}
+                  example:
+                    client: acme
+                    batch: '2026-10-05'
+      responses:
+        '201':
+          description: Job created and queued.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Job'
+        '400':
+          description: '`invalid_request`: `metadata` is not an object. A body that is not JSON at all, or whose `workflow` or `extra_data` is not an object, is a `400` too, answered by the request decoder before any of these checks, with a bare `message` body rather than this envelope.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '402':
+          description: '`insufficient_credits` (Cloud / serverless only).'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          description: '`not_found`: on a deployment''s address, no deployment there that the caller''s workspace owns.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '422':
+          description: '`invalid_workflow` (with per-node details), `workflow_format_ui`, `missing_asset`, `idempotency_key_reuse`, `metadata_invalid` (for a bad key or value, the message and `details.key` name the key; for more than 16 pairs, the message gives the count and there are no `details`), or `metadata_not_supported` (a surface that keeps no job labels yet).'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '429':
+          description: '`queue_full` (bounded queue depth reached) or, on deployment-scoped surfaces, `deployment_not_ready` (deployment still provisioning/starting) or `deployment_unavailable` (the deployment is ready but its GPU provider is not taking work on it yet), or `rate_limited` (the caller is past a request rate limit). Disambiguate by `error.code`; all four mean back off and retry after `Retry-After`.'
+          headers:
+            Retry-After:
+              $ref: '#/components/headers/RetryAfter'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '503':
+          $ref: '#/components/responses/DeploymentLookupUnavailable'
+        '500':
+          $ref: '#/components/responses/UpstreamError'
+    get:
+      operationId: listJobs
+      tags:
+      - jobs
+      summary: List jobs, newest first
+      description: 'Lists jobs newest first. At a deployment''s address, the jobs sent to
+
+        that deployment; at the workspace address, every job in the
+
+        caller''s workspace. A caller never sees another workspace''s jobs.
+
+
+        Filter by your own labels with `metadata[<key>]=<value>`, up to 3
+
+        times; a job is listed only when every pair matches exactly. A 4th
+
+        filter, a repeated key, a key outside the key rule, or a value with a
+
+        character no label may hold (a control character or a bidirectional
+
+        embedding, override or isolate, as on submit) is refused `400`
+
+        `invalid_metadata_filter`. A filter value must be URL-encoded; a raw
+
+        `;` or a bad `%` escape answers `400` `invalid_metadata_filter`.
+
+
+        Pages: pass the response''s `next_cursor` back as `cursor`, with the
+
+        same filters, to read the next page. `next_cursor` is absent on the
+
+        last page. Each job appears once across the pages.
+
+
+        List items are a job''s stored record, not the `Job` object: they
+
+        carry no `outputs` and no `urls`. Read a job with
+
+        `GET /api/v2/jobs/{id}` for its outputs.
+
+
+        Only the serverless platform lists jobs today. Comfy Cloud answers
+
+        `501` `not_implemented`.
+
+        '
+      parameters:
+      - name: limit
+        in: query
+        required: false
+        description: 'Most jobs per page. Above 500 is read as 500; absent means 500. Not a positive integer: `422` `invalid_request`.'
+        schema:
+          type: integer
+          minimum: 1
+      - name: cursor
+        in: query
+        required: false
+        description: 'The previous page''s `next_cursor`, unchanged. Opaque: do not build or edit one. A cursor that is not well-formed is refused `400` `invalid_cursor`. Cursors are not signed, so a well-formed one is read as a position whether or not this list issued it.'
+        schema:
+          type: string
+      - name: metadata
+        in: query
+        required: false
+        style: deepObject
+        explode: true
+        description: Exact-match label filters, written `metadata[client]=acme`. Up to 3; all must match.
+        schema:
+          type: object
+          maxProperties: 3
+          additionalProperties:
+            type: string
+        example:
+          client: acme
+      responses:
+        '200':
+          description: One page of jobs, newest first.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/JobList'
+        '400':
+          description: '`invalid_metadata_filter` or `invalid_cursor`.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          description: '`not_found`: on a deployment''s address, no deployment there that the caller''s workspace owns.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '422':
+          description: '`invalid_request`: `limit` is not a positive integer.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '503':
+          $ref: '#/components/responses/DeploymentLookupUnavailable'
+        '500':
+          $ref: '#/components/responses/UpstreamError'
+        '501':
+          description: '`not_implemented`: this surface does not list jobs yet.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+  /api/v2/jobs/{id}:
+    get:
+      operationId: getJob
+      tags:
+      - jobs
+      summary: Job status (the polling workhorse)
+      description: 'Returns the full job object: current status, the latest progress
+
+        snapshot, and every output committed so far (`outputs` populates
+
+        incrementally while the job runs). This is the authoritative,
+
+        resumable view of a job; everything on the SSE stream is derived
+
+        from it.
+
+        '
+      parameters:
+      - $ref: '#/components/parameters/JobId'
+      responses:
+        '200':
+          description: The job.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Job'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '503':
+          $ref: '#/components/responses/DeploymentLookupUnavailable'
+        '500':
+          $ref: '#/components/responses/UpstreamError'
+  /api/v2/jobs/{id}/workflow:
+    get:
+      operationId: getJobWorkflow
+      tags:
+      - jobs
+      summary: The workflow behind a job — authoring version if pinned, executed graph otherwise
+      description: "Returns the workflow behind a job. The response's `format` field says\nwhich of two different shapes `workflow` is in:\n\n- `format: save` — the original authoring workflow exactly as saved\n  in the Comfy Cloud editor at the version the job ran, including\n  canvas layout and frontend-only nodes (e.g. Note nodes; Get/Set\n  nodes not yet expanded). Returned only when the job is pinned to a\n  specific workflow version — see the \"when you get which\" note\n  below.\n- `format: api` — the executed API-format prompt graph the job\n  actually ran: frontend-only constructs are gone and Get/Set nodes\n  are expanded. This is the same shape `POST /api/v2/jobs`'s\n  `workflow` request field takes, and never includes the\n  submission's `extra_data`, which can carry a live credential.\n\nAlways branch on `format`, never assume one or the other — which\nshape comes back depends on how the job was submitted, not on\nanything the caller controls per-request.\n\nA deliberate sub-resource, not a field on `GET /api/v2/jobs/{id}` —\nso the polling workhorse stays cheap and a caller pays for this only\nwhen it actually wants the workflow (for example, to recover what\nproduced a given output).\n\nTied to the job's own retention: this 404s under the same conditions\n`GET /api/v2/jobs/{id}` does (unknown, not-yours, or past its\nretention deadline) — there is no separate lifetime for the\nworkflow.\n\n**When you get which:** a job only carries a pinned workflow version\nwhen it was submitted with that association. Today that means jobs\nsubmitted from the Comfy Cloud frontend/editor. Jobs submitted\ndirectly through this v2 API (`POST /api/v2/jobs`) do not carry that\nassociation — v2 job submission has no version-linking fields yet —\nso they always get `format: api`. This is expected, not a bug: it\nwill change once v2 submission grows the same version pinning.\n\nA job pinned to a version also falls back to `format: api` if that\nversion, or the workflow it belongs to, is no longer readable by the\ncaller — for example the caller deleted the workflow since the job\nran. This is the same fallback as an unpinned job, and for the same\nreason: it is preferable to the alternative of erroring the whole\nrequest over data that is genuinely gone.\n"
+      parameters:
+      - $ref: '#/components/parameters/JobId'
+      responses:
+        '200':
+          description: The workflow graph.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/JobWorkflowResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '503':
+          $ref: '#/components/responses/DeploymentLookupUnavailable'
+        '500':
+          $ref: '#/components/responses/UpstreamError'
+  /api/v2/jobs/{id}/logs:
+    get:
+      operationId: getJobLogs
+      tags:
+      - jobs
+      summary: What the run printed
+      description: "Returns the job's captured execution log. Fetched on demand: a log\nis a debugging artifact a caller wants occasionally, while\n`GET /api/v2/jobs/{id}` is polled to terminal on every run, so the\nlog is a resource of its own rather than a field that would ride\nevery one of those polls to be read at most once.\n\nCaptured whenever the worker reports its own outcome, success and\nfailure alike, since a job that succeeds while producing the wrong\nthing is exactly what a failure-only log cannot explain. A run the\nplatform or the provider killed — out of memory, a crashed worker, a\ntimeout, a job past its maximum runtime — never gets that far, so it\nreaches a terminal status carrying no log at all. That is a real gap\nand worth stating: the failures a caller most wants a log for are\nthe ones least likely to have produced one.\n\n**`204` is the normal answer for a job with no log.** The cases behind\nit: this surface does not capture logs at all, the job has not\nfinished, the job predates log capture, the run was killed before the\nworker could report one, the worker reported none, or capture was\nattempted and failed.\n\nA surface that captures logs may say which side of the job's end the\nanswer falls on, in the optional `No-Log-Reason` response header:\n\n- `not_finished`: the job has not reached a terminal status. It may\n  have a log once it does, so a caller that wants one reads again\n  after a terminal status.\n- `finished`: the job reached a terminal status with no log captured.\n  This does not say why. In particular it does not mean the run\n  printed nothing: a killed run, an empty report and a failed capture\n  all answer the same.\n\nThe header is absent on a surface that captures no logs, and on a\nbuild that does not send it yet, so its absence says nothing about the\njob; read the job's status instead. A `204` on a job already in a\nterminal state means stop asking, with or without the header, and so\ndoes a missing `urls.logs`.\n\n**Only jobs run on the serverless platform** (a\n`{deployment}.run.comfy.app` host) have one today. An implementation\nthat captures no logs must still serve this operation, answering\n`204` for every job it can read, so that the two answers stay\ndistinct — Comfy Cloud does. A self-hosted deployment on a build\npredating this operation has not implemented it yet and will answer\na routing `404` instead, which is the case `job.urls.logs` exists to\nkeep a client out of: its absence says the surface has no logs at\nall, without a request.\n\nTied to the job's own retention: this `404`s under the same\nconditions `GET /api/v2/jobs/{id}` does (unknown, not-yours, or past\nits retention deadline). Nothing ages a log out ahead of the job's\nown `expires_at`. Account deletion is an exception: it clears the\nworkflow, caller labels and log in a personal workspace the account\noccupies alone. A scrubbed job answers `200` with empty `text`,\n`truncated: false`, `complete: true` and `captured_at` set to the\nscrub time, even if it never captured a worker log.\n\nLive tailing is not offered here yet. When it is, it arrives on this\nsame path under `Accept: text/event-stream`, leaving this\nJSON snapshot the default; its resume semantics will be defined\nthen, against a capture that is incremental. Until then the SSE\n`log` event on `GET /api/v2/jobs/{id}/events` is the reserved live\nrail, and this is the authoritative snapshot it reconciles against.\n"
+      parameters:
+      - $ref: '#/components/parameters/JobId'
+      responses:
+        '200':
+          description: The captured log.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/JobLogs'
+        '204':
+          description: This job has no log. A normal answer, not an error — see the description for the cases it covers.
+          headers:
+            No-Log-Reason:
+              $ref: '#/components/headers/NoLogReason'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '503':
+          $ref: '#/components/responses/DeploymentLookupUnavailable'
+        '500':
+          $ref: '#/components/responses/UpstreamError'
+  /api/v2/jobs/{id}/events:
+    get:
+      operationId: getJobEvents
+      tags:
+      - jobs
+      summary: Live event stream (SSE)
+      description: 'Server-Sent Events stream of the job''s live state. On connect the
+
+        client receives the current snapshot (a `status` event, the latest
+
+        `progress`, and the most recent `preview` if any), then future
+
+        updates. The stream ends after either the terminal `status` event
+
+        or a terminal `error` event (see the `error` event below).
+
+
+        Live push only — NOT a replayable log: events carry no `id`, there
+
+        is no `Last-Event-ID` resume, and frames emitted while disconnected
+
+        are gone. Each `progress` event is a complete snapshot, so a single
+
+        one fully re-syncs a reconnecting client; the authoritative state is
+
+        always `GET /api/v2/jobs/{id}`.
+
+        '
+      x-sse-events:
+        status:
+          description: Every lifecycle transition, including the initial state on connect and queue_position updates while queued.
+          schema: '#/components/schemas/StatusEvent'
+        progress:
+          description: Node- and step-level progress, throttled server-side (~2/s). Complete snapshot per event.
+          schema: '#/components/schemas/Progress'
+        preview:
+          description: In-progress preview image (JPEG, base64), throttled; server keeps only the most recent, pushed on connect.
+          schema: '#/components/schemas/PreviewEvent'
+        output:
+          description: 'Emitted the moment each output asset is committed, carrying the same `Output` object that appears on `job.outputs[]`. A latency optimization only: it lets a client render each result as it lands instead of waiting for the terminal `status` event. It is delivered best-effort over the live broadcast path — an output whose durable asset record is not yet resolvable when its node finishes may be delivered on a slightly later event or, failing that, only in the terminal `status` snapshot — so the authoritative, complete set of outputs is always `job.outputs[]` on `GET /api/v2/jobs/{id}` and on the terminal `status` event. A client must therefore treat these as additive hints and must not assume it receives one per output.'
+          schema: '#/components/schemas/Output'
+        log:
+          description: 'Selected execution log lines, carried while the run is still going. Best-effort diagnostics, and lossy by the same rule as the rest of this stream: lines emitted while a client was disconnected are gone and no `Last-Event-ID` replays them. The authoritative, complete log is the snapshot at `GET /api/v2/jobs/{id}/logs`, which a client re-reads after a terminal status to reconcile whatever it missed — on a surface that captures logs at all. Comfy Cloud does not, and answers `204` there for every job, so this event has nothing to be the live view of; see that operation for what a self-hosted deployment answers. NOT YET EMITTED by the server in the first iteration — reserved in the catalog so the wire contract is stable. Clients must not depend on receiving this event yet: to get a log today, stream to a terminal status and read the snapshot.'
+          x-sse-not-yet-emitted: true
+          schema: '#/components/schemas/LogEvent'
+        error:
+          description: 'Terminal event sent when the stream ends for a reason OTHER than the job reaching a terminal state — the credential the stream was opened with stopped being accepted (`credential_expired`, the common case for a short-lived Cloud JWT or OAuth access token that expires while a long job is still running), or the job stopped being accessible (`job_not_found`, `forbidden`). Transient upstream failures (5xx, network errors) do NOT end the stream — they are retried on the next poll. No `status` event follows it. Its whole purpose is to make an aborted stream distinguishable from a completed one: without it both simply close, and a client cannot tell "your job finished" from "you were cut off". On `credential_expired` the job itself is unaffected — refresh the credential and reopen the stream, or fall back to `GET /api/v2/jobs/{id}`. A serverless deployment sends only `job_not_found`.
+
+
+            Browser note: a browser `EventSource` also fires a BUILT-IN `error` event on any transport failure, and a server-sent `event: error` frame is delivered to the same listener. The two are told apart by the payload — this event always carries a JSON `ErrorEnvelope` in `data`, the built-in one carries none — so a handler should check for `data` before treating an `error` as an explained, terminal end-of-stream rather than a retryable connection drop.'
+          schema: '#/components/schemas/ErrorEnvelope'
+      parameters:
+      - $ref: '#/components/parameters/JobId'
+      responses:
+        '200':
+          description: 'SSE stream; see `x-sse-events` for the event catalog. Sent with `Cache-Control: no-cache, no-store, no-transform` and `X-Accel-Buffering: no` so intermediaries neither cache, compress nor buffer the stream.'
+          content:
+            text/event-stream:
+              schema:
+                type: string
+                description: Stream of `event:`/`data:` frames. Data payloads are the JSON schemas listed in x-sse-events.
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '429':
+          description: '`too_many_streams` — the caller already has the maximum number of concurrent GET .../events streams open. Close an existing stream (or wait for one to reach a terminal status) before opening another; GET /api/v2/jobs/{id} remains available as a plain poll regardless of this limit. Or `rate_limited`, the caller past a request rate limit; retry after `Retry-After`.'
+          headers:
+            Retry-After:
+              $ref: '#/components/headers/RetryAfter'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '501':
+          description: '`not_implemented` — this deployment does not yet serve live event streaming. GET /api/v2/jobs/{id} remains available as a plain poll in the meantime.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '503':
+          $ref: '#/components/responses/DeploymentLookupUnavailable'
+        '500':
+          $ref: '#/components/responses/UpstreamError'
+  /api/v2/jobs/{id}/cancel:
+    post:
+      operationId: cancelJob
+      tags:
+      - jobs
+      summary: Request cancellation
+      description: 'Requests cancellation and returns the current job object —
+
+        `canceling` (interruption takes effect at node/step boundaries),
+
+        `canceled` where the provider''s record already shows the interrupt, or
+
+        already-terminal. Idempotent: canceling a finished job is a no-op
+
+        returning the terminal state. On serverless, GPU seconds consumed
+
+        before the interrupt takes effect are still billed.
+
+        '
+      x-retryable: true
+      parameters:
+      - $ref: '#/components/parameters/JobId'
+      responses:
+        '200':
+          description: Current job state.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Job'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '503':
+          $ref: '#/components/responses/DeploymentLookupUnavailable'
+        '500':
+          $ref: '#/components/responses/UpstreamError'
+  /api/v2/health:
+    get:
+      operationId: getHealth
+      tags:
+      - service
+      summary: Liveness probe
+      description: Cheap liveness probe of the serving process; it does not check upstream dependencies. Served by self-hosted ComfyUI. Comfy Cloud and serverless deployments do not serve this operation.
+      security: []
+      responses:
+        '200':
+          description: The serving process is alive.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Health'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/UpstreamError'
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: '`Authorization: Bearer <credential>`. The credential is one of: an account-scoped API key (`comfyui-…`), accepted on Cloud and serverless; a Comfy Cloud session JWT; or an OAuth access token issued for the Comfy Cloud resource. Which kinds a given deployment accepts is deployment configuration — an API key always works on Cloud and serverless, and a deployment that does not accept JWT bearers answers `401` with a message saying so. Self-hosted accepts unauthenticated requests by default and can be configured with a static bearer token.'
+  parameters:
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: false
+      schema:
+        type: string
+      description: 'Client-generated UUID (recommended). Single-use: the first request to present a key is processed; any later request with the same key is rejected `422` `idempotency_key_reuse` (reject-on-duplicate, no response replay). Keys expire after 24h.'
+    JobId:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+      example: 7f3d2c1b-9a8e-4d6f-b012-3c4d5e6f7a8b
+    AssetId:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+      example: 9f8a1c0d-2b3e-4f56-8a7b-1c2d3e4f5a6b
+    BlakeHash:
+      name: hash
+      in: path
+      required: true
+      schema:
+        type: string
+      description: Content hash, written `blake3:<hex>`.
+      example: blake3:9f8a1c0d...
+  headers:
+    RetryAfter:
+      schema:
+        type: integer
+      description: Seconds to wait before retrying.
+    NoLogReason:
+      schema:
+        type: string
+        enum:
+        - not_finished
+        - finished
+      description: 'On a `204` from `GET /api/v2/jobs/{id}/logs`, whether the job has ended: `not_finished`, or `finished` with no log captured, which does not say why. Optional; see that operation. Clients tolerate unknown values: a later release may add a reason.'
+  responses:
+    Unauthorized:
+      description: '`unauthorized`: missing or invalid credentials. A credential that could not be checked answers `auth_unavailable` (503) instead.'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+    Forbidden:
+      description: '`forbidden` — authenticated but not allowed. On a serverless deployment, also `sso_required` — the key is valid, but the account must sign in through its organization''s single sign-on, which does not accept this key; it can come back on any operation.'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+    NotFound:
+      description: '`not_found`.'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+    UpstreamError:
+      description: '`upstream_error` — an unexpected failure reaching or processing the request in this implementation''s backing services. The message is always a generic, safe-to-display string; implementation detail (the specific upstream, its error text, transport failures) is never included here — see each implementation''s own error-mapping notes. Every operation in this contract can fail this way.'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+    RateLimited:
+      description: '`rate_limited` — the caller has exceeded a request rate limit for this account. Account/rate-scoped, not resource-specific — this can be returned even for a job, asset or deployment the caller doesn''t own or that doesn''t exist.'
+      headers:
+        Retry-After:
+          $ref: '#/components/headers/RetryAfter'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+    DeploymentLookupUnavailable:
+      description: 'On deployment-scoped surfaces, `deployment_lookup_unavailable`: the deployment this address names could not be looked up just now. The request was refused before it did anything (nothing was created, read, changed or canceled), so the same request can be sent again after `Retry-After`. Every operation at a deployment''s address can answer this way. A job submit can also answer this 503 with `database_unavailable`: the job could not be saved just now and nothing was started, so the same request can be sent again after `Retry-After`. No other operation answers `database_unavailable`. On Comfy Cloud an asset upload can also answer this 503 with `upload_busy`: the server is busy with other uploads and nothing was stored, so the same upload can be sent again after `Retry-After`. Any operation can also answer this 503 with `auth_unavailable`: the credential could not be checked just now, so the same request can be sent again after `Retry-After`. A job status read can also answer it with `output_unavailable`: an output of the job could not be prepared just now, and the job is unchanged. A transient storage failure clears on a later read after `Retry-After`; an output whose stored address is broken answers it on every read until the platform repairs the output.'
+      headers:
+        Retry-After:
+          $ref: '#/components/headers/RetryAfter'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+  schemas:
+    Asset:
+      type: object
+      description: 'A user-owned record identified by a server-assigned UUID, backing an immutable blob whose content carries a server-computed blake3 hash. `hash` may be computed lazily: an asset record (and its retrievable bytes) can exist before its hash is filled in. On an output, `job_metadata` carries the labels its producing job was submitted with, so code holding only the asset knows which run it came from. It is absent for assets no job produced, for outputs of a job sent without labels, where the serving surface keeps no job labels, and when the labels could not be read: so `job_id` without `job_metadata` does not prove the job had no labels. A create whose file path and bytes match an existing output answers with that output, so its `job_id` and `job_metadata` are the output''s.'
+      required:
+      - id
+      - hash
+      - size_bytes
+      - content_type
+      - created_at
+      - url
+      - url_expires_at
+      properties:
+        id:
+          type: string
+          example: 9f8a1c0d-2b3e-4f56-8a7b-1c2d3e4f5a6b
+        hash:
+          type: string
+          nullable: true
+          description: '`blake3:<hex>`; null while lazily computed.'
+          example: blake3:9f8a1c0d...
+        size_bytes:
+          type: integer
+          format: int64
+          example: 4816293
+        content_type:
+          type: string
+          example: image/png
+        file_path:
+          type: string
+          nullable: true
+          example: photo.png
+        created_new:
+          type: boolean
+          description: On `POST /api/v2/assets` responses, distinguishes a brand-new blob (true) from a dedup hit against bytes the platform already had (false). On `POST /api/v2/assets/from-hash` responses, true means a new asset reference was created over existing bytes (201); false means an existing asset was reused (200).
+        created_at:
+          type: string
+          format: date-time
+        url:
+          type: string
+          format: uri
+          description: Short-lived content URL (signed, or proxy-served).
+        url_expires_at:
+          type: string
+          format: date-time
+        expires_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: 'Retention deadline for the asset itself (distinct from `url_expires_at`, the signed URL''s validity). Null or absent means the asset is non-expiring. On a dedup-hit create response the deadline may be later than now + the requested/default retention: re-referencing content extends its retention, never shortens it.'
+        job_id:
+          type: string
+          nullable: true
+          description: ID of the job that produced this asset. Absent for assets no job produced, such as a fresh upload.
+        job_metadata:
+          allOf:
+          - $ref: '#/components/schemas/JobMetadata'
+          description: 'The labels the producing job was submitted with, read through `job_id` on each read. Absent for assets no job produced, for outputs of a job sent without labels, where the serving surface keeps no job labels, when the job is gone, and when the labels could not be read: so `job_id` without `job_metadata` does not prove the job had no labels.'
+    Job:
+      type: object
+      description: One execution of a workflow. Durable from creation until `expires_at`; `outputs` populates incrementally during execution.
+      required:
+      - id
+      - status
+      - created_at
+      - started_at
+      - completed_at
+      - expires_at
+      - queue_position
+      - progress
+      - outputs
+      - error
+      - urls
+      properties:
+        id:
+          type: string
+          example: 7f3d2c1b-9a8e-4d6f-b012-3c4d5e6f7a8b
+        status:
+          $ref: '#/components/schemas/JobStatus'
+        created_at:
+          type: string
+          format: date-time
+        started_at:
+          type: string
+          format: date-time
+          nullable: true
+        completed_at:
+          type: string
+          format: date-time
+          nullable: true
+        expires_at:
+          type: string
+          format: date-time
+          description: Retention deadline — a platform property, not an API constant.
+        queue_position:
+          type: integer
+          nullable: true
+        progress:
+          allOf:
+          - $ref: '#/components/schemas/Progress'
+          nullable: true
+          description: The latest progress snapshot; same data the SSE stream pushes.
+        outputs:
+          type: array
+          items:
+            $ref: '#/components/schemas/Output'
+        error:
+          allOf:
+          - $ref: '#/components/schemas/JobError'
+          nullable: true
+        metrics:
+          type: object
+          description: 'Values are nullable (a metric not yet available — e.g. `execution_ms` before a job starts running — is `null`, not omitted); the example below is deliberately all-non-null purely to work around a Spectral/nimma lint-tooling crash on a literal `null` inside a schema `example` combined with `additionalProperties.nullable: true` — the schema itself is unchanged and still allows null values at runtime.'
+          additionalProperties:
+            type: integer
+            nullable: true
+          example:
+            queue_ms: 9000
+            execution_ms: 42000
+        urls:
+          $ref: '#/components/schemas/JobUrls'
+        deployment_id:
+          type: string
+          description: 'The deployment the job was sent to: the id in the address it was posted at, which stays the same when the deployment moves to another release. Absent on a surface that runs jobs on no deployment.'
+          example: dep-0f19a2b3c4d5
+        release_id:
+          type: string
+          description: The release of the deployment's build that ran the job, which can differ from the release the deployment runs now. Absent where the serving surface does not report it.
+          example: 7c1e9a40-3b2d-4f6a-9e81-0c5d2a7b4f13
+        release_version:
+          type: integer
+          minimum: 1
+          description: The version of the release in `release_id`, the number its build cut it as. Absent where the serving surface does not report it or could not look it up at the time of the answer.
+          example: 3
+        metadata:
+          $ref: '#/components/schemas/JobMetadata'
+    JobMetadata:
+      type: object
+      description: The labels the job was submitted with, exactly as sent. Absent when it was sent with none.
+      additionalProperties:
+        type: string
+      example:
+        client: acme
+    JobList:
+      type: object
+      description: One page of `GET /api/v2/jobs`.
+      required:
+      - jobs
+      properties:
+        jobs:
+          type: array
+          items:
+            $ref: '#/components/schemas/JobListItem'
+        next_cursor:
+          type: string
+          description: Pass as `cursor` to read the next page. Absent on the last page.
+    JobListItem:
+      type: object
+      description: A job's stored record. The fields below are stable; an item may carry more, which a client should ignore rather than rely on.
+      required:
+      - id
+      - status
+      - create_time
+      - update_time
+      additionalProperties: true
+      properties:
+        id:
+          type: string
+          example: 7f3d2c1b-9a8e-4d6f-b012-3c4d5e6f7a8b
+        status:
+          $ref: '#/components/schemas/JobStatus'
+        create_time:
+          type: string
+          format: date-time
+        update_time:
+          type: string
+          format: date-time
+        release_version:
+          type: integer
+          minimum: 1
+          description: The version of the release that ran the job. Absent where the serving surface does not report it or could not look it up at the time of the answer.
+          example: 3
+        metadata:
+          $ref: '#/components/schemas/JobMetadata'
+    JobLogs:
+      type: object
+      description: 'A job''s captured execution log — the body of `GET /api/v2/jobs/{id}/logs`. Diagnostics, not a contract on content: this is whatever the workflow''s own code and nodes wrote to standard output, in the order they wrote it, so nothing about its shape is stable between runs or between releases of a build. It is **untrusted text** — a workflow chooses what goes in it — and must be rendered as plain text rather than interpreted.'
+      required:
+      - text
+      - truncated
+      - captured_at
+      - complete
+      properties:
+        text:
+          type: string
+          description: The captured output.
+        truncated:
+          type: boolean
+          description: 'The BEGINNING of the captured output was discarded — `text` is the TAIL of a longer run. Implementations bound what they capture and store, so a workflow that prints megabytes keeps its last lines, where a failure normally is, instead of being dropped whole. True with an empty `text` means the log was captured and then shed entirely to fit. This describes the stored log, never the response: it does not mean a caller asked for part of one.'
+        captured_at:
+          type: string
+          format: date-time
+          description: When the run's output was read back off the worker.
+        complete:
+          type: boolean
+          description: No further output will be appended to this log. Always `true` today, because a log is read back off the worker once, when the run ends, so a log that exists is already whole. Sent so that a surface which later captures output while a run is still going can say so, and a client written now against `false` keeps working when it does. `false` does not promise that more output will arrive, only that this snapshot may not be the last one.
+    JobWorkflowResponse:
+      type: object
+      description: The workflow behind a job. See GET /api/v2/jobs/{id}/workflow's description for exactly when `format` is `save` vs `api`.
+      required:
+      - workflow
+      - format
+      properties:
+        workflow:
+          type: object
+          description: The workflow, verbatim, in the shape `format` says.
+          additionalProperties: true
+        format:
+          type: string
+          enum:
+          - save
+          - api
+          description: 'Discriminates the `workflow` field''s shape. `save`: the original authoring workflow JSON, at the version pinned to the job. `api`: the executed API-format prompt graph.'
+    JobStatus:
+      type: string
+      enum:
+      - queued
+      - running
+      - succeeded
+      - canceling
+      - canceled
+      - failed
+      - expired
+      description: 'Lifecycle: queued → running → succeeded | failed | expired;
+
+        a cancel request, or the deletion of the deployment the job is running
+
+        on, moves running → canceling → canceled.
+
+        Terminal states: succeeded, canceled, failed, expired.
+
+        '
+    JobUrls:
+      type: object
+      description: Embedded follow-up links — follow these, don't build URLs. A link is either an absolute URL or a host-relative reference (leading `/`) that already includes any prefix the serving surface is mounted under (e.g. a serverless gateway's `/deployment/{deployment_id}/api/v2`). Clients MUST resolve a host-relative link against the request origin (scheme + authority), never against a configured base URL — joining it to a base URL that carries the same mount prefix duplicates the prefix.
+      required:
+      - self
+      - events
+      - cancel
+      properties:
+        self:
+          type: string
+          format: uri-reference
+        events:
+          type: string
+          format: uri-reference
+        cancel:
+          type: string
+          format: uri-reference
+        logs:
+          type: string
+          format: uri-reference
+          description: 'Where to read what this run printed. Present on any surface that captures execution logs, which is why it is the one link here that is optional: absent means this surface captures none, for any job, so a client can stop looking without spending a request on an answer it already has.
+
+            Follow this link rather than building the path from the job id. The two are not interchangeable: a surface may be mounted under a prefix this link already carries and a hand-built path would not, and a surface that does not implement the operation at all answers a routing `404` — indistinguishable, to the client, from the `404` that means the job itself is gone. Present does NOT mean this job has a log, and it is deliberately not a signal about one: a surface that captures logs offers the link on every job, including those it will answer `204` for. Read the log, not the link.'
+    Progress:
+      type: object
+      description: Server-computed progress snapshot (node-count and sampler-step weighted). Complete per snapshot — one fully re-syncs a client.
+      required:
+      - value
+      - nodes_done
+      - nodes_total
+      properties:
+        value:
+          type: number
+          format: double
+          minimum: 0
+          maximum: 1
+          description: Overall fraction, server-computed.
+          example: 0.42
+        nodes_done:
+          type: integer
+          example: 11
+        nodes_total:
+          type: integer
+          example: 31
+        current_node:
+          type: string
+          nullable: true
+          example: '12'
+        current_node_class:
+          type: string
+          nullable: true
+          example: KSampler
+        step:
+          type: integer
+          nullable: true
+          example: 21
+        steps:
+          type: integer
+          nullable: true
+          example: 50
+        message:
+          type: string
+          nullable: true
+          example: KSampler 21/50
+    Output:
+      type: object
+      description: 'A committed job output. Outputs are assets: `id` is the asset UUID, retrievable via GET /api/v2/assets/{id} for as long as the job is retained. `hash` is lazily computed and may be null on the retrieval hot path.'
+      required:
+      - node_id
+      - name
+      - type
+      - content_type
+      - size_bytes
+      - id
+      - hash
+      - url
+      - url_expires_at
+      properties:
+        node_id:
+          type: string
+          description: The workflow node that reported this file; empty when the worker named none.
+          example: '9'
+        name:
+          type: string
+          example: ComfyUI_00001_.png
+        type:
+          $ref: '#/components/schemas/OutputType'
+        content_type:
+          type: string
+          example: image/png
+        size_bytes:
+          type: integer
+          format: int64
+          example: 1848320
+        id:
+          type: string
+          description: Asset UUID.
+          example: 9f8a1c0d-2b3e-4f56-...
+        hash:
+          type: string
+          nullable: true
+          description: '`blake3:<hex>`; null until lazily computed.'
+        url:
+          type: string
+          format: uri
+        url_expires_at:
+          type: string
+          format: date-time
+        job_id:
+          type: string
+          nullable: true
+          description: ID of the job that produced this output.
+    OutputType:
+      type: string
+      enum:
+      - image
+      - video
+      - audio
+      - text
+      - file
+      - latent
+      description: Normalized output kind — nothing silently dropped.
+    JobError:
+      type: object
+      description: Execution failure detail, carried in `job.error` (not an HTTP error).
+      required:
+      - code
+      - message
+      properties:
+        code:
+          type: string
+          example: node_execution_error
+        message:
+          type: string
+          description: Why the job failed, written for a person to read. On a serverless deployment, where ComfyUI refused the workflow, it names the rejected nodes it has room for and their reasons, which `node_errors` carries in full. Its wording may change; read `code` and `node_errors` rather than matching this text.
+        node_id:
+          type: string
+          nullable: true
+        class_type:
+          type: string
+          nullable: true
+        traceback:
+          type: string
+          nullable: true
+        node_errors:
+          type: object
+          description: 'Every node ComfyUI rejected when it refused the workflow before running any of it (a value outside its allowed range, a model the deployment does not contain, a graph that loops back on itself), keyed by node id, under the names ComfyUI gave them. Absent when the workflow ran and a node raised: `node_id`, `class_type` and `traceback` describe that failure instead.'
+          additionalProperties:
+            $ref: '#/components/schemas/JobNodeError'
+          example:
+            '22':
+              class_type: LoraLoader
+              errors:
+              - type: value_not_in_list
+                message: Value not in list
+                details: 'lora_name: ''sdxl\Hyper-SDXL-8steps-lora.safetensors'' not in (list of length 40)'
+    JobNodeError:
+      type: object
+      description: 'One node that was rejected, and why: by ComfyUI when it refused the workflow after dispatch, or by the gateway when it refused the workflow at submit.'
+      required:
+      - errors
+      properties:
+        class_type:
+          type: string
+        errors:
+          type: array
+          items:
+            $ref: '#/components/schemas/JobNodeErrorReason'
+    JobNodeErrorReason:
+      type: object
+      description: 'One problem found with a node. `type` is the code for it: ComfyUI''s (for example `value_not_in_list`, `value_bigger_than_max`, `dependency_cycle`), or one of the gateway''s, sent where its submit checks are switched on: `unknown_node_class` (a node class the deployment''s build does not contain), `waits_for_browser` (a node the workflow would run whose class waits for a browser tab to answer while the job runs, which a deployment never has), `invalid_node` (the node is not a JSON object), `invalid_inputs` (its `inputs` is present but not an object, refused only where the deployment''s ComfyUI would fail such a node anyway, so no workflow that runs today is refused), or `invalid_class_type` (its `class_type` is missing or is not a non-empty string). ComfyUI''s `missing_node_type` means the same as `unknown_node_class`, found after dispatch rather than at submit. For either, `message` ends naming the node pack that provides the class where the Comfy node registry knows one. `details` usually starts with the input it is about.'
+      required:
+      - type
+      - message
+      properties:
+        type:
+          type: string
+          example: value_not_in_list
+        message:
+          type: string
+          example: Value not in list
+        details:
+          type: string
+    ErrorEnvelope:
+      type: object
+      description: 'Shared error envelope with machine-readable codes. Core codes (v1):
+
+        `invalid_workflow` (422), `workflow_format_ui` (422),
+
+        `missing_asset` (422), `hash_mismatch` (409), `blob_not_found`
+
+        (404), `idempotency_key_reuse` (422), `upload_timed_out` (422: an
+
+        asset upload stopped sending or was too slow; retry from a faster
+
+        connection),
+
+        `queue_full` (429 + Retry-After), `rate_limited` (429 + Retry-After:
+
+        the caller is past a request rate limit; retry), `insufficient_credits`
+
+        (402), `not_found` (404), `unauthorized` (401), `forbidden` (403).
+
+        Deployment-scoped surfaces add: `deployment_not_ready` (429 +
+
+        Retry-After — the deployment can still reach ready; retry),
+
+        `deployment_unavailable` (429 + Retry-After: the deployment is ready
+
+        but its GPU provider is not taking work on it yet; retry),
+
+        `deployment_lookup_unavailable` (503 + Retry-After, on any
+
+        operation: the deployment the address names could not be looked up
+
+        just now; nothing was done, so retry), `database_unavailable` (503 +
+
+        Retry-After, only on a job submit: the job could not be saved just
+
+        now and nothing was started, so retry), `auth_unavailable` (503 +
+
+        Retry-After, on any operation: the credential could not be checked
+
+        just now, which says nothing about the credential, so retry),
+
+        `output_unavailable` (503 + Retry-After, only on a job status read: an
+
+        output of the job could not be prepared just now; the job is
+
+        unchanged, so retry after `Retry-After`, and report the job if it
+
+        keeps answering),
+
+        `deployment_stopped` (422 — terminal deployment state; a retry
+
+        cannot succeed without operator action), `invalid_request` (422:
+
+        a malformed asset upload or asset-from-hash field, or a jobs-list
+
+        `limit` that is not a positive integer), `validation_error` (422,
+
+        Cloud: an asset upload or asset-from-hash field was refused, e.g. a
+
+        tag over the tag limits), `content_blocked` (451:
+
+        content moderation flagged the asset''s bytes) and `sso_required` (403:
+
+        the key is valid, but the account must sign in through its
+
+        organization''s single sign-on, which does not accept this key).
+
+        Comfy Cloud''s asset upload adds `invalid_content_type` (422: the
+
+        request is not `multipart/form-data` with a boundary),
+
+        `invalid_body` (422: a malformed multipart body or upload field),
+
+        `validation_error` (422: the platform refused the upload, for example
+
+        an image over the size cap or a disallowed tag) and `upload_busy`
+
+        (503 + Retry-After: the server is busy with other uploads and nothing
+
+        was stored, so retry).
+
+        Job labels add: `metadata_invalid` (422: a submitted `metadata` breaks a
+
+        limit; `details.key` names the key, except for too many pairs, which
+
+        has no `details`), `metadata_not_supported` (422:
+
+        this surface keeps no job labels yet), `invalid_metadata_filter` (400)
+
+        and `invalid_cursor` (400). A surface that does not list jobs yet
+
+        answers `not_implemented` (501), and `assetFromPath` answers it on
+
+        every surface that serves it today. A 429 is disambiguated
+
+        by `error.code` alone; clients should treat any 429 + Retry-After
+
+        as "back off and retry".
+
+        '
+      required:
+      - error
+      properties:
+        error:
+          type: object
+          required:
+          - code
+          - message
+          properties:
+            code:
+              type: string
+              example: invalid_workflow
+            message:
+              type: string
+              example: 'Node 12 (KSampler): required input ''model'' is not connected'
+            organization_id:
+              type: string
+              description: 'On `sso_required`: the organization whose single sign-on governs this key, the one that holds the account, else the one that holds the key''s workspace. It is the `organization` query parameter of Comfy Cloud''s single sign-on start; treat it as opaque. Absent when the organization is unknown, and on every other code.'
+              example: org_01HXYZEXAMPLE
+            details:
+              type: object
+              nullable: true
+              additionalProperties: true
+              description: Machine-readable detail for the code. When it carries `node_errors`, that is keyed by node id and each value is a `JobNodeError`, the same shape as a job's `error.node_errors`, whether the refusal came at submit (for example `unknown_node_class`, a node class the deployment's build does not contain) or from ComfyUI after dispatch. With `unknown_node_class` errors it carries `unknown_node_classes`, the missing classes; with `waits_for_browser` errors, `browser_wait_node_classes`, the classes that wait for a browser. A submit refusal names at most fifty nodes. For `invalid_node`, `invalid_inputs` and `invalid_class_type`, when it found more than fifty, `node_errors_truncated` is true and `malformed_node_count` carries the full count; for `waits_for_browser`, `browser_wait_node_count` does. For `unknown_node_class` it names only nodes whose class is one of the at most ten listed in `unknown_node_classes`; when those nodes number more than fifty, `node_errors_truncated` is true and `unknown_node_count` is how many nodes have a listed class. Nodes whose class is past those ten are neither named nor counted.
+              example:
+                node_errors:
+                  '12':
+                    class_type: SomeCustomNode
+                    errors:
+                    - type: unknown_node_class
+                      message: this deployment's build does not contain the node class SomeCustomNode.
+                unknown_node_classes:
+                - SomeCustomNode
+    StatusEvent:
+      type: object
+      description: SSE `status` event payload.
+      required:
+      - status
+      properties:
+        status:
+          $ref: '#/components/schemas/JobStatus'
+        queue_position:
+          type: integer
+          nullable: true
+    PreviewEvent:
+      type: object
+      description: SSE `preview` event payload (JPEG, base64, throttled).
+      required:
+      - node_id
+      - content_type
+      - data_base64
+      properties:
+        node_id:
+          type: string
+        content_type:
+          type: string
+          example: image/jpeg
+        data_base64:
+          type: string
+    LogEvent:
+      type: object
+      description: SSE `log` event payload. Best-effort diagnostics.
+      required:
+      - level
+      - message
+      properties:
+        level:
+          type: string
+          example: info
+        message:
+          type: string
+    AssetReference:
+      type: object
+      description: "The typed asset-reference object placed inside workflow JSON where a\nfilename would normally go (documented here for tooling; it is not a\nrequest/response body itself):\n\n    {\"__type\": \"core/ASSET\",\n     \"info\": {\"id\": \"<asset-uuid>\", \"hash\": \"blake3:...\",\n              \"file_path\": \"photo.png\"}}\n\n`info.id` (the asset UUID) is required in v1 and authoritative;\n`hash` and `file_path` are optional staging/lookup hints and never\noverride a present `id`. A malformed reference or one that is not\nresolvable/owned by the caller fails submission with 422\n`missing_asset`.\n"
+      required:
+      - __type
+      - info
+      properties:
+        __type:
+          type: string
+          enum:
+          - core/ASSET
+        info:
+          type: object
+          required:
+          - id
+          properties:
+            id:
+              type: string
+              example: 9f8a1c0d-2b3e-4f56-8a7b-1c2d3e4f5a6b
+            hash:
+              type: string
+              example: blake3:9f8a1c0d...
+            file_path:
+              type: string
+              example: photo.png
+    Health:
+      type: object
+      required:
+      - status
+      properties:
+        status:
+          type: string
+          enum:
+          - healthy
+    AssetFromPathRequest:
+      type: object
+      required:
+      - path
+      properties:
+        path:
+          type: string
+          description: Absolute path on the serving host.
+        file_path:
+          type: string
+        content_type:
+          type: string
