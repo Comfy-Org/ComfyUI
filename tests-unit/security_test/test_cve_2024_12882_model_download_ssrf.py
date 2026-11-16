@@ -38,7 +38,7 @@ def test_download_route_not_registered(prompt_server):
     internal_paths = {resource.canonical for resource in prompt_server.internal_routes.get_app().router.resources()}
     for path in EXPLOIT_PATHS:
         assert path not in app_paths
-    assert "/models/download" not in internal_paths
+    assert "/internal/models/download" not in internal_paths
 
 
 @pytest.mark.asyncio
