@@ -1114,7 +1114,8 @@ class Autogrow(ComfyTypeI):
         # NOTE: purposely do not include self in out_dict; instead use only the template inputs
         finalized_prefix = finalize_prefix(curr_prefix)
         if finalized_prefix in live_inputs:
-            raise ValueError(
+            raise DynamicInputError(
+                finalized_prefix,
                 f"Input '{finalized_prefix}' is an Autogrow group and cannot be given a value directly; "
                 f"wire each sub-slot individually using a dotted key, e.g. '{finalized_prefix}.<name>'."
             )
@@ -1265,6 +1266,12 @@ class DynamicSlot(ComfyTypeI):
             # add self to inputs
             out_dict[input_type][finalized_id] = value
             out_dict["dynamic_paths"][finalized_id] = finalize_prefix(curr_prefix, curr_prefix[-1])
+
+class DynamicInputError(ValueError):
+    def __init__(self, input_name: str, message: str):
+        super().__init__(message)
+        self.input_name = input_name
+
 
 @comfytype(io_type="IMAGECOMPARE")
 class ImageCompare(ComfyTypeI):

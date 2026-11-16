@@ -1,6 +1,6 @@
 import pytest
 
-from comfy_api.latest._io import Autogrow, Image, create_input_dict_v1, get_finalized_class_inputs
+from comfy_api.latest._io import Autogrow, DynamicInputError, Image, create_input_dict_v1, get_finalized_class_inputs
 
 
 def _autogrow_class_inputs():
@@ -18,8 +18,9 @@ def _autogrow_class_inputs():
 def test_autogrow_rejects_nested_dict_on_group_key():
     class_inputs = _autogrow_class_inputs()
 
-    with pytest.raises(ValueError, match=r"Input 'images' is an Autogrow group.*dotted key"):
+    with pytest.raises(DynamicInputError, match=r"Input 'images' is an Autogrow group.*dotted key") as exc_info:
         get_finalized_class_inputs(class_inputs, {"images": {"image_1": ["14", 0]}})
+    assert exc_info.value.input_name == "images"
 
 
 def test_autogrow_accepts_dotted_sub_slot_key():
