@@ -23,6 +23,32 @@ def partition_segments(segments, start, end, device):
     return result
 
 
+def adjacent_kv_rows(k, v):
+    k, v = k.transpose(1, 2), v.transpose(1, 2)
+    batch, rows, heads, width = k.shape
+    if (k.dtype != v.dtype or k.stride() != v.stride() or k.stride(-1) != 1
+            or k.stride(-2) != width
+            or k.untyped_storage().data_ptr() != v.untyped_storage().data_ptr()
+            or v.storage_offset() - k.storage_offset() != heads * width):
+        return None
+    # The inference projection retains adjacent K/V columns in its QKV buffer.
+    return k.as_strided((batch, rows, 2, heads, width),
+                        (k.stride(0), k.stride(1), heads * width, width, 1))
+
+
+def gather_full_kv(qkvs, devices):
+    packed = [adjacent_kv_rows(qkv[1], qkv[2]) for qkv in qkvs]
+    full_kv = []
+    for device in devices:
+        with torch.cuda.device(device):
+            if all(value is not None for value in packed):
+                full = torch.cat([value.to(device, non_blocking=True) for value in packed], dim=1)
+                full_kv.append(tuple(value.transpose(1, 2) for value in full.unbind(dim=2)))
+            else:
+                full_kv.append(tuple(torch.cat([qkv[j].transpose(1, 2).to(device, non_blocking=True) for qkv in qkvs], dim=1).transpose(1, 2) for j in (1, 2)))
+    return full_kv
+
+
 def parallel_block(block, replica, target, x, t_emb, segments, rope, options):
     source = x.device
     # Round the midpoint to a tile boundary without creating an empty partition.
@@ -41,10 +67,7 @@ def parallel_block(block, replica, target, x, t_emb, segments, rope, options):
             mods.append((gate, shift2, scale2, gate2))
             h = _mod_scale_shift(blocks[i].norm1(xs[i]), shift, scale, local_segments[i])
             qkvs.append(blocks[i].attn.project_qkv(h, ropes[i]))
-    full_kv = []
-    for device in devices:
-        with torch.cuda.device(device):
-            full_kv.append(tuple(torch.cat([qkv[j].transpose(1, 2).to(device, non_blocking=True) for qkv in qkvs], dim=1).transpose(1, 2) for j in (1, 2)))
+    full_kv = gather_full_kv(qkvs, devices)
     for i, device in enumerate(devices):
         with torch.cuda.device(device):
             b = blocks[i]
