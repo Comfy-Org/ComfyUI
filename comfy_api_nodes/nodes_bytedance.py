@@ -120,6 +120,7 @@ BYTEPLUS_SEEDANCE2_TASK_STATUS_ENDPOINT = "/proxy/byteplus-seedance2/api/v3/cont
 SEEDANCE_MODELS = {
     "Seedance 2.5": "dreamina-seedance-2-5-260628",
     "Seedance 2.5 Draft": "dreamina-seedance-2-5-260628",
+    "Seedance 2.5 Flash": "dreamina-seedance-2-5-flash-261115",
     "Seedance 2.0": "dreamina-seedance-2-0-260128",
     "Seedance 2.0 Fast": "dreamina-seedance-2-0-fast-260128",
     "Seedance 2.0 Mini": "dreamina-seedance-2-0-mini",
@@ -129,6 +130,7 @@ SEEDANCE_MODEL_TOOLTIP = (
     "Seedance 2.5 for the newest model, videos up to 30 seconds, 4k and mp4/mov output; "
     "Seedance 2.5 Draft for a quick 480p preview whose draft_task_id renders the 1080p or 4k final "
     "in the Seedance 2.5 Draft to Final Video node; "
+    "Seedance 2.5 Flash for 480p and 720p videos up to 30 seconds; "
     "Seedance 2.0 for maximum quality and 4k; Fast for speed optimization; "
     "Mini for the fastest, lowest-cost generation."
 )
@@ -2282,7 +2284,7 @@ def _seedance2_text_inputs(resolutions: list[str], default_ratio: str = "16:9"):
 
 
 def _seedance25_text_inputs(
-    with_ratio: bool = True, with_video_editing: bool = False, with_task_type: bool = False, draft: bool = False
+    resolutions: list[str], with_ratio: bool = True, with_video_editing: bool = False, with_task_type: bool = False
 ):
     return [
         IO.String.Input(
@@ -2294,8 +2296,8 @@ def _seedance25_text_inputs(
         ),
         IO.Combo.Input(
             "resolution",
-            options=["480p"] if draft else ["480p", "720p", "1080p", "4k"],
-            default="480p" if draft else "720p",
+            options=resolutions,
+            default="720p" if "720p" in resolutions else "480p",
             tooltip="Resolution of the output video.",
         ),
         *(
@@ -2370,14 +2372,17 @@ def _seedance25_text_inputs(
     ]
 
 
-def _seedance25_reference_inputs(with_video_editing: bool = False, with_task_type: bool = False, draft: bool = False):
+def _seedance25_reference_inputs(
+    resolutions: list[str], model_id: str, with_video_editing: bool = False, with_task_type: bool = False
+):
+    limits = seedance2_reference_limits(model_id)
     return [
-        *_seedance25_text_inputs(with_video_editing=with_video_editing, with_task_type=with_task_type, draft=draft),
+        *_seedance25_text_inputs(resolutions, with_video_editing=with_video_editing, with_task_type=with_task_type),
         IO.Autogrow.Input(
             "reference_images",
             template=IO.Autogrow.TemplateNames(
                 IO.Image.Input("reference_image"),
-                names=[f"image_{i}" for i in range(1, 31)],
+                names=[f"image_{i}" for i in range(1, limits["max_images"] + 1)],
                 min=0,
             ),
         ),
@@ -2385,7 +2390,7 @@ def _seedance25_reference_inputs(with_video_editing: bool = False, with_task_typ
             "reference_videos",
             template=IO.Autogrow.TemplateNames(
                 IO.Video.Input("reference_video"),
-                names=[f"video_{i}" for i in range(1, 11)],
+                names=[f"video_{i}" for i in range(1, limits["max_videos"] + 1)],
                 min=0,
             ),
         ),
@@ -2393,7 +2398,7 @@ def _seedance25_reference_inputs(with_video_editing: bool = False, with_task_typ
             "reference_audios",
             template=IO.Autogrow.TemplateNames(
                 IO.Audio.Input("reference_audio"),
-                names=[f"audio_{i}" for i in range(1, 11)],
+                names=[f"audio_{i}" for i in range(1, limits["max_audios"] + 1)],
                 min=0,
             ),
         ),
@@ -2418,7 +2423,7 @@ def _seedance25_reference_inputs(with_video_editing: bool = False, with_task_typ
             "reference_assets",
             template=IO.Autogrow.TemplateNames(
                 IO.String.Input("reference_asset"),
-                names=[f"asset_{i}" for i in range(1, 31)],
+                names=[f"asset_{i}" for i in range(1, limits["max_images"] + 1)],
                 min=0,
             ),
         ),
@@ -2483,7 +2488,8 @@ _SEEDANCE2_PRICE_EXPR_TEMPLATE = """
                    $ratio = "3:4"  ? ($is480 ? 411.25   : $is1080 ? 2028      : $is4k ? 8100.6289 : 905.6719) :
                    $ratio = "21:9" ? ($is480 ? 418.5    : $is1080 ? 2037.9648 : $is4k ? 8100.2227 : 904.3945) :
                                      ($is480 ? 400.3125 : $is1080 ? 2025      : $is4k ? 8100      : 900);
-      $price := $is4k   ? ($hasVideo ? 0.004147 : 0.006721) :
+      $price := $contains($m, "flash") ? ($hasVideo ? 0.006149 : 0.01001) :
+                $is4k   ? ($hasVideo ? 0.004147 : 0.006721) :
                 $is1080 ? ($hasVideo ? 0.01001 : 0.016731) :
                           ($hasVideo ? 0.009152 : 0.015301);
       $costFor := function($d) { $floor($perFrame * (24 * $d + 1)) / 1000 * $price };
@@ -2612,8 +2618,9 @@ class ByteDance2TextToVideoNode(IO.ComfyNode):
                 IO.DynamicCombo.Input(
                     "model",
                     options=[
-                        IO.DynamicCombo.Option("Seedance 2.5", _seedance25_text_inputs()),
-                        IO.DynamicCombo.Option("Seedance 2.5 Draft", _seedance25_text_inputs(draft=True)),
+                        IO.DynamicCombo.Option("Seedance 2.5", _seedance25_text_inputs(["480p", "720p", "1080p", "4k"])),
+                        IO.DynamicCombo.Option("Seedance 2.5 Draft", _seedance25_text_inputs(["480p"])),
+                        IO.DynamicCombo.Option("Seedance 2.5 Flash", _seedance25_text_inputs(["480p", "720p"])),
                         IO.DynamicCombo.Option("Seedance 2.0", _seedance2_text_inputs(["480p", "720p", "1080p", "4k"])),
                         IO.DynamicCombo.Option("Seedance 2.0 Fast", _seedance2_text_inputs(["480p", "720p"])),
                         IO.DynamicCombo.Option("Seedance 2.0 Mini", _seedance2_text_inputs(["480p", "720p"])),
@@ -2697,9 +2704,14 @@ class ByteDance2FirstLastFrameNode(IO.ComfyNode):
                 IO.DynamicCombo.Input(
                     "model",
                     options=[
-                        IO.DynamicCombo.Option("Seedance 2.5", _seedance25_text_inputs(with_ratio=False)),
                         IO.DynamicCombo.Option(
-                            "Seedance 2.5 Draft", _seedance25_text_inputs(with_ratio=False, draft=True)
+                            "Seedance 2.5", _seedance25_text_inputs(["480p", "720p", "1080p", "4k"], with_ratio=False)
+                        ),
+                        IO.DynamicCombo.Option(
+                            "Seedance 2.5 Draft", _seedance25_text_inputs(["480p"], with_ratio=False)
+                        ),
+                        IO.DynamicCombo.Option(
+                            "Seedance 2.5 Flash", _seedance25_text_inputs(["480p", "720p"], with_ratio=False)
                         ),
                         IO.DynamicCombo.Option(
                             "Seedance 2.0",
@@ -2801,7 +2813,7 @@ class ByteDance2FirstLastFrameNode(IO.ComfyNode):
         if last_frame is not None and last_frame_asset_id:
             raise ValueError("Provide only one of last_frame or last_frame_asset_id, not both.")
 
-        if model_id == "dreamina-seedance-2-5-260628":
+        if model_id in ("dreamina-seedance-2-5-260628", "dreamina-seedance-2-5-flash-261115"):
             # 2.5 accepts ratio="adaptive" only here and keeps the first frame's own aspect
             # (a 1920x1088 frame yields 850x482, not a grid ratio), so pre-sizing the frames to a
             # supported pixel pair would crop framing the model would otherwise have preserved.
@@ -2973,9 +2985,23 @@ class ByteDance2ReferenceNodeV2(IO.ComfyNode):
                 IO.DynamicCombo.Input(
                     "model",
                     options=[
-                        IO.DynamicCombo.Option("Seedance 2.5", _seedance25_reference_inputs(with_task_type=True)),
                         IO.DynamicCombo.Option(
-                            "Seedance 2.5 Draft", _seedance25_reference_inputs(with_task_type=True, draft=True)
+                            "Seedance 2.5",
+                            _seedance25_reference_inputs(
+                                ["480p", "720p", "1080p", "4k"], SEEDANCE_MODELS["Seedance 2.5"], with_task_type=True
+                            ),
+                        ),
+                        IO.DynamicCombo.Option(
+                            "Seedance 2.5 Draft",
+                            _seedance25_reference_inputs(
+                                ["480p"], SEEDANCE_MODELS["Seedance 2.5 Draft"], with_task_type=True
+                            ),
+                        ),
+                        IO.DynamicCombo.Option(
+                            "Seedance 2.5 Flash",
+                            _seedance25_reference_inputs(
+                                ["480p", "720p"], SEEDANCE_MODELS["Seedance 2.5 Flash"], with_task_type=True
+                            ),
                         ),
                         IO.DynamicCombo.Option(
                             "Seedance 2.0",
@@ -3051,7 +3077,9 @@ class ByteDance2ReferenceNodeV2(IO.ComfyNode):
         limits = seedance2_reference_limits(model_id)
 
         if not reference_images and not reference_videos and not reference_image_assets and not reference_video_assets:
-            if model_id != "dreamina-seedance-2-5-260628" or not (reference_audios or reference_audio_assets):
+            if model_id not in ("dreamina-seedance-2-5-260628", "dreamina-seedance-2-5-flash-261115") or not (
+                reference_audios or reference_audio_assets
+            ):
                 raise ValueError("At least one reference image or video or asset is required.")
 
         total_images = len(reference_images) + len(reference_image_assets)
@@ -3226,7 +3254,12 @@ class ByteDance2ReferenceNode(ByteDance2ReferenceNodeV2):
                 IO.DynamicCombo.Input(
                     "model",
                     options=[
-                        IO.DynamicCombo.Option("Seedance 2.5", _seedance25_reference_inputs(with_video_editing=True)),
+                        IO.DynamicCombo.Option(
+                            "Seedance 2.5",
+                            _seedance25_reference_inputs(
+                                ["480p", "720p", "1080p", "4k"], SEEDANCE_MODELS["Seedance 2.5"], with_video_editing=True
+                            ),
+                        ),
                         IO.DynamicCombo.Option(
                             "Seedance 2.0",
                             _seedance2_reference_inputs(["480p", "720p", "1080p", "4k"], default_ratio="adaptive"),

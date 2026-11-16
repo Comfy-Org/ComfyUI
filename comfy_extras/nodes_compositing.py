@@ -186,6 +186,35 @@ class SplitImageWithAlpha(io.ComfyNode):
         return io.NodeOutput(torch.stack(out_images), 1.0 - torch.stack(out_alphas))
 
 
+class SplitImageChannels(io.ComfyNode):
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="SplitImageChannels",
+            search_aliases=["convert to grayscale", "extract channels", "grayscale", "split channels", "RGB channels"],
+            display_name="Split Image Channels",
+            category="image/compositing",
+            description="Splits an image into red, green, and blue images and an alpha mask.",
+            inputs=[
+                io.Image.Input("image"),
+            ],
+            outputs=[
+                io.Image.Output(display_name="red"),
+                io.Image.Output(display_name="green"),
+                io.Image.Output(display_name="blue"),
+                io.Mask.Output(display_name="alpha")
+            ],
+        )
+
+    @classmethod
+    def execute(cls, image: torch.Tensor) -> io.NodeOutput:
+        if image.shape[-1] == 1:
+            image = image.expand(*image.shape[:-1], 3)
+        alpha = 1.0 - image[..., 3] if image.shape[-1] > 3 else torch.zeros_like(image[..., 0])
+        shape = (*image.shape[:-1], 3)
+        return io.NodeOutput(image[..., 0:1].expand(shape), image[..., 1:2].expand(shape), image[..., 2:3].expand(shape), alpha)
+
+
 class JoinImageWithAlpha(io.ComfyNode):
     @classmethod
     def define_schema(cls):
@@ -215,6 +244,7 @@ class CompositingExtension(ComfyExtension):
     async def get_node_list(self) -> list[type[io.ComfyNode]]:
         return [
             PorterDuffImageComposite,
+            SplitImageChannels,
             SplitImageWithAlpha,
             JoinImageWithAlpha,
         ]
