@@ -87,6 +87,7 @@ from comfy.ldm.sensenova.sampling import SenseNovaModelSampling, time_snr_shift
 import comfy.ldm.depth_anything_3.model
 import comfy.ldm.moss_image.model
 import comfy.ldm.fibo2.model
+import comfy.ldm.pan2.model
 
 import comfy.model_management
 import comfy.patcher_extension
@@ -2992,6 +2993,27 @@ class MOSSImage(BaseModel):
             return noise.new_zeros((noise.shape[0], channels) + noise.shape[2:])
         image = utils.common_upscale(image.to(kwargs["device"]), noise.shape[-1], noise.shape[-2], "bilinear", "center")
         return utils.resize_to_batch_size(self.process_latent_in(image), noise.shape[0])
+
+class PAN2(BaseModel):
+    def __init__(self, model_config, model_type=ModelType.FLOW, device=None):
+        super().__init__(model_config, model_type, device=device, unet_model=comfy.ldm.pan2.model.PAN2)
+
+    def extra_conds(self, **kwargs):
+        out = super().extra_conds(**kwargs)
+        cross_attn = kwargs.get("cross_attn", None)
+        # no repeat padding, the joint attention would weight repeated caption tokens: cond and uncond of different lengths run separately
+        if cross_attn is not None:
+            out['c_crossattn'] = comfy.conds.CONDRegular(cross_attn)
+        return out
+
+    def concat_cond(self, **kwargs):
+        # [clean latent of the known frames, their mask], zeros for text to video
+        noise = kwargs["noise"]
+        denoise_mask = kwargs.get("denoise_mask", None)
+        if denoise_mask is None:
+            return noise.new_zeros((noise.shape[0], noise.shape[1] + 1) + noise.shape[2:])
+        known = 1.0 - denoise_mask[:, :1]
+        return torch.cat((kwargs["latent_image"] * known, known), dim=1)
 
 class Fibo2(BaseModel):
     def __init__(self, model_config, model_type=ModelType.FLUX, device=None):
