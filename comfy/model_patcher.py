@@ -1938,9 +1938,6 @@ class ModelPatcherDynamic(ModelPatcher):
             comfy.utils.set_attr_param(self.model, key, bk.weight)
         for key in list(self.backup_buffers.keys()):
             owner, buf = self.backup_buffers.pop(key)
-            # Restore onto the module the buffer was backed up from, not whatever
-            # module now resolves at `key` - an object patch (e.g. ModelSamplingDiscrete)
-            # may have swapped in a different module at that path since the backup.
             comfy.utils.set_attr_buffer(owner, key.rsplit(".", 1)[-1], buf)
         self.model.model_loaded_weight_memory = 0
         return restored
