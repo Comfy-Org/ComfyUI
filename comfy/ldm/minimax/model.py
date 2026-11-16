@@ -278,6 +278,9 @@ def _window_segments(segments, start, stop):
     for a, b, row in segments:
         lo, hi = max(a, start), min(b, stop)
         if lo < hi:
+            if isinstance(row, torch.Tensor):
+                # per-token mod rows travel with their tokens: keep only the slice inside the window
+                row = row[lo - a:hi - a]
             window.append((lo - start, hi - start, row))
     return window
 

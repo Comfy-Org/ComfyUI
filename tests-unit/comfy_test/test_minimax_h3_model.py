@@ -149,6 +149,35 @@ def test_dit_block_mlp_chunking_matches_a_full_pass(monkeypatch):
     torch.testing.assert_close(actual, expected, atol=1e-5, rtol=1e-5)
 
 
+def test_dit_block_mlp_chunking_matches_a_full_pass_with_token_mod_rows(monkeypatch):
+    block = make_dit_block()
+    tokens = 37
+    x = torch.randn(tokens, 8)
+    t_emb = torch.randn(1, 8)
+    # masked video/audio segments carry one mod row per token, so a window clip has to clip the
+    # index tensor too: segment (5, 20) starts outside the first chunk, (20, 37) spans a boundary
+    rows = torch.arange(tokens, dtype=torch.long) % 3
+    segments = [(0, 5, 0), (5, 20, rows[5:20]), (20, tokens, rows[20:])]
+
+    def attention(h, rope_freqs=None, transformer_options=None):
+        return 0.5 * h
+
+    with torch.no_grad():
+        expected = block(x.clone(), t_emb, segments, None, attention=attention).clone()
+        chunks = []
+        handle = block.mlp.register_forward_pre_hook(lambda module, args: chunks.append(args[0].shape[0]))
+        try:
+            monkeypatch.setattr(minimax_model, "MLP_TOKEN_CHUNK", 8)
+            actual = block(x.clone(), t_emb, segments, None, attention=attention)
+        finally:
+            handle.remove()
+
+    assert len(chunks) > 1
+    assert max(chunks) <= 8
+    assert sum(chunks) == tokens
+    torch.testing.assert_close(actual, expected, atol=1e-5, rtol=1e-5)
+
+
 def test_refiner_block_mlp_chunking_matches_a_full_pass(monkeypatch):
     block = RefinerBlock(hidden=8, heads=1, head_dim=8, ffn=8, eps=1e-6, qk_eps=1e-6,
                          dtype=torch.float32, device="cpu", operations=nn)
