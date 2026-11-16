@@ -1401,7 +1401,7 @@
         "extra": {
           "workflowRendererVersion": "LG"
         },
-        "category": "Image generation and editing/Conditioned",
+        "category": "Image generation/Conditioned",
         "description": "Generates images from a text prompt and ControlNet conditioning (e.g. depth, canny) using Z-Image-Turbo."
       }
     ]

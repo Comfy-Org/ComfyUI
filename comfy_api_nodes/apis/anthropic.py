@@ -36,7 +36,7 @@ class AnthropicMessage(BaseModel):
 
 
 class AnthropicThinkingConfig(BaseModel):
-    type: Literal["enabled", "disabled", "adaptive"] = Field(...)
+    type: Literal["enabled", "disabled", "adaptive", "between_tools"] = Field(...)
     budget_tokens: int | None = Field(
         None, ge=1024,
         description="Reasoning budget in tokens. Used when type is 'enabled'. Must be less than max_tokens.",
@@ -45,7 +45,7 @@ class AnthropicThinkingConfig(BaseModel):
 
 class AnthropicOutputConfig(BaseModel):
     """Used with `thinking.type='adaptive'` on models like Opus 4.7."""
-    effort: Literal["low", "medium", "high"] | None = Field(None)
+    effort: Literal["low", "medium", "high", "xhigh", "max"] | None = Field(None)
 
 
 class AnthropicMessagesRequest(BaseModel):

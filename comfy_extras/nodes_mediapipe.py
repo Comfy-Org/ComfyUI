@@ -19,6 +19,7 @@ from typing_extensions import override
 
 import comfy.model_management
 import comfy.model_patcher
+import comfy.storage
 import comfy.utils
 import folder_paths
 from comfy_api.latest import ComfyExtension, io
@@ -72,6 +73,7 @@ class FaceLandmarkerModel:
             self.patchers[variant] = comfy.model_patcher.CoreModelPatcher(
                 fl, load_device=self.load_device, offload_device=offload_device,
                 size=comfy.model_management.module_size(fl),
+                fast_disk=comfy.storage.state_dict_fast_disk(sub),
             )
 
     def detect_batch(self, images, num_faces: int, score_thresh: float, variant: str):

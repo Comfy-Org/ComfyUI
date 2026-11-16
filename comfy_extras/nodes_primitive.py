@@ -26,7 +26,7 @@ class StringMultiline(io.ComfyNode):
     def define_schema(cls):
         return io.Schema(
             node_id="PrimitiveStringMultiline",
-            search_aliases=["text", "string", "text multiline", "string multiline", "text box", "prompt"],
+            search_aliases=["text", "string", "text box", "prompt"],
             display_name="Text (Multiline)",
             category="utilities/primitive",
             essentials_category="Basics",

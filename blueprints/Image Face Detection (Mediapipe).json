@@ -771,7 +771,7 @@
           }
         ],
         "extra": {},
-        "category": "Conditioning & Preprocessors/Face Detection"
+        "category": "Preprocessors/Face"
       }
     ]
   },

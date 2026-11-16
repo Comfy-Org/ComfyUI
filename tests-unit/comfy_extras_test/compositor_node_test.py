@@ -10,6 +10,7 @@ import pytest
 import torch
 
 from comfy_extras.nodes_compositor import (
+    ImageCompositor,
     _layer_params,
     composite_from_state,
     expand_item_frames,
@@ -70,3 +71,43 @@ class TestGraphOnlyBackground:
         assert out.shape[-1] == 4
         assert float(out[0, 0, 3]) == pytest.approx(1.0)
         assert float(out[3, 3, 3]) == pytest.approx(0.0)
+
+
+class TestCanvasEmission:
+    """execute must report the document canvas so the editor sizes itself to it
+    rather than to the max natural size of cropped/placed layers."""
+
+    def test_explicit_document_canvas_is_emitted(self):
+        # A small layer placed on a large explicit canvas: the editor must learn
+        # the 1280x1280 canvas, not the 200x150 layer size.
+        doc = {
+            "version": 1,
+            "canvas": (1280, 1280),
+            "layers": [
+                {"image": _solid([1.0, 0.0, 0.0, 1.0], w=200, h=150),
+                 "type": "raster", "x": 400, "y": 300, "z_index": 0}
+            ],
+        }
+        ui = ImageCompositor.execute(layers=doc).ui
+        assert ui["compositor_canvas"] == [{"w": 1280, "h": 1280}]
+
+    def test_replay_emits_saved_canvas(self):
+        tensor = _solid([0.0, 1.0, 0.0, 1.0], w=4, h=4)
+        doc = {"version": 1, "layers": [{"image": tensor, "type": "raster"}]}
+        fp = ImageCompositor.execute(layers=doc).ui["compositor_inputs"]
+        saved = {
+            "version": 1,
+            "canvas": {"w": 640, "h": 480},
+            "inputs": fp,
+            "layers": [{
+                "name": "a", "visible": True, "opacity": 1.0, "blend": "normal",
+                "flipH": False, "flipV": False,
+                "transform": {"x": 0, "y": 0, "w": 4, "h": 4, "rotation": 0.0},
+            }],
+        }
+        ui = ImageCompositor.execute(layers=doc, compositor=saved).ui
+        assert ui["compositor_canvas"] == [{"w": 640, "h": 480}]
+
+    def test_no_layers_emits_no_canvas(self):
+        ui = ImageCompositor.execute(layers={"version": 1, "layers": []}).ui
+        assert "compositor_canvas" not in ui

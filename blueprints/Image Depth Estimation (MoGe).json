@@ -1146,7 +1146,7 @@
           }
         ],
         "extra": {},
-        "category": "Conditioning & Preprocessors/Depth"
+        "category": "Preprocessors/Depth"
       }
     ]
   },

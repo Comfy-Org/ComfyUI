@@ -528,7 +528,9 @@ class ImageCompositor(io.ComfyNode):
         raw_state = compositor
         state = parse_layer_state(raw_state)
         replay = bool(state is not None and tensors and state["inputs"] == fp)
+        canvas = None
         if replay:
+            canvas = state["canvas"]
             out = composite_from_state(tensors, state, alphas)
         elif tensors:
             canvas = document_canvas(layers) or canvas_extent(frames)
@@ -544,6 +546,8 @@ class ImageCompositor(io.ComfyNode):
         ui_dict["compositor_layers"] = layer_refs
         ui_dict["compositor_inputs"] = fp
         ui_dict["compositor_bboxes"] = layer_ui_entries(frames)
+        if canvas is not None:
+            ui_dict["compositor_canvas"] = [{"w": int(canvas[0]), "h": int(canvas[1])}]
         if state_stale:
             ui_dict["compositor_state_stale"] = [True]
         return io.NodeOutput(out, mask, ui=ui_dict)

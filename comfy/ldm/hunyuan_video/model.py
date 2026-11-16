@@ -4,7 +4,7 @@ import torch
 import comfy.patcher_extension
 import comfy.ldm.flux.layers
 import comfy.ldm.modules.diffusionmodules.mmdit
-from comfy.ldm.modules.attention import optimized_attention
+from comfy.ldm.modules.attention import AttentionTensorContainer, ComfyAttention, optimized_attention
 
 from dataclasses import dataclass
 from einops import repeat
@@ -63,6 +63,7 @@ class TokenRefinerBlock(nn.Module):
         operations=None
     ):
         super().__init__()
+        self.comfy_attention = ComfyAttention()
         self.heads = heads
         mlp_hidden_dim = hidden_size * 4
 
@@ -88,7 +89,9 @@ class TokenRefinerBlock(nn.Module):
         norm_x = self.norm1(x)
         qkv = self.self_attn.qkv(norm_x)
         q, k, v = qkv.reshape(qkv.shape[0], qkv.shape[1], 3, self.heads, -1).permute(2, 0, 3, 1, 4)
-        attn = optimized_attention(q, k, v, self.heads, mask=mask, skip_reshape=True, transformer_options=transformer_options)
+        q, k, v = AttentionTensorContainer(q), AttentionTensorContainer(k), AttentionTensorContainer(v)
+        del qkv
+        attn = optimized_attention(q, k, v, self.heads, mask=mask, skip_reshape=True, preferred_attention=self.comfy_attention, transformer_options=transformer_options)
 
         x = x + self.self_attn.proj(attn) * mod1.unsqueeze(1)
         x = x + self.mlp(self.norm2(x)) * mod2.unsqueeze(1)

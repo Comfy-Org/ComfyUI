@@ -83,6 +83,45 @@ class OrNode(io.ComfyNode):
         return io.NodeOutput(any(values.values()))
 
 
+class BranchNode(io.ComfyNode):
+    @classmethod
+    def define_schema(cls):
+        mtemplate = io.MatchType.Template("switch")
+        minput = io.MatchType.Input("branch", template=mtemplate, lazy=True, optional=True)
+        template = _io.Autogrow.TemplatePrefix(input=minput, prefix="branch", min=1, max=32)
+        return io.Schema(
+            node_id="BranchNode",
+            display_name="Branch",
+            category="utilities/logic",
+            description="Select from connected inputs by name. Inputs can be renamed by double clicking them.",
+            search_aliases=["switch", "choice", "pick"],
+            is_experimental=True,
+            inputs=[
+                _io.Autogrow.Input("autogrow", template=template),
+                io.String.Input("branch", extra_dict={"widgetType": "COMFY_BRANCH_SELECTOR"}),
+                io.Array.Input("branch_names", extra_dict={"widgetType": "COMFY_BRANCH_INPUT_NAMES", "socketless": True}),
+            ],
+            outputs=[
+                io.MatchType.Output(template=mtemplate, display_name="output"),
+            ],
+        )
+
+    @classmethod
+    def check_lazy_status(cls, branch, branch_names, autogrow):
+        if branch not in branch_names:
+            raise ValueError(f"{branch} is not included in available inputs: {branch_names}")
+        key = f"branch{branch_names.index(branch)}"
+        if key not in autogrow:
+            raise ValueError(f"Selected input {branch} is not connected")
+        return ['autogrow.' + key]
+
+    @classmethod
+    def execute(cls, branch, branch_names, autogrow) -> io.NodeOutput:
+        if branch not in branch_names:
+            raise ValueError(f"{branch} is not included in available inputs: {branch_names}")
+        return autogrow[f"branch{branch_names.index(branch)}"],
+
+
 class SwitchNode(io.ComfyNode):
     @classmethod
     def define_schema(cls):
@@ -95,8 +134,8 @@ class SwitchNode(io.ComfyNode):
             is_experimental=True,
             inputs=[
                 io.Boolean.Input("switch"),
-                io.MatchType.Input("on_false", template=template, lazy=True),
-                io.MatchType.Input("on_true", template=template, lazy=True),
+                io.MatchType.Input("on_false", template=template, lazy=True, optional=True),
+                io.MatchType.Input("on_true", template=template, lazy=True, optional=True),
             ],
             outputs=[
                 io.MatchType.Output(template=template, display_name="output"),
@@ -104,15 +143,16 @@ class SwitchNode(io.ComfyNode):
         )
 
     @classmethod
-    def check_lazy_status(cls, switch, on_false=None, on_true=None):
+    def check_lazy_status(cls, switch, on_false=MISSING, on_true=MISSING):
         if switch and on_true is None:
             return ["on_true"]
         if not switch and on_false is None:
             return ["on_false"]
 
     @classmethod
-    def execute(cls, switch, on_true, on_false) -> io.NodeOutput:
-        return io.NodeOutput(on_true if switch else on_false)
+    def execute(cls, switch, on_true=MISSING, on_false=MISSING) -> io.NodeOutput:
+        selected = on_true if switch else on_false
+        return io.NodeOutput(None if selected is MISSING else selected)
 
 
 class SoftSwitchNode(io.ComfyNode):
@@ -340,6 +380,7 @@ class LogicExtension(ComfyExtension):
             NotNode,
             AndNode,
             OrNode,
+            BranchNode,
             # SoftSwitchNode,
             # ConvertStringToComboNode,
             # DCTestNode,

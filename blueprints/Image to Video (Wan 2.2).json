@@ -2027,7 +2027,7 @@
         "extra": {
           "workflowRendererVersion": "LG"
         },
-        "category": "Video generation and editing/Image to video",
+        "category": "Video generation/Image to video",
         "description": "Image-to-video with Wan 2.2 using a start image plus text prompt to extend motion from the still frame."
       }
     ]

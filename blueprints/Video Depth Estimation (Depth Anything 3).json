@@ -814,7 +814,7 @@
           }
         ],
         "extra": {},
-        "category": "Conditioning & Preprocessors/Depth",
+        "category": "Preprocessors/Depth",
         "description": "This subgraph processes a video input through Depth Anything 3 to produce temporally consistent depth maps for each frame, outputting a depth video. It is ideal for video content requiring spatial geometry estimation, such as 3D reconstruction, SLAM, or novel view synthesis from moving cameras. The model uses a plain transformer backbone trained with a depth-ray representation, supporting any number of views without requiring known camera poses."
       }
     ]

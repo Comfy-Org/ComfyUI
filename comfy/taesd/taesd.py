@@ -58,6 +58,27 @@ class Decoder(nn.Sequential):
             Block(64, 64), conv(64, 3),
         )
 
+class EncoderF16(nn.Sequential):
+    # 16x: 2x2 pixel unshuffle on the way in and wider low resolution stages (Qwen Image 2.1, RGBA)
+    def __init__(self, latent_channels: int = 64, image_channels: int = 4):
+        super().__init__(
+            nn.PixelUnshuffle(2), conv(image_channels * 4, 64), nn.ReLU(inplace=True), Block(64, 64),
+            conv(64, 64, stride=2, bias=False), Block(64, 64), Block(64, 64), Block(64, 64),
+            conv(64, 128, stride=2, bias=False), Block(128, 128), Block(128, 128), Block(128, 128),
+            conv(128, 256, stride=2, bias=False), Block(256, 256), Block(256, 256), Block(256, 256),
+            conv(256, latent_channels),
+        )
+
+class DecoderF16(nn.Sequential):
+    def __init__(self, latent_channels: int = 64, image_channels: int = 4):
+        super().__init__(
+            Clamp(), conv(latent_channels, 256), nn.ReLU(),
+            Block(256, 256), Block(256, 256), Block(256, 256), nn.Upsample(scale_factor=2), conv(256, 128, bias=False),
+            Block(128, 128), Block(128, 128), Block(128, 128), nn.Upsample(scale_factor=2), conv(128, 64, bias=False),
+            Block(64, 64), Block(64, 64), Block(64, 64), nn.Upsample(scale_factor=2), conv(64, 64, bias=False),
+            Block(64, 64), conv(64, image_channels * 4), nn.PixelShuffle(2),
+        )
+
 class DecoderFlux2(Decoder):
     def __init__(self, latent_channels: int = 128, use_gn: bool = True):
         if latent_channels != 128 or not use_gn:
@@ -101,14 +122,19 @@ class TAESD(nn.Module):
         if latent_channels == 128:
             encoder_class = EncoderFlux2
             decoder_class = DecoderFlux2
+        elif latent_channels == 64:
+            encoder_class = EncoderF16
+            decoder_class = DecoderF16
         else:
             encoder_class = Encoder
             decoder_class = Decoder
         self.taesd_encoder = encoder_class(latent_channels=latent_channels)
         self.taesd_decoder = decoder_class(latent_channels=latent_channels)
 
-        self.vae_scale = torch.nn.Parameter(torch.tensor(1.0))
-        self.vae_shift = torch.nn.Parameter(torch.tensor(0.0))
+        # the 64 channel latents are normalized per channel
+        shape = (latent_channels, 1, 1) if latent_channels == 64 else ()
+        self.vae_scale = torch.nn.Parameter(torch.ones(shape))
+        self.vae_shift = torch.nn.Parameter(torch.zeros(shape))
         if encoder_path is not None:
             self.taesd_encoder.load_state_dict(comfy.utils.load_torch_file(encoder_path, safe_load=True))
         if decoder_path is not None:

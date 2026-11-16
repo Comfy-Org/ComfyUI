@@ -3,16 +3,20 @@ from torch import nn
 import math
 
 import comfy.ldm.common_dit
-from comfy.ldm.modules.attention import optimized_attention
+from comfy.ldm.modules.attention import AttentionTensorContainer, ComfyAttention, optimized_attention
 from comfy.ldm.flux.math import apply_rope1
 from comfy.ldm.flux.layers import EmbedND
 
-def attention(q, k, v, heads, transformer_options={}):
+def attention(q, k, v, heads, transformer_options={}, preferred_attention=None):
+    if isinstance(q, AttentionTensorContainer):
+        q, k, v = q.take(), k.take(), v.take()
+    q = AttentionTensorContainer(q.transpose(1, 2))
+    k = AttentionTensorContainer(k.transpose(1, 2))
+    v = AttentionTensorContainer(v.transpose(1, 2))
     return optimized_attention(
-        q.transpose(1, 2),
-        k.transpose(1, 2),
-        v.transpose(1, 2),
+        q, k, v,
         heads=heads,
+        preferred_attention=preferred_attention,
         skip_reshape=True,
         transformer_options=transformer_options
     )
@@ -98,6 +102,7 @@ class Modulation(nn.Module):
 class SelfAttention(nn.Module):
     def __init__(self, num_channels, head_dim, operation_settings=None):
         super().__init__()
+        self.comfy_attention = ComfyAttention()
         assert num_channels % head_dim == 0
         self.num_heads = num_channels // head_dim
         self.head_dim = head_dim
@@ -120,7 +125,8 @@ class SelfAttention(nn.Module):
         q = self._compute_qk(x, freqs, self.to_query, self.query_norm)
         k = self._compute_qk(x, freqs, self.to_key, self.key_norm)
         v = self.to_value(x).view(*x.shape[:-1], self.num_heads, -1)
-        out = attention(q, k, v, self.num_heads, transformer_options=transformer_options)
+        q, k, v = AttentionTensorContainer(q), AttentionTensorContainer(k), AttentionTensorContainer(v)
+        out = attention(q, k, v, self.num_heads, preferred_attention=self.comfy_attention, transformer_options=transformer_options)
         return self.out_layer(out)
 
     def _forward_chunked(self, x, freqs, transformer_options={}):
@@ -135,7 +141,8 @@ class SelfAttention(nn.Module):
         q = process_chunks(self.to_query, self.query_norm)
         k = process_chunks(self.to_key, self.key_norm)
         v = self.to_value(x).view(*x.shape[:-1], self.num_heads, -1)
-        out = attention(q, k, v, self.num_heads, transformer_options=transformer_options)
+        q, k, v = AttentionTensorContainer(q), AttentionTensorContainer(k), AttentionTensorContainer(v)
+        out = attention(q, k, v, self.num_heads, preferred_attention=self.comfy_attention, transformer_options=transformer_options)
         return self.out_layer(out)
 
     def forward(self, x, freqs, transformer_options={}):
@@ -154,7 +161,8 @@ class CrossAttention(SelfAttention):
 
     def forward(self, x, context, transformer_options={}):
         q, k, v = self.get_qkv(x, context)
-        out = attention(self.query_norm(q), self.key_norm(k), v, self.num_heads, transformer_options=transformer_options)
+        q, k, v = AttentionTensorContainer(self.query_norm(q)), AttentionTensorContainer(self.key_norm(k)), AttentionTensorContainer(v)
+        out = attention(q, k, v, self.num_heads, preferred_attention=self.comfy_attention, transformer_options=transformer_options)
         return self.out_layer(out)
 
 

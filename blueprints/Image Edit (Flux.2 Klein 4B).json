@@ -1472,7 +1472,7 @@
         "extra": {
           "workflowRendererVersion": "LG"
         },
-        "category": "Image generation and editing/Edit image",
+        "category": "Image editing/Edit image",
         "description": "Edits an input image via text instructions using FLUX.2 [klein] 4B."
       },
       {

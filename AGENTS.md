@@ -29,6 +29,12 @@
 
 ## Architecture Boundaries
 
+- Keep `comfy/` limited to model implementations and their supporting inference
+  infrastructure, consistent with its current scope: model detection, loading,
+  and conversion; encoders, tokenizers, and latent formats; conditioning,
+  sampling, and model patching; tensor operations, quantization, and device,
+  memory, and offload management. Put UI, API/server, workflow/queue, application
+  persistence, and other product-level logic outside `comfy/`.
 - Keep each layer focused on the concepts it owns. Do not leak UI, API,
   workflow, queue, persistence, telemetry, model-loading, node, or execution
   concerns into unrelated layers just because it is convenient to pass data
@@ -153,6 +159,17 @@
   or describe obvious behavior. Short TODOs are fine when they name the concrete
   missing follow-up.
 
+## Model Integration
+
+- Reuse native ComfyUI loaders and nodes wherever possible. Extend existing
+  loading paths before introducing model-specific loaders.
+- Use standard `MODEL`, `CLIP`, and `VAE` interfaces where they fit, preferring
+  the regular checkpoint loader for bundled components.
+- Package weights as single `.safetensors` files in the normal model folders;
+  never require model directories. Provide a conversion script when repackaging.
+- Use native execution and optimization mechanisms. Benchmark performance and
+  verify short and long generations against the reference implementation.
+
 ## Model, Device, and Memory Behavior
 
 - Treat dtype, device placement, VRAM usage, and offloading behavior as core
@@ -186,6 +203,10 @@
   handwritten implementations of the same operation. Remove duplicate local
   kernels and adapt inputs to the shared operation's documented layout while
   preserving the model's original math and output contract.
+- Model implementations must use `AttentionTensorContainer` and per-module
+  `self.comfy_attention = ComfyAttention()`, passed to attention as `preferred_attention`.
+- Integrate model block loops with the memory compiler and prefetch helpers in
+  `comfy.model_prefetch`, following existing model patterns.
 - All models should use the optimized attention function selected by ComfyUI.
   Treat optimized backend functions, dispatch helpers, and capability-selected
   callables as opaque. Higher-level code must not inspect function identity,
@@ -297,14 +318,38 @@
 - Avoid caches that persist across different executions as much as possible.
   Persistent caches are acceptable only when they use a very minimal amount of
   memory and have a clear ownership and invalidation story.
+- When condition-dependent model work would otherwise repeat on every denoising
+  step and preprocessing it once materially improves performance, expose a
+  model preprocessing method and call it from `BaseModel.extra_conds`, following
+  patterns such as LTXAV and Anima. Pass the result through normal conditioning;
+  do not add model-owned caches, sampler-option caches, or cache-management
+  wrappers for this work.
 - When optimizing, favor small measurable changes: fewer allocations, fewer
   device transfers, less peak memory, better batching, or use of a faster
   existing backend op.
 
+## User Input Tolerance
+
+- Prefer completing a workflow with the user's supplied values over rejecting
+  them because they fall outside recommended, UI-advertised, or quality-oriented
+  limits. If the downstream implementation can consume an input, pass it
+  through unchanged even when the result may be poor. For example, do not reject
+  or truncate additional reference images merely because a node advertises a
+  smaller recommended maximum.
+- Do not add validation errors solely to prevent degraded, nonsensical, or
+  low-quality model output. A bad result is preferable to failing an otherwise
+  executable workflow.
+- Resize, pad, clamp, normalize, or otherwise adapt user input only when passing
+  it through unchanged would make the existing model or underlying operation
+  fail. Make the smallest adjustment needed to keep execution running; do not
+  add a model-level validation failure merely to justify changing the input.
+- This permissive policy does not override security boundaries such as path
+  containment, or integrity checks required to load model formats and
+  checkpoints safely.
+
 ## Nodes and User-Facing Behavior
 
-- Follow existing node conventions: `INPUT_TYPES`, `RETURN_TYPES`, `FUNCTION`,
-  `CATEGORY`, and registration through the local mapping used by that file.
+- Use V3 schemas for new nodes and reuse existing native nodes wherever possible.
 - Treat legacy combo inputs, `io.Combo`, and `io.DynamicCombo` values as
   untrusted when they affect filesystem access. Any value used as a file or
   folder name, path component, format, or extension must be validated again at
@@ -322,9 +367,6 @@
 - Mark inputs optional when execution has a valid path that does not read them.
   If one optional input is needed only to process another optional input, do not
   force users on the path that supplies neither to connect it.
-- Conditioning nodes should normally output conditioning only. Do not expose
-  input or intermediate images as convenience outputs for downstream sizing or
-  routing; use the existing image path or a dedicated image operation instead.
 - Nodes should output only values they own. Do not add pass-through outputs for
   workflow convenience unless the node is explicitly an output node. Existing
   models, latents, conditioning, or other inputs should flow directly to the

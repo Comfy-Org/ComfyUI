@@ -3,6 +3,7 @@ from pathlib import Path
 from typing import Literal
 
 import folder_paths
+from app.assets.helpers import cached_prefix_matcher
 
 
 _NON_MODEL_FOLDER_NAMES = frozenset({"configs", "custom_nodes"})
@@ -250,7 +251,6 @@ def get_backend_system_tags_from_path(path: str) -> list[str]:
     category still get the ``models`` tag.
     """
     fp_abs = os.path.abspath(path)
-    fp_path = Path(fp_abs)
     tags: list[str] = []
 
     def _add(tag: str) -> None:
@@ -262,21 +262,19 @@ def get_backend_system_tags_from_path(path: str) -> list[str]:
         ("output", folder_paths.get_output_directory()),
         ("temp", folder_paths.get_temp_directory()),
     ):
-        if fp_path.is_relative_to(os.path.abspath(base)):
+        if cached_prefix_matcher((base,))(fp_abs):
             _add(role)
 
     ext = os.path.splitext(fp_abs)[1].lower()
     model_types: list[str] = []
     under_models_base = False
     for folder_name, bases, extensions in get_comfy_models_folders():
-        for base in bases:
-            if fp_path.is_relative_to(os.path.abspath(base)):
-                under_models_base = True
-                # Empty set accepts any extension, matching
-                # folder_paths.filter_files_extensions semantics.
-                if not extensions or ext in extensions:
-                    model_types.append(folder_name)
-                break
+        if cached_prefix_matcher(tuple(bases))(fp_abs):
+            under_models_base = True
+            # Empty set accepts any extension, matching
+            # folder_paths.filter_files_extensions semantics.
+            if not extensions or ext in extensions:
+                model_types.append(folder_name)
 
     if under_models_base:
         _add("models")
@@ -306,7 +304,7 @@ def get_known_input_subfolder_tags_from_path(path: str) -> list[str]:
     """
     fp_abs = os.path.abspath(path)
     input_base = os.path.abspath(folder_paths.get_input_directory())
-    if not Path(fp_abs).is_relative_to(input_base):
+    if not cached_prefix_matcher((input_base,))(fp_abs):
         return []
 
     rel = os.path.relpath(fp_abs, input_base)

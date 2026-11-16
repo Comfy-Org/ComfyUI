@@ -9,7 +9,7 @@ import torch.nn.functional as F
 import comfy.model_management
 import comfy.patcher_extension
 import comfy.rmsnorm
-from comfy.ldm.modules.attention import optimized_attention
+from comfy.ldm.modules.attention import AttentionTensorContainer, ComfyAttention, optimized_attention
 from comfy.ldm.flux.math import apply_rope
 
 
@@ -100,9 +100,13 @@ class PcdAbsolutePositionEmbedder(nn.Module):
         return out.to(orig_dtype)
 
 
-def attention(q, k, v, transformer_options=None):
+def attention(q, k, v, transformer_options=None, preferred_attention=None):
+    if isinstance(q, AttentionTensorContainer):
+        q, k, v = q.take(), k.take(), v.take()
+    heads = q.shape[2]
+    q, k, v = AttentionTensorContainer(q.transpose(1, 2)), AttentionTensorContainer(k.transpose(1, 2)), AttentionTensorContainer(v.transpose(1, 2))
     # q, k, v: (B, L, heads, dim) -> (B, L, heads, dim). Shared optimized_attention call convention.
-    out = optimized_attention(q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2), heads=q.shape[2],
+    out = optimized_attention(q, k, v, heads=heads, preferred_attention=preferred_attention,
                               skip_reshape=True, skip_output_reshape=True, low_precision_attention=False,
                               transformer_options=transformer_options)
     return out.transpose(1, 2)
@@ -127,6 +131,7 @@ class RopeMultiHeadAttention(nn.Module):
     def __init__(self, channels, num_heads, qkv_bias=True, qk_rms_norm=False, use_rope=False,
                  dtype=None, device=None, operations=None):
         super().__init__()
+        self.comfy_attention = ComfyAttention()
         self.channels = channels
         self.num_heads = num_heads
         self.head_dim = channels // num_heads
@@ -147,7 +152,9 @@ class RopeMultiHeadAttention(nn.Module):
         if self.qk_rms_norm:
             q = self.q_norm(q)
             k = self.k_norm(k)
-        h = attention(q, k, v, transformer_options)  # (B, L, heads, dim)
+        del qkv
+        q, k, v = AttentionTensorContainer(q), AttentionTensorContainer(k), AttentionTensorContainer(v)
+        h = attention(q, k, v, transformer_options, preferred_attention=self.comfy_attention)  # (B, L, heads, dim)
         return self.out(h.reshape(B, L, C))
 
 

@@ -18,12 +18,13 @@
 
 import torch
 import torch.nn as nn
-from comfy.ldm.modules.attention import optimized_attention
+from comfy.ldm.modules.attention import AttentionTensorContainer, ComfyAttention, optimized_attention
 import comfy.ops
 
 class OptimizedAttention(nn.Module):
     def __init__(self, c, nhead, dropout=0.0, dtype=None, device=None, operations=None):
         super().__init__()
+        self.comfy_attention = ComfyAttention()
         self.heads = nhead
 
         self.to_q = operations.Linear(c, c, bias=True, dtype=dtype, device=device)
@@ -37,7 +38,8 @@ class OptimizedAttention(nn.Module):
         k = self.to_k(k)
         v = self.to_v(v)
 
-        out = optimized_attention(q, k, v, self.heads, transformer_options=transformer_options)
+        q, k, v = AttentionTensorContainer(q), AttentionTensorContainer(k), AttentionTensorContainer(v)
+        out = optimized_attention(q, k, v, self.heads, preferred_attention=self.comfy_attention, transformer_options=transformer_options)
 
         return self.out_proj(out)
 

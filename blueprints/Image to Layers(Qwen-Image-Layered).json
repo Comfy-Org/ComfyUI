@@ -1676,7 +1676,7 @@
         "extra": {
           "workflowRendererVersion": "LG"
         },
-        "category": "Image generation and editing/Image to layers",
+        "category": "Image editing/Image to layers",
         "description": "Decomposes an image into variable-resolution RGBA layers for independent editing using Qwen-Image-Layered."
       }
     ]

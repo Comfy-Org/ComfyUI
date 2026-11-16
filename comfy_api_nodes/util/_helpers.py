@@ -1,5 +1,9 @@
 import asyncio
+import base64
+import binascii
 import contextlib
+import json
+import logging
 import os
 import re
 import time
@@ -7,14 +11,18 @@ from collections.abc import Callable
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from io import BytesIO
+from urllib.parse import urljoin, urlparse
 
+import aiohttp
+from aiohttp.client_exceptions import ClientError
 from yarl import URL
 
+from app.comfy_api_env import normalize_comfy_api_base
+from app.deploy_environment import get_deploy_environment
 from comfy.cli_args import args
-from comfy.comfy_api_env import normalize_comfy_api_base
-from comfy.deploy_environment import get_deploy_environment
 from comfy.model_management import processing_interrupted
 from comfy_api.latest import IO
+from comfy_execution.graph_utils import is_link
 from comfy_execution.utils import get_executing_context
 from comfyui_version import __version__ as comfyui_version
 
@@ -33,9 +41,164 @@ def get_node_id(node_cls: type[IO.ComfyNode]) -> str:
     return node_cls.hidden.unique_id
 
 
+PARTNER_NODE_TOKEN_AUDIENCE = "comfy-partner-node"
+PARTNER_NODE_TOKEN_RENEW_PATH = "/auth/partner-node/renew"
+_PARTNER_NODE_TOKEN_RENEW_MARGIN = 300.0  # renew a partner-node token this many seconds before it expires
+_PARTNER_NODE_TOKEN_RENEW_RETRY_DELAYS = (1.0, 2.0)  # pauses between renewal retries
+
+_partner_token_lineages: dict[str, str] = {}
+"""Renewed partner-node token -> the token it descends from. Only tokens comfy-api issued on renewal are entered."""
+_renewed_partner_tokens: dict[str, str] = {}
+"""Newest renewed partner-node token per lineage. In memory only; renewal does not rotate the token."""
+_partner_token_renewals: dict[str, asyncio.Task] = {}
+_capped_partner_token_lineages: set[str] = set()
+"""Lineages whose last renewed token did not extend ``exp`` and is already inside the renew margin (session end reached): no pre-emptive renewal, only on a 401."""
+_partner_token_renew_not_before: dict[str, float] = {}
+"""Lineage -> wall-clock time before which comfy-api asked (HTTP 429) not to be sent another renewal."""
+_rejected_partner_tokens: set[str] = set()
+"""Tokens comfy-api answered with a 401: a renewal replaces them even when it expires sooner."""
+
+
+def _partner_token_claims(token: str) -> dict | None:
+    """Unverified JWT payload of a partner-node token, or None for any other credential.
+
+    The signature is not checked: the claims only decide when to renew, comfy-api still validates the token.
+    """
+    parts = token.split(".")
+    if len(parts) != 3:
+        return None
+    try:
+        claims = json.loads(base64.urlsafe_b64decode(parts[1] + "=" * (-len(parts[1]) % 4)))
+    except (ValueError, binascii.Error):
+        return None
+    if not isinstance(claims, dict) or claims.get("aud") not in (PARTNER_NODE_TOKEN_AUDIENCE, [PARTNER_NODE_TOKEN_AUDIENCE]):
+        return None
+    if not isinstance(claims.get("sid"), str) or not isinstance(claims.get("exp"), (int, float)):
+        return None
+    return claims
+
+
+def _partner_token_lineage(token: str) -> str:
+    """The token a credential was first presented as.
+
+    Unverified claims such as ``sid`` can be forged, so a cached renewal is only shared with the token it was renewed from.
+    """
+    return _partner_token_lineages.get(token, token)
+
+
+def _newest_partner_token(token: str, claims: dict) -> tuple[str, float]:
+    renewed = _renewed_partner_tokens.get(_partner_token_lineage(token))
+    if renewed is not None:
+        renewed_exp = _partner_token_claims(renewed)["exp"]
+        if renewed_exp >= claims["exp"] or token in _rejected_partner_tokens:
+            return renewed, renewed_exp
+    return token, claims["exp"]
+
+
+async def _request_partner_token_renewal(lineage: str, sid: str, token: str) -> str | None:
+    url = urljoin(default_base_url().rstrip("/") + "/", PARTNER_NODE_TOKEN_RENEW_PATH.lstrip("/"))
+    body = error = None
+    retry_delays = _PARTNER_NODE_TOKEN_RENEW_RETRY_DELAYS
+    if token not in _rejected_partner_tokens and _partner_token_claims(token)["exp"] > time.time():
+        retry_delays = ()
+    deadline = time.monotonic() + 30.0
+    for retry_delay in (*retry_delays, None):
+        if is_processing_interrupted():
+            return None
+        try:
+            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=max(deadline - time.monotonic(), 1.0)), trust_env=True) as session:
+                async with session.post(url, headers={"Authorization": f"Bearer {token}"}) as resp:
+                    if 400 <= resp.status < 500:
+                        logging.warning("Comfy API refused to renew the sign-in token (HTTP %s).", resp.status)
+                        if resp.status in (401, 403):
+                            _renewed_partner_tokens.pop(lineage, None)
+                        if resp.status == 429:
+                            wait = _retry_after_wait(resp.headers.get("Retry-After"), 60.0, 600.0)
+                            _partner_token_renew_not_before[lineage] = time.time() + wait
+                        return None
+                    if resp.status < 400:
+                        body = await resp.json(content_type=None)
+                        break
+                    error = f"HTTP {resp.status}"
+        except (ValueError, asyncio.TimeoutError) as e:
+            logging.warning("Could not renew the sign-in token: %s", type(e).__name__)
+            return None
+        except (ClientError, OSError) as e:
+            error = type(e).__name__
+        if retry_delay is None or time.monotonic() + 2 * retry_delay > deadline or is_processing_interrupted():
+            logging.warning("Could not renew the sign-in token: %s", error)
+            return None
+        await asyncio.sleep(retry_delay)
+    renewed = body.get("token") if isinstance(body, dict) else None
+    claims = _partner_token_claims(renewed) if isinstance(renewed, str) else None
+    if claims is None or claims["sid"] != sid:
+        logging.warning("Comfy API returned an unusable renewed sign-in token.")
+        return None
+    if claims["exp"] <= _partner_token_claims(token)["exp"] and claims["exp"] - time.time() < _PARTNER_NODE_TOKEN_RENEW_MARGIN:
+        _capped_partner_token_lineages.add(lineage)
+    else:
+        _capped_partner_token_lineages.discard(lineage)
+    _partner_token_lineages[renewed] = lineage
+    _renewed_partner_tokens[lineage] = renewed
+    return renewed
+
+
+async def _renew_partner_token(token: str, claims: dict) -> str | None:
+    """Renew once per lineage at a time; concurrent callers share the in-flight renewal."""
+    lineage = _partner_token_lineage(token)
+    if time.time() < _partner_token_renew_not_before.get(lineage, 0.0):
+        return None
+    task = _partner_token_renewals.get(lineage)
+    if task is None or task.done() or task.get_loop() is not asyncio.get_running_loop():
+        task = asyncio.create_task(_request_partner_token_renewal(lineage, claims["sid"], token))
+        _partner_token_renewals[lineage] = task
+        task.add_done_callback(
+            lambda t: _partner_token_renewals.pop(lineage, None) if _partner_token_renewals.get(lineage) is t else None
+        )
+    while True:
+        if is_processing_interrupted():
+            raise ProcessingInterrupted("Task cancelled")
+        if task.done():
+            return task.result()
+        await asyncio.wait({task}, timeout=1.0)
+
+
+async def refresh_partner_token(node_cls: type[IO.ComfyNode]) -> None:
+    """Renew the node's partner-node token if it expires soon. Any other credential is left untouched."""
+    token = node_cls.hidden.auth_token_comfy_org
+    claims = _partner_token_claims(token) if token else None
+    if claims is None or _partner_token_lineage(token) in _capped_partner_token_lineages or is_processing_interrupted():
+        return
+    newest, exp = _newest_partner_token(token, claims)
+    if exp - time.time() < _PARTNER_NODE_TOKEN_RENEW_MARGIN:
+        await _renew_partner_token(newest, claims)
+
+
+async def renew_rejected_partner_token(authorization: str | None) -> bool:
+    """After comfy-api rejected ``authorization`` with a 401, make a fresh partner-node token current.
+
+    Returns True when a resend would carry a different, fresh token.
+    """
+    if not authorization or not authorization.startswith("Bearer "):
+        return False
+    rejected = authorization[len("Bearer "):]
+    claims = _partner_token_claims(rejected)
+    if claims is None:
+        return False
+    _rejected_partner_tokens.add(rejected)
+    newest, exp = _newest_partner_token(rejected, claims)
+    if newest != rejected and exp - time.time() >= _PARTNER_NODE_TOKEN_RENEW_MARGIN:
+        return True
+    return await _renew_partner_token(newest, claims) is not None
+
+
 def get_auth_header(node_cls: type[IO.ComfyNode]) -> dict[str, str]:
-    if node_cls.hidden.auth_token_comfy_org:
-        return {"Authorization": f"Bearer {node_cls.hidden.auth_token_comfy_org}"}
+    token = node_cls.hidden.auth_token_comfy_org
+    if token:
+        claims = _partner_token_claims(token)
+        if claims is not None:
+            token = _newest_partner_token(token, claims)[0]
+        return {"Authorization": f"Bearer {token}"}
     if node_cls.hidden.api_key_comfy_org:
         return {"X-API-KEY": node_cls.hidden.api_key_comfy_org}
     return {}
@@ -74,14 +237,55 @@ def default_base_url() -> str:
     return normalize_comfy_api_base(getattr(args, "comfy_api_base", "https://api.comfy.org"))
 
 
+async def diagnose_connectivity() -> dict[str, bool]:
+    """Best-effort connectivity diagnostics to distinguish local vs. server issues."""
+    results = {
+        "internet_accessible": False,
+        "api_accessible": False,
+    }
+    timeout = aiohttp.ClientTimeout(total=5.0)
+
+    # Probe Google and Baidu in parallel: Google is blocked by the GFW in mainland China, so a Baidu probe is required
+    # to correctly detect that Chinese users with working internet do have working internet.
+    internet_probe_urls = ("https://www.google.com", "https://www.baidu.com")
+
+    async with aiohttp.ClientSession(timeout=timeout, trust_env=True) as session:
+        async def _probe(url: str) -> bool:
+            try:
+                async with session.get(url) as resp:
+                    return resp.status < 500
+            except (ClientError, OSError, asyncio.TimeoutError):
+                return False
+
+        probe_tasks = [asyncio.create_task(_probe(u)) for u in internet_probe_urls]
+        try:
+            for fut in asyncio.as_completed(probe_tasks):
+                if await fut:
+                    results["internet_accessible"] = True
+                    break
+        finally:
+            for t in probe_tasks:
+                if not t.done():
+                    t.cancel()
+            await asyncio.gather(*probe_tasks, return_exceptions=True)
+        if not results["internet_accessible"]:
+            return results
+
+        parsed = urlparse(default_base_url())
+        health_url = f"{parsed.scheme}://{parsed.netloc}/health"
+        with contextlib.suppress(ClientError, OSError):
+            async with session.get(health_url) as resp:
+                results["api_accessible"] = resp.status < 500
+    return results
+
+
 async def sleep_with_interrupt(
     seconds: float,
     node_cls: type[IO.ComfyNode] | None,
     label: str | None = None,
     start_ts: float | None = None,
-    estimated_total: int | None = None,
     *,
-    display_callback: Callable[[type[IO.ComfyNode], str, int, int | None], None] | None = None,
+    display_callback: Callable[[type[IO.ComfyNode], str, int], None] | None = None,
 ):
     """
     Sleep in 1s slices while:
@@ -95,7 +299,7 @@ async def sleep_with_interrupt(
         now = time.monotonic()
         if start_ts is not None and label and display_callback:
             with contextlib.suppress(Exception):
-                display_callback(node_cls, label, int(now - start_ts), estimated_total)
+                display_callback(node_cls, label, int(now - start_ts))
         if now >= end:
             break
         await asyncio.sleep(min(1.0, end - now))
@@ -136,6 +340,27 @@ def get_fs_object_size(path_or_object: str | BytesIO) -> int:
     if isinstance(path_or_object, str):
         return os.path.getsize(path_or_object)
     return len(path_or_object.getvalue())
+
+
+def get_output_consumers(node_cls: type[IO.ComfyNode], output_index: int) -> list[str]:
+    dynprompt = node_cls.hidden.dynprompt
+    if dynprompt is None:
+        return []
+    node_id = str(node_cls.hidden.unique_id)
+    consumers = []
+    for consumer_id in dynprompt.all_node_ids():
+        consumer = dynprompt.get_node(consumer_id)
+        for value in (consumer.get("inputs") or {}).values():
+            if is_link(value) and value[0] == node_id and value[1] == output_index:
+                title = (consumer.get("_meta") or {}).get("title") or consumer.get("class_type")
+                consumers.append(f"{title} #{dynprompt.get_display_node_id(consumer_id)}")
+    return sorted(consumers)
+
+
+def validate_output_unlinked(node_cls: type[IO.ComfyNode], output_index: int, reason: str) -> None:
+    consumers = get_output_consumers(node_cls, output_index)
+    if consumers:
+        raise ValueError(f"{reason} (currently linked: {', '.join(consumers)}).")
 
 
 def to_aiohttp_url(url: str) -> URL:

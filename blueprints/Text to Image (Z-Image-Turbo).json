@@ -1103,7 +1103,7 @@
         "extra": {
           "workflowRendererVersion": "LG"
         },
-        "category": "Image generation and editing/Text to image",
+        "category": "Image generation/Text to image",
         "description": "Generates images from text prompts using Z-Image-Turbo, Alibaba's distilled 6B DiT model."
       }
     ]

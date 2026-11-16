@@ -2,11 +2,7 @@
 import torch
 import torch.nn as nn
 from torch import Tensor
-import logging
-try:
-    from torchaudio.transforms import MelScale
-except:
-    logging.warning("torchaudio missing, ACE model will be broken")
+from comfy.audio import MelScale
 
 import comfy.model_management
 
@@ -92,8 +88,6 @@ class LogMelSpectrogram(nn.Module):
             self.f_min,
             self.f_max,
             self.n_fft // 2 + 1,
-            "slaney",
-            "slaney",
         )
 
     def compress(self, x: Tensor) -> Tensor:

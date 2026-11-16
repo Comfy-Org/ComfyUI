@@ -1,5 +1,5 @@
 import av
-import torchaudio
+import comfy.audio
 import torch
 import comfy.model_management
 import folder_paths
@@ -9,6 +9,7 @@ import node_helpers
 import logging
 from typing_extensions import override
 from comfy_api.latest import ComfyExtension, IO, UI
+from server import PromptServer
 
 class EmptyLatentAudio(IO.ComfyNode):
     @classmethod
@@ -85,7 +86,7 @@ class VAEEncodeAudio(IO.ComfyNode):
         sample_rate = audio["sample_rate"]
         vae_sample_rate = getattr(vae, "audio_sample_rate", 44100)
         if vae_sample_rate != sample_rate:
-            waveform = torchaudio.functional.resample(audio["waveform"], sample_rate, vae_sample_rate)
+            waveform = comfy.audio.resample(audio["waveform"], sample_rate, vae_sample_rate)
         else:
             waveform = audio["waveform"]
 
@@ -132,6 +133,44 @@ class VAEDecodeAudio(IO.ComfyNode):
         return IO.NodeOutput(vae_decode_audio(vae, samples))
 
     decode = execute  # TODO: remove
+
+
+class GetAudioLatentSize(IO.ComfyNode):
+    @classmethod
+    def define_schema(cls):
+        return IO.Schema(
+            node_id="GetAudioLatentSize",
+            search_aliases=["dimensions", "audio latent info", "audio latent length"],
+            display_name="Get Audio Latent Size",
+            description="Returns the length, audio channel count, and batch size of an audio latent.",
+            category="model/latent",
+            inputs=[
+                IO.Latent.Input("latent", tooltip="The audio or audio/video latent to inspect."),
+            ],
+            outputs=[
+                IO.Int.Output(display_name="length", tooltip="The audio latent length."),
+                IO.Int.Output(display_name="audio_channels", tooltip="The number of audio channels. Latents without an audio channel dimension have one channel."),
+                IO.Int.Output(display_name="batch_size", tooltip="The number of latents in the batch."),
+            ],
+            hidden=[IO.Hidden.unique_id],
+        )
+
+    @classmethod
+    def execute(cls, latent) -> IO.NodeOutput:
+        samples = latent["samples"]
+        if samples.is_nested:
+            samples = samples.unbind()[-1]
+
+        if samples.ndim == 4:
+            batch_size, _, audio_channels, length = samples.shape
+        else:
+            batch_size, _, length = samples.shape
+            audio_channels = 1
+
+        if cls.hidden.unique_id:
+            PromptServer.instance.send_progress_text(f"length: {length}, audio channels: {audio_channels}\n batch size: {batch_size}", cls.hidden.unique_id)
+
+        return IO.NodeOutput(length, audio_channels, batch_size)
 
 
 class VAEDecodeAudioTiled(IO.ComfyNode):
@@ -299,7 +338,7 @@ class PreviewAudio(IO.ComfyNode):
     def define_schema(cls):
         return IO.Schema(
             node_id="PreviewAudio",
-            search_aliases=["play audio"],
+            search_aliases=["preview", "preview audio", "play audio"],
             display_name="Preview Audio",
             category="audio",
             description="Preview the audio without saving it to the ComfyUI output directory.",
@@ -578,11 +617,11 @@ class JoinAudioChannels(IO.ComfyNode):
 def match_audio_sample_rates(waveform_1, sample_rate_1, waveform_2, sample_rate_2):
     if sample_rate_1 != sample_rate_2:
         if sample_rate_1 > sample_rate_2:
-            waveform_2 = torchaudio.functional.resample(waveform_2, sample_rate_2, sample_rate_1)
+            waveform_2 = comfy.audio.resample(waveform_2, sample_rate_2, sample_rate_1)
             output_sample_rate = sample_rate_1
             logging.info(f"Resampling audio2 from {sample_rate_2}Hz to {sample_rate_1}Hz for merging.")
         else:
-            waveform_1 = torchaudio.functional.resample(waveform_1, sample_rate_1, sample_rate_2)
+            waveform_1 = comfy.audio.resample(waveform_1, sample_rate_1, sample_rate_2)
             output_sample_rate = sample_rate_2
             logging.info(f"Resampling audio1 from {sample_rate_1}Hz to {sample_rate_2}Hz for merging.")
     else:
@@ -835,7 +874,7 @@ class AudioEqualizer3Band(IO.ComfyNode):
 
         # 1. Apply Low Shelf (Bass)
         if low_gain_dB != 0:
-            eq_waveform = torchaudio.functional.bass_biquad(
+            eq_waveform = comfy.audio.bass_biquad(
                 eq_waveform,
                 sample_rate,
                 gain=low_gain_dB,
@@ -845,7 +884,7 @@ class AudioEqualizer3Band(IO.ComfyNode):
 
         # 2. Apply Peaking EQ (Mids)
         if mid_gain_dB != 0:
-            eq_waveform = torchaudio.functional.equalizer_biquad(
+            eq_waveform = comfy.audio.equalizer_biquad(
                 eq_waveform,
                 sample_rate,
                 center_freq=float(mid_freq),
@@ -855,7 +894,7 @@ class AudioEqualizer3Band(IO.ComfyNode):
 
         # 3. Apply High Shelf (Treble)
         if high_gain_dB != 0:
-            eq_waveform = torchaudio.functional.treble_biquad(
+            eq_waveform = comfy.audio.treble_biquad(
                 eq_waveform,
                 sample_rate,
                 gain=high_gain_dB,
@@ -873,6 +912,7 @@ class AudioExtension(ComfyExtension):
             EmptyLatentAudio,
             VAEEncodeAudio,
             VAEDecodeAudio,
+            GetAudioLatentSize,
             VAEDecodeAudioTiled,
             SaveAudio,
             SaveAudioMP3,
