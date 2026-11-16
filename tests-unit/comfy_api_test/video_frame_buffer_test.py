@@ -123,8 +123,9 @@ if not comfy_aimdo.control.init():
 import gc
 import numpy as np
 import comfy.memory_management
-from comfy_api.input_impl.video_types import VideoFromFile
+from comfy_api.latest._input_impl.video_types import FrameChunks, VideoFromFile
 comfy.memory_management.aimdo_enabled = True
+FrameChunks.BLOCK_BYTES = int(sys.argv[3])  # 0 keeps even these few frames in the host buffer
 components = VideoFromFile(sys.argv[1]).get_components()
 arrays = {}
 if components.alpha is not None:
@@ -139,8 +140,9 @@ np.savez(sys.argv[2], **arrays)
 """
 
 
+@pytest.mark.parametrize("block_bytes", [FrameChunks.BLOCK_BYTES, 0], ids=["copied_out", "kept"])
 @pytest.mark.parametrize("name", ["video.mp4", "video.mov", "cut.mp4"])
-def test_host_buffer_and_fromiter_decode_the_same_frames(tmp_path, name):
+def test_host_buffer_and_fromiter_decode_the_same_frames(tmp_path, name, block_bytes):
     path = str(tmp_path / name)
     if name == "video.mov":
         _write_rgba_video(path, 4)
@@ -149,7 +151,7 @@ def test_host_buffer_and_fromiter_decode_the_same_frames(tmp_path, name):
     else:
         _write_video(path, _noise_frames(10))
     output = str(tmp_path / "frames.npz")
-    _run_with_aimdo(HOST_BUFFER_DECODE, path, output)
+    _run_with_aimdo(HOST_BUFFER_DECODE, path, output, str(block_bytes))
     expected = VideoFromFile(path).get_components()
     with np.load(output) as frames:
         assert np.array_equal(frames["tail"], expected.images[1:].numpy())
@@ -181,6 +183,58 @@ def test_a_refused_reservation_falls_back_to_plain_arrays(tmp_path):
     path = str(tmp_path / "video.mov")
     _write_rgba_video(path, 4)
     _run_with_aimdo(REFUSED_RESERVATION_DECODE, path)
+
+
+REFUSED_ALPHA_RESERVATION_DECODE = """
+import resource
+import sys
+import comfy_aimdo.control
+if not comfy_aimdo.control.init():
+    sys.exit("comfy-aimdo unavailable")
+import psutil
+import torch
+import comfy.memory_management
+from comfy_api.latest._input_impl import video_types
+comfy.memory_management.aimdo_enabled = True
+reservation = psutil.virtual_memory().total + psutil.swap_memory().total
+address_space = psutil.Process().memory_info().vms + reservation + reservation // 2  # room for the frames' buffer only
+resource.setrlimit(resource.RLIMIT_AS, (address_space, resource.getrlimit(resource.RLIMIT_AS)[1]))
+components = video_types.VideoFromFile(sys.argv[1]).get_components()
+expected = torch.arange(4, dtype=torch.float32) * 16 / 255
+assert torch.equal(components.images[:, 0, 0, 0], expected), components.images[:, 0, 0, 0]
+assert torch.equal(components.alpha[:, 0, 0, 0], expected), components.alpha[:, 0, 0, 0]
+"""
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="address space limits need the resource module")
+def test_8_bit_frames_decode_when_only_the_alpha_reservation_is_refused(tmp_path):
+    path = str(tmp_path / "video.mov")
+    _write_rgba_video(path, 4)
+    _run_with_aimdo(REFUSED_ALPHA_RESERVATION_DECODE, path)
+
+
+CACHED_SMALL_DECODES = """
+import sys
+import comfy_aimdo.control
+if not comfy_aimdo.control.init():
+    sys.exit("comfy-aimdo unavailable")
+import psutil
+import comfy.memory_management
+from comfy_api.latest._input_impl import video_types
+comfy.memory_management.aimdo_enabled = True
+assert video_types.host_frames() is not None
+reservation = psutil.virtual_memory().total + psutil.swap_memory().total
+before = psutil.Process().memory_info().vms
+kept = [video_types.VideoFromFile(sys.argv[1]).get_components() for _ in range(3)]
+grown = psutil.Process().memory_info().vms - before
+assert grown < reservation, (grown, reservation)
+"""
+
+
+def test_kept_small_decodes_do_not_hold_their_reservation(tmp_path):
+    path = str(tmp_path / "video.mp4")
+    _write_video(path, _noise_frames(10))
+    _run_with_aimdo(CACHED_SMALL_DECODES, path)
 
 
 # ---- without aimdo: blocks of frames, copied into one tensor at the end ---------------------------------------
