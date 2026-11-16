@@ -4,7 +4,8 @@ import pytest
 import torch
 from torch import nn
 
-from comfy.ldm.minimax.model import MiniMaxH3Model, PackedLayout, time_shift_sigma
+from comfy.ldm.minimax import model as minimax_model
+from comfy.ldm.minimax.model import DiTBlock, MiniMaxH3Model, PackedLayout, RefinerBlock, time_shift_sigma
 from comfy.model_sampling import CONST
 
 
@@ -113,3 +114,58 @@ def test_embed_and_pack_releases_intermediates(conditioning):
     assert torch.equal(slices["video"], outputs["video"])
     assert torch.equal(slices["audio"], outputs["audio"])
     assert torch.equal(slices["text"], context[0])
+
+
+def make_dit_block():
+    return DiTBlock(hidden=8, heads=1, head_dim=8, ffn=8, t_dim=8, eps=1e-6, qk_eps=1e-6,
+                    dtype=torch.float32, device="cpu", operations=nn)
+
+
+def test_dit_block_mlp_chunking_matches_a_full_pass(monkeypatch):
+    block = make_dit_block()
+    tokens = 37
+    x = torch.randn(tokens, 8)
+    t_emb = torch.randn(1, 8)
+    # the middle segment spans two chunks, the last one starts inside a chunk
+    segments = [(0, 5, 0), (5, 20, 1), (20, tokens, 2)]
+
+    def attention(h, rope_freqs=None, transformer_options=None):
+        return 0.5 * h
+
+    with torch.no_grad():
+        expected = block(x.clone(), t_emb, segments, None, attention=attention).clone()
+        chunks = []
+        handle = block.mlp.register_forward_pre_hook(lambda module, args: chunks.append(args[0].shape[0]))
+        try:
+            monkeypatch.setattr(minimax_model, "MLP_TOKEN_CHUNK", 8)
+            actual = block(x.clone(), t_emb, segments, None, attention=attention)
+        finally:
+            handle.remove()
+
+    # the MLP really ran in chunks, and chunking must not change the result
+    assert len(chunks) > 1
+    assert max(chunks) <= 8
+    assert sum(chunks) == tokens
+    torch.testing.assert_close(actual, expected, atol=1e-5, rtol=1e-5)
+
+
+def test_refiner_block_mlp_chunking_matches_a_full_pass(monkeypatch):
+    block = RefinerBlock(hidden=8, heads=1, head_dim=8, ffn=8, eps=1e-6, qk_eps=1e-6,
+                         dtype=torch.float32, device="cpu", operations=nn)
+    tokens = 37
+    x = torch.randn(tokens, 8)
+
+    with torch.no_grad():
+        expected = block(x.clone()).clone()
+        chunks = []
+        handle = block.mlp.register_forward_pre_hook(lambda module, args: chunks.append(args[0].shape[0]))
+        try:
+            monkeypatch.setattr(minimax_model, "MLP_TOKEN_CHUNK", 8)
+            actual = block(x.clone())
+        finally:
+            handle.remove()
+
+    assert len(chunks) > 1
+    assert max(chunks) <= 8
+    assert sum(chunks) == tokens
+    torch.testing.assert_close(actual, expected, atol=1e-5, rtol=1e-5)
