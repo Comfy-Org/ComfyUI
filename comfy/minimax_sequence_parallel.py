@@ -1,12 +1,64 @@
 """Two-device sequence parallelism with replicas owned by model management."""
 
+from contextlib import contextmanager
+import ctypes
 from functools import partial
+import logging
+import sys
 
 import torch
 
 import comfy.model_management as mm
 import comfy.model_patcher
 from comfy.ldm.minimax.model import MiniMaxH3Model, _mod_gate, _mod_scale_shift
+
+
+@contextmanager
+def sampling_memory_policy(source, target):
+    if (sys.platform != "linux" or torch.version.hip is None
+            or any(torch.cuda.get_device_properties(device).gcnArchName.split(":")[0] != "gfx1201" for device in (source, target))):
+        yield
+        return
+    try:
+        numa = ctypes.CDLL("libnuma.so.1", use_errno=True)
+        numa.get_mempolicy.argtypes = [ctypes.POINTER(ctypes.c_int), ctypes.POINTER(ctypes.c_ulong), ctypes.c_ulong, ctypes.c_void_p, ctypes.c_ulong]
+        numa.get_mempolicy.restype = ctypes.c_int
+        numa.set_mempolicy.argtypes = [ctypes.c_int, ctypes.POINTER(ctypes.c_ulong), ctypes.c_ulong]
+        numa.set_mempolicy.restype = ctypes.c_int
+        mode = ctypes.c_int()
+        if numa.get_mempolicy(ctypes.byref(mode), None, 0, None, 0):
+            raise OSError(ctypes.get_errno(), "get_mempolicy failed")
+    except OSError as error:
+        logging.warning("MiniMax H3 NUMA binding unavailable (%s); using the existing memory policy", error)
+        yield
+        return
+    if mode.value != 0:
+        yield
+        return
+    try:
+        with open("/proc/self/status") as status:
+            allowed = next(line.split(":", 1)[1].strip() for line in status if line.startswith("Mems_allowed_list:"))
+        nodes = []
+        for entry in allowed.split(","):
+            limits = [int(value) for value in entry.split("-")]
+            nodes.extend(range(limits[0], limits[-1] + 1))
+        bits = ctypes.sizeof(ctypes.c_ulong) * 8
+        words = (max(nodes) + bits) // bits
+        mask = (ctypes.c_ulong * words)()
+        for node in nodes:
+            mask[node // bits] |= 1 << (node % bits)
+        # Binding without MPOL_F_NUMA_BALANCING avoids NUMA-driven SVM queue evictions.
+        if numa.set_mempolicy(2, mask, words * bits):
+            raise OSError(ctypes.get_errno(), "set_mempolicy failed")
+    except OSError as error:
+        logging.warning("MiniMax H3 NUMA binding unavailable (%s); using the existing memory policy", error)
+        yield
+        return
+    try:
+        yield
+    finally:
+        if numa.set_mempolicy(0, None, 0):
+            raise OSError(ctypes.get_errno(), "Could not restore sampling memory policy")
 
 
 def partition_segments(segments, start, end, device):
@@ -125,6 +177,7 @@ class SequenceParallelSampling:
         for i, block in enumerate(model.blocks):
             replacements[("double_block", i)] = partial(run_block, block, replica_model.blocks[i], target, patcher)
         try:
-            return executor(*args, **kwargs)
+            with sampling_memory_policy(source, target):
+                return executor(*args, **kwargs)
         finally:
             guider.model_options = options
