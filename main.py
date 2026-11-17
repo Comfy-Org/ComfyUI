@@ -607,6 +607,10 @@ def start_comfyui(asyncio_loop=None):
     if args.enable_manager and not args.disable_manager_ui:
         comfyui_manager.start()
 
+    # custom node API (comfy_api.v4): the execution provider, before any pack registers or a prompt runs
+    from comfy_api.latest import _runtime
+    _runtime.load_execution_provider()
+
     hook_breaker_ac10a0.save_functions()
     asyncio_loop.run_until_complete(nodes.init_extra_nodes(
         init_custom_nodes=(not args.disable_all_custom_nodes) or len(args.whitelist_custom_nodes) > 0,

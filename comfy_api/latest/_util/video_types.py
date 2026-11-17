@@ -1,8 +1,12 @@
+from __future__ import annotations
+
 from dataclasses import dataclass
 from enum import Enum
 from fractions import Fraction
-from typing import Optional
-from .._input import ImageInput, AudioInput, MaskInput
+from typing import TYPE_CHECKING, Optional
+
+if TYPE_CHECKING:  # _input imports this module
+    from .._input import ImageInput, AudioInput, MaskInput
 
 class VideoCodec(str, Enum):
     AUTO = "auto"

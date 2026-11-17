@@ -8,11 +8,18 @@ from ._input_impl import VideoFromFile, VideoFromComponents, VideoFromList
 from ._util import VideoCodec, VideoContainer, VideoComponents, MESH, VOXEL, SPLAT, File3D
 from . import _io_public as io
 from . import _ui_public as ui
-from comfy_execution.utils import get_executing_context
-from comfy_execution.progress import get_progress_state, PreviewImageTuple
+from . import util
+from ._engine import eng
 from PIL import Image
-from comfy.cli_args import args
 import numpy as np
+
+
+def _preview_tensor(image):
+    """A preview as the IMAGE tensor ``eng.progress.update`` takes, from a PIL image or a tensor."""
+    if image is None or isinstance(image, ImageInput):
+        return image
+    import torch
+    return torch.from_numpy(np.array(image.convert("RGB"))).float().div(255)
 
 
 class ComfyAPI_latest(ComfyAPIBase):
@@ -48,6 +55,16 @@ class ComfyAPI_latest(ComfyAPIBase):
 
             Migration from previous API: comfy.utils.PROGRESS_BAR_HOOK
             """
+            from . import _runtime
+            runtime = _runtime._active_runtime.get()
+            if runtime is not None and getattr(runtime.ops, "out_of_process", False):
+                from ._engine import eng
+                await eng.progress.update(value, max_value, preview=_preview_tensor(preview_image))
+                return
+            from comfy.cli_args import args
+            from comfy_execution.progress import get_progress_state
+            from comfy_execution.utils import get_executing_context
+
             executing_context = get_executing_context()
             if node_id is None and executing_context is not None:
                 node_id = executing_context.node_id
@@ -55,7 +72,7 @@ class ComfyAPI_latest(ComfyAPIBase):
                 raise ValueError("node_id must be provided if not in executing context")
 
             # Convert preview_image to PreviewImageTuple if needed
-            to_display: PreviewImageTuple | Image.Image | ImageInput | None = preview_image
+            to_display = preview_image
             if to_display is not None:
                 # First convert to PIL Image if needed
                 if isinstance(to_display, ImageInput):
@@ -126,6 +143,26 @@ class ComfyExtension(ABC):
         Returns a list of nodes that this extension provides.
         """
 
+    async def get_samplers(self) -> dict | None:
+        """``{name: fn}``: samplers added to ComfyUI's sampler list. ``fn`` is a sampling loop, as
+        ``eng.sampler.custom`` takes: ``fn(model, x, sigmas, extra_args, callback=None, disable=None)``."""
+        return None
+
+    async def get_schedulers(self) -> dict | None:
+        """``{name: fn}``: schedulers added to ComfyUI's scheduler list. ``fn(model_sampling, steps)``
+        returns the sigmas; ``model_sampling`` is ``{"sigma_min", "sigma_max", "sigmas", "sigma",
+        "timestep", "percent_to_sigma"}``, the last three functions that call the engine."""
+        return None
+
+    async def get_model_folders(self) -> dict | None:
+        """``{folder: [extensions] or None}``: model folders the pack's files live in, such as
+        ``{"onnx": ["onnx"]}``; ``io.ModelFolder`` lists them."""
+        return None
+
+    async def get_node_replacements(self) -> list | None:
+        """``io.NodeReplace`` entries: what replaces node ids old workflows use."""
+        return None
+
 class Input:
     Image = ImageInput
     Audio = AudioInput
@@ -171,8 +208,10 @@ __all__ = [
     "Types",
     "Caching",
     "ComfyExtension",
+    "eng",
     "io",
     "IO",
     "ui",
     "UI",
+    "util",
 ]
