@@ -1,4 +1,3 @@
-from types import SimpleNamespace
 
 import pytest
 import torch
@@ -11,13 +10,10 @@ import comfy.model_management
 import comfy.ops
 import comfy.sd
 import nodes
-from comfy_extras.nodes_edit_model import ReferenceLatent
+from comfy_extras.nodes_hidream_o1 import HiDreamO1ReferenceImages
 from comfy.ldm.sensenova import model as sensenova_model
-from comfy.ldm.sensenova.interleave import (
-    prefix_arguments,
-)
+from comfy.ldm.sensenova.conditioning import prepare_interleave_image
 from comfy.text_encoders.sensenova import (
-    SenseNovaTextEncoder,
     INTERLEAVE_SYSTEM_MESSAGE,
     SenseNovaQwenTokenizer,
     SenseNovaTokenizer,
@@ -30,20 +26,22 @@ from comfy_extras.nodes_sensenova import (
     append_interleave_image,
     append_interleave_tokens,
     expand_interleave_metadata,
-    TextGenerateSenseNova,
+    SenseNovaConditioning,
     SenseNovaInterleaveDecode,
 )
 from sensenova_test_utils import (
+    prefix_arguments,
+    prepared_prefix,
     PatchEmbedding,
     _generation_input_ids,
     _run_prepared_generation,
-    _text_model_patcher,
+    _text_clip,
     _tokenize_generation_prompt,
 )
 
 
-def test_sensenova_thinking_returns_stop_without_decoding_suffix():
-    model = object.__new__(sensenova_model.SenseNovaU15)
+def test_sensenova_text_returns_stop_without_decoding_suffix():
+    model = object.__new__(sensenova_model.SenseNovaTextModel)
     torch.nn.Module.__init__(model)
     model.has_lm_head = True
     tokens = iter((42, 151668))
@@ -55,7 +53,7 @@ def test_sensenova_thinking_returns_stop_without_decoding_suffix():
         [torch.zeros(1, 1, 1, 1)],
         torch.tensor([3]),
     )
-    model._next_text_token = lambda hidden: torch.tensor([next(tokens)])
+    model._next_text_token = lambda hidden, **sampling: torch.tensor([next(tokens)])
 
     def decode(token, caches, hidden, rope, transformer_options=None):
         decoded.append(int(token.item()))
@@ -64,14 +62,16 @@ def test_sensenova_thinking_returns_stop_without_decoding_suffix():
     progress_updates = []
     interrupt_calls = []
 
-    token_ids = model.generate_thinking_tokens(
+    token_ids, stop_token = model.generate_text_tokens(
         torch.tensor([[1, 2, 3]]),
-        max_think_tokens=4,
+        max_tokens=4,
+        stop_token_ids=(151668,),
         progress=progress_updates.append,
         interrupt=lambda: interrupt_calls.append(True),
     )
 
     assert token_ids == [42, 151668]
+    assert stop_token == 151668
     assert decoded == [42]
     assert progress_updates == [1, 2]
     assert interrupt_calls == [True, True]
@@ -80,37 +80,38 @@ def test_sensenova_thinking_returns_stop_without_decoding_suffix():
 @pytest.mark.parametrize(
     ("tokens", "max_think_tokens", "expected_decoded"),
     [
-        ((42, 43), 1, [42, 151668]),
-        ((151645,), 4, [151668]),
+        ((42, 43), 1, [42]),
+        ((151645,), 4, []),
+        ((151668,), 4, [151668]),
     ],
 )
-def test_sensenova_thinking_closes_truncated_reasoning(
-    tokens, max_think_tokens, expected_decoded
+def test_sensenova_thinking_preserves_reference_stop_protocol(
+    monkeypatch, tokens, max_think_tokens, expected_decoded
 ):
-    model = object.__new__(sensenova_model.SenseNovaU15)
-    torch.nn.Module.__init__(model)
-    model.has_lm_head = True
-    token_iterator = iter(tokens)
-    decoded = []
-
-    model._preprocess_prefix_state = lambda *args, **kwargs: (
-        torch.zeros(1, 1, 1),
-        [torch.zeros(1, 1, 1, 1)],
-        [torch.zeros(1, 1, 1, 1)],
-        torch.tensor([3]),
-    )
-    model._next_text_token = lambda hidden: torch.tensor([next(token_iterator)])
-
-    def decode(token, caches, hidden, rope, transformer_options=None):
-        decoded.append(int(token.item()))
-
-    model._decode_text_token = decode
-    token_ids = model.generate_thinking_tokens(
-        torch.tensor([[1, 2, 3]]), max_think_tokens=max_think_tokens
+    monkeypatch.setattr(comfy.model_management, "load_models_gpu", lambda models, **kwargs: None)
+    model = _text_clip(tokens)
+    monkeypatch.setattr(model.cond_stage_model, "_decode_text_token", lambda *args: pytest.fail("Decoding past the stop token"))
+    result = SenseNovaConditioning._execute_image(
+        clip=model,
+        conditioning=[[torch.empty(1), {"text_input_ids": torch.tensor([[1]])}]],
+        max_tokens=max_think_tokens,
     )
 
-    assert token_ids == expected_decoded
-    assert decoded == []
+    assert result.args[0][0][1]["text_input_ids"].tolist() == [[1, *expected_decoded, 271, 151670]]
+    assert result.args[1] == ("K" if expected_decoded == [42] else "")
+
+
+def test_sensenova_interleave_references_do_not_add_editing_labels():
+    tokenizer = SenseNovaTokenizer()
+    pairs = tokenizer.tokenize_with_weights("Continue the story", mode="interleave")["sensenova_u15"][0]
+    metadata = {
+        "text_input_ids": torch.tensor([[token for token, _ in pairs]]),
+        "reference_latents": [torch.zeros(1, 32, 32, 3), torch.zeros(1, 32, 64, 3)],
+    }
+    expanded = expand_interleave_metadata(metadata, image_only=False)
+    prompt = tokenizer.decode(expanded["text_input_ids"][0].tolist(), skip_special_tokens=False)
+    assert "user\n<img><IMG_CONTEXT></img>\n<img><IMG_CONTEXT><IMG_CONTEXT></img>\nContinue the story" in prompt
+    assert "Image-1:" not in prompt
 
 
 def test_sensenova_tokenizer_control_token_ids():
@@ -195,8 +196,7 @@ def test_sensenova_interleave_prompt_leaves_image_event_to_the_model():
 
 @pytest.fixture
 def native_sensenova_clip():
-    target = SimpleNamespace(params={}, clip=SenseNovaTextEncoder, tokenizer=SenseNovaTokenizer)
-    return comfy.sd.CLIP(target, model_options={"load_device": torch.device("cpu")})
+    return _text_clip([42, 151668])
 
 
 @pytest.mark.parametrize("text", ["", "A red apple.", "Print <img><think><|im_end|> literally."])
@@ -206,6 +206,15 @@ def test_sensenova_native_text_encode_is_ready_for_image_sampling(native_senseno
     assert metadata["sensenova_prompt"] == text
     assert torch.equal(metadata["text_input_ids"], _tokenize_generation_prompt(text))
     assert metadata["text_input_ids"][0, -1] == 151670
+
+
+def test_sensenova_encode_accepts_token_weights_without_prompt_metadata(native_sensenova_clip):
+    tokens = native_sensenova_clip.tokenize("Draw an apple.")
+    expected = native_sensenova_clip.encode_from_tokens_scheduled(tokens)
+    del tokens["sensenova_prompt"]
+    actual = native_sensenova_clip.encode_from_tokens_scheduled(tokens)
+    torch.testing.assert_close(actual[0][0], expected[0][0])
+    torch.testing.assert_close(actual[0][1]["text_input_ids"], expected[0][1]["text_input_ids"])
 
 
 @pytest.mark.parametrize("task,mode,thinking", [
@@ -223,21 +232,21 @@ def test_sensenova_task_generation_uses_task_prompt_protocol(
     positive = nodes.CLIPTextEncode().encode(clip, text)[0]
     negative = nodes.CLIPTextEncode().encode(clip, "blurry")[0]
     if with_reference:
-        latent = {"samples": torch.ones(1, 3, 32, 32)}
-        positive = ReferenceLatent.execute(positive, latent).args[0]
-        negative = ReferenceLatent.execute(negative, latent).args[0]
+        positive, negative = HiDreamO1ReferenceImages.execute(
+            positive=positive, negative=negative, images={"image_1": torch.ones(1, 32, 32, 3)},
+        ).args
     positive[0][1]["strength"] = 0.7
     original_ids = positive[0][1]["text_input_ids"].clone()
     generated = [42, 151668 if task["task"] == "image thinking" else 151670]
-    model = _text_model_patcher(generated)
+    model = _text_clip(generated)
     monkeypatch.setattr(sensenova_model, "HIDDEN_SIZE", len(generated))
-    model.model.diffusion_model.vision_model = PatchEmbedding(3, len(generated), kernel_size=32, stride=32)
-    embeddings = model.model.diffusion_model.language_model.model.embed_tokens.weight.detach()
+    model.cond_stage_model.vision_model = PatchEmbedding(3, len(generated), kernel_size=32, stride=32)
+    embeddings = model.cond_stage_model.language_model.model.embed_tokens.weight.detach()
     for token in (198, 271):
         embeddings[token].copy_(embeddings[1])
-    result = TextGenerateSenseNova.execute(
-        model=model, clip=clip, conditioning=positive,
-        task={**task, "negative": negative}, max_tokens=8,
+    result = SenseNovaConditioning.execute(
+        clip=model, conditioning=positive,
+        task=task, negative=negative, max_tokens=8,
     ).args
     protocol_tokens = clip.tokenize(text, mode=mode, thinking=thinking)
     protocol_conditioning = clip.encode_from_tokens_scheduled(protocol_tokens)
@@ -254,31 +263,32 @@ def test_sensenova_task_generation_uses_task_prompt_protocol(
     assert torch.equal(positive[0][1]["text_input_ids"], original_ids)
     assert "sensenova_interleave_expanded" not in positive[0][1]
     if task["task"] != "image thinking":
-        continuation = _text_model_patcher([151671, 43, 151645])
+        continuation = _text_clip([151671, 43, 151645])
         monkeypatch.setattr(sensenova_model, "HIDDEN_SIZE", 3)
-        continuation.model.diffusion_model.vision_model = PatchEmbedding(3, 3, kernel_size=32, stride=32)
+        continuation.cond_stage_model.vision_model = PatchEmbedding(3, 3, kernel_size=32, stride=32)
         def unexpected_tokenize(*args, **kwargs):
             raise AssertionError("An expanded history must not be tokenized again")
         monkeypatch.setattr(clip, "tokenize", unexpected_tokenize)
-        resumed = TextGenerateSenseNova.execute(
-            model=continuation, clip=clip, conditioning=result[0],
-            task={**task, "negative": result[2], "samples": {"samples": torch.zeros(1, 3, 32, 32)}},
+        resumed = SenseNovaConditioning.execute(
+            clip=continuation, conditioning=result[0], negative=result[2],
+            task={**task, "samples": {"samples": torch.zeros(1, 3, 32, 32)}},
             max_tokens=8,
         ).args
         assert resumed[3] is False
         assert resumed[0][0][1]["sensenova_interleave_finished"] is True
         assert resumed[0][0][1]["text_input_ids"].tolist() == [expected_ids[0].tolist() + [151669, 151671, 43]]
         assert len(resumed[0][0][1]["reference_latents"]) == int(with_reference) + 1
+        assert resumed[0][0][1]["reference_latents"][-1] is resumed[2][0][1]["reference_latents"][-1]
 
 
 def test_sensenova_generate_requires_head_only_for_token_generation(native_sensenova_clip):
     clip = native_sensenova_clip
     conditioning = nodes.CLIPTextEncode().encode(clip, "Draw an apple.")[0]
-    model = _text_model_patcher([42, 151668])
-    model.model.diffusion_model.has_lm_head = False
-    del model.model.diffusion_model.language_model.lm_head
+    model = _text_clip([42, 151668])
+    model.cond_stage_model.has_lm_head = False
+    del model.cond_stage_model.language_model.lm_head
     with pytest.raises(RuntimeError, match="required for text generation"):
-        TextGenerateSenseNova.execute(model=model, clip=clip, conditioning=conditioning,
+        SenseNovaConditioning.execute(clip=model, conditioning=conditioning,
             task={"task": "image thinking"}, max_tokens=8)
 
 
@@ -339,9 +349,8 @@ def test_sensenova_interleave_reference_is_part_of_the_initial_prefix():
 def test_sensenova_generate_returns_prefix_conditioning_and_text(monkeypatch, prompt_type, with_reference):
     monkeypatch.setattr(comfy.model_management, "load_models_gpu", lambda models, **kwargs: None)
     monkeypatch.setattr(sensenova_model, "HIDDEN_SIZE", 3)
-    model = _text_model_patcher([41, 42, 151668])
-    model.model.concat_keys = ()
-    diffusion = model.model.diffusion_model
+    model = _text_clip([41, 42, 151668])
+    diffusion = model.cond_stage_model
     diffusion.vision_model = PatchEmbedding(3, 3, kernel_size=32, stride=32)
     embeddings = diffusion.language_model.model.embed_tokens.weight.detach()
     embeddings[198].copy_(embeddings[1])
@@ -351,8 +360,8 @@ def test_sensenova_generate_returns_prefix_conditioning_and_text(monkeypatch, pr
         "text_input_ids": input_ids, "reference_latents": references, "prompt_type": prompt_type,
     }]]
 
-    updated, text, negative, requested = TextGenerateSenseNova._execute_image(
-        model=model, clip=SenseNovaQwenTokenizer(), conditioning=conditioning, max_tokens=8,
+    updated, text, negative, requested = SenseNovaConditioning._execute_image(
+        clip=model, conditioning=conditioning, max_tokens=8,
     ).args
 
     metadata = updated[0][1]
@@ -363,23 +372,16 @@ def test_sensenova_generate_returns_prefix_conditioning_and_text(monkeypatch, pr
     assert metadata["text_input_ids"].tolist() == [input_ids[0].tolist() + [41, 42, 151668, 271, 151670]]
     assert metadata["sensenova_thinking_start"] == input_ids.shape[1]
     assert metadata["reference_latents"] is references
-    assert not {"prefix_keys", "prefix_values", "prefix_time"} & metadata.keys()
+    assert {"prefix_keys", "prefix_values", "prefix_time"} <= metadata.keys()
     assert conditioning[0][1]["text_input_ids"] is input_ids
     assert "sensenova_thinking_start" not in conditioning[0][1]
 
-    conds = model.model.extra_conds(**metadata, device=model.load_device, hooks=object())
-    sampler_ids = conds["text_input_ids"].cond
+    conds = prepared_prefix(**{**metadata, "prompt_type": None})
+    sampler_ids = conds["text_input_ids"]
     assert (sampler_ids == 151669).sum().item() == (6 if with_reference else 0)
-    if with_reference and prompt_type == "negative":
-        assert sampler_ids.tolist() == [[
-            151644, 872, 198, 151670, *[151669] * 6, 151671,
-            151645, 198, 151644, 77091, 198, 151670,
-        ]]
-        assert "text_suffix" not in conds
-    else:
-        assert conds["text_suffix"].cond.tolist() == [[41, 42, 151668, 271, 151670]]
+    assert conds["text_suffix"].tolist() == [[41, 42, 151668, 271, 151670]]
     if with_reference:
-        assert conds["reference_images"].cond[0].shape == (1, 3, 33, 65)
+        assert conds["reference_images"][0].shape == (1, 3, 33, 65)
 
 
 @pytest.mark.parametrize("interleave,token_ids,expected", [
@@ -407,7 +409,7 @@ def test_sensenova_generate_returns_current_text_without_think_wrappers(
     }]]
     output = _run_prepared_generation(
         generation_mode="interleave" if interleave else "image",
-        model=_text_model_patcher(token_ids), clip=SenseNovaQwenTokenizer(),
+        clip=_text_clip(token_ids),
         conditioning=positive,
         negative=[[torch.empty(1), {"text_input_ids": torch.tensor([[9]])}]],
         max_think_tokens=8,
@@ -436,7 +438,7 @@ def test_sensenova_interleave_display_uses_thinking_history(
     prompt_ids = [151667, 151668, 1]
     first = _run_prepared_generation(
         generation_mode="interleave",
-        model=_text_model_patcher(first_tokens), clip=clip,
+        clip=_text_clip(first_tokens),
         conditioning=[[torch.empty(1), {"text_input_ids": torch.tensor([prompt_ids]), "sensenova_interleave": True}]],
         negative=[[torch.empty(1), {"text_input_ids": torch.tensor([[9]]), "sensenova_interleave": True}]],
         max_think_tokens=8,
@@ -445,12 +447,12 @@ def test_sensenova_interleave_display_uses_thinking_history(
 
     # After image feedback the prefix ends with </img>; continue from that token.
     continuation = [151671, 43, 151668, 44, 151667, 45, 151645]
-    model = _text_model_patcher(continuation)
+    model = _text_clip(continuation)
     monkeypatch.setattr(sensenova_model, "HIDDEN_SIZE", len(continuation))
-    model.model.diffusion_model.vision_model = PatchEmbedding(3, len(continuation), kernel_size=32, stride=32)
+    model.cond_stage_model.vision_model = PatchEmbedding(3, len(continuation), kernel_size=32, stride=32)
     second = _run_prepared_generation(
         generation_mode="interleave",
-        model=model, clip=clip, conditioning=first.args[0], negative=first.args[2],
+        clip=model, conditioning=first.args[0], negative=first.args[2],
         samples={"samples": torch.zeros(1, 3, 32, 32)}, max_think_tokens=8,
     )
     assert second.args[1] == stage_text
@@ -472,16 +474,15 @@ def test_sensenova_interleave_display_uses_thinking_history(
 def test_sensenova_generated_image_markers_remain_text_for_sampler(monkeypatch, marker, reference_shapes):
     monkeypatch.setattr(comfy.model_management, "load_models_gpu", lambda models, **kwargs: None)
     token_ids = [42, marker, 43, 151668]
-    model = _text_model_patcher(token_ids)
-    model.model.concat_keys = ()
+    model = _text_clip(token_ids)
     width = len(token_ids)
     for name, value in (("HIDDEN_SIZE", width), ("INTERMEDIATE_SIZE", 16), ("NUM_HEADS", 1), ("NUM_KV_HEADS", 1)):
         monkeypatch.setattr(sensenova_model, name, value)
 
-    diffusion = model.model.diffusion_model
+    diffusion = model.cond_stage_model
     diffusion.vision_model = PatchEmbedding(3, width, kernel_size=32, stride=32)
     # The initial reference prefix ends in a newline, not the last prompt token.
-    embedding = model.model.diffusion_model.language_model.model.embed_tokens.weight.detach()
+    embedding = model.cond_stage_model.language_model.model.embed_tokens.weight.detach()
     embedding[198].copy_(embedding[1])
     positive = [[torch.empty(1), {
         "text_input_ids": _generation_input_ids()[:, :-1],
@@ -490,7 +491,7 @@ def test_sensenova_generated_image_markers_remain_text_for_sampler(monkeypatch, 
 
     result = _run_prepared_generation(
         generation_mode="image",
-        model=model, clip=SenseNovaQwenTokenizer(), conditioning=positive, max_think_tokens=8,
+        clip=model, conditioning=positive, max_think_tokens=8,
     )
     metadata = result.args[0][0][1]
     assert metadata["text_input_ids"][0, 15:].tolist() == [42, marker, 43, 151668, 271, 151670]
@@ -506,18 +507,16 @@ def test_sensenova_generated_image_markers_remain_text_for_sampler(monkeypatch, 
                 parameter.detach().fill_(1)
             else:
                 parameter.detach().normal_(std=0.15, generator=generator)
-    conds = model.model.extra_conds(**metadata, device=torch.device("cpu"))
-    assert conds["prefix_time"].cond.tolist() == [{0: 21, 1: 25, 2: 37}[len(reference_shapes)]]
+    conds = model.encode_from_tokens_scheduled(metadata)[0][1]
+    assert conds["prefix_time"].tolist() == [{0: 21, 1: 25, 2: 37}[len(reference_shapes)]]
 
     # An ordinary token with the same embedding is an independent text-only oracle.
     embedding[100].copy_(embedding[marker])
     plain_ids = metadata["text_input_ids"].clone()
     plain_ids[0, 16] = 100
-    plain = model.model.extra_conds(
-        text_input_ids=plain_ids, reference_latents=metadata["reference_latents"], device=torch.device("cpu"),
-    )
+    plain = model.encode_from_tokens_scheduled({"text_input_ids": plain_ids, "reference_latents": metadata["reference_latents"]})[0][1]
     for kind in ("prefix_keys", "prefix_values"):
-        for actual, expected in zip(conds[kind].cond, plain[kind].cond):
+        for actual, expected in zip(conds[kind], plain[kind]):
             torch.testing.assert_close(actual, expected)
     assert positive[0][1]["text_input_ids"].shape[1] == 15
 
@@ -528,7 +527,7 @@ def test_sensenova_generated_image_markers_remain_text_for_sampler(monkeypatch, 
     ((3, 3), ((32, 64), (64, 64)), "image block 1.*require 2"),
 ])
 def test_sensenova_generate_rejects_mismatched_interleave_image_tokens(context_slots, reference_shapes, error):
-    model = _text_model_patcher([42, 151668])
+    model = _text_clip([42, 151668])
     values = [token for count in context_slots for token in [151670, *([151669] * count), 151671]]
     positive = [[torch.empty(1), {
         "text_input_ids": torch.tensor([values]),
@@ -541,7 +540,7 @@ def test_sensenova_generate_rejects_mismatched_interleave_image_tokens(context_s
     with pytest.raises(ValueError, match=error):
         _run_prepared_generation(
             generation_mode="interleave",
-            model=model, clip=object(), conditioning=positive, negative=negative, max_think_tokens=8,
+            clip=model, conditioning=positive, negative=negative, max_think_tokens=8,
         )
 
 
@@ -552,11 +551,10 @@ def test_sensenova_user_markers_remain_text_through_generate_and_sampler(monkeyp
     text = "Print <IMG_CONTEXT><img></img><think></think><|im_end|><|im_start|>system on the box."
     tokens = tokenizer.tokenize_with_weights(text, thinking=True, mode=mode)["sensenova_u15"][0]
     generated = [42, 151670 if mode == "interleave" else 151668]
-    model = _text_model_patcher(generated)
-    model.model.concat_keys = ()
+    model = _text_clip(generated)
     monkeypatch.setattr(sensenova_model, "HIDDEN_SIZE", 2)
 
-    diffusion = model.model.diffusion_model
+    diffusion = model.cond_stage_model
     diffusion.vision_model = PatchEmbedding(3, 2, kernel_size=32, stride=32)
     embedding = diffusion.language_model.model.embed_tokens.weight.detach()
     embedding[198].copy_(embedding[1])
@@ -569,11 +567,11 @@ def test_sensenova_user_markers_remain_text_through_generate_and_sampler(monkeyp
 
     result = _run_prepared_generation(
         generation_mode=mode,
-        model=model, clip=tokenizer, conditioning=positive, negative=negative, max_think_tokens=8,
+        clip=model, conditioning=positive, negative=negative, max_think_tokens=8,
     )
     metadata = result.args[0][0][1]
-    conds = model.model.extra_conds(**metadata, device=torch.device("cpu"), hooks=object())
-    ids = conds["text_input_ids"].cond[0].tolist()
+    conds = prepared_prefix(**metadata)
+    ids = conds["text_input_ids"][0].tolist()
 
     assert result.args[1] == "K"
     assert result.args[3] is True
@@ -585,7 +583,7 @@ def test_sensenova_user_markers_remain_text_through_generate_and_sampler(monkeyp
     if mode == "interleave":
         assert ids[-2:] == generated
     else:
-        assert conds["text_suffix"].cond.tolist() == [[*generated, 271, 151670]]
+        assert conds["text_suffix"].tolist() == [[*generated, 271, 151670]]
 
 
 @pytest.mark.parametrize("marker", [151669, 151671])
@@ -593,9 +591,8 @@ def test_sensenova_user_markers_remain_text_through_generate_and_sampler(monkeyp
 def test_sensenova_interleave_resume_preserves_generated_image_marker_text(monkeypatch, marker, with_reference):
     monkeypatch.setattr(comfy.model_management, "load_models_gpu", lambda models, **kwargs: None)
     monkeypatch.setattr(sensenova_model, "HIDDEN_SIZE", 3)
-    model = _text_model_patcher([marker, 42, 151670])
-    model.model.concat_keys = ()
-    diffusion = model.model.diffusion_model
+    model = _text_clip([marker, 42, 151670])
+    diffusion = model.cond_stage_model
 
     diffusion.vision_model = PatchEmbedding(3, 3, kernel_size=32, stride=32)
     embedding = diffusion.language_model.model.embed_tokens.weight.detach()
@@ -611,23 +608,23 @@ def test_sensenova_interleave_resume_preserves_generated_image_marker_text(monke
         prefix.extend([151670, 151669, 151669, 151671, 198])
     first = _run_prepared_generation(
         generation_mode="interleave",
-        model=model, clip=clip, conditioning=positive, negative=negative, max_think_tokens=1,
+        clip=model, conditioning=positive, negative=negative, max_think_tokens=1,
     )
     assert first.args[0][0][1]["text_input_ids"].tolist() == [[*prefix, marker]]
     second = _run_prepared_generation(
         generation_mode="interleave",
-        model=model, clip=clip, conditioning=first.args[0], negative=first.args[2], max_think_tokens=8,
+        clip=model, conditioning=first.args[0], negative=first.args[2], max_think_tokens=8,
     )
     metadata = second.args[0][0][1]
     assert second.args[3] is True
     assert metadata["text_input_ids"].tolist() == [[*prefix, marker, 42, 151670]]
-    conds = model.model.extra_conds(**metadata, device=torch.device("cpu"), hooks=object())
-    assert conds["text_input_ids"].cond.tolist() == [[*prefix, marker, 42, 151670]]
+    conds = prepared_prefix(**metadata)
+    assert conds["text_input_ids"].tolist() == [[*prefix, marker, 42, 151670]]
 
     samples = {"samples": torch.ones(1, 3, 32, 32)}
     third = _run_prepared_generation(
         generation_mode="interleave",
-        model=model, clip=clip, conditioning=second.args[0], negative=second.args[2],
+        clip=model, conditioning=second.args[0], negative=second.args[2],
         samples=samples, max_think_tokens=8,
     )
     next_text = [marker, 42, 151670] if marker == 151669 else [42, 151670]
@@ -644,20 +641,19 @@ def test_sensenova_interleave_resume_preserves_generated_image_marker_text(monke
 
 def test_sensenova_interleave_token_limit_can_resume_to_image(monkeypatch):
     monkeypatch.setattr(comfy.model_management, "load_models_gpu", lambda models, **kwargs: None)
-    model = _text_model_patcher([42, 43, 151670])
-    clip = SenseNovaQwenTokenizer()
+    model = _text_clip([42, 43, 151670])
     positive = [[torch.empty(1), {"text_input_ids": torch.tensor([[1]]), "sensenova_interleave": True}]]
     negative = [[torch.empty(1), {"text_input_ids": torch.tensor([[9]]), "sensenova_interleave": True}]]
     first = _run_prepared_generation(
         generation_mode="interleave",
-        model=model, clip=clip, conditioning=positive, negative=negative, max_think_tokens=1,
+        clip=model, conditioning=positive, negative=negative, max_think_tokens=1,
     )
     assert first.args[3] is False
     assert first.args[0][0][1]["text_input_ids"].tolist() == [[1, 42]]
 
     second = _run_prepared_generation(
         generation_mode="interleave",
-        model=model, clip=clip, conditioning=first.args[0], negative=first.args[2], max_think_tokens=8,
+        clip=model, conditioning=first.args[0], negative=first.args[2], max_think_tokens=8,
     )
     assert second.args[3] is True
     assert second.args[0][0][1]["text_input_ids"].tolist() == [[1, 42, 43, 151670]]
@@ -683,18 +679,20 @@ def test_sensenova_interleave_negative_modes_preserve_generation_and_decode(
         metadata["reference_latents"] = [torch.ones(1, 33, 65, 3)]
     negative = [[torch.empty(1), metadata]]
     positive = [[torch.empty(1), {"text_input_ids": torch.tensor([[1]]), "sensenova_interleave": True}]]
-    model = _text_model_patcher([42, 151670])
+    monkeypatch.setattr(sensenova_model, "HIDDEN_SIZE", 2)
+    model = _text_clip([42, 151670])
+    model.cond_stage_model.vision_model = PatchEmbedding(3, 2, kernel_size=32, stride=32)
     clip = SenseNovaQwenTokenizer()
 
     first = _run_prepared_generation(
         generation_mode="interleave",
-        model=model, clip=clip, conditioning=positive, negative=negative,
+        clip=model, conditioning=positive, negative=negative,
         max_think_tokens=1,
     )
     assert first.args[3] is False
     second = _run_prepared_generation(
         generation_mode="interleave",
-        model=model, clip=clip, conditioning=first.args[0], negative=first.args[2],
+        clip=model, conditioning=first.args[0], negative=first.args[2],
         max_think_tokens=8,
     )
 
@@ -734,7 +732,7 @@ def test_sensenova_generate_interleave_ignores_empty_reference_batches(monkeypat
 
     output = _run_prepared_generation(
         generation_mode="interleave",
-        model=_text_model_patcher([42, 151670]), clip=SenseNovaQwenTokenizer(),
+        clip=_text_clip([42, 151670]),
         conditioning=positive, negative=negative, max_think_tokens=8,
     )
 
@@ -766,7 +764,7 @@ def test_sensenova_decode_excludes_prompt_and_input_images():
         "inspect</think>answer <image1>", disable_weights=True
     )[0]]
     metadata = append_interleave_tokens(metadata, before, True)
-    metadata = append_interleave_image(metadata, torch.zeros(1, 3, 32, 64))
+    metadata = append_interleave_image(metadata, *prepare_interleave_image(torch.zeros(1, 3, 32, 64)))
     metadata = append_interleave_tokens(metadata, after, False)
     conditioning = [[torch.empty(1), metadata]]
 
@@ -788,7 +786,7 @@ def test_sensenova_decode_requires_samples_for_pending_image(previous_images):
     )
     for _ in range(previous_images):
         metadata = append_interleave_tokens(metadata, [151670], True)
-        metadata = append_interleave_image(metadata, torch.zeros(1, 3, 32, 64))
+        metadata = append_interleave_image(metadata, *prepare_interleave_image(torch.zeros(1, 3, 32, 64)))
     metadata = append_interleave_tokens(metadata, [151670], True)
 
     with pytest.raises(ValueError, match="SenseNova Interleave Decode.*samples.*KSampler"):
@@ -813,7 +811,7 @@ def test_sensenova_decode_includes_pending_image_once_without_mutating_history()
         "between<img>", disable_weights=True
     )[0]]
     metadata = append_interleave_tokens(metadata, before, True)
-    metadata = append_interleave_image(metadata, torch.zeros(1, 3, 32, 64))
+    metadata = append_interleave_image(metadata, *prepare_interleave_image(torch.zeros(1, 3, 32, 64)))
     metadata = append_interleave_tokens(metadata, between, True)
     conditioning = [[torch.empty(1), metadata]]
     samples = {"samples": torch.tensor([-2.0, 0.0, 2.0]).reshape(1, 1, 1, 3).expand(1, 3, 1, 3).clone()}
@@ -836,7 +834,7 @@ def test_sensenova_decode_includes_pending_image_once_without_mutating_history()
 
 
 @pytest.mark.parametrize("channels", [1, 4])
-@pytest.mark.parametrize("consumer", [TextGenerateSenseNova, SenseNovaInterleaveDecode])
+@pytest.mark.parametrize("consumer", [SenseNovaConditioning, SenseNovaInterleaveDecode])
 def test_sensenova_interleave_rejects_non_rgb_pixel_latents(channels, consumer):
     metadata = expand_interleave_metadata(
         {"text_input_ids": _generation_input_ids()[:, :-1], "sensenova_interleave": True},
@@ -848,11 +846,11 @@ def test_sensenova_interleave_rejects_non_rgb_pixel_latents(channels, consumer):
         clip=SenseNovaQwenTokenizer(), conditioning=conditioning,
         samples={"samples": torch.zeros(1, channels, 32, 32)},
     )
-    if consumer is TextGenerateSenseNova:
-        kwargs.update(model=object(), negative=conditioning, max_think_tokens=8, generation_mode="interleave")
+    if consumer is SenseNovaConditioning:
+        kwargs.update(clip=object(), negative=conditioning, max_think_tokens=8, generation_mode="interleave")
 
     with pytest.raises(ValueError, match="three-channel RGB pixel latent"):
-        if consumer is TextGenerateSenseNova:
+        if consumer is SenseNovaConditioning:
             _run_prepared_generation(**kwargs)
         else:
             consumer.execute(**kwargs)
@@ -926,7 +924,8 @@ def test_sensenova_decode_clamps_images_without_changing_reference_history():
         image_only=False,
     )
     metadata = append_interleave_tokens(metadata, [151670], True)
-    metadata = append_interleave_image(metadata, torch.tensor([[[[-2.0, 2.0]]]]).expand(1, 3, 1, 2))
+    samples = torch.tensor([[[[-2.0, 2.0]]]]).expand(1, 3, 1, 2)
+    metadata = append_interleave_image(metadata, *prepare_interleave_image(samples))
 
     _, images, _ = SenseNovaInterleaveDecode.execute(
         clip=SenseNovaQwenTokenizer(), conditioning=[[torch.empty(1), metadata]],
@@ -948,15 +947,14 @@ def test_sensenova_image_thinking_can_start_interleave(native_sensenova_clip, mo
         positive[0][1]["reference_latents"] = [reference]
         negative[0][1]["reference_latents"] = [reference]
     monkeypatch.setattr(sensenova_model, "HIDDEN_SIZE", 2)
-    model = _text_model_patcher([42, 151668])
-    model.model.concat_keys = ()
-    diffusion = model.model.diffusion_model
+    model = _text_clip([42, 151668])
+    diffusion = model.cond_stage_model
     diffusion.vision_model = PatchEmbedding(3, 2, kernel_size=32, stride=32)
     embeddings = diffusion.language_model.model.embed_tokens.weight.detach()
     for token in (198, 271, 151671):
         embeddings[token].copy_(embeddings[1])
-    thought = TextGenerateSenseNova.execute(
-        model=model, clip=clip, conditioning=positive,
+    thought = SenseNovaConditioning.execute(
+        clip=model, conditioning=positive,
         task={"task": "image thinking"}, max_tokens=8,
     ).args[0]
     original_ids = thought[0][1]["text_input_ids"].clone()
@@ -965,21 +963,21 @@ def test_sensenova_image_thinking_can_start_interleave(native_sensenova_clip, mo
     head[151670].copy_(head[151668])
     head[151668].zero_()
 
-    first = TextGenerateSenseNova.execute(
-        model=model, clip=clip, conditioning=thought,
-        task={**task, "negative": negative}, max_tokens=8,
+    first = SenseNovaConditioning.execute(
+        clip=model, conditioning=thought,
+        task=task, negative=negative, max_tokens=8,
     ).args
-    second = TextGenerateSenseNova.execute(
-        model=model, clip=clip, conditioning=first[0],
-        task={**task, "negative": first[2], "samples": {"samples": torch.zeros(1, 3, 32, 32)}},
+    second = SenseNovaConditioning.execute(
+        clip=model, conditioning=first[0], negative=first[2],
+        task={**task, "samples": {"samples": torch.zeros(1, 3, 32, 32)}},
         max_tokens=8,
     ).args
 
     assert first[3] is second[3] is True
     for conditioning in (second[0], second[2]):
         metadata = conditioning[0][1]
-        conds = model.model.extra_conds(**metadata, device=model.load_device, hooks=object())
-        assert len(conds["reference_images"].cond) == int(with_reference) + 1
+        conds = prepared_prefix(**metadata)
+        assert len(conds["reference_images"]) == int(with_reference) + 1
         assert "text_suffix" not in conds
         assert "sensenova_thinking_start" not in metadata
     assert second[0][0][1]["strength"] == 0.7
@@ -993,8 +991,8 @@ def test_sensenova_generate_noop_needs_no_model_or_clip(task, finished):
     conditioning = [[torch.empty(1), {"sensenova_interleave_finished": True}]] if finished else []
     negative = [[torch.empty(1), {}]]
 
-    result = TextGenerateSenseNova.execute(
-        conditioning=conditioning, task={"task": task, "negative": negative}, max_tokens=8,
+    result = SenseNovaConditioning.execute(
+        conditioning=conditioning, negative=negative, task={"task": task}, max_tokens=8,
     )
 
     assert result.args[0] is conditioning
@@ -1004,16 +1002,15 @@ def test_sensenova_generate_noop_needs_no_model_or_clip(task, finished):
     assert result.ui.as_dict() == {"text": ("",)}
 
 
-def test_sensenova_generate_model_and_clip_are_optional():
-    inputs = {value.id: value for value in TextGenerateSenseNova.GET_SCHEMA().inputs}
-    assert inputs["model"].optional
+def test_sensenova_generate_uses_clip_without_model():
+    inputs = {value.id: value for value in SenseNovaConditioning.GET_SCHEMA().inputs}
+    assert "model" not in inputs
     assert inputs["clip"].optional
 
 
-@pytest.mark.parametrize("connections", [{}, {"model": object()}, {"clip": object()}])
-def test_sensenova_generate_requires_connections_for_text(connections):
-    with pytest.raises(ValueError, match="Connect MODEL and CLIP"):
-        TextGenerateSenseNova.execute(
-            **connections, conditioning=[[torch.empty(1), {}]],
+def test_sensenova_generate_requires_clip_for_text():
+    with pytest.raises(ValueError, match="Connect CLIP"):
+        SenseNovaConditioning.execute(
+            conditioning=[[torch.empty(1), {}]],
             task={"task": "image thinking"}, max_tokens=8,
         )
