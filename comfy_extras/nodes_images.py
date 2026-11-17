@@ -855,11 +855,10 @@ class SaveSVGNode(IO.ComfyNode):
                 svg_content = re.sub(r'(<svg[^>]*>)', replacement, svg_content, flags=re.UNICODE)
 
             # Write the modified SVG to file
-            with UI.output_file(os.path.join(full_output_folder, file)) as output:
-                with open(output.path, 'wb') as svg_file:
-                    svg_file.write(svg_content.encode('utf-8'))
+            with open(os.path.join(full_output_folder, file), 'wb') as svg_file:
+                svg_file.write(svg_content.encode('utf-8'))
 
-            results.append(UI.SavedResult(filename=output.filename, subfolder=subfolder, type=IO.FolderType.output))
+            results.append(UI.SavedResult(filename=file, subfolder=subfolder, type=IO.FolderType.output))
             counter += 1
         return IO.NodeOutput(svg, ui={"images": results})
 
@@ -2233,18 +2232,17 @@ class SaveImageAdvanced(IO.ComfyNode):
             for batch_number, batch in enumerate(batches):
                 name = filename.replace("%batch_num%", str(batch_number))
                 file = f"{name}_{counter:05}.avif"
-                with UI.output_file(os.path.join(full_output_folder, file)) as output:
-                    _save_avif(
-                        batch,
-                        output.path,
-                        bit_depth,
-                        colorspace,
-                        format["crf"],
-                        fps=save_mode.get("fps", 1.0),
-                        loop_count=save_mode.get("loop_count") if animated else None,
-                        metadata=metadata,
-                    )
-                results.append({"filename": output.filename, "subfolder": subfolder, "type": "output"})
+                _save_avif(
+                    batch,
+                    os.path.join(full_output_folder, file),
+                    bit_depth,
+                    colorspace,
+                    format["crf"],
+                    fps=save_mode.get("fps", 1.0),
+                    loop_count=save_mode.get("loop_count") if animated else None,
+                    metadata=metadata,
+                )
+                results.append({"filename": file, "subfolder": subfolder, "type": "output"})
                 counter += 1
             ui = {"images": results}
             if animated and len(images) > 1:
@@ -2280,11 +2278,10 @@ class SaveImageAdvanced(IO.ComfyNode):
 
             name = filename.replace("%batch_num%", str(batch_number))
             file = f"{name}_{counter:05}.{file_format}"
-            with UI.output_file(os.path.join(full_output_folder, file)) as output:
-                with open(output.path, "wb") as f:
-                    f.write(encoded)
+            with open(os.path.join(full_output_folder, file), "wb") as f:
+                f.write(encoded)
 
-            entry = {"filename": output.filename, "subfolder": subfolder, "type": "output"}
+            entry = {"filename": file, "subfolder": subfolder, "type": "output"}
             if write_previews:
                 asset_preview = _write_asset_preview(image)
                 if asset_preview is not None:

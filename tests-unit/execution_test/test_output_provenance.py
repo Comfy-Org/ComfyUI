@@ -1,20 +1,24 @@
-import errno
 import json
 import os
-from pathlib import Path
 
 import pytest
 
 import folder_paths
-from comfy_execution import output_provenance
-from comfy_execution.utils import CurrentNodeContext
+from comfy_execution.asset_enrichment import register_cached_outputs, register_executed_outputs
+
+
+class _CatalogDisabled:
+    enabled = False
 
 
 @pytest.fixture
 def storage(tmp_path, monkeypatch):
     outputs = tmp_path / "output"
+    temp = tmp_path / "temp"
     outputs.mkdir()
+    temp.mkdir()
     monkeypatch.setattr(folder_paths, "output_directory", str(outputs))
+    monkeypatch.setattr(folder_paths, "temp_directory", str(temp))
     monkeypatch.setenv("COMFYUI_OUTPUT_JOURNAL_DIR", str(tmp_path / "journal"))
     monkeypatch.setenv("COMFYUI_OUTPUT_PRODUCER_ID", "build-a")
     return outputs, tmp_path / "journal"
@@ -23,135 +27,135 @@ def storage(tmp_path, monkeypatch):
 def records(directory):
     return [
         json.loads(line)
-        for file in directory.glob("*.jsonl")
+        for file in sorted(directory.glob("*.jsonl"))
         for line in file.read_text().splitlines()
     ]
 
 
-def save(path, data, **options):
-    with CurrentNodeContext("prompt-id", "save"):
-        with output_provenance.output_file(str(path), **options) as output:
-            Path(output.path).write_bytes(data)
-    return path.with_name(output.filename)
+def entry(filename, subfolder="", folder_type="output"):
+    return {"filename": filename, "subfolder": subfolder, "type": folder_type}
+
+
+def emit(*entries, job_id="prompt-id"):
+    return register_executed_outputs({"images": list(entries)}, job_id, _CatalogDisabled())
 
 
 def matches_file(record, path):
     info = path.stat()
     return (
-        int(record["inode"]) == info.st_ino
+        record["path"] == str(path.resolve())
+        and int(record["device"]) == info.st_dev & ((1 << 32) - 1 if os.name == "nt" else (1 << 64) - 1)
+        and int(record["inode"]) == info.st_ino
         and int(record["size"]) == info.st_size
         and int(record["mtime_ns"]) == info.st_mtime_ns
     )
 
 
-def test_records_the_file_version_under_its_producer_before_publishing(storage, monkeypatch):
+def test_records_every_emitted_output_file_with_the_catalog_disabled(storage):
+    outputs, journal = storage
+    first = outputs / "ComfyUI_00001_.png"
+    nested = outputs / "videos" / "clip.mp4"
+    nested.parent.mkdir()
+    first.write_bytes(b"photo")
+    nested.write_bytes(b"video")
+    output_ui = {"images": [entry(first.name)], "gifs": [entry(nested.name, "videos")], "text": ["done"]}
+
+    emitted = register_executed_outputs(output_ui, "prompt-id", _CatalogDisabled())
+
+    assert emitted == output_ui
+    photo, video = records(journal)
+    assert photo["version"] == video["version"] == 1
+    assert photo["producer_id"] == video["producer_id"] == "build-a"
+    assert photo["job_id"] == video["job_id"] == "prompt-id"
+    assert matches_file(photo, first)
+    assert matches_file(video, nested)
+
+
+def test_replacing_a_file_retires_the_earlier_record(storage, monkeypatch):
     outputs, journal = storage
     target = outputs / "test.png"
-    original_link = os.link
-
-    def assert_record_exists(staged, destination):
-        record, = records(journal)
-        assert not target.exists()
-        assert record["path"] == str(target.resolve())
-        assert matches_file(record, staged)
-        original_link(staged, destination)
-
-    monkeypatch.setattr(os, "link", assert_record_exists)
-    assert save(target, b"photo") == target
-    record, = records(journal)
-    assert record["version"] == 1
-    assert record["producer_id"] == "build-a"
-    assert record["job_id"] == "prompt-id"
-    assert matches_file(record, target)
-    assert target.read_bytes() == b"photo"
-
-
-def test_disambiguates_concurrent_names_and_preserves_both_files(storage):
-    outputs, journal = storage
-    target = outputs / "test.png"
-    with CurrentNodeContext("overlapping-prompt", "save"):
-        with output_provenance.output_file(str(target)) as first:
-            Path(first.path).write_bytes(b"first")
-            assert save(target, b"second") == target
-    other = target.with_name(first.filename)
-
-    assert other != target
-    assert target.read_bytes() == b"second"
-    assert other.read_bytes() == b"first"
-    assert sum(
-        matches_file(record, target)
-        for record in records(journal)
-        if record["path"] == str(target.resolve())
-    ) == 1
-
-
-def test_explicit_overwrite_retires_the_earlier_file_version(storage, monkeypatch):
-    outputs, journal = storage
-    target = outputs / "test.png"
-    save(target, b"first", overwrite=True)
+    target.write_bytes(b"first")
+    emit(entry(target.name))
     original, = records(journal)
 
     monkeypatch.setenv("COMFYUI_OUTPUT_PRODUCER_ID", "build-b")
-    save(target, b"other", overwrite=True)
+    target.write_bytes(b"another build")
+    emit(entry(target.name))
 
-    assert target.read_bytes() == b"other"
     assert not matches_file(original, target)
     replacement = records(journal)[-1]
     assert replacement["producer_id"] == "build-b"
     assert matches_file(replacement, target)
 
 
-def test_file_is_saved_on_volumes_without_hard_links(storage, monkeypatch):
+def test_only_files_in_the_output_directory_are_recorded(storage, tmp_path):
     outputs, journal = storage
+    (tmp_path / "temp" / "preview.png").write_bytes(b"preview")
+    (tmp_path / "outside.png").write_bytes(b"outside")
 
-    def unsupported(*args):
-        raise OSError(errno.ENOTSUP, "hard links unavailable")
+    emit(
+        entry("preview.png", folder_type="temp"),
+        entry("outside.png", subfolder=".."),
+        entry("missing.png"),
+    )
 
-    monkeypatch.setattr(os, "link", unsupported)
-    target = save(outputs / "test.png", b"file")
-    assert target.read_bytes() == b"file"
-    record, = records(journal)
-    assert matches_file(record, target)
-
-
-def test_encoder_failure_keeps_partial_bytes_out_of_outputs(storage):
-    outputs, journal = storage
-    with pytest.raises(RuntimeError, match="encode failed"):
-        with CurrentNodeContext("prompt-id", "save"):
-            with output_provenance.output_file(str(outputs / "test.png")) as output:
-                Path(output.path).write_bytes(b"partial")
-                raise RuntimeError("encode failed")
-
-    assert list(outputs.iterdir()) == []
     assert records(journal) == []
 
 
-def test_journal_failure_preserves_the_saved_file(storage, caplog):
+@pytest.mark.skipif(os.name == "nt", reason="creating a symlink needs a privilege on Windows")
+def test_a_symlink_in_the_output_directory_is_not_recorded(storage, tmp_path):
     outputs, journal = storage
+    elsewhere = tmp_path / "elsewhere.png"
+    elsewhere.write_bytes(b"elsewhere")
+    (outputs / "link.png").symlink_to(elsewhere)
+
+    emit(entry("link.png"))
+
+    assert records(journal) == []
+
+
+def test_a_cached_replay_writes_no_record(storage):
+    outputs, journal = storage
+    (outputs / "test.png").write_bytes(b"photo")
+    emit(entry("test.png"))
+
+    register_cached_outputs({"meta": {}, "output": {"images": [entry("test.png")]}}, "replay", _CatalogDisabled())
+
+    assert [record["job_id"] for record in records(journal)] == ["prompt-id"]
+
+
+def test_a_journal_failure_leaves_the_result_intact_and_later_saves_recorded(storage, caplog):
+    outputs, journal = storage
+    (outputs / "test.png").write_bytes(b"photo")
+    (outputs / "again.png").write_bytes(b"photo")
     journal.touch()
 
-    file = save(outputs / "test.png", b"file")
-    assert file.read_bytes() == b"file"
+    assert emit(entry("test.png")) == {"images": [entry("test.png")]}
     assert "Could not record output provenance" in caplog.text
 
     journal.unlink()
-    save(outputs / "again.png", b"file")
-    assert len(records(journal)) == 1
+    emit(entry("again.png"))
+    record, = records(journal)
+    assert matches_file(record, outputs / "again.png")
 
 
-def test_preserves_untracked_saves(storage, tmp_path, monkeypatch):
+@pytest.mark.parametrize("variable", ["COMFYUI_OUTPUT_JOURNAL_DIR", "COMFYUI_OUTPUT_PRODUCER_ID"])
+def test_nothing_is_written_unless_the_launcher_sets_both_variables(storage, monkeypatch, variable):
     outputs, journal = storage
-    outside = tmp_path / "outside.png"
-    assert save(outside, b"outside") == outside
-    temporary = save(outputs / "preview.png", b"preview", track=False)
-    assert temporary.read_bytes() == b"preview"
+    (outputs / "test.png").write_bytes(b"photo")
+    monkeypatch.delenv(variable)
 
-    outside_prompt = outputs / "outside-prompt.png"
-    with output_provenance.output_file(str(outside_prompt)) as output:
-        Path(output.path).write_bytes(b"outside a prompt")
-    assert outside_prompt.read_bytes() == b"outside a prompt"
+    emit(entry("test.png"))
 
-    monkeypatch.delenv("COMFYUI_OUTPUT_JOURNAL_DIR")
-    unmanaged = save(outputs / "regular.png", b"regular")
-    assert unmanaged.read_bytes() == b"regular"
-    assert records(journal) == []
+    assert not journal.exists()
+
+
+def test_a_relative_journal_directory_is_ignored(storage, monkeypatch, tmp_path):
+    outputs, journal = storage
+    (outputs / "test.png").write_bytes(b"photo")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("COMFYUI_OUTPUT_JOURNAL_DIR", "relative-journal")
+
+    emit(entry("test.png"))
+
+    assert not (tmp_path / "relative-journal").exists()

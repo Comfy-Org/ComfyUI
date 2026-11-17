@@ -325,26 +325,30 @@ Embedded PNG metadata is independent of the asset database. Save code writes it 
 ### Local output journal
 
 A launcher can set `COMFYUI_OUTPUT_PRODUCER_ID` to a stable local producer ID and
-`COMFYUI_OUTPUT_JOURNAL_DIR` to an absolute directory it owns. Participating save
-nodes use `comfy_api.latest.ui.output_file(path)` inside a running node. Write and
-close the file at `output.path` inside the context, then use `output.filename`
-after the context exits. Generated names are published exclusively and may get
-a suffix on collision. Pass `overwrite=True` for a save that explicitly replaces
-an existing file. A writer that saves several files calls the helper once per
-file. This also works when the asset catalog is disabled.
+`COMFYUI_OUTPUT_JOURNAL_DIR` to an absolute directory it owns. Core then journals
+every file in the output directory that an executed node reports in its UI
+result, at the moment the node returns. Custom nodes are covered with no change
+on their side, and the journal works when the asset catalog is disabled.
 
 Each Core process appends newline-terminated UTF-8 JSON to its own
 `<pid>-<nonce>.jsonl` file. A v1 record contains `version`, `producer_id`,
 `job_id`, the absolute `path`, and decimal strings `device`, `inode`, `size`, and
-`mtime_ns`. These last four fields describe the newly encoded file on that
-volume. The record is synced before publication. A reader accepts a record as
-evidence only when the current regular file at that path matches all four
-fields. Skip incomplete final lines and unsupported versions. Filesystems that
-lack a usable file ID may leave the output unattributed.
+`mtime_ns`. The last four fields describe the regular file found at that path
+when the node returned. The record is synced before the result is emitted. A
+reader accepts a record as evidence only when the current regular file at that
+path matches all four fields. Skip incomplete final lines and unsupported
+versions. Filesystems that lack a usable file ID may leave the output
+unattributed.
 
-Cached deliveries and directory scans write no journal records. If recording
-fails, Core publishes the output and logs the error. A launcher should treat
-outputs without a matching record as having unknown provenance.
+A record says that a prompt on this producer emitted that file revision. A node
+that returns an existing file is recorded too. Two producers that save to the
+same path at the same time can both record the surviving file, so a reader that
+needs one producer should treat a revision claimed by several as unknown.
+
+Cached deliveries and directory scans write no journal records. A process that
+exits between a save and the node's return leaves that file without a record.
+If recording fails, Core logs the error and the output is unaffected. A launcher
+should treat outputs without a matching record as having unknown provenance.
 
 ## Concurrency and failure boundaries
 

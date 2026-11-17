@@ -31,7 +31,6 @@ from comfy.comfy_types import IO, ComfyNodeABC, InputTypeDict, FileLocator
 from comfy_api.internal import register_versions, ComfyAPIWithVersion
 from comfy_api.version_list import supported_versions
 from comfy_api.latest import io, ComfyExtension, InputImpl
-from comfy_execution.output_provenance import output_file
 
 import comfy.clip_vision
 
@@ -1718,10 +1717,9 @@ class SaveImage:
 
             filename_with_batch_num = filename.replace("%batch_num%", str(batch_number))
             file = f"{filename_with_batch_num}_{counter:05}_.png"
-            with output_file(os.path.join(full_output_folder, file), track=self.type == "output") as output:
-                img.save(output.path, pnginfo=metadata, compress_level=self.compress_level)
+            img.save(os.path.join(full_output_folder, file), pnginfo=metadata, compress_level=self.compress_level)
             results.append({
-                "filename": output.filename,
+                "filename": file,
                 "subfolder": subfolder,
                 "type": self.type
             })

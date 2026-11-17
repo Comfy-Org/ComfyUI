@@ -14,7 +14,6 @@ from PIL import Image as PILImage
 from PIL.PngImagePlugin import PngInfo
 
 import folder_paths
-from comfy_execution.output_provenance import output_file
 
 # used for image preview
 from comfy.cli_args import args
@@ -145,9 +144,8 @@ class ImageSaveHelper:
             img = ImageSaveHelper._convert_tensor_to_pil(image_tensor)
             filename_with_batch_num = filename.replace("%batch_num%", str(batch_number))
             file = f"{filename_with_batch_num}_{counter:05}_.png"
-            with output_file(os.path.join(full_output_folder, file), track=folder_type == FolderType.output) as output:
-                img.save(output.path, pnginfo=metadata, compress_level=compress_level)
-            results.append(SavedResult(output.filename, subfolder, folder_type))
+            img.save(os.path.join(full_output_folder, file), pnginfo=metadata, compress_level=compress_level)
+            results.append(SavedResult(file, subfolder, folder_type))
             counter += 1
         return results
 
@@ -175,16 +173,16 @@ class ImageSaveHelper:
         pil_images = [ImageSaveHelper._convert_tensor_to_pil(img) for img in images]
         metadata = ImageSaveHelper._create_animated_png_metadata(cls)
         file = f"{filename}_{counter:05}_.png"
-        with output_file(os.path.join(full_output_folder, file), track=folder_type == FolderType.output) as output:
-            pil_images[0].save(
-                output.path,
-                pnginfo=metadata,
-                compress_level=compress_level,
-                save_all=True,
-                duration=int(1000.0 / fps),
-                append_images=pil_images[1:],
-            )
-        return SavedResult(output.filename, subfolder, folder_type)
+        save_path = os.path.join(full_output_folder, file)
+        pil_images[0].save(
+            save_path,
+            pnginfo=metadata,
+            compress_level=compress_level,
+            save_all=True,
+            duration=int(1000.0 / fps),
+            append_images=pil_images[1:],
+        )
+        return SavedResult(file, subfolder, folder_type)
 
     @staticmethod
     def get_save_animated_png_ui(
@@ -219,18 +217,17 @@ class ImageSaveHelper:
         pil_images = [ImageSaveHelper._convert_tensor_to_pil(img) for img in images]
         pil_exif = ImageSaveHelper._create_webp_metadata(pil_images[0], cls)
         file = f"{filename}_{counter:05}_.webp"
-        with output_file(os.path.join(full_output_folder, file), track=folder_type == FolderType.output) as output:
-            pil_images[0].save(
-                output.path,
-                save_all=True,
-                duration=int(1000.0 / fps),
-                append_images=pil_images[1:],
-                exif=pil_exif,
-                lossless=lossless,
-                quality=quality,
-                method=method,
-            )
-        return SavedResult(output.filename, subfolder, folder_type)
+        pil_images[0].save(
+            os.path.join(full_output_folder, file),
+            save_all=True,
+            duration=int(1000.0 / fps),
+            append_images=pil_images[1:],
+            exif=pil_exif,
+            lossless=lossless,
+            quality=quality,
+            method=method,
+        )
+        return SavedResult(file, subfolder, folder_type)
 
     @staticmethod
     def get_save_animated_webp_ui(
@@ -362,11 +359,10 @@ class AudioSaveHelper:
 
             # Write the output to file
             output_buffer.seek(0)
-            with output_file(output_path, track=folder_type == FolderType.output) as output:
-                with open(output.path, "wb") as f:
-                    f.write(output_buffer.getbuffer())
+            with open(output_path, "wb") as f:
+                f.write(output_buffer.getbuffer())
 
-            results.append(SavedResult(output.filename, subfolder, folder_type))
+            results.append(SavedResult(file, subfolder, folder_type))
             counter += 1
 
         return results
@@ -485,7 +481,6 @@ class PreviewText(_UIOutput):
 
 
 __all__ = [
-    "output_file",
     "SavedResult",
     "SavedImages",
     "SavedAudios",

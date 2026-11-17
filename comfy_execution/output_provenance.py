@@ -1,40 +1,41 @@
-import errno
+"""Journals the output files a prompt emitted, for a launcher that runs several
+ComfyUI builds over one output folder. A launcher opts in with a producer ID and
+a journal directory. A record names the file, the prompt, and the file revision
+seen when the node returned. See "Local output journal" in app/assets/docs.
+"""
+
 import json
 import logging
 import os
 import stat
-import tempfile
 import threading
 import uuid
-from contextlib import contextmanager
-from dataclasses import dataclass
 from pathlib import Path
-
-import folder_paths
-from comfy_execution.utils import get_executing_context
 
 _PRODUCER_ENV = "COMFYUI_OUTPUT_PRODUCER_ID"
 _JOURNAL_ENV = "COMFYUI_OUTPUT_JOURNAL_DIR"
-_LINK_UNSUPPORTED = {
-    errno.ENOSYS, errno.ENOTSUP, getattr(errno, "EOPNOTSUPP", errno.ENOTSUP),
-    errno.EPERM, errno.EXDEV, errno.EINVAL,
-}
 _UINT64 = (1 << 64) - 1
+# Windows reports a 64-bit volume serial. Readers that see the 32-bit one compare the low half.
 _DEVICE_MASK = (1 << 32) - 1 if os.name == "nt" else _UINT64
 _journal_lock = threading.Lock()
 _journal_id = uuid.uuid4().hex
 
 
-@dataclass
-class OutputFile:
-    path: str
-    filename: str
+def _launcher_journal() -> tuple[Path, str] | None:
+    directory = os.environ.get(_JOURNAL_ENV)
+    producer_id = os.environ.get(_PRODUCER_ENV)
+    if not directory or not producer_id:
+        return None
+    journal = Path(directory)
+    return (journal, producer_id) if journal.is_absolute() else None
 
 
-def _append_record(directory: Path, producer_id: str, job_id: str, target: Path, revision: os.stat_result):
+def enabled() -> bool:
+    return _launcher_journal() is not None
+
+
+def _append_record(directory: Path, producer_id: str, job_id: str | None, target: Path, revision: os.stat_result) -> None:
     global _journal_id
-    if not 0 < revision.st_ino <= _UINT64:
-        return
     event = {
         "version": 1,
         "producer_id": producer_id,
@@ -55,75 +56,28 @@ def _append_record(directory: Path, producer_id: str, job_id: str, target: Path,
                 stream.flush()
                 os.fsync(stream.fileno())
         except OSError as error:
+            # A failed write may have left a partial line. Start a new file so
+            # only the last line of any journal can be incomplete.
             _journal_id = uuid.uuid4().hex
             logging.warning("Could not record output provenance for %s: %s", target.name, error)
 
 
-def _publish(staged: Path, target: Path, record, overwrite: bool) -> Path:
-    if overwrite:
-        record(target)
-        os.replace(staged, target)
-        return target
+def record_output(path: str, job_id: str | None) -> None:
+    """Journal the file at ``path`` as an output of ``job_id``. Never raises."""
+    import folder_paths
 
-    candidate = target
-    link_supported = True
-    while True:
-        record(candidate)
-        if link_supported:
-            try:
-                os.link(staged, candidate)
-                return candidate
-            except FileExistsError:
-                candidate = target.with_name(f"{target.stem}_{uuid.uuid4().hex[:12]}{target.suffix}")
-                continue
-            except OSError as error:
-                if error.errno not in _LINK_UNSUPPORTED:
-                    raise
-                link_supported = False
-        try:
-            with candidate.open("xb") as reservation:
-                reserved = os.fstat(reservation.fileno())
-        except FileExistsError:
-            candidate = target.with_name(f"{target.stem}_{uuid.uuid4().hex[:12]}{target.suffix}")
-            continue
-        try:
-            os.replace(staged, candidate)
-        except OSError:
-            try:
-                if os.path.samestat(reserved, candidate.lstat()):
-                    candidate.unlink()
-            except FileNotFoundError:
-                pass
-            raise
-        return candidate
-
-
-@contextmanager
-def output_file(path: str, *, track: bool = True, overwrite: bool = False):
-    """Yield a path for one save. After exit, filename is the published basename."""
-    path = Path(path)
-    directory = os.environ.get(_JOURNAL_ENV)
-    producer_id = os.environ.get(_PRODUCER_ENV)
-    execution = get_executing_context()
-    journal = Path(directory) if directory else None
-    if not track or execution is None or not producer_id or journal is None or not journal.is_absolute():
-        yield OutputFile(str(path), path.name)
-        return
-
-    target = path.parent.resolve() / path.name
-    if not target.parent.is_relative_to(Path(folder_paths.get_output_directory()).resolve()):
-        yield OutputFile(str(path), path.name)
-        return
-
-    with tempfile.TemporaryDirectory(prefix=".comfy-output-", dir=target.parent, ignore_cleanup_errors=True) as staging:
-        staged = Path(staging) / target.name
-        output = OutputFile(str(staged), target.name)
-        yield output
-        revision = staged.lstat()
-        if not stat.S_ISREG(revision.st_mode):
-            raise ValueError(f"Output encoder did not write a regular file: {target.name}")
-
-        def record(destination: Path):
-            _append_record(journal, producer_id, execution.prompt_id, destination, revision)
-
-        output.filename = _publish(staged, target, record, overwrite).name
+    try:
+        launcher = _launcher_journal()
+        if launcher is None:
+            return
+        directory, producer_id = launcher
+        target = Path(path).parent.resolve() / os.path.basename(path)
+        if not target.parent.is_relative_to(Path(folder_paths.get_output_directory()).resolve()):
+            return
+        revision = target.lstat()
+        # A file ID the journal cannot carry leaves the output unattributed.
+        if not stat.S_ISREG(revision.st_mode) or not 0 < revision.st_ino <= _UINT64:
+            return
+        _append_record(directory, producer_id, job_id, target, revision)
+    except Exception:
+        logging.warning("Could not record output provenance for %s", os.path.basename(path), exc_info=True)

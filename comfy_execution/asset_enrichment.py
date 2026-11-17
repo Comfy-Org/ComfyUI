@@ -4,12 +4,18 @@ directory and skipped when it escapes that directory or is not on disk, and a
 run served from cache replays the same registration so cached results still
 yield assets. Registering at emission rather than by inspecting the cache
 afterwards keeps this independent of any cache eviction policy.
+
+A launcher that opted in also gets a journal record for each file a node
+emitted. That works with the asset catalog disabled, and a cached replay writes
+no record.
 """
 
 import copy
 import logging
 import os
 from typing import TYPE_CHECKING, Callable
+
+from comfy_execution import output_provenance
 
 if TYPE_CHECKING:
     from app.assets.manager import AssetManager
@@ -97,6 +103,8 @@ def _strip_ids(output_ui: dict) -> None:
 
 def register_executed_outputs(output_ui: dict, job_id: str, asset_manager: "AssetManager", asset_previews: dict[str, dict] | None = None) -> dict:
     enriched = copy.deepcopy(output_ui)
+    if output_provenance.enabled():
+        _enrich_in_place(enriched, job_id, output_provenance.record_output)
     if not asset_manager.enabled:
         return enriched
 
