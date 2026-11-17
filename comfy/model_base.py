@@ -2521,148 +2521,42 @@ class SenseNovaSharedRegular(comfy.conds.CONDRegular):
         return self._copy_with(self.cond)
 
 class SenseNovaSharedList(comfy.conds.CONDList):
-    """Keep a list-valued SenseNova prefix at one copy per guidance branch."""
-
     def process_cond(self, batch_size, **kwargs):
         return self._copy_with(self.cond)
 
 class SenseNovaU15(BaseModel):
-    """ComfyUI model wrapper for SenseNova U1.5 image generation."""
-
-    PATCH_SIZE = comfy.ldm.sensenova.model.MERGED_PATCH_SIZE
-    reference_image_dtype = torch.float32
-
     def __init__(self, model_config, model_type=ModelType.FLOW, device=None):
         super().__init__(model_config, model_type, device=device, unet_model=comfy.ldm.sensenova.model.SenseNovaU15)
         self.model_sampling = SenseNovaModelSampling(model_config)
-        self.memory_usage_factor_conds = ("reference_images",)
 
     def get_dynamic_vram__units(self):
-        """Expose text-decoding units and the separately managed embedding for DynamicVRAM."""
-        language = self.diffusion_model.language_model
-        units = [layer.text_modules() for layer in language.model.layers]
-        units.append(language.model.norm)
-        if self.diffusion_model.has_lm_head:
-            units.append(language.lm_head)
-        return units, [language.model.embed_tokens]
+        return list(self.diffusion_model.layers), []
 
     def process_timestep(self, timestep, **kwargs):
         base_timestep = timestep / self.model_sampling.multiplier
         return 1.0 - time_snr_shift(self.model_sampling.shift, 1.0 - base_timestep)
 
     def extra_conds(self, **kwargs):
-        """Build shared prefix conditions, deferring prefill when conditioning hooks are active."""
         out = super().extra_conds(**kwargs)
-        text_input_ids = kwargs.get("text_input_ids")
-        if text_input_ids is not None:
+        references = comfy.ldm.sensenova.conditioning.split_reference_batches(kwargs.get("reference_latents") or [])
+        if len(references) != kwargs.get("sensenova_reference_count", 0):
+            raise ValueError("Encode reference images with SenseNova Conditioning before sampling.")
+        if "prefix_keys" in kwargs:
             device = kwargs["device"]
             dtype = self.get_dtype_inference()
-            text_suffix = None
-            thinking_start = kwargs.get("sensenova_thinking_start")
-            if thinking_start is not None:
-                text_suffix = text_input_ids[:, thinking_start:]
-                text_input_ids = text_input_ids[:, :thinking_start]
-            text_input_ids, reference_images, indexes, prefix_mask = comfy.ldm.sensenova.conditioning.prepare_prefix_inputs(
-                text_input_ids, kwargs.get("reference_latents"),
-                comfy.ldm.sensenova.model.MERGED_PATCH_SIZE, dtype,
-                image_only=kwargs.get("prompt_type") == "negative",
-                expand_images=not kwargs.get("sensenova_interleave_expanded", False),
-                generated_start=kwargs.get("sensenova_interleave_start"),
-                generated_images_start=kwargs.get("sensenova_interleave_input_images"),
-                generated_dtype=self.reference_image_dtype,
-            )
-            if reference_images and kwargs.get("prompt_type") == "negative":
-                text_suffix = None
-
-            hooks = kwargs.get("hooks")
-            if hooks is None:
-                prefix_args = (
-                    text_input_ids.to(device=device),
-                    [
-                        image.to(device=device, dtype=dtype)
-                        for image in reference_images
-                    ]
-                    if reference_images
-                    else None,
-                    indexes.to(device=device) if indexes is not None else None,
-                    prefix_mask.to(device=device)
-                    if prefix_mask is not None
-                    else None,
-                )
-                prefix_keys, prefix_values, prefix_time = (
-                    self.diffusion_model.preprocess_prefix(
-                        *prefix_args,
-                        transformer_options={
-                            "prefetch_dynamic_vbars": self.current_patcher is not None and self.current_patcher.is_dynamic(),
-                            "sensenova_prefix_start": kwargs.get("sensenova_interleave_start"),
-                        },
-                        text_suffix=text_suffix.to(device=device) if text_suffix is not None else None,
-                        compute_dtype=dtype,
-                    )
-                )
-                out["prefix_keys"] = SenseNovaSharedList(prefix_keys)
-                out["prefix_values"] = SenseNovaSharedList(prefix_values)
-                out["prefix_time"] = SenseNovaSharedRegular(prefix_time)
-            else:
-                if reference_images:
-                    out["prefix_indexes"] = SenseNovaSharedRegular(indexes)
-                    out["prefix_mask"] = SenseNovaSharedRegular(prefix_mask)
-                    out["reference_images"] = SenseNovaSharedList(reference_images)
-                out["text_input_ids"] = SenseNovaSharedRegular(text_input_ids)
-                if text_suffix is not None:
-                    out["text_suffix"] = SenseNovaSharedRegular(text_suffix)
+            for key in ("prefix_keys", "prefix_values"):
+                out[key] = SenseNovaSharedList([value.to(device=device, dtype=dtype) for value in kwargs[key]])
+            out["prefix_time"] = SenseNovaSharedRegular(kwargs["prefix_time"].to(device=device))
         return out
 
     def extra_conds_shapes(self, **kwargs):
-        """Estimate padded reference, mask and KV shapes for memory planning."""
-        images = kwargs.get("reference_latents")
-        images = comfy.ldm.sensenova.conditioning.split_reference_batches(images) if images is not None else []
-        patch_size = comfy.ldm.sensenova.model.MERGED_PATCH_SIZE
-        reference_grids = [
-            comfy.ldm.sensenova.conditioning.reference_grid(
-                image.shape[-3], image.shape[-2], patch_size
-            )
-            for image in images
-        ]
-        reference_pixels = sum(
-            height * width * patch_size**2 for height, width in reference_grids
-        )
-        out = {}
-        if reference_pixels:
-            out["reference_images"] = [1, 3, reference_pixels]
-        text_input_ids = kwargs.get("text_input_ids")
-        if text_input_ids is not None:
-            if kwargs.get("sensenova_interleave_expanded", False):
-                length = text_input_ids.shape[1]
-            elif reference_grids:
-                length = comfy.ldm.sensenova.conditioning.conditioned_input_length(
-                    text_input_ids.shape[1],
-                    reference_grids,
-                    image_only=kwargs.get("prompt_type") == "negative",
-                )
-            else:
-                length = text_input_ids.shape[1]
-            out["prefix_mask"] = [1, 1, length, length]
-            if kwargs.get("hooks") is None:
-                prefix_shape = [
-                    1,
-                    comfy.ldm.sensenova.model.NUM_KV_HEADS,
-                    comfy.ldm.sensenova.model.NUM_LAYERS
-                    * length
-                    * comfy.ldm.sensenova.model.HEAD_DIM,
-                ]
-                out["prefix_keys"] = prefix_shape
-                out["prefix_values"] = prefix_shape
-        return out
+        return {key: [sum(value.numel() for value in kwargs[key])] for key in ("prefix_keys", "prefix_values") if key in kwargs}
 
     def memory_required(self, input_shape, cond_shapes={}):
         memory = super().memory_required(input_shape, cond_shapes)
         dtype_size = comfy.model_management.dtype_size(self.get_dtype_inference())
-        return memory + sum(
-            math.prod(shape) * dtype_size
-            for key in ("prefix_mask", "prefix_keys", "prefix_values")
-            for shape in cond_shapes.get(key, ())
-        )
+        return memory + sum(math.prod(shape) * dtype_size for key in ("prefix_keys", "prefix_values") for shape in cond_shapes.get(key, ()))
+
 
 class Chroma(Flux):
     def __init__(self, model_config, model_type=ModelType.FLUX, device=None, unet_model=comfy.ldm.chroma.model.Chroma):

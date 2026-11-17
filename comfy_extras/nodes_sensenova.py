@@ -1,15 +1,6 @@
-from contextlib import ExitStack, contextmanager
-from dataclasses import dataclass
-import math
-
 import torch
 from typing_extensions import override
 
-import comfy.model_management
-import comfy.hooks
-import comfy.model_prefetch
-import comfy.samplers
-import comfy.utils
 from comfy.ldm.sensenova.conditioning import (
     IMAGE_CONTEXT_ID,
     IMAGE_END_ID,
@@ -18,28 +9,22 @@ from comfy.ldm.sensenova.conditioning import (
     THINK_END_ID,
     THINK_START_ID,
     THINK_SUFFIX_IDS,
-)
-from comfy.ldm.sensenova.interleave import (
-    append_image_to_prefix,
     expand_interleave_inputs,
-    prefix_arguments,
+    prepare_interleave_image,
 )
-from comfy.ldm.sensenova.model import HEAD_DIM, NUM_KV_HEADS, NUM_LAYERS
 from comfy.ldm.sensenova.sampling import SenseNovaModelSampling
 from comfy_api.latest import ComfyExtension, io, ui
 from comfy_execution.graph_utils import ExecutionBlocker
 
 
-class ModelSamplingSenseNova(io.ComfyNode):
-    """Configure SenseNova flow sampling parameters on a model patcher."""
-
+class SenseNovaSamplingOptions(io.ComfyNode):
     @classmethod
     def define_schema(cls) -> io.Schema:
         return io.Schema(
-            node_id="ModelSamplingSenseNova",
-            display_name="ModelSamplingSenseNova",
+            node_id="SenseNovaSamplingOptions",
+            display_name="SenseNova Sampling Options",
             category="model/patch/sensenova",
-            description="Configure SenseNova model sampling and its timestep shift, preserving the SenseNova timestep mapping and resolution-dependent noise scaling.",
+            description="Set the SenseNova flow shift.",
             inputs=[
                 io.Model.Input(id="model"),
                 io.Float.Input(id="shift", default=3.0, step=0.01),
@@ -48,18 +33,7 @@ class ModelSamplingSenseNova(io.ComfyNode):
         )
 
     @classmethod
-    def validate_inputs(cls, shift):
-        """Validate a finite positive timestep shift, allowing unresolved linked inputs."""
-        if shift is not None and (not math.isfinite(shift) or shift <= 0):
-            return "shift must be finite and greater than zero."
-        return True
-
-    @classmethod
     def execute(cls, *, model, shift: float) -> io.NodeOutput:
-        """Clone the model patcher and configure its SenseNova timestep shift."""
-        validation = cls.validate_inputs(shift)
-        if validation is not True:
-            raise ValueError(validation)
         patched = model.clone()
         model_sampling = SenseNovaModelSampling(patched.model.model_config)
         model_sampling.set_parameters(shift=shift)
@@ -67,34 +41,31 @@ class ModelSamplingSenseNova(io.ComfyNode):
         return io.NodeOutput(patched)
 
 
-class TextGenerateSenseNova(io.ComfyNode):
-    """Generate image reasoning or the next interleaved text/image request."""
-
+class SenseNovaConditioning(io.ComfyNode):
     @classmethod
     def define_schema(cls) -> io.Schema:
         return io.Schema(
-            node_id="TextGenerateSenseNova",
-            display_name="Generate SenseNova Text",
+            node_id="SenseNovaConditioning",
+            display_name="SenseNova Conditioning",
             category="model/sampling/sensenova",
             description=(
-                "Generate image thinking, interleaved text, or self-correction. "
-                "Use CLIP Text Encode for the prompt and a standard sampler for images. "
-                "Ordinary image generation and editing do not need this node."
+                "Encode reference images, image thinking, interleaved text, or self-correction with CLIP. "
+                "Connect HiDream-O1 Reference Images before this node and use a standard sampler for images. "
+                "Text-to-image without thinking needs only CLIP Text Encode; text-only output can use Generate Text."
             ),
             inputs=[
-                io.Model.Input("model", optional=True),
                 io.Clip.Input("clip", optional=True),
                 io.Conditioning.Input("conditioning"),
+                io.Conditioning.Input("negative", optional=True),
                 io.DynamicCombo.Input("task", options=[
+                    io.DynamicCombo.Option("image", []),
                     io.DynamicCombo.Option("image thinking", []),
                     io.DynamicCombo.Option("interleave", [
                         io.Boolean.Input("thinking", default=True),
-                        io.Conditioning.Input("negative"),
                         io.Latent.Input("samples", optional=True,
                             tooltip="Previous sampler output, connected when continuing after an image request."),
                     ]),
                     io.DynamicCombo.Option("self-correction", [
-                        io.Conditioning.Input("negative"),
                         io.Latent.Input("samples", optional=True,
                             tooltip="Previous sampler output, connected when continuing after an image request."),
                     ]),
@@ -113,40 +84,36 @@ class TextGenerateSenseNova(io.ComfyNode):
         )
 
     @classmethod
-    def execute(cls, *, conditioning, task: io.DynamicCombo.Type, max_tokens, model=None, clip=None) -> io.NodeOutput:
-        """Select the task's prompt protocol before generating text with the shared model."""
+    def execute(cls, *, conditioning, task: io.DynamicCombo.Type, max_tokens, clip=None, negative=None) -> io.NodeOutput:
         name = task["task"]
-        if name not in ("image thinking", "interleave", "self-correction"):
+        if name not in ("image", "image thinking", "interleave", "self-correction"):
             raise ValueError(f"Unknown SenseNova task: {name}")
-        negative = task.get("negative")
         if not conditioning or conditioning[0][1].get("sensenova_interleave_finished"):
             return io.NodeOutput(conditioning, "", negative or [], False, ui=ui.PreviewText(""))
-        if model is None or clip is None:
-            raise ValueError("Connect MODEL and CLIP to Generate SenseNova Text for text generation.")
+        if clip is None:
+            raise ValueError("Connect CLIP to SenseNova Conditioning.")
+        if name == "image":
+            return io.NodeOutput(encode_conditioning(clip, conditioning), "", encode_conditioning(clip, negative or [], image_only=True), True)
         mode = "interleave" if name == "interleave" else "image"
         thinking = name == "image thinking" or (name == "interleave" and task["thinking"])
         positive = prepare_generation_conditioning(clip, conditioning, mode, thinking)
         if name == "image thinking":
-            return cls._execute_image(model=model, clip=clip, conditioning=positive, max_tokens=max_tokens)
+            return cls._execute_image(clip=clip, conditioning=positive, max_tokens=max_tokens, negative=negative)
         negative = prepare_generation_conditioning(clip, negative or [], mode, False)
         return cls._execute_interleave(
-            model=model, clip=clip, positive=positive, negative=negative,
+            clip=clip, positive=positive, negative=negative,
             samples=task.get("samples"), max_text_tokens=max_tokens,
         )
 
     @classmethod
-    def _execute_image(cls, *, model, clip, conditioning, max_tokens) -> io.NodeOutput:
-        """Generate thinking, then prepare one image for a downstream sampler."""
+    def _execute_image(cls, *, clip, conditioning, max_tokens, negative=None) -> io.NodeOutput:
         if len(conditioning) != 1:
-            raise ValueError("Generate SenseNova Text requires one positive conditioning entry.")
+            raise ValueError("SenseNova Conditioning requires one positive conditioning entry.")
         metadata = conditioning[0][1]
         if metadata.get("text_input_ids") is None:
-            raise ValueError("Generate SenseNova Text requires SenseNova text conditioning.")
-        with _generation_context(model, metadata, max_tokens) as (diffusion_model, prefix_args, options):
-            token_ids = diffusion_model.generate_thinking_tokens(
-                *prefix_args, max_think_tokens=max_tokens, **options,
-            )
-        text = _decode_generated_text(clip, token_ids[:-1])
+            raise ValueError("SenseNova Conditioning requires SenseNova text conditioning.")
+        token_ids, stop_token = generate_tokens(clip, metadata, max_tokens, THINK_END_ID)
+        text = _decode_generated_text(clip, token_ids[:-1] if stop_token == THINK_END_ID else token_ids)
         input_ids = metadata["text_input_ids"]
         suffix = input_ids.new_tensor([*token_ids, *THINK_SUFFIX_IDS]).unsqueeze(0)
         updated_metadata = {
@@ -155,22 +122,20 @@ class TextGenerateSenseNova(io.ComfyNode):
             "sensenova_thinking_start": input_ids.shape[1],
         }
         return io.NodeOutput(
-            [[conditioning[0][0], updated_metadata]], text, [], True, ui=ui.PreviewText(text),
+            encode_conditioning(clip, [[conditioning[0][0], updated_metadata]]), text,
+            encode_conditioning(clip, negative or [], image_only=True), True, ui=ui.PreviewText(text),
         )
 
     @classmethod
     def _execute_interleave(
         cls,
         *,
-        model,
         clip,
         positive,
         negative,
         samples,
         max_text_tokens,
     ) -> io.NodeOutput:
-        """Generate one interleave text stage for external KSampler orchestration."""
-
         if negative is None or len(positive) != 1 or len(negative) != 1:
             raise ValueError(
                 "SenseNova interleave requires one positive and one negative conditioning entry."
@@ -179,8 +144,8 @@ class TextGenerateSenseNova(io.ComfyNode):
             return io.NodeOutput(
                 positive, "", negative, False, ui=ui.PreviewText("")
             )
-        if model is None or clip is None:
-            raise ValueError("Connect MODEL and CLIP to Generate SenseNova Text for text generation.")
+        if clip is None:
+            raise ValueError("Connect CLIP to SenseNova Conditioning.")
         positive_metadata = expand_interleave_metadata(positive[0][1], image_only=False)
         negative_metadata = expand_interleave_metadata(negative[0][1], image_only=True)
         pending_image = bool(
@@ -196,30 +161,22 @@ class TextGenerateSenseNova(io.ComfyNode):
                 raise ValueError(
                     "SenseNova interleave is waiting for samples from the preceding KSampler."
                 )
-            positive_metadata = append_interleave_image(
-                positive_metadata, latent_samples
-            )
-            negative_metadata = append_interleave_image(
-                negative_metadata, latent_samples
-            )
+            image_tokens, image = prepare_interleave_image(latent_samples)
+            positive_metadata = append_interleave_image(positive_metadata, image_tokens, image)
+            negative_metadata = append_interleave_image(negative_metadata, image_tokens, image)
         elif latent_samples is not None:
             raise ValueError(
                 "SenseNova interleave received samples before requesting an image."
             )
 
-        with _generation_context(model, positive_metadata, max_text_tokens) as (diffusion_model, prefix_args, options):
-            event = generate_text_event(
-                diffusion_model,
-                prefix_args,
-                max_text_tokens=max_text_tokens,
-                **options,
-            )
+        token_ids, stop_token = generate_tokens(clip, positive_metadata, max_text_tokens, IMAGE_START_ID)
 
+        image_requested = stop_token == IMAGE_START_ID
         positive_metadata = append_interleave_tokens(
-            positive_metadata, event.token_ids, event.image_requested
+            positive_metadata, token_ids, image_requested
         )
-        positive_metadata["sensenova_interleave_finished"] = event.stop_reason == "eos"
-        if event.image_requested:
+        positive_metadata["sensenova_interleave_finished"] = stop_token == IM_END_ID
+        if image_requested:
             negative_ids = negative_metadata["text_input_ids"]
             image_start = [] if negative_ids.shape[1] and negative_ids[0, -1] == IMAGE_START_ID else [IMAGE_START_ID]
             negative_metadata = append_interleave_tokens(
@@ -227,81 +184,39 @@ class TextGenerateSenseNova(io.ComfyNode):
             )
         history = positive_metadata["text_input_ids"][0, positive_metadata["sensenova_interleave_start"]:].tolist()
         think_start, think_end = _interleave_thinking_span(clip, history)
-        stage_start = len(history) - len(event.token_ids)
+        stage_start = len(history) - len(token_ids)
         text = _decode_generated_text(clip, [
-            token for index, token in enumerate(event.token_ids, start=stage_start)
+            token for index, token in enumerate(token_ids, start=stage_start)
             if index not in (think_start, think_end)
         ])
-        updated_positive = [[positive[0][0], positive_metadata]]
-        updated_negative = [[negative[0][0], negative_metadata]]
+        updated_positive = encode_conditioning(clip, [[positive[0][0], positive_metadata]])
+        updated_negative = encode_conditioning(clip, [[negative[0][0], negative_metadata]])
         return io.NodeOutput(
             updated_positive,
             text,
             updated_negative,
-            event.image_requested,
+            image_requested,
             ui=ui.PreviewText(text),
         )
 
 
-@dataclass
-class InterleaveTextEvent:
-    """One text-generation stage ending at an image request or stop condition."""
-
-    token_ids: list[int]
-    stop_reason: str
-
-    @property
-    def image_requested(self):
-        return self.stop_reason == "image"
-
-
-def generate_text_event(
-    model,
-    prefix_args,
-    max_text_tokens,
-    transformer_options=None,
-    progress=None,
-    interrupt=None,
-    compute_dtype=None,
-):
-    """Decode one interleave text stage without carrying KV state across nodes."""
-
-    token_ids, stop_token_id = model.generate_text_tokens(
-        *prefix_args,
-        max_tokens=max_text_tokens,
-        stop_token_ids=(IMAGE_START_ID,),
-        transformer_options=transformer_options,
-        progress=progress,
-        interrupt=interrupt,
-        compute_dtype=compute_dtype,
-    )
-    stop_reason = {
-        IM_END_ID: "eos",
-        IMAGE_START_ID: "image",
-    }.get(stop_token_id, "max_text_tokens")
-    return InterleaveTextEvent(token_ids, stop_reason)
-
-
 def prepare_generation_conditioning(clip, conditioning, mode, thinking):
-    """Apply the task's template once, preserving references and native conditioning metadata."""
     prepared = []
     for tensor, metadata in conditioning:
         if metadata.get("sensenova_interleave_expanded"):
             prepared.append([tensor, metadata])
             continue
         if "sensenova_prompt" not in metadata:
-            raise ValueError("Use CLIP Text Encode with the SenseNova CLIP output before Generate SenseNova Text.")
+            raise ValueError("Use CLIP Text Encode with the SenseNova CLIP output before SenseNova Conditioning.")
         tokens = clip.tokenize(metadata["sensenova_prompt"], mode=mode, thinking=thinking)
-        encoded = clip.encode_from_tokens_scheduled(tokens)[0]
-        updated = {**metadata, "text_input_ids": encoded[1]["text_input_ids"]}
+        input_ids = torch.tensor([[int(value[0]) for value in batch] for batch in tokens["sensenova_u15"]], dtype=torch.long)
+        updated = {**metadata, "text_input_ids": input_ids}
         updated.pop("sensenova_thinking_start", None)
-        prepared.append([encoded[0], updated])
+        prepared.append([tensor, updated])
     return prepared
 
 
 def expand_interleave_metadata(metadata, image_only):
-    """Create a reconstructable token/image history for interleave stages."""
-
     expanded = dict(metadata)
     if expanded.get("sensenova_interleave_expanded"):
         return expanded
@@ -319,7 +234,6 @@ def expand_interleave_metadata(metadata, image_only):
         {
             "text_input_ids": input_ids,
             "reference_latents": references,
-            "sensenova_interleave": True,
             "sensenova_interleave_expanded": True,
             "sensenova_interleave_pending_image": False,
             "sensenova_interleave_start": input_ids.shape[1],
@@ -330,8 +244,6 @@ def expand_interleave_metadata(metadata, image_only):
 
 
 def append_interleave_tokens(metadata, token_ids, image_requested):
-    """Append generated text tokens to an expanded interleave history."""
-
     updated = dict(metadata)
     if token_ids:
         suffix = updated["text_input_ids"].new_tensor(token_ids).unsqueeze(0)
@@ -342,81 +254,43 @@ def append_interleave_tokens(metadata, token_ids, image_requested):
     return updated
 
 
-def append_interleave_image(metadata, latent_samples):
-    """Append one sampled image to an expanded interleave history."""
-
+def append_interleave_image(metadata, image_tokens, image):
     if not metadata.get("sensenova_interleave_pending_image"):
         raise ValueError("SenseNova interleave received an image without an image request.")
-    input_ids, image = append_image_to_prefix(metadata["text_input_ids"], latent_samples)
-    updated = dict(metadata)
-    updated["text_input_ids"] = input_ids
-    updated["reference_latents"] = [
-        *(metadata.get("reference_latents") or []),
-        image,
-    ]
-    updated["sensenova_interleave_pending_image"] = False
+    updated = append_interleave_tokens(metadata, image_tokens, False)
+    updated["reference_latents"] = [*(metadata.get("reference_latents") or []), image]
     return updated
 
 
-@contextmanager
-def _generation_context(model, metadata, max_tokens):
-    """Load with a generation KV budget and clean up model/prefetch state on exit."""
-    with ExitStack() as hook_state:
-        if model.current_hooks is not None:
-            hook_state.callback(model.apply_hooks, model.current_hooks)
-            model.apply_hooks(None)
-        hooks = metadata.get("hooks")
-        if hooks is not None:
-            model = model.get_non_dynamic_delegate() if model.is_dynamic() else model.clone()
-            hook_state.callback(model.apply_hooks, None)
-            hooks = hooks.clone()
-            for hook in hooks.get_type(comfy.hooks.EnumHookType.Weight):
-                hook.hook_keyframe = hook.hook_keyframe.clone()
-            target = comfy.hooks.create_target_dict(comfy.hooks.EnumWeightTarget.Model)
-            registered = comfy.hooks.HookGroup()
-            for hook in hooks.get_type(comfy.hooks.EnumHookType.TransformerOptions):
-                hook.add_hook_patches(model, model.model_options, target, registered)
-            hooks = model.register_all_hook_patches(
-                hooks, target, model.model_options, registered,
-            )
-        # Generation keeps the full text, including for negative conditioning.
-        prefix_shape = model.model.extra_conds_shapes(**{**metadata, "prompt_type": None})["prefix_mask"]
-        prefix_length = prefix_shape[-1]
-        dtype_size = comfy.model_management.dtype_size(
-            model.get_model_object("manual_cast_dtype") or model.model.get_dtype()
-        )
-        kv_bytes = 2 * NUM_LAYERS * NUM_KV_HEADS * HEAD_DIM * (prefix_length + max_tokens) * dtype_size
-        mask_bytes = math.prod(prefix_shape) * dtype_size
-        comfy.model_management.load_models_gpu([model], memory_required=kv_bytes + mask_bytes)
-        with comfy.model_management.cuda_device_context(model.load_device):
-            try:
-                model.pre_run()
-                transformer_options = model.model_options.get("transformer_options", {}).copy()
-                if hooks is not None:
-                    transformer_options = model.apply_hooks(hooks, transformer_options)
-                compute_dtype = model.model.get_dtype_inference()
-                prefix_args = prefix_arguments(
-                    metadata, model.load_device, compute_dtype,
-                    generated_dtype=model.get_model_object("reference_image_dtype"),
-                )
-                transformer_options["prefetch_dynamic_vbars"] = model.is_dynamic()
-                transformer_options["sensenova_prefix_start"] = metadata.get("sensenova_interleave_start")
-                options = {
-                    "compute_dtype": compute_dtype,
-                    "transformer_options": transformer_options,
-                    "progress": comfy.utils.ProgressBar(max_tokens).update_absolute,
-                    "interrupt": comfy.model_management.throw_exception_if_processing_interrupted,
-                }
-                yield model.model.diffusion_model, prefix_args, options
-            finally:
-                try:
-                    comfy.model_prefetch.cleanup_prefetch_queues()
-                finally:
-                    model.cleanup()
+def conditioning_tokens(metadata):
+    tokens = {key: metadata[key] for key in (
+        "text_input_ids", "reference_latents", "sensenova_prompt", "sensenova_thinking_start",
+        "sensenova_interleave_expanded", "sensenova_interleave_start",
+    ) if key in metadata}
+    return tokens
+
+
+def encode_conditioning(clip, conditioning, image_only=False):
+    output = []
+    for _, metadata in conditioning:
+        tokens = conditioning_tokens(metadata)
+        tokens["image_only"] = image_only
+        for tensor, encoded in clip.encode_from_tokens_scheduled(tokens):
+            output.append([tensor, {**metadata, **encoded}])
+    return output
+
+
+def generate_tokens(clip, metadata, max_tokens, stop_token):
+    tokens = conditioning_tokens(metadata)
+    tokens["stop_token_ids"] = (stop_token,)
+    token_ids = clip.generate(tokens, do_sample=False, max_length=max_tokens)
+    stop = token_ids[-1] if token_ids and token_ids[-1] in (stop_token, IM_END_ID) else None
+    if stop == IM_END_ID:
+        token_ids.pop()
+    return token_ids, stop
 
 
 def _decode_generated_text(clip, token_ids):
-    """Decode generated reasoning while excluding image-start protocol tokens."""
     text_tokens = [token for token in token_ids if token != IMAGE_START_ID]
     return clip.decode(text_tokens, skip_special_tokens=True) if text_tokens else ""
 
@@ -432,7 +306,6 @@ def _interleave_thinking_span(clip, token_ids):
 
 
 def _decode_interleave_text(clip, token_ids):
-    """Separate leading reasoning from answer text and render answer images as placeholders."""
     start, end = _interleave_thinking_span(clip, token_ids)
     has_thinking = start < len(token_ids)
     thinking_ids = []
@@ -458,8 +331,6 @@ def _decode_interleave_text(clip, token_ids):
 
 
 class SenseNovaInterleaveDecode(io.ComfyNode):
-    """Decode the generated portion of a SenseNova interleave history."""
-
     @classmethod
     def define_schema(cls) -> io.Schema:
         return io.Schema(
@@ -468,7 +339,7 @@ class SenseNovaInterleaveDecode(io.ComfyNode):
             category="model/sampling/sensenova",
             description=(
                 "Extract generated text, images and thinking from the interleave "
-                "history produced by Generate SenseNova Text, including U1.6 "
+                "history produced by SenseNova Conditioning, including U1.6 "
                 "self-correction. With loops, use End Loop with "
                 "accumulate disabled. Input reference images are excluded. "
                 "Image consumers are skipped when no images were generated."
@@ -496,10 +367,9 @@ class SenseNovaInterleaveDecode(io.ComfyNode):
         conditioning,
         samples=None,
     ) -> io.NodeOutput:
-        """Extract generated text/images, consuming a pending image without mutating history."""
         if len(conditioning) != 1 or "sensenova_interleave_start" not in conditioning[0][1]:
             raise ValueError(
-                "SenseNova Interleave Decode requires interleave conditioning from Generate SenseNova Text."
+                "SenseNova Interleave Decode requires interleave conditioning from SenseNova Conditioning."
             )
         metadata = conditioning[0][1]
         if metadata["sensenova_interleave_pending_image"]:
@@ -508,7 +378,7 @@ class SenseNovaInterleaveDecode(io.ComfyNode):
                     "SenseNova Interleave Decode is waiting for samples from the last KSampler. "
                     "Connect its LATENT output to samples."
                 )
-            metadata = append_interleave_image(metadata, samples["samples"])
+            metadata = append_interleave_image(metadata, *prepare_interleave_image(samples["samples"]))
         token_ids = metadata["text_input_ids"][0, metadata["sensenova_interleave_start"]:].tolist()
         text, thinking = _decode_interleave_text(clip, token_ids)
         images = [
@@ -519,18 +389,14 @@ class SenseNovaInterleaveDecode(io.ComfyNode):
 
 
 class SenseNovaExtension(ComfyExtension):
-    """Register the native SenseNova node collection."""
-
     @override
     async def get_node_list(self) -> list[type[io.ComfyNode]]:
         return [
-            TextGenerateSenseNova,
-            ModelSamplingSenseNova,
+            SenseNovaConditioning,
+            SenseNovaSamplingOptions,
             SenseNovaInterleaveDecode,
         ]
 
 
 async def comfy_entrypoint() -> SenseNovaExtension:
-    """Create the native SenseNova node extension."""
-
     return SenseNovaExtension()

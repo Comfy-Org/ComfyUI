@@ -16,14 +16,13 @@ IMAGE_LABEL_ID = 1906
 HYPHEN_ID = 12
 DIGIT_ZERO_ID = 15
 COLON_ID = 25
+MERGED_PATCH_SIZE = 32
 
 
-def preprocess_reference(image, dtype=torch.float32):
-    """Convert a ComfyUI reference image to normalized BCHW RGB."""
-
+def preprocess_reference(image):
     if image.ndim == 3:
         image = image.unsqueeze(0)
-    image = image[:, :, :, :3].movedim(-1, 1).to(dtype)
+    image = image[:, :, :, :3].movedim(-1, 1).float()
     if image.shape[1] == 0:
         image = image.new_zeros((image.shape[0], 3, *image.shape[-2:]))
     elif image.shape[1] < 3:
@@ -35,8 +34,6 @@ def preprocess_reference(image, dtype=torch.float32):
 
 
 def split_reference_batches(images):
-    """Split reference image batches into single-image tensors."""
-
     references = []
     for image in images:
         if image.ndim == 3:
@@ -45,13 +42,8 @@ def split_reference_batches(images):
     return references
 
 
-def preprocess_references(images, generated_images_start=None, generated_dtype=torch.float32):
-    """Normalize each reference image independently."""
-
-    return [
-        preprocess_reference(image, generated_dtype if generated_images_start is not None and index >= generated_images_start else torch.float32)
-        for index, image in enumerate(split_reference_batches(images))
-    ]
+def preprocess_references(images):
+    return [preprocess_reference(image) for image in split_reference_batches(images)]
 
 
 def reference_grid(height, width, patch_size):
@@ -71,21 +63,15 @@ def image_token_mask(input_ids):
 
 def prepare_prefix_inputs(
     input_ids, reference_images, patch_size, dtype, *,
-    image_only=False, expand_images=True, append_image_start=True, generated_start=None,
-    generated_images_start=None, generated_dtype=torch.float32,
+    image_only=False, expand_images=True, generated_start=None,
 ):
-    """Prepare reference tokens, normalized images, positions and attention mask."""
-
-    reference_images = preprocess_references(reference_images, generated_images_start, generated_dtype) if reference_images else []
+    reference_images = preprocess_references(reference_images) if reference_images else []
     reference_grids = [
         reference_grid(image.shape[-2], image.shape[-1], patch_size)
         for image in reference_images
     ]
     if reference_images and expand_images:
-        input_ids = condition_input_ids(
-            input_ids, reference_grids,
-            image_only=image_only, append_image_start=append_image_start,
-        )
+        input_ids = condition_input_ids(input_ids, reference_grids, image_only=image_only)
     values = input_ids[0].tolist()
     image_slots = []
     in_image = False
@@ -135,30 +121,36 @@ def _image_tokens(token_height, token_width):
     )
 
 
+def expand_interleave_inputs(input_ids, reference_images, image_only):
+    references = split_reference_batches(reference_images or [])
+    if references:
+        reference_grids = [
+            reference_grid(image.shape[-3], image.shape[-2], MERGED_PATCH_SIZE)
+            for image in references
+        ]
+        input_ids = condition_input_ids(input_ids, reference_grids, image_only=image_only, append_image_start=False, image_labels=False)
+    return input_ids, references
+
+
+def prepare_interleave_image(latent_samples):
+    if latent_samples.ndim != 4 or latent_samples.shape[0] != 1:
+        raise ValueError("SenseNova interleave requires one BCHW latent image per stage.")
+    if latent_samples.shape[1] != 3:
+        raise ValueError("SenseNova interleave requires a three-channel RGB pixel latent from KSampler.")
+
+    image = (latent_samples * 0.5 + 0.5).movedim(1, -1)
+    token_height, token_width = reference_grid(*latent_samples.shape[-2:], MERGED_PATCH_SIZE)
+    return [IMAGE_CONTEXT_ID] * (token_height * token_width) + [IMAGE_END_ID], image
+
+
 def _image_label_tokens(index):
     digits = (DIGIT_ZERO_ID + int(digit) for digit in str(index + 1))
     return (IMAGE_LABEL_ID, HYPHEN_ID, *digits, COLON_ID)
 
 
-def conditioned_input_length(input_length, reference_grids, image_only=False):
-    """Return the token length after inserting reference-image blocks."""
-
-    image_token_count = sum(height * width for height, width in reference_grids)
-    if image_only:
-        return image_token_count + 9 + 2 * len(reference_grids)
-    label_count = (
-        sum(len(_image_label_tokens(index)) for index in range(len(reference_grids)))
-        if len(reference_grids) > 1
-        else 0
-    )
-    return input_length + image_token_count + 3 * len(reference_grids) + label_count
-
-
 def condition_input_ids(
-    input_ids, reference_grids, image_only=False, append_image_start=True
+    input_ids, reference_grids, image_only=False, append_image_start=True, image_labels=True
 ):
-    """Insert reference-image token blocks into a SenseNova prompt."""
-
     image_blocks = [_image_tokens(height, width) for height, width in reference_grids]
     if image_only:
         values = (
@@ -180,7 +172,7 @@ def condition_input_ids(
     insert_at = starts[1] + 3 if len(starts) > 1 else len(values)
     inserted = []
     for index, block in enumerate(image_blocks):
-        if len(image_blocks) > 1:
+        if image_labels and len(image_blocks) > 1:
             inserted.extend(_image_label_tokens(index))
         inserted.extend(block)
         inserted.append(NEWLINE_ID)
@@ -189,8 +181,6 @@ def condition_input_ids(
 
 
 def thw_indexes(input_ids, reference_grids):
-    """Build temporal, height, and width positions for prefix tokens."""
-
     values = input_ids[0]
     image_start_shift = torch.cat(
         (
@@ -218,8 +208,6 @@ def thw_indexes(input_ids, reference_grids):
 
 
 def block_causal_mask(time_indexes, dtype=torch.float32):
-    """Build the block-causal attention mask used by the prefix decoder."""
-
     values = time_indexes[0, 0]
     length = values.shape[0]
     same_block = values[:, None] == values[None, :]

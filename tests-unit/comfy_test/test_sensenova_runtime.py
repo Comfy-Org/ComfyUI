@@ -3,100 +3,45 @@ import json
 
 import pytest
 import torch
-import comfy_aimdo.host_buffer
 import comfy_kitchen
+import comfy_aimdo.host_buffer
+from safetensors import safe_open
+from safetensors.torch import save_file
 
 from comfy.cli_args import args
 
 args.cpu = True
 
 import comfy.hooks
+import comfy.checkpoint_convert
+import comfy.sd
+import comfy.model_base
+import comfy.model_detection
+import comfy.supported_models
 import comfy.model_management
 import comfy.model_patcher
 import comfy.quant_ops
 import comfy.model_prefetch
 import comfy.ops
 import comfy.utils
+import comfy.text_encoders.sensenova
 from comfy.ldm.sensenova import model as sensenova_model
-from comfy.ldm.sensenova.sampling import SenseNovaModelSampling
-from comfy.text_encoders.sensenova import SenseNovaQwenTokenizer
-from comfy_extras.nodes_sensenova import TextGenerateSenseNova
+from comfy_extras.nodes_textgen import TextGenerateV2
+from comfy_extras.nodes_hidream_o1 import HiDreamO1ReferenceImages
+from comfy_extras.nodes_sensenova import SenseNovaConditioning
 from sensenova_test_utils import (
     PatchEmbedding,
     _generation_input_ids,
     _run_prepared_generation,
-    _text_model_patcher,
+    _text_clip,
 )
 
 
-@pytest.mark.parametrize("with_reference", [False, True])
-@pytest.mark.parametrize("max_tokens,compute_dtype,text_padding,text_bytes,reference_bytes", [
-    (32, torch.float32, 0, 16_171_908, 19_269_888),
-    (8192, torch.float32, 0, 2_823_734_148, 2_826_832_128),
-    (32, torch.bfloat16, 0, 8_085_954, 9_634_944),
-    (8192, torch.bfloat16, 0, 1_411_867_074, 1_413_416_064),
-    (32, torch.bfloat16, 4096, 746_529_218, 748_225_664),
-])
-def test_sensenova_generation_reserves_prefix_and_decode_memory(
-    monkeypatch, with_reference, max_tokens, compute_dtype, text_padding, text_bytes, reference_bytes,
-):
-    budgets = []
-    monkeypatch.setattr(comfy.model_management, "load_models_gpu", lambda models, memory_required: budgets.append(memory_required))
-    monkeypatch.setattr(sensenova_model, "HIDDEN_SIZE", 2)
-    model = _text_model_patcher([42, 151668])
-    model.model.manual_cast_dtype = compute_dtype
-    diffusion = model.model.diffusion_model
-    diffusion.vision_model = PatchEmbedding(3, 2, kernel_size=32, stride=32)
-    model.model.to(compute_dtype)
-    embeddings = diffusion.language_model.model.embed_tokens.weight.detach()
-    embeddings[198].copy_(embeddings[1])
-    input_ids = _generation_input_ids()[:, :-1]
-    input_ids = torch.cat((input_ids[:, :3], input_ids.new_full((1, text_padding), 2), input_ids[:, 3:]), dim=1)
-
-    output = TextGenerateSenseNova._execute_image(
-        model=model, clip=SenseNovaQwenTokenizer(), max_tokens=max_tokens,
-        conditioning=[[torch.empty(1), {
-            "text_input_ids": input_ids,
-            "reference_latents": [torch.ones(1, 33, 65, 3)] if with_reference else [],
-        }]],
-    )
-
-    # 15 text positions plus padding; a 2x3 reference grid adds 9 prefix positions.
-    assert budgets == [reference_bytes if with_reference else text_bytes]
-    assert output.args[1] == "K"
-    assert model.model.current_patcher is None
-
-
-def test_sensenova_interleave_memory_includes_sampled_images(monkeypatch):
-    budgets = []
-    monkeypatch.setattr(comfy.model_management, "load_models_gpu", lambda models, memory_required: budgets.append(memory_required))
-    monkeypatch.setattr(sensenova_model, "HIDDEN_SIZE", 3)
-    clip = SenseNovaQwenTokenizer()
-    first = TextGenerateSenseNova._execute_interleave(
-        model=_text_model_patcher([42, 151670]), clip=clip,
-        positive=[[torch.empty(1), {"text_input_ids": torch.tensor([[7, 1]])}]],
-        negative=[[torch.empty(1), {"text_input_ids": torch.tensor([[9]])}]],
-        samples=None, max_text_tokens=8,
-    ).args
-    model = _text_model_patcher([151671, 43, 151645])
-    model.model.diffusion_model.vision_model = PatchEmbedding(3, 3, kernel_size=32, stride=32)
-    second = TextGenerateSenseNova._execute_interleave(
-        model=model, clip=clip, positive=first[0], negative=first[2],
-        samples={"samples": torch.zeros(1, 3, 32, 64)}, max_text_tokens=8,
-    ).args
-
-    assert first[3] is True and second[3] is False
-    assert (first[1], second[1]) == ("K", "L")
-    assert budgets == [3_440_656, 5_161_156]
-    assert second[0][0][1]["sensenova_interleave_finished"] is True
-    assert model.model.current_patcher is None
-
-
-def _prefix_dtype_model(monkeypatch, storage_dtype, compute_dtype, offloaded):
-    model = _text_model_patcher([42, 43, 151668])
+def _prefix_dtype_clip(monkeypatch, storage_dtype, compute_dtype, offloaded):
+    model = _text_clip([42, 43, 151668])
     _add_identity_decoder_layers(monkeypatch, model)
-    model.model.to(dtype=compute_dtype)
-    diffusion = model.model.diffusion_model
+    model.cond_stage_model.to(dtype=compute_dtype)
+    diffusion = model.cond_stage_model
     backbone = diffusion.language_model.model
     for layer in backbone.layers:
         for module in (layer.input_layernorm, layer.self_attn.k_proj, layer.self_attn.v_proj,
@@ -114,9 +59,7 @@ def _prefix_dtype_model(monkeypatch, storage_dtype, compute_dtype, offloaded):
     diffusion.vision_model = PatchEmbedding(3, weight.shape[1], kernel_size=32, stride=32).to(compute_dtype)
     diffusion.vision_model.weight.detach().zero_()
     diffusion.vision_model.bias.detach().zero_()
-    diffusion.dtype = storage_dtype
-    model.model.manual_cast_dtype = compute_dtype
-    model.model.concat_keys = ()
+    monkeypatch.setattr(comfy.text_encoders.sensenova, "generate_dtype", lambda device: compute_dtype)
     return model
 
 
@@ -127,17 +70,17 @@ def _prefix_dtype_model(monkeypatch, storage_dtype, compute_dtype, offloaded):
 def test_sensenova_sampler_prefix_uses_inference_dtype(
     monkeypatch, storage_dtype, compute_dtype, offloaded, with_reference,
 ):
-    model = _prefix_dtype_model(monkeypatch, storage_dtype, compute_dtype, offloaded)
+    model = _prefix_dtype_clip(monkeypatch, storage_dtype, compute_dtype, offloaded)
     metadata = {
         "text_input_ids": _generation_input_ids(),
         "reference_latents": [torch.ones(1, 32, 32, 3)] if with_reference else [],
     }
-    conds = model.model.extra_conds(**metadata, device=model.load_device)
+    conds = model.encode_from_tokens_scheduled(metadata)[0][1]
 
-    assert model.model.diffusion_model.language_model.model.embed_tokens.weight.dtype == storage_dtype
+    assert model.cond_stage_model.language_model.model.embed_tokens.weight.dtype == storage_dtype
     for kind in ("prefix_keys", "prefix_values"):
-        assert len(conds[kind].cond) == 2
-        for tensor in conds[kind].cond:
+        assert len(conds[kind]) == 2
+        for tensor in conds[kind]:
             assert tensor.dtype == compute_dtype
             assert torch.isfinite(tensor).all()
             assert torch.count_nonzero(tensor) > 0
@@ -151,9 +94,9 @@ def test_sensenova_generate_uses_inference_dtype(
     monkeypatch, compute_dtype, offloaded, with_reference, interleave,
 ):
     monkeypatch.setattr(comfy.model_management, "load_models_gpu", lambda models, **kwargs: None)
-    model = _prefix_dtype_model(monkeypatch, torch.float8_e4m3fn, compute_dtype, offloaded)
+    model = _prefix_dtype_clip(monkeypatch, torch.float8_e4m3fn, compute_dtype, offloaded)
     if interleave:
-        head = model.model.diffusion_model.language_model.lm_head.weight.detach()
+        head = model.cond_stage_model.language_model.lm_head.weight.detach()
         head[151670].copy_(head[151668])
         head[151668].zero_()
     positive = [[torch.empty(1), {
@@ -163,7 +106,7 @@ def test_sensenova_generate_uses_inference_dtype(
     }]]
     result = _run_prepared_generation(
         generation_mode="interleave" if interleave else "image",
-        model=model, clip=SenseNovaQwenTokenizer(), conditioning=positive,
+        clip=model, conditioning=positive,
         negative=[[torch.empty(1), {"text_input_ids": torch.tensor([[9]])}]], max_think_tokens=8,
     )
 
@@ -171,239 +114,16 @@ def test_sensenova_generate_uses_inference_dtype(
     assert result.args[3] is True
     expected = [42, 43, 151670] if interleave else [42, 43, 151668, 271, 151670]
     assert result.args[0][0][1]["text_input_ids"][0, -len(expected):].tolist() == expected
-    conds = model.model.extra_conds(**result.args[0][0][1], device=model.load_device)
+    conds = result.args[0][0][1]
     for kind in ("prefix_keys", "prefix_values"):
-        assert all(value.dtype == compute_dtype and torch.isfinite(value).all() for value in conds[kind].cond)
-
-
-@pytest.mark.parametrize("patch_dtype,expected_bytes", [
-    (torch.float32, 4_472_932), (torch.bfloat16, 2_236_466), (None, 2_236_466),
-])
-def test_sensenova_generate_uses_pending_compute_dtype_patch(monkeypatch, patch_dtype, expected_bytes):
-    compute_dtype = patch_dtype or torch.bfloat16
-    model = _prefix_dtype_model(monkeypatch, torch.bfloat16, compute_dtype, False)
-    model.model.manual_cast_dtype = torch.bfloat16 if compute_dtype == torch.float32 else torch.float32
-    model.set_model_compute_dtype(patch_dtype)
-    memory_budgets = []
-
-    def load_model(models, memory_required=0):
-        memory_budgets.append(memory_required)
-        for patcher in models:
-            patcher.patch_model(load_weights=False)
-
-    monkeypatch.setattr(comfy.model_management, "load_models_gpu", load_model)
-    positive = [[torch.empty(1), {
-        "text_input_ids": torch.tensor([[1]]),
-        "reference_latents": [torch.ones(1, 32, 32, 3)],
-    }]]
-    result = _run_prepared_generation(
-        generation_mode="image",
-        model=model, clip=SenseNovaQwenTokenizer(), conditioning=positive, max_think_tokens=8,
-    )
-
-    assert result.args[1] == "KL"
-    assert memory_budgets == [expected_bytes]
-    assert model.model.get_dtype_inference() == compute_dtype
-    conds = model.model.extra_conds(**result.args[0][0][1], device=model.load_device)
-    for kind in ("prefix_keys", "prefix_values"):
-        assert all(value.dtype == compute_dtype and torch.isfinite(value).all() for value in conds[kind].cond)
-
-
-@pytest.mark.parametrize("offloaded", [False, True])
-@pytest.mark.parametrize("compute_dtype", [torch.float32, torch.bfloat16])
-@pytest.mark.parametrize("with_reference", [False, True])
-def test_sensenova_hooked_sampling_uses_inference_dtype(monkeypatch, compute_dtype, offloaded, with_reference):
-    model = _prefix_dtype_model(monkeypatch, torch.float8_e4m3fn, compute_dtype, offloaded).model
-    diffusion = model.diffusion_model
-    width = diffusion.language_model.model.embed_tokens.embedding_dim
-    diffusion.language_model.model.norm_mot_gen = torch.nn.Identity()
-    diffusion.fm_modules = torch.nn.ModuleDict({
-        "vision_model_mot_gen": PatchEmbedding(3, width, kernel_size=32, stride=32),
-        "timestep_embedder": sensenova_model.TimestepEmbedder(width, operations=comfy.ops.manual_cast),
-        "noise_scale_embedder": sensenova_model.TimestepEmbedder(width, operations=comfy.ops.manual_cast),
-        "fm_head": torch.nn.ConvTranspose2d(width, 3, kernel_size=32, stride=32),
-    }).to(compute_dtype)
-    for parameter in diffusion.fm_modules.parameters():
-        parameter.detach().fill_(0.1)
-    model.model_sampling = SenseNovaModelSampling()
-    metadata = {
-        "text_input_ids": _generation_input_ids(),
-        "reference_latents": [torch.ones(1, 32, 32, 3)] if with_reference else [],
-        "device": torch.device("cpu"),
-    }
-    image = torch.ones(1, 3, 32, 32)
-    sigma = torch.tensor([0.5])
-    prepared = model.extra_conds(**metadata)
-    expected = model.apply_model(image, sigma, **{key: value.cond for key, value in prepared.items()})
-    hooked = model.extra_conds(**metadata, hooks=object())
-    actual = model.apply_model(image, sigma, **{key: value.cond for key, value in hooked.items()})
-
-    assert torch.isfinite(actual).all()
-    torch.testing.assert_close(actual, expected)
-
-
-@pytest.mark.parametrize("interleave", [False, True])
-def test_sensenova_generate_initialization_failure_cleans_up_and_can_run_again(monkeypatch, interleave):
-    monkeypatch.setattr(comfy.model_management, "load_models_gpu", lambda models, **kwargs: None)
-    model = _text_model_patcher([42, 151645 if interleave else 151668])
-    positive = [[torch.empty(1), {
-        "text_input_ids": torch.tensor([[1]]),
-        "sensenova_interleave": interleave,
-    }]]
-    kwargs = dict(
-        model=model, clip=SenseNovaQwenTokenizer(), conditioning=positive,
-        negative=[[torch.empty(1), {"text_input_ids": torch.tensor([[9]])}]],
-        max_think_tokens=8,
-    )
-
-    def fail_initialization(patcher):
-        assert patcher.model.current_patcher is patcher
-        raise RuntimeError("initialization failed")
-
-    model.add_callback_with_key("on_pre_run", "test_failure", fail_initialization)
-    with pytest.raises(RuntimeError, match="initialization failed"):
-        _run_prepared_generation(generation_mode="interleave" if interleave else "image", **kwargs)
-
-    assert model.model.current_patcher is None
-    assert positive[0][1]["text_input_ids"].tolist() == [[1]]
-    model.remove_callbacks_with_key("on_pre_run", "test_failure")
-    assert _run_prepared_generation(generation_mode="interleave" if interleave else "image", **kwargs).args[1] == "K"
-    assert model.model.current_patcher is None
-
-
-@pytest.mark.parametrize("interleave", [False, True])
-@pytest.mark.parametrize("dynamic", [False, True])
-@pytest.mark.parametrize("cancel_during_prefill", [False, True])
-def test_sensenova_generate_cancel_cleans_up_and_can_run_again(monkeypatch, interleave, dynamic, cancel_during_prefill):
-    monkeypatch.setattr(comfy.model_management, "load_models_gpu", lambda models, **kwargs: None)
-    monkeypatch.setattr(comfy.model_management, "NUM_STREAMS", 1)
-    monkeypatch.setattr(comfy.model_management, "is_device_cpu", lambda device: False)
-    monkeypatch.setattr(comfy.model_management, "device_supports_non_blocking", lambda device: True)
-    monkeypatch.setattr(comfy_aimdo.host_buffer, "HostBuffer", lambda *args: None)
-    model = _text_model_patcher([42, 43, 151645 if interleave else 151668])
-    _add_identity_decoder_layers(monkeypatch, model)
-    if dynamic:
-        model = comfy.model_patcher.ModelPatcherDynamic(
-            model.model, load_device=torch.device("cpu"), offload_device=torch.device("cpu"),
-        )
-    positive = [[torch.empty(1), {
-        "text_input_ids": torch.tensor([[1]]),
-        "sensenova_interleave": interleave,
-    }]]
-    negative = [[torch.empty(1), {"text_input_ids": torch.tensor([[9]])}]]
-    kwargs = dict(
-        model=model, clip=SenseNovaQwenTokenizer(), conditioning=positive,
-        negative=negative, max_think_tokens=8,
-    )
-
-    def cancel_on_progress(value, total, preview, node_id=None):
-        assert model.model.current_patcher is model
-        assert bool(comfy.model_prefetch.PREFETCH_QUEUES) == dynamic
-        comfy.model_management.interrupt_current_processing()
-
-    layers = model.model.diffusion_model.language_model.model.layers
-    completed_prefill_layers = []
-
-    def cancel_after_layer(module, inputs, output):
-        completed_prefill_layers.append(module)
-        cancel_on_progress(0, 0, None)
-
-    handles = [layer.mlp.register_forward_hook(cancel_after_layer) for layer in layers] if cancel_during_prefill else []
-    if not cancel_during_prefill:
-        monkeypatch.setattr(comfy.utils, "PROGRESS_BAR_HOOK", cancel_on_progress)
-    try:
-        with pytest.raises(comfy.model_management.InterruptProcessingException):
-            _run_prepared_generation(generation_mode="interleave" if interleave else "image", **kwargs)
-    finally:
-        for handle in handles:
-            handle.remove()
-        comfy.model_management.interrupt_current_processing(False)
-    if cancel_during_prefill:
-        assert completed_prefill_layers == [layers[0].mlp]
-    assert comfy.model_prefetch.PREFETCH_QUEUES == []
-    assert model.model.current_patcher is None
-    assert positive[0][1]["text_input_ids"].tolist() == [[1]]
-
-    monkeypatch.setattr(comfy.utils, "PROGRESS_BAR_HOOK", None)
-    completed = _run_prepared_generation(generation_mode="interleave" if interleave else "image", **kwargs)
-    expected = [[1, 42, 43]] if interleave else [[1, 42, 43, 151668, 271, 151670]]
-    assert completed.args[0][0][1]["text_input_ids"].tolist() == expected
-    assert model.model.current_patcher is None
-    assert comfy.model_prefetch.PREFETCH_QUEUES == []
-
-
-@pytest.mark.parametrize("dynamic", [False, True])
-def test_sensenova_generate_uses_native_prefetch_for_dynamic_models(monkeypatch, dynamic):
-    monkeypatch.setattr(comfy.model_management, "load_models_gpu", lambda models, **kwargs: None)
-    monkeypatch.setattr(comfy.model_management, "NUM_STREAMS", 1)
-    monkeypatch.setattr(comfy.model_management, "is_device_cpu", lambda device: False)
-    monkeypatch.setattr(comfy.model_management, "device_supports_non_blocking", lambda device: True)
-    monkeypatch.setattr(comfy_aimdo.host_buffer, "HostBuffer", lambda *args: None)
-    model = _text_model_patcher([42, 43, 151668])
-    _add_identity_decoder_layers(monkeypatch, model)
-    if dynamic:
-        model = comfy.model_patcher.ModelPatcherDynamic(
-            model.model, load_device=torch.device("cpu"), offload_device=torch.device("cpu"),
-        )
-    options = {"prefetch_dynamic_vbars": not dynamic}
-    model.model_options["transformer_options"] = options
-    active_prefetch = []
-    monkeypatch.setattr(
-        comfy.utils, "PROGRESS_BAR_HOOK",
-        lambda *args, **kwargs: active_prefetch.append(bool(comfy.model_prefetch.PREFETCH_QUEUES)),
-    )
-    conditioning = [[torch.empty(1), {
-        "text_input_ids": torch.tensor([[1]]),
-    }]]
-    try:
-        output = _run_prepared_generation(
-            generation_mode="image",
-            model=model, clip=SenseNovaQwenTokenizer(), conditioning=conditioning,
-            max_think_tokens=8,
-        )
-        assert output.args[0][0][1]["text_input_ids"].tolist() == [[1, 42, 43, 151668, 271, 151670]]
-        assert output.args[1] == "KL"
-        assert active_prefetch and all(active == dynamic for active in active_prefetch)
-        assert comfy.model_prefetch.PREFETCH_QUEUES == []
-        assert model.model_options["transformer_options"] == {"prefetch_dynamic_vbars": not dynamic}
-    finally:
-        comfy.model_prefetch.cleanup_prefetch_queues()
-
-
-@pytest.mark.parametrize("dynamic", [False, True])
-def test_sensenova_sampler_prefix_uses_current_patcher_prefetch(monkeypatch, dynamic):
-    monkeypatch.setattr(comfy.model_management, "NUM_STREAMS", 1)
-    monkeypatch.setattr(comfy.model_management, "is_device_cpu", lambda device: False)
-    monkeypatch.setattr(comfy.model_management, "device_supports_non_blocking", lambda device: True)
-    monkeypatch.setattr(comfy_aimdo.host_buffer, "HostBuffer", lambda *args: None)
-    model = _text_model_patcher([42, 151668])
-    _add_identity_decoder_layers(monkeypatch, model)
-    if dynamic:
-        model = comfy.model_patcher.ModelPatcherDynamic(
-            model.model, load_device=torch.device("cpu"), offload_device=torch.device("cpu"),
-        )
-    model.model.concat_keys = ()
-    model.pre_run()
-    try:
-        conds = model.model.extra_conds(
-            text_input_ids=torch.tensor([[1]]), device=model.load_device,
-        )
-        assert conds["prefix_time"].cond.tolist() == [1]
-        assert len(conds["prefix_keys"].cond) == 2
-        for key, value in zip(conds["prefix_keys"].cond, conds["prefix_values"].cond):
-            assert key.shape == value.shape == (1, 1, 1, 8)
-            assert torch.count_nonzero(key) == torch.count_nonzero(value) == 0
-        assert bool(comfy.model_prefetch.PREFETCH_QUEUES) == dynamic
-    finally:
-        comfy.model_prefetch.cleanup_prefetch_queues()
-        model.cleanup()
+        assert all(value.dtype == compute_dtype and torch.isfinite(value).all() for value in conds[kind])
 
 
 def _add_identity_decoder_layers(monkeypatch, model):
-    backbone = model.model.diffusion_model.language_model.model
+    backbone = model.cond_stage_model.language_model.model
     for name, value in {
         "HIDDEN_SIZE": backbone.embed_tokens.embedding_dim,
-        "INTERMEDIATE_SIZE": 4, "NUM_HEADS": 1, "NUM_KV_HEADS": 1, "HEAD_DIM": 8,
+        "INTERMEDIATE_SIZE": 4, "NUM_LAYERS": 2, "NUM_HEADS": 1, "NUM_KV_HEADS": 1, "HEAD_DIM": 8,
     }.items():
         monkeypatch.setattr(sensenova_model, name, value)
     backbone.layers = torch.nn.ModuleList([
@@ -411,77 +131,6 @@ def _add_identity_decoder_layers(monkeypatch, model):
     ])
     for parameter in backbone.layers.parameters():
         torch.nn.init.zeros_(parameter)
-
-
-def test_sensenova_generate_layer_failure_releases_prefetch_and_can_retry(monkeypatch):
-    monkeypatch.setattr(comfy.model_management, "load_models_gpu", lambda models, **kwargs: None)
-    monkeypatch.setattr(comfy.model_management, "NUM_STREAMS", 1)
-    monkeypatch.setattr(comfy.model_management, "is_device_cpu", lambda device: False)
-    monkeypatch.setattr(comfy.model_management, "device_supports_non_blocking", lambda device: True)
-    monkeypatch.setattr(comfy_aimdo.host_buffer, "HostBuffer", lambda *args: None)
-    model = _text_model_patcher([42, 151668])
-    _add_identity_decoder_layers(monkeypatch, model)
-    model = comfy.model_patcher.ModelPatcherDynamic(
-        model.model, load_device=torch.device("cpu"), offload_device=torch.device("cpu"),
-    )
-    conditioning = [[torch.empty(1), {
-        "text_input_ids": torch.tensor([[1]]),
-    }]]
-    kwargs = dict(model=model, clip=SenseNovaQwenTokenizer(), conditioning=conditioning, max_think_tokens=8)
-
-    def fail_layer(module, inputs):
-        assert comfy.model_prefetch.PREFETCH_QUEUES
-        raise RuntimeError("layer failed")
-
-    handle = model.model.diffusion_model.language_model.model.layers[0].mlp.register_forward_pre_hook(fail_layer)
-    try:
-        with pytest.raises(RuntimeError, match="layer failed"):
-            _run_prepared_generation(generation_mode="image", **kwargs)
-        assert comfy.model_prefetch.PREFETCH_QUEUES == []
-        assert model.model.current_patcher is None
-        assert conditioning[0][1]["text_input_ids"].tolist() == [[1]]
-    finally:
-        handle.remove()
-        comfy.model_prefetch.cleanup_prefetch_queues()
-    assert _run_prepared_generation(generation_mode="image", **kwargs).args[1] == "K"
-    assert comfy.model_prefetch.PREFETCH_QUEUES == []
-
-
-def test_sensenova_generate_releases_native_prefetch_on_initialization_failure(monkeypatch):
-    monkeypatch.setattr(comfy.model_management, "load_models_gpu", lambda models, **kwargs: None)
-    monkeypatch.setattr(comfy.model_management, "NUM_STREAMS", 1)
-    monkeypatch.setattr(comfy.model_management, "is_device_cpu", lambda device: False)
-    monkeypatch.setattr(comfy.model_management, "device_supports_non_blocking", lambda device: True)
-    model = _text_model_patcher([42, 151668])
-    conditioning = [[torch.empty(1), {
-        "text_input_ids": torch.tensor([[1]]),
-    }]]
-
-    def fail_initialization(patcher):
-        queue = comfy.model_prefetch.make_prefetch_queue(
-            [], patcher.load_device, {"prefetch_dynamic_vbars": True},
-        )
-        assert queue is not None
-        raise RuntimeError("initialization failed after prefetch")
-
-    model.add_callback_with_key("on_pre_run", "prefetch_failure", fail_initialization)
-    try:
-        with pytest.raises(RuntimeError, match="initialization failed after prefetch"):
-            _run_prepared_generation(
-                generation_mode="image",
-                model=model, clip=SenseNovaQwenTokenizer(), conditioning=conditioning,
-                max_think_tokens=8,
-            )
-        assert comfy.model_prefetch.PREFETCH_QUEUES == []
-        assert model.model.current_patcher is None
-        model.remove_callbacks_with_key("on_pre_run", "prefetch_failure")
-        assert _run_prepared_generation(
-            generation_mode="image",
-            model=model, clip=SenseNovaQwenTokenizer(), conditioning=conditioning,
-            max_think_tokens=8,
-        ).args[1] == "K"
-    finally:
-        comfy.model_prefetch.cleanup_prefetch_queues()
 
 
 @pytest.mark.parametrize(
@@ -572,76 +221,6 @@ def test_sensenova_decode_attention_uses_configured_backend(monkeypatch, storage
     assert torch.equal(cache.value[:, 3], torch.full_like(cache.value[:, 3], 64))
 
 
-@pytest.mark.parametrize("interleave", [False, True])
-@pytest.mark.parametrize("prior_hook", [False, True])
-@pytest.mark.parametrize("interrupt", [False, True])
-def test_sensenova_generation_applies_conditioning_weights_and_restores_sampling(monkeypatch, interleave, prior_hook, interrupt):
-    monkeypatch.setattr(comfy.model_management, "load_models_gpu", lambda models, **kwargs: None)
-    model = _text_model_patcher([42, 43, 151670 if interleave else 151668])
-    embed = model.model.diffusion_model.language_model.model.embed_tokens
-    base = embed.weight.detach().clone()
-    key = "diffusion_model.language_model.model.embed_tokens.weight"
-
-    def weight_group(column):
-        delta = torch.zeros_like(base)
-        delta[1] = -base[1]
-        delta[1, column] += 1
-        hook = comfy.hooks.WeightHook()
-        hook.need_weight_init = False
-        hook.weights = {key: (delta,)}
-        group = comfy.hooks.HookGroup()
-        group.add(hook)
-        return group
-
-    generation_hooks, sampling_hooks = weight_group(1), weight_group(2)
-    if prior_hook:
-        hook = sampling_hooks.hooks[0]
-        model.add_hook_patches(hook, hook.weights)
-        model.apply_hooks(sampling_hooks)
-    previous_hooks = model.current_hooks
-    previous_weights = embed.weight.detach().clone()
-    previous_patches = model.hook_patches
-    previous_uuid = model.patches_uuid
-    seen = []
-
-    def inspect_prefill(module, inputs, output):
-        if not seen:
-            seen.append(output.clone())
-            assert torch.equal(output[0, 0], base[42])
-            if interrupt:
-                raise comfy.model_management.InterruptProcessingException()
-
-    handle = embed.register_forward_hook(inspect_prefill)
-    positive = [[torch.empty(1), {"text_input_ids": torch.tensor([[1]]), "hooks": generation_hooks}]]
-    negative = [[torch.empty(1), {"text_input_ids": torch.tensor([[9]]), "hooks": sampling_hooks}]]
-    try:
-        if interrupt:
-            with pytest.raises(comfy.model_management.InterruptProcessingException):
-                _run_prepared_generation(generation_mode="interleave" if interleave else "image", model=model,
-                                         clip=SenseNovaQwenTokenizer(), conditioning=positive, negative=negative, max_think_tokens=8)
-        else:
-            result = _run_prepared_generation(generation_mode="interleave" if interleave else "image", model=model,
-                                             clip=SenseNovaQwenTokenizer(), conditioning=positive, negative=negative, max_think_tokens=8)
-            assert result.args[1] == "L"
-            assert result.args[0][0][1]["hooks"] is generation_hooks
-            if interleave:
-                assert result.args[2][0][1]["hooks"] is sampling_hooks
-    finally:
-        handle.remove()
-    assert seen
-    assert torch.equal(embed.weight, previous_weights)
-    assert model.current_hooks is previous_hooks
-    assert model.hook_patches is previous_patches
-    assert model.patches_uuid == previous_uuid
-    assert model.model.current_patcher is None
-    assert comfy.model_prefetch.PREFETCH_QUEUES == []
-
-    model.register_all_hook_patches(sampling_hooks, comfy.hooks.create_target_dict(comfy.hooks.EnumWeightTarget.Model))
-    model.apply_hooks(sampling_hooks)
-    assert torch.equal(embed(torch.tensor([[1]]))[0, 0], base[43])
-    model.cleanup()
-
-
 @pytest.mark.parametrize("storage_dtype", [torch.float8_e4m3fn, torch.float8_e5m2])
 def test_sensenova_plain_cpu_fp8_uses_native_embedding_for_prefill_and_decode(monkeypatch, storage_dtype):
     embed = comfy.ops.manual_cast.Embedding(8, 4, dtype=storage_dtype, device="cpu")
@@ -651,11 +230,11 @@ def test_sensenova_plain_cpu_fp8_uses_native_embedding_for_prefill_and_decode(mo
     monkeypatch.setattr(embed, "host_rows", lambda *args, **kwargs: pytest.fail("Plain CPU FP8 requires native embedding lookup"))
     model = SimpleNamespace(language_model=SimpleNamespace(model=SimpleNamespace(embed_tokens=embed, layers=[])))
     ids = torch.tensor([[1, 2]])
-    prefix, _, _, _ = sensenova_model.SenseNovaU15._prepare_prefix(model, ids, None, None, None, compute_dtype=torch.bfloat16)
+    prefix, _, _, _ = sensenova_model.SenseNovaTextModel._prepare_prefix(model, ids, None, None, None, compute_dtype=torch.bfloat16)
     expected = torch.nn.functional.embedding(ids, embed.weight.float()).bfloat16()
     assert torch.equal(prefix, expected)
     hidden = torch.empty(1, 1, 4, dtype=torch.bfloat16)
-    sensenova_model.SenseNovaU15._decode_text_token(model, ids[:, 0], [], hidden, None)
+    sensenova_model.SenseNovaTextModel._decode_text_token(model, ids[:, 0], [], hidden, None)
     assert torch.equal(hidden, expected[:, :1])
     assert embed.weight.dtype == storage_dtype
 
@@ -686,126 +265,290 @@ def test_sensenova_quantized_embedding_preserves_native_lookup(quant_format, con
         embed.weight_lowvram_function = None
         assert sensenova_model._use_host_rows(embed)
     model = SimpleNamespace(language_model=SimpleNamespace(model=SimpleNamespace(embed_tokens=embed, layers=[])))
-    prefix, _, _, _ = sensenova_model.SenseNovaU15._prepare_prefix(model, ids, None, None, None, compute_dtype=torch.bfloat16)
+    prefix, _, _, _ = sensenova_model.SenseNovaTextModel._prepare_prefix(model, ids, None, None, None, compute_dtype=torch.bfloat16)
     assert torch.equal(prefix, expected)
     hidden = torch.empty(1, 1, 256, dtype=torch.bfloat16)
-    sensenova_model.SenseNovaU15._decode_text_token(model, ids[:, 0], [], hidden, None)
+    sensenova_model.SenseNovaTextModel._decode_text_token(model, ids[:, 0], [], hidden, None)
     assert torch.equal(hidden, expected[:, :1])
     assert isinstance(embed.weight, comfy.quant_ops.QuantizedTensor)
 
 
-def test_sensenova_generation_weight_hook_uses_native_dynamic_delegate(monkeypatch):
+
+
+@pytest.fixture
+def small_sensenova(monkeypatch):
+    for name, value in {"HIDDEN_SIZE": 16, "INTERMEDIATE_SIZE": 32, "NUM_LAYERS": 2,
+                        "NUM_HEADS": 2, "NUM_KV_HEADS": 1, "HEAD_DIM": 8}.items():
+        monkeypatch.setattr(sensenova_model, name, value)
+
+
+@pytest.mark.parametrize("prefix", ["", "model.diffusion_model."])
+def test_sensenova_checkpoint_and_clip_round_trip(small_sensenova, monkeypatch, tmp_path, prefix, caplog):
+    text = sensenova_model.SenseNovaTextModel(has_lm_head=True, operations=torch.nn)
+    image = sensenova_model.SenseNovaU15(dtype=torch.float32, operations=torch.nn)
+    text_sd, image_sd = text.state_dict(), image.state_dict()
+    assert not text_sd.keys() & image_sd.keys()
+    state = {prefix + key.replace("vision_model.", "vision_model.embeddings.", 1): value for key, value in text_sd.items()}
+    for key, value in image_sd.items():
+        if key.startswith("layers."):
+            parts = key.split(".")
+            parts[3 if parts[2] == "self_attn" else 2] += "_mot_gen"
+            name = "language_model.model." + ".".join(parts)
+        elif key.startswith("norm."):
+            name = "language_model.model.norm_mot_gen." + key[len("norm."):]
+        elif key.startswith("patch_embed."):
+            name = "fm_modules.vision_model_mot_gen.embeddings." + key[len("patch_embed."):]
+        elif key.startswith("head."):
+            name = "fm_modules.fm_head." + key[len("head."):]
+        else:
+            name = "fm_modules." + key
+        state[prefix + name] = value
+    destination = tmp_path / "comfy.safetensors"
+    save_file(comfy.checkpoint_convert.convert_checkpoint(state), destination, metadata={"format": "sensenova-u1.5-mot"})
+    with safe_open(destination, framework="pt") as converted:
+        assert converted.metadata() == {"format": "sensenova-u1.5-mot"}
+    state = comfy.utils.load_torch_file(str(destination))
+    model_config = comfy.supported_models.SenseNovaU15({"image_model": "sensenova_u15"})
+    # Detection dimensions are covered separately with full-size checkpoint shapes.
+    monkeypatch.setattr(comfy.model_detection, "model_config_from_unet", lambda *a, **kw: model_config)
+    options = {"load_device": torch.device("cpu"), "dtype": torch.float32}
+    model, clip, vae, _ = comfy.sd.load_state_dict_guess_config(
+        state, model_options=options, te_model_options=options, disable_dynamic=True,
+    )
+    assert model is not None and clip is not None and vae is not None
+    assert state == {}
+    assert set(model.model.diffusion_model.state_dict()) == set(image_sd)
+    assert set(clip.get_sd()) == set(text_sd)
+    assert not {p.data_ptr() for p in model.model.parameters()} & {p.data_ptr() for p in clip.cond_stage_model.parameters()}
+    saved = model.model.state_dict_for_saving(model.model.diffusion_model.state_dict(), clip.get_sd(), vae.get_sd())
+    torch.testing.assert_close(saved["vae.pixel_space_vae"], torch.tensor(1.0))
+    for prefix, weights in (("model.diffusion_model.", image_sd), ("text_encoders.", text_sd)):
+        for key, value in weights.items():
+            torch.testing.assert_close(saved[prefix + key], value, rtol=0, atol=0)
+    reloaded_model, reloaded_clip, reloaded_vae, _ = comfy.sd.load_state_dict_guess_config(
+        saved, model_options=options, te_model_options=options, disable_dynamic=True,
+    )
+    assert set(reloaded_model.model.diffusion_model.state_dict()) == set(image_sd)
+    assert set(reloaded_vae.get_sd()) == {"pixel_space_vae"}
+    standalone = comfy.sd.load_text_encoder_state_dicts([clip.get_sd()], model_options=options, disable_dynamic=True)
+    tokens = clip.tokenize("an apple", skip_template=False)
+    expected = clip.generate(tokens, do_sample=False, max_length=2)
+    assert reloaded_clip.generate(tokens, do_sample=False, max_length=2) == expected
+    assert standalone.generate(tokens, do_sample=False, max_length=2) == expected
+    assert "missing:" not in caplog.text and "unexpected:" not in caplog.text
+
+    text_key = "language_model.model.layers.0.self_attn.q_proj"
+    image_key = "layers.0.self_attn.q_proj"
+    lora = {prefix + key + suffix: value for prefix, key in (("text_encoders.", text_key), ("diffusion_model.", image_key)) for suffix, value in (
+        (".lora_up.weight", torch.ones(16, 1)), (".lora_down.weight", torch.ones(1, 16)),
+    )}
+    patched_model, patched_clip = comfy.sd.load_lora_for_models(model, clip, lora, 1.0, 0.5)
+    assert set(patched_model.patches) == {"diffusion_model." + image_key + ".weight"}
+    assert set(patched_clip.patcher.patches) == {text_key + ".weight"}
+    text_weight = clip.get_sd()[text_key + ".weight"].clone()
+    image_weight = model.model.diffusion_model.state_dict()[image_key + ".weight"].clone()
+    try:
+        comfy.model_management.load_models_gpu([patched_model, patched_clip.patcher], force_full_load=True)
+        torch.testing.assert_close(patched_model.model.diffusion_model.state_dict()[image_key + ".weight"], image_weight + 1)
+        torch.testing.assert_close(patched_clip.get_sd()[text_key + ".weight"], text_weight + 0.5)
+    finally:
+        patched_model.unpatch_model()
+        patched_clip.patcher.unpatch_model()
+
+
+@pytest.mark.parametrize("component", ["model", "clip", "vae", "diffusion"])
+def test_sensenova_partial_checkpoint_loading(small_sensenova, monkeypatch, component, caplog):
+    text = sensenova_model.SenseNovaTextModel(has_lm_head=True, operations=torch.nn)
+    image = sensenova_model.SenseNovaU15(dtype=torch.float32, operations=torch.nn)
+    text_sd, image_sd = text.state_dict(), image.state_dict()
+    state = {"model.diffusion_model." + key: value for key, value in image_sd.items()}
+    state.update({"text_encoders." + key: value for key, value in text_sd.items()})
+    vae_sd = {"pixel_space_vae": torch.tensor(1.0)}
+    state.update({"vae." + key: value for key, value in vae_sd.items()})
+    model_config = comfy.supported_models.SenseNovaU15({"image_model": "sensenova_u15"})
+    monkeypatch.setattr(comfy.model_detection, "model_config_from_unet", lambda *a, **kw: model_config)
+    options = {"load_device": torch.device("cpu"), "dtype": torch.float32}
+    if component == "diffusion":
+        model = comfy.sd.load_diffusion_model_state_dict(state, model_options=options, disable_dynamic=True)
+    else:
+        model, clip, vae, _ = comfy.sd.load_state_dict_guess_config(
+            state, output_model=component == "model", output_clip=component == "clip", output_vae=component == "vae",
+            model_options=options, te_model_options=options, disable_dynamic=True,
+        )
+    if component == "clip":
+        actual, expected = clip.get_sd(), text_sd
+    elif component == "vae":
+        actual, expected = vae.get_sd(), vae_sd
+    else:
+        actual, expected = model.model.diffusion_model.state_dict(), image_sd
+    assert actual.keys() == expected.keys()
+    for key, value in expected.items():
+        torch.testing.assert_close(actual[key], value)
+    assert "missing:" not in caplog.text and "unexpected:" not in caplog.text
+
+
+def test_sensenova_native_sampling_and_generation_node():
+    clip = _text_clip([42, 43, 151645])
+    tokens = {"text_input_ids": torch.tensor([[1]])}
+    assert clip.generate(tokens, do_sample=False, max_length=8) == [42, 43, 151645]
+    assert clip.generate(tokens, top_k=1, max_length=8, seed=7) == [42, 43, 151645]
+    sampled = dict(max_length=8, seed=7, temperature=0.8, top_k=7, top_p=0.9, min_p=0.01, repetition_penalty=1.2, presence_penalty=0.1)
+    assert clip.generate(tokens, **sampled) == clip.generate(tokens, **sampled)
+    embed = clip.cond_stage_model.language_model.model.embed_tokens.weight.detach()
+    embed[271].copy_(embed[1])
+    result = TextGenerateV2.execute(clip=clip, prompt="Say hello", max_length=8, sampling_mode={"sampling_mode": "off"})
+    assert result.args == ("KL", "")
+    raw = clip.tokenize("literal <img>", skip_template=True)
+    assert clip.decode([pair[0] for pair in raw["sensenova_u15"][0]], skip_special_tokens=False) == "literal <img>"
+    custom = clip.tokenize("hello", skip_template=False, system_prompt="Be concise.")
+    assert "system\nBe concise.<|im_end|>" in clip.decode([pair[0] for pair in custom["sensenova_u15"][0]], skip_special_tokens=False)
+
+
+@pytest.mark.parametrize(("generated", "limit", "expected"), [
+    ([42, 43, 151645], 8, [42, 43, 151645]),
+    ([151645], 8, [151645]),
+    ([42, 151668], 8, [42, 151668]),
+    ([42, 43, 44], 2, [42, 43]),
+])
+def test_sensenova_text_progress_reaches_ui_and_console(monkeypatch, capsys, generated, limit, expected):
+    clip = _text_clip(generated)
+    updates = []
+    monkeypatch.setattr(comfy.utils, "PROGRESS_BAR_HOOK", lambda value, total, preview, **kw: updates.append((value, total)))
+    monkeypatch.setattr(comfy.utils, "PROGRESS_THROTTLE_MIN_INTERVAL", 0)
+    monkeypatch.setattr(comfy.utils, "PROGRESS_THROTTLE_MIN_PERCENT", 0)
+
+    result = clip.generate({"text_input_ids": torch.tensor([[1]]), "stop_token_ids": (151668,)}, do_sample=False, max_length=limit)
+
+    assert result == expected
+    count = len(expected)
+    assert updates == [(value, limit) for value in range(count + 1)] + [(count, count)]
+    console = capsys.readouterr().err
+    assert "Generating tokens" in console and "100%" in console
+    assert f"{count}/{count}" in console
+
+
+@pytest.mark.parametrize("phase", ["prefill", "decode", "encode"])
+def test_sensenova_clip_cancellation_releases_prefetch_and_can_retry(monkeypatch, phase):
+    clip = _text_clip([42, 43, 151668])
+    _add_identity_decoder_layers(monkeypatch, clip)
+    monkeypatch.setattr(comfy.model_management, "load_models_gpu", lambda *a, **kw: None)
+    monkeypatch.setattr(comfy.model_management, "NUM_STREAMS", 1)
     monkeypatch.setattr(comfy.model_management, "is_device_cpu", lambda device: False)
+    monkeypatch.setattr(comfy.model_management, "device_supports_non_blocking", lambda device: True)
+    monkeypatch.setattr(comfy.text_encoders.sensenova, "generate_dtype", lambda device: torch.float32)
     monkeypatch.setattr(comfy_aimdo.host_buffer, "HostBuffer", lambda *args: None)
-    original = _text_model_patcher([42, 43, 151668])
-    model = comfy.model_patcher.ModelPatcherDynamic(_text_model_patcher([42, 43, 151668]).model,
-                                                 load_device=torch.device("cpu"), offload_device=torch.device("cpu"))
-    model.non_dynamic_delegate_model = original.get_clone_model_override()
-    weights = original.model.diffusion_model.language_model.model.embed_tokens.weight.detach()
-    delta = torch.zeros_like(weights)
-    delta[1] = weights[42] - weights[1]
+    tokens = {"text_input_ids": torch.tensor([[1]]), "stop_token_ids": (151668,)}
+
+    def cancel(*args, **kwargs):
+        assert comfy.model_prefetch.PREFETCH_QUEUES
+        raise comfy.model_management.InterruptProcessingException()
+
+    handle = None
+    if phase == "decode":
+        monkeypatch.setattr(comfy.utils, "PROGRESS_BAR_HOOK", lambda value, *a, **kw: cancel() if value else None)
+    else:
+        handle = clip.cond_stage_model.language_model.model.layers[0].mlp.register_forward_pre_hook(cancel)
+    try:
+        with pytest.raises(comfy.model_management.InterruptProcessingException):
+            if phase == "encode":
+                clip.encode_from_tokens_scheduled(tokens)
+            else:
+                clip.generate(tokens, do_sample=False, max_length=8)
+        assert comfy.model_prefetch.PREFETCH_QUEUES == []
+    finally:
+        if handle is not None:
+            handle.remove()
+        monkeypatch.setattr(comfy.utils, "PROGRESS_BAR_HOOK", None)
+    assert clip.generate(tokens, do_sample=False, max_length=8) == [42, 43, 151668]
+    assert comfy.model_prefetch.PREFETCH_QUEUES == []
+
+
+def test_sensenova_clip_uses_native_weight_hooks():
+    clip = _text_clip([42, 43, 151668])
+    embed = clip.cond_stage_model.language_model.model.embed_tokens.weight.detach().clone()
+    delta = torch.zeros_like(embed)
+    delta[1] = embed[42] - embed[1]
     hook = comfy.hooks.WeightHook()
     hook.need_weight_init = False
-    hook.weights = {"diffusion_model.language_model.model.embed_tokens.weight": (delta,)}
     group = comfy.hooks.HookGroup()
     group.add(hook)
-    loaded = []
-    monkeypatch.setattr(comfy.model_management, "load_models_gpu", lambda models, **kwargs: loaded.extend(models))
-    result = _run_prepared_generation(generation_mode="image", model=model, clip=SenseNovaQwenTokenizer(),
-                                     conditioning=[[torch.empty(1), {"text_input_ids": torch.tensor([[1]]), "hooks": group}]],
-                                     max_think_tokens=8)
-    assert result.args[1] == "L"
-    assert len(loaded) == 1 and not loaded[0].is_dynamic()
-    assert model.is_dynamic()
-    assert model.current_hooks is None
-    assert model.hook_patches == {}
+    patched = clip.clone()
+    patched.patcher.add_hook_patches(hook, {"language_model.model.embed_tokens.weight": (delta,)})
+    patched.patcher.forced_hooks = group
+    tokens = {"text_input_ids": torch.tensor([[1]]), "stop_token_ids": (151668,)}
+    try:
+        assert patched.generate(tokens, do_sample=False, max_length=8) == [43, 151668]
+        assert clip.generate(tokens, do_sample=False, max_length=8) == [42, 43, 151668]
+    finally:
+        patched.patcher.unpatch_model()
 
 
-def test_sensenova_generation_weight_hook_preserves_transformer_patches(monkeypatch):
-    monkeypatch.setattr(comfy.model_management, "load_models_gpu", lambda models, **kwargs: None)
-    model = _text_model_patcher([42, 151668])
-    patch = lambda *args: None
-    model.set_model_attn1_patch(patch)
-    hook = comfy.hooks.WeightHook()
-    hook.need_weight_init = False
-    hook.weights = {}
-    group = comfy.hooks.HookGroup()
-    group.add(hook)
-    diffusion = model.model.diffusion_model
-    prefill = diffusion._preprocess_prefix_state
-    seen = []
-
-    def inspect_prefill(ids, references, indexes, mask, transformer_options=None, **kwargs):
-        seen.append(transformer_options["patches"]["attn1_patch"])
-        return prefill(ids, references, indexes, mask, transformer_options=transformer_options, **kwargs)
-
-    monkeypatch.setattr(diffusion, "_preprocess_prefix_state", inspect_prefill)
-    result = _run_prepared_generation(generation_mode="image", model=model, clip=SenseNovaQwenTokenizer(),
-                                     conditioning=[[torch.empty(1), {"text_input_ids": torch.tensor([[1]]), "hooks": group}]],
-                                     max_think_tokens=8)
-    assert result.args[1] == "K"
-    assert seen == [[patch]]
-    assert model.model_options["transformer_options"] == {"patches": {"attn1_patch": [patch]}}
+def test_sensenova_sampler_requires_reencoding_late_references():
+    model = object.__new__(comfy.model_base.SenseNovaU15)
+    torch.nn.Module.__init__(model)
+    model.concat_keys = ()
+    model.manual_cast_dtype = None
+    model.diffusion_model = SimpleNamespace(dtype=torch.float32)
+    keys = [torch.ones(1, 1, 3, 8)]
+    metadata = {"prefix_keys": keys, "prefix_values": keys, "prefix_time": torch.tensor([3]), "device": torch.device("cpu")}
+    conds = model.extra_conds(**metadata)
+    assert conds["prefix_keys"].cond[0] is keys[0]
+    reference = torch.zeros(1, 32, 32, 3)
+    with pytest.raises(ValueError, match="Encode reference images"):
+        model.extra_conds(**metadata, reference_latents=[reference])
+    conds = model.extra_conds(**metadata, reference_latents=[reference], sensenova_reference_count=1)
+    assert conds["prefix_keys"].cond[0] is keys[0]
+    model.manual_cast_dtype = torch.bfloat16
+    conds = model.extra_conds(**metadata)
+    assert conds["prefix_keys"].cond[0].dtype == torch.bfloat16
+    assert conds["prefix_keys"].process_cond(batch_size=3).cond[0] is conds["prefix_keys"].cond[0]
+    assert keys[0].dtype == torch.float32
 
 
-@pytest.mark.parametrize("scope", list(comfy.hooks.EnumHookScope))
-@pytest.mark.parametrize("with_weight_hook", [False, True])
-def test_sensenova_generation_registers_transformer_hooks(monkeypatch, scope, with_weight_hook):
-    monkeypatch.setattr(comfy.model_management, "load_models_gpu", lambda models, **kwargs: None)
-    model = _text_model_patcher([42, 151668])
-    override = lambda *args, **kwargs: None
-    hook = comfy.hooks.TransformerOptionsHook({"optimized_attention_override": override}, hook_scope=scope)
-    hooks = comfy.hooks.HookGroup()
-    hooks.add(hook)
-    if with_weight_hook:
-        weight_hook = comfy.hooks.WeightHook()
-        weight_hook.need_weight_init = False
-        weight_hook.weights = {}
-        hooks.add(weight_hook)
-    diffusion = model.model.diffusion_model
-    prefill = diffusion._preprocess_prefix_state
-    seen = []
+@pytest.mark.parametrize("quant_format", ["int8_tensorwise", "float8_e4m3fn"])
+@pytest.mark.parametrize("bundled", [False, True])
+def test_sensenova_clip_loader_preserves_quantized_weights(small_sensenova, monkeypatch, quant_format, bundled):
+    text = sensenova_model.SenseNovaTextModel(has_lm_head=True, operations=torch.nn)
+    state = text.state_dict()
+    quant_keys = ("language_model.model.embed_tokens", "language_model.model.layers.0.self_attn.q_proj")
+    for key in quant_keys:
+        layout = comfy.quant_ops.QUANT_ALGOS[quant_format]["comfy_tensor_layout"]
+        options = {"per_channel": True} if quant_format == "int8_tensorwise" else {}
+        weight = comfy.quant_ops.QuantizedTensor.from_float(state[key + ".weight"], layout, **options)
+        state[key + ".weight"] = weight._qdata
+        state[key + ".weight_scale"] = weight._params.scale
+        state[key + ".comfy_quant"] = torch.tensor(list(json.dumps({"format": quant_format}).encode()), dtype=torch.uint8)
+    options = {"load_device": torch.device("cpu")}
+    if not bundled:
+        clip = comfy.sd.load_text_encoder_state_dicts([state], model_options=options, disable_dynamic=True)
+    else:
+        image = sensenova_model.SenseNovaU15(dtype=torch.float32, operations=torch.nn)
+        state = {"text_encoders." + key: value for key, value in state.items()}
+        state.update({"model.diffusion_model." + key: value for key, value in image.state_dict().items()})
+        monkeypatch.setattr(comfy.model_detection, "detect_unet_config", lambda *a, **kw: {"image_model": "sensenova_u15"})
+        model, clip, _, _ = comfy.sd.load_state_dict_guess_config(
+            state, output_vae=False, model_options=options, te_model_options=options, disable_dynamic=True,
+        )
+        assert model.model.model_config.quant_config is None
+    for key in quant_keys:
+        weight = comfy.utils.get_attr(clip.cond_stage_model, key + ".weight")
+        assert isinstance(weight, comfy.quant_ops.QuantizedTensor)
+    conditioning = clip.encode_from_tokens_scheduled({"text_input_ids": torch.tensor([[1, 2, 3]])})
+    assert all(torch.isfinite(key).all() for key in conditioning[0][1]["prefix_keys"])
 
-    def inspect_prefill(ids, references, indexes, mask, transformer_options=None, **kwargs):
-        seen.append(transformer_options["optimized_attention_override"])
-        return prefill(ids, references, indexes, mask, transformer_options=transformer_options, **kwargs)
 
-    monkeypatch.setattr(diffusion, "_preprocess_prefix_state", inspect_prefill)
-    result = _run_prepared_generation(generation_mode="image", model=model, clip=SenseNovaQwenTokenizer(),
-                                     conditioning=[[torch.empty(1), {"text_input_ids": torch.tensor([[1]]), "hooks": hooks}]],
-                                     max_think_tokens=8)
-    assert result.args[1] == "K"
-    assert seen == [override]
-    assert model.model_options["transformer_options"] == {}
-    assert not hook._skip_adding
-
-
-@pytest.mark.parametrize("initial_strength", [0.75, 1.0])
-def test_sensenova_text_stages_use_initial_hook_keyframe(monkeypatch, initial_strength):
-    monkeypatch.setattr(comfy.model_management, "load_models_gpu", lambda models, **kwargs: None)
-    model = _text_model_patcher([42, 43, 151668])
-    model.model.model_sampling = SenseNovaModelSampling()
-    weight = model.model.diffusion_model.language_model.model.embed_tokens.weight.detach()
-    delta = torch.zeros_like(weight)
-    delta[1] = weight[42] - weight[1]
-    hook = comfy.hooks.WeightHook()
-    hook.need_weight_init = False
-    hook.weights = {"diffusion_model.language_model.model.embed_tokens.weight": (delta,)}
-    hook.hook_keyframe.add(comfy.hooks.HookKeyframe(initial_strength, 0.0))
-    hook.hook_keyframe.add(comfy.hooks.HookKeyframe(0.0, 0.5))
-    hooks = comfy.hooks.HookGroup()
-    hooks.add(hook)
-    kwargs = dict(generation_mode="image", model=model, clip=SenseNovaQwenTokenizer(),
-                  conditioning=[[torch.empty(1), {"text_input_ids": torch.tensor([[1]]), "hooks": hooks}]],
-                  max_think_tokens=8)
-    assert _run_prepared_generation(**kwargs).args[1] == "L"
-    model.register_all_hook_patches(hooks, comfy.hooks.create_target_dict(comfy.hooks.EnumWeightTarget.Model))
-    hook.initialize_timesteps(model.model)
-    sigmas = torch.tensor([1.0, 0.0])
-    for sigma in sigmas:
-        model.prepare_hook_patches_current_keyframe(sigma[None], hooks, {"transformer_options": {"sample_sigmas": sigmas}})
-        model.apply_hooks(hooks)
-    model.cleanup()
-    assert hook.strength == 0.0
-    assert _run_prepared_generation(**kwargs).args[1] == "L"
-    assert hook.strength == 0.0
+def test_sensenova_image_conditioning_encodes_both_reference_branches(small_sensenova):
+    text = sensenova_model.SenseNovaTextModel(has_lm_head=True, operations=torch.nn)
+    clip = comfy.sd.load_text_encoder_state_dicts([text.state_dict()], model_options={"load_device": torch.device("cpu")}, disable_dynamic=True)
+    positive = clip.encode_from_tokens_scheduled(clip.tokenize("an apple"))
+    negative = clip.encode_from_tokens_scheduled(clip.tokenize("blurry"))
+    positive, negative = HiDreamO1ReferenceImages.execute(
+        positive=positive, negative=negative, images={"image_1": torch.full((1, 33, 65, 3), 0.5)},
+    ).args
+    result = SenseNovaConditioning.execute(clip=clip, conditioning=positive, negative=negative, task={"task": "image"}, max_tokens=8).args
+    expected = clip.encode_from_tokens_scheduled(clip.tokenize("an apple", images=[torch.full((1, 33, 65, 3), 0.5)]))
+    for actual, reference in zip(result[0][0][1]["prefix_keys"], expected[0][1]["prefix_keys"]):
+        torch.testing.assert_close(actual, reference)
+    assert result[0][0][1]["sensenova_reference_count"] == result[2][0][1]["sensenova_reference_count"] == 1
+    assert result[2][0][1]["prefix_keys"][0].shape[2] == 17
+    assert positive[0][1]["sensenova_reference_count"] == negative[0][1]["sensenova_reference_count"] == 0
