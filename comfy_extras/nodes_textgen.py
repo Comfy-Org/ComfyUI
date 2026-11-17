@@ -1,14 +1,37 @@
 from comfy_api.latest import ComfyExtension, io
 from typing_extensions import override
 
+import contextlib
 import json
 import time
 
 import comfy.model_state
+import comfy.text_encoders.token_stream as token_stream
+from server import PromptServer
 from comfy.text_encoders import llm_state_cache
 
 # older clients (the local agent's textgen client, the Qwen proxy) send these names and add LLMPrefixCacheStats
 LEGACY_CACHE_MODES = {"vram": "on", "gpu": "on", "cpu": "on", "disk": "on", "stats": "off"}
+
+
+class ProgressText:
+    """Shows the text generated so far on the node, for the client that queued the prompt only, at most every
+    INTERVAL seconds (a token_stream listener)."""
+
+    INTERVAL = 0.15
+
+    def __init__(self, clip, node_id):
+        self.clip, self.node_id, self.sent_at = clip, node_id, 0.0
+
+    def __call__(self, token_ids):
+        now = time.monotonic()
+        if now - self.sent_at < self.INTERVAL:
+            return
+        server = PromptServer.instance
+        if server is None or server.client_id is None:  # never broadcast another client's text
+            return
+        self.sent_at = now
+        server.send_progress_text(self.clip.decode(list(token_ids)), self.node_id, sid=server.client_id)
 
 
 class TextGenerate(io.ComfyNode):
@@ -89,20 +112,22 @@ class TextGenerate(io.ComfyNode):
         repetition_penalty = sampling_mode.get("repetition_penalty", 1.0)
         presence_penalty = sampling_mode.get("presence_penalty", 0.0)
 
-        generated_ids = clip.generate(
-            tokens,
-            do_sample=do_sample,
-            max_length=max_length,
-            temperature=temperature,
-            top_k=top_k,
-            top_p=top_p,
-            min_p=min_p,
-            repetition_penalty=repetition_penalty,
-            presence_penalty=presence_penalty,
-            seed=seed,
-            mtp=mtp,
-            state=state,
-        )
+        progress = ProgressText(clip, cls.hidden.unique_id) if cls.hidden is not None and cls.hidden.unique_id else None
+        with token_stream.listen(progress) if progress is not None else contextlib.nullcontext():
+            generated_ids = clip.generate(
+                tokens,
+                do_sample=do_sample,
+                max_length=max_length,
+                temperature=temperature,
+                top_k=top_k,
+                top_p=top_p,
+                min_p=min_p,
+                repetition_penalty=repetition_penalty,
+                presence_penalty=presence_penalty,
+                seed=seed,
+                mtp=mtp,
+                state=state,
+            )
         # the output is written back only when something consumes it; otherwise it is released after the node
         dynprompt = cls.hidden.dynprompt
         if any(value == [cls.hidden.unique_id, 2] for node_id in dynprompt.all_node_ids() for value in dynprompt.get_node(node_id)["inputs"].values()):
