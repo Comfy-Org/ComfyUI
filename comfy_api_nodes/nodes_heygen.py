@@ -29,8 +29,10 @@ from comfy_api_nodes.util import (
     upload_image_to_comfyapi,
     upload_images_to_comfyapi,
     upload_video_to_comfyapi,
+    validate_audio_duration,
     validate_image_aspect_ratio,
     validate_string,
+    validate_video_duration,
 )
 from server import PromptServer
 
@@ -42,6 +44,7 @@ _AVATARS_PATH = "/proxy/heygen/v3/avatars"
 _LOOKS_PATH = "/proxy/heygen/v3/avatars/looks"
 _MODEL_VOICES_PATH = "/proxy/heygen/v3/models/audio/voices"
 _MODEL_TTS_PATH = "/proxy/heygen/v3/models/audio/tts"
+_MODEL_AVATARS_PATH = "/proxy/heygen/v3/models/avatars"
 
 _DEFAULT_VOICE_OPTION = "(avatar's default voice)"
 _VOICE_LANGUAGE_OPTIONS = ["auto", *HEYGEN_VOICE_LANGUAGES]
@@ -50,6 +53,13 @@ _NEW_VOICE_RETRIES = 5
 _AVATARS_BY_ENGINE = {
     e: [label for label, (_aid, _atype, engines) in HEYGEN_AVATAR_MAP.items() if e in engines]
     for e in ("avatar_iv", "avatar_iii", "avatar_v")
+}
+
+_AVATAR6_MODELS = ["heygen-avatar-6", "heygen-avatar-6-turbo"]
+_AVATAR6_LOOKS = [label for label, (_aid, _atype, engines) in HEYGEN_AVATAR_MAP.items() if "heygen-avatar-6" in engines]
+_AVATAR6_SIZES = {
+    "1080p": {"16:9": (1920, 1080), "9:16": (1080, 1920), "1:1": (1080, 1080), "4:5": (1080, 1350), "5:4": (1350, 1080)},
+    "2k": {"16:9": (2880, 1620), "9:16": (1620, 2880), "1:1": (1620, 1620), "4:5": (1620, 2024), "5:4": (2024, 1620)},
 }
 
 _REFERENCE_TAG_RE = re.compile(r"(?<!\w)@(image|video|audio)(\d*)(?!\w)", re.IGNORECASE | re.ASCII)
@@ -95,7 +105,9 @@ async def _apply_speech_source(cls: type[IO.ComfyNode], payload: dict, speech: d
             payload["voice_settings"] = {"speed": round(speed, 2)}
 
 
-async def _create_and_poll_video(cls: type[IO.ComfyNode], create_path: str, payload: dict) -> dict:
+async def _create_and_poll_video(
+    cls: type[IO.ComfyNode], create_path: str, payload: dict, max_poll_attempts: int
+) -> dict:
     """POST a video payload, poll /v3/videos until terminal, and return the final video data."""
     for attempt in range(_NEW_VOICE_RETRIES + 1):
         try:
@@ -118,6 +130,7 @@ async def _create_and_poll_video(cls: type[IO.ComfyNode], create_path: str, payl
         status_extractor=lambda r: (r.get("data") or {}).get("status"),
         queued_statuses=["pending", "waiting"],
         poll_interval=5.0,
+        max_poll_attempts=max_poll_attempts,
     )
     data = final["data"]
     if not data.get("video_url"):
@@ -286,7 +299,7 @@ class HeyGenTalkingPhotoNode(IO.ComfyNode):
             "title": "ComfyUI Talking Photo",
         }
         await _apply_speech_source(cls, payload, speech, require_voice=True)
-        video = await _create_and_poll_video(cls, _VIDEOS_PATH, payload)
+        video = await _create_and_poll_video(cls, _VIDEOS_PATH, payload, max_poll_attempts=480)
         return IO.NodeOutput(await download_url_to_video_output(video["video_url"]))
 
 
@@ -487,7 +500,7 @@ class HeyGenAvatarVideoNode(IO.ComfyNode):
                 raise ValueError("background_color must be a hex color code like '#00ff00'.")
             payload["background"] = {"type": "color", "value": background_color}
         await _apply_speech_source(cls, payload, speech, require_voice=False)
-        video = await _create_and_poll_video(cls, _VIDEOS_PATH, payload)
+        video = await _create_and_poll_video(cls, _VIDEOS_PATH, payload, max_poll_attempts=480)
         return IO.NodeOutput(await download_url_to_video_output(video["video_url"]))
 
 
@@ -1030,7 +1043,7 @@ class HeyGenReferenceToVideoNode(IO.ComfyNode):
                 }
                 for a in reference_audios.values()
             ]
-        video = await _create_and_poll_video(cls, _MODEL_VIDEOS_PATH, payload)
+        video = await _create_and_poll_video(cls, _MODEL_VIDEOS_PATH, payload, max_poll_attempts=480)
         return IO.NodeOutput(await download_url_to_video_output(video["video_url"]))
 
 
@@ -1145,7 +1158,7 @@ class HeyGenImageToVideoNode(IO.ComfyNode):
             "resolution": model["resolution"],
             "seed": model["seed"],
         }
-        video = await _create_and_poll_video(cls, _MODEL_VIDEOS_PATH, payload)
+        video = await _create_and_poll_video(cls, _MODEL_VIDEOS_PATH, payload, max_poll_attempts=480)
         return IO.NodeOutput(await download_url_to_video_output(video["video_url"]))
 
 
@@ -1348,6 +1361,311 @@ class HeyGenVoiceTextToSpeechNode(IO.ComfyNode):
         return IO.NodeOutput(audio_bytes_to_audio_input(audio_bytes.getvalue()))
 
 
+def _avatar6_reference_inputs() -> list:
+    return [
+        IO.Image.Input(
+            "image",
+            optional=True,
+            tooltip="Photo of the person or character to animate. It sets the look and the scene; "
+            "it is not used as the first frame.",
+        ),
+        IO.Video.Input(
+            "video",
+            optional=True,
+            tooltip="Video of an animated or stylized character showing how it talks and moves, at least "
+            "2 seconds; longer videos are trimmed to the first 30 seconds. Videos of realistic people are refused.",
+        ),
+        IO.Audio.Input(
+            "audio",
+            tooltip="Speech for the avatar, 1.5 seconds to 10 minutes. The video length follows the audio.",
+        ),
+        IO.Combo.Input("resolution", options=["1080p", "2k"]),
+        IO.Combo.Input(
+            "aspect_ratio",
+            options=["auto", "16:9", "9:16", "1:1", "4:5", "5:4"],
+            tooltip="'auto' keeps the shape of the image, or of the video when no image is connected. "
+            "Other values re-frame the scene.",
+        ),
+        IO.String.Input(
+            "motion_prompt",
+            multiline=True,
+            default="",
+            tooltip="Gestures, expression, posture and camera movement, up to 1200 characters.",
+        ),
+        IO.Combo.Input(
+            "motion_expressiveness",
+            options=["less", "default"],
+            default="default",
+            tooltip="'less' gives fewer, smaller gestures. The motion prompt takes precedence where they overlap.",
+        ),
+        IO.Int.Input(
+            "seed",
+            default=42,
+            min=0,
+            max=2147483647,
+            control_after_generate=True,
+            tooltip="Seed controls whether the node should re-run; results are non-deterministic regardless of seed.",
+        ),
+    ]
+
+
+class HeyGenAvatar6ReferenceToVideoNode(IO.ComfyNode):
+
+    @classmethod
+    def define_schema(cls) -> IO.Schema:
+        return IO.Schema(
+            node_id="HeyGenAvatar6ReferenceToVideoNode",
+            display_name="HeyGen Avatar 6 Reference to Video",
+            category="partner/video/HeyGen",
+            description="Make a person or character from a photo or a video speak the connected audio with "
+            "HeyGen Avatar 6. Connect an image, a video, or both.",
+            inputs=[
+                IO.DynamicCombo.Input(
+                    "model",
+                    options=[IO.DynamicCombo.Option(m, _avatar6_reference_inputs()) for m in _AVATAR6_MODELS],
+                ),
+            ],
+            outputs=[IO.Video.Output()],
+            hidden=[
+                IO.Hidden.auth_token_comfy_org,
+                IO.Hidden.api_key_comfy_org,
+                IO.Hidden.unique_id,
+            ],
+            is_api_node=True,
+            price_badge=IO.PriceBadge(
+                depends_on=IO.PriceBadgeDepends(widgets=["model", "model.resolution"]),
+                expr="""
+                (
+                  $res := $lookup(widgets, "model.resolution");
+                  $rate := widgets.model = "heygen-avatar-6-turbo"
+                    ? ($res = "2k" ? 0.125125 : 0.0715)
+                    : ($res = "2k" ? 0.20735 : 0.143);
+                  {"type":"usd","usd": $rate,"format":{"suffix":"/second"}}
+                )
+                """,
+            ),
+        )
+
+    @classmethod
+    async def execute(cls, model: dict) -> IO.NodeOutput:
+        image = model.get("image")
+        video = model.get("video")
+        if image is None and video is None:
+            raise ValueError("Connect an image, a video, or both.")
+        if image is not None and get_number_of_images(image) != 1:
+            raise ValueError("The image input must contain exactly one image, not a batch.")
+        if video is not None:
+            validate_video_duration(video, min_duration=2)
+            if video.get_duration() > 30:
+                video = video.as_trimmed(start_time=0, duration=30)
+        validate_audio_duration(model["audio"], min_duration=1.5, max_duration=600)
+        validate_string(model["motion_prompt"], field_name="motion_prompt", max_length=1200)
+        payload = {
+            "model": model["model"],
+            "resolution": model["resolution"],
+            "motion_expressiveness": model["motion_expressiveness"],
+        }
+        if model["aspect_ratio"] != "auto":
+            payload["output_width"], payload["output_height"] = _AVATAR6_SIZES[model["resolution"]][model["aspect_ratio"]]
+        if model["motion_prompt"].strip():
+            payload["motion_prompt"] = model["motion_prompt"]
+        if image is not None:
+            payload["reference_images"] = [
+                {"type": "url", "url": await upload_image_to_comfyapi(cls, image, mime_type="image/png")}
+            ]
+        if video is not None:
+            payload["reference_videos"] = [{"type": "url", "url": await upload_video_to_comfyapi(cls, video)}]
+        payload["audio"] = {
+            "type": "url",
+            "url": await upload_audio_to_comfyapi(
+                cls, model["audio"], container_format="mp3", codec_name="libmp3lame", mime_type="audio/mpeg"
+            ),
+        }
+        try:
+            created = await sync_op_raw(cls, ApiEndpoint(path=_MODEL_AVATARS_PATH, method="POST"), data=payload)
+        except Exception as e:
+            if "realistic humans" in str(e):
+                raise ValueError(
+                    "HeyGen Avatar 6 does not accept reference videos of realistic people. Use a video of an "
+                    "animated or stylized character, or connect a photo of the person to the image input instead."
+                ) from e
+            if "reference_videos[0] is too large" in str(e):
+                raise ValueError("The reference video is larger than 50 MB; use a shorter or lower-resolution clip.") from e
+            raise
+        video_id = (created.get("data") or {}).get("video_id")
+        if not video_id:
+            raise ValueError(f"HeyGen did not return a video_id: {created}")
+        final = await poll_op_raw(
+            cls,
+            ApiEndpoint(path=f"{_MODEL_VIDEOS_PATH}/{video_id}"),
+            status_extractor=lambda r: (r.get("data") or {}).get("status"),
+            poll_interval=5.0,
+            max_poll_attempts=1440,
+        )
+        return IO.NodeOutput(await download_url_to_video_output(final["data"]["video_url"]))
+
+
+class HeyGenAvatar6IdentityToVideoNode(IO.ComfyNode):
+
+    @classmethod
+    def define_schema(cls) -> IO.Schema:
+        return IO.Schema(
+            node_id="HeyGenAvatar6IdentityToVideoNode",
+            display_name="HeyGen Avatar 6 Identity to Video",
+            category="partner/video/HeyGen",
+            description="Generate a talking video of a HeyGen avatar with HeyGen Avatar 6, driven by a text script "
+            "or your own audio.",
+            inputs=[
+                IO.Combo.Input("model", options=_AVATAR6_MODELS),
+                IO.DynamicCombo.Input(
+                    "avatar",
+                    options=[
+                        *[IO.DynamicCombo.Option(label, []) for label in _AVATAR6_LOOKS],
+                        IO.DynamicCombo.Option(
+                            "custom avatar",
+                            [
+                                IO.String.Input(
+                                    "custom_avatar_id",
+                                    default="",
+                                    tooltip="HeyGen avatar look ID that supports Avatar 6, such as one made with "
+                                    "HeyGen Create Avatar.",
+                                ),
+                            ],
+                        ),
+                    ],
+                ),
+                IO.DynamicCombo.Input(
+                    "speech",
+                    display_name="speech source",
+                    options=[
+                        IO.DynamicCombo.Option(
+                            "script",
+                            [
+                                IO.String.Input(
+                                    "text",
+                                    multiline=True,
+                                    default="",
+                                    tooltip="Text for the avatar to speak (up to 5000 characters).",
+                                ),
+                                IO.Combo.Input(
+                                    "voice",
+                                    options=[_DEFAULT_VOICE_OPTION] + HEYGEN_VOICE_GENERAL_OPTIONS,
+                                    tooltip="Voice for the script. The default option uses the voice HeyGen assigned "
+                                    "to the avatar; avatars made with HeyGen Create Avatar have none, so pick a voice "
+                                    "for them.",
+                                ),
+                                IO.String.Input(
+                                    "custom_voice_id",
+                                    default="",
+                                    optional=True,
+                                    tooltip="Optional HeyGen voice ID. When set, overrides the voice selected above.",
+                                ),
+                                IO.Float.Input(
+                                    "voice_speed",
+                                    default=1.0,
+                                    min=0.5,
+                                    max=1.5,
+                                    step=0.05,
+                                    optional=True,
+                                    tooltip="Speech speed multiplier.",
+                                ),
+                            ],
+                        ),
+                        IO.DynamicCombo.Option(
+                            "audio",
+                            [
+                                IO.Audio.Input(
+                                    "audio",
+                                    tooltip="Speech for the avatar, 0.5 seconds to 10 minutes.",
+                                ),
+                            ],
+                        ),
+                    ],
+                    tooltip="Drive the avatar with a text script (HeyGen text-to-speech) or your own audio.",
+                ),
+                IO.Combo.Input("resolution", options=["1080p", "2k"]),
+                IO.Combo.Input(
+                    "aspect_ratio",
+                    options=["auto", "16:9", "9:16", "1:1", "4:5", "5:4"],
+                    tooltip="'auto' follows the avatar's source footage.",
+                ),
+                IO.String.Input(
+                    "motion_prompt",
+                    multiline=True,
+                    default="",
+                    tooltip="Gestures, expression, posture and camera movement.",
+                ),
+                IO.Combo.Input(
+                    "motion_expressiveness",
+                    options=["less", "default"],
+                    default="default",
+                    tooltip="'less' gives fewer, smaller gestures. The motion prompt takes precedence where they "
+                    "overlap.",
+                ),
+                IO.Int.Input(
+                    "seed",
+                    default=42,
+                    min=0,
+                    max=2147483647,
+                    control_after_generate=True,
+                    tooltip="Seed controls whether the node should re-run; results are non-deterministic regardless "
+                    "of seed.",
+                ),
+            ],
+            outputs=[IO.Video.Output()],
+            hidden=[
+                IO.Hidden.auth_token_comfy_org,
+                IO.Hidden.api_key_comfy_org,
+                IO.Hidden.unique_id,
+            ],
+            is_api_node=True,
+            price_badge=IO.PriceBadge(
+                depends_on=IO.PriceBadgeDepends(widgets=["model", "resolution"]),
+                expr="""
+                (
+                  $rate := widgets.model = "heygen-avatar-6-turbo"
+                    ? (widgets.resolution = "2k" ? 0.125125 : 0.0715)
+                    : (widgets.resolution = "2k" ? 0.20735 : 0.143);
+                  {"type":"usd","usd": $rate,"format":{"suffix":"/second"}}
+                )
+                """,
+            ),
+        )
+
+    @classmethod
+    async def execute(
+        cls,
+        model: str,
+        avatar: dict,
+        speech: dict,
+        resolution: str,
+        aspect_ratio: str,
+        motion_prompt: str,
+        motion_expressiveness: str,
+        seed: int,
+    ) -> IO.NodeOutput:
+        if avatar["avatar"] == "custom avatar":
+            avatar_id = avatar["custom_avatar_id"].strip()
+            if not avatar_id:
+                raise ValueError("Enter a HeyGen avatar look ID in custom_avatar_id.")
+        else:
+            avatar_id = HEYGEN_AVATAR_MAP[avatar["avatar"]][0]
+        if speech["speech"] == "audio":
+            validate_audio_duration(speech["audio"], min_duration=0.5, max_duration=600)
+        payload = {
+            "type": "avatar",
+            "avatar_id": avatar_id,
+            "engine": {"type": model, "motion_expressiveness": motion_expressiveness},
+            "resolution": resolution,
+            "aspect_ratio": aspect_ratio,
+        }
+        if motion_prompt.strip():
+            payload["motion_prompt"] = motion_prompt
+        await _apply_speech_source(cls, payload, speech, require_voice=False)
+        video = await _create_and_poll_video(cls, _VIDEOS_PATH, payload, max_poll_attempts=1440)
+        return IO.NodeOutput(await download_url_to_video_output(video["video_url"]))
+
+
 class HeyGenExtension(ComfyExtension):
     @override
     async def get_node_list(self) -> list[type[IO.ComfyNode]]:
@@ -1361,6 +1679,8 @@ class HeyGenExtension(ComfyExtension):
             HeyGenImageToVideoNode,
             HeyGenVoiceCloneNode,
             HeyGenVoiceTextToSpeechNode,
+            HeyGenAvatar6ReferenceToVideoNode,
+            HeyGenAvatar6IdentityToVideoNode,
         ]
 
 
