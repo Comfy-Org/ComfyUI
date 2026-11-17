@@ -1,4 +1,3 @@
-
 import pytest
 import torch
 
@@ -27,7 +26,7 @@ def tokenizer():
 
 @pytest.fixture(scope="module")
 def other_qwen3_sizes():
-    return ZImageTokenizer(), KleinTokenizer8B()
+    return {"Qwen3-4B": ZImageTokenizer(), "Qwen3-8B": KleinTokenizer8B()}
 
 
 def ids_of(tokens):
@@ -41,9 +40,9 @@ def tokenize(tokenizer, text, **kwargs):
 
 def test_conditioning_keeps_the_ovis_template(tokenizer):
     ids, text = tokenize(tokenizer, PROMPT)
-    assert len(ids) == 284
+    assert len(ids) == 284, "conditioning pads to the Ovis encoder's min_length"
     assert text.removesuffix("<|endoftext|>" * text.count("<|endoftext|>")) == OVIS.format(PROMPT)
-    assert tokenize(tokenizer, PROMPT, llama_template="{}", thinking=False, min_length=1)[1] == PROMPT
+    assert tokenize(tokenizer, PROMPT, llama_template="{}", thinking=False, min_length=1)[1] == PROMPT, "an explicit template wins over the chat template"
 
 
 @pytest.mark.parametrize("thinking", [False, True])
@@ -54,9 +53,9 @@ def test_textgenerate_chat_template_matches_the_other_qwen3_sizes(tokenizer, oth
     system = f"<|im_start|>system\n{system_prompt}<|im_end|>\n" if system_prompt else ""
     assert text == system + CHAT.format(PROMPT) + ("" if thinking else NO_THINK)
     if not thinking:
-        assert ids[-4:] == [151667, 271, 151668, 271]
-    for other in other_qwen3_sizes:
-        assert ids_of(other.tokenize_with_weights(PROMPT, **kwargs)) == ids
+        assert ids[-4:] == [151667, 271, 151668, 271], "the empty think block is <think> and </think> as single tokens"
+    for size, other in other_qwen3_sizes.items():
+        assert ids_of(other.tokenize_with_weights(PROMPT, **kwargs)) == ids, f"differs from the {size} chat template"
 
 
 def test_textgenerate_without_default_template_passes_text_through(tokenizer):
@@ -83,7 +82,7 @@ class RecordingClip:
 def test_generate_text_node_gets_the_chat_template(tokenizer):
     clip = RecordingClip(tokenizer)
     TextGenerateV2.execute(clip, PROMPT, 8, {"sampling_mode": "off"})
-    assert tokenizer.decode(clip.prompt_ids, skip_special_tokens=False) == CHAT.format(PROMPT) + NO_THINK
+    assert tokenizer.decode(clip.prompt_ids, skip_special_tokens=False) == CHAT.format(PROMPT) + NO_THINK, "Generate Text with its default inputs must reach the chat template"
 
 
 def tiny_model(vocab_size):
@@ -110,13 +109,14 @@ def test_greedy_generate_matches_full_forward_with_tied_head():
     assert generated == expected
 
 
-@pytest.mark.parametrize("stop", [151643, 151645])
+@pytest.mark.parametrize("stop", [151643, 151645], ids=["endoftext", "im_end"])
 def test_generate_stops_at_end_of_turn(stop):
     model = tiny_model(151936)
     embeds = torch.randn(1, 5, 64)
     free = model.generate(embeds.clone(), do_sample=False, max_length=8, stop_tokens=[], execution_dtype=torch.float32)
     assert stop not in free
-    k = next(i for i in range(1, len(free)) if free[i] not in free[:i])
+    new_token_step = next(i for i in range(1, len(free)) if free[i] not in free[:i])
     weight = model.model.embed_tokens.weight.data
-    weight[[free[k], stop]] = weight[[stop, free[k]]]
-    assert model.generate(embeds.clone(), do_sample=False, max_length=8, execution_dtype=torch.float32) == free[:k] + [stop]
+    weight[[free[new_token_step], stop]] = weight[[stop, free[new_token_step]]]
+    assert model.generate(embeds.clone(), do_sample=False, max_length=8, execution_dtype=torch.float32) == free[:new_token_step] + [stop], \
+        "the stop token, swapped into that step's row, ends generation there"
