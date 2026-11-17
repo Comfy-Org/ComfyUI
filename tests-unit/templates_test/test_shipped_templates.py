@@ -74,6 +74,27 @@ def is_workflow_asset(template_id: str) -> bool:
 # Muted and bypassed nodes are not executed, so a stale one is not a break.
 SKIPPED_MODES = {2, 4}
 
+# Templates that reference a core node this build no longer registers, with
+# why. These open with missing nodes for users, so this is a defect list rather
+# than an exemption: fix the template in Comfy-Org/workflow_templates and
+# delete the entry. Asserted both ways, so a fix cannot leave a stale entry
+# behind and anything new still fails.
+#
+# The Luma API nodes were renamed (the classes still exist, but register under
+# `LumaImageNode2` and `LumaImageEditNode2` now) and no alias was left for the
+# old ids. Note the distinction from a *replaced* node: a replacement declared
+# in comfy_extras/nodes_replacements.py keeps the old id registered as well, so
+# templates using one of those are fine and are not listed here.
+KNOWN_MISSING_NODES: dict[str, dict[str, str]] = {
+    "api_luma_photon_i2i": {
+        "LumaImageModifyNode": "renamed, no alias for the old id"
+    },
+    "api_luma_photon_style_ref": {
+        "LumaImageNode": "renamed to LumaImageNode2, no alias",
+        "LumaReferenceNode": "renamed, no alias for the old id",
+    },
+}
+
 
 @pytest.fixture(scope="session")
 def node_registry() -> dict[str, Any]:
@@ -262,9 +283,39 @@ def test_every_core_node_a_template_uses_is_registered(
                 if node.get("mode") in SKIPPED_MODES:
                     # Not executed, so a stale one is not worth a release.
                     continue
+                if node_type in KNOWN_MISSING_NODES.get(template_id, {}):
+                    continue
                 if node_type not in node_registry:
                     missing.add((template_id, node_type))
     assert not missing, f"templates use core nodes this build does not define: {sorted(missing)}"
+
+
+def test_no_known_missing_node_has_been_restored(shipped_templates, node_registry):
+    """Keeps KNOWN_MISSING_NODES honest in the other direction.
+
+    A template fixed upstream, or a node given its old id back, has to drop out
+    of the list, or the next regression in the same template stays excused.
+    """
+    shipped = {template_id for template_id, _graph in shipped_templates}
+    stale = []
+    for template_id, nodes_and_reasons in KNOWN_MISSING_NODES.items():
+        if template_id not in shipped:
+            stale.append(f"{template_id} is no longer shipped")
+            continue
+        graph = next(
+            graph for shipped_id, graph in shipped_templates if shipped_id == template_id
+        )
+        referenced = {
+            node.get("type")
+            for scope in iter_nodes(graph)
+            for node in scope.get("nodes") or []
+        }
+        for node_type, reason in nodes_and_reasons.items():
+            if node_type in node_registry:
+                stale.append(f"{template_id}: {node_type} is registered again ({reason})")
+            elif node_type not in referenced:
+                stale.append(f"{template_id} no longer references {node_type} ({reason})")
+    assert not stale, f"remove these from KNOWN_MISSING_NODES: {sorted(stale)}"
 
 
 def test_every_connected_input_a_template_uses_still_exists(
