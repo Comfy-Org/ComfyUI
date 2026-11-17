@@ -17,6 +17,7 @@ from comfy_execution.jobs import (
     cancel_job,
     CANCEL_PENDING,
     CANCEL_RUNNING,
+    is_hidden_job,
 )
 import uuid
 import urllib
@@ -114,6 +115,11 @@ def workflow_metadata_from_prompt(extra_data: dict) -> Optional[dict]:
 def _remove_sensitive_from_queue(queue: list) -> list:
     """Remove sensitive data (index 5) from queue item tuples."""
     return [item[:5] for item in queue]
+
+
+def _visible_queue(queue: list) -> list:
+    """Queue items without the jobs submitted as hidden, sensitive data removed."""
+    return _remove_sensitive_from_queue([item for item in queue if not is_hidden_job(item)])
 
 
 async def send_socket_catch_exception(function, message):
@@ -981,10 +987,10 @@ class PromptServer():
                     )
 
             running, queued = self.prompt_queue.get_current_queue_volatile()
-            history = self.prompt_queue.get_history()
+            history = self.prompt_queue.get_history(include_hidden=False)
 
-            running = _remove_sensitive_from_queue(running)
-            queued = _remove_sensitive_from_queue(queued)
+            running = _visible_queue(running)
+            queued = _visible_queue(queued)
 
             jobs, total = get_all_jobs(
                 running, queued, history,
@@ -1146,7 +1152,7 @@ class PromptServer():
             else:
                 offset = -1
 
-            return web.json_response(self.prompt_queue.get_history(max_items=max_items, offset=offset))
+            return web.json_response(self.prompt_queue.get_history(max_items=max_items, offset=offset, include_hidden=False))
 
         @routes.get("/history/{prompt_id}")
         async def get_history_prompt_id(request):
@@ -1157,8 +1163,8 @@ class PromptServer():
         async def get_queue(request):
             queue_info = {}
             current_queue = self.prompt_queue.get_current_queue_volatile()
-            queue_info['queue_running'] = _remove_sensitive_from_queue(current_queue[0])
-            queue_info['queue_pending'] = _remove_sensitive_from_queue(current_queue[1])
+            queue_info['queue_running'] = _visible_queue(current_queue[0])
+            queue_info['queue_pending'] = _visible_queue(current_queue[1])
             return web.json_response(queue_info)
 
         @routes.post("/prompt")
@@ -1393,7 +1399,7 @@ class PromptServer():
     def get_queue_info(self):
         prompt_info = {}
         exec_info = {}
-        exec_info['queue_remaining'] = self.prompt_queue.get_tasks_remaining()
+        exec_info['queue_remaining'] = self.prompt_queue.get_tasks_remaining(include_hidden=False)
         prompt_info['exec_info'] = exec_info
         return prompt_info
 
