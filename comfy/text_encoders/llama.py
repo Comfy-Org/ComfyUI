@@ -16,6 +16,7 @@ import comfy.ldm.common_dit
 import comfy.clip_model
 
 from . import qwen_vl
+from . import token_stream
 
 # widest speculative verify (draft chain or tree rows) the decode caches serve in one step
 SPEC_ROWS = 8
@@ -1301,6 +1302,7 @@ class BaseGenerate:
                 if step > 0 and next_pos is not None:
                     next_pos += 1
                 pbar.update(1)
+                token_stream.report(generated_token_ids)
 
                 if token_id in stop_tokens:
                     break
