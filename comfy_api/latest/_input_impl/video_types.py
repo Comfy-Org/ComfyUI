@@ -396,6 +396,46 @@ def _rotation_quadrant(frame: av.VideoFrame) -> int:
     return int(round(frame.rotation // 90)) % 4 if frame.rotation else 0
 
 
+def conformed_output_slot(start, end, last_slot):
+    slot = math.floor(start + Fraction(1, 2))
+    return None if slot == last_slot or slot >= end else slot
+
+
+def conformed_frame_indices(frame_count, source_rate, target_rate):
+    slots_per_frame = Fraction(target_rate) / Fraction(source_rate)
+    indices = []
+    for index in range(frame_count):
+        slot = conformed_output_slot(index * slots_per_frame, (index + 1) * slots_per_frame, len(indices) - 1)
+        if slot is not None:
+            indices.extend(indices[-1:] * (slot - len(indices)))
+            indices.append(index)
+    indices.extend(indices[-1:] * (math.floor(frame_count * slots_per_frame + Fraction(1, 2)) - len(indices)))
+    return indices
+
+
+def conformed_frame_count(frame_count, source_rate, target_rate):
+    if source_rate == target_rate:
+        return frame_count
+    return len(conformed_frame_indices(frame_count, source_rate, target_rate))
+
+
+def conformed_waveform(audio, sample_rate, channels):
+    waveform = audio["waveform"]
+    source_rate = int(audio["sample_rate"])
+    if source_rate == sample_rate and waveform.shape[1] == channels:
+        return waveform
+    layouts = {1: "mono", 2: "stereo", 6: "5.1"}
+    if waveform.shape[1] not in layouts or channels not in layouts:
+        raise ValueError("Cannot materialize accumulated videos with incompatible audio")
+    frame = av.AudioFrame.from_ndarray(
+        waveform[0].float().cpu().contiguous().numpy(), format="fltp", layout=layouts[waveform.shape[1]]
+    )
+    frame.sample_rate = source_rate
+    resampler = av.AudioResampler(format="fltp", layout=layouts[channels], rate=sample_rate)
+    resampled = resampler.resample(frame) + resampler.resample(None)
+    return torch.from_numpy(np.concatenate([part.to_ndarray() for part in resampled], axis=1)).unsqueeze(0)
+
+
 class VideoFromFile(VideoInput):
     """
     Class representing video input from a file.
@@ -976,6 +1016,8 @@ class VideoFromFile(VideoInput):
         video_pts_offset = None
         last_video_pts = None
         last_video_end = None
+        last_output_slot = None
+        last_encoded_frame = None
         # rebased pts -> true display duration: the mp4 muxer pads the last sample with 1/rate otherwise
         video_frame_durations = {}
         source_size = None
@@ -996,6 +1038,20 @@ class VideoFromFile(VideoInput):
             frame = av.AudioFrame.from_ndarray(np.ascontiguousarray(nd_planar), format="fltp", layout=layout)
             frame.sample_rate = sample_rate
             return frame
+
+        def encode_video_frame(frame):
+            for out_packet in out_video.encode(frame):
+                out_packet.duration = video_frame_durations.pop(out_packet.pts, 0)
+                output.mux(out_packet)
+
+        def repeat_last_frame_until(slot):
+            nonlocal last_output_slot
+            while last_output_slot + 1 < slot:
+                last_output_slot += 1
+                last_encoded_frame.pts = last_output_slot
+                last_encoded_frame.time_base = 1 / rate
+                encode_video_frame(last_encoded_frame)
+                pbar.update(1)
 
         def drain_audio(final=False):
             # Audio may cover the pts span of the video written so far, capped by the requested duration
@@ -1166,15 +1222,25 @@ class VideoFromFile(VideoInput):
                                 if frame.pts >= frame_output_end:
                                     continue
                                 frame_duration = frame_output_end - frame.pts
+                        if not preserve_source_timestamps:
+                            slots_per_pts = video_stream.time_base * rate
+                            output_slot = conformed_output_slot(
+                                frame.pts * slots_per_pts, (frame.pts + frame_duration) * slots_per_pts, last_output_slot
+                            )
+                            if output_slot is None:
+                                last_video_end = frame.pts + frame_duration
+                                continue
+                            if last_output_slot is not None:
+                                repeat_last_frame_until(output_slot)
+                            last_output_slot = output_slot
                         last_video_pts = frame.pts
                         last_video_end = frame.pts + frame_duration
                         video_frame_durations[frame.pts] = frame_duration
                         # the decoded pict_type would force x264's frame types (intra-only
                         # sources like MJPEG/ProRes would come out all-keyframe)
                         frame.pict_type = 0
-                        for out_packet in out_video.encode(frame):
-                            out_packet.duration = video_frame_durations.pop(out_packet.pts, 0)
-                            output.mux(out_packet)
+                        encode_video_frame(frame)
+                        last_encoded_frame = frame
                         drain_audio()
                         pbar.update(1)
 
@@ -1215,6 +1281,8 @@ class VideoFromFile(VideoInput):
                 raise ValueError(f"No decodable video frames found in file '{self.__file}'")
             if out_audio is not None and not audio_done:
                 drain_audio(final=True)
+            if not preserve_source_timestamps:
+                repeat_last_frame_until(math.floor(last_video_end * video_stream.time_base * rate + Fraction(1, 2)))
             window_fill = last_video_end - last_video_pts if video_done and last_video_pts is not None else 0
             for out_packet in out_video.encode(None):
                 duration = video_frame_durations.pop(out_packet.pts, 0)
@@ -1455,10 +1523,14 @@ class VideoFromList(VideoInput):
     def get_components(self) -> VideoComponents:
         components = [video.get_components() for video in self.videos]
         frame_rate = components[0].frame_rate
-        if any(component.frame_rate != frame_rate for component in components[1:]):
-            raise ValueError("Cannot materialize accumulated videos with different frame rates")
+
+        def conformed_frames(frames, source_rate):
+            if source_rate == frame_rate:
+                return frames
+            return frames[conformed_frame_indices(len(frames), source_rate, frame_rate)]
+
         try:
-            images = torch.cat([component.images for component in components])
+            images = torch.cat([conformed_frames(component.images, component.frame_rate) for component in components])
         except RuntimeError as error:
             raise ValueError("Accumulated videos have incompatible frame dimensions") from error
 
@@ -1473,15 +1545,9 @@ class VideoFromList(VideoInput):
                 raise ValueError("Cannot materialize accumulated videos with missing audio segments")
             sample_rate = int(components[0].audio["sample_rate"])
             channels = components[0].audio["waveform"].shape[1]
-            if any(
-                int(component.audio["sample_rate"]) != sample_rate
-                or component.audio["waveform"].shape[1] != channels
-                for component in components[1:]
-            ):
-                raise ValueError("Cannot materialize accumulated videos with incompatible audio")
             audio = AudioInput({
                 "waveform": torch.cat(
-                    [component.audio["waveform"] for component in components], dim=-1
+                    [conformed_waveform(component.audio, sample_rate, channels) for component in components], dim=-1
                 )[..., :round(len(images) / frame_rate * sample_rate)],
                 "sample_rate": sample_rate,
             })
@@ -1489,7 +1555,11 @@ class VideoFromList(VideoInput):
             audio = None
 
         alphas = [component.alpha for component in components]
-        alpha = torch.cat(alphas) if all(value is not None for value in alphas) else None
+        alpha = (
+            torch.cat([conformed_frames(component.alpha, component.frame_rate) for component in components])
+            if all(value is not None for value in alphas)
+            else None
+        )
         return VideoComponents(
             images=images,
             audio=audio,
@@ -1526,7 +1596,11 @@ class VideoFromList(VideoInput):
         return sum(video.get_duration() for video in self.videos)
 
     def get_frame_count(self):
-        return sum(video.get_frame_count() for video in self.videos)
+        frame_rate = self.get_frame_rate()
+        return sum(
+            conformed_frame_count(video.get_frame_count(), video.get_frame_rate(), frame_rate)
+            for video in self.videos
+        )
 
     def get_frame_rate(self):
         return self.videos[0].get_frame_rate()

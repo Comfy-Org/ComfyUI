@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from dataclasses import dataclass, field
+from tokenizers import Tokenizer
 from tqdm import tqdm
 import contextlib
 import os
@@ -806,7 +807,8 @@ class Qwen35VisionModel(nn.Module):
             patch_pos_embeds_permute.append(pos_embed)
         return torch.cat(patch_pos_embeds_permute)
 
-    def forward(self, x, grid_thw):
+    def forward(self, x, grid_thw, premerge=None):
+        # premerge: optional {block index: None}, filled with those blocks' outputs (before any merger)
         x = self.patch_embed(x)
         pos_embeds = self.fast_pos_embed_interpolate(grid_thw).to(x.device)
         x = x + pos_embeds
@@ -829,6 +831,8 @@ class Qwen35VisionModel(nn.Module):
             x = blk(x, cu_seqlens=cu_seqlens, position_embeddings=position_embeddings, optimized_attention=optimized_attention)
             if self.deepstack_merger_list is not None and layer_num in self.deepstack_visual_indexes:
                 deepstack_features.append(self.deepstack_merger_list[self.deepstack_visual_indexes.index(layer_num)](x))
+            if premerge is not None and layer_num in premerge:
+                premerge[layer_num] = x
         merged = self.merger(x)
         if self.deepstack_merger_list is not None:
             return merged, deepstack_features
@@ -911,12 +915,11 @@ class Qwen35(BaseLlama, BaseGenerate, torch.nn.Module):
         sampling = None
         if do_sample and temperature != 0.0:
             sampling = {"temperature": temperature, "top_k": top_k, "top_p": top_p, "min_p": min_p,
-                        "repetition_penalty": repetition_penalty,
-                        "presence_penalty": kwargs.get("presence_penalty", 0.0) or 0.0,
                         "seed": seed if seed is not None else 42}
-        return self._generate_mtp(embeds, max_length, stop_tokens, mtp, sampling=sampling, position_ids=kwargs.get("position_ids"))
+        return self._generate_mtp(embeds, max_length, stop_tokens, mtp, sampling=sampling, position_ids=kwargs.get("position_ids"),
+                                  repetition_penalty=repetition_penalty, presence_penalty=kwargs.get("presence_penalty", 0.0) or 0.0)
 
-    def _generate_mtp(self, embeds, max_length, stop_tokens, mtp, sampling=None, position_ids=None):
+    def _generate_mtp(self, embeds, max_length, stop_tokens, mtp, sampling=None, position_ids=None, repetition_penalty=1.0, presence_penalty=0.0):
         device = embeds.device
         cfg = self.model.config
         if stop_tokens is None:
@@ -940,7 +943,7 @@ class Qwen35(BaseLlama, BaseGenerate, torch.nn.Module):
         generator = None
         if sampling is not None:
             generator = torch.Generator(device=device).manual_seed(sampling["seed"])
-        penalized = sampling is not None and penalty_active(sampling["repetition_penalty"], sampling["presence_penalty"])
+        penalized = penalty_active(repetition_penalty, presence_penalty)
 
         # after an image, text positions run behind the cache index (MRoPE); decode continues from the last prefill position
         rope_offset = 0 if position_ids is None else int(position_ids[:, -1].max()) + 1 - embeds.shape[1]
@@ -960,7 +963,7 @@ class Qwen35(BaseLlama, BaseGenerate, torch.nn.Module):
             nt_buf.copy_(lg0.argmax(dim=-1, keepdim=True))
         else:
             nt_buf.copy_(self.sample_token(lg0, sampling["temperature"], sampling["top_k"], sampling["top_p"], sampling["min_p"],
-                                           sampling["repetition_penalty"], [], generator, presence_penalty=sampling["presence_penalty"]))
+                                           1.0, [], generator))
         pen_mask = torch.zeros((lg0.shape[-1],), device=device, dtype=torch.bool) if penalized else None
         h_buf.copy_(x[:, -1:, :])
         del x, lg0
@@ -1043,14 +1046,16 @@ class Qwen35(BaseLlama, BaseGenerate, torch.nn.Module):
 
         def verify_sample(lg):
             s = sampling
-            rows = lg[0].float()
+            rows = lg[0] if s is None else lg[0].float()
             if penalized:
                 # Each row sees committed history and its own path, never siblings.
                 mask = pen_mask.unsqueeze(0).repeat(tree.rows, 1)
                 for r in range(1, tree.rows):
                     mask[r].copy_(mask[tree.parent[r]])
                     mask[r].index_fill_(0, verify_tokens[:, r], True)
-                rows = torch.where(mask, apply_penalty(rows, s["repetition_penalty"], s["presence_penalty"]), rows)
+                rows = torch.where(mask, apply_penalty(rows, repetition_penalty, presence_penalty), rows)
+            if s is None:
+                return rows.argmax(dim=-1).unsqueeze(0)
             return self.sample_token(rows, s["temperature"], s["top_k"], s["top_p"], s["min_p"],
                                      1.0, [], generator).transpose(0, 1)
 
@@ -1087,7 +1092,7 @@ class Qwen35(BaseLlama, BaseGenerate, torch.nn.Module):
             x, _, _ = self.model.forward(None, embeds=ev, attention_mask=None, past_key_values=pkv, position_ids=verify_pos, decode_buffers=verify_buffers)
             # all verify positions in one lm_head GEMV, accept decided GPU-side, one sync
             lg = verify_logits(x)
-            toks = lg.argmax(dim=-1) if sampling is None else verify_sample(lg)
+            toks = lg.argmax(dim=-1) if sampling is None and not penalized else verify_sample(lg)
             if adaptive:
                 if timers:
                     timers[2].record(torch.cuda.current_stream(device))
@@ -1204,7 +1209,8 @@ class Qwen35Tokenizer(sd1_clip.SDTokenizer):
         from transformers import Qwen2Tokenizer
         tokenizer_path = os.path.join(os.path.dirname(os.path.realpath(__file__)), "qwen35_tokenizer")
         super().__init__(tokenizer_path, pad_with_end=False, embedding_directory=embedding_directory, embedding_size=embedding_size, embedding_key=embedding_key, tokenizer_class=Qwen2Tokenizer,
-            has_start_token=False, has_end_token=False, pad_to_max_length=False, max_length=99999999, min_length=1, pad_token=248044, tokenizer_data=tokenizer_data)
+            has_start_token=False, has_end_token=False, pad_to_max_length=False, max_length=99999999, min_length=1, tokenizer_data=tokenizer_data)
+        self.pad_token = self.tokenizer.get_vocab()["<|endoftext|>"]
 
 
 class Qwen35ImageTokenizer(sd1_clip.SD1Tokenizer):
@@ -1212,6 +1218,9 @@ class Qwen35ImageTokenizer(sd1_clip.SD1Tokenizer):
         embedding_size = QWEN35_MODELS.get(model_type, {}).get("hidden_size", 2048)
         tokenizer = lambda *a, **kw: Qwen35Tokenizer(*a, **kw, embedding_size=embedding_size, embedding_key=model_type)
         super().__init__(embedding_directory=embedding_directory, tokenizer_data=tokenizer_data, name=model_type, tokenizer=tokenizer)
+        vocab = getattr(self, self.clip).tokenizer.get_vocab()
+        self.image_token_id = vocab["<|image_pad|>"]
+        self.video_token_id = vocab.get("<|video_pad|>")
         self.llama_template = "<|im_start|>user\n{}<|im_end|>\n<|im_start|>assistant\n"
         self.llama_template_images = "<|im_start|>user\n<|vision_start|><|image_pad|><|vision_end|>{}<|im_end|>\n<|im_start|>assistant\n"
 
@@ -1276,11 +1285,11 @@ class Qwen35ImageTokenizer(sd1_clip.SD1Tokenizer):
         qwen_tokens = tokens[key_name]
         for r in qwen_tokens:
             for i in range(len(r)):
-                if isinstance(r[i][0], (int, float)) and r[i][0] == 248056:  # <|image_pad|>
+                if isinstance(r[i][0], (int, float)) and r[i][0] == self.image_token_id:
                     if len(images) > embed_count:
                         r[i] = ({"type": "image", "data": images[embed_count], "original_type": "image"},) + r[i][1:]
                         embed_count += 1
-                elif isinstance(r[i][0], (int, float)) and r[i][0] == 248057:  # <|video_pad|>
+                elif isinstance(r[i][0], (int, float)) and r[i][0] == self.video_token_id:
                     if len(video_embeds) > video_count:
                         r[i] = (video_embeds[video_count],) + r[i][1:]
                         video_count += 1
@@ -1294,8 +1303,9 @@ class Qwen35ClipModel(sd1_clip.SDClipModel):
         Qwen35_.model_type = model_type
 
         super().__init__(device=device, layer=layer, layer_idx=layer_idx, textmodel_json_config={"mtp": True} if mtp else {},
-            dtype=dtype, special_tokens={"pad": 248044}, layer_norm_hidden_state=False,
+            dtype=dtype, special_tokens={}, layer_norm_hidden_state=False,
             model_class=Qwen35_, enable_attention_masks=attention_mask, return_attention_masks=attention_mask, model_options=model_options)
+        self.special_tokens = {"pad": self.transformer.model.config.stop_tokens[0]}
 
     def generate(self, tokens, do_sample, max_length, temperature, top_k, top_p, min_p, repetition_penalty, seed, presence_penalty=0.0, mtp=True):
         if isinstance(tokens, dict):
@@ -1320,13 +1330,20 @@ def tokenizer(model_type="qwen35_2b"):
     return Qwen35ImageTokenizer_
 
 
-def te(dtype_llama=None, llama_quantization_metadata=None, model_type="qwen35_2b", mtp=False):
+def te(dtype_llama=None, llama_quantization_metadata=None, model_type="qwen35_2b", mtp=False, vocab_size=Qwen35Config.vocab_size, tokenizer_json=None):
+    config = {"vocab_size": vocab_size}
+    if tokenizer_json is not None:
+        vocab = Tokenizer.from_str(tokenizer_json).get_vocab()
+        config["stop_tokens"] = [vocab["<|endoftext|>"], vocab["<|im_end|>"]]
+
     class Qwen35TEModel_(Qwen35TEModel):
         def __init__(self, device="cpu", dtype=None, model_options={}):
             if dtype_llama is not None:
                 dtype = dtype_llama
+            model_options = model_options.copy()
+            config_key = "{}_model_config".format(model_type)
+            model_options[config_key] = {**config, **model_options.get(config_key, {})}
             if llama_quantization_metadata is not None:
-                model_options = model_options.copy()
                 model_options["quantization_metadata"] = llama_quantization_metadata
             super().__init__(device=device, dtype=dtype, model_options=model_options, model_type=model_type, mtp=mtp)
     return Qwen35TEModel_
