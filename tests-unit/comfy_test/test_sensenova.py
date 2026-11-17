@@ -1,5 +1,6 @@
 from types import SimpleNamespace
 
+import pytest
 import torch
 
 from comfy.cli_args import args
@@ -8,104 +9,96 @@ args.cpu = True
 
 from comfy import model_base, model_detection
 import comfy.latent_formats
+import comfy.ops
 import comfy.sample
 import nodes
 from comfy.ldm.sensenova import model as sensenova_model
 from comfy.ldm.sensenova.conditioning import (
     block_causal_mask,
     condition_input_ids,
-    conditioned_input_length,
     preprocess_references,
     thw_indexes,
 )
-from comfy.ldm.sensenova.model import _match_prefix_batch, _pad_to_merged_patch_size
+from comfy.ldm.sensenova.model import _pad_to_merged_patch_size
 from comfy.ldm.sensenova.sampling import (
     SenseNovaModelSampling,
     resolution_noise_scale,
     upstream_sigmas,
 )
-from comfy.text_encoders.sensenova import SenseNovaTokenizer
+from comfy.text_encoders.sensenova import (
+    SenseNovaQwenTokenizer,
+    SenseNovaTokenizer,
+    build_generation_prompt,
+)
 from comfy_extras.nodes_hidream_o1 import HiDreamO1ReferenceImages
-from comfy_extras.nodes_sensenova import SenseNovaSamplingOptions
+from comfy_extras.nodes_sensenova import (
+    SenseNovaSamplingOptions,
+)
+from sensenova_test_utils import (
+    prefix_arguments,
+    prepared_prefix,
+    PatchEmbedding,
+    _generation_input_ids,
+    _text_clip,
+    _tokenize_generation_prompt,
+)
 
 
-def _minimal_state_dict():
-    return {
-        "fm_modules.vision_model_mot_gen.embeddings.patch_embedding.weight": torch.empty(
+def _minimal_u15_state_dict(has_lm_head=False):
+    state_dict = {
+        "patch_embed.patch_embedding.weight": torch.empty(
             1024, 3, 16, 16, device="meta"
         ),
-        "language_model.model.layers.0.self_attn.q_proj_mot_gen.weight": torch.empty(
+        "layers.0.self_attn.q_proj.weight": torch.empty(
             4096, 4096, device="meta"
         ),
+        "head.conv1.weight": torch.empty(
+            1024, 1024, 3, 3, device="meta"
+        ),
+        "head.conv2.weight": torch.empty(192, 256, 3, 3, device="meta"),
+        "norm.weight": torch.empty(4096, device="meta"),
+        "patch_embed.dense_embedding.weight": torch.empty(4096, 1024, 2, 2, device="meta"),
     }
+    state_dict = {"model.diffusion_model." + key: value for key, value in state_dict.items()}
+    if has_lm_head:
+        state_dict["text_encoders.language_model.lm_head.weight"] = torch.empty(
+            151936, 4096, device="meta"
+        )
+    return state_dict
 
 
-def _generation_input_ids():
-    return torch.tensor(
-        [
-            [
-                151644,
-                8948,
-                198,
-                1,
-                151645,
-                198,
-                151644,
-                872,
-                198,
-                2,
-                151645,
-                198,
-                151644,
-                77091,
-                198,
-                151670,
-            ]
-        ],
-        dtype=torch.long,
-    )
+@pytest.mark.parametrize("has_lm_head", [False, True])
+def test_sensenova_packaged_checkpoint_detection(has_lm_head):
+    state_dict = _minimal_u15_state_dict(has_lm_head)
 
-
-def _tokenize_generation_prompt(text):
-    tokenizer = SenseNovaTokenizer()
-    values = tokenizer.tokenize_with_weights(text)["sensenova_u15"][0]
-    return torch.tensor([[int(value[0]) for value in values]], dtype=torch.long)
-
-
-def test_sensenova_top_level_checkpoint_detection():
-    state_dict = _minimal_state_dict()
-
-    assert model_detection.unet_prefix_from_state_dict(state_dict) == ""
-    assert model_detection.detect_unet_config(state_dict, "") == {
-        "image_model": "sensenova_u15"
+    prefix = model_detection.unet_prefix_from_state_dict(state_dict)
+    assert prefix == "model.diffusion_model."
+    assert model_detection.detect_unet_config(state_dict, prefix) == {
+        "image_model": "sensenova_u15",
     }
     assert (
-        type(model_detection.model_config_from_unet(state_dict, "")).__name__
+        type(model_detection.model_config_from_unet(state_dict, prefix)).__name__
         == "SenseNovaU15"
     )
 
 
 def test_sensenova_detection_rejects_incompatible_dimensions():
-    state_dict = _minimal_state_dict()
-    state_dict["language_model.model.layers.0.self_attn.q_proj_mot_gen.weight"] = (
+    state_dict = _minimal_u15_state_dict()
+    state_dict["model.diffusion_model.layers.0.self_attn.q_proj.weight"] = (
         torch.empty(2048, 2048, device="meta")
     )
 
-    assert model_detection.detect_unet_config(state_dict, "") is None
+    assert model_detection.detect_unet_config(state_dict, "model.diffusion_model.") is None
 
 
-def test_sensenova_model_config_builds_pixel_space_outputs():
-    model_config = model_detection.model_config_from_unet(_minimal_state_dict(), "")
-    state_dict = {
-        "language_model.lm_head.weight": torch.empty(1),
-        "kept": torch.empty(1),
-    }
+def test_sensenova_detection_does_not_treat_u1_mlp_head_as_u15():
+    state_dict = _minimal_u15_state_dict()
+    state_dict.pop("model.diffusion_model.head.conv1.weight")
+    state_dict["model.diffusion_model.head.0.weight"] = torch.empty(
+        4096, 1024, device="meta"
+    )
 
-    processed = model_config.process_unet_state_dict(state_dict)
-    assert set(processed) == {"kept"}
-    assert torch.equal(processed["kept"], state_dict["kept"])
-    assert "pixel_space_vae" in model_config.process_vae_state_dict({})
-    assert "_sensenova_te_sentinel" in model_config.process_clip_state_dict({})
+    assert model_detection.detect_unet_config(state_dict, "model.diffusion_model.") is None
 
 
 def test_sensenova_sampling_matches_upstream_schedule_and_resolution_scale():
@@ -237,51 +230,16 @@ def test_hidream_o1_ignores_shared_negative_marker(monkeypatch):
 
 def test_sensenova_reference_preprocessing_preserves_size_and_splits_batches():
     references = preprocess_references(
-        [torch.rand(2, 9, 13, 1), torch.empty(1, 0, 0, 0)]
+        [torch.rand(2, 9, 13, 1), torch.empty(1, 9, 13, 0)]
     )
 
     assert len(references) == 3
     assert all(reference.shape == (1, 3, 9, 13) for reference in references[:2])
-    assert references[2].shape == (1, 3, 0, 0)
+    assert references[2].shape == (1, 3, 9, 13)
     assert _pad_to_merged_patch_size(references[0]).shape == (1, 3, 32, 32)
     assert _pad_to_merged_patch_size(references[2]).shape == (1, 3, 32, 32)
 
 
-def test_sensenova_reference_shape_estimate_uses_padded_image_sizes():
-    model = object.__new__(model_base.SenseNovaU15)
-    input_ids = _generation_input_ids()
-
-    shapes = model.extra_conds_shapes(
-        reference_latents=[torch.empty(2, 33, 65, 3)],
-        text_input_ids=input_ids,
-    )
-
-    grids = [(2, 3), (2, 3)]
-    length = conditioned_input_length(input_ids.shape[1], grids)
-    assert shapes["reference_images"] == [1, 3, 12288]
-    assert shapes["prefix_mask"] == [1, 1, length, length]
-    prefix_shape = [
-        1,
-        sensenova_model.NUM_KV_HEADS,
-        sensenova_model.NUM_LAYERS * length * sensenova_model.HEAD_DIM,
-    ]
-    assert shapes["prefix_keys"] == prefix_shape
-    assert shapes["prefix_values"] == prefix_shape
-
-    negative_shapes = model.extra_conds_shapes(
-        reference_latents=[torch.empty(2, 33, 65, 3)],
-        text_input_ids=input_ids,
-        prompt_type="negative",
-    )
-    negative_length = conditioned_input_length(
-        input_ids.shape[1], grids, image_only=True
-    )
-    assert negative_shapes["prefix_mask"] == [
-        1,
-        1,
-        negative_length,
-        negative_length,
-    ]
 
 
 def test_standard_empty_latent_adapts_to_sensenova_pixel_format():
@@ -299,19 +257,10 @@ def test_standard_empty_latent_adapts_to_sensenova_pixel_format():
     assert samples.shape == (2, 3, 96, 64)
 
 
-def test_sensenova_prefix_conditioning_adapts_to_mismatched_batches():
-    input_ids = torch.tensor([[1], [2]])
-    indexes = torch.arange(6).reshape(2, 3, 1)
-    mask = torch.zeros(2, 1, 1, 1)
-
-    input_ids, indexes, mask = _match_prefix_batch(3, input_ids, indexes, mask)
-
-    assert input_ids[:, 0].tolist() == [1, 2, 2]
-    assert indexes.shape == (3, 3, 1)
-    assert mask.shape == (3, 1, 1, 1)
 
 
-def test_reference_node_and_sensenova_sampling_do_not_add_quality_limits():
+def test_sensenova_sampling_and_reference_schema_limits():
+    assert SenseNovaSamplingOptions.define_schema().node_id == "SenseNovaSamplingOptions"
     sampling_inputs = {
         input.id: input for input in SenseNovaSamplingOptions.define_schema().inputs
     }
@@ -363,12 +312,13 @@ def test_sensenova_prefix_preprocessing_runs_each_prefix_layer_once(monkeypatch)
             )
         )
     )
-    model._prepare_prefix = lambda *args: sensenova_model.SenseNovaU15._prepare_prefix(
+    model._prepare_prefix = lambda *args: sensenova_model.SenseNovaTextModel._prepare_prefix(
         model, *args
     )
+    model._preprocess_prefix_state = lambda *args, **kwargs: sensenova_model.SenseNovaTextModel._preprocess_prefix_state(model, *args, **kwargs)
 
     prefix_keys, prefix_values, prefix_time = (
-        sensenova_model.SenseNovaU15.preprocess_prefix(model, input_ids)
+        sensenova_model.SenseNovaTextModel.preprocess_prefix(model, input_ids)
     )
 
     assert calls == [
@@ -398,79 +348,206 @@ def test_sensenova_prefix_preprocessing_runs_each_prefix_layer_once(monkeypatch)
     assert prefix_time.tolist() == [3]
 
 
-def test_sensenova_model_base_preprocesses_prefix_conditioning():
-    calls = []
 
-    def preprocess_prefix(input_ids, references, indexes, prefix_mask):
-        calls.append((input_ids, references, indexes, prefix_mask))
-        return (
-            [torch.zeros(1, 1, 3, 1, dtype=torch.bfloat16)],
-            [torch.ones(1, 1, 3, 1, dtype=torch.bfloat16)],
-            torch.tensor([3]),
+
+@pytest.mark.parametrize("height,width", [(0, 32), (32, 0), (0, 0), (0, 65), (65, 0)])
+@pytest.mark.parametrize("batched", [False, True])
+def test_sensenova_sampler_encodes_zero_sized_references(monkeypatch, height, width, batched):
+    monkeypatch.setattr(sensenova_model, "HIDDEN_SIZE", 8)
+    model = _text_clip([42] * 8).cond_stage_model
+    model.concat_keys = ()
+    model.vision_model = sensenova_model.VisionEmbeddings(operations=torch.nn)
+    reference = torch.empty(height, width, 3)
+    if batched:
+        reference = reference.unsqueeze(0)
+
+    conds = prepared_prefix(
+        text_input_ids=_generation_input_ids(), reference_latents=[reference],
+        device=torch.device("cpu"), hooks=object(),
+    )
+    input_ids = conds["text_input_ids"]
+    references = conds["reference_images"]
+    prefix, indexes, mask, _ = model._prepare_prefix(
+        input_ids, references, conds["prefix_indexes"], conds["prefix_mask"],
+    )
+    encoded = model.vision_model(_pad_to_merged_patch_size(references[0]))
+    selected = input_ids == 151669
+    assert selected.sum().item() == max(1, (height + 31) // 32) * max(1, (width + 31) // 32)
+    torch.testing.assert_close(prefix[selected], encoded.flatten(0, 1))
+    assert prefix.isfinite().all()
+    assert indexes.shape[-1] == mask.shape[-1] == prefix.shape[1]
+
+
+@pytest.mark.parametrize("negative", [False, True])
+@pytest.mark.parametrize("expanded", [False, True])
+@pytest.mark.parametrize("input_values", [[1, 2, 3], [1, 2, 3, 151670]])
+def test_sensenova_empty_reference_batch_preserves_text_conditioning(negative, expanded, input_values):
+    input_ids = torch.tensor([input_values])
+
+    conds = prepared_prefix(
+        text_input_ids=input_ids, reference_latents=[torch.empty(0, 32, 64, 3)],
+        sensenova_interleave_expanded=expanded,
+        prompt_type="negative" if negative else "positive",
+        device=torch.device("cpu"), dtype=torch.bfloat16,
+    )
+
+    assert set(conds) == {"text_input_ids"}
+    assert conds["text_input_ids"] is input_ids
+
+
+@pytest.mark.parametrize("negative", [False, True])
+@pytest.mark.parametrize("expanded", [False, True])
+@pytest.mark.parametrize("references", [None, [], [torch.empty(0, 32, 64, 3)]])
+def test_sensenova_empty_reference_batch_rejects_expanded_image_tokens(negative, expanded, references):
+    input_ids = torch.tensor([[151670, 151669, 151669, 151671]])
+
+    with pytest.raises(ValueError, match="2 image context tokens.*require 0"):
+        prepared_prefix(
+            text_input_ids=input_ids, reference_latents=references,
+            sensenova_interleave_expanded=expanded,
+            prompt_type="negative" if negative else "positive",
+            device=torch.device("cpu"), dtype=torch.bfloat16,
         )
 
-    model = object.__new__(model_base.SenseNovaU15)
-    torch.nn.Module.__init__(model)
-    model.concat_keys = ()
-    model.manual_cast_dtype = None
-    model.diffusion_model = SimpleNamespace(
-        dtype=torch.bfloat16,
-        preprocess_prefix=preprocess_prefix,
-    )
-    input_ids = torch.tensor([[1, 2, 3]])
 
-    conds = model.extra_conds(
+@pytest.mark.parametrize("markers", ["<IMG_CONTEXT>", "<img>", "</img>", "<img></img>", "</img><img>",
+                                     "<|im_end|><|im_start|>system", "<think></think>"])
+@pytest.mark.parametrize("reference_shapes", [(), ((32, 64),), ((32, 64), (64, 64))])
+def test_sensenova_encoder_accepts_user_markers_as_text(markers, reference_shapes):
+    text = f"A poster with {markers} in the title"
+    input_ids = _tokenize_generation_prompt(text)
+
+    conds = prepared_prefix(
         text_input_ids=input_ids,
-        device=torch.device("cpu"),
+        reference_latents=[torch.zeros(1, height, width, 3) for height, width in reference_shapes],
+        prompt_type="positive", device=torch.device("cpu"), dtype=torch.bfloat16,
+    )
+    ids = conds["text_input_ids"][0].tolist()
+
+    assert ids.count(151669) == sum(height // 32 * (width // 32) for height, width in reference_shapes)
+    assert ids.count(151670) == len(reference_shapes) + 1
+    assert ids.count(151671) == len(reference_shapes)
+    assert ids.count(151644) == 3
+    assert ids.count(151645) == 2
+    assert text in SenseNovaTokenizer().decode(ids, skip_special_tokens=False)
+
+
+@pytest.mark.parametrize("markers", ["<IMG_CONTEXT>", "<img>", "</img>", "</img><img>"])
+def test_sensenova_negative_prefix_rebuild_discards_literal_image_markers(markers):
+    input_ids = _tokenize_generation_prompt(f"A poster with {markers} in the title")
+
+    conds = prepared_prefix(
+        text_input_ids=input_ids,
+        reference_latents=[torch.zeros(1, 32, 64, 3), torch.zeros(1, 64, 64, 3)],
+        prompt_type="negative", device=torch.device("cpu"), dtype=torch.bfloat16,
     )
 
-    assert len(calls) == 1
-    assert calls[0][0] is input_ids
-    assert calls[0][1:] == (None, None, None)
-    assert "text_input_ids" not in conds
-    assert conds["prefix_keys"].cond[0].dtype == torch.bfloat16
-    assert conds["prefix_values"].cond[0].dtype == torch.bfloat16
-    assert conds["prefix_time"].cond.tolist() == [3]
+    assert conds["text_input_ids"].tolist() == [[
+        151644, 872, 198,
+        151670, 151669, 151669, 151671,
+        151670, 151669, 151669, 151669, 151669, 151671,
+        151645, 198, 151644, 77091, 198, 151670,
+    ]]
 
 
-def test_sensenova_uses_prompt_type_for_negative_reference_conditioning():
-    calls = []
+@pytest.mark.parametrize("negative", [False, True])
+@pytest.mark.parametrize("expanded", [False, True])
+def test_sensenova_encoder_prefix_preserves_reference_blocks(negative, expanded):
+    image_block = [151670, 151669, 151669, 151671]
+    input_ids = torch.tensor([[1, 2, 3, *image_block, 198]] if expanded else [[1, 2, 3]])
+    reference = torch.ones(1, 32, 64, 3)
 
-    def preprocess_prefix(input_ids, references, indexes, prefix_mask):
-        calls.append((input_ids, references, indexes, prefix_mask))
-        return (
-            [torch.zeros(1, 1, 1, 1, dtype=torch.bfloat16)],
-            [torch.ones(1, 1, 1, 1, dtype=torch.bfloat16)],
-            torch.tensor([1]),
+    conds = prepared_prefix(
+        text_input_ids=input_ids, reference_latents=[reference],
+        sensenova_interleave_expanded=expanded,
+        prompt_type="negative" if negative else "positive",
+        device=torch.device("cpu"), dtype=torch.bfloat16,
+    )
+
+    if negative and not expanded:
+        expected = [[151644, 872, 198, *image_block, 151645, 198, 151644, 77091, 198, 151670]]
+    else:
+        expected = [[1, 2, 3, *image_block, 198]]
+    assert conds["text_input_ids"].tolist() == expected
+    assert "prefix_keys" not in conds
+    assert conds["reference_images"][0].shape == (1, 3, 32, 64)
+    assert conds["reference_images"][0].dtype == torch.bfloat16
+    torch.testing.assert_close(
+        conds["reference_images"][0][0, :, 0, 0],
+        torch.tensor([2.2489083, 2.4285714, 2.64], dtype=torch.bfloat16),
+    )
+    assert conds["prefix_indexes"][0, :, 4:6].tolist() == [[4, 4], [0, 0], [0, 1]]
+    mask = conds["prefix_mask"]
+    assert mask.dtype == torch.bfloat16
+    assert mask[0, 0, 4, 5] == 0
+    assert torch.isneginf(mask[0, 0, 3, 4])
+    assert torch.equal(reference, torch.ones(1, 32, 64, 3))
+
+
+@pytest.mark.parametrize("context_slots", [3, 5])
+@pytest.mark.parametrize("negative", [False, True])
+@pytest.mark.parametrize("generated_start", [None, 0])
+def test_sensenova_encoder_rejects_mismatched_interleave_image_tokens(context_slots, negative, generated_start):
+    input_ids = torch.tensor([[151670, *([151669] * context_slots), 151671]])
+
+    with pytest.raises(ValueError, match=f"{context_slots} image context tokens.*require 4"):
+        prepared_prefix(
+            text_input_ids=input_ids, reference_latents=[torch.zeros(1, 64, 64, 3)],
+            sensenova_interleave_expanded=True,
+            sensenova_interleave_start=generated_start,
+            prompt_type="negative" if negative else "positive",
+            device=torch.device("cpu"),
         )
 
-    model = object.__new__(model_base.SenseNovaU15)
-    torch.nn.Module.__init__(model)
-    model.concat_keys = ()
-    model.manual_cast_dtype = None
-    model.diffusion_model = SimpleNamespace(
-        dtype=torch.bfloat16,
-        preprocess_prefix=preprocess_prefix,
-    )
-    input_ids = _generation_input_ids()
-    reference = torch.rand(1, 32, 32, 3)
 
-    model.extra_conds(
+@pytest.mark.parametrize("values,error", [
+    ([151670, 151669, 151669, 151669, 151671, 151670, 151669, 151669, 151669, 151671], "image block 1.*require 2"),
+    ([151670, 151669, 151669, 151671, 151670, 151669, 151669, 151669, 151669], "image blocks do not match"),
+    ([151669, 151669, 151671, 151670, 151669, 151669, 151669, 151669, 151671], "image blocks do not match"),
+    ([151669, 151670, 151669, 151671, 151670, 151669, 151669, 151669, 151669, 151671], "image block 1.*require 2"),
+], ids=["wrong-block-sizes", "missing-end", "missing-start", "context-outside-block"])
+def test_sensenova_encoder_rejects_misaligned_interleave_image_blocks(values, error):
+    input_ids = torch.tensor([values])
+
+    with pytest.raises(ValueError, match=error):
+        prepared_prefix(
+            text_input_ids=input_ids,
+            reference_latents=[torch.zeros(1, 32, 64, 3), torch.zeros(1, 64, 64, 3)],
+            sensenova_interleave_expanded=True, prompt_type="positive",
+            device=torch.device("cpu"), dtype=torch.bfloat16,
+        )
+
+
+@pytest.mark.parametrize("negative", [False, True])
+@pytest.mark.parametrize("pending_image", [False, True])
+def test_sensenova_encoder_preserves_multiple_interleave_image_blocks(negative, pending_image):
+    values = [151670, 151669, 151669, 151671, 198, 151670, 151669, 151669, 151669, 151669, 151671]
+    if pending_image:
+        values.append(151670)
+    input_ids = torch.tensor([values])
+
+    conds = prepared_prefix(
         text_input_ids=input_ids,
-        reference_latents=[reference],
-        prompt_type="negative",
-        device=torch.device("cpu"),
+        reference_latents=[torch.zeros(1, 32, 64, 3), torch.zeros(1, 64, 64, 3)],
+        sensenova_interleave_expanded=True,
+        prompt_type="negative" if negative else "positive",
+        device=torch.device("cpu"), dtype=torch.bfloat16,
     )
 
-    expected_ids = condition_input_ids(input_ids, [(1, 1)], image_only=True)
-    assert torch.equal(calls[0][0], expected_ids)
-    assert len(calls[0][1]) == 1
-    assert calls[0][1][0].shape == (1, 3, 32, 32)
-    assert calls[0][2].shape == (1, 3, expected_ids.shape[1])
-    assert calls[0][3].shape == (1, 1, expected_ids.shape[1], expected_ids.shape[1])
+    assert conds["text_input_ids"] is input_ids
+    assert len(conds["reference_images"]) == 2
+    indexes = conds["prefix_indexes"]
+    assert indexes[0, 1:, 1:3].tolist() == [[0, 0], [0, 1]]
+    assert indexes[0, 1:, 6:10].tolist() == [[0, 0, 1, 1], [0, 1, 0, 1]]
 
 
-def test_sensenova_preprocessed_prefix_matches_raw_forward():
+
+
+
+
+@pytest.mark.parametrize("text_suffix", [None, torch.tensor([[42, 151670, 43, 151669, 151671, 151668, 271, 151670]])])
+@pytest.mark.parametrize("prefix_batch,batch", [(1, 1), (1, 2), (2, 3), (2, 4)])
+def test_sensenova_image_model_consumes_clip_prefix(text_suffix, prefix_batch, batch):
     class Layer:
         def forward_prefix(self, prefix, prefix_rope, prefix_mask, transformer_options):
             key = prefix[..., :1].unsqueeze(1)
@@ -511,37 +588,32 @@ def test_sensenova_preprocessed_prefix_matches_raw_forward():
     timestep_embedder = TimestepEmbedder()
     noise_scale_embedder = TimestepEmbedder()
     backbone = SimpleNamespace(
-        embed_tokens=lambda values: torch.zeros(
-            *values.shape, sensenova_model.HIDDEN_SIZE
+        embed_tokens=lambda values: values.float().unsqueeze(-1).repeat(
+            1, 1, sensenova_model.HIDDEN_SIZE
         ),
         layers=[Layer(), Layer()],
-        norm_mot_gen=lambda image: image,
     )
     model = SimpleNamespace(
         language_model=SimpleNamespace(model=backbone),
-        fm_modules={
-            "vision_model_mot_gen": VisionModel(),
-            "timestep_embedder": timestep_embedder,
-            "noise_scale_embedder": noise_scale_embedder,
-            "fm_head": Head(),
-        },
+        layers=backbone.layers,
+        norm=lambda image: image,
+        patch_embed=VisionModel(),
+        timestep_embedder=timestep_embedder,
+        noise_scale_embedder=noise_scale_embedder,
+        head=Head(),
     )
-    model._prepare_prefix = lambda *args: sensenova_model.SenseNovaU15._prepare_prefix(
+    model._prepare_prefix = lambda *args: sensenova_model.SenseNovaTextModel._prepare_prefix(
         model, *args
     )
-    input_ids = torch.tensor([[1, 2, 3]])
-    image = torch.zeros(1, 3, 64, 64)
-    timesteps = torch.tensor([0.5])
+    model._preprocess_prefix_state = lambda *args, **kwargs: sensenova_model.SenseNovaTextModel._preprocess_prefix_state(model, *args, **kwargs)
+    input_ids = torch.arange(1, prefix_batch * 3 + 1).reshape(prefix_batch, 3)
+    if text_suffix is not None:
+        text_suffix = text_suffix.expand(prefix_batch, -1)
+    image = torch.zeros(batch, 3, 64, 64)
+    timesteps = torch.full((batch,), 0.5)
 
-    raw = sensenova_model.SenseNovaU15._forward(
-        model,
-        image,
-        timesteps,
-        text_input_ids=input_ids,
-        transformer_options={},
-    )
     prefix_keys, prefix_values, prefix_time = (
-        sensenova_model.SenseNovaU15.preprocess_prefix(model, input_ids)
+        sensenova_model.SenseNovaTextModel.preprocess_prefix(model, input_ids, text_suffix=text_suffix)
     )
     preprocessed = sensenova_model.SenseNovaU15._forward(
         model,
@@ -552,10 +624,16 @@ def test_sensenova_preprocessed_prefix_matches_raw_forward():
         prefix_time=prefix_time,
         transformer_options={},
     )
-
-    assert torch.equal(raw, preprocessed)
-    assert timestep_embedder.shapes == [torch.Size([1]), torch.Size([1])]
-    assert noise_scale_embedder.shapes == [torch.Size([1]), torch.Size([1])]
+    ids = torch.cat((input_ids, text_suffix), dim=1) if text_suffix is not None else input_ids
+    branch_means = ids.float().mean(dim=1)
+    if batch % prefix_batch:
+        branch_means = branch_means[torch.tensor([0, 1, 1])]
+    else:
+        branch_means = branch_means.repeat_interleave(batch // prefix_batch)
+    expected = (-(4 * branch_means + 4) / 0.5).reshape(batch, 1, 1, 1).expand_as(image)
+    torch.testing.assert_close(preprocessed, expected)
+    assert timestep_embedder.shapes == [torch.Size([batch])]
+    assert noise_scale_embedder.shapes == [torch.Size([batch])]
 
 
 def test_sensenova_reference_tokens_and_indexes():
@@ -565,7 +643,6 @@ def test_sensenova_reference_tokens_and_indexes():
     conditioned = condition_input_ids(input_ids, grids)
     indexes = thw_indexes(conditioned, grids)
 
-    assert conditioned.shape[1] == conditioned_input_length(input_ids.shape[1], grids)
     assert torch.count_nonzero(conditioned == 151669) == 8
     assert indexes.shape == (1, 3, conditioned.shape[1])
 
@@ -582,7 +659,7 @@ def test_sensenova_prefix_mask_matches_attention_dtype(monkeypatch):
 
     monkeypatch.setattr(sensenova_model, "optimized_attention", optimized_attention)
     attention = SimpleNamespace(
-        _project=lambda hidden_states, rope, generation: (query, key, value),
+        _project=lambda hidden_states, rope: (query, key, value),
         o_proj=lambda output: output,
         comfy_attention=sensenova_model.ComfyAttention(),
     )
@@ -633,8 +710,10 @@ def test_sensenova_reference_tokens_allow_more_than_ten_images():
         + "test"
     )
 
-    assert torch.equal(conditioned, _tokenize_generation_prompt(expected_text))
-    assert conditioned.shape[1] == conditioned_input_length(input_ids.shape[1], grids)
+    expected = SenseNovaQwenTokenizer().tokenize_with_weights(
+        build_generation_prompt(expected_text), disable_weights=True,
+    )[0]
+    assert conditioned.tolist() == [[int(pair[0]) for pair in expected]]
     assert torch.count_nonzero(conditioned == 151669) == 12
     assert indexes.shape == (1, 3, conditioned.shape[1])
 
@@ -645,14 +724,128 @@ def test_sensenova_reference_tokens_tolerate_nonstandard_prompt_templates():
     assert torch.count_nonzero(conditioned == 151669) == 1
 
 
-def test_sensenova_tokenizer_control_token_ids():
+def test_sensenova_interleave_negative_reference_waits_for_image_event():
     tokenizer = SenseNovaTokenizer()
-    backend = tokenizer.sensenova_u15.tokenizer
+    pairs = tokenizer.tokenize_with_weights("", mode="interleave")["sensenova_u15"][0]
+    input_ids = torch.tensor([[int(pair[0]) for pair in pairs]])
 
-    assert len(backend) == 151936
-    assert backend.convert_tokens_to_ids(
-        ["<IMG_CONTEXT>", "<img>", "</img>", "<FAKE_PAD_253>"]
-    ) == [151669, 151670, 151671, 151935]
-    assert "<|im_start|>" in backend.all_special_tokens
-    assert "<|vision_pad|>" in backend.all_special_tokens
-    assert tokenizer.tokenize_with_weights("")["sensenova_u15"][0][-1][0] == 151670
+    conditioned = condition_input_ids(
+        input_ids,
+        [(1, 2)],
+        image_only=True,
+        append_image_start=False,
+    )
+
+    assert torch.count_nonzero(conditioned == 151669) == 2
+    assert conditioned[0, -1].item() == 198
+    assert conditioned.shape[1] == 12
+
+
+def test_sensenova_interleave_replay_matches_continuous_decode(monkeypatch):
+    for name, value in (("HIDDEN_SIZE", 32), ("INTERMEDIATE_SIZE", 48), ("NUM_HEADS", 4), ("NUM_KV_HEADS", 2), ("HEAD_DIM", 8)):
+        monkeypatch.setattr(sensenova_model, name, value)
+    model = _text_clip(list(range(32))).cond_stage_model
+    model.concat_keys = ()
+    diffusion = model
+    backbone = diffusion.language_model.model
+    backbone.layers = torch.nn.ModuleList([
+        sensenova_model.DecoderLayer(device="cpu", dtype=torch.float32, operations=comfy.ops.manual_cast)
+        for _ in range(2)
+    ])
+    backbone.norm = comfy.ops.manual_cast.RMSNorm(32, eps=1e-6)
+
+    diffusion.vision_model = PatchEmbedding(3, 32, kernel_size=32, stride=32)
+    generator = torch.Generator().manual_seed(23)
+    for name, parameter in diffusion.named_parameters():
+        if "norm" in name:
+            parameter.detach().fill_(1)
+        else:
+            parameter.detach().normal_(std=0.08, generator=generator)
+
+    # Explicit upstream events, not a second parser of the serialized history.
+    ids = [1, 2, 151669, 151671, 3, 151670, 151669, 151669, 151671,
+           151669, 151671, 4, 151670, 151669, 151669, 151669, 151669, 151671,
+           151669, 151671, 5]
+    times = [0, 1, 2, 3, 4, 5, 6, 6, 7, 8, 9, 10, 11, 12, 12, 12, 12, 13, 14, 15, 16]
+    heights = [0] * 15 + [1, 1] + [0] * 4
+    widths = [0] * 7 + [1] + [0] * 6 + [1, 0, 1] + [0] * 4
+    references = [
+        torch.linspace(-0.2, 1.2, 32 * 64 * 3).reshape(1, 32, 64, 3),
+        torch.linspace(1.1, -0.1, 64 * 64 * 3).reshape(1, 64, 64, 3),
+    ]
+    image_events = {6: (2, references[0]), 13: (4, references[1])}
+    checkpoints = {5: 0, 6: 0, 9: 1, 12: 1, 13: 1, 18: 2, 21: 2}
+    position = torch.empty(1, dtype=torch.int64)
+    seqlen = torch.zeros(1, dtype=torch.int32)
+    caches = [sensenova_model.FixedKV(
+        torch.zeros(1, len(ids) + 2, 2, 8), torch.zeros(1, len(ids) + 2, 2, 8),
+        0, position, seqlen,
+    ) for _ in backbone.layers]
+
+    def decode_text(token, time, state):
+        hidden = backbone.embed_tokens(torch.tensor([[token]]))
+        rope = sensenova_model._prepare_mrope(torch.tensor([[time], [0], [0]]), hidden.device, hidden.dtype)
+        state[0].prepare(1)
+        for layer, cache in zip(backbone.layers, state):
+            hidden = layer.forward_decode(hidden, rope, cache, {})
+            cache.advance(1)
+        return hidden
+
+    cursor = 0
+    while cursor < len(ids):
+        if cursor in image_events:
+            count, image = image_events[cursor]
+            mean = image.new_tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1)
+            std = image.new_tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1)
+            hidden = diffusion.vision_model((image.movedim(-1, 1) - mean) / std)
+            indexes = torch.tensor([times[cursor:cursor + count], heights[cursor:cursor + count], widths[cursor:cursor + count]])
+            rope = sensenova_model._prepare_mrope(indexes, hidden.device, hidden.dtype)
+            for layer, cache in zip(backbone.layers, caches):
+                attention = layer.self_attn
+                query, key, value = attention._project(layer.input_layernorm(hidden), rope)
+                cache.key[:, cursor:cursor + count].copy_(key.transpose(1, 2))
+                cache.value[:, cursor:cursor + count].copy_(value.transpose(1, 2))
+                # Image patches attend the entire new image and the prior cache.
+                output = torch.nn.functional.scaled_dot_product_attention(
+                    query, cache.key[:, :cursor + count].transpose(1, 2),
+                    cache.value[:, :cursor + count].transpose(1, 2), enable_gqa=True,
+                ).transpose(1, 2).flatten(2)
+                hidden = hidden + attention.o_proj(output)
+                hidden = hidden + layer.mlp(layer.post_attention_layernorm(hidden))
+                cache.advance(count)
+            seqlen.add_(count)
+            cursor += count
+        else:
+            hidden = decode_text(ids[cursor], times[cursor], caches)
+            cursor += 1
+        if cursor not in checkpoints:
+            continue
+
+        metadata = {
+            "text_input_ids": torch.tensor([ids[:cursor]]),
+            "reference_latents": references[:checkpoints[cursor]],
+            "sensenova_interleave_expanded": True,
+            "sensenova_interleave_start": 2,
+        }
+        args = prefix_arguments(metadata, torch.device("cpu"), torch.float32)
+        if args[2] is not None:
+            assert args[2].tolist() == [[times[:cursor], heights[:cursor], widths[:cursor]]]
+        keys, values, time = diffusion.preprocess_prefix(*args)
+        conds = model.encode_token_weights(metadata)[2]
+        assert time.item() == times[cursor - 1] + 1
+        torch.testing.assert_close(conds["prefix_time"], time)
+        for index, cache in enumerate(caches):
+            # Batched replay and token-wise decode accumulate FP32 rounding differently across CPU backends.
+            torch.testing.assert_close(keys[index], cache.key[:, :cursor].transpose(1, 2), atol=1e-5, rtol=2e-5)
+            torch.testing.assert_close(values[index], cache.value[:, :cursor].transpose(1, 2), atol=1e-5, rtol=2e-5)
+            torch.testing.assert_close(conds["prefix_keys"][index], keys[index])
+            torch.testing.assert_close(conds["prefix_values"][index], values[index])
+
+        # Branch the continuous cache to compare two actual greedy predictions.
+        first = diffusion.language_model.lm_head(backbone.norm(hidden))[:, -1].argmax().item()
+        branch_position, branch_length = position.clone(), seqlen.clone()
+        branch = [sensenova_model.FixedKV(cache.key.clone(), cache.value.clone(), cursor, branch_position, branch_length) for cache in caches]
+        next_hidden = decode_text(first, times[cursor - 1] + 1, branch)
+        second = diffusion.language_model.lm_head(backbone.norm(next_hidden))[:, -1].argmax().item()
+        generated, stop = diffusion.generate_text_tokens(*args, max_tokens=2, stop_token_ids=())
+        assert (generated, stop) == ([first, second], None)

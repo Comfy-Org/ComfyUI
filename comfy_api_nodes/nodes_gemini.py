@@ -288,11 +288,12 @@ async def download_interaction_video(uri: str, cls: type[IO.ComfyNode] | None = 
     name = uri.split("?", 1)[0].rsplit("/files/", 1)[-1].split(":", 1)[0]
     await poll_op(
         cls,
-        ApiEndpoint(path=f"{GEMINI_INTERACTIONS_ENDPOINT}/files/{name}"),
+        ApiEndpoint(path=f"{GEMINI_INTERACTIONS_ENDPOINT}/files/{name}", query_params={"fields": "state"}),
         response_model=GeminiFile,
         status_extractor=lambda file: file.state,
-        completed_statuses=["ACTIVE"],
-        failed_statuses=["FAILED"],
+        # Google may mark a finished output FAILED; its video still downloads
+        completed_statuses=["ACTIVE", "FAILED"],
+        failed_statuses=[],
         queued_statuses=["PROCESSING"],
         poll_interval=3.0,
         max_poll_attempts=200,
