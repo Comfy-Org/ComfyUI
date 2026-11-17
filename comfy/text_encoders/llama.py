@@ -445,6 +445,7 @@ class Ovis25_2BConfig:
     rope_scale = None
     final_norm: bool = True
     lm_head: bool = False
+    stop_tokens = [151643, 151645]
 
 @dataclass
 class Qwen25_7BVLI_Config:
@@ -1465,7 +1466,7 @@ class Qwen3_8B(BaseLlama, BaseQwen3, BaseGenerate, torch.nn.Module):
         self.model = Llama2_(config, device=device, dtype=dtype, ops=operations)
         self.dtype = dtype
 
-class Ovis25_2B(BaseLlama, torch.nn.Module):
+class Ovis25_2B(BaseLlama, BaseGenerate, torch.nn.Module):
     def __init__(self, config_dict, dtype, device, operations):
         super().__init__()
         config = Ovis25_2BConfig(**config_dict)
