@@ -204,6 +204,10 @@ class TopologicalSort:
     def get_ready_nodes(self):
         return [node_id for node_id in self.pendingNodes if self.blockCount[node_id] == 0]
 
+    def is_blocked(self):
+        """True when staging would wait for an external block to be released."""
+        return self.externalBlocks > 0 and len(self.get_ready_nodes()) == 0
+
     def pop_node(self, unique_id):
         del self.pendingNodes[unique_id]
         for blocked_node_id in self.blocking[unique_id]:

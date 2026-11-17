@@ -8,6 +8,7 @@ from typing import Sequence, Mapping, Dict
 from comfy.model_patcher import is_model_patcher_output
 from comfy.system_memory import virtual_memory_available
 from comfy_execution.graph import DynamicPrompt
+from comfy_execution.utils import current_prompt_id
 from abc import ABC, abstractmethod
 
 import nodes
@@ -151,30 +152,57 @@ class CacheKeySetInputSignature(CacheKeySet):
 class BasicCache:
     def __init__(self, key_class, enable_providers=False):
         self.key_class = key_class
-        self.initialized = False
         self.enable_providers = enable_providers
-        self.dynprompt: DynamicPrompt
-        self.cache_key_set: CacheKeySet
+        # Entries are shared between prompts; keys are resolved through the prompt bound for the
+        # current execution context, so several in-flight prompts can use one cache.
+        self.prompts: Dict[str | None, tuple[DynamicPrompt, CacheKeySet, object]] = {}
+        self.ended = set()
         self.cache = {}
         self.subcaches = {}
         self._pending_store_tasks: set = set()
 
+    @property
+    def initialized(self):
+        return current_prompt_id.get() in self.prompts
+
+    @property
+    def dynprompt(self) -> DynamicPrompt:
+        return self.prompts[current_prompt_id.get()][0]
+
+    @property
+    def cache_key_set(self) -> CacheKeySet:
+        return self.prompts[current_prompt_id.get()][1]
+
+    @property
+    def is_changed_cache(self):
+        return self.prompts[current_prompt_id.get()][2]
+
     async def set_prompt(self, dynprompt, node_ids, is_changed_cache):
-        self.dynprompt = dynprompt
-        self.cache_key_set = self.key_class(dynprompt, node_ids, is_changed_cache)
-        await self.cache_key_set.add_keys(node_ids)
-        self.is_changed_cache = is_changed_cache
-        self.initialized = True
+        for prompt_id in self.ended:
+            self.prompts.pop(prompt_id, None)
+        self.ended.clear()
+        cache_key_set = self.key_class(dynprompt, node_ids, is_changed_cache)
+        await cache_key_set.add_keys(node_ids)
+        self.prompts[current_prompt_id.get()] = (dynprompt, cache_key_set, is_changed_cache)
+
+    def end_prompt(self):
+        """The prompt's entries stop being preserved; its binding stays readable until the next prompt binds."""
+        self.ended.add(current_prompt_id.get())
+        for subcache in self.subcaches.values():
+            subcache.end_prompt()
 
     def all_node_ids(self):
         assert self.initialized
         node_ids = self.cache_key_set.all_node_ids()
         for subcache in self.subcaches.values():
-            node_ids = node_ids.union(subcache.all_node_ids())
+            if subcache.initialized:
+                node_ids = node_ids.union(subcache.all_node_ids())
         return node_ids
 
     def _clean_cache(self):
-        preserve_keys = set(self.cache_key_set.get_used_keys())
+        preserve_keys = set()
+        for _, cache_key_set, _ in self.prompts.values():
+            preserve_keys.update(cache_key_set.get_used_keys())
         to_remove = []
         for key in self.cache:
             if key not in preserve_keys:
@@ -183,7 +211,9 @@ class BasicCache:
             del self.cache[key]
 
     def _clean_subcaches(self):
-        preserve_subcaches = set(self.cache_key_set.get_used_subcache_keys())
+        preserve_subcaches = set()
+        for _, cache_key_set, _ in self.prompts.values():
+            preserve_subcaches.update(cache_key_set.get_used_subcache_keys())
 
         to_remove = []
         for key in self.subcaches:
@@ -312,7 +342,7 @@ class BasicCache:
         return hasattr(value, 'outputs') and hasattr(value, 'ui')
 
     def _get_class_type(self, node_id):
-        if not self.initialized or not self.dynprompt:
+        if not self.initialized:
             return ''
         try:
             return self.dynprompt.get_node(node_id).get('class_type', '')
@@ -413,6 +443,9 @@ class NullCache:
     async def set_prompt(self, dynprompt, node_ids, is_changed_cache):
         pass
 
+    def end_prompt(self):
+        pass
+
     def all_node_ids(self):
         return []
 
@@ -444,16 +477,23 @@ class LRUCache(BasicCache):
         self.min_generation = 0
         self.generation = 0
         self.used_generation = {}
+        self.bound_generation = {}
         self.children = {}
 
     async def set_prompt(self, dynprompt, node_ids, is_changed_cache):
         await super().set_prompt(dynprompt, node_ids, is_changed_cache)
         self.generation += 1
+        self.bound_generation = {prompt_id: gen for prompt_id, gen in self.bound_generation.items() if prompt_id in self.prompts}
+        self.bound_generation[current_prompt_id.get()] = self.generation
         for node_id in node_ids:
             self._mark_used(node_id)
 
+    def active_generation(self):
+        """Entries used at or after this generation belong to a prompt still in flight."""
+        return min((gen for prompt_id, gen in self.bound_generation.items() if prompt_id not in self.ended), default=self.generation)
+
     def clean_unused(self):
-        while len(self.cache) > self.max_size and self.min_generation < self.generation:
+        while len(self.cache) > self.max_size and self.min_generation < self.active_generation():
             self.min_generation += 1
             to_remove = [key for key in self.cache if self.used_generation[key] < self.min_generation]
             for key in to_remove:
@@ -553,15 +593,16 @@ class RAMPressureCache(LRUCache):
             return 0
 
         clean_list = []
+        active_generation = self.active_generation()
 
         for key, cache_entry in self.cache.items():
-            if not free_active and self.used_generation[key] == self.generation:
+            if not free_active and self.used_generation[key] >= active_generation:
                 continue
 
-            if all_outputs_dynamic(cache_entry.outputs) and self.used_generation[key] == self.generation:
+            if all_outputs_dynamic(cache_entry.outputs) and self.used_generation[key] >= active_generation:
                 continue
 
-            oom_score = RAM_CACHE_OLD_WORKFLOW_OOM_MULTIPLIER ** (self.generation - self.used_generation[key])
+            oom_score = RAM_CACHE_OLD_WORKFLOW_OOM_MULTIPLIER ** max(active_generation - self.used_generation[key], 0)
 
             ram_usage = RAM_CACHE_DEFAULT_RAM_USAGE
             oom_ram_usage = ram_usage
@@ -585,7 +626,7 @@ class RAMPressureCache(LRUCache):
                             seen_storages.add(storage_key)
                             ram_usage += storage.nbytes()
                             oom_ram_usage += storage.nbytes()
-                    elif is_model_patcher_output(output) and self.used_generation[key] != self.generation:
+                    elif is_model_patcher_output(output) and self.used_generation[key] < active_generation:
                         #old ModelPatchers are the first to go
                         oom_ram_usage = 1e30
                     elif hasattr(output, "_comfy_cache_tensors"):

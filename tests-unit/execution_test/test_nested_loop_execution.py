@@ -1,3 +1,4 @@
+import contextvars
 import copy
 
 import pytest
@@ -8,6 +9,7 @@ import comfy_extras.nodes_loop as nodes_loop
 from comfy_api.latest import io
 from comfy_execution.graph_utils import GraphBuilder
 from comfy_execution.validation import validate_loops
+from comfy_execution.utils import current_prompt_id
 from execution import PromptExecutor
 
 
@@ -327,15 +329,21 @@ def register_internal_loop_nodes(monkeypatch):
         starts = {node_id for node_id, node in prompt.items() if node["class_type"] == "StartLoop"}
         ends = {node_id for node_id, node in prompt.items() if node["class_type"] == "EndLoop"}
         validate_loops(prompt, set(execute_outputs), prompt, starts, ends)
-        execute(executor, prompt, prompt_id, extra_data, execute_outputs)
+        return execute(executor, prompt, prompt_id, extra_data, execute_outputs)
 
     monkeypatch.setattr(PromptExecutor, "execute", execute_validated)
 
 
+def cached_output(executor, prompt_id, node_id):
+    """Look the node up under the prompt that bound it, as the executor does."""
+    context = contextvars.copy_context()
+    context.run(current_prompt_id.set, prompt_id)
+    return context.run(executor.caches.outputs.get_local, node_id)
+
+
 def execute_prompt(prompt, prompt_id, outputs):
     executor = PromptExecutor(Server(), cache_type=False, cache_args={"ram": 0, "ram_inactive": 0})
-    executor.execute(prompt, prompt_id, execute_outputs=outputs)
-    assert executor.success
+    assert executor.execute(prompt, prompt_id, execute_outputs=outputs).success
     return executor
 
 
@@ -465,7 +473,6 @@ def test_loop_executes_multiple_termination_branches_each_iteration():
 
     executor = execute_prompt(prompt, "multiple-termination-loop-test", ["first", "second"])
 
-    assert executor.success
     assert Increment.calls == [1, 2]
     assert CapturePassthroughFirst.values == [1, 2]
     assert CapturePassthroughSecond.values == [(1, False), (2, True)]
@@ -581,7 +588,7 @@ def test_empty_loop_skips_body(mode_inputs):
     executor = execute_prompt(prompt, "empty-loop-test", ["preview"])
     assert Increment.calls == []
     assert CapturePassthrough.values == []
-    assert executor.caches.outputs.get_local("close") is not None
+    assert cached_output(executor, "empty-loop-test", "close") is not None
 
 
 @pytest.mark.parametrize(
@@ -645,12 +652,10 @@ def test_iteration_cache_policy_and_end_cache(cache_iterations, expected_calls):
     second_prompt = copy.deepcopy(prompt)
     executor = PromptExecutor(Server(), cache_type=False, cache_args={"ram": 0, "ram_inactive": 0})
 
-    executor.execute(prompt, "loop-cache-first", execute_outputs=["capture"])
-    assert executor.success
-    assert executor.caches.outputs.get_local("close") is not None
-    executor.execute(second_prompt, "loop-cache-second", execute_outputs=["capture"])
+    assert executor.execute(prompt, "loop-cache-first", execute_outputs=["capture"]).success
+    assert cached_output(executor, "loop-cache-first", "close") is not None
 
-    assert executor.success
+    assert executor.execute(second_prompt, "loop-cache-second", execute_outputs=["capture"]).success
     assert Increment.calls == expected_calls
     assert Progress.messages == [
         ("Iteration 0 / 2", "loop"),
@@ -687,11 +692,8 @@ def test_iteration_cache_still_expands_when_only_termination_is_requested():
     second_prompt = copy.deepcopy(prompt)
     executor = PromptExecutor(Server(), cache_type=False, cache_args={"ram": 0, "ram_inactive": 0})
 
-    executor.execute(prompt, "termination-cache-first", execute_outputs=["preview"])
-    assert executor.success
-    executor.execute(second_prompt, "termination-cache-second", execute_outputs=["preview"])
-
-    assert executor.success
+    assert executor.execute(prompt, "termination-cache-first", execute_outputs=["preview"]).success
+    assert executor.execute(second_prompt, "termination-cache-second", execute_outputs=["preview"]).success
     assert Increment.calls == [1, 2]
     assert CapturePassthrough.values == [1, 2]
 

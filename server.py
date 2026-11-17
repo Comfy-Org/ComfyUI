@@ -8,6 +8,7 @@ import time
 import nodes
 import folder_paths
 import execution
+from comfy_execution.utils import current_prompt_id
 from comfy_execution.jobs import (
     JobStatus,
     get_job,
@@ -328,8 +329,9 @@ class PromptServer():
         routes = web.RouteTableDef()
         self.routes = routes
         self.last_node_id = None
+        self.last_prompt_id = None
         self.client_id = None
-        self.workflow_metadata = {}
+        self.workflow_metadata = {} # prompt_id -> metadata merged into that prompt's messages
 
         self.on_prompt_handlers = []
 
@@ -1281,13 +1283,13 @@ class PromptServer():
                         break
 
                 if should_interrupt:
-                    nodes.interrupt_processing()
+                    self.prompt_queue.interrupt_prompt(prompt_id)
                 else:
                     logging.info(f"Prompt {prompt_id} is not currently running, skipping interrupt")
             else:
                 # No prompt_id provided, do a global interrupt
                 logging.info("Global interrupt (no prompt_id specified)")
-                nodes.interrupt_processing()
+                self.prompt_queue.interrupt_prompt(None)
 
             return web.Response(status=200)
 
@@ -1502,7 +1504,7 @@ class PromptServer():
     def send_sync(self, event, data, sid=None):
         if self.workflow_metadata:
             if isinstance(data, dict) and "prompt_id" in data:
-                data = {**self.workflow_metadata, **data}
+                data = {**self.workflow_metadata.get(data["prompt_id"], {}), **data}
             elif (
                 event == BinaryEventTypes.PREVIEW_IMAGE_WITH_METADATA
                 and isinstance(data, tuple)
@@ -1511,10 +1513,9 @@ class PromptServer():
                 and "prompt_id" in data[1]
             ):
                 # Merged here rather than at publication: messages wait in the
-                # queue, so by the time publish_loop sends a preview the next
-                # prompt may already have replaced workflow_metadata, and the
-                # frame would carry the wrong workflow.
-                data = (data[0], {**self.workflow_metadata, **data[1]})
+                # queue, so by the time publish_loop sends a preview the
+                # prompt may already have finished and dropped its metadata.
+                data = (data[0], {**self.workflow_metadata.get(data[1]["prompt_id"], {}), **data[1]})
 
         self.loop.call_soon_threadsafe(
             self.messages.put_nowait, (event, data, sid))
@@ -1601,5 +1602,12 @@ class PromptServer():
 
         # Pack the node_id length as a 4-byte unsigned integer, followed by the node_id bytes
         message = struct.pack(">I", len(node_id_bytes)) + node_id_bytes + text
+        # Clients that opt in get the prompt id prepended, so they can tell concurrent prompts apart.
+        prompt_id_bytes = (current_prompt_id.get() or "").encode("utf-8")
+        message_with_prompt = struct.pack(">I", len(prompt_id_bytes)) + prompt_id_bytes + message
 
-        self.send_sync(BinaryEventTypes.TEXT, message, sid)
+        for target in ([sid] if sid is not None else list(self.sockets.keys())):
+            supported = feature_flags.supports_feature(
+                self.sockets_metadata, target, "supports_progress_text_metadata"
+            )
+            self.send_sync(BinaryEventTypes.TEXT, message_with_prompt if supported else message, target)
