@@ -215,7 +215,8 @@ def get_torch_device():
         return torch.device("cpu")
     else:
         if is_vulkan():
-            return torch.device("vulkan", torchvulkan.current_device())
+            global default_vulkan_device
+            return default_vulkan_device
         elif is_intel_xpu():
             return torch.device("xpu", torch.xpu.current_device())
         elif is_ascend_npu():
