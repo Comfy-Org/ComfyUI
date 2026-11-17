@@ -23,9 +23,9 @@ class ProgressText:
     def __init__(self, clip, node_id):
         self.clip, self.node_id, self.sent_at = clip, node_id, 0.0
 
-    def __call__(self, token_ids):
+    def __call__(self, token_ids, final=False):
         now = time.monotonic()
-        if now - self.sent_at < self.INTERVAL:
+        if now - self.sent_at < self.INTERVAL and not final:
             return
         server = PromptServer.instance
         if server is None or server.client_id is None:  # never broadcast another client's text
@@ -128,6 +128,8 @@ class TextGenerate(io.ComfyNode):
                 mtp=mtp,
                 state=state,
             )
+        if progress is not None:
+            progress(generated_ids, final=True)  # the throttle may have held back the last tokens
         # the output is written back only when something consumes it; otherwise it is released after the node
         dynprompt = cls.hidden.dynprompt
         if any(value == [cls.hidden.unique_id, 2] for node_id in dynprompt.all_node_ids() for value in dynprompt.get_node(node_id)["inputs"].values()):

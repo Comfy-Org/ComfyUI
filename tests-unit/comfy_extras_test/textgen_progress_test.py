@@ -81,6 +81,8 @@ def test_progress_text_is_throttled(server, monkeypatch):
     p([ord("a")])
     p([ord("a"), ord("b")])
     assert [t for t, _, _ in server.sent] == ["a"]
+    p([ord("a"), ord("b"), ord("c")], final=True)
+    assert [t for t, _, _ in server.sent] == ["a", "abc"]
 
 
 NO_PROMPT = SimpleNamespace(all_node_ids=lambda: [])
@@ -90,7 +92,7 @@ def test_generate_text_shows_its_text_while_it_is_written(server):
     clone = TextGenerate.PREPARE_CLASS_CLONE({"hidden_inputs": {io.Hidden.unique_id: "2", io.Hidden.dynprompt: NO_PROMPT}})
     out = clone.execute(FakeClip("Hello"), "hi", 16, {"sampling_mode": "off"})
     assert out.args[0] == "Hello"
-    assert [t for t, _, _ in server.sent] == ["H", "He", "Hel", "Hell", "Hello"]
+    assert [t for t, _, _ in server.sent] == ["H", "He", "Hel", "Hell", "Hello", "Hello"]  # the last, unthrottled
     assert {(n, sid) for _, n, sid in server.sent} == {("2", "tab")}
 
 
