@@ -13,6 +13,7 @@ from comfy.cli_args import args
 args.cpu = True
 
 import comfy.hooks
+import comfy.checkpoint_convert
 import comfy.sd
 import comfy.model_base
 import comfy.model_detection
@@ -28,7 +29,6 @@ from comfy.ldm.sensenova import model as sensenova_model
 from comfy_extras.nodes_textgen import TextGenerateV2
 from comfy_extras.nodes_hidream_o1 import HiDreamO1ReferenceImages
 from comfy_extras.nodes_sensenova import SenseNovaConditioning
-from script_examples.convert_sensenova import convert_checkpoint
 from sensenova_test_utils import (
     PatchEmbedding,
     _generation_input_ids,
@@ -303,10 +303,8 @@ def test_sensenova_checkpoint_and_clip_round_trip(small_sensenova, monkeypatch, 
         else:
             name = "fm_modules." + key
         state[prefix + name] = value
-    source = tmp_path / "original.safetensors"
     destination = tmp_path / "comfy.safetensors"
-    save_file(state, source, metadata={"format": "sensenova-u1.5-mot"})
-    convert_checkpoint(source, destination)
+    save_file(comfy.checkpoint_convert.convert_checkpoint(state), destination, metadata={"format": "sensenova-u1.5-mot"})
     with safe_open(destination, framework="pt") as converted:
         assert converted.metadata() == {"format": "sensenova-u1.5-mot"}
     state = comfy.utils.load_torch_file(str(destination))
