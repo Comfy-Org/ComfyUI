@@ -10,7 +10,9 @@ if not torch.cuda.is_available():
 
 import comfy.ops  # noqa: E402
 from comfy.text_encoders.llama import Ovis25_2B  # noqa: E402
+from comfy.text_encoders.flux import KleinTokenizer8B  # noqa: E402
 from comfy.text_encoders.ovis import OvisTokenizer  # noqa: E402
+from comfy.text_encoders.z_image import ZImageTokenizer  # noqa: E402
 
 PROMPT = "a red fox in the snow"
 OVIS = "<|im_start|>user\nDescribe the image by detailing the color, quantity, text, shape, size, texture, spatial relationships of the objects and background: {}<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
@@ -41,9 +43,13 @@ def test_textgenerate_thinking_off(tokenizer, system_prompt):
     assert ids[-4:] == [151667, 271, 151668, 271]  # <think> \n\n </think> \n\n as single tokens
 
 
-def test_textgenerate_thinking_on_leaves_the_turn_open(tokenizer):
-    _, text = tokenize(tokenizer, PROMPT, min_length=1, thinking=True, system_prompt="", skip_template=False)
-    assert text == CHAT.format(PROMPT)
+@pytest.mark.parametrize("thinking", [False, True])
+@pytest.mark.parametrize("system_prompt", ["", "You write image prompts."])
+def test_textgenerate_matches_the_other_qwen3_sizes(tokenizer, thinking, system_prompt):
+    kwargs = dict(min_length=1, thinking=thinking, system_prompt=system_prompt, skip_template=False)
+    ids, _ = tokenize(tokenizer, PROMPT, **kwargs)
+    for other in (ZImageTokenizer(), KleinTokenizer8B()):  # Qwen3-4B, Qwen3-8B
+        assert [t[0] for t in next(iter(other.tokenize_with_weights(PROMPT, **kwargs).values()))[0]] == ids
 
 
 def test_textgenerate_without_default_template_passes_text_through(tokenizer):
