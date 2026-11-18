@@ -195,15 +195,18 @@ def test_sensenova_decode_attention_uses_configured_backend(monkeypatch, storage
     ).view(1, 1, 128).expand(1, 8, 128)
     prefix = torch.ones(1, 8, 2, 128, dtype=compute_dtype)
     cache = sensenova_model.FixedKV(
-        torch.zeros(1, 5, 8, 128, dtype=compute_dtype), torch.zeros(1, 5, 8, 128, dtype=compute_dtype), 2,
-        torch.empty(1, dtype=torch.int64), torch.tensor([2], dtype=torch.int32),
+        torch.zeros(1, 5, 8, 128, dtype=compute_dtype), torch.zeros(1, 5, 8, 128, dtype=compute_dtype),
+        2, torch.empty(1, dtype=torch.int64), torch.tensor([2], dtype=torch.int32),
     )
+    mask = hidden.new_full((1, 1, 1, 5), float("-inf"))
+    mask[..., :2].zero_()
     cache.key[:, :2].copy_(prefix.transpose(1, 2))
     cache.value[:, :2].copy_(prefix.transpose(1, 2))
     for position in (2, 3):
         hidden.fill_(position - 1)
         cache.prepare(1)
-        output = attention.forward_decode(hidden, rope, cache, {})
+        mask[..., cache.index].zero_()
+        output = attention.forward_decode(hidden, rope, cache, mask, {})
         cache.advance(1)
 
         assert output.dtype == compute_dtype
@@ -234,7 +237,7 @@ def test_sensenova_plain_cpu_fp8_uses_native_embedding_for_prefill_and_decode(mo
     expected = torch.nn.functional.embedding(ids, embed.weight.float()).bfloat16()
     assert torch.equal(prefix, expected)
     hidden = torch.empty(1, 1, 4, dtype=torch.bfloat16)
-    sensenova_model.SenseNovaTextModel._decode_text_token(model, ids[:, 0], [], hidden, None)
+    sensenova_model.SenseNovaTextModel._decode_text_token(model, ids[:, 0], [], hidden, None, None)
     assert torch.equal(hidden, expected[:, :1])
     assert embed.weight.dtype == storage_dtype
 
@@ -268,7 +271,7 @@ def test_sensenova_quantized_embedding_preserves_native_lookup(quant_format, con
     prefix, _, _, _ = sensenova_model.SenseNovaTextModel._prepare_prefix(model, ids, None, None, None, compute_dtype=torch.bfloat16)
     assert torch.equal(prefix, expected)
     hidden = torch.empty(1, 1, 256, dtype=torch.bfloat16)
-    sensenova_model.SenseNovaTextModel._decode_text_token(model, ids[:, 0], [], hidden, None)
+    sensenova_model.SenseNovaTextModel._decode_text_token(model, ids[:, 0], [], hidden, None, None)
     assert torch.equal(hidden, expected[:, :1])
     assert isinstance(embed.weight, comfy.quant_ops.QuantizedTensor)
 
@@ -316,6 +319,8 @@ def test_sensenova_checkpoint_and_clip_round_trip(small_sensenova, monkeypatch, 
         state, model_options=options, te_model_options=options, disable_dynamic=True,
     )
     assert model is not None and clip is not None and vae is not None
+    for layer in model.model.diffusion_model.layers:
+        assert layer.self_attn.combined_qkv is None and layer.mlp.combined_gate_up is None
     assert state == {}
     assert set(model.model.diffusion_model.state_dict()) == set(image_sd)
     assert set(clip.get_sd()) == set(text_sd)
@@ -533,6 +538,10 @@ def test_sensenova_clip_loader_preserves_quantized_weights(small_sensenova, monk
     for key in quant_keys:
         weight = comfy.utils.get_attr(clip.cond_stage_model, key + ".weight")
         assert isinstance(weight, comfy.quant_ops.QuantizedTensor)
+    for layer in clip.cond_stage_model.language_model.model.layers:
+        attn, mlp = layer.self_attn, layer.mlp
+        assert attn.combined_qkv.linears == (attn.q_proj, attn.k_proj, attn.v_proj)
+        assert mlp.combined_gate_up.linears == (mlp.gate_proj, mlp.up_proj)
     conditioning = clip.encode_from_tokens_scheduled({"text_input_ids": torch.tensor([[1, 2, 3]])})
     assert all(torch.isfinite(key).all() for key in conditioning[0][1]["prefix_keys"])
 

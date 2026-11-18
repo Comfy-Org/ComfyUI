@@ -158,7 +158,7 @@ class VisionEmbeddings(nn.Module):
 
 
 class MLP(nn.Module):
-    def __init__(self, device=None, dtype=None, operations=None):
+    def __init__(self, device=None, dtype=None, operations=None, combine_projections=False):
         super().__init__()
         self.gate_proj = operations.Linear(
             HIDDEN_SIZE, INTERMEDIATE_SIZE, bias=False, device=device, dtype=dtype
@@ -166,23 +166,33 @@ class MLP(nn.Module):
         self.up_proj = operations.Linear(
             HIDDEN_SIZE, INTERMEDIATE_SIZE, bias=False, device=device, dtype=dtype
         )
+        self.combined_gate_up = None
+        if combine_projections:
+            self.combined_gate_up = comfy.ops.CombinedLinear((self.gate_proj, self.up_proj))
+            self.combined_gate_up.comfy_gemv_optimized = True
         self.down_proj = operations.Linear(
             INTERMEDIATE_SIZE, HIDDEN_SIZE, bias=False, device=device, dtype=dtype
         )
 
     def forward(self, hidden_states):
-        return self.down_proj(
-            F.silu(self.gate_proj(hidden_states)) * self.up_proj(hidden_states)
-        )
+        if self.combined_gate_up is not None:
+            gate_up = self.combined_gate_up.forward(hidden_states)
+            if gate_up is not NotImplemented:
+                return comfy.ops.linear_input_act(self.down_proj, gate_up, "swiglu")
+        return self.down_proj(F.silu(self.gate_proj(hidden_states)) * self.up_proj(hidden_states))
 
 
 class Attention(nn.Module):
-    def __init__(self, device=None, dtype=None, operations=None):
+    def __init__(self, device=None, dtype=None, operations=None, combine_projections=False):
         super().__init__()
         self.comfy_attention = ComfyAttention()
         self.q_proj = operations.Linear(HIDDEN_SIZE, NUM_HEADS * HEAD_DIM, bias=False, device=device, dtype=dtype)
         self.k_proj = operations.Linear(HIDDEN_SIZE, NUM_KV_HEADS * HEAD_DIM, bias=False, device=device, dtype=dtype)
         self.v_proj = operations.Linear(HIDDEN_SIZE, NUM_KV_HEADS * HEAD_DIM, bias=False, device=device, dtype=dtype)
+        self.combined_qkv = None
+        if combine_projections:
+            self.combined_qkv = comfy.ops.CombinedLinear((self.q_proj, self.k_proj, self.v_proj))
+            self.combined_qkv.comfy_gemv_optimized = True
         self.o_proj = operations.Linear(NUM_HEADS * HEAD_DIM, HIDDEN_SIZE, bias=False, device=device, dtype=dtype)
         self.q_norm = operations.RMSNorm(HEAD_DIM // 2, eps=1e-6, device=device, dtype=dtype)
         self.q_norm_hw = operations.RMSNorm(HEAD_DIM // 2, eps=1e-6, device=device, dtype=dtype)
@@ -191,9 +201,15 @@ class Attention(nn.Module):
 
     def _project(self, hidden_states, rope):
         batch, length, _ = hidden_states.shape
-        query = self.q_proj(hidden_states).view(batch, length, NUM_HEADS, HEAD_DIM)
-        key = self.k_proj(hidden_states).view(batch, length, NUM_KV_HEADS, HEAD_DIM)
-        value = self.v_proj(hidden_states).view(batch, length, NUM_KV_HEADS, HEAD_DIM).transpose(1, 2)
+        qkv = self.combined_qkv.forward(hidden_states) if self.combined_qkv is not None else NotImplemented
+        if qkv is NotImplemented:
+            query, key, value = self.q_proj(hidden_states), self.k_proj(hidden_states), self.v_proj(hidden_states)
+        else:
+            kv_size = NUM_KV_HEADS * HEAD_DIM
+            query, key, value = qkv.split((NUM_HEADS * HEAD_DIM, kv_size, kv_size), dim=-1)
+        query = query.view(batch, length, NUM_HEADS, HEAD_DIM)
+        key = key.view(batch, length, NUM_KV_HEADS, HEAD_DIM)
+        value = value.view(batch, length, NUM_KV_HEADS, HEAD_DIM).transpose(1, 2)
         query_t, query_hw = query.chunk(2, dim=-1)
         key_t, key_hw = key.chunk(2, dim=-1)
         query_t = self.q_norm(query_t).transpose(1, 2)
@@ -201,13 +217,17 @@ class Attention(nn.Module):
         key_t = self.k_norm(key_t).transpose(1, 2)
         key_hw = self.k_norm_hw(key_hw).transpose(1, 2)
 
-        query_h, query_w = query_hw.chunk(2, dim=-1)
-        key_h, key_w = key_hw.chunk(2, dim=-1)
         query_t, key_t = _apply_llm_rope(query_t, key_t, rope[0])
-        query_h, key_h = _apply_llm_rope(query_h, key_h, rope[1])
-        query_w, key_w = _apply_llm_rope(query_w, key_w, rope[2])
-        query = torch.cat((query_t, query_h, query_w), dim=-1)
-        key = torch.cat((key_t, key_h, key_w), dim=-1)
+        if len(rope) == 1:
+            query = torch.cat((query_t, query_hw), dim=-1)
+            key = torch.cat((key_t, key_hw), dim=-1)
+        else:
+            query_h, query_w = query_hw.chunk(2, dim=-1)
+            key_h, key_w = key_hw.chunk(2, dim=-1)
+            query_h, key_h = _apply_llm_rope(query_h, key_h, rope[1])
+            query_w, key_w = _apply_llm_rope(query_w, key_w, rope[2])
+            query = torch.cat((query_t, query_h, query_w), dim=-1)
+            key = torch.cat((key_t, key_h, key_w), dim=-1)
         return query, key, value
 
     def forward_prefix(
@@ -251,22 +271,19 @@ class Attention(nn.Module):
         hidden_states,
         rope,
         cache,
+        attention_mask,
         transformer_options,
     ):
         query, key, value = self._project(hidden_states, rope)
         key, value = key.transpose(1, 2), value.transpose(1, 2)
-        position = cache.position.view(-1, 1, 1, 1).expand_as(key)
-        cache.key.scatter_(1, position, key)
-        cache.value.scatter_(1, position, value)
-        mask = torch.zeros(
-            (hidden_states.shape[0], 1, 1, cache.key.shape[1]), device=query.device, dtype=query.dtype,
-        ).masked_fill_(torch.arange(cache.key.shape[1], device=query.device) >= cache.seqlen.view(-1, 1, 1, 1), float("-inf"))
+        cache.key.index_copy_(1, cache.position, key)
+        cache.value.index_copy_(1, cache.position, value)
         output = optimized_attention(
             AttentionTensorContainer(query),
             AttentionTensorContainer(cache.key.transpose(1, 2)),
             AttentionTensorContainer(cache.value.transpose(1, 2)),
             NUM_HEADS,
-            mask=mask,
+            mask=attention_mask,
             skip_reshape=True,
             transformer_options=transformer_options,
             enable_gqa=True,
@@ -276,10 +293,10 @@ class Attention(nn.Module):
 
 
 class DecoderLayer(nn.Module):
-    def __init__(self, device=None, dtype=None, operations=None):
+    def __init__(self, device=None, dtype=None, operations=None, combine_projections=False):
         super().__init__()
-        self.self_attn = Attention(device=device, dtype=dtype, operations=operations)
-        self.mlp = MLP(device=device, dtype=dtype, operations=operations)
+        self.self_attn = Attention(device=device, dtype=dtype, operations=operations, combine_projections=combine_projections)
+        self.mlp = MLP(device=device, dtype=dtype, operations=operations, combine_projections=combine_projections)
         self.input_layernorm = operations.RMSNorm(HIDDEN_SIZE, eps=1e-6, device=device, dtype=dtype)
         self.post_attention_layernorm = operations.RMSNorm(HIDDEN_SIZE, eps=1e-6, device=device, dtype=dtype)
 
@@ -313,12 +330,14 @@ class DecoderLayer(nn.Module):
         hidden_states,
         rope,
         cache,
+        attention_mask,
         transformer_options,
     ):
         attention = self.self_attn.forward_decode(
             self.input_layernorm(hidden_states),
             rope,
             cache,
+            attention_mask,
             transformer_options,
         )
         hidden_states = hidden_states + attention
@@ -333,7 +352,7 @@ class LanguageBackbone(nn.Module):
         super().__init__()
         self.embed_tokens = operations.Embedding(VOCAB_SIZE, HIDDEN_SIZE, padding_idx=151643, device=device, dtype=dtype)
         self.layers = nn.ModuleList(
-            DecoderLayer(device=device, dtype=dtype, operations=operations)
+            DecoderLayer(device=device, dtype=dtype, operations=operations, combine_projections=True)
             for _ in range(NUM_LAYERS)
         )
         self.norm = operations.RMSNorm(HIDDEN_SIZE, eps=1e-6, device=device, dtype=dtype)
@@ -512,6 +531,7 @@ class SenseNovaTextModel(nn.Module, BaseGenerate):
         caches,
         hidden_states,
         rope,
+        attention_mask,
         transformer_options=None,
     ):
         embed = self.language_model.model.embed_tokens
@@ -521,6 +541,7 @@ class SenseNovaTextModel(nn.Module, BaseGenerate):
             hidden_states.copy_(embed(token[:, None]))
         if caches:
             caches[0].prepare(1)
+            attention_mask[..., caches[0].index].zero_()
         if transformer_options is None:
             transformer_options = {}
         prefetch = comfy.model_prefetch.make_prefetch_queue(
@@ -533,7 +554,7 @@ class SenseNovaTextModel(nn.Module, BaseGenerate):
                 cache = caches[layer_index]
 
                 def core():
-                    hidden_states.copy_(layer.forward_decode(hidden_states, rope, cache, transformer_options))
+                    hidden_states.copy_(layer.forward_decode(hidden_states, rope, cache, attention_mask, transformer_options))
 
                 comfy.model_prefetch.prefetch_queue_pop(
                     prefetch, hidden_states.device, layer, hidden_states.dtype,
@@ -617,12 +638,16 @@ class SenseNovaTextModel(nn.Module, BaseGenerate):
             if step == 0:
                 batch = text_input_ids.shape[0]
                 position = torch.empty((batch,), device=decode_hidden.device, dtype=torch.int64)
-                seqlen = torch.full((batch,), text_input_ids.shape[1], device=decode_hidden.device, dtype=torch.int32)
+                prefix_length = text_input_ids.shape[1]
+                capacity = prefix_length + max_tokens - 1
+                seqlen = torch.full((batch,), prefix_length, device=decode_hidden.device, dtype=torch.int32)
+                attention_mask = decode_hidden.new_full((batch, 1, 1, capacity), float("-inf"))
+                attention_mask[..., :prefix_length].zero_()
                 caches = []
                 for index in range(len(prefix_keys)):
                     key, value = prefix_keys[index], prefix_values[index]
                     _, heads, length, head_dim = key.shape
-                    buffer = key.new_zeros((batch, length + max_tokens - 1, heads, head_dim))
+                    buffer = key.new_zeros((batch, capacity, heads, head_dim))
                     cache = FixedKV(buffer, torch.zeros_like(buffer), length, position, seqlen)
                     cache.key[:, :length].copy_(key.transpose(1, 2))
                     cache.value[:, :length].copy_(value.transpose(1, 2))
@@ -631,15 +656,13 @@ class SenseNovaTextModel(nn.Module, BaseGenerate):
                     del key, value, buffer, cache
                 del prefix_keys, prefix_values
                 positions = prefix_time[:, None] + torch.arange(max_tokens - 1, device=prefix_time.device)
-                zeros = torch.zeros_like(positions)
-                ropes = _prepare_mrope(torch.stack((positions, zeros, zeros)), decode_hidden.device, decode_hidden.dtype)
-                rope = tuple(tuple(freq[:, :, :1].clone() for freq in pair) for pair in ropes)
+                temporal = _prepare_llm_rope(positions, HEAD_DIM // 2, 5000000.0, decode_hidden.device, decode_hidden.dtype)
+                rope = (tuple(freq[:, :, :1].clone() for freq in temporal),)
             else:
-                for target, source in zip(rope, ropes):
-                    for dst, src in zip(target, source):
-                        dst.copy_(src[:, :, step:step + 1])
+                for dst, src in zip(rope[0], temporal):
+                    dst.copy_(src[:, :, step:step + 1])
             self._decode_text_token(
-                next_token, caches, decode_hidden, rope, transformer_options,
+                next_token, caches, decode_hidden, rope, attention_mask, transformer_options,
             )
             next_token = self._next_text_token(decode_hidden, **sampling)
 

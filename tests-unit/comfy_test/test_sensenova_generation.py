@@ -55,7 +55,7 @@ def test_sensenova_text_returns_stop_without_decoding_suffix():
     )
     model._next_text_token = lambda hidden, **sampling: torch.tensor([next(tokens)])
 
-    def decode(token, caches, hidden, rope, transformer_options=None):
+    def decode(token, caches, hidden, rope, attention_mask, transformer_options=None):
         decoded.append(int(token.item()))
 
     model._decode_text_token = decode
@@ -75,6 +75,34 @@ def test_sensenova_text_returns_stop_without_decoding_suffix():
     assert decoded == [42]
     assert progress_updates == [1, 2]
     assert interrupt_calls == [True, True]
+
+
+def test_sensenova_decode_shares_mask_and_updates_only_temporal_rope(monkeypatch):
+    model = _text_clip([42, 43, 44, 151668]).cond_stage_model
+    prefix = torch.zeros(1, 1, 3, 4)
+    monkeypatch.setattr(model, "_preprocess_prefix_state", lambda *args, **kwargs: (
+        torch.zeros(1, 3, 4), [prefix, prefix], [prefix, prefix], torch.tensor([7]),
+    ))
+    predictions = iter((42, 43, 44, 151668))
+    monkeypatch.setattr(model, "_next_text_token", lambda *args, **kwargs: torch.tensor([next(predictions)]))
+    masks = []
+
+    class Layer(torch.nn.Module):
+        def forward_decode(self, hidden, rope, cache, attention_mask, transformer_options):
+            step = len(masks) // 2
+            assert cache.position.item() == cache.index == 3 + step
+            assert cache.seqlen.item() == 4 + step
+            assert len(rope) == 1
+            expected = sensenova_model._prepare_mrope(torch.tensor([[7 + step], [0], [0]]), hidden.device, hidden.dtype)
+            torch.testing.assert_close(rope[0], expected[0])
+            assert attention_mask.flatten().tolist() == [0.] * (4 + step) + [float("-inf")] * (3 - step)
+            masks.append(attention_mask)
+            return hidden
+
+    model.language_model.model.layers = torch.nn.ModuleList([Layer(), Layer()])
+    generated, stop = model.generate_text_tokens(torch.tensor([[1, 2, 3]]), max_tokens=5, stop_token_ids=(151668,))
+    assert (generated, stop) == ([42, 43, 44, 151668], 151668)
+    assert len(masks) == 6 and all(mask is masks[0] for mask in masks)
 
 
 @pytest.mark.parametrize(

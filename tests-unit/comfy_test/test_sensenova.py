@@ -786,8 +786,10 @@ def test_sensenova_interleave_replay_matches_continuous_decode(monkeypatch):
         hidden = backbone.embed_tokens(torch.tensor([[token]]))
         rope = sensenova_model._prepare_mrope(torch.tensor([[time], [0], [0]]), hidden.device, hidden.dtype)
         state[0].prepare(1)
+        mask = hidden.new_full((1, 1, 1, len(ids) + 2), float("-inf"))
+        mask[..., :state[0].index + 1].zero_()
         for layer, cache in zip(backbone.layers, state):
-            hidden = layer.forward_decode(hidden, rope, cache, {})
+            hidden = layer.forward_decode(hidden, rope, cache, mask, {})
             cache.advance(1)
         return hidden
 
