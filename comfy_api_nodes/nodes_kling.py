@@ -2802,7 +2802,9 @@ def _kling4_seed() -> IO.Int.Input:
 
 
 def _kling4_omni_aspect_ratio(tooltip: str) -> IO.Combo.Input:
-    return IO.Combo.Input("aspect_ratio", options=["adaptive", "16:9", "9:16", "1:1", "21:9"], tooltip=tooltip)
+    return IO.Combo.Input(
+        "aspect_ratio", options=["adaptive", "16:9", "9:16", "1:1", "21:9", "4:3", "3:4"], tooltip=tooltip
+    )
 
 
 def _kling4_reference_images() -> IO.Autogrow.Input:
@@ -2912,7 +2914,7 @@ def _kling4_text_to_video_inputs(resolutions: list[str], max_duration: int) -> l
     return [
         IO.String.Input("prompt", multiline=True, default=""),
         _kling4_resolution(resolutions),
-        IO.Combo.Input("aspect_ratio", options=["16:9", "9:16", "1:1", "21:9"]),
+        IO.Combo.Input("aspect_ratio", options=["16:9", "9:16", "1:1", "21:9", "4:3", "3:4"]),
         _kling4_duration(max_duration),
         _kling4_seed(),
     ]
