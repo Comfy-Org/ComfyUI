@@ -1691,7 +1691,7 @@ class LongCatAvatarToVideo(io.ComfyNode):
         def speaker_inputs():
             return [
                 io.AudioEncoderOutput.Input("audio_encoder_output_2", optional=True),
-                io.Mask.Input("mask_1", optional=True, tooltip="Region of the first speaker."),
+                io.Mask.Input("mask_1", optional=True, tooltip="Region of the first speaker. Without any masks the first speaker is the left half of the image, the second the right half."),
                 io.Mask.Input("mask_2", optional=True, tooltip="Region of the second speaker."),
             ]
         return io.Schema(
@@ -1771,8 +1771,15 @@ class LongCatAvatarToVideo(io.ComfyNode):
         encoded = [torch.cat([e, e[-1:].expand(frames - e.shape[0], -1, -1)]) for e in encoded]
         audio_embed = get_audio_embeds(encoded, video_frame_offset, video_frame_offset + length).unsqueeze(0)
 
-        # upstream's order: speaker 1, speaker 2, the background around them, then any further person; without two masks the audio is not routed
+        # upstream's order: speaker 1, speaker 2, the background around them, then any further person; a single mask does not route the audio
         people = [mode[f"mask_{i}"] for i in range(1, 4) if mode.get(f"mask_{i}") is not None]
+        if not people and len(encoded) >= 2:
+            # upstream's default without boxes: the left and right halves of the source image, inset by 10%
+            h, w = start_image.shape[1:3] if start_image is not None else (height, width)
+            half = w // 2
+            people = [torch.zeros(1, h, w), torch.zeros(1, h, w)]
+            for i, m in enumerate(people):
+                m[:, int(h * 0.1):int(h * 0.9), i * half + int(half * 0.1):i * half + int(half * 0.9)] = 1
         if len(people) >= 2:
             masks = torch.cat([comfy.utils.common_upscale(m[:1].unsqueeze(1), width, height, "nearest-exact", "center") for m in people]).squeeze(1) > 0
             masks = torch.cat([masks[:2], ~masks[:2].any(dim=0, keepdim=True), masks[2:]]).float()
