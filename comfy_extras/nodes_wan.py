@@ -1740,6 +1740,8 @@ class LongCatAvatarToVideo(io.ComfyNode):
         def encode(images):
             return vae.encode(comfy.utils.common_upscale(images.movedim(-1, 1), width, height, "bilinear", "center").movedim(1, -1)[:, :, :, :3])
 
+        # the VAE keeps 1 + 4k frames, the audio windows and the re-encoded overlap follow it
+        length = ((length - 1) // 4) * 4 + 1
         out_latent = {"samples": torch.zeros([1, 16, ((length - 1) // 4) + 1, height // 8, width // 8], device=comfy.model_management.intermediate_device())}
         # on both passes so they still batch, the zeroed-audio negative is unaffected by it
         values = {"audio_strength": audio_strength}
@@ -1747,7 +1749,7 @@ class LongCatAvatarToVideo(io.ComfyNode):
         cond = None
         if previous_frames is not None:
             # the decoded overlap is re-encoded rather than reusing its latents, like upstream 1.5 and 1.6
-            trim_image = min(overlap_frames, previous_frames.shape[0])
+            trim_image = ((min(overlap_frames, previous_frames.shape[0]) - 1) // 4) * 4 + 1
             cond = encode(previous_frames[-trim_image:])
             if start_image is not None:
                 values.update({"reference_latents": [encode(start_image[:1])], "ref_frame_index": ref_frame_index, "ref_mask_frame_range": ref_mask_frame_range})
@@ -1771,16 +1773,17 @@ class LongCatAvatarToVideo(io.ComfyNode):
         encoded = [torch.cat([e, e[-1:].expand(frames - e.shape[0], -1, -1)]) for e in encoded]
         audio_embed = get_audio_embeds(encoded, video_frame_offset, video_frame_offset + length).unsqueeze(0)
 
-        # upstream's order: speaker 1, speaker 2, the background around them, then any further person; a single mask does not route the audio
-        people = [mode[f"mask_{i}"] for i in range(1, 4) if mode.get(f"mask_{i}") is not None]
-        if not people and len(encoded) >= 2:
+        # upstream's order: speaker 1, speaker 2, the background around them, then any further person; routed only when speakers 1 and 2 have masks
+        people = [mode.get(f"mask_{i}") for i in range(1, 4)]
+        if all(m is None for m in people) and len(encoded) >= 2:
             # upstream's default without boxes: the left and right halves of the source image, inset by 10%
             h, w = start_image.shape[1:3] if start_image is not None else (height, width)
             half = w // 2
             people = [torch.zeros(1, h, w), torch.zeros(1, h, w)]
             for i, m in enumerate(people):
                 m[:, int(h * 0.1):int(h * 0.9), i * half + int(half * 0.1):i * half + int(half * 0.9)] = 1
-        if len(people) >= 2:
+        if people[0] is not None and people[1] is not None:
+            people = [m for m in people if m is not None]
             masks = torch.cat([comfy.utils.common_upscale(m[:1].unsqueeze(1), width, height, "nearest-exact", "center") for m in people]).squeeze(1) > 0
             masks = torch.cat([masks[:2], ~masks[:2].any(dim=0, keepdim=True), masks[2:]]).float()
             values["speaker_masks"] = (torch.nn.functional.interpolate(masks.unsqueeze(0), size=(height // 16, width // 16), mode="nearest")[0] > 0).flatten(1).float()

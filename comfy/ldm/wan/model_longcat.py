@@ -34,11 +34,6 @@ def rope_1d(pos, dim):
     return rope(pos.unsqueeze(0), dim, 10000).unsqueeze(2)
 
 
-def modulations(modulation, e, chunks, dtype):
-    # fp32 like upstream: shifts and scales feed the fused adaln in the compute dtype, gates stay fp32
-    return [m if i % 3 == 2 else m.to(dtype) for i, m in enumerate(modulation(e).chunk(chunks, dim=-1))]
-
-
 def speaker_attn_map(q, k_ref, masks, heads, comfy_attention, transformer_options={}):
     # per mask, the head-averaged attention mass the queries put on its first-frame tokens: one attention call with the normalized masks as values
     b, s, h, d = q.shape
@@ -234,8 +229,8 @@ class TimeEmbedding(nn.Module):
         self.freq_dim = freq_dim
         self.mlp = nn.Sequential(operations.Linear(freq_dim, dim, device=device, dtype=dtype), nn.SiLU(), operations.Linear(dim, dim, device=device, dtype=dtype))
 
-    def forward(self, t):
-        return self.mlp(sinusoidal_embedding_1d(self.freq_dim, t))
+    def forward(self, t, dtype):
+        return self.mlp(sinusoidal_embedding_1d(self.freq_dim, t).to(dtype))
 
 
 class Head(nn.Module):
@@ -246,9 +241,8 @@ class Head(nn.Module):
         self.modulation = nn.Sequential(nn.SiLU(), operations.Linear(adaln_dim, 2 * dim, device=device, dtype=dtype))
 
     def forward(self, x, e):
-        shift, scale = self.modulation(e).to(x.dtype).chunk(2, dim=-1)
-        # the output projection runs in fp32 like upstream
-        return self.head(modulated_norm(x, self.norm, scale, shift).float())
+        shift, scale = self.modulation(e).chunk(2, dim=-1)
+        return self.head(modulated_norm(x, self.norm, scale, shift))
 
 
 class LongCatVideoModel(nn.Module):
@@ -352,10 +346,10 @@ class LongCatVideoModel(nn.Module):
         del tokens
 
         # upstream rounds the timestep to the model dtype; condition frames are clean, t = 0
-        t = timestep.to(dtype).float()
+        t = timestep.to(dtype)
         if n_cond:
             t = torch.cat([t, t.new_zeros(1)])
-        e = self.time_embedding(t).unsqueeze(1)
+        e = self.time_embedding(t, dtype).unsqueeze(1)
         e_noise = e[:B]
 
         # the umT5 encoder zeroes padded tokens, they stay zero after the embedding and are still attended
@@ -391,7 +385,8 @@ class LongCatVideoModel(nn.Module):
                     cached = cache.filled(key)
                     for layer in slots[0]:
                         layer.read_before_write = cached
-            elif options.get("device", "auto") in ("cpu", "gpu") or not self.cache_patcher.is_dynamic():
+            elif (options.get("device", "auto") in ("cpu", "gpu") or not self.cache_patcher.is_dynamic()) and all(torch.equal(key, x[i:i + 1, :, :n_cond]) for i in range(1, B)):
+                # one cached row serves the whole batch, a batch mixing different condition frames recomputes them
                 cache_bytes = len(self.blocks) * cond_len * self.dim * x.element_size()
                 cache, cached = self.select_cond_cache(key, cache_bytes, device, options)
         writable = isinstance(cache, PrefixCache)
@@ -405,10 +400,10 @@ class LongCatVideoModel(nn.Module):
             comfy.model_prefetch.prefetch_queue_pop(prefetch_queue, device, block, dtype, malloc_scope="block")
             transformer_options["block_index"] = i
             with cache.layer(i, device, write=not cached) if writable else contextlib.nullcontext():
-                mod = modulations(block.modulation, e, 6, dtype)
+                mod = block.modulation(e).chunk(6, dim=-1)
                 audio_mod = None
                 if audio is not None:
-                    audio_mod = modulations(block.audio_modulation, e_noise, 3, dtype)
+                    audio_mod = block.audio_modulation(e_noise).chunk(3, dim=-1)
                 k_cond = v_cond = None
                 if cached:
                     x_in = cache.take(i, device, dtype, 1)
