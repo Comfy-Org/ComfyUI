@@ -236,7 +236,7 @@ class CreateVideo(io.ComfyNode):
                 ),
                 io.Combo.Input(
                     "chroma_subsampling",
-                    options=["auto", "444", "422", "420"],
+                    options=["auto", "444", "422", "420", "none"],
                     default="auto",
                     optional=True,
                     tooltip="444 keeps full color resolution, 422 halves horizontal color resolution, and 420 halves both axes. Auto uses the codec default. Unsupported choices use the closest supported mode and print a console warning.",
@@ -261,11 +261,12 @@ class CreateVideo(io.ComfyNode):
     ) -> io.NodeOutput:
         if bit_depth == "auto":
             bit_depth = 10 if color_space in ("HDR", "HDR PQ") else 8
+        chroma_subsampling = chroma_subsampling if chroma_subsampling in ("444", "422", "420") else None
         video = InputImpl.VideoFromComponents(
             Types.VideoComponents(images=images, audio=audio, frame_rate=Fraction(fps)),
             bit_depth=bit_depth,
             color_space=color_space,
-            chroma_subsampling=None if chroma_subsampling == "auto" else chroma_subsampling,
+            chroma_subsampling=chroma_subsampling,
         )
         if codec != "none":
             video = InputImpl.VideoFromList([video], codec=Types.VideoCodec(codec))

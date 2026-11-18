@@ -383,3 +383,17 @@ def test_custom_frontend_root_is_not_checked(monkeypatch, caplog):
         agent_host.check_frontend("1.57.6", "Comfy-Org/ComfyUI_frontend@1.59.0", "/srv/my-frontend")
     assert agent_host.feature_flag() == {"state": "ready"}
     assert "too old" not in caplog.text and not _agent_records(caplog)
+
+
+@pytest.mark.parametrize("eps", [{}, {"v9": FakeHost}])
+def test_the_install_hint_upgrades_from_agent_requirements(monkeypatch, caplog, eps):
+    # agent_requirements.txt names the package without a version, so a plain
+    # `pip install -r` leaves an old or placeholder comfy-agent in place.
+    # Quoted: Windows profile paths often contain spaces.
+    root = os.path.join(os.path.abspath(os.sep), "Users", "First Last", "ComfyUI")
+    monkeypatch.setattr(folder_paths, "__file__", os.path.join(root, "folder_paths.py"))
+    _entry_points(monkeypatch, eps)
+    with caplog.at_level(logging.WARNING):
+        agent_host.load()
+    req = os.path.join(root, "agent_requirements.txt")
+    assert any(f'pip install -U -r "{req}"' in r.getMessage() for r in caplog.records)

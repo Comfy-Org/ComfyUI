@@ -10,6 +10,7 @@ from PIL import Image, ImageDraw, ImageFont
 import comfy.rmsnorm
 import comfy.text_encoders.qwen3vl
 from comfy import sd1_clip
+from comfy.text_encoders.qwen_vl import smart_resize
 
 VISION_MARKER = "<|vision_start|><|image_pad|><|vision_end|>"
 TEMPLATE = "<|im_start|>user\n{}<|im_end|>\n<|im_start|>assistant\n"
@@ -120,15 +121,7 @@ def thumbnail(image, size=768):
 
 def to_qwen_grid(image):
     # the processor's 32 pixel grid, so ComfyUI's own bilinear resize is a no-op
-    h, w = image.shape[1], image.shape[2]
-    height, width = round(h / 32) * 32, round(w / 32) * 32
-    if height * width > 1605632:
-        beta = math.sqrt(h * w / 1605632)
-        height, width = max(32, math.floor(h / beta / 32) * 32), max(32, math.floor(w / beta / 32) * 32)
-    elif height * width < 3136:
-        beta = math.sqrt(3136 / (h * w))
-        height, width = math.ceil(h * beta / 32) * 32, math.ceil(w * beta / 32) * 32
-    return resize_8bit(image, height, width)
+    return resize_8bit(image, *smart_resize(image.shape[1], image.shape[2], 32, 3136, 1605632))
 
 
 class Fibo2Tokenizer(comfy.text_encoders.qwen3vl.Qwen3VLTokenizer):

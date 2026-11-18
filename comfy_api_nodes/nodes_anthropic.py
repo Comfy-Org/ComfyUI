@@ -31,6 +31,7 @@ CLAUDE_MODELS: dict[str, str] = {
     "Opus 5.5": "claude-opus-5-5",
     "Opus 5": "claude-opus-5",
     "Opus 4.8": "claude-opus-4-8",
+    "Fable 5.2": "claude-fable-5-2",
     "Fable 5.1": "claude-fable-5-1",
     "Fable 5": "claude-fable-5",
     "Sonnet 5.5": "claude-sonnet-5-5",
@@ -46,12 +47,12 @@ _THINKING_UNSUPPORTED = {"Haiku 4.5"}
 # Models that use the newer "adaptive" thinking mode (Opus 4.7+ require it; older models keep the explicit budget API).
 # Anthropic decides the actual budget when adaptive is used, based on the `output_config.effort` hint.
 _ADAPTIVE_THINKING_MODELS = {"Opus 4.8", "Sonnet 5.5", "Sonnet 5", "Opus 4.7", "Opus 4.6", "Sonnet 4.6"}
-_ALWAYS_THINKING_MODELS = {"Opus 5.5", "Opus 5", "Fable 5.1", "Fable 5"}
-_XHIGH_EFFORT_MODELS = {"Opus 5.5", "Opus 5", "Opus 4.8", "Fable 5.1", "Fable 5", "Sonnet 5.5", "Sonnet 5", "Opus 4.7"}
+_ALWAYS_THINKING_MODELS = {"Opus 5.5", "Opus 5", "Fable 5.2", "Fable 5.1", "Fable 5"}
+_XHIGH_EFFORT_MODELS = {"Opus 5.5", "Opus 5", "Opus 4.8", "Fable 5.2", "Fable 5.1", "Fable 5", "Sonnet 5.5", "Sonnet 5", "Opus 4.7"}
 _MAX_EFFORT_MODELS = _XHIGH_EFFORT_MODELS | {"Opus 4.6", "Sonnet 4.6"}
 _EXPLICIT_THINKING_OFF_MODELS = {"Sonnet 5.5": "between_tools", "Sonnet 5": "disabled"}
-_NO_TEMPERATURE_MODELS = {"Opus 5.5", "Opus 5", "Opus 4.8", "Fable 5.1", "Fable 5", "Sonnet 5.5", "Sonnet 5"}
-_LOW_MAX_TOKENS_MODELS = {"Opus 5.5", "Sonnet 5.5"}
+_NO_TEMPERATURE_MODELS = {"Opus 5.5", "Opus 5", "Opus 4.8", "Fable 5.2", "Fable 5.1", "Fable 5", "Sonnet 5.5", "Sonnet 5"}
+_MAX_TOKENS_MIN = {"Opus 5.5": 1024, "Sonnet 5.5": 1024, "Fable 5.2": 8192}
 
 # Budget mode (Sonnet 4.5): effort -> reasoning budget in tokens. Must be < max_tokens.
 # Sized so even the "high" budget fits comfortably under the default max_tokens=32768.
@@ -79,7 +80,7 @@ def _claude_model_inputs(model_label: str):
         IO.Int.Input(
             "max_tokens",
             default=32768,
-            min=1024 if model_label in _LOW_MAX_TOKENS_MODELS else 4096,
+            min=_MAX_TOKENS_MIN.get(model_label, 4096),
             max=64000,
             tooltip="Maximum number of tokens to generate (includes reasoning tokens when enabled).",
             advanced=True,
@@ -213,7 +214,12 @@ class ClaudeNode(IO.ComfyNode):
                 expr="""
                 (
                   $m := widgets.model;
-                  $contains($m, "fable") ? {
+                  $contains($m, "fable 5.2") ? {
+                    "type": "list_usd",
+                    "usd": [0.01144, 0.0572],
+                    "format": { "approximate": true, "separator": "-", "suffix": " per 1K tokens" }
+                  }
+                  : $contains($m, "fable") ? {
                     "type": "list_usd",
                     "usd": [0.0143, 0.0715],
                     "format": { "approximate": true, "separator": "-", "suffix": " per 1K tokens" }

@@ -1,6 +1,7 @@
 import os
 
-from transformers import CLIPTokenizer
+from tokenizers import Tokenizer
+from transformers import CLIPTokenizer, PreTrainedTokenizerFast
 import comfy.ops
 import torch
 import traceback
@@ -487,7 +488,11 @@ class SDTokenizer:
     def __init__(self, tokenizer_path=None, max_length=77, pad_with_end=True, embedding_directory=None, embedding_size=768, embedding_key='clip_l', tokenizer_class=CLIPTokenizer, has_start_token=True, has_end_token=True, pad_to_max_length=True, min_length=None, pad_token=None, end_token=None, start_token=None, min_padding=None, pad_left=False, disable_weights=False, tokenizer_data={}, tokenizer_args={}):
         if tokenizer_path is None:
             tokenizer_path = os.path.join(os.path.dirname(os.path.realpath(__file__)), "sd1_tokenizer")
-        self.tokenizer = tokenizer_class.from_pretrained(tokenizer_path, **tokenizer_args)
+        tokenizer_json = tokenizer_data.get("{}_tokenizer_json".format(embedding_key))
+        if tokenizer_json is not None:
+            self.tokenizer = PreTrainedTokenizerFast(tokenizer_object=Tokenizer.from_str(tokenizer_json))
+        else:
+            self.tokenizer = tokenizer_class.from_pretrained(tokenizer_path, **tokenizer_args)
         self.max_length = tokenizer_data.get("{}_max_length".format(embedding_key), max_length)
         self.min_length = tokenizer_data.get("{}_min_length".format(embedding_key), min_length)
         self.end_token = None

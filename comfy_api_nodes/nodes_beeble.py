@@ -8,7 +8,6 @@ from comfy_api_nodes.apis.beeble import (
     SwitchXStatusResponse,
 )
 from comfy_api_nodes.util import (
-    ApiEndpoint,
     bytesio_to_image_tensor,
     convert_mask_to_image,
     download_url_as_bytesio,
@@ -16,8 +15,7 @@ from comfy_api_nodes.util import (
     download_url_to_video_output,
     downscale_image_tensor,
     downscale_video_to_max_pixels,
-    poll_op,
-    sync_op,
+    router_op,
     upload_image_to_comfyapi,
     upload_video_to_comfyapi,
     validate_string,
@@ -161,25 +159,6 @@ def _common_inputs(*, source: IO.Input, video: bool) -> list[IO.Input]:
     ]
 
 
-async def _submit_and_poll(
-    cls: type[IO.ComfyNode],
-    request: CreateSwitchXRequest,
-) -> SwitchXStatusResponse:
-    initial = await sync_op(
-        cls,
-        ApiEndpoint(path="/proxy/beeble/v1/switchx/generations", method="POST"),
-        response_model=SwitchXStatusResponse,
-        data=request,
-    )
-    return await poll_op(
-        cls,
-        ApiEndpoint(path=f"/proxy/beeble/v1/switchx/generations/{initial.id}"),
-        response_model=SwitchXStatusResponse,
-        status_extractor=lambda r: r.status,
-        progress_extractor=lambda r: r.progress,
-    )
-
-
 def _require_output_url(response: SwitchXStatusResponse, name: str) -> str:
     if response.output is None or getattr(response.output, name) is None:
         raise RuntimeError(f"Beeble job {response.id} completed without a {name!r} output URL.")
@@ -286,7 +265,7 @@ class BeebleSwitchXVideoEdit(IO.ComfyNode):
             alpha_uri=alpha_uri,
             max_resolution=1080 if max_resolution == "1080p" else 720,
         )
-        response = await _submit_and_poll(cls, request)
+        response = await router_op(cls, "beeble/switchx", response_model=SwitchXStatusResponse, data=request)
 
         render = await download_url_to_video_output(_require_output_url(response, "render"))
         alpha = None
@@ -381,7 +360,7 @@ class BeebleSwitchXImageEdit(IO.ComfyNode):
             alpha_uri=alpha_uri,
             max_resolution=1080 if max_resolution == "1080p" else 720,
         )
-        response = await _submit_and_poll(cls, request)
+        response = await router_op(cls, "beeble/switchx", response_model=SwitchXStatusResponse, data=request)
 
         render = await download_url_to_image_tensor(_require_output_url(response, "render"))
         alpha_mask = None

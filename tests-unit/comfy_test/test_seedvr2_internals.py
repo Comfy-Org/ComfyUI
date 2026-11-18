@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import inspect
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -355,6 +356,67 @@ def test_causal_memory_cache_offloads_small_tails_and_parked_frames_exactly():
     cache.free()
 
 
+def _plan(free_gib, tail_gib=1, compiler=True, room_on_host=True, dtype=torch.float16, vram_state="NORMAL_VRAM", latents=80):
+    mm = vae_mod.comfy.model_management
+    gib = 1024 ** 3
+    with patch.object(vae_mod.comfy.model_prefetch, "malloc_graph_enabled", lambda dev: compiler), \
+            patch.object(mm, "vram_state", mm.VRAMState[vram_state]), \
+            patch.object(mm, "is_device_cuda", lambda dev: True), \
+            patch.object(mm, "extra_reserved_memory", lambda: 0), \
+            patch.object(vae_mod, "SEEDVR2_SLICE_MEM_HEADROOM", 1.0), \
+            patch.object(vae_mod, "_offload_caches_for", lambda frame_pixels: room_on_host):
+        return vae_mod._plan_pass(torch.device("cpu"), free_gib * gib, 1, latents, 1 * gib, 1 * gib, tail_gib * gib, dtype)
+
+
+@pytest.mark.parametrize("plan, slices, compiled, offload", [
+    (dict(free_gib=0.5), 0, False, True),                                     # below the floor: as it always ran
+    (dict(free_gib=2.5), 0, True, False),                                     # the tails first, nothing left for a slice
+    (dict(free_gib=5.0), 3, True, False),
+    (dict(free_gib=30.0), vae_mod.SEEDVR2_MAX_SLICE_LATENTS, True, False),
+    (dict(free_gib=30.0, latents=2), 2, False, False),                        # fits in one run: no cache
+    (dict(free_gib=30.0, dtype=torch.bfloat16), vae_mod.SEEDVR2_MAX_SLICE_LATENTS, False, True),   # only fp16 tails stay on the device
+    (dict(free_gib=5.0, compiler=False), vae_mod.SEEDVR2_MAX_SLICE_LATENTS, False, True),          # tails in host memory
+    (dict(free_gib=3.0, tail_gib=3, room_on_host=False), 0, False, False),   # tails have no home: the floor
+    (dict(free_gib=30.0, vram_state="LOW_VRAM"), 0, False, True),
+])
+def test_seedvr2_plan(plan, slices, compiled, offload):
+    planned, cache = _plan(**plan)
+    assert (planned, cache.compiled, cache.offload) == (slices, compiled, offload)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="the buffered convs run fp16 on CUDA")
+def test_seedvr2_slice_length_does_not_change_the_result():
+    """The caches carry a causal stage across slices and GroupNorm is per frame, so how many frames run
+    at once leaves only fp16 rounding: three summed taps round differently from one conv."""
+    class Unpacked(vae_mod.CausalMemoryCache):
+        def _packable(self, value):
+            return False
+
+    torch.manual_seed(0)
+    vae = vae_mod.VideoAutoencoderKLWrapper()
+    for name, p in vae.named_parameters():   # small enough that nothing overflows fp16 through the whole network
+        if p.dim() >= 2:
+            torch.nn.init.normal_(p, std=0.01)
+        else:
+            p.data.fill_(1.0 if "norm" in name else 0.0)
+    vae = vae.to("cuda", torch.float16)
+    vae.device = torch.device("cuda")
+    vae.current_patcher = SimpleNamespace(get_free_memory=lambda device: 0)
+    z = torch.randn(1, 16, 7, 16, 24, device="cuda", dtype=torch.float16)
+    x = torch.randn(1, 3, 13, 64, 96, device="cuda", dtype=torch.float16)
+
+    def run(fn, data, slices, **cache):
+        with patch.object(vae_mod, "_plan_pass", lambda *a: (slices, Unpacked(**cache))):
+            return fn(data).float()
+
+    for fn, data in ((vae.slicing_decode, z), (vae.slicing_encode, x)):
+        reference = run(fn, data, 0)
+        assert torch.isfinite(reference).all()
+        for slices in (1, 2, 4):
+            torch.testing.assert_close(run(fn, data, slices), reference, rtol=0, atol=1e-2)
+            torch.testing.assert_close(run(fn, data, slices, compiled=True), reference, rtol=0, atol=1e-2)
+
+
 def _ring(cache, key):
     frames = []
     cache.for_each_frame(key, lambda i, frame: frames.append(frame.clone()))
@@ -659,9 +721,12 @@ def test_seedvr2_batch_runs_a_video_at_a_time():
     slices land back in their video's place (in the preallocated output too)."""
     vae = vae_mod.VideoAutoencoderKLWrapper.__new__(vae_mod.VideoAutoencoderKLWrapper)
     vae.slicing_sample_min_size = vae.slicing_latent_min_size = 2
+    vae.device = torch.device("cpu")   # encode() and decode() set it before slicing
+    vae.encoder = vae.decoder = None
+    vae.current_patcher = SimpleNamespace(get_free_memory=lambda device: 0)
     seen = []
 
-    def run(x, memory_state=vae_mod.MemoryState.DISABLED, memory_cache=None):
+    def run(x, memory_state=vae_mod.MemoryState.DISABLED, memory_cache=None, **_):
         seen.append(x.size(0))
         return x[:, :3].clone()
     vae._decode = vae._encode = run
