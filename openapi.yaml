@@ -2948,6 +2948,11 @@ paths:
                                     max_upload_size:
                                         description: Maximum upload size in bytes
                                         type: integer
+                                    server_boot_id:
+                                        description: 'Local ComfyUI only: a random id that is new on every server start. A client that reconnects and gets a different value knows the server restarted, so node definitions it loaded earlier may be stale. Not settable with --feature-flag.'
+                                        type: string
+                                        x-runtime:
+                                            - local
                                     supports_preview_metadata:
                                         description: Whether the server supports preview metadata
                                         type: boolean
