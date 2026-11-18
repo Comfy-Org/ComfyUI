@@ -79,7 +79,6 @@ def _running_server(tmp_path: Path, extra_args: list) -> Iterator[str]:
         str(port),
         "--cpu",
         "--disable-assets",
-        "--cache-classic",
         "--output-directory",
         str(tmp_path / "output"),
         "--temp-directory",
@@ -130,9 +129,10 @@ def _saved_files(history: dict) -> list:
 
 
 @pytest.mark.execution
-def test_output_node_rewrites_its_file_on_a_cache_hit(tmp_path: Path) -> None:
+@pytest.mark.parametrize("cache_args", [[], ["--cache-classic"]], ids=["ram-pressure-default", "classic"])
+def test_output_node_rewrites_its_file_on_a_cache_hit(tmp_path: Path, cache_args: list) -> None:
     # Given a server started with the flag, and a prompt that has already run once
-    with _running_server(tmp_path, ["--force-output-rerun"]) as base_url:
+    with _running_server(tmp_path, ["--force-output-rerun", *cache_args]) as base_url:
         first = _run(base_url, PROMPT)
         for name in _saved_files(first):  # what a multi-tenant server does after upload
             (tmp_path / "output" / name).unlink()
@@ -157,7 +157,7 @@ def test_output_node_rewrites_its_file_on_a_cache_hit(tmp_path: Path) -> None:
 @pytest.mark.execution
 def test_without_the_flag_a_cache_hit_replays_the_first_filename(tmp_path: Path) -> None:
     # Control: the default behaviour this flag exists to change
-    with _running_server(tmp_path, []) as base_url:
+    with _running_server(tmp_path, ["--cache-classic"]) as base_url:
         first = _run(base_url, PROMPT)
         second = _run(base_url, PROMPT)
 
