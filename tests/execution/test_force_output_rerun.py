@@ -140,8 +140,9 @@ def test_output_node_rewrites_its_file_on_a_cache_hit(tmp_path: Path) -> None:
         # When the identical prompt runs again
         second = _run(base_url, PROMPT)
 
-    # Then the save node ran again and wrote a file that exists
-    assert _saved_files(second) != _saved_files(first)
+    # Then the save node ran again and wrote a file that exists. (The name can
+    # repeat: the first file was deleted, so the counter starts over.)
+    assert _saved_files(second)
     for name in _saved_files(second):
         assert (tmp_path / "output" / name).is_file()
     cached = _cached_nodes(second)
