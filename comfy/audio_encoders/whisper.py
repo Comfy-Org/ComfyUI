@@ -179,6 +179,8 @@ class WhisperLargeV3(nn.Module):
         )
 
     def forward(self, audio):
-        mel = self.feature_extractor(audio)
-        x, all_x = self.encoder(mel)
+        # the encoder sees 30 s windows, longer audio is encoded window by window
+        outs = [self.encoder(self.feature_extractor(chunk)) for chunk in audio.split(self.feature_extractor.n_samples, dim=-1)]
+        x = torch.cat([o[0] for o in outs], dim=1)
+        all_x = tuple(torch.cat(layers, dim=1) for layers in zip(*(o[1] for o in outs)))
         return x, all_x

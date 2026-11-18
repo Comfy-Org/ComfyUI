@@ -1512,7 +1512,7 @@ class VSRDecode(io.ComfyNode):
         return io.NodeOutput(decoded.reshape(-1, *decoded.shape[-3:]))
 
 
-from comfy.ldm.wan.model_multitalk import InfiniteTalkOuterSampleWrapper, MultiTalkCrossAttnPatch, MultiTalkGetAttnMapPatch, project_audio_features
+from comfy.ldm.wan.model_multitalk import InfiniteTalkOuterSampleWrapper, MultiTalkCrossAttnPatch, MultiTalkGetAttnMapPatch, get_audio_embeds, project_audio_features
 class WanInfiniteTalkToVideo(io.ComfyNode):
     class DCValues(TypedDict):
         mode: str
@@ -1677,6 +1677,139 @@ class WanInfiniteTalkToVideo(io.ComfyNode):
         return io.NodeOutput(model_patched, positive, negative, out_latent, trim_image)
 
 
+class LongCatAvatarToVideo(io.ComfyNode):
+    class DCValues(TypedDict):
+        mode: str
+        audio_encoder_output_2: io.AudioEncoderOutput.Type
+        audio_encoder_output_3: io.AudioEncoderOutput.Type
+        mask_1: io.Mask.Type
+        mask_2: io.Mask.Type
+        mask_3: io.Mask.Type
+
+    @classmethod
+    def define_schema(cls):
+        def speaker_inputs():
+            return [
+                io.AudioEncoderOutput.Input("audio_encoder_output_2", optional=True),
+                io.Mask.Input("mask_1", optional=True, tooltip="Region of the first speaker."),
+                io.Mask.Input("mask_2", optional=True, tooltip="Region of the second speaker."),
+            ]
+        return io.Schema(
+            node_id="LongCatAvatarToVideo",
+            category="model/conditioning/wan/longcat",
+            inputs=[
+                io.Conditioning.Input("positive"),
+                io.Conditioning.Input("negative"),
+                io.Vae.Input("vae"),
+                io.Int.Input("width", default=832, min=16, max=nodes.MAX_RESOLUTION, step=16),
+                io.Int.Input("height", default=480, min=16, max=nodes.MAX_RESOLUTION, step=16),
+                io.Int.Input("length", default=93, min=1, max=nodes.MAX_RESOLUTION, step=4),
+                io.AudioEncoderOutput.Input("audio_encoder_output_1", tooltip="Whisper large-v3 encoding of the speech, the video runs at 25 fps."),
+                io.DynamicCombo.Input("mode", options=[
+                    io.DynamicCombo.Option("single_speaker", []),
+                    io.DynamicCombo.Option("two_speakers", speaker_inputs()),
+                    io.DynamicCombo.Option("three_speakers", speaker_inputs() + [
+                        io.AudioEncoderOutput.Input("audio_encoder_output_3", optional=True,
+                                                    tooltip="Third person. Upstream uses this slot, shared with the background, for silent bystanders."),
+                        io.Mask.Input("mask_3", optional=True, tooltip="Region of the third person."),
+                    ]),
+                ]),
+                io.Image.Input("start_image", optional=True, tooltip="First frame. When continuing from previous_frames it is the identity reference instead."),
+                io.Image.Input("previous_frames", optional=True, tooltip="Frames to continue from, the last overlap_frames of them are re-encoded as the start of this segment."),
+                io.Int.Input("video_frame_offset", default=0, min=0, max=nodes.MAX_RESOLUTION * 100, step=1,
+                             tooltip="Frame of the full video where this segment starts, it picks the audio window. In a loop: iteration_index * (length - overlap_frames)."),
+                io.Int.Input("overlap_frames", default=13, min=1, max=nodes.MAX_RESOLUTION, step=4, advanced=True),
+                io.Int.Input("ref_frame_index", default=10, min=-1000, max=1000, advanced=True,
+                             tooltip="Temporal slot of the reference frame when continuing. 0 to 24 keeps the identity consistent, values outside (e.g. -10 or 30) reduce repeated motion."),
+                io.Int.Input("ref_mask_frame_range", default=0, min=0, max=100, advanced=True,
+                             tooltip="Latent frames around ref_frame_index that do not attend to the reference frame, against repeated motion. Large values can cause artifacts."),
+                io.Float.Input("audio_strength", default=1.0, min=0.0, max=10.0, step=0.01,
+                               tooltip="Scales the audio's effect on lip and face motion relative to the model's no-audio state, like audio guidance without the extra pass. 1.0 is the trained behavior, 0.0 the no-audio state."),
+            ],
+            outputs=[
+                io.Conditioning.Output(display_name="positive"),
+                io.Conditioning.Output(display_name="negative"),
+                io.Latent.Output(display_name="latent"),
+                io.Int.Output(display_name="trim_image", tooltip="Frames to drop from the start of the decoded segment before appending it to previous_frames."),
+            ],
+        )
+
+    @classmethod
+    def execute(cls, positive, negative, vae, width, height, length, audio_encoder_output_1, mode: DCValues, video_frame_offset, overlap_frames, ref_frame_index, ref_mask_frame_range,
+                start_image=None, previous_frames=None, audio_strength=1.0) -> io.NodeOutput:
+        def encode(images):
+            return vae.encode(comfy.utils.common_upscale(images.movedim(-1, 1), width, height, "bilinear", "center").movedim(1, -1)[:, :, :, :3])
+
+        out_latent = {"samples": torch.zeros([1, 16, ((length - 1) // 4) + 1, height // 8, width // 8], device=comfy.model_management.intermediate_device())}
+        # on both passes so they still batch, the zeroed-audio negative is unaffected by it
+        values = {"audio_strength": audio_strength}
+        trim_image = 0
+        cond = None
+        if previous_frames is not None:
+            # the decoded overlap is re-encoded rather than reusing its latents, like upstream 1.5 and 1.6
+            trim_image = min(overlap_frames, previous_frames.shape[0])
+            cond = encode(previous_frames[-trim_image:])
+            if start_image is not None:
+                values.update({"reference_latents": [encode(start_image[:1])], "ref_frame_index": ref_frame_index, "ref_mask_frame_range": ref_mask_frame_range})
+        elif start_image is not None:
+            cond = encode(start_image[:1])
+        if cond is not None:
+            # the model keeps these frames clean itself, so split samplers (DMD then OPSD steps) work without a noise mask
+            values["cond_latents"] = cond
+
+        encoded = []
+        for output in (audio_encoder_output_1, mode.get("audio_encoder_output_2"), mode.get("audio_encoder_output_3")):
+            if output is None:
+                continue
+            # four 8-layer means and the last layer, resampled from 50 Hz to the video's 25 fps; the zero padding of Whisper's last 30 s window
+            # is kept, it encodes the silence upstream appends to the audio for frames past its end
+            layers = torch.stack(output["encoded_audio_all_layers"], dim=2)
+            feats = [layers[:, :, i:i + 8].mean(dim=2) for i in range(0, 32, 8)] + [layers[:, :, 32]]
+            encoded.append(torch.stack([linear_interpolation(f, 50, 25) for f in feats], dim=2)[0])
+        # beyond the encoded windows, and for a shorter speaker's track, the last (silent) frame repeats
+        frames = max([video_frame_offset + length] + [e.shape[0] for e in encoded])
+        encoded = [torch.cat([e, e[-1:].expand(frames - e.shape[0], -1, -1)]) for e in encoded]
+        audio_embed = get_audio_embeds(encoded, video_frame_offset, video_frame_offset + length).unsqueeze(0)
+
+        # upstream's order: speaker 1, speaker 2, the background around them, then any further person; without two masks the audio is not routed
+        people = [mode[f"mask_{i}"] for i in range(1, 4) if mode.get(f"mask_{i}") is not None]
+        if len(people) >= 2:
+            masks = torch.cat([comfy.utils.common_upscale(m[:1].unsqueeze(1), width, height, "nearest-exact", "center") for m in people]).squeeze(1) > 0
+            masks = torch.cat([masks[:2], ~masks[:2].any(dim=0, keepdim=True), masks[2:]]).float()
+            values["speaker_masks"] = (torch.nn.functional.interpolate(masks.unsqueeze(0), size=(height // 16, width // 16), mode="nearest")[0] > 0).flatten(1).float()
+
+        # the unconditional pass gets zeroed audio, as upstream does for its audio guidance
+        positive = node_helpers.conditioning_set_values(positive, {**values, "audio_embed": audio_embed})
+        negative = node_helpers.conditioning_set_values(negative, {**values, "audio_embed": torch.zeros_like(audio_embed)})
+        return io.NodeOutput(positive, negative, out_latent, trim_image)
+
+
+class LongCatCache(io.ComfyNode):
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="LongCatCache",
+            display_name="LongCat Cache",
+            category="model/conditioning/wan/longcat",
+            description="Sets where the clean condition frames' per-block inputs are cached during sampling, and their precision. Without this node the model uses the auto option.",
+            inputs=[
+                io.Model.Input("model"),
+                io.Combo.Input("device", options=["auto", "gpu", "cpu", "off"], default="auto",
+                               tooltip="auto uses spare VRAM, then RAM. cpu (RAM) is prefetched behind compute. off recomputes the condition frames every step."),
+                io.Combo.Input("dtype", options=["default", "int8", "int4"], default="default",
+                               tooltip="Storage precision. default is lossless, int8 halves the cache and int4 quarters it, convrot is used to retain accuracy."),
+            ],
+            outputs=[io.Model.Output()],
+            is_experimental=True,
+        )
+
+    @classmethod
+    def execute(cls, model, device, dtype) -> io.NodeOutput:
+        m = model.clone()
+        m.model_options["transformer_options"]["longcat_cache"] = {"device": device, "dtype": dtype}
+        return io.NodeOutput(m)
+
+
 class WanExtension(ComfyExtension):
     @override
     async def get_node_list(self) -> list[type[io.ComfyNode]]:
@@ -1699,6 +1832,8 @@ class WanExtension(ComfyExtension):
             WanAnimate2Cache,
             Wan22ImageToVideoLatent,
             WanInfiniteTalkToVideo,
+            LongCatAvatarToVideo,
+            LongCatCache,
             RelayVSRConditioning,
             VSRDecode,
         ]

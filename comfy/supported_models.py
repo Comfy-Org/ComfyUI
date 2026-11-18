@@ -1394,6 +1394,20 @@ class WAN21_T2V(supported_models_base.BASE):
         t5_detect = comfy.text_encoders.sd3_clip.t5_xxl_detect(state_dict, "{}umt5xxl.transformer.".format(pref))
         return supported_models_base.ClipTarget(comfy.text_encoders.wan.WanT5Tokenizer, comfy.text_encoders.wan.te(**t5_detect))
 
+class LongCatVideo(WAN21_T2V):
+    unet_config = {
+        "image_model": "longcat_video",
+    }
+
+    sampling_settings = {
+        "shift": 7.0,
+    }
+
+    supported_inference_dtypes = [torch.bfloat16, torch.float32]
+
+    def get_model(self, state_dict, prefix="", device=None):
+        return model_base.LongCatVideo(self, device=device)
+
 class WAN21_CausalAR_T2V(WAN21_T2V):
     unet_config = {
         "image_model": "wan2.1",
@@ -2767,6 +2781,7 @@ models = [
     WAN22_T2V,
     WAN21_CausalAR_T2V,
     WAN21_T2V,
+    LongCatVideo,
     WAN21_I2V,
     WAN21_FunControl2V,
     WAN21_Vace,
