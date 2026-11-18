@@ -464,7 +464,8 @@ async def execute(server: "ExecutionServer", dynprompt, caches, current_item, ex
     class_type = dynprompt.get_node(unique_id)['class_type']
     class_def = nodes.NODE_CLASS_MAPPINGS[class_type]
     cached = await caches.outputs.get(unique_id)
-    if cached is not None and not _should_force_output_rerun(class_def):
+    # A forced output node runs once per prompt; after that its fresh result is reused.
+    if cached is not None and (unique_id in executed or not _should_force_output_rerun(class_def)):
         emit_cached_output(server, unique_id, _node_meta(dynprompt, unique_id), cached, prompt_id, ui_outputs, asset_manager)
         get_progress_state().finish_progress(unique_id)
         execution_list.cache_update(unique_id, cached)
@@ -780,7 +781,11 @@ class PromptExecutor:
                 cache_results = await asyncio.gather(
                     *(self.caches.outputs.get(node_id) for node_id in node_ids)
                 )
+                executed = set()
+
                 def force_rerun(node_id):
+                    if node_id in executed:
+                        return False
                     class_type = dynamic_prompt.get_node(node_id)["class_type"]
                     return _should_force_output_rerun(nodes.NODE_CLASS_MAPPINGS[class_type])
 
@@ -805,7 +810,6 @@ class PromptExecutor:
                 pending_subgraph_results = {}
                 pending_async_nodes = {} # TODO - Unify this with pending_subgraph_results
                 ui_node_outputs = {}
-                executed = set()
 
                 while not execution_list.is_empty():
                     node_id, error, ex = await execution_list.stage_node_execution()
