@@ -99,9 +99,12 @@ def check_frontend(served: str | None, pinned: str | None, front_end_root: str |
             return
     except InvalidVersion:
         return
+    selector = pinned.rpartition("@")[2] if pinned else ""
     if not pinned:
         cause = "update comfyui-frontend-package"
-    elif pinned.rpartition("@")[2].lstrip("v") == served:
+    elif selector in ("latest", "prerelease"):  # resolved by GitHub; whether it loaded isn't known here
+        cause = f"{pinned} gave {served}, so pin {MIN_FRONTEND_VERSION} or newer instead"
+    elif selector.lstrip("v") == served:
         cause = f"pin a newer version than {pinned}"
     else:
         cause = f"check the log above for why {pinned} did not load"

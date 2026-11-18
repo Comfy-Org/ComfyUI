@@ -504,3 +504,24 @@ def test_served_version_does_not_exit_when_the_frontend_package_fails_to_import(
 
     with patch("builtins.__import__", side_effect=broken_import):
         assert FrontendManager.served_version("/some/other/frontend") is None
+
+
+def test_served_version_survives_a_frontend_package_that_raises_on_import():
+    # Not an ImportError: a broken install can raise anything on import.
+    with patch.object(FrontendManager, "_package_frontend_path", side_effect=SyntaxError("broken install")):
+        assert FrontendManager.served_version("/some/other/frontend") is None
+
+
+def test_served_version_is_unknown_when_the_package_metadata_is_missing():
+    from importlib.metadata import PackageNotFoundError
+    with patch.object(FrontendManager, "_package_frontend_path", return_value="/site/static"):
+        with patch("app.frontend_management.version", side_effect=PackageNotFoundError("comfyui-frontend-package")):
+            assert FrontendManager.served_version("/site/static") is None
+
+
+def test_served_version_logs_an_unexpected_metadata_error(caplog):
+    with patch.object(FrontendManager, "_package_frontend_path", return_value="/site/static"):
+        with patch("app.frontend_management.version", side_effect=ValueError("bad metadata")):
+            with caplog.at_level("WARNING"):
+                assert FrontendManager.served_version("/site/static") is None
+    assert "bad metadata" in caplog.text
