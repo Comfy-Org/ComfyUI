@@ -22,7 +22,9 @@ SQLAlchemy>=2.0.0
 filelock
 av>=17.0.0
 comfy-aimdo==0.6.0
-comfy-kitchen==0.2.40
+# Pinned to comfy-kitchen#303's head (3- and 5-bit weight widths) for our evals and demos, until it merges and is released.
+# Boxes with no GitHub access or no CUDA toolkit install the CUDA wheel #303's CI built from this same commit instead.
+comfy-kitchen @ git+https://github.com/kijai/comfy-kitchen.git@34bc5830941b7d356343f2bceeb72712d4efade6
 requests
 simpleeval>=1.0.0
 blake3

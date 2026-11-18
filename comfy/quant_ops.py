@@ -264,6 +264,11 @@ QUANT_ALGOS["w6a8_int8"] = {
     "quantize_input": False,
 }
 
+# 3-bit (8-entry codebook, [N, 3K/8]) and 5-bit (uniform, [N, 5K/8]) widths of the same layout;
+# need comfy_kitchen with 3/5-bit support (comfy-kitchen#303).
+for _fmt in ("w3a8_int8", "w5a8_int8"):
+    QUANT_ALGOS[_fmt] = dict(QUANT_ALGOS["w6a8_int8"])
+
 
 # ==============================================================================
 # Re-exports for backward compatibility
