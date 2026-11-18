@@ -5,6 +5,8 @@ import asyncio
 import inspect
 from comfy_execution.graph_utils import is_link, ExecutionBlocker
 from comfy.comfy_types.node_typing import ComfyNodeABC, InputTypeDict, InputTypeOptions
+from comfy_api.internal import _ComfyNodeInternal
+from comfy_api.latest import _io
 
 # NOTE: ExecutionBlocker code got moved to graph_utils.py to prevent torch being imported too soon during unit tests
 ExecutionBlocker = ExecutionBlocker
@@ -123,9 +125,12 @@ class TopologicalSort:
         self.unblockedEvent = asyncio.Event()
 
     def get_input_info(self, unique_id, input_name):
-        class_type = self.dynprompt.get_node(unique_id)["class_type"]
-        class_def = nodes.NODE_CLASS_MAPPINGS[class_type]
-        return get_input_info(class_def, input_name)
+        node = self.dynprompt.get_node(unique_id)
+        class_def = nodes.NODE_CLASS_MAPPINGS[node["class_type"]]
+        valid_inputs = class_def.INPUT_TYPES()
+        if issubclass(class_def, _ComfyNodeInternal):
+            valid_inputs, _, _ = _io.get_finalized_class_inputs(valid_inputs, node["inputs"])
+        return get_input_info(class_def, input_name, valid_inputs)
 
     def make_input_strong_link(self, to_node_id, to_input):
         inputs = self.dynprompt.get_node(to_node_id)["inputs"]
@@ -214,15 +219,19 @@ class ExecutionList(TopologicalSort):
     ExecutionList implements a topological dissolve of the graph. After a node is staged for execution,
     it can still be returned to the graph after having further dependencies added.
     """
-    def __init__(self, dynprompt, output_cache, output_link_callback=None):
+    def __init__(self, dynprompt, output_cache, output_link_callback=None, force_rerun=None):
         super().__init__(dynprompt)
         self.output_cache = output_cache
         self.output_link_callback = output_link_callback
+        # Optional predicate: node ids that must run again even with a cached result.
+        self.force_rerun = force_rerun
         self.staged_node_id = None
         self.execution_cache = {}
         self.execution_cache_listeners = {}
 
     def is_cached(self, node_id):
+        if self.force_rerun is not None and self.force_rerun(node_id):
+            return False
         return self.output_cache.get_local(node_id) is not None
 
     def cache_link(self, from_node_id, to_node_id, from_socket=None):

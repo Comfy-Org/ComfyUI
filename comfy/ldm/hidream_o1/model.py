@@ -15,6 +15,7 @@ import torch
 import torch.nn as nn
 
 import comfy.patcher_extension
+from comfy.ldm.modules.attention import ComfyAttention
 from comfy.ldm.modules.diffusionmodules.mmdit import TimestepEmbedder
 from comfy.text_encoders.llama import Llama2_
 from comfy.text_encoders.qwen35 import Qwen35VisionModel
@@ -113,6 +114,8 @@ class HiDreamO1Transformer(nn.Module):
 
         self.visual = Qwen35VisionModel(vision_cfg, device=device, dtype=dtype, ops=operations)
         self.language_model = Llama2_(text_cfg, device=device, dtype=dtype, ops=operations)
+        for layer in self.language_model.layers:
+            layer.self_attn.comfy_attention = ComfyAttention()
         self.t_embedder1 = TimestepEmbedder(
             text_cfg.hidden_size, device=device, dtype=dtype, operations=operations,
         )
@@ -197,7 +200,6 @@ class HiDreamO1Transformer(nn.Module):
         freqs_cis = self.language_model.compute_freqs_cis(position_ids[0].to(x.device), x.device)
         freqs_cis = tuple(t.to(x.dtype) for t in freqs_cis)
 
-        two_pass_attn = make_two_pass_attention(ar_len, transformer_options=transformer_options)
         patches_replace = transformer_options.get("patches_replace", {})
         blocks_replace = patches_replace.get("dit", {})
         transformer_options["total_blocks"] = len(self.language_model.layers)
@@ -231,6 +233,7 @@ class HiDreamO1Transformer(nn.Module):
             hidden_states = inputs_embeds[:, cache_len:]
             sliced_freqs = tuple(t[..., cache_len:, :] for t in freqs_cis)
             for i, layer in enumerate(self.language_model.layers):
+                two_pass_attn = make_two_pass_attention(ar_len, transformer_options=transformer_options, preferred_attention=layer.self_attn.comfy_attention)
                 transformer_options["block_index"] = i
                 K_i, V_i = kv_cache["kv"][i]
                 hidden_states, _ = layer(
@@ -243,6 +246,7 @@ class HiDreamO1Transformer(nn.Module):
             past_kv_cold = () if can_cache else None
             hidden_states = inputs_embeds
             for i, layer in enumerate(self.language_model.layers):
+                two_pass_attn = make_two_pass_attention(ar_len, transformer_options=transformer_options, preferred_attention=layer.self_attn.comfy_attention)
                 transformer_options["block_index"] = i
                 if ("double_block", i) in blocks_replace:
                     def block_wrap(args, _layer=layer):

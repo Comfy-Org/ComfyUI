@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 
 from comfy.ldm.flux.math import apply_rope, rope
-from comfy.ldm.modules.attention import optimized_attention
+from comfy.ldm.modules.attention import AttentionTensorContainer, ComfyAttention, optimized_attention
 from comfy.ldm.modules.diffusionmodules.mmdit import Mlp, get_1d_sincos_pos_embed_from_grid_torch
 
 
@@ -58,6 +58,7 @@ class RotaryAttention(nn.Module):
     """Single-stream self-attention with rotary positional encoding (used inside PiTBlock)."""
     def __init__(self, dim, num_heads=8, qkv_bias=False, dtype=None, device=None, operations=None):
         super().__init__()
+        self.comfy_attention = ComfyAttention()
         assert dim % num_heads == 0
         self.num_heads = num_heads
         self.head_dim = dim // num_heads
@@ -73,7 +74,9 @@ class RotaryAttention(nn.Module):
         qkv = self.qkv(x).reshape(B, N, 3, H, D).permute(2, 0, 3, 1, 4)
         q, k, v = qkv.unbind(0)
         q, k = apply_rope(self.q_norm(q), self.k_norm(k), pos[None, None])
-        x = optimized_attention(q, k, v, H, mask=mask, skip_reshape=True, transformer_options=transformer_options)
+        del qkv
+        q, k, v = AttentionTensorContainer(q), AttentionTensorContainer(k), AttentionTensorContainer(v)
+        x = optimized_attention(q, k, v, H, mask=mask, skip_reshape=True, preferred_attention=self.comfy_attention, transformer_options=transformer_options)
         return self.proj(x)
 
 

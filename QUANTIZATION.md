@@ -1,189 +1,150 @@
-# The Comfy guide to Quantization
+# Comfy quantization format
 
+Comfy quantized checkpoints are standard safetensors files containing quantized
+weights, scale tensors, and per-module configuration. A checkpoint can mix
+quantization formats and ordinary floating-point layers. ComfyUI selects native
+kernels where supported and dequantizes weights for compute-dtype execution when
+a format's fast path is disabled.
 
-## How does quantization work?
+## Checkpoint layout
 
-Quantization aims to map a high-precision value x_f to a lower precision format with minimal loss in accuracy. These smaller formats then serve to reduce the models memory footprint and increase throughput by using specialized hardware.
+Keep the model's normal state-dict names. Each quantized module adds a
+`<module>.comfy_quant` tensor containing UTF-8 JSON as a one-dimensional `uint8`
+array. For example, an FP8 linear layer contains:
 
-When simply converting a value from FP16 to FP8 using the round-nearest method we might hit two issues:
-- The dynamic range of FP16 (-65,504, 65,504) far exceeds FP8 formats like E4M3 (-448, 448) or E5M2 (-57,344, 57,344), potentially resulting in clipped values
-- The original values are concentrated in a small range (e.g. -1,1) leaving many FP8-bits "unused"
-
-By using a scaling factor, we aim to map these values into the quantized-dtype range, making use of the full spectrum. One of the easiest approaches, and common, is using per-tensor absolute-maximum scaling.
-
-```
-absmax = max(abs(tensor))
-scale = amax / max_dynamic_range_low_precision
-
-# Quantization
-tensor_q = (tensor / scale).to(low_precision_dtype)
-
-# De-Quantization
-tensor_dq = tensor_q.to(fp16) * scale
-
-tensor_dq ~ tensor
+```text
+blocks.0.proj.weight         # quantized weight
+blocks.0.proj.weight_scale   # weight scale
+blocks.0.proj.bias           # ordinary floating-point bias, if present
+blocks.0.proj.comfy_quant    # encoded {"format": "float8_e4m3fn"}
 ```
 
-Given that additional information (scaling factor) is needed to "interpret" the quantized values, we describe those as derived datatypes.
-
-
-## Quantization in Comfy
-
-```
-QuantizedTensor (torch.Tensor subclass)
-  ↓ __torch_dispatch__
-Two-Level Registry (generic + layout handlers)
-  ↓
-MixedPrecisionOps + Metadata Detection
-```
-
-### Representation
-
-To represent these derived datatypes, ComfyUI uses a subclass of torch.Tensor to implements these using the `QuantizedTensor` class found in `comfy/quant_ops.py`
-
-A `Layout` class defines how a specific quantization format behaves:
-- Required parameters
-- Quantize method
-- De-Quantize method
+To encode configuration in an existing state dict:
 
 ```python
-from comfy.quant_ops import QuantizedLayout
+import json
+import torch
 
-class MyLayout(QuantizedLayout):
-    @classmethod
-    def quantize(cls, tensor, **kwargs):
-        # Convert to quantized format
-        qdata = ...
-        params = {'scale': ..., 'orig_dtype': tensor.dtype}
-        return qdata, params
-    
-    @staticmethod
-    def dequantize(qdata, scale, orig_dtype, **kwargs):
-        return qdata.to(orig_dtype) * scale
+config = {"format": "float8_e4m3fn", "full_precision_matrix_mult": True}
+state_dict["blocks.0.proj.comfy_quant"] = torch.tensor(
+    list(json.dumps(config).encode("utf-8")), dtype=torch.uint8
+)
 ```
 
-To then run operations using these QuantizedTensors we use two registry systems to define supported operations. 
-The first is a **generic registry** that handles operations common to all quantized formats (e.g., `.to()`, `.clone()`, `.reshape()`).
+`format` is required. Modules without `comfy_quant` load normally. Logical weight
+dimensions come from the model's module definition; compute dtype is selected at
+runtime. No file-level layer map or `format_version` field is required. The older
+`_quantization_metadata` safetensors header and `scaled_fp8` checkpoints are
+converted during loading; new files should use per-module entries.
 
-The second registry is layout-specific and allows to implement fast-paths like nn.Linear.
-```python
-from comfy.quant_ops import register_layout_op
+## Weight formats
 
-@register_layout_op(torch.ops.aten.linear.default, MyLayout)
-def my_linear(func, args, kwargs):
-    # Extract tensors, call optimized kernel
-    ...
-```
-When `torch.nn.functional.linear()` is called with QuantizedTensor arguments, `__torch_dispatch__` automatically routes to the registered implementation.
-For any unsupported operation, QuantizedTensor will fallback to call `dequantize` and dispatch using the high-precision implementation.
+All tensor names below have the same `<module>.` prefix. `N` is the output width
+(or vocabulary size), `K` is the input width, and `G` is the quantization group
+size. Scales are FP32 unless another dtype is specified.
 
+| `format` | `weight` storage | Scale tensors |
+| --- | --- | --- |
+| `float8_e4m3fn` | FP8 E4M3FN, `[N, K]` | `weight_scale`: scalar |
+| `float8_e5m2` | FP8 E5M2, `[N, K]` | `weight_scale`: scalar |
+| `nvfp4` | FP4 E2M1 packed into `uint8`, `[N, K/2]` before padding | `weight_scale`: FP8 E4M3FN block scales, groups of 16; `weight_scale_2`: global scalar |
+| `mxfp8` | FP8 E4M3FN, `[N, K]` before padding | `weight_scale`: E8M0 power-of-two block scales, groups of 32 |
+| `int8_tensorwise` | `int8`, `[N, K]` | `weight_scale`: scalar or per-row `[N, 1]` |
+| `convrot_w4a4` | Signed INT4 packed into `int8`, `[N, K/2]` | `weight_scale`: per-row `[N]` |
+| `asym_w4a8_int8` | 4-bit codes packed into `int8`, `[N, K/2]` | `weight_s_rel`: FP8 E4M3FN or FP32 `[N, K/G]`; `weight_s_channel`: FP32 `[N]` |
+| `w6a8_int8` | Uniform 6-bit codes packed into `int8`, `[N, 3K/4]` | `weight_s_rel` and `weight_s_channel`, as above |
 
-### Mixed Precision
+NVFP4 and MXFP8 use Comfy Kitchen's blocked/swizzled scale layout, with weight
+dimensions padded to multiples of 16 and 32 respectively. Their block scales,
+and FP8 `weight_s_rel`, can also be stored as raw `uint8` bytes. Use the layout's
+quantizer and `QuantizedTensor.state_dict(prefix)` to produce the correct packing,
+padding, and scale keys; add `comfy_quant` separately.
 
-The `MixedPrecisionOps` class (lines 542-648 in `comfy/ops.py`) enables per-layer quantization decisions, allowing different layers in a model to use different precisions. This is activated when a model config contains a `layer_quant_config` dictionary that specifies which layers should be quantized and how.
+### Format options
 
-**Architecture:**
+Options belong in the module's `comfy_quant` JSON:
 
-```python
-class MixedPrecisionOps(disable_weight_init):
-    _layer_quant_config = {}  # Maps layer names to quantization configs
-    _compute_dtype = torch.bfloat16  # Default compute / dequantize precision
-```
+| Option | Applies to | Behavior |
+| --- | --- | --- |
+| `full_precision_matrix_mult` | Linear and MoE weights | Default `false`. `true` keeps quantized storage but dequantizes for matrix multiplication in the compute dtype; it does not force FP32. |
+| `convrot` | `int8_tensorwise` | Default `false`. Enables grouped Hadamard rotation; export rotated weights with per-row scales. |
+| `convrot_groupsize` | Rotated INT8 and all packed integer formats | Rotation group size, default `256`. Packed integer formats always use rotation. |
+| `linear_dtype` | `convrot_w4a4` | `"int4"` (default) or `"int8"` selects the multiplication path; stored weights remain INT4. The internal `quant_group_size` is fixed at `64`. |
+| `group_size` | `asym_w4a8_int8`, `w6a8_int8` | Weight scale group size, default `16`. |
+| `num_experts` | MoE banks | Expert count written when saving; the model definition supplies the dimensions when loading. |
 
-**Key mechanism:**
+Linear/MoE loaders also accept rotation, group-size, and `linear_dtype` options
+inside a nested `params` object; top-level values take precedence. Embedding
+rotation options must be top-level.
 
-The custom `Linear._load_from_state_dict()` method inspects each layer during model loading:
-- If the layer name is **not** in `_layer_quant_config`: load weight as regular tensor in `_compute_dtype`
-- If the layer name **is** in `_layer_quant_config`: 
-  - Load weight as `QuantizedTensor` with the specified layout (e.g., `TensorCoreFP8Layout`)
-  - Load associated quantization parameters (scales, block_size, etc.)
+`asym_w4a8_int8` optionally stores `weight_codebook`, a floating-point `[16]`
+lookup table; without it, codes use uniform levels. `w6a8_int8` has no codebook.
+Export these formats with symmetric weights: the ComfyUI loader does not consume
+Comfy Kitchen's optional `weight_correction` tensor.
 
-**Why it's needed:**
+Rotation groups must divide `K` and be powers of four. W4A4 also requires `K`
+divisible by 64. For grouped W4A8, `K` must be divisible by 16 and `G`; `G` must
+be at least 4 and either divide 16 or be a multiple of 16. W6A8 requires `K`
+divisible by 32 and `G` a multiple of 16. Accelerated backends may impose further
+shape restrictions.
 
-Not all layers tolerate quantization equally. Sensitive operations like final projections can be kept in higher precision, while compute-heavy matmuls are quantized. This provides most of the performance benefits while maintaining quality.
+## Activations and smoothing
 
-The system is selected in `pick_operations()` when `model_config.layer_quant_config` is present, making it the highest-priority operation mode.
+- **FP8:** optional `input_scale` supplies a calibrated scalar activation scale.
+  Without it, the scale is `1.0`.
+- **NVFP4:** optional `input_scale` supplies the global activation scale;
+  otherwise it is computed from the current input. Block scales are dynamic.
+- **MXFP8:** activation block scales are computed dynamically; a stored
+  `input_scale` is not used by the quantizer.
+- **Integer formats:** accept floating-point inputs and quantize activations
+  inside the selected kernel. They do not load `input_scale`.
+- **NVFP4 smoothing:** optional `pre_quant_scale` multiplies the input before
+  the linear operation. Export weights with the matching inverse adjustment.
 
+Calibration is needed to choose representative fixed activation scales, not to
+use formats with dynamic activation scaling. Biases remain floating point.
 
-## Checkpoint Format
+## Embeddings and MoE
 
-Quantized checkpoints are stored as standard safetensors files with quantized weight tensors and associated scaling parameters, plus a `_quantization_metadata` JSON entry describing the quantization scheme.
+Quantized embeddings support `float8_e4m3fn`, `float8_e5m2`, and
+`int8_tensorwise`, including INT8 per-row scales and optional rotation. Lookup
+dequantizes the selected rows; embedding scales default to `1.0` when omitted.
 
-The quantized checkpoint will contain the same layers as the original checkpoint but:
-- The weights are stored as quantized values, sometimes using a different storage datatype. E.g. uint8 container for fp8.
-- For each quantized weight a number of additional scaling parameters are stored alongside depending on the recipe.
-- We store a metadata.json in the metadata of the final safetensor containing the `_quantization_metadata` describing which layers are quantized and what layout has been used.
+Models using `MoEExperts` can store an expert bank under one module prefix.
+Weights and per-expert scales carry a leading expert dimension `E`; optional
+bias is `[E, N]`. Scalar scales can be shared. Grouped W4A8/W6A8 and INT8 banks
+with per-row scales can also be stored with expert/output rows flattened to
+`E * N`. MoE banks do not load `input_scale` or `pre_quant_scale`.
 
-### Scaling Parameters details
-We define 4 possible scaling parameters that should cover most recipes in the near-future:
-- **weight_scale**: quantization scalers for the weights
-- **weight_scale_2**: global scalers in the context of double scaling
-- **pre_quant_scale**: scalers used for smoothing salient weights
-- **input_scale**: quantization scalers for the activations
+Linear weights use ComfyUI's normal offloading and LoRA patching paths. Module
+state-dict saving writes quantized tensors, scales, and supported configuration.
 
-| Format | Storage dtype | weight_scale | weight_scale_2 | pre_quant_scale | input_scale |
-|--------|---------------|--------------|----------------|-----------------|-------------|
-| float8_e4m3fn | float32 | float32 (scalar) | - | - | float32 (scalar) |
+## Attention preferences
 
-You can find the defined formats in `comfy/quant_ops.py` (QUANT_ALGOS).
-
-### Quantization Metadata
-
-The metadata stored alongside the checkpoint contains:
-- **format_version**: String to define a version of the standard
-- **layers**: A dictionary mapping layer names to their quantization format. The format string maps to the definitions found in `QUANT_ALGOS`. 
-
-Example:
-```json
-{
-  "_quantization_metadata": {
-    "format_version": "1.0",
-    "layers": {
-      "model.layers.0.mlp.up_proj": {"format": "float8_e4m3fn"},
-      "model.layers.0.mlp.down_proj": {"format": "float8_e4m3fn"},
-      "model.layers.1.mlp.up_proj": {"format": "float8_e4m3fn"}
-    }
-  }
-}
-```
-
-
-## Creating Quantized Checkpoints
-
-To create compatible checkpoints, use any quantization tool provided the output follows the checkpoint format described above and uses a layout defined in `QUANT_ALGOS`.
-
-### Diffusion attention preferences
-
-A diffusion attention module can have a `<module path>.comfy_attention.config` entry whose
-uint8 tensor contains UTF-8 JSON:
+An attention module with a `ComfyAttention` child can store
+`<module>.comfy_attention.config` using the same `uint8` JSON encoding. This is
+independent of weight quantization. Supply one object or an ordered list:
 
 ```json
-{"attention": "comfy_kitchen_int8"}
+[
+  {"attention": "comfy_kitchen_sol", "tau": 1.0},
+  {"attention": "comfy_kitchen_int8"}
+]
 ```
 
-Use the module that performs attention, such as `transformer_blocks.0.attn` for
-Qwen Image 2.1 or `blocks.0.attn` for MiniMax H3.
+ComfyUI selects the first supported preference for the primary device during
+loading. Unknown methods are skipped with a warning; unavailable methods are
+skipped. An empty list or no available preference leaves normal attention
+selection in effect. Explicit attention overrides take priority. Saving
+preserves the full preference list, including unsupported entries.
 
-Only `comfy_kitchen_int8` is supported. Invalid targets and other method names
-are ignored with a warning during loading, leaving normal attention selection.
-Kitchen INT8 support is checked when each preference is loaded
-for the primary device; unsupported devices keep normal attention selection.
-Explicit attention overrides retain priority.
-The `ComfyAttention` child module loads and saves its own metadata through normal
-state-dict loading and saving. Preferences do not enable weight
-quantization. Text encoder and VAE loaders do not apply these preferences.
+Only the two methods above are accepted. SOL exposes `tau` (default `1.0`);
+higher values route fewer blocks through exact attention. Other SOL options use
+Comfy Kitchen defaults. SOL requires matching FP16/BF16 Q/K/V inputs with head
+dimension 128. Masked calls use PyTorch attention; `low_precision_attention=False`
+does not disable SOL.
 
-### Weight Quantization
-
-Weight quantization is straightforward - compute the scaling factor directly from the weight tensor using the absolute maximum method described earlier. Each layer's weights are quantized independently and stored with their corresponding `weight_scale` parameter.
-
-### Calibration (for Activation Quantization)
-
-Activation quantization (e.g., for FP8 Tensor Core operations) requires `input_scale` parameters that cannot be determined from static weights alone. Since activation values depend on actual inputs, we use **post-training calibration (PTQ)**:
-
-1. **Collect statistics**: Run inference on N representative samples
-2. **Track activations**: Record the absolute maximum (`amax`) of inputs to each quantized layer
-3. **Compute scales**: Derive `input_scale` from collected statistics
-4. **Store in checkpoint**: Save `input_scale` parameters alongside weights
-
-The calibration dataset should be representative of your target use case. For diffusion models, this typically means a diverse set of prompts and generation parameters.
+Implementation: [format registry](comfy/quant_ops.py),
+[loaders and serialization](comfy/ops.py),
+[legacy conversion](comfy/utils.py),
+[attention configuration](comfy/ldm/modules/attention.py).

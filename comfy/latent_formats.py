@@ -880,6 +880,14 @@ class Wan22(Wan21):
                 0.3971, 1.0600, 0.3943, 0.5537, 0.5444, 0.4089, 0.7468, 0.7744
             ]).view(1, self.latent_channels, 1, 1, 1)
 
+class RelayVSR(Wan22):
+    # the keyframe Wan and the Flash decoder both work on the normalized latent
+    def process_in(self, latent):
+        return latent
+
+    def process_out(self, latent):
+        return latent
+
 class HunyuanImage21(LatentFormat):
     latent_channels = 64
     latent_dimensions = 2
@@ -958,6 +966,7 @@ class QwenImage21(LatentFormat):
     latent_channels = 64
     latent_dimensions = 2
     spacial_downscale_ratio = 16
+    taesd_decoder_name = "taeqi2_1_decoder"
 
     latent_rgb_factors = [
         [-0.0158, -0.0115, -0.0174], [ 0.0030,  0.0120,  0.0027], [ 0.0637,  0.0470, -0.0127], [ 0.0360,  0.0661, -0.0030],

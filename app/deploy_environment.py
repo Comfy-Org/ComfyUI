@@ -7,7 +7,7 @@ logger = logging.getLogger(__name__)
 _DEFAULT_DEPLOY_ENV = "local-git"
 _ENV_FILENAME = ".comfy_environment"
 
-# Resolve the ComfyUI install directory (the parent of this `comfy/` package).
+# Resolve the ComfyUI install directory (the parent of this `app/` package).
 # We deliberately avoid `folder_paths.base_path` here because that is overridden
 # by the `--base-directory` CLI arg to a user-supplied path, whereas the
 # `.comfy_environment` marker is written by launchers/installers next to the

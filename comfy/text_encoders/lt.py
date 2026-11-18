@@ -27,13 +27,15 @@ class Gemma3_Tokenizer():
     def state_dict(self):
         return {"spiece_model": self.tokenizer.serialize_model()}
 
-    def tokenize_with_weights(self, text, return_word_ids=False, image=None, llama_template=None, skip_template=True, system_prompt="", **kwargs):
+    def tokenize_with_weights(self, text, return_word_ids=False, image=None, llama_template=None, skip_template=True, system_prompt="", images=[], **kwargs):
         self.llama_template = "<start_of_turn>system\nYou are a helpful assistant.<end_of_turn>\n<start_of_turn>user\n{}<end_of_turn>\n<start_of_turn>model\n"
         self.llama_template_images = "<start_of_turn>system\nYou are a helpful assistant.<end_of_turn>\n<start_of_turn>user\n\n<image_soft_token>{}<end_of_turn>\n\n<start_of_turn>model\n"
 
-        if image is None:
-            images = []
-        else:
+        if image is not None and len(images) == 0:
+            images = [image]
+
+        resized = []
+        for image in images:
             samples = image.movedim(-1, 1)
             total = int(896 * 896)
 
@@ -42,7 +44,8 @@ class Gemma3_Tokenizer():
             height = round(samples.shape[2] * scale_by)
 
             s = comfy.utils.common_upscale(samples, width, height, "area", "disabled").movedim(1, -1)
-            images = [s[:, :, :, :3]]
+            resized.append(s[:, :, :, :3])
+        images = resized
 
         if text.startswith('<start_of_turn>'):
             skip_template = True
@@ -52,7 +55,7 @@ class Gemma3_Tokenizer():
         else:
             if llama_template is None:
                 if len(images) > 0:
-                    llama_text = self.llama_template_images.format(text)
+                    llama_text = self.llama_template_images.replace("<image_soft_token>", "\n\n\n\n".join(["<image_soft_token>"] * len(images)), 1).format(text)
                 else:
                     llama_text = self.llama_template.format(text)
             else:

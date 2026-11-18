@@ -11,7 +11,7 @@ import torch.nn.functional as F
 from comfy.ldm.flux.math import apply_rope, rope
 from comfy.ldm.flux.layers import LastLayer
 
-from comfy.ldm.modules.attention import optimized_attention
+from comfy.ldm.modules.attention import AttentionTensorContainer, ComfyAttention, optimized_attention
 import comfy.model_management
 import comfy.patcher_extension
 import comfy.ldm.common_dit
@@ -72,8 +72,12 @@ class TimestepEmbed(nn.Module):
         return t_emb
 
 
-def attention(query: torch.Tensor, key: torch.Tensor, value: torch.Tensor, transformer_options={}):
-    return optimized_attention(query.view(query.shape[0], -1, query.shape[-1] * query.shape[-2]), key.view(key.shape[0], -1, key.shape[-1] * key.shape[-2]), value.view(value.shape[0], -1, value.shape[-1] * value.shape[-2]), query.shape[2], transformer_options=transformer_options)
+def attention(query: torch.Tensor, key: torch.Tensor, value: torch.Tensor, transformer_options={}, preferred_attention=None):
+    if isinstance(query, AttentionTensorContainer):
+        query, key, value = query.take(), key.take(), value.take()
+    heads = query.shape[2]
+    query, key, value = AttentionTensorContainer(query.flatten(2)), AttentionTensorContainer(key.flatten(2)), AttentionTensorContainer(value.flatten(2))
+    return optimized_attention(query, key, value, heads, preferred_attention=preferred_attention, transformer_options=transformer_options)
 
 
 class HiDreamAttnProcessor_flashattn:
@@ -120,11 +124,13 @@ class HiDreamAttnProcessor_flashattn:
             query = torch.cat([query_i, query_t], dim=1)
             key = torch.cat([key_i, key_t], dim=1)
             value = torch.cat([value_i, value_t], dim=1)
+            del query_t, key_t, value_t
         else:
             query = query_i
             key = key_i
             value = value_i
 
+        del query_i, key_i, value_i
         if query.shape[-1] == rope.shape[-3] * 2:
             query, key = apply_rope(query, key, rope)
         else:
@@ -133,8 +139,10 @@ class HiDreamAttnProcessor_flashattn:
             query_1, key_1 = apply_rope(query_1, key_1, rope)
             query = torch.cat([query_1, query_2], dim=-1)
             key = torch.cat([key_1, key_2], dim=-1)
+            del query_1, query_2, key_1, key_2
 
-        hidden_states = attention(query, key, value, transformer_options=transformer_options)
+        query, key, value = AttentionTensorContainer(query), AttentionTensorContainer(key), AttentionTensorContainer(value)
+        hidden_states = attention(query, key, value, transformer_options=transformer_options, preferred_attention=attn.comfy_attention)
 
         if not attn.single:
             hidden_states_i, hidden_states_t = torch.split(hidden_states, [num_image_tokens, num_text_tokens], dim=1)
@@ -162,6 +170,7 @@ class HiDreamAttention(nn.Module):
     ):
         # super(Attention, self).__init__()
         super().__init__()
+        self.comfy_attention = ComfyAttention()
         self.inner_dim = out_dim if out_dim is not None else dim_head * heads
         self.query_dim = query_dim
         self.upcast_attention = upcast_attention

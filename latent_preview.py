@@ -23,8 +23,6 @@ def preview_to_image(latent_image, do_scale=True):
             latents_ubyte = (latent_image.clamp(0, 1)
                                 .mul(0xFF)  # to 0..255
                                 )
-        if comfy.model_management.directml_enabled:
-                latents_ubyte = latents_ubyte.to(dtype=torch.uint8)
         latents_ubyte = latents_ubyte.to(device="cpu", dtype=torch.uint8, non_blocking=comfy.model_management.device_supports_non_blocking(latent_image.device))
 
         return Image.fromarray(latents_ubyte.numpy())
@@ -42,7 +40,8 @@ class TAESDPreviewerImpl(LatentPreviewer):
         self.taesd = taesd
 
     def decode_latent_to_preview(self, x0):
-        x_sample = self.taesd.decode(x0[:1])[0].movedim(0, 2)
+        # RGB only: previews are JPEG
+        x_sample = self.taesd.decode(x0[:1])[0, :3].movedim(0, 2)
         return preview_to_image(x_sample)
 
 class TAEHVPreviewerImpl(TAESDPreviewerImpl):

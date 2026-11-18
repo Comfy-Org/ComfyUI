@@ -36,11 +36,7 @@ class AnthropicMessage(BaseModel):
 
 
 class AnthropicThinkingConfig(BaseModel):
-    type: Literal["enabled", "disabled", "adaptive"] = Field(...)
-    budget_tokens: int | None = Field(
-        None, ge=1024,
-        description="Reasoning budget in tokens. Used when type is 'enabled'. Must be less than max_tokens.",
-    )
+    type: Literal["disabled", "adaptive", "between_tools"] = Field(...)
 
 
 class AnthropicOutputConfig(BaseModel):

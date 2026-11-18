@@ -12,7 +12,7 @@ from .position_embedding import VideoRopePosition3DEmb, LearnablePosEmbAxis
 from torchvision import transforms
 
 import comfy.patcher_extension
-from comfy.ldm.modules.attention import optimized_attention
+from comfy.ldm.modules.attention import AttentionTensorContainer, ComfyAttention, optimized_attention
 import comfy.ldm.common_dit
 import comfy.ops
 import comfy.quant_ops
@@ -38,7 +38,7 @@ class GPT2FeedForward(nn.Module):
         return x
 
 
-def torch_attention_op(q_B_S_H_D: torch.Tensor, k_B_S_H_D: torch.Tensor, v_B_S_H_D: torch.Tensor, transformer_options: Optional[dict] = {}) -> torch.Tensor:
+def torch_attention_op(q_B_S_H_D: torch.Tensor, k_B_S_H_D: torch.Tensor, v_B_S_H_D: torch.Tensor, transformer_options: Optional[dict] = {}, preferred_attention=None) -> torch.Tensor:
     """Computes multi-head attention using PyTorch's native implementation.
 
     This function provides a PyTorch backend alternative to Transformer Engine's attention operation.
@@ -60,12 +60,16 @@ def torch_attention_op(q_B_S_H_D: torch.Tensor, k_B_S_H_D: torch.Tensor, v_B_S_H
     Returns:
         Attention output tensor with shape (batch, seq_len, n_heads * head_dim)
     """
+    if isinstance(q_B_S_H_D, AttentionTensorContainer):
+        q_B_S_H_D, k_B_S_H_D, v_B_S_H_D = q_B_S_H_D.take(), k_B_S_H_D.take(), v_B_S_H_D.take()
     in_q_shape = q_B_S_H_D.shape
     in_k_shape = k_B_S_H_D.shape
     q_B_H_S_D = rearrange(q_B_S_H_D, "b ... h k -> b h ... k").view(in_q_shape[0], in_q_shape[-2], -1, in_q_shape[-1])
     k_B_H_S_D = rearrange(k_B_S_H_D, "b ... h v -> b h ... v").view(in_k_shape[0], in_k_shape[-2], -1, in_k_shape[-1])
     v_B_H_S_D = rearrange(v_B_S_H_D, "b ... h v -> b h ... v").view(in_k_shape[0], in_k_shape[-2], -1, in_k_shape[-1])
-    return optimized_attention(q_B_H_S_D, k_B_H_S_D, v_B_H_S_D, in_q_shape[-2], skip_reshape=True, transformer_options=transformer_options)
+    q_B_H_S_D, k_B_H_S_D, v_B_H_S_D = AttentionTensorContainer(q_B_H_S_D), AttentionTensorContainer(k_B_H_S_D), AttentionTensorContainer(v_B_H_S_D)
+    del q_B_S_H_D, k_B_S_H_D, v_B_S_H_D
+    return optimized_attention(q_B_H_S_D, k_B_H_S_D, v_B_H_S_D, in_q_shape[-2], skip_reshape=True, preferred_attention=preferred_attention, transformer_options=transformer_options)
 
 
 class Attention(nn.Module):
@@ -112,6 +116,7 @@ class Attention(nn.Module):
         operations=None,
     ) -> None:
         super().__init__()
+        self.comfy_attention = ComfyAttention()
         logging.debug(
             f"Setting up {self.__class__.__name__}. Query dim is {query_dim}, context_dim is {context_dim} and using "
             f"{n_heads} heads with a dimension of {head_dim}."
@@ -197,7 +202,7 @@ class Attention(nn.Module):
         return q, k, v
 
     def compute_attention(self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, transformer_options: Optional[dict] = {}) -> torch.Tensor:
-        result = self.attn_op(q, k, v, transformer_options=transformer_options)  # [B, S, H, D]
+        result = self.attn_op(q, k, v, transformer_options=transformer_options, preferred_attention=self.comfy_attention)  # [B, S, H, D]
         return self.output_dropout(self.output_proj(result))
 
     def forward(
@@ -213,6 +218,7 @@ class Attention(nn.Module):
             context (Optional[Tensor]): The key tensor of shape [B, Mk, K] or use x as context [self attention] if None
         """
         q, k, v = self.compute_qkv(x, context, rope_emb=rope_emb, transformer_options=transformer_options)
+        q, k, v = AttentionTensorContainer(q), AttentionTensorContainer(k), AttentionTensorContainer(v)
         return self.compute_attention(q, k, v, transformer_options=transformer_options)
 
 

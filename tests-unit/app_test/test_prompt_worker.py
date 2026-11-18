@@ -18,19 +18,36 @@ class LoopEscape(Exception):
 
 
 class Queue:
-    def __init__(self, completion_error: RuntimeError | None = None) -> None:
+    def __init__(
+        self,
+        completion_error: RuntimeError | None = None,
+        queued_after_first: int = 1,
+        on_second_get=None,
+    ) -> None:
         self.completion_error = completion_error
+        # Prompts still waiting once the first is taken; tests opt in to an idle queue.
+        self.queued = queued_after_first
+        self.running = 0
+        self.on_second_get = on_second_get
         self.get_calls = 0
 
     def get(self, timeout=None):
         self.get_calls += 1
         if self.get_calls > 1:
+            if self.on_second_get is not None:
+                self.on_second_get()
             raise LoopEscape("prompt worker requested a second item")
+        self.running = 1
         return (0, "prompt-id", {}, {}, [], {}), 1
+
+    def get_tasks_remaining(self) -> int:
+        # Like PromptQueue: queued plus running, and the running prompt only leaves in task_done.
+        return self.queued + self.running
 
     def task_done(self, *args, **kwargs) -> None:
         if self.completion_error is not None:
             raise self.completion_error
+        self.running = 0
 
     def get_flags(self):
         return {}
@@ -116,3 +133,25 @@ def test_prompt_worker_resumes_scan_when_later_iteration_raises_before_gc(monkey
 
     assert queue.get_calls == 2
     assert asset_manager.paused is False
+
+
+def _paused_when_the_worker_asks_for_the_next_prompt(monkeypatch, queued_after_first: int) -> list[bool]:
+    monkeypatch.setattr(main.execution, "PromptExecutor", Executor)
+    # The clock never reaches the 10 s GC interval, so only the idle check can resume the scan.
+    monkeypatch.setattr(main.time, "perf_counter", lambda: 1.0)
+    asset_manager = AssetManager()
+    seen: list[bool] = []
+    queue = Queue(queued_after_first=queued_after_first, on_second_get=lambda: seen.append(asset_manager.paused))
+
+    with pytest.raises(LoopEscape, match="^prompt worker requested a second item$"):
+        main.prompt_worker(queue, Server(), asset_manager)
+
+    return seen
+
+
+def test_prompt_worker_resumes_scan_once_the_queue_is_empty(monkeypatch) -> None:
+    assert _paused_when_the_worker_asks_for_the_next_prompt(monkeypatch, queued_after_first=0) == [False]
+
+
+def test_prompt_worker_keeps_scan_paused_while_prompts_are_queued(monkeypatch) -> None:
+    assert _paused_when_the_worker_asks_for_the_next_prompt(monkeypatch, queued_after_first=1) == [True]
