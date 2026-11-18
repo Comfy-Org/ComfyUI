@@ -179,8 +179,19 @@ class WhisperLargeV3(nn.Module):
         )
 
     def forward(self, audio):
-        # the encoder sees 30 s windows, longer audio is encoded window by window
-        outs = [self.encoder(self.feature_extractor(chunk)) for chunk in audio.split(self.feature_extractor.n_samples, dim=-1)]
-        x = torch.cat([o[0] for o in outs], dim=1)
-        all_x = tuple(torch.cat(layers, dim=1) for layers in zip(*(o[1] for o in outs)))
+        # the encoder sees 30 s windows, longer audio is encoded window by window into preallocated outputs
+        chunks = audio.split(self.feature_extractor.n_samples, dim=-1)
+        if len(chunks) == 1:
+            return self.encoder(self.feature_extractor(audio))
+        x = all_x = None
+        for i, chunk in enumerate(chunks):
+            out, layers = self.encoder(self.feature_extractor(chunk))
+            if x is None:
+                n = out.shape[1]
+                x = out.new_empty(out.shape[0], n * len(chunks), out.shape[2])
+                all_x = tuple(h.new_empty(h.shape[0], n * len(chunks), h.shape[2]) for h in layers)
+            x[:, i * n:(i + 1) * n] = out
+            for dst, h in zip(all_x, layers):
+                dst[:, i * n:(i + 1) * n] = h
+            del out, layers
         return x, all_x
