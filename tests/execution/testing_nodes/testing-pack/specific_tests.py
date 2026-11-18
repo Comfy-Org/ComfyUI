@@ -574,8 +574,24 @@ class TestExecutedNodeIdsBlocking:
         await self.release_event.wait()
         return {"ui": {"completed": [True]}}
 
+class TestPaidOutputNode:
+    """An output node marked as an API node: a stand-in for a paid partner node."""
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {"required": {"seed": ("INT", {"default": 0})}}
+
+    RETURN_TYPES = ()
+    FUNCTION = "execute"
+    CATEGORY = "Testing/Nodes"
+    OUTPUT_NODE = True
+    API_NODE = True
+
+    def execute(self, seed):
+        return {"ui": {"text": [str(time.time_ns())]}}
+
 TEST_NODE_CLASS_MAPPINGS = {
     "TestLazyMixImages": TestLazyMixImages,
+    "TestPaidOutputNode": TestPaidOutputNode,
     "TestVariadicAverage": TestVariadicAverage,
     "TestCustomIsChanged": TestCustomIsChanged,
     "TestIsChangedWithConstants": TestIsChangedWithConstants,
@@ -599,6 +615,7 @@ TEST_NODE_CLASS_MAPPINGS = {
 
 TEST_NODE_DISPLAY_NAME_MAPPINGS = {
     "TestLazyMixImages": "Lazy Mix Images",
+    "TestPaidOutputNode": "Paid Output Node",
     "TestVariadicAverage": "Variadic Average",
     "TestCustomIsChanged": "Custom IsChanged",
     "TestIsChangedWithConstants": "IsChanged With Constants",
