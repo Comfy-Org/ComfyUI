@@ -2566,6 +2566,7 @@ async def init_builtin_extra_nodes():
         "nodes_loop.py",
         "nodes_sam3d_body.py",
         "nodes_marigold.py",
+        "nodes_pan2.py",
     ]
 
     import_failed = []
