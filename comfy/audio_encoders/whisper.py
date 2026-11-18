@@ -179,8 +179,8 @@ class WhisperLargeV3(nn.Module):
         )
 
     def forward(self, audio):
-        # the encoder sees 30 s windows, longer audio is encoded window by window into preallocated outputs
-        chunks = audio.split(self.feature_extractor.n_samples, dim=-1)
+        # 30 s windows; the extra zero sample makes the last window always end in padding (silence)
+        chunks = F.pad(audio, (0, 1)).split(self.feature_extractor.n_samples, dim=-1)
         if len(chunks) == 1:
             return self.encoder(self.feature_extractor(audio))
         x = all_x = None
