@@ -442,9 +442,9 @@ def _should_force_output_rerun(class_def) -> bool:
     normal caching because re-running one repeats a paid external call."""
     if not args.force_output_rerun:
         return False
-    if getattr(class_def, "OUTPUT_NODE", False) is not True:
+    if not getattr(class_def, "OUTPUT_NODE", False):
         return False
-    return getattr(class_def, "API_NODE", False) is not True
+    return not getattr(class_def, "API_NODE", False)
 
 
 def _node_meta(dynprompt, unique_id) -> dict:
@@ -780,10 +780,22 @@ class PromptExecutor:
                 cache_results = await asyncio.gather(
                     *(self.caches.outputs.get(node_id) for node_id in node_ids)
                 )
+                def force_rerun(node_id):
+                    class_type = dynamic_prompt.get_node(node_id)["class_type"]
+                    return _should_force_output_rerun(nodes.NODE_CLASS_MAPPINGS[class_type])
+
+                # A forced output node counts as uncached while planning, so a node
+                # that consumes its result waits for it to run again.
+                execution_list = ExecutionList(dynamic_prompt, self.caches.outputs, self.prompt_model_tracker.add,
+                                               force_rerun=force_rerun if args.force_output_rerun else None)
+                current_outputs = self.caches.outputs.all_node_ids()
+                for node_id in list(execute_outputs):
+                    execution_list.add_node(node_id)
+
                 cached_nodes = [
                     node_id for node_id, result in zip(node_ids, cache_results)
                     if result is not None
-                    and not _should_force_output_rerun(nodes.NODE_CLASS_MAPPINGS[prompt[node_id]["class_type"]])
+                    and not (node_id in execution_list.pendingNodes and force_rerun(node_id))
                 ]
 
                 comfy.model_management.cleanup_models_gc()
@@ -794,10 +806,6 @@ class PromptExecutor:
                 pending_async_nodes = {} # TODO - Unify this with pending_subgraph_results
                 ui_node_outputs = {}
                 executed = set()
-                execution_list = ExecutionList(dynamic_prompt, self.caches.outputs, self.prompt_model_tracker.add)
-                current_outputs = self.caches.outputs.all_node_ids()
-                for node_id in list(execute_outputs):
-                    execution_list.add_node(node_id)
 
                 while not execution_list.is_empty():
                     node_id, error, ex = await execution_list.stage_node_execution()

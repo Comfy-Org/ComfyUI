@@ -589,9 +589,25 @@ class TestPaidOutputNode:
     def execute(self, seed):
         return {"ui": {"text": [str(time.time_ns())]}}
 
+class TestOutputPassthrough:
+    """An output node that also returns a value, different on every execution."""
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {"required": {"seed": ("INT", {"default": 0})}}
+
+    RETURN_TYPES = ("STRING",)
+    FUNCTION = "execute"
+    CATEGORY = "Testing/Nodes"
+    OUTPUT_NODE = True
+
+    def execute(self, seed):
+        value = str(time.time_ns())
+        return {"ui": {"text": [value]}, "result": (value,)}
+
 TEST_NODE_CLASS_MAPPINGS = {
     "TestLazyMixImages": TestLazyMixImages,
     "TestPaidOutputNode": TestPaidOutputNode,
+    "TestOutputPassthrough": TestOutputPassthrough,
     "TestVariadicAverage": TestVariadicAverage,
     "TestCustomIsChanged": TestCustomIsChanged,
     "TestIsChangedWithConstants": TestIsChangedWithConstants,
@@ -616,6 +632,7 @@ TEST_NODE_CLASS_MAPPINGS = {
 TEST_NODE_DISPLAY_NAME_MAPPINGS = {
     "TestLazyMixImages": "Lazy Mix Images",
     "TestPaidOutputNode": "Paid Output Node",
+    "TestOutputPassthrough": "Output Passthrough",
     "TestVariadicAverage": "Variadic Average",
     "TestCustomIsChanged": "Custom IsChanged",
     "TestIsChangedWithConstants": "IsChanged With Constants",

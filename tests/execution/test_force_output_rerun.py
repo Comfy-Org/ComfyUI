@@ -163,3 +163,24 @@ def test_without_the_flag_a_cache_hit_replays_the_first_filename(tmp_path: Path)
 
     assert _saved_files(second) == _saved_files(first)
     assert {"source", "save", "paid"} <= _cached_nodes(second)
+
+
+@pytest.mark.execution
+def test_a_node_reading_a_forced_output_node_gets_the_new_value(tmp_path: Path) -> None:
+    # Given an output node whose result feeds another node, already run once
+    prompt = {
+        "producer": {"class_type": "TestOutputPassthrough", "inputs": {"seed": 1}},
+        "show": {"class_type": "PreviewAny", "inputs": {"source": ["producer", 0]}},
+    }
+    with _running_server(tmp_path, ["--force-output-rerun", "--cache-classic"]) as base_url:
+        first = _run(base_url, prompt)
+
+        # When the identical prompt runs again
+        second = _run(base_url, prompt)
+
+    # Then the producer ran again, and the output node reading it (also forced)
+    # waited for that run instead of reading the previous run's value
+    produced = second["outputs"]["producer"]["text"]
+    assert produced != first["outputs"]["producer"]["text"]
+    assert second["outputs"]["show"]["text"] == produced
+    assert "producer" not in _cached_nodes(second)
