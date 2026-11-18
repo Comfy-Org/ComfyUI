@@ -7,6 +7,7 @@ if not torch.cuda.is_available():
     cli_args.cpu = True
 
 import comfy.model_prefetch as model_prefetch  # noqa: E402
+from comfy.model_management import InterruptProcessingException  # noqa: E402
 
 
 @pytest.fixture
@@ -57,3 +58,21 @@ def test_first_cleanup_error_wins(steps):
     steps(queues_error=RuntimeError("first"), watermark_error=ValueError("second"))
     with pytest.raises(RuntimeError, match="first"):
         model_prefetch.cleanup_after_node(node_failed=False)
+
+
+def test_a_cancel_survives_a_failing_cleanup_in_finally(steps):
+    # The execution.py shape: the node raises, cleanup runs in a finally.
+    ran = steps(queues_error=RuntimeError("unpin failed"))
+    cancel = InterruptProcessingException()
+    node_failed = False
+    with pytest.raises(InterruptProcessingException) as raised:
+        try:
+            try:
+                raise cancel
+            except BaseException:
+                node_failed = True
+                raise
+        finally:
+            model_prefetch.cleanup_after_node(node_failed)
+    assert raised.value is cancel
+    assert ran == ["queues", "buffers", "watermark"]

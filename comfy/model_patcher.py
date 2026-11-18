@@ -1852,25 +1852,31 @@ class ModelPatcherDynamic(ModelPatcher):
             failed = True
             raise
         finally:
-            with comfy.model_management.cuda_device_context(self.load_device):
-                # The final forward may still be using the allocation graph's pages.
-                comfy.model_management.synchronize()
-                # A failing step must not skip the vbar and model release below.
-                cleanup_error = comfy.model_prefetch.run_cleanup_steps([
-                    comfy.model_prefetch.cleanup_prefetch_queues,
-                    comfy.model_prefetch.cleanup_malloc_graph,
-                ])
-                if patcher is not None:
-                    self.remove_additional_models("writable")
-                    vbar = model.dynamic_vbars.pop(patcher.load_device, None)
-                    if vbar is not None:
-                        vbar.close()
-                    for module in model.modules():
-                        for pin in getattr(module, "_pins", {}).values():
-                            pin["dirty"] = False
-                    comfy.model_management.unload_model_and_clones(patcher, unload_additional_models=False)
-                file.close()
-            comfy.model_prefetch.report_cleanup_error(cleanup_error, failed)
+            # A release error that is already propagating outranks a recorded
+            # cleanup error, the same rule as an error from the caller.
+            release_failed = True
+            try:
+                with comfy.model_management.cuda_device_context(self.load_device):
+                    # The final forward may still be using the allocation graph's pages.
+                    comfy.model_management.synchronize()
+                    # A failing step must not skip the vbar and model release below.
+                    cleanup_error = comfy.model_prefetch.run_cleanup_steps([
+                        comfy.model_prefetch.cleanup_prefetch_queues,
+                        comfy.model_prefetch.cleanup_malloc_graph,
+                    ])
+                    if patcher is not None:
+                        self.remove_additional_models("writable")
+                        vbar = model.dynamic_vbars.pop(patcher.load_device, None)
+                        if vbar is not None:
+                            vbar.close()
+                        for module in model.modules():
+                            for pin in getattr(module, "_pins", {}).values():
+                                pin["dirty"] = False
+                        comfy.model_management.unload_model_and_clones(patcher, unload_additional_models=False)
+                    file.close()
+                release_failed = False
+            finally:
+                comfy.model_prefetch.report_cleanup_error(cleanup_error, failed or release_failed)
 
     def set_in_use_by_current_prompt(self, in_use):
         self.model.dynamic_pins[self.load_device]["current_prompt"] = in_use
