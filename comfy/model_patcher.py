@@ -1838,6 +1838,8 @@ class ModelPatcherDynamic(ModelPatcher):
     def writable_model(self, model):
         state, file = comfy.utils.create_safetensors(model.state_dict())
         patcher = None
+        failed = False
+        cleanup_error = None
         try:
             model.load_state_dict(state, assign=True)
             patcher = ModelPatcherDynamic(model, self.load_device, torch.device("cpu"), fast_disk=self.fast_disk)
@@ -1846,12 +1848,18 @@ class ModelPatcherDynamic(ModelPatcher):
             comfy.model_management.load_models_gpu([patcher, self])
             patcher.set_in_use_by_current_prompt(True)
             yield patcher
+        except BaseException:
+            failed = True
+            raise
         finally:
             with comfy.model_management.cuda_device_context(self.load_device):
                 # The final forward may still be using the allocation graph's pages.
                 comfy.model_management.synchronize()
-                comfy.model_prefetch.cleanup_prefetch_queues()
-                comfy.model_prefetch.cleanup_malloc_graph()
+                # A failing step must not skip the vbar and model release below.
+                cleanup_error = comfy.model_prefetch.run_cleanup_steps([
+                    comfy.model_prefetch.cleanup_prefetch_queues,
+                    comfy.model_prefetch.cleanup_malloc_graph,
+                ])
                 if patcher is not None:
                     self.remove_additional_models("writable")
                     vbar = model.dynamic_vbars.pop(patcher.load_device, None)
@@ -1862,6 +1870,7 @@ class ModelPatcherDynamic(ModelPatcher):
                             pin["dirty"] = False
                     comfy.model_management.unload_model_and_clones(patcher, unload_additional_models=False)
                 file.close()
+            comfy.model_prefetch.report_cleanup_error(cleanup_error, failed)
 
     def set_in_use_by_current_prompt(self, in_use):
         self.model.dynamic_pins[self.load_device]["current_prompt"] = in_use

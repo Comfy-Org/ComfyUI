@@ -564,15 +564,19 @@ async def execute(server: "ExecutionServer", dynprompt, caches, current_item, ex
                 # TODO - How to handle this with async functions without contextvars (which requires Python 3.12)?
                 GraphBuilder.set_default_prefix(unique_id, call_index, 0)
 
+            # A flag, not the exception: keeping the exception would keep the
+            # failed node's frames, and the tensors they hold, alive.
+            node_failed = False
             try:
                 output_data, output_ui, has_subgraph, has_pending_tasks = await get_output_data(prompt_id, unique_id, obj, input_data_all, execution_block_cb=execution_block_cb, pre_execute_cb=pre_execute_cb, v3_data=v3_data)
+            except BaseException:
+                node_failed = True
+                raise
             finally:
                 if comfy.memory_management.aimdo_enabled:
                     if get_console_log_level(args.verbose) == "DEBUG":
                         comfy_aimdo.control.analyze()
-                    comfy.model_prefetch.cleanup_prefetch_queues()
-                    comfy.model_management.reset_cast_buffers()
-                    comfy_aimdo.model_vbar.vbars_reset_watermark_limits()
+                    comfy.model_prefetch.cleanup_after_node(node_failed)
 
             if has_pending_tasks:
                 pending_async_nodes[unique_id] = output_data

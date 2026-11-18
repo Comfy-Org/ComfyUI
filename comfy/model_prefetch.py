@@ -228,6 +228,45 @@ def cleanup_prefetch_queues():
     if first_error is not None:
         raise first_error
 
+def run_cleanup_steps(steps):
+    """Run every step even when one raises; return the first error, or None."""
+    first_error = None
+    for step in steps:
+        try:
+            step()
+        except Exception as e:
+            if first_error is None:
+                first_error = e
+    return first_error
+
+def report_cleanup_error(error, node_failed):
+    """Raise a cleanup error, unless an error is already in flight.
+
+    Raised from a finally, a cleanup error replaces the one in flight: a cancel
+    becomes an execution error and an OOM no longer reads as an OOM. With a
+    node error in flight it is logged instead and the original propagates.
+    """
+    if error is None:
+        return
+    if node_failed:
+        logging.warning("Cleanup after a failed node also failed: %s: %s", type(error).__name__, error)
+        return
+    raise error
+
+def cleanup_after_node(node_failed):
+    """Release a node's prefetch state and reset the cast buffers and watermarks.
+
+    Every step runs even when an earlier one raises, so the next node never
+    starts from the failed node's state. node_failed says whether the node is
+    already raising (see report_cleanup_error).
+    """
+    error = run_cleanup_steps([
+        cleanup_prefetch_queues,
+        comfy.model_management.reset_cast_buffers,
+        comfy_aimdo.model_vbar.vbars_reset_watermark_limits,
+    ])
+    report_cleanup_error(error, node_failed)
+
 def prefetch_queue_pop(queue, device, module, dtype=None, core=None, enable_graph=False, generator=None, malloc_scope=None):
     malloc_graph = MALLOC_GRAPHS.get(threading.get_ident())
     if malloc_graph is not None and not malloc_graph._comfy_active:
