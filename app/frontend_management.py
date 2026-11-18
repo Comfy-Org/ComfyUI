@@ -268,17 +268,22 @@ comfyui-frontend-package is not installed.
         return path
 
     @classmethod
+    def serves_bundled(cls, web_root: str) -> bool:
+        """Whether web_root is the frontend bundled in comfyui-frontend-package."""
+        try:
+            package_path = cls._package_frontend_path()  # not default_frontend_path(), which exits without the package
+        except Exception:  # a broken install can raise anything on import
+            logging.warning("Could not import comfyui-frontend-package to identify the served frontend.", exc_info=True)
+            return False
+        return package_path is not None and web_root == package_path
+
+    @classmethod
     def served_version(cls, web_root: str) -> Optional[str]:
         """The version of the official frontend at web_root, or None if it isn't one we can identify."""
         path = Path(web_root)
         if path.parent.parent == Path(cls.CUSTOM_FRONTENDS_ROOT):
             return path.name if path.parent.name.lower() == "comfy-org_comfyui_frontend" else None
-        try:
-            package_path = cls._package_frontend_path()  # not default_frontend_path(), which exits without the package
-        except Exception:  # a broken install can raise anything on import; the version is then unknown
-            logging.warning("Could not import comfyui-frontend-package to identify the served frontend.", exc_info=True)
-            return None
-        if web_root != package_path:
+        if not cls.serves_bundled(web_root):
             return None
         try:
             return version("comfyui-frontend-package")

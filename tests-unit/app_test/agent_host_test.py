@@ -348,6 +348,15 @@ def test_old_frontend_from_a_selector_pin_is_not_called_a_load_failure(monkeypat
     assert f"{pin} gave 1.57.0" in caplog.text and agent_host.MIN_FRONTEND_VERSION in caplog.text
     assert agent_host.feature_flag() == {"state": "ready", "frontend_outdated": True}
 
+
+@pytest.mark.parametrize("pin", ["Comfy-Org/ComfyUI_frontend@latest", "Comfy-Org/ComfyUI_frontend@1.59.0", "Comfy-Org/ComfyUI_frontend@v1.57.6"])
+def test_bundled_fallback_is_not_attributed_to_the_pin(monkeypatch, caplog, pin):
+    _ready_host(monkeypatch)
+    with caplog.at_level(logging.WARNING):
+        agent_host.check_frontend("1.57.6", pin, bundled=True)
+    assert f"check the log above for why {pin} did not load" in caplog.text
+    assert "gave" not in caplog.text and "pin a newer version" not in caplog.text
+
 @pytest.mark.parametrize("served", ["1.58.1", "1.59.0", "1.59.0.dev2", "2.0.0"])
 def test_supported_frontend_is_not_flagged(monkeypatch, served):
     _ready_host(monkeypatch)

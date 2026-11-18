@@ -83,11 +83,13 @@ def load() -> bool:
     return _failure is None
 
 
-def check_frontend(served: str | None, pinned: str | None, front_end_root: str | None = None) -> None:
+def check_frontend(served: str | None, pinned: str | None, front_end_root: str | None = None, bundled: bool | None = None) -> None:
     """Report a frontend too old to show the agent panel, so a page with no Agent
     button isn't the only sign of it. `served` is None when the version is unknown;
     `pinned` is the --front-end-version argument and `front_end_root` the
-    --front-end-root one. A custom root has no version to compare. The host's state
+    --front-end-root one. `bundled` says whether the served frontend is the one in
+    comfyui-frontend-package (a pin that fell back to it did not load); None means
+    unknown. A custom root has no version to compare. The host's state
     is left alone: it describes the host, and a newer frontend can still use it."""
     global _frontend_outdated
     if _failure is not None or _host is None or served is None or front_end_root is not None:
@@ -100,11 +102,13 @@ def check_frontend(served: str | None, pinned: str | None, front_end_root: str |
     except InvalidVersion:
         return
     selector = pinned.rpartition("@")[2] if pinned else ""
+    is_selector = selector in ("latest", "prerelease")
+    loaded = (not bundled) if bundled is not None else (is_selector or selector.lstrip("v") == served)
     if not pinned:
         cause = "update comfyui-frontend-package"
-    elif selector in ("latest", "prerelease"):  # resolved by GitHub; whether it loaded isn't known here
+    elif loaded and is_selector:
         cause = f"{pinned} gave {served}, so pin {MIN_FRONTEND_VERSION} or newer instead"
-    elif selector.lstrip("v") == served:
+    elif loaded:
         cause = f"pin a newer version than {pinned}"
     else:
         cause = f"check the log above for why {pinned} did not load"

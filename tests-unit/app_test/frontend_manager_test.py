@@ -1,4 +1,5 @@
 import argparse
+from importlib.metadata import PackageNotFoundError
 from types import SimpleNamespace
 from unittest.mock import Mock, patch, mock_open
 
@@ -513,7 +514,6 @@ def test_served_version_survives_a_frontend_package_that_raises_on_import():
 
 
 def test_served_version_is_unknown_when_the_package_metadata_is_missing():
-    from importlib.metadata import PackageNotFoundError
     with patch.object(FrontendManager, "_package_frontend_path", return_value="/site/static"):
         with patch("app.frontend_management.version", side_effect=PackageNotFoundError("comfyui-frontend-package")):
             assert FrontendManager.served_version("/site/static") is None
@@ -525,3 +525,11 @@ def test_served_version_logs_an_unexpected_metadata_error(caplog):
             with caplog.at_level("WARNING"):
                 assert FrontendManager.served_version("/site/static") is None
     assert "bad metadata" in caplog.text
+
+
+def test_serves_bundled_only_for_the_package_frontend():
+    with patch.object(FrontendManager, "_package_frontend_path", return_value="/site/static"):
+        assert FrontendManager.serves_bundled("/site/static") is True
+        assert FrontendManager.serves_bundled(f"{FrontendManager.CUSTOM_FRONTENDS_ROOT}/Comfy-Org_ComfyUI_frontend/1.59.0") is False
+    with patch.object(FrontendManager, "_package_frontend_path", side_effect=SyntaxError("broken install")):
+        assert FrontendManager.serves_bundled("/site/static") is False
