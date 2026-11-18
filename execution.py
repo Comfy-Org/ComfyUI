@@ -436,6 +436,17 @@ def _is_intermediate_output(dynprompt, node_id):
     return getattr(class_def, 'HAS_INTERMEDIATE_OUTPUT', False)
 
 
+def _should_force_output_rerun(class_def) -> bool:
+    """With --force-output-rerun, an output node re-executes on a cache hit so it
+    writes its files again; its inputs still come from the cache. API nodes keep
+    normal caching because re-running one repeats a paid external call."""
+    if not args.force_output_rerun:
+        return False
+    if getattr(class_def, "OUTPUT_NODE", False) is not True:
+        return False
+    return getattr(class_def, "API_NODE", False) is not True
+
+
 def _node_meta(dynprompt, unique_id) -> dict:
     return {
         "node_id": unique_id,
@@ -453,7 +464,7 @@ async def execute(server: "ExecutionServer", dynprompt, caches, current_item, ex
     class_type = dynprompt.get_node(unique_id)['class_type']
     class_def = nodes.NODE_CLASS_MAPPINGS[class_type]
     cached = await caches.outputs.get(unique_id)
-    if cached is not None:
+    if cached is not None and not _should_force_output_rerun(class_def):
         emit_cached_output(server, unique_id, _node_meta(dynprompt, unique_id), cached, prompt_id, ui_outputs, asset_manager)
         get_progress_state().finish_progress(unique_id)
         execution_list.cache_update(unique_id, cached)
@@ -772,6 +783,7 @@ class PromptExecutor:
                 cached_nodes = [
                     node_id for node_id, result in zip(node_ids, cache_results)
                     if result is not None
+                    and not _should_force_output_rerun(nodes.NODE_CLASS_MAPPINGS[prompt[node_id]["class_type"]])
                 ]
 
                 comfy.model_management.cleanup_models_gc()
