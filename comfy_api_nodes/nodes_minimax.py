@@ -32,6 +32,9 @@ from comfy_api_nodes.apis.minimax import (
     Hailuo03VideoContent,
     Hailuo03VideoContentUrl,
     MinimaxFileRetrieveResponse,
+    MinimaxH3ImageInput,
+    MinimaxH3ImageRequest,
+    MinimaxH3ImageResponse,
     MiniMaxModel,
     MinimaxTaskResultResponse,
     MinimaxVideoGenerationRequest,
@@ -40,6 +43,7 @@ from comfy_api_nodes.apis.minimax import (
 )
 from comfy_api_nodes.util import (
     ApiEndpoint,
+    download_url_to_image_tensor,
     download_url_to_video_output,
     downscale_image_tensor_by_max_sides,
     poll_op,
@@ -2618,6 +2622,181 @@ class MinimaxHailuo03MaxCameraControlNode(IO.ComfyNode):
         )
 
 
+H3_IMAGE_MODELS = ["MiniMax-H3-Image", "MiniMax-H3-Image-Highspeed"]
+H3_IMAGE_ASPECT_RATIOS = [
+    "auto", "1:1", "4:3", "3:4", "3:2", "2:3", "5:4", "4:5", "16:9", "9:16", "2:1", "1:2", "21:9", "9:21", "3:1", "1:3"
+]
+H3_IMAGE_MAX_REFERENCES = 16
+H3_IMAGE_EDIT_PROMPT_MAX_LENGTH = 8000
+
+
+def _h3_image_aspect_ratio_input():
+    return IO.Combo.Input(
+        "aspect_ratio",
+        options=H3_IMAGE_ASPECT_RATIOS,
+        default="auto",
+        tooltip="With 'auto', MiniMax picks the ratio from the prompt, or follows the reference image when one "
+        "is connected. Text-to-image with enhance_prompt off needs a fixed ratio.",
+    )
+
+
+def _h3_image_side_input(name: str):
+    return IO.Int.Input(
+        name,
+        default=2048,
+        min=512,
+        max=7680,
+        step=16,
+        tooltip="Width x height must be 655,360 to 20,000,000 pixels with an aspect ratio of at most 3:1.",
+    )
+
+
+class MinimaxH3ImageNode(IO.ComfyNode):
+    @classmethod
+    def define_schema(cls):
+        return IO.Schema(
+            node_id="MinimaxH3ImageNode",
+            display_name="MiniMax H3 Image",
+            category="partner/image/MiniMax",
+            description="Generate images from text, or edit and combine up to 16 reference images, "
+            "with MiniMax H3-Image. Refer to the references in the prompt by their order: @Image1, @Image2, and so on.",
+            inputs=[
+                IO.Combo.Input("model", options=H3_IMAGE_MODELS, default=H3_IMAGE_MODELS[0]),
+                IO.String.Input(
+                    "prompt",
+                    multiline=True,
+                    default="",
+                    tooltip="With reference images connected, the prompt can be at most 8,000 characters.",
+                ),
+                IO.DynamicCombo.Input(
+                    "size",
+                    options=[
+                        IO.DynamicCombo.Option("2K", [_h3_image_aspect_ratio_input()]),
+                        IO.DynamicCombo.Option("4K", [_h3_image_aspect_ratio_input()]),
+                        IO.DynamicCombo.Option("custom", [_h3_image_side_input("width"), _h3_image_side_input("height")]),
+                    ],
+                    tooltip="2K and 4K derive the size from the aspect ratio; custom sets an exact width and height.",
+                ),
+                IO.Boolean.Input(
+                    "enhance_prompt",
+                    default=True,
+                    tooltip="MiniMax rewrites the prompt into a detailed scene description before generating. "
+                    "Image edits are always enhanced. When off, pick an aspect ratio or a custom size.",
+                ),
+                IO.Int.Input(
+                    "seed",
+                    default=42,
+                    min=0,
+                    max=2147483647,
+                    display_mode=IO.NumberDisplay.number,
+                    control_after_generate=True,
+                    tooltip="Seed controls whether the node should re-run; "
+                    "results are non-deterministic regardless of seed.",
+                ),
+                IO.Autogrow.Input(
+                    "images",
+                    template=IO.Autogrow.TemplateNames(
+                        IO.Image.Input("image"),
+                        names=[f"image_{i}" for i in range(1, H3_IMAGE_MAX_REFERENCES + 1)],
+                        min=0,
+                    ),
+                    optional=True,
+                    tooltip="Optional reference images to edit or combine, referred to in the prompt as "
+                    "@Image1..@Image16 in connection order. Up to 16.",
+                ),
+            ],
+            outputs=[
+                IO.Image.Output(),
+                IO.String.Output("revised_prompt"),
+            ],
+            hidden=[
+                IO.Hidden.auth_token_comfy_org,
+                IO.Hidden.api_key_comfy_org,
+                IO.Hidden.unique_id,
+            ],
+            is_api_node=True,
+            price_badge=IO.PriceBadge(
+                depends_on=IO.PriceBadgeDepends(
+                    widgets=["model", "size", "size.width", "size.height", "enhance_prompt"],
+                    input_groups=["images"],
+                ),
+                expr="""
+                (
+                  $hs := widgets.model = "minimax-h3-image-highspeed";
+                  $outRate := $hs ? 0.000010868 : 0.000005434;
+                  $imgRate := $hs ? 0.00000429 : 0.000002145;
+                  $txtRate := 0.000003289;
+                  $px := widgets.size = "custom"
+                    ? $lookup(widgets, "size.width") * $lookup(widgets, "size.height")
+                    : (widgets.size = "4k" ? 16777216 : 4194304);
+                  $out := ($px > 4194304 ? $px : 4194304) / 1024 * $outRate;
+                  $refsRaw := inputGroups.images;
+                  $refs := $refsRaw ? $refsRaw : 0;
+                  $txt := $refs > 0
+                    ? [2000 + 300 * ($refs - 1), 6500 + 800 * ($refs - 1)]
+                    : (widgets.enhance_prompt = false ? [0, 300] : [900, 5000]);
+                  {
+                    "type": "range_usd",
+                    "min_usd": $out + $txt[0] * $txtRate + $refs * 2050 * $imgRate,
+                    "max_usd": $out + $txt[1] * $txtRate + $refs * 8194 * $imgRate,
+                    "format": {"approximate": true}
+                  }
+                )
+                """,
+            ),
+        )
+
+    @classmethod
+    async def execute(
+        cls,
+        model: str,
+        prompt: str,
+        size: dict,
+        enhance_prompt: bool,
+        seed: int,
+        images: dict,
+    ) -> IO.NodeOutput:
+        image_tensors = list(images.values())
+        validate_string(
+            prompt,
+            strip_whitespace=True,
+            min_length=1,
+            max_length=H3_IMAGE_EDIT_PROMPT_MAX_LENGTH if image_tensors else None,
+        )
+        reference_count = sum(t.shape[0] for t in image_tensors)
+        if reference_count > H3_IMAGE_MAX_REFERENCES:
+            raise ValueError(
+                f"MiniMax H3 Image accepts up to {H3_IMAGE_MAX_REFERENCES} reference images, got {reference_count}."
+            )
+        prompt = _hailuo03_resolve_ref_tags(prompt, {"image": reference_count})
+        image_urls = []
+        if image_tensors:
+            image_urls = await upload_images_to_comfyapi(
+                cls, image_tensors, max_images=H3_IMAGE_MAX_REFERENCES, wait_label="Uploading references"
+            )
+        custom = size["size"] == "custom"
+        response = await sync_op(
+            cls,
+            ApiEndpoint(
+                path="/proxy/minimax/v1/images/edits" if image_urls else "/proxy/minimax/v1/images/generations",
+                method="POST",
+            ),
+            response_model=MinimaxH3ImageResponse,
+            data=MinimaxH3ImageRequest(
+                model=model,
+                prompt=prompt,
+                images=[MinimaxH3ImageInput(image_url=url) for url in image_urls] or None,
+                size=f"{size['width']}x{size['height']}" if custom else None,
+                area=None if custom else size["size"],
+                aspect_ratio=None if custom else size["aspect_ratio"],
+                disable_prompt_enhanced=None if image_urls else not enhance_prompt,
+                output_format="png",
+            ),
+        )
+        result = response.data[0]
+        return IO.NodeOutput(await download_url_to_image_tensor(result.url, cls=cls), result.revised_prompt)
+
+
 class MinimaxExtension(ComfyExtension):
     @override
     async def get_node_list(self) -> list[type[IO.ComfyNode]]:
@@ -2637,6 +2816,7 @@ class MinimaxExtension(ComfyExtension):
             MinimaxHailuo03MaxInsertVideoNode,
             MinimaxHailuo03MaxLipSyncNode,
             MinimaxHailuo03MaxCameraControlNode,
+            MinimaxH3ImageNode,
         ]
 
 

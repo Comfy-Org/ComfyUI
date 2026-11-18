@@ -71,6 +71,7 @@ class BriaRemoveBackgroundRequest(BaseModel):
         False, description="If true, returns 422 on visual output moderation failure."
     )
     seed: int = Field(...)
+    model: str = Field(...)
 
 
 class BriaGenFillRequest(BaseModel):
