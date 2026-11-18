@@ -33,6 +33,7 @@ def sampling(monkeypatch):
     monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
     monkeypatch.setattr(torch.cuda, "device_count", lambda: 2)
     monkeypatch.setattr(torch.cuda, "can_device_access_peer", lambda a, b: True)
+    monkeypatch.setattr(torch.cuda, "get_device_properties", lambda device: SimpleNamespace(gcnArchName="gfx1100"))
     monkeypatch.setattr(sp.mm, "in_training", False)
     return guider
 
