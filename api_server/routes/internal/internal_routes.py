@@ -1,6 +1,6 @@
 from aiohttp import web
 from typing import Optional
-from folder_paths import folder_names_and_paths, get_directory_by_type
+from folder_paths import folder_names_and_paths, get_directory_by_type, filter_files_content_types
 from api_server.services.terminal_service import TerminalService
 import app.logger
 import os
@@ -67,7 +67,10 @@ class InternalRoutes:
                 (entry for entry in os.scandir(directory) if is_visible_file(entry)),
                 key=lambda entry: -entry.stat().st_mtime
             )
-            return web.json_response([f"{entry.name} [{directory_type}]" for entry in sorted_files], status=200)
+            filenames = [entry.name for entry in sorted_files]
+            if request.query.get("content_type") == "image":
+                filenames = filter_files_content_types(filenames, ["image"])
+            return web.json_response([f"{name} [{directory_type}]" for name in filenames], status=200)
 
 
     def get_app(self):
