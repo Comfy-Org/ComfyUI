@@ -12,6 +12,7 @@ from comfy.ldm.modules.attention import optimized_attention_for_device
 import comfy.model_management
 import comfy.model_prefetch
 import comfy.ops
+import comfy.int8_gemv
 import comfy.ldm.common_dit
 import comfy.clip_model
 
@@ -1205,10 +1206,26 @@ class BaseGenerate:
         else:
             module = self.model.embed_tokens
 
+        if (input.is_cuda and getattr(module, "quant_format", None) == "int8_tensorwise"
+                and isinstance(module.weight, comfy.quant_ops.QuantizedTensor) and len(module.weight_function) == 0):
+            return self.logits_int8(module, input)
         if not module.comfy_cast_weights:
             return torch.nn.functional.linear(input, module.weight.to(x), None)
         with comfy.ops.CastBiasWeightContext(module, input, offloadable=True) as (weight, _bias):
             return torch.nn.functional.linear(input, weight, None)
+
+    def logits_int8(self, module, input):
+        # The vocab table is huge (Qwen3.5: 248320 x 4096): dequantizing it whole takes ~7.6 GiB of fp32 temporaries
+        # per token. Multiply by the int8 table directly instead (ConvRot rotation folded into the activation).
+        with comfy.ops.CastBiasWeightContext(module, device=input.device, dtype=module.weight.dtype, offloadable=True, compute_dtype=input.dtype) as (qweight, _bias):
+            if not isinstance(qweight, comfy.quant_ops.QuantizedTensor):
+                if qweight.is_floating_point():  # a low-VRAM (LoRA) patch was applied: use the patched weight
+                    return torch.nn.functional.linear(input, qweight.to(input.dtype), None)
+                qweight = module.weight
+            out = comfy.int8_gemv.int8_linear(input, qweight)
+            if out is NotImplemented:
+                out = comfy.int8_gemv.int8_linear_chunked(input, qweight)
+            return out
 
     def init_kv_cache(self, batch, max_cache_len, device, execution_dtype):
         return self.model.init_kv_cache(batch, max_cache_len, device, execution_dtype)

@@ -28,6 +28,7 @@ import json
 import comfy.memory_management
 import comfy.pinned_memory
 import comfy.rmsnorm
+import comfy.int8_gemv
 import comfy.utils
 
 import comfy_aimdo.model_vbar
@@ -1156,7 +1157,11 @@ class CombinedLinear:
             return NotImplemented
         if self._full_precision_mm:
             x = _eager_input_act(x, input_act, act_weight, act_eps)
-            out = torch.nn.functional.linear(x, self._v_weight.to(dtype=x.dtype).dequantize())
+            out = NotImplemented
+            if self.linears[0].quant_format == "int8_tensorwise" and isinstance(self._v_weight, QuantizedTensor) and not comfy.model_management.supports_int8_compute(x.device):
+                out = comfy.int8_gemv.int8_linear(x, self._v_weight)
+            if out is NotImplemented:
+                out = torch.nn.functional.linear(x, self._v_weight.to(dtype=x.dtype).dequantize())
             return _linear_residual(out, residual, residual_scale)
         return _try_quantized_linear_input_act(x, self._v_weight, None, input_act, act_weight, act_eps,
                                                residual, residual_scale)
@@ -1584,6 +1589,28 @@ def mixed_precision_ops(quant_config={}, compute_dtype=torch.bfloat16, full_prec
                 want_requant=False,
                 weight_only_quant=False,
             ):
+                # Emulated int8 (no int8 matmul): small batches multiply by the int8 weight directly instead of dequantizing it
+                if (not weight_only_quant and self._full_precision_mm and self.quant_format == "int8_tensorwise"
+                        and isinstance(self.weight, QuantizedTensor) and len(self.weight_function) == 0
+                        and input.is_cuda and input.numel() // input.shape[-1] <= comfy.int8_gemv.MAX_ROWS
+                        and not comfy.model_management.supports_int8_compute(input.device)):
+                    with CastBiasWeightContext(
+                        self,
+                        input=None,
+                        dtype=self.weight.dtype,
+                        device=input.device,
+                        bias_dtype=input.dtype,
+                        offloadable=True,
+                        compute_dtype=compute_dtype,
+                        want_requant=want_requant,
+                    ) as (weight, bias):
+                        if isinstance(weight, QuantizedTensor):
+                            out = comfy.int8_gemv.int8_linear(input, weight, bias)
+                            if out is not NotImplemented:
+                                return out
+                            weight = weight.to(dtype=input.dtype).dequantize()  # dequantize straight to the input dtype
+                        return self._forward(input, weight.to(dtype=input.dtype), bias)
+
                 if not weight_only_quant:
                     with CastBiasWeightContext(
                         self,
