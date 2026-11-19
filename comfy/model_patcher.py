@@ -55,9 +55,6 @@ class PromptModelTracker:
     def __init__(self):
         self.models = {}
 
-    def start(self):
-        self.end()
-
     def add(self, outputs):
         if isinstance(outputs, collections.abc.Mapping):
             outputs = outputs.values()

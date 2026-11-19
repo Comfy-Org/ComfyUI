@@ -381,22 +381,22 @@ def prompt_worker(q, server_instance, asset_manager):
 
                 asset_manager.pause_background_scan()
                 background_scan_paused = True
-                e.execute(item[2], prompt_id, extra_data, item[4])
+                run = e.execute(item[2], prompt_id, extra_data, item[4])
 
                 need_gc = True
 
                 remove_sensitive = lambda prompt: prompt[:5] + prompt[6:]
                 q.task_done(item_id,
-                            e.history_result,
+                            run.history_result,
                             status=execution.PromptQueue.ExecutionStatus(
-                                status_str='success' if e.success else 'error',
-                                completed=e.success,
-                                messages=e.status_messages), process_item=remove_sensitive)
+                                status_str='success' if run.success else 'error',
+                                completed=run.success,
+                                messages=run.status_messages), process_item=remove_sensitive)
                 if q.get_tasks_remaining() == 0:
                     # Nothing else is queued, so let the background scan run now rather than on the next GC tick.
                     asset_manager.resume_background_scan()
-                if server_instance.client_id is not None:
-                    server_instance.send_sync("executing", {"node": None, "prompt_id": prompt_id}, server_instance.client_id)
+                if run.client_id is not None:
+                    server_instance.send_sync("executing", {"node": None, "prompt_id": prompt_id}, run.client_id)
                 server_instance.workflow_metadata = {}
 
                 current_time = time.perf_counter()
@@ -409,7 +409,7 @@ def prompt_worker(q, server_instance, asset_manager):
                 else:
                     logging.info("Prompt executed in {:.2f} seconds".format(execution_time), extra={'color': 'green'})
 
-                job_hint = product_tips.get_relevant_job_hint(args, os.environ, e.success, extra_data)
+                job_hint = product_tips.get_relevant_job_hint(args, os.environ, run.success, extra_data)
                 if job_hint is not None:
                     logging.info(job_hint)
 
