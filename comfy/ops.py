@@ -182,130 +182,147 @@ def cast_modules_with_vbar(comfy_modules, dtype, device, bias_dtype, non_blockin
 
     group_faults = {}
     dropped_groups = []
-    for s in comfy_modules:
-        group = s._combined_linear
-        if group is not None and group._v_weight is not None and len(comfy_modules) == 1:
-            group._v_weight = None
-            for m in group.linears:
-                m._v_signature = None
-        if group is None or group._v_weight is None:
-            signature = comfy_aimdo.model_vbar.vbar_fault(s._v)
-            resident = comfy_aimdo.model_vbar.vbar_signature_compare(signature, s._v_signature)
-        else:
-            # A combined group's members hold each other's bytes, so one member's miss
-            # is a miss for all of them. Fault the peers now; each keeps that fault's
-            # pin as its own, so every member must be in comfy_modules. An uncombined
-            # group's members fault individually above, which also keeps the
-            # single-module cast path from pinning peers it never releases.
-            if s not in group_faults:
+    # Modules faulted with a pin but not yet marked with _prefetch. Cleanup only unpins marked
+    # modules, so if the cast fails part way these are released here before the error escapes.
+    unmarked_faults = {}
+    try:
+        for s in comfy_modules:
+            group = s._combined_linear
+            if group is not None and group._v_weight is not None and len(comfy_modules) == 1:
+                group._v_weight = None
                 for m in group.linears:
-                    signature = comfy_aimdo.model_vbar.vbar_fault(m._v)
-                    group_faults[m] = (signature, comfy_aimdo.model_vbar.vbar_signature_compare(signature, m._v_signature))
-                if not all(group_faults[m][1] for m in group.linears):
-                    # Dropped after the loop: a member that already holds its group fault
-                    # must not fall into the uncombined branch and take a second pin.
-                    dropped_groups.append(group)
+                    m._v_signature = None
+            if group is None or group._v_weight is None:
+                signature = comfy_aimdo.model_vbar.vbar_fault(s._v)
+                unmarked_faults[s] = signature
+                resident = comfy_aimdo.model_vbar.vbar_signature_compare(signature, s._v_signature)
+            else:
+                # A combined group's members hold each other's bytes, so one member's miss
+                # is a miss for all of them. Fault the peers now; each keeps that fault's
+                # pin as its own, so every member must be in comfy_modules. An uncombined
+                # group's members fault individually above, which also keeps the
+                # single-module cast path from pinning peers it never releases.
+                if s not in group_faults:
                     for m in group.linears:
-                        group_faults[m] = (group_faults[m][0], False)
-            signature, resident = group_faults.pop(s)
-        if return_faulted and (signature is None or not resident):
-            fully_faulted = False
-        prefetch = {
-            "signature": signature,
-            "resident": resident,
-        }
+                        signature = comfy_aimdo.model_vbar.vbar_fault(m._v)
+                        unmarked_faults[m] = signature
+                        group_faults[m] = (signature, comfy_aimdo.model_vbar.vbar_signature_compare(signature, m._v_signature))
+                    if not all(group_faults[m][1] for m in group.linears):
+                        # Dropped after the loop: a member that already holds its group fault
+                        # must not fall into the uncombined branch and take a second pin.
+                        dropped_groups.append(group)
+                        for m in group.linears:
+                            group_faults[m] = (group_faults[m][0], False)
+                signature, resident = group_faults.pop(s)
+            if return_faulted and (signature is None or not resident):
+                fully_faulted = False
+            prefetch = {
+                "signature": signature,
+                "resident": resident,
+            }
 
-        if resident:
-            s._prefetch = prefetch
-            continue
-
-        materialize_meta_param(s, ["weight", "bias"])
-        xfer_dest = comfy_aimdo.torch.aimdo_to_tensor(s._v, device) if signature is not None else None
-        cast_geometry = comfy.memory_management.tensors_to_geometries([ s.weight, s.bias ])
-        cast_dest = None
-        needs_cast = False
-
-        xfer_source = [ s.weight, s.bias ]
-        fast_disk = s._pin_state["fast_disk"]
-        subset = "weights-fast" if fast_disk else "weights"
-        pin = comfy.pinned_memory.get_pin(s, subset=subset)
-        if pin is None and not fast_disk:
-            loaded_pin = comfy.pinned_memory.get_pin(s, subset="weights-loaded")
-            if loaded_pin is not None or signature is not None:
-                subset = "weights-loaded"
-                pin = loaded_pin
-        if pin is not None:
-            xfer_source = [ pin ]
-
-        for data, geometry in zip([ s.weight, s.bias ], cast_geometry):
-            if data is None:
+            if resident:
+                s._prefetch = prefetch
+                unmarked_faults.pop(s, None)
                 continue
-            if data.dtype != geometry.dtype:
-                needs_cast = True
-                cast_dest = xfer_dest
-                xfer_dest = None
-                break
 
-        dest_size = comfy.memory_management.vram_aligned_size(xfer_source)
-        ensure_offload_stream(s, dest_size if xfer_dest is None else 0, True)
-        if xfer_dest is None:
-            xfer_dest = get_cast_buffer(dest_size)
+            materialize_meta_param(s, ["weight", "bias"])
+            xfer_dest = comfy_aimdo.torch.aimdo_to_tensor(s._v, device) if signature is not None else None
+            cast_geometry = comfy.memory_management.tensors_to_geometries([ s.weight, s.bias ])
+            cast_dest = None
+            needs_cast = False
 
-        def cast_maybe_lowvram_patch(xfer_source, xfer_dest, stream, xfer_dest2=None):
-            if xfer_source is not None:
-                if getattr(xfer_source, "is_lowvram_patch", False):
-                    if xfer_dest is not None:
-                        xfer_source.prepare(xfer_dest, stream, copy=True, commit=False)
-                        xfer_source = [ xfer_dest ]
-                        xfer_dest = xfer_dest2
-                        xfer_dest2 = None
-                    elif xfer_dest2 is not None:
-                        xfer_source.prepare(xfer_dest2, stream, copy=True, commit=False)
-                        return
-                    else:
-                        return
-                comfy.model_management.cast_to_gathered(xfer_source, xfer_dest, non_blocking=non_blocking, stream=stream, r2=xfer_dest2)
-
-        def handle_pin(m, pin, source, dest, subset="weights", size=None):
+            xfer_source = [ s.weight, s.bias ]
+            fast_disk = s._pin_state["fast_disk"]
+            subset = "weights-fast" if fast_disk else "weights"
+            pin = comfy.pinned_memory.get_pin(s, subset=subset)
+            if pin is None and not fast_disk:
+                loaded_pin = comfy.pinned_memory.get_pin(s, subset="weights-loaded")
+                if loaded_pin is not None or signature is not None:
+                    subset = "weights-loaded"
+                    pin = loaded_pin
             if pin is not None:
-                cast_maybe_lowvram_patch([pin], dest, offload_stream)
-                return
-            if signature is None or not fast_disk or args.high_ram:
-                comfy.pinned_memory.pin_memory(m, subset=subset, size=size)
-                pin = comfy.pinned_memory.get_pin(m, subset=subset)
-            cast_maybe_lowvram_patch(source, pin, offload_stream, xfer_dest2=dest)
+                xfer_source = [ pin ]
 
-        if not isinstance(s, WritableWeight) or s.read_before_write:
-            handle_pin(s, pin, xfer_source, xfer_dest, subset=subset, size=dest_size)
+            for data, geometry in zip([ s.weight, s.bias ], cast_geometry):
+                if data is None:
+                    continue
+                if data.dtype != geometry.dtype:
+                    needs_cast = True
+                    cast_dest = xfer_dest
+                    xfer_dest = None
+                    break
 
-        for param_key in ("weight", "bias"):
-            lowvram_source = getattr(s, param_key + "_lowvram_function", None)
-            if lowvram_source is not None:
-                ensure_offload_stream(s, cast_buffer_offset, False)
-                lowvram_size = lowvram_source.memory_required()
-                lowvram_dest = get_cast_buffer(lowvram_size)
-                lowvram_source.prepare(lowvram_dest, None, copy=False, commit=True)
+            dest_size = comfy.memory_management.vram_aligned_size(xfer_source)
+            ensure_offload_stream(s, dest_size if xfer_dest is None else 0, True)
+            if xfer_dest is None:
+                xfer_dest = get_cast_buffer(dest_size)
 
-                subset = "patches-fast" if fast_disk else "patches"
-                pin = comfy.pinned_memory.get_pin(lowvram_source, subset=subset)
-                if pin is None and not fast_disk:
-                    loaded_pin = comfy.pinned_memory.get_pin(lowvram_source, subset="patches-loaded")
-                    if loaded_pin is not None:
-                        subset = "patches-loaded"
-                        pin = loaded_pin
-                    elif signature is not None:
-                        subset = "patches-loaded"
-                handle_pin(lowvram_source, pin, lowvram_source, lowvram_dest, subset=subset, size=lowvram_size)
+            def cast_maybe_lowvram_patch(xfer_source, xfer_dest, stream, xfer_dest2=None):
+                if xfer_source is not None:
+                    if getattr(xfer_source, "is_lowvram_patch", False):
+                        if xfer_dest is not None:
+                            xfer_source.prepare(xfer_dest, stream, copy=True, commit=False)
+                            xfer_source = [ xfer_dest ]
+                            xfer_dest = xfer_dest2
+                            xfer_dest2 = None
+                        elif xfer_dest2 is not None:
+                            xfer_source.prepare(xfer_dest2, stream, copy=True, commit=False)
+                            return
+                        else:
+                            return
+                    comfy.model_management.cast_to_gathered(xfer_source, xfer_dest, non_blocking=non_blocking, stream=stream, r2=xfer_dest2)
+
+            def handle_pin(m, pin, source, dest, subset="weights", size=None):
+                if pin is not None:
+                    cast_maybe_lowvram_patch([pin], dest, offload_stream)
+                    return
+                if signature is None or not fast_disk or args.high_ram:
+                    comfy.pinned_memory.pin_memory(m, subset=subset, size=size)
+                    pin = comfy.pinned_memory.get_pin(m, subset=subset)
+                cast_maybe_lowvram_patch(source, pin, offload_stream, xfer_dest2=dest)
+
+            if not isinstance(s, WritableWeight) or s.read_before_write:
+                handle_pin(s, pin, xfer_source, xfer_dest, subset=subset, size=dest_size)
+
+            for param_key in ("weight", "bias"):
+                lowvram_source = getattr(s, param_key + "_lowvram_function", None)
+                if lowvram_source is not None:
+                    ensure_offload_stream(s, cast_buffer_offset, False)
+                    lowvram_size = lowvram_source.memory_required()
+                    lowvram_dest = get_cast_buffer(lowvram_size)
+                    lowvram_source.prepare(lowvram_dest, None, copy=False, commit=True)
+
+                    subset = "patches-fast" if fast_disk else "patches"
+                    pin = comfy.pinned_memory.get_pin(lowvram_source, subset=subset)
+                    if pin is None and not fast_disk:
+                        loaded_pin = comfy.pinned_memory.get_pin(lowvram_source, subset="patches-loaded")
+                        if loaded_pin is not None:
+                            subset = "patches-loaded"
+                            pin = loaded_pin
+                        elif signature is not None:
+                            subset = "patches-loaded"
+                    handle_pin(lowvram_source, pin, lowvram_source, lowvram_dest, subset=subset, size=lowvram_size)
 
 
-        prefetch["xfer_dest"] = xfer_dest
-        prefetch["cast_dest"] = cast_dest
-        prefetch["cast_geometry"] = cast_geometry
-        prefetch["needs_cast"] = needs_cast
-        s._prefetch = prefetch
-
-    for group in dropped_groups:
-        group._v_weight = None
+            prefetch["xfer_dest"] = xfer_dest
+            prefetch["cast_dest"] = cast_dest
+            prefetch["cast_geometry"] = cast_geometry
+            prefetch["needs_cast"] = needs_cast
+            s._prefetch = prefetch
+            unmarked_faults.pop(s, None)
+    except BaseException:
+        for m, fault_signature in unmarked_faults.items():
+            if fault_signature is None:
+                continue
+            try:
+                comfy_aimdo.model_vbar.vbar_unpin(m._v)
+            except Exception:
+                logging.exception("Failed to unpin a module after a failed cast")
+        raise
+    finally:
+        for group in dropped_groups:
+            group._v_weight = None
     if return_faulted:
         return offload_stream, fully_faulted
     return offload_stream
