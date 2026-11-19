@@ -40,6 +40,8 @@ reviews:
         conventional-commit type and provider apply. Do not require this
         prefix for unrelated changes, even when they touch shared API-node
         infrastructure or tests.
+    docstrings:
+      mode: "off"
 
   path_filters:
     - "!comfy_api_nodes/apis/**"
@@ -118,10 +120,6 @@ reviews:
       enabled: false
     unit_tests:
       enabled: false
-
-  pre_merge_checks:
-    docstrings:
-      mode: "off"
 
   tools:
     ruff:
