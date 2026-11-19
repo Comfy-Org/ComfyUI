@@ -153,8 +153,9 @@ class ModelMergeBlocks:
         m = model1.clone()
         kp = model2.get_key_patches("diffusion_model.")
         default_ratio = next(iter(kwargs.values()))
+        patches_by_ratio = {}
 
-        for k in kp:
+        for k, patch in kp.items():
             ratio = default_ratio
             k_unet = k[len("diffusion_model."):]
 
@@ -164,7 +165,10 @@ class ModelMergeBlocks:
                     ratio = kwargs[arg]
                     last_arg_size = len(arg)
 
-            m.add_patches({k: kp[k]}, 1.0 - ratio, ratio)
+            patches_by_ratio.setdefault(ratio, {})[k] = patch
+
+        for ratio, patches in patches_by_ratio.items():
+            m.add_patches(patches, 1.0 - ratio, ratio)
         return (m, )
 
 def save_checkpoint(model, clip=None, vae=None, clip_vision=None, filename_prefix=None, output_dir=None, prompt=None, extra_pnginfo=None):
