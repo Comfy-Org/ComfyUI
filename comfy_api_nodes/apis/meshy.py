@@ -97,6 +97,30 @@ class MeshyMultiImageToModelRequest(BaseModel):
     moderation: bool = Field(False)
 
 
+class MeshySmartTopologyTextToModelRequest(BaseModel):
+    mode: str = Field("preview")
+    model_type: str = Field("smart-topology")
+    prompt: str = Field(...)
+    ai_model: str = Field(...)
+    target_polycount: int = Field(...)
+    pose_mode: str = Field(...)
+    seed: int = Field(...)
+
+
+class MeshySmartTopologyImageToModelRequest(BaseModel):
+    image_url: str = Field(...)
+    model_type: str = Field("smart-topology")
+    ai_model: str = Field(...)
+    target_polycount: int = Field(...)
+    should_texture: bool = Field(...)
+    enable_pbr: bool | None = Field(...)
+    texture_resolution: str | None = Field(...)
+    texture_prompt: str | None = Field(...)
+    texture_image_url: str | None = Field(...)
+    pose_mode: str = Field(...)
+    seed: int = Field(...)
+
+
 class MeshyRiggingRequest(BaseModel):
     input_task_id: str = Field(...)
     height_meters: float = Field(...)

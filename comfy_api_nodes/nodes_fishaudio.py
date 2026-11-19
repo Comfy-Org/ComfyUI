@@ -243,9 +243,7 @@ class FishAudioTextToSpeech(IO.ComfyNode):
                 expr="""
                 (
                   $t := widgets.text;
-                  $rate := widgets.model = "drama-3"
-                    ? ($now() < "2026-11-13T00:00:00.000Z" ? 14.3 : 35.75)
-                    : 21.45;
+                  $rate := widgets.model = "drama-3" ? 35.75 : 21.45;
                   $type($t) = "string"
                     ? (
                         $bytes := $length($t) + 2 * $count($match($t, /[^\\x00-\\x7F]/));
@@ -357,11 +355,13 @@ class FishAudioSpeechToText(IO.ComfyNode):
         audio_bytes_io = audio_ndarray_to_bytesio(audio_data_np, audio["sample_rate"], "mp4", "aac")
         response = await sync_op(
             cls,
-            ApiEndpoint(path="/proxy/fishaudio/v1/asr", method="POST"),
+            ApiEndpoint(path="/proxy/fishaudio/v1/asr", method="POST", headers={"model": "transcribe-1-pro"}),
             response_model=FishAudioASRResponse,
             data=FishAudioASRRequest(
                 language=language.strip() or None,
                 ignore_timestamps=not precise_timestamps,
+                diarize=False,
+                tag_audio_events=False,
             ),
             files={"audio": ("audio.mp4", audio_bytes_io, "audio/mp4")},
             content_type="multipart/form-data",

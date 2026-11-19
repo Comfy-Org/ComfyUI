@@ -683,6 +683,37 @@ class TestNormalizeHistoryItem:
             'extra_data': {'create_time': 1234567890, 'client_id': 'abc'},
         }
 
+    def test_include_outputs_returns_execution_meta(self):
+        """Detail view should expose each node's display node as execution_meta."""
+        meta = {
+            '15.0.0.3': {'node_id': '15.0.0.3', 'display_node': '15', 'parent_node': '15', 'real_node_id': '15'},
+            '9': {'node_id': '9', 'display_node': '9', 'parent_node': None, 'real_node_id': '9'},
+        }
+        history_item = {
+            'prompt': (5, 'prompt-meta', {}, {'create_time': 1234567890}, ['9']),
+            'status': {'status_str': 'success', 'completed': True, 'messages': []},
+            'outputs': {'9': {'images': [{'filename': 'a.png'}]}},
+            'meta': meta,
+        }
+
+        detail = normalize_history_item('prompt-meta', history_item, include_outputs=True)
+        summary = normalize_history_item('prompt-meta', history_item)
+
+        assert detail['execution_meta'] == meta
+        assert 'execution_meta' not in summary
+
+    def test_include_outputs_without_meta(self):
+        """History written before meta existed should still give an object."""
+        history_item = {
+            'prompt': (5, 'prompt-old', {}, {'create_time': 1234567890}, []),
+            'status': {'status_str': 'success', 'completed': True, 'messages': []},
+            'outputs': {},
+        }
+
+        job = normalize_history_item('prompt-old', history_item, include_outputs=True)
+
+        assert job['execution_meta'] == {}
+
     def test_include_outputs_normalizes_3d_strings(self):
         """Detail view should transform string 3D filenames into file output dicts."""
         history_item = {

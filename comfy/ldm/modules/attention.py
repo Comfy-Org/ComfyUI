@@ -79,6 +79,7 @@ class ComfyAttention(ConfigurableModule):
         super().__init__()
         self.config = None
         self.function = None
+        self.method = None
 
     def with_config(self, encoded_config):
         attention = ComfyAttention()
@@ -88,6 +89,7 @@ class ComfyAttention(ConfigurableModule):
     def _load_from_state_dict(self, state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs):
         self.config = None
         self.function = None
+        self.method = None
         metadata = state_dict.pop(prefix + "config", None)
         if metadata is not None:
             self.config = json.loads(metadata.numpy().tobytes())
@@ -103,6 +105,7 @@ class ComfyAttention(ConfigurableModule):
                 else:
                     logging.warning(f"Ignoring unknown attention method {method!r} for {prefix.rstrip('.')}")
                 if self.function is not None:
+                    self.method = method
                     break
         super()._load_from_state_dict(state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs)
 
