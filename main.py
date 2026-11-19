@@ -360,6 +360,52 @@ def prompt_worker(q, server_instance, asset_manager):
     gc_collect_interval = 10.0
     background_scan_paused = False
 
+    def run_prompt(item, item_id):
+        nonlocal current_time, need_gc, background_scan_paused
+        execution_start_time = time.perf_counter()
+        prompt_id = item[1]
+        server_instance.last_prompt_id = prompt_id
+        server_instance.workflow_metadata = item[3].get("workflow_metadata", {})
+
+        sensitive = item[5]
+        extra_data = item[3].copy()
+        for k in sensitive:
+            extra_data[k] = sensitive[k]
+
+        asset_manager.pause_background_scan()
+        background_scan_paused = True
+        run = e.execute(item[2], prompt_id, extra_data, item[4])
+
+        need_gc = True
+
+        remove_sensitive = lambda prompt: prompt[:5] + prompt[6:]
+        q.task_done(item_id,
+                    run.history_result,
+                    status=execution.PromptQueue.ExecutionStatus(
+                        status_str='success' if run.success else 'error',
+                        completed=run.success,
+                        messages=run.status_messages), process_item=remove_sensitive)
+        if q.get_tasks_remaining() == 0:
+            # Nothing else is queued, so let the background scan run now rather than on the next GC tick.
+            asset_manager.resume_background_scan()
+        if run.client_id is not None:
+            server_instance.send_sync("executing", {"node": None, "prompt_id": prompt_id}, run.client_id)
+        server_instance.workflow_metadata = {}
+
+        current_time = time.perf_counter()
+        execution_time = current_time - execution_start_time
+
+        # Log Time in a more readable way after 10 minutes
+        if execution_time > 600:
+            execution_time = time.strftime("%H:%M:%S", time.gmtime(execution_time))
+            logging.info(f"Prompt executed in {execution_time}", extra={'color': 'green'})
+        else:
+            logging.info("Prompt executed in {:.2f} seconds".format(execution_time), extra={'color': 'green'})
+
+        job_hint = product_tips.get_relevant_job_hint(args, os.environ, run.success, extra_data)
+        if job_hint is not None:
+            logging.info(job_hint)
+
     while True:
         try:
             timeout = 1000.0
@@ -369,49 +415,7 @@ def prompt_worker(q, server_instance, asset_manager):
             queue_item = q.get(timeout=timeout)
             if queue_item is not None:
                 item, item_id = queue_item
-                execution_start_time = time.perf_counter()
-                prompt_id = item[1]
-                server_instance.last_prompt_id = prompt_id
-                server_instance.workflow_metadata = item[3].get("workflow_metadata", {})
-
-                sensitive = item[5]
-                extra_data = item[3].copy()
-                for k in sensitive:
-                    extra_data[k] = sensitive[k]
-
-                asset_manager.pause_background_scan()
-                background_scan_paused = True
-                run = e.execute(item[2], prompt_id, extra_data, item[4])
-
-                need_gc = True
-
-                remove_sensitive = lambda prompt: prompt[:5] + prompt[6:]
-                q.task_done(item_id,
-                            run.history_result,
-                            status=execution.PromptQueue.ExecutionStatus(
-                                status_str='success' if run.success else 'error',
-                                completed=run.success,
-                                messages=run.status_messages), process_item=remove_sensitive)
-                if q.get_tasks_remaining() == 0:
-                    # Nothing else is queued, so let the background scan run now rather than on the next GC tick.
-                    asset_manager.resume_background_scan()
-                if run.client_id is not None:
-                    server_instance.send_sync("executing", {"node": None, "prompt_id": prompt_id}, run.client_id)
-                server_instance.workflow_metadata = {}
-
-                current_time = time.perf_counter()
-                execution_time = current_time - execution_start_time
-
-                # Log Time in a more readable way after 10 minutes
-                if execution_time > 600:
-                    execution_time = time.strftime("%H:%M:%S", time.gmtime(execution_time))
-                    logging.info(f"Prompt executed in {execution_time}", extra={'color': 'green'})
-                else:
-                    logging.info("Prompt executed in {:.2f} seconds".format(execution_time), extra={'color': 'green'})
-
-                job_hint = product_tips.get_relevant_job_hint(args, os.environ, run.success, extra_data)
-                if job_hint is not None:
-                    logging.info(job_hint)
+                run_prompt(item, item_id)
 
             flags = q.get_flags()
             free_memory = flags.get("free_memory", False)
