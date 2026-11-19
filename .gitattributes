@@ -1,3 +1,6 @@
 /web/assets/** linguist-generated
 /web/** linguist-vendored
 comfy_api_nodes/apis/__init__.py linguist-generated
+
+# The GGUF patches retain the upstream CRLF lines and unified diff context markers.
+extra/iris-xe/*.patch -text whitespace=cr-at-eol,-blank-at-eol
