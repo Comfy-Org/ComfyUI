@@ -14,6 +14,7 @@ from comfy.cli_args import args
 if not torch.cuda.is_available():
     args.cpu = True
 
+import comfy.model_management  # noqa: E402
 import comfy.model_prefetch  # noqa: E402
 import comfy.ops  # noqa: E402
 
@@ -152,3 +153,24 @@ def test_prefix_cache_layer_cleans_slots_when_pinning_fails(monkeypatch):
         with cache.layer(0, "cpu", write=False):
             pass
     assert cleaned == [slot]
+
+
+def test_direct_cast_resolve_failure_releases_pin_and_marker(vbar, monkeypatch):
+    s = _module("weight")
+    s.weight = torch.zeros(4)
+    s.bias = None
+
+    def cast(modules, *args, **kwargs):
+        for m in modules:
+            m._prefetch = {"signature": comfy.ops.comfy_aimdo.model_vbar.vbar_fault(m._v), "resident": False}
+
+    def resolve(*args, **kwargs):
+        raise RuntimeError("Allocation on device failed")
+    monkeypatch.setattr(comfy.model_management, "is_device_cpu", lambda device: False)
+    monkeypatch.setattr(comfy.model_management, "sync_stream", lambda device, stream: None)
+    monkeypatch.setattr(comfy.ops, "cast_modules_with_vbar", cast)
+    monkeypatch.setattr(comfy.ops, "resolve_cast_module_with_vbar", resolve)
+    with pytest.raises(RuntimeError, match="Allocation on device failed"):
+        comfy.ops.cast_bias_weight(s, dtype=torch.float32, device=torch.device("meta"), bias_dtype=torch.float32, offloadable=True)
+    assert vbar.pinned == []
+    assert not hasattr(s, "_prefetch")

@@ -222,8 +222,9 @@ def cast_modules_with_vbar(comfy_modules, dtype, device, bias_dtype, non_blockin
             }
 
             if resident:
-                s._prefetch = prefetch
+                # Untrack before marking: an interrupt in between may leak the pin, never unpin it twice.
                 unmarked_faults.pop(s, None)
+                s._prefetch = prefetch
                 continue
 
             materialize_meta_param(s, ["weight", "bias"])
@@ -309,8 +310,8 @@ def cast_modules_with_vbar(comfy_modules, dtype, device, bias_dtype, non_blockin
             prefetch["cast_dest"] = cast_dest
             prefetch["cast_geometry"] = cast_geometry
             prefetch["needs_cast"] = needs_cast
-            s._prefetch = prefetch
             unmarked_faults.pop(s, None)
+            s._prefetch = prefetch
     except BaseException:
         for m, fault_signature in unmarked_faults.items():
             if fault_signature is None:
@@ -437,9 +438,19 @@ def cast_bias_weight(s, input=None, dtype=None, device=None, bias_dtype=None, of
         offload_device = None
         if not prefetched:
             offload_stream = cast_modules_with_vbar([s], dtype, device, bias_dtype, non_blocking)
-            comfy.model_management.sync_stream(device, offload_stream)
-
-        weight, bias = resolve_cast_module_with_vbar(s, dtype, device, bias_dtype, compute_dtype, want_requant)
+        try:
+            if not prefetched:
+                comfy.model_management.sync_stream(device, offload_stream)
+            weight, bias = resolve_cast_module_with_vbar(s, dtype, device, bias_dtype, compute_dtype, want_requant)
+        except BaseException:
+            if not prefetched:
+                # The cast pinned and marked s. Release both, or the next cast reuses the stale marker.
+                import comfy.model_prefetch as model_prefetch  # model_prefetch imports this module
+                try:
+                    model_prefetch.cleanup_prefetched_modules(None, [s])
+                except Exception:
+                    logging.exception("Failed to clean up a module after a failed cast")
+            raise
 
         if not prefetched:
             if getattr(s, "_prefetch")["signature"] is not None:
