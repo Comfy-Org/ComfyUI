@@ -893,7 +893,11 @@ class ModelPatcher:
                     continue
             bk = self.backup.get(k, None)
             hbk = self.hook_backup.get(k, None)
-            weight, set_func, convert_func = get_key_weight(self.model, k)
+            try:
+                weight, set_func, convert_func = get_key_weight(self.model, k)
+            except AttributeError as e:
+                logging.warning("Skipping state dict key %s during patch collection (%s)", k, e)
+                continue
             if not isinstance(weight, torch.Tensor):
                 continue
             if bk is not None:
