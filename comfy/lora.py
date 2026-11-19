@@ -349,6 +349,15 @@ def model_lora_keys_unet(model, key_map={}):
                     key_map["transformer.{}".format(key_lora)] = to
                     key_map["lycoris_{}".format(key_lora.replace(".", "_"))] = to #SimpleTuner lycoris format
 
+    if isinstance(model, comfy.model_base.SenseNovaU15):
+        for k in sdk:
+            if k.startswith("diffusion_model.layers.") and k.endswith(".weight"):
+                parts = k[len("diffusion_model."):-len(".weight")].split(".")
+                parts[3 if parts[2] == "self_attn" else 2] += "_mot_gen"
+                key_lora = "language_model.model." + ".".join(parts)
+                key_map["diffusion_model.{}".format(key_lora)] = k
+                key_map["lora_unet_{}".format(key_lora.replace(".", "_"))] = k
+
     if isinstance(model, comfy.model_base.Flux3):
         for k in sdk:
             if k.endswith(".qkv.weight"):  # fused q/k/v files; LoRAs address the separate projections

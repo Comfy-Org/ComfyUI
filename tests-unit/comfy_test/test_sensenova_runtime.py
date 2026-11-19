@@ -361,6 +361,50 @@ def test_sensenova_checkpoint_and_clip_round_trip(small_sensenova, monkeypatch, 
         patched_clip.patcher.unpatch_model()
 
 
+@pytest.mark.parametrize("key_format", ["current", "legacy", "legacy_flat"])
+def test_sensenova_generation_lora_legacy_keys(small_sensenova, key_format, caplog):
+    config = comfy.supported_models.SenseNovaU15({"image_model": "sensenova_u15"})
+    config.set_inference_dtype(torch.float32, None)
+    base = config.get_model({}, device=torch.device("cpu"))
+    model = comfy.model_patcher.ModelPatcher(base, load_device=torch.device("cpu"), offload_device=torch.device("cpu"))
+    modules = (
+        ("self_attn.q_proj", "self_attn.q_proj_mot_gen"),
+        ("self_attn.k_proj", "self_attn.k_proj_mot_gen"),
+        ("self_attn.v_proj", "self_attn.v_proj_mot_gen"),
+        ("self_attn.o_proj", "self_attn.o_proj_mot_gen"),
+        ("mlp.gate_proj", "mlp_mot_gen.gate_proj"),
+        ("mlp.up_proj", "mlp_mot_gen.up_proj"),
+        ("mlp.down_proj", "mlp_mot_gen.down_proj"),
+    )
+    weights = base.state_dict()
+    expected = set()
+    lora = {}
+    for layer in range(sensenova_model.NUM_LAYERS):
+        for current, legacy in modules:
+            target = f"diffusion_model.layers.{layer}.{current}.weight"
+            weights[target].zero_()
+            expected.add(target)
+            if key_format == "current":
+                key = target.removesuffix(".weight")
+            else:
+                key = f"language_model.model.layers.{layer}.{legacy}"
+                key = "lora_unet_" + key.replace(".", "_") if key_format == "legacy_flat" else "diffusion_model." + key
+            rows, columns = weights[target].shape
+            lora[key + ".lora_up.weight"] = torch.ones(rows, 1)
+            lora[key + ".lora_down.weight"] = torch.ones(1, columns)
+            lora[key + ".alpha"] = torch.tensor(2.0)
+    patched, _ = comfy.sd.load_lora_for_models(model, None, lora, 0.25, 0.0)
+    assert set(patched.patches) == expected
+    assert not model.patches
+    assert "lora key not loaded" not in caplog.text
+    try:
+        comfy.model_management.load_models_gpu([patched], force_full_load=True)
+        for key in expected:
+            torch.testing.assert_close(base.state_dict()[key], torch.full_like(weights[key], 0.5))
+    finally:
+        patched.unpatch_model()
+
+
 @pytest.mark.parametrize("component", ["model", "clip", "vae", "diffusion"])
 def test_sensenova_partial_checkpoint_loading(small_sensenova, monkeypatch, component, caplog):
     text = sensenova_model.SenseNovaTextModel(has_lm_head=True, operations=torch.nn)
