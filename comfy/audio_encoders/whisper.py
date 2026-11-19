@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import torchaudio
+import comfy.audio
 from typing import Optional
 from comfy.ldm.modules.attention import optimized_attention_masked
 import comfy.ops
@@ -16,15 +16,13 @@ class WhisperFeatureExtractor(nn.Module):
         self.chunk_length = 30
         self.n_samples = 480000
 
-        self.mel_spectrogram = torchaudio.transforms.MelSpectrogram(
+        self.mel_spectrogram = comfy.audio.MelSpectrogram(
             sample_rate=self.sample_rate,
             n_fft=self.n_fft,
             hop_length=self.hop_length,
             n_mels=self.n_mels,
             f_min=0,
             f_max=8000,
-            norm="slaney",
-            mel_scale="slaney",
         ).to(device)
 
     def __call__(self, audio):

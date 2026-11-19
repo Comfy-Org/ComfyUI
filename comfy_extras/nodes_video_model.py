@@ -15,7 +15,7 @@ class ImageOnlyCheckpointLoader:
     RETURN_TYPES = ("MODEL", "CLIP_VISION", "VAE")
     FUNCTION = "load_checkpoint"
 
-    CATEGORY = "loaders/video_models"
+    CATEGORY = "model/loaders"
 
     def load_checkpoint(self, ckpt_name, output_vae=True, output_clip=True):
         ckpt_path = folder_paths.get_full_path_or_raise("checkpoints", ckpt_name)
@@ -41,7 +41,7 @@ class SVD_img2vid_Conditioning:
 
     FUNCTION = "encode"
 
-    CATEGORY = "conditioning/video_models"
+    CATEGORY = "model/conditioning/stable video"
 
     def encode(self, clip_vision, init_image, vae, width, height, video_frames, motion_bucket_id, fps, augmentation_level):
         output = clip_vision.encode_image(init_image)
@@ -65,7 +65,7 @@ class VideoLinearCFGGuidance:
     RETURN_TYPES = ("MODEL",)
     FUNCTION = "patch"
 
-    CATEGORY = "sampling/video_models"
+    CATEGORY = "model/sampling/guiders"
 
     def patch(self, model, min_cfg):
         def linear_cfg(args):
@@ -89,7 +89,7 @@ class VideoTriangleCFGGuidance:
     RETURN_TYPES = ("MODEL",)
     FUNCTION = "patch"
 
-    CATEGORY = "sampling/video_models"
+    CATEGORY = "model/sampling/guiders"
 
     def patch(self, model, min_cfg):
         def linear_cfg(args):
@@ -108,7 +108,7 @@ class VideoTriangleCFGGuidance:
         return (m, )
 
 class ImageOnlyCheckpointSave(comfy_extras.nodes_model_merging.CheckpointSave):
-    CATEGORY = "advanced/model_merging"
+    CATEGORY = "model/merging"
 
     @classmethod
     def INPUT_TYPES(s):
@@ -138,7 +138,7 @@ class ConditioningSetAreaPercentageVideo:
     RETURN_TYPES = ("CONDITIONING",)
     FUNCTION = "append"
 
-    CATEGORY = "conditioning"
+    CATEGORY = "model/conditioning/transform"
 
     def append(self, conditioning, width, height, temporal, x, y, z, strength):
         c = node_helpers.conditioning_set_values(conditioning, {"area": ("percentage", temporal, height, width, z, y, x),
@@ -157,5 +157,8 @@ NODE_CLASS_MAPPINGS = {
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "ImageOnlyCheckpointLoader": "Image Only Checkpoint Loader (img2vid model)",
+    "ImageOnlyCheckpointLoader": "Load Checkpoint Image Only (img2vid model)",
+    "VideoLinearCFGGuidance": "Video Linear CFG Guidance",
+    "VideoTriangleCFGGuidance": "Video Triangle CFG Guidance",
+    "ConditioningSetAreaPercentageVideo": "Conditioning (Set Area with Percentage for Video)",
 }

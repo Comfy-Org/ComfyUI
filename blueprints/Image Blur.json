@@ -1,1 +1,382 @@
-{"revision": 0, "last_node_id": 8, "last_link_id": 0, "nodes": [{"id": 8, "type": "198632a3-ee76-4aab-9ce7-a69c624eaff9", "pos": [4470, -1840], "size": [210, 82], "flags": {}, "order": 3, "mode": 0, "inputs": [{"label": "image", "localized_name": "images.image0", "name": "images.image0", "type": "IMAGE", "link": null}], "outputs": [{"label": "blurred_image", "localized_name": "IMAGE0", "name": "IMAGE0", "type": "IMAGE", "links": []}], "properties": {"proxyWidgets": [["12", "choice"], ["10", "value"]]}, "widgets_values": [], "title": "Image Blur"}], "links": [], "version": 0.4, "definitions": {"subgraphs": [{"id": "198632a3-ee76-4aab-9ce7-a69c624eaff9", "version": 1, "state": {"lastGroupId": 0, "lastNodeId": 12, "lastLinkId": 11, "lastRerouteId": 0}, "revision": 0, "config": {}, "name": "Image Blur", "inputNode": {"id": -10, "bounding": [3540, -2445, 120, 60]}, "outputNode": {"id": -20, "bounding": [4620, -2445, 121.11666870117188, 60]}, "inputs": [{"id": "7ff2a402-6b11-45e8-a92a-7158d216520a", "name": "images.image0", "type": "IMAGE", "linkIds": [9], "localized_name": "images.image0", "label": "image", "pos": [3640, -2425]}], "outputs": [{"id": "80a8e19e-ffd9-44a5-90f2-710815a5b063", "name": "IMAGE0", "type": "IMAGE", "linkIds": [3], "localized_name": "IMAGE0", "label": "blurred_image", "pos": [4640, -2425]}], "widgets": [], "nodes": [{"id": 12, "type": "CustomCombo", "pos": [3720, -2620], "size": [270, 174], "flags": {}, "order": 0, "mode": 0, "inputs": [{"label": "blur_type", "localized_name": "choice", "name": "choice", "type": "COMBO", "widget": {"name": "choice"}, "link": null}], "outputs": [{"localized_name": "STRING", "name": "STRING", "type": "STRING", "links": null}, {"localized_name": "INDEX", "name": "INDEX", "type": "INT", "links": [11]}], "properties": {"Node name for S&R": "CustomCombo"}, "widgets_values": ["Gaussian", 0, "Gaussian", "Box", "Radial", ""]}, {"id": 10, "type": "PrimitiveFloat", "pos": [4020, -2780], "size": [270, 58], "flags": {}, "order": 1, "mode": 0, "inputs": [{"label": "strength", "localized_name": "value", "name": "value", "type": "FLOAT", "widget": {"name": "value"}, "link": null}], "outputs": [{"localized_name": "FLOAT", "name": "FLOAT", "type": "FLOAT", "links": [10]}], "properties": {"Node name for S&R": "PrimitiveFloat", "max": 100, "min": 0}, "widgets_values": [20]}, {"id": 1, "type": "GLSLShader", "pos": [4020, -2670], "size": [430, 212], "flags": {}, "order": 2, "mode": 0, "inputs": [{"label": "image0", "localized_name": "images.image0", "name": "images.image0", "type": "IMAGE", "link": 9}, {"label": "image1", "localized_name": "images.image1", "name": "images.image1", "shape": 7, "type": "IMAGE", "link": null}, {"label": "u_float0", "localized_name": "floats.u_float0", "name": "floats.u_float0", "shape": 7, "type": "FLOAT", "link": 10}, {"label": "u_float1", "localized_name": "floats.u_float1", "name": "floats.u_float1", "shape": 7, "type": "FLOAT", "link": null}, {"label": "u_int0", "localized_name": "ints.u_int0", "name": "ints.u_int0", "shape": 7, "type": "INT", "link": 11}, {"label": "u_int1", "localized_name": "ints.u_int1", "name": "ints.u_int1", "shape": 7, "type": "INT", "link": null}, {"localized_name": "fragment_shader", "name": "fragment_shader", "type": "STRING", "widget": {"name": "fragment_shader"}, "link": null}, {"localized_name": "size_mode", "name": "size_mode", "type": "COMFY_DYNAMICCOMBO_V3", "widget": {"name": "size_mode"}, "link": null}], "outputs": [{"localized_name": "IMAGE0", "name": "IMAGE0", "type": "IMAGE", "links": [3]}, {"localized_name": "IMAGE1", "name": "IMAGE1", "type": "IMAGE", "links": []}, {"localized_name": "IMAGE2", "name": "IMAGE2", "type": "IMAGE", "links": []}, {"localized_name": "IMAGE3", "name": "IMAGE3", "type": "IMAGE", "links": []}], "properties": {"Node name for S&R": "GLSLShader"}, "widgets_values": ["#version 300 es\n#pragma passes 2\nprecision highp float;\n\n// Blur type constants\nconst int BLUR_GAUSSIAN = 0;\nconst int BLUR_BOX = 1;\nconst int BLUR_RADIAL = 2;\n\n// Radial blur config\nconst int RADIAL_SAMPLES = 12;\nconst float RADIAL_STRENGTH = 0.0003;\n\nuniform sampler2D u_image0;\nuniform vec2 u_resolution;\nuniform int u_int0;      // Blur type (BLUR_GAUSSIAN, BLUR_BOX, BLUR_RADIAL)\nuniform float u_float0;  // Blur radius/amount\nuniform int u_pass;      // Pass index (0 = horizontal, 1 = vertical)\n\nin vec2 v_texCoord;\nlayout(location = 0) out vec4 fragColor0;\n\nfloat gaussian(float x, float sigma) {\n    return exp(-(x * x) / (2.0 * sigma * sigma));\n}\n\nvoid main() {\n    vec2 texelSize = 1.0 / u_resolution;\n    float radius = max(u_float0, 0.0);\n\n    // Radial (angular) blur - single pass, doesn't use separable\n    if (u_int0 == BLUR_RADIAL) {\n        // Only execute on first pass\n        if (u_pass > 0) {\n            fragColor0 = texture(u_image0, v_texCoord);\n            return;\n        }\n\n        vec2 center = vec2(0.5);\n        vec2 dir = v_texCoord - center;\n        float dist = length(dir);\n\n        if (dist < 1e-4) {\n            fragColor0 = texture(u_image0, v_texCoord);\n            return;\n        }\n\n        vec4 sum = vec4(0.0);\n        float totalWeight = 0.0;\n        float angleStep = radius * RADIAL_STRENGTH;\n\n        dir /= dist;\n\n        float cosStep = cos(angleStep);\n        float sinStep = sin(angleStep);\n\n        float negAngle = -float(RADIAL_SAMPLES) * angleStep;\n        vec2 rotDir = vec2(\n            dir.x * cos(negAngle) - dir.y * sin(negAngle),\n            dir.x * sin(negAngle) + dir.y * cos(negAngle)\n        );\n\n        for (int i = -RADIAL_SAMPLES; i <= RADIAL_SAMPLES; i++) {\n            vec2 uv = center + rotDir * dist;\n            float w = 1.0 - abs(float(i)) / float(RADIAL_SAMPLES);\n            sum += texture(u_image0, uv) * w;\n            totalWeight += w;\n\n            rotDir = vec2(\n                rotDir.x * cosStep - rotDir.y * sinStep,\n                rotDir.x * sinStep + rotDir.y * cosStep\n            );\n        }\n\n        fragColor0 = sum / max(totalWeight, 0.001);\n        return;\n    }\n\n    // Separable Gaussian / Box blur\n    int samples = int(ceil(radius));\n\n    if (samples == 0) {\n        fragColor0 = texture(u_image0, v_texCoord);\n        return;\n    }\n\n    // Direction: pass 0 = horizontal, pass 1 = vertical\n    vec2 dir = (u_pass == 0) ? vec2(1.0, 0.0) : vec2(0.0, 1.0);\n\n    vec4 color = vec4(0.0);\n    float totalWeight = 0.0;\n    float sigma = radius / 2.0;\n\n    for (int i = -samples; i <= samples; i++) {\n        vec2 offset = dir * float(i) * texelSize;\n        vec4 sample_color = texture(u_image0, v_texCoord + offset);\n\n        float weight;\n        if (u_int0 == BLUR_GAUSSIAN) {\n            weight = gaussian(float(i), sigma);\n        } else {\n            // BLUR_BOX\n            weight = 1.0;\n        }\n\n        color += sample_color * weight;\n        totalWeight += weight;\n    }\n\n    fragColor0 = color / totalWeight;\n}\n", "from_input"]}], "groups": [], "links": [{"id": 10, "origin_id": 10, "origin_slot": 0, "target_id": 1, "target_slot": 2, "type": "FLOAT"}, {"id": 11, "origin_id": 12, "origin_slot": 1, "target_id": 1, "target_slot": 4, "type": "INT"}, {"id": 9, "origin_id": -10, "origin_slot": 0, "target_id": 1, "target_slot": 0, "type": "IMAGE"}, {"id": 3, "origin_id": 1, "origin_slot": 0, "target_id": -20, "target_slot": 0, "type": "IMAGE"}], "extra": {"workflowRendererVersion": "LG"}, "category": "Image Tools/Blur"}]}}
+{
+  "revision": 0,
+  "last_node_id": 8,
+  "last_link_id": 0,
+  "nodes": [
+    {
+      "id": 8,
+      "type": "198632a3-ee76-4aab-9ce7-a69c624eaff9",
+      "pos": [
+        4470,
+        -1840
+      ],
+      "size": [
+        210,
+        82
+      ],
+      "flags": {},
+      "order": 3,
+      "mode": 0,
+      "inputs": [
+        {
+          "label": "image",
+          "localized_name": "images.image0",
+          "name": "images.image0",
+          "type": "IMAGE",
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "label": "blurred_image",
+          "localized_name": "IMAGE0",
+          "name": "IMAGE0",
+          "type": "IMAGE",
+          "links": []
+        }
+      ],
+      "properties": {
+        "proxyWidgets": [
+          [
+            "12",
+            "choice"
+          ],
+          [
+            "10",
+            "value"
+          ]
+        ]
+      },
+      "widgets_values": [],
+      "title": "Image Blur"
+    }
+  ],
+  "links": [],
+  "version": 0.4,
+  "definitions": {
+    "subgraphs": [
+      {
+        "id": "198632a3-ee76-4aab-9ce7-a69c624eaff9",
+        "version": 1,
+        "state": {
+          "lastGroupId": 0,
+          "lastNodeId": 12,
+          "lastLinkId": 11,
+          "lastRerouteId": 0
+        },
+        "revision": 0,
+        "config": {},
+        "name": "Image Blur",
+        "inputNode": {
+          "id": -10,
+          "bounding": [
+            3540,
+            -2445,
+            120,
+            60
+          ]
+        },
+        "outputNode": {
+          "id": -20,
+          "bounding": [
+            4620,
+            -2445,
+            121.11666870117188,
+            60
+          ]
+        },
+        "inputs": [
+          {
+            "id": "7ff2a402-6b11-45e8-a92a-7158d216520a",
+            "name": "images.image0",
+            "type": "IMAGE",
+            "linkIds": [
+              9
+            ],
+            "localized_name": "images.image0",
+            "label": "image",
+            "pos": [
+              3640,
+              -2425
+            ]
+          }
+        ],
+        "outputs": [
+          {
+            "id": "80a8e19e-ffd9-44a5-90f2-710815a5b063",
+            "name": "IMAGE0",
+            "type": "IMAGE",
+            "linkIds": [
+              3
+            ],
+            "localized_name": "IMAGE0",
+            "label": "blurred_image",
+            "pos": [
+              4640,
+              -2425
+            ]
+          }
+        ],
+        "widgets": [],
+        "nodes": [
+          {
+            "id": 12,
+            "type": "CustomCombo",
+            "pos": [
+              3720,
+              -2620
+            ],
+            "size": [
+              270,
+              174
+            ],
+            "flags": {},
+            "order": 0,
+            "mode": 0,
+            "inputs": [
+              {
+                "label": "blur_type",
+                "localized_name": "choice",
+                "name": "choice",
+                "type": "COMBO",
+                "widget": {
+                  "name": "choice"
+                },
+                "link": null
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "STRING",
+                "name": "STRING",
+                "type": "STRING",
+                "links": null
+              },
+              {
+                "localized_name": "INDEX",
+                "name": "INDEX",
+                "type": "INT",
+                "links": [
+                  11
+                ]
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "CustomCombo"
+            },
+            "widgets_values": [
+              "Gaussian",
+              0,
+              "Gaussian",
+              "Box",
+              "Radial",
+              ""
+            ]
+          },
+          {
+            "id": 10,
+            "type": "PrimitiveFloat",
+            "pos": [
+              4020,
+              -2780
+            ],
+            "size": [
+              270,
+              58
+            ],
+            "flags": {},
+            "order": 1,
+            "mode": 0,
+            "inputs": [
+              {
+                "label": "strength",
+                "localized_name": "value",
+                "name": "value",
+                "type": "FLOAT",
+                "widget": {
+                  "name": "value"
+                },
+                "link": null
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "FLOAT",
+                "name": "FLOAT",
+                "type": "FLOAT",
+                "links": [
+                  10
+                ]
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "PrimitiveFloat",
+              "max": 100,
+              "min": 0
+            },
+            "widgets_values": [
+              20
+            ]
+          },
+          {
+            "id": 1,
+            "type": "GLSLShader",
+            "pos": [
+              4020,
+              -2670
+            ],
+            "size": [
+              430,
+              212
+            ],
+            "flags": {},
+            "order": 2,
+            "mode": 0,
+            "inputs": [
+              {
+                "label": "image0",
+                "localized_name": "images.image0",
+                "name": "images.image0",
+                "type": "IMAGE",
+                "link": 9
+              },
+              {
+                "label": "image1",
+                "localized_name": "images.image1",
+                "name": "images.image1",
+                "shape": 7,
+                "type": "IMAGE",
+                "link": null
+              },
+              {
+                "label": "u_float0",
+                "localized_name": "floats.u_float0",
+                "name": "floats.u_float0",
+                "shape": 7,
+                "type": "FLOAT",
+                "link": 10
+              },
+              {
+                "label": "u_float1",
+                "localized_name": "floats.u_float1",
+                "name": "floats.u_float1",
+                "shape": 7,
+                "type": "FLOAT",
+                "link": null
+              },
+              {
+                "label": "u_int0",
+                "localized_name": "ints.u_int0",
+                "name": "ints.u_int0",
+                "shape": 7,
+                "type": "INT",
+                "link": 11
+              },
+              {
+                "label": "u_int1",
+                "localized_name": "ints.u_int1",
+                "name": "ints.u_int1",
+                "shape": 7,
+                "type": "INT",
+                "link": null
+              },
+              {
+                "localized_name": "fragment_shader",
+                "name": "fragment_shader",
+                "type": "STRING",
+                "widget": {
+                  "name": "fragment_shader"
+                },
+                "link": null
+              },
+              {
+                "localized_name": "size_mode",
+                "name": "size_mode",
+                "type": "COMFY_DYNAMICCOMBO_V3",
+                "widget": {
+                  "name": "size_mode"
+                },
+                "link": null
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "IMAGE0",
+                "name": "IMAGE0",
+                "type": "IMAGE",
+                "links": [
+                  3
+                ]
+              },
+              {
+                "localized_name": "IMAGE1",
+                "name": "IMAGE1",
+                "type": "IMAGE",
+                "links": []
+              },
+              {
+                "localized_name": "IMAGE2",
+                "name": "IMAGE2",
+                "type": "IMAGE",
+                "links": []
+              },
+              {
+                "localized_name": "IMAGE3",
+                "name": "IMAGE3",
+                "type": "IMAGE",
+                "links": []
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "GLSLShader"
+            },
+            "widgets_values": [
+              "#version 300 es\n#pragma passes 2\nprecision highp float;\n\n// Blur type constants\nconst int BLUR_GAUSSIAN = 0;\nconst int BLUR_BOX = 1;\nconst int BLUR_RADIAL = 2;\n\n// Radial blur config\nconst int RADIAL_SAMPLES = 12;\nconst float RADIAL_STRENGTH = 0.0003;\n\nuniform sampler2D u_image0;\nuniform int u_int0;      // Blur type (BLUR_GAUSSIAN, BLUR_BOX, BLUR_RADIAL)\nuniform float u_float0;  // Blur radius/amount\nuniform int u_pass;      // Pass index (0 = horizontal, 1 = vertical)\n\nin vec2 v_texCoord;\nlayout(location = 0) out vec4 fragColor0;\n\nfloat gaussian(float x, float sigma) {\n    return exp(-(x * x) / (2.0 * sigma * sigma));\n}\n\nvoid main() {\n    vec2 texelSize = 1.0 / vec2(textureSize(u_image0, 0));\n    float radius = max(u_float0, 0.0);\n\n    // Radial (angular) blur - single pass, doesn't use separable\n    if (u_int0 == BLUR_RADIAL) {\n        // Only execute on first pass\n        if (u_pass > 0) {\n            fragColor0 = texture(u_image0, v_texCoord);\n            return;\n        }\n\n        vec2 center = vec2(0.5);\n        vec2 dir = v_texCoord - center;\n        float dist = length(dir);\n\n        if (dist < 1e-4) {\n            fragColor0 = texture(u_image0, v_texCoord);\n            return;\n        }\n\n        vec4 sum = vec4(0.0);\n        float totalWeight = 0.0;\n        float angleStep = radius * RADIAL_STRENGTH;\n\n        dir /= dist;\n\n        float cosStep = cos(angleStep);\n        float sinStep = sin(angleStep);\n\n        float negAngle = -float(RADIAL_SAMPLES) * angleStep;\n        vec2 rotDir = vec2(\n            dir.x * cos(negAngle) - dir.y * sin(negAngle),\n            dir.x * sin(negAngle) + dir.y * cos(negAngle)\n        );\n\n        for (int i = -RADIAL_SAMPLES; i <= RADIAL_SAMPLES; i++) {\n            vec2 uv = center + rotDir * dist;\n            float w = 1.0 - abs(float(i)) / float(RADIAL_SAMPLES);\n            sum += texture(u_image0, uv) * w;\n            totalWeight += w;\n\n            rotDir = vec2(\n                rotDir.x * cosStep - rotDir.y * sinStep,\n                rotDir.x * sinStep + rotDir.y * cosStep\n            );\n        }\n\n        fragColor0 = sum / max(totalWeight, 0.001);\n        return;\n    }\n\n    // Separable Gaussian / Box blur\n    int samples = int(ceil(radius));\n\n    if (samples == 0) {\n        fragColor0 = texture(u_image0, v_texCoord);\n        return;\n    }\n\n    // Direction: pass 0 = horizontal, pass 1 = vertical\n    vec2 dir = (u_pass == 0) ? vec2(1.0, 0.0) : vec2(0.0, 1.0);\n\n    vec4 color = vec4(0.0);\n    float totalWeight = 0.0;\n    float sigma = radius / 2.0;\n\n    for (int i = -samples; i <= samples; i++) {\n        vec2 offset = dir * float(i) * texelSize;\n        vec4 sample_color = texture(u_image0, v_texCoord + offset);\n\n        float weight;\n        if (u_int0 == BLUR_GAUSSIAN) {\n            weight = gaussian(float(i), sigma);\n        } else {\n            // BLUR_BOX\n            weight = 1.0;\n        }\n\n        color += sample_color * weight;\n        totalWeight += weight;\n    }\n\n    fragColor0 = color / totalWeight;\n}\n",
+              "from_input"
+            ]
+          }
+        ],
+        "groups": [],
+        "links": [
+          {
+            "id": 10,
+            "origin_id": 10,
+            "origin_slot": 0,
+            "target_id": 1,
+            "target_slot": 2,
+            "type": "FLOAT"
+          },
+          {
+            "id": 11,
+            "origin_id": 12,
+            "origin_slot": 1,
+            "target_id": 1,
+            "target_slot": 4,
+            "type": "INT"
+          },
+          {
+            "id": 9,
+            "origin_id": -10,
+            "origin_slot": 0,
+            "target_id": 1,
+            "target_slot": 0,
+            "type": "IMAGE"
+          },
+          {
+            "id": 3,
+            "origin_id": 1,
+            "origin_slot": 0,
+            "target_id": -20,
+            "target_slot": 0,
+            "type": "IMAGE"
+          }
+        ],
+        "extra": {
+          "workflowRendererVersion": "LG"
+        },
+        "category": "Image Tools/Blur",
+        "description": "Applies Gaussian, Box, or Radial blur to soften images and create stylized depth or motion effects."
+      }
+    ]
+  }
+}

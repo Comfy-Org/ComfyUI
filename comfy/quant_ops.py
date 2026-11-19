@@ -1,6 +1,9 @@
 import torch
 import logging
 
+from comfy.cli_args import args
+
+
 try:
     import comfy_kitchen as ck
     from comfy_kitchen.tensor import (
@@ -8,6 +11,9 @@ try:
         QuantizedLayout,
         TensorCoreFP8Layout as _CKFp8Layout,
         TensorCoreNVFP4Layout as _CKNvfp4Layout,
+        TensorCoreConvRotW4A4Layout as _CKTensorCoreConvRotW4A4Layout,
+        TensorWiseINT8Layout as _CKTensorWiseINT8Layout,
+        AsymW4A8Int8Layout as _CKAsymW4A8Int8Layout,
         register_layout_op,
         register_layout_class,
         get_layout_class,
@@ -19,9 +25,20 @@ try:
         cuda_version = tuple(map(int, str(torch.version.cuda).split('.')))
         if cuda_version < (13,):
             ck.registry.disable("cuda")
-            logging.warning("WARNING: You need pytorch with cu130 or higher to use optimized CUDA operations.")
+            logging.warning("WARNING: You need pytorch with cu130 or higher to use optimized CUDA operations.\nWARNING WARNING WARNING\nIf you are on nvidia 20 series and above it is required that you update your pytorch to cu130 or higher.\n")
 
-    ck.registry.disable("triton")
+    # comfy-kitchen picks its accelerated backend on import: the HIP backend registers
+    # itself on a supported AMD device and takes dispatch priority there, CUDA on NVIDIA.
+    # Triton is an opt-in override, off by default on every platform.
+    if args.enable_triton_backend and not args.disable_triton_backend:
+        try:
+            import triton
+            logging.info("Found triton %s. Enabling comfy-kitchen triton backend.", triton.__version__)
+        except ImportError as e:
+            logging.error(f"Failed to import triton, Error: {e}, the comfy-kitchen triton backend will not be available.")
+            ck.registry.disable("triton")
+    else:
+        ck.registry.disable("triton")
     for k, v in ck.list_backends().items():
         logging.info(f"Found comfy_kitchen backend {k}: {v}")
 except ImportError as e:
@@ -37,11 +54,32 @@ except ImportError as e:
     class _CKNvfp4Layout:
         pass
 
+    class _CKTensorWiseINT8Layout:
+        pass
+
+    class _CKTensorCoreConvRotW4A4Layout:
+        pass
+
+    class _CKAsymW4A8Int8Layout:
+        pass
+
     def register_layout_class(name, cls):
         pass
 
     def get_layout_class(name):
         return None
+
+_CK_MXFP8_AVAILABLE = False
+if _CK_AVAILABLE:
+    try:
+        from comfy_kitchen.tensor import TensorCoreMXFP8Layout as _CKMxfp8Layout
+        _CK_MXFP8_AVAILABLE = True
+    except ImportError:
+        logging.warning("comfy_kitchen does not support MXFP8, please update comfy_kitchen.")
+
+if not _CK_MXFP8_AVAILABLE:
+    class _CKMxfp8Layout:
+        pass
 
 import comfy.float
 
@@ -81,6 +119,31 @@ class _TensorCoreFP8LayoutBase(_CKFp8Layout):
             qdata = ck.quantize_per_tensor_fp8(tensor, scale, cls.FP8_DTYPE)
 
         params = cls.Params(scale=scale.float(), orig_dtype=orig_dtype, orig_shape=orig_shape)
+        return qdata, params
+
+
+class TensorCoreMXFP8Layout(_CKMxfp8Layout):
+    @classmethod
+    def quantize(cls, tensor, scale=None, stochastic_rounding=0, inplace_ops=False):
+        if tensor.dim() != 2:
+            raise ValueError(f"MXFP8 requires 2D tensor, got {tensor.dim()}D")
+
+        orig_dtype = tensor.dtype
+        orig_shape = tuple(tensor.shape)
+
+        padded_shape = cls.get_padded_shape(orig_shape)
+        needs_padding = padded_shape != orig_shape
+
+        if stochastic_rounding > 0:
+            qdata, block_scale = comfy.float.stochastic_round_quantize_mxfp8_by_block(tensor, pad_32x=needs_padding, seed=stochastic_rounding)
+        else:
+            qdata, block_scale = ck.quantize_mxfp8(tensor, pad_32x=needs_padding)
+
+        params = cls.Params(
+            scale=block_scale,
+            orig_dtype=orig_dtype,
+            orig_shape=orig_shape,
+        )
         return qdata, params
 
 
@@ -127,7 +190,9 @@ class TensorCoreFP8E5M2Layout(_TensorCoreFP8LayoutBase):
 
 # Backward compatibility alias - default to E4M3
 TensorCoreFP8Layout = TensorCoreFP8E4M3Layout
-
+TensorWiseINT8Layout = _CKTensorWiseINT8Layout
+TensorCoreConvRotW4A4Layout = _CKTensorCoreConvRotW4A4Layout
+AsymW4A8Int8Layout = _CKAsymW4A8Int8Layout
 
 # ==============================================================================
 # Registry
@@ -137,6 +202,11 @@ register_layout_class("TensorCoreFP8Layout", TensorCoreFP8Layout)
 register_layout_class("TensorCoreFP8E4M3Layout", TensorCoreFP8E4M3Layout)
 register_layout_class("TensorCoreFP8E5M2Layout", TensorCoreFP8E5M2Layout)
 register_layout_class("TensorCoreNVFP4Layout", TensorCoreNVFP4Layout)
+register_layout_class("TensorWiseINT8Layout", _CKTensorWiseINT8Layout)
+register_layout_class("TensorCoreConvRotW4A4Layout", _CKTensorCoreConvRotW4A4Layout)
+if _CK_MXFP8_AVAILABLE:
+    register_layout_class("TensorCoreMXFP8Layout", TensorCoreMXFP8Layout)
+register_layout_class("AsymW4A8Int8Layout", _CKAsymW4A8Int8Layout)
 
 QUANT_ALGOS = {
     "float8_e4m3fn": {
@@ -151,10 +221,47 @@ QUANT_ALGOS = {
     },
     "nvfp4": {
         "storage_t": torch.uint8,
-        "parameters": {"weight_scale", "weight_scale_2", "input_scale"},
+        "parameters": {"weight_scale", "weight_scale_2", "input_scale", "pre_quant_scale"},
         "comfy_tensor_layout": "TensorCoreNVFP4Layout",
         "group_size": 16,
     },
+}
+
+if _CK_MXFP8_AVAILABLE:
+    QUANT_ALGOS["mxfp8"] = {
+        "storage_t": torch.float8_e4m3fn,
+        "parameters": {"weight_scale", "input_scale"},
+        "comfy_tensor_layout": "TensorCoreMXFP8Layout",
+        "group_size": 32,
+    }
+
+QUANT_ALGOS["int8_tensorwise"] = {
+    "storage_t": torch.int8,
+    "parameters": {"weight_scale"},
+    "comfy_tensor_layout": "TensorWiseINT8Layout",
+    "quantize_input": False,
+}
+
+QUANT_ALGOS["convrot_w4a4"] = {
+    "storage_t": torch.int8,
+    "parameters": {"weight_scale"},
+    "comfy_tensor_layout": "TensorCoreConvRotW4A4Layout",
+    "quantize_input": False,
+}
+
+QUANT_ALGOS["asym_w4a8_int8"] = {
+    "storage_t": torch.int8,
+    "parameters": {"weight_scale"},
+    "comfy_tensor_layout": "AsymW4A8Int8Layout",
+    "quantize_input": False,
+}
+
+# Same layout class and kernels, 6-bit uniform codes: weight is int8 [N, 3K/4], no codebook.
+QUANT_ALGOS["w6a8_int8"] = {
+    "storage_t": torch.int8,
+    "parameters": {"weight_scale"},
+    "comfy_tensor_layout": "AsymW4A8Int8Layout",
+    "quantize_input": False,
 }
 
 
@@ -169,6 +276,9 @@ __all__ = [
     "TensorCoreFP8E4M3Layout",
     "TensorCoreFP8E5M2Layout",
     "TensorCoreNVFP4Layout",
+    "TensorCoreConvRotW4A4Layout",
+    "TensorWiseINT8Layout",
+    "AsymW4A8Int8Layout",
     "QUANT_ALGOS",
     "register_layout_op",
 ]

@@ -1,73 +1,72 @@
-from __future__ import annotations
-
 from enum import Enum
-from typing import Any, Dict, Optional
+from typing import Any
 
-from pydantic import BaseModel, Field, confloat, conint
-
-
-class BFLOutputFormat(str, Enum):
-    png = 'png'
-    jpeg = 'jpeg'
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class BFLFluxExpandImageRequest(BaseModel):
-    prompt: str = Field(..., description='The description of the changes you want to make. This text guides the expansion process, allowing you to specify features, styles, or modifications for the expanded areas.')
-    prompt_upsampling: Optional[bool] = Field(
-        None, description='Whether to perform upsampling on the prompt. If active, automatically modifies the prompt for more creative generation.'
-    )
-    seed: Optional[int] = Field(None, description='The seed value for reproducibility.')
-    top: conint(ge=0, le=2048) = Field(..., description='Number of pixels to expand at the top of the image')
-    bottom: conint(ge=0, le=2048) = Field(..., description='Number of pixels to expand at the bottom of the image')
-    left: conint(ge=0, le=2048) = Field(..., description='Number of pixels to expand at the left side of the image')
-    right: conint(ge=0, le=2048) = Field(..., description='Number of pixels to expand at the right side of the image')
-    steps: conint(ge=15, le=50) = Field(..., description='Number of steps for the image generation process')
-    guidance: confloat(ge=1.5, le=100) = Field(..., description='Guidance strength for the image generation process')
-    safety_tolerance: Optional[conint(ge=0, le=6)] = Field(
-        6, description='Tolerance level for input and output moderation. Between 0 and 6, 0 being most strict, 6 being least strict. Defaults to 2.'
-    )
-    output_format: Optional[BFLOutputFormat] = Field(
-        BFLOutputFormat.png, description="Output format for the generated image. Can be 'jpeg' or 'png'.", examples=['png']
-    )
-    image: str = Field(None, description='A Base64-encoded string representing the image you wish to expand')
+    prompt: str = Field(...)
+    prompt_upsampling: bool | None = Field(None)
+    seed: int | None = Field(None)
+    top: int = Field(...)
+    bottom: int = Field(...)
+    left: int = Field(...)
+    right: int = Field(...)
+    steps: int = Field(...)
+    guidance: float = Field(...)
+    safety_tolerance: int = Field(6)
+    output_format: str = Field("png")
+    image: str = Field(None, description="A Base64-encoded string representing the image you wish to expand")
 
 
 class BFLFluxFillImageRequest(BaseModel):
-    prompt: str = Field(..., description='The description of the changes you want to make. This text guides the expansion process, allowing you to specify features, styles, or modifications for the expanded areas.')
-    prompt_upsampling: Optional[bool] = Field(
-        None, description='Whether to perform upsampling on the prompt. If active, automatically modifies the prompt for more creative generation.'
+    prompt: str = Field(...)
+    prompt_upsampling: bool | None = Field(None)
+    seed: int | None = Field(None)
+    steps: int = Field(...)
+    guidance: float = Field(...)
+    safety_tolerance: int = Field(6)
+    output_format: str = Field("png")
+    image: str = Field(
+        None, description="Base64-encoded string representing the image to modify. Can contain alpha mask if desired.",
     )
-    seed: Optional[int] = Field(None, description='The seed value for reproducibility.')
-    steps: conint(ge=15, le=50) = Field(..., description='Number of steps for the image generation process')
-    guidance: confloat(ge=1.5, le=100) = Field(..., description='Guidance strength for the image generation process')
-    safety_tolerance: Optional[conint(ge=0, le=6)] = Field(
-        6, description='Tolerance level for input and output moderation. Between 0 and 6, 0 being most strict, 6 being least strict. Defaults to 2.'
+    mask: str = Field(
+        None, description="Base64-encoded string representing the mask of the areas you wish to modify."
     )
-    output_format: Optional[BFLOutputFormat] = Field(
-        BFLOutputFormat.png, description="Output format for the generated image. Can be 'jpeg' or 'png'.", examples=['png']
+
+
+class BFLFluxEraseRequest(BaseModel):
+    image: str = Field(..., description="A Base64-encoded string representing the image to erase from.")
+    mask: str = Field(
+        ...,
+        description="A Base64-encoded black/white mask matching the input dimensions; "
+        "white (255) marks areas to remove, black (0) marks areas to preserve.",
     )
-    image: str = Field(None, description='A Base64-encoded string representing the image you wish to modify. Can contain alpha mask if desired.')
-    mask: str = Field(None, description='A Base64-encoded string representing the mask of the areas you with to modify.')
+    dilate_pixels: int = Field(10)
+    seed: int | None = Field(None)
+    output_format: str = Field("png")
+
+
+class BFLFluxVTORequest(BaseModel):
+    prompt: str = Field(
+        ..., description="Natural-language styling instruction. Required field, but may be an empty string."
+    )
+    person: str = Field(..., description="A Base64-encoded string representing the person image.")
+    garment: str = Field(..., description="A Base64-encoded string representing the garment reference image.")
+    seed: int | None = Field(None)
+    safety_tolerance: int = Field(5)
+    output_format: str = Field("png")
 
 
 class BFLFluxProGenerateRequest(BaseModel):
-    prompt: str = Field(..., description='The text prompt for image generation.')
-    prompt_upsampling: Optional[bool] = Field(
-        None, description='Whether to perform upsampling on the prompt. If active, automatically modifies the prompt for more creative generation.'
-    )
-    seed: Optional[int] = Field(None, description='The seed value for reproducibility.')
-    width: conint(ge=256, le=1440) = Field(1024, description='Width of the generated image in pixels. Must be a multiple of 32.')
-    height: conint(ge=256, le=1440) = Field(768, description='Height of the generated image in pixels. Must be a multiple of 32.')
-    safety_tolerance: Optional[conint(ge=0, le=6)] = Field(
-        6, description='Tolerance level for input and output moderation. Between 0 and 6, 0 being most strict, 6 being least strict. Defaults to 2.'
-    )
-    output_format: Optional[BFLOutputFormat] = Field(
-        BFLOutputFormat.png, description="Output format for the generated image. Can be 'jpeg' or 'png'.", examples=['png']
-    )
-    image_prompt: Optional[str] = Field(None, description='Optional image to remix in base64 format')
-    # image_prompt_strength: Optional[confloat(ge=0.0, le=1.0)] = Field(
-    #     None, description='Blend between the prompt and the image prompt.'
-    # )
+    prompt: str = Field(...)
+    prompt_upsampling: bool | None = Field(None)
+    seed: int | None = Field(None)
+    width: int = Field(1024, description="Must be a multiple of 32.")
+    height: int = Field(768, description="Must be a multiple of 32.")
+    safety_tolerance: int = Field(6)
+    output_format: str = Field("png")
+    image_prompt: str | None = Field(None, description="Optional image to remix in base64 format")
 
 
 class Flux2ProGenerateRequest(BaseModel):
@@ -85,61 +84,45 @@ class Flux2ProGenerateRequest(BaseModel):
     input_image_7: str | None = Field(None, description="Base64 encoded image for image-to-image generation")
     input_image_8: str | None = Field(None, description="Base64 encoded image for image-to-image generation")
     input_image_9: str | None = Field(None, description="Base64 encoded image for image-to-image generation")
-    safety_tolerance: int | None = Field(
-        5, description="Tolerance level for input and output moderation. Value 0 being most strict.", ge=0, le=5
-    )
-    output_format: str | None = Field(
-        "png", description="Output format for the generated image. Can be 'jpeg' or 'png'."
-    )
+    safety_tolerance: int = Field(5)
+    output_format: str = Field("png")
 
 
 class BFLFluxKontextProGenerateRequest(BaseModel):
-    prompt: str = Field(..., description='The text prompt for what you wannt to edit.')
-    input_image: Optional[str] = Field(None, description='Image to edit in base64 format')
-    seed: Optional[int] = Field(None, description='The seed value for reproducibility.')
-    guidance: confloat(ge=0.1, le=99.0) = Field(..., description='Guidance strength for the image generation process')
-    steps: conint(ge=1, le=150) = Field(..., description='Number of steps for the image generation process')
-    safety_tolerance: Optional[conint(ge=0, le=2)] = Field(
-        2, description='Tolerance level for input and output moderation. Between 0 and 2, 0 being most strict, 6 being least strict. Defaults to 2.'
-    )
-    output_format: Optional[BFLOutputFormat] = Field(
-        BFLOutputFormat.png, description="Output format for the generated image. Can be 'jpeg' or 'png'.", examples=['png']
-    )
-    aspect_ratio: Optional[str] = Field(None, description='Aspect ratio of the image between 21:9 and 9:21.')
-    prompt_upsampling: Optional[bool] = Field(
-        None, description='Whether to perform upsampling on the prompt. If active, automatically modifies the prompt for more creative generation.'
-    )
+    prompt: str = Field(...)
+    input_image: str | None = Field(None, description="Image to edit in base64 format")
+    seed: int | None = Field(None)
+    guidance: float = Field(...)
+    steps: int = Field(...)
+    safety_tolerance: int = Field(2)
+    output_format: str = Field("png")
+    aspect_ratio: str | None = Field(None)
+    prompt_upsampling: bool | None = Field(None)
 
 
 class BFLFluxProUltraGenerateRequest(BaseModel):
-    prompt: str = Field(..., description='The text prompt for image generation.')
-    prompt_upsampling: Optional[bool] = Field(
-        None, description='Whether to perform upsampling on the prompt. If active, automatically modifies the prompt for more creative generation.'
-    )
-    seed: Optional[int] = Field(None, description='The seed value for reproducibility.')
-    aspect_ratio: Optional[str] = Field(None, description='Aspect ratio of the image between 21:9 and 9:21.')
-    safety_tolerance: Optional[conint(ge=0, le=6)] = Field(
-        6, description='Tolerance level for input and output moderation. Between 0 and 6, 0 being most strict, 6 being least strict. Defaults to 2.'
-    )
-    output_format: Optional[BFLOutputFormat] = Field(
-        BFLOutputFormat.png, description="Output format for the generated image. Can be 'jpeg' or 'png'.", examples=['png']
-    )
-    raw: Optional[bool] = Field(None, description='Generate less processed, more natural-looking images.')
-    image_prompt: Optional[str] = Field(None, description='Optional image to remix in base64 format')
-    image_prompt_strength: Optional[confloat(ge=0.0, le=1.0)] = Field(
-        None, description='Blend between the prompt and the image prompt.'
-    )
+    prompt: str = Field(...)
+    prompt_upsampling: bool | None = Field(None)
+    seed: int | None = Field(None)
+    aspect_ratio: str | None = Field(None)
+    safety_tolerance: int = Field(6)
+    output_format: str = Field("png")
+    raw: bool | None = Field(None)
+    image_prompt: str | None = Field(None, description="Optional image to remix in base64 format")
+    image_prompt_strength: float | None = Field(None)
 
 
 class BFLFluxProGenerateResponse(BaseModel):
-    id: str = Field(..., description="The unique identifier for the generation task.")
-    polling_url: str = Field(..., description="URL to poll for the generation result.")
+    id: str = Field(...)
+    polling_url: str = Field(...)
     cost: float | None = Field(None, description="Price in cents")
 
 
 class BFLStatus(str, Enum):
     task_not_found = "Task not found"
     pending = "Pending"
+    reasoning = "Reasoning"
+    generating = "Generating"
     request_moderated = "Request Moderated"
     content_moderated = "Content Moderated"
     ready = "Ready"
@@ -147,7 +130,102 @@ class BFLStatus(str, Enum):
 
 
 class BFLFluxStatusResponse(BaseModel):
-    id: str = Field(..., description="The unique identifier for the generation task.")
-    status: BFLStatus = Field(..., description="The status of the task.")
-    result: Optional[Dict[str, Any]] = Field(None, description="The result of the task (null if not completed).")
-    progress: Optional[float] = Field(None, description="The progress of the task (0.0 to 1.0).", ge=0.0, le=1.0)
+    id: str = Field(...)
+    status: BFLStatus = Field(...)
+    result: dict[str, Any] | None = Field(None)
+    progress: float | None = Field(None, ge=0.0, le=1.0)
+
+
+class Flux3VideoRequest(BaseModel):
+    """Fields shared by every generation mode of /v1/flux-3-video."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    prompt: str = Field(...)
+    aspect_ratio: str = Field("auto")
+    duration: int | str = Field("auto", description="Whole seconds, or 'auto'.")
+    resolution: str = Field("hd", description="'hd' is the 720p class, 'fhd' the 1080p class.")
+    generate_audio: bool = Field(True)
+    safety_tolerance: int = Field(2, description="0 is the strictest; conditioned modes cap at 2.")
+
+
+class Flux3TextToVideoRequest(Flux3VideoRequest):
+    mode: str = Field("t2v")
+
+
+class Flux3ImageToVideoRequest(Flux3VideoRequest):
+    mode: str = Field("i2v")
+    keyframes: list[str] | list[tuple[float, str]] = Field(
+        ...,
+        description="Images (URL or base64), or [seconds, image] pairs pinning each to a time.",
+    )
+
+
+class Flux3VideoContinuationRequest(Flux3VideoRequest):
+    mode: str = Field("v2v")
+    start_video: str = Field(
+        ..., description="MP4 (URL or base64); the new clip carries on from its final frames."
+    )
+
+
+class BFLFluxVideoUpscaleRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    input_video: str = Field(..., description="MP4 (URL or base64), 1 to 20 seconds.")
+    upscale_factor: float = Field(2.0, ge=1.5, le=3.0)
+    creativity: int = Field(1, description="0 preserves the source precisely, 1 enhances detail.")
+    prompt: str | None = Field(None)
+    safety_tolerance: int = Field(2, ge=0, le=4)
+
+
+class BFLFluxVideoEditRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    video: str = Field(..., description="MP4 (URL or base64), at most 15 seconds and 50 MiB.")
+    prompt: str = Field(..., description="Edit instruction, 1 to 4096 characters once trimmed.")
+    safety_tolerance: int = Field(4, ge=0, le=4)
+
+
+class Flux3ImageRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    prompt: str = Field(...)
+    images: list[str] | None = Field(None, description="1 to 10 reference images (URL or base64).")
+    aspect_ratio: str = Field("auto")
+    resolution: str = Field("1k")
+    grounding: bool = Field(True, description="Web and image search before generating.")
+    safety_tolerance: int = Field(2, ge=0, le=4)
+
+
+class Flux3MaxKeyframe(BaseModel):
+    image_url: str = Field(...)
+    frame_index: int = Field(..., description="Frame position in the 24 fps output, at most duration * 24.")
+
+
+class Flux3MaxVideoRequest(BaseModel):
+    prompt: str = Field(...)
+    duration: int = Field(...)
+    resolution: str = Field(...)
+    reasoning_level: str = Field(...)
+    aspect_ratio: str = Field(...)
+    generate_audio: bool = Field(...)
+    seed: int = Field(...)
+    image_url: str | None = Field(None)
+    end_image_url: str | None = Field(None)
+    keyframes: list[Flux3MaxKeyframe] | None = Field(None)
+
+
+class Flux3MaxSubmitResponse(BaseModel):
+    request_id: str = Field(...)
+
+
+class Flux3MaxStatusResponse(BaseModel):
+    status: str | None = Field(None)
+
+
+class Flux3MaxVideo(BaseModel):
+    url: str = Field(...)
+
+
+class Flux3MaxResult(BaseModel):
+    video: Flux3MaxVideo = Field(...)

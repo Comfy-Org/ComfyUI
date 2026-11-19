@@ -4,7 +4,6 @@ Tier 1: Filesystem metadata (zero parsing)
 Tier 2: Safetensors header metadata (fast JSON read only)
 """
 
-from __future__ import annotations
 
 import json
 import logging

@@ -23,6 +23,11 @@ class CausalConv3d(nn.Module):
         self.in_channels = in_channels
         self.out_channels = out_channels
 
+        if isinstance(stride, int):
+            self.time_stride = stride
+        else:
+            self.time_stride = stride[0]
+
         kernel_size = (kernel_size, kernel_size, kernel_size)
         self.time_kernel_size = kernel_size[0]
 
@@ -44,6 +49,12 @@ class CausalConv3d(nn.Module):
         )
         self.temporal_cache_state={}
 
+    def _empty_output(self, x):
+        # empty (0 frame) outputs must still have the conv's output channels and spatial dims
+        h = (x.shape[3] + 2 * self.conv.padding[1] - self.conv.kernel_size[1]) // self.conv.stride[1] + 1
+        w = (x.shape[4] + 2 * self.conv.padding[2] - self.conv.kernel_size[2]) // self.conv.stride[2] + 1
+        return x.new_empty((x.shape[0], self.out_channels, 0, h, w))
+
     def forward(self, x, causal: bool = True):
         tid = threading.get_ident()
 
@@ -53,23 +64,32 @@ class CausalConv3d(nn.Module):
             if not causal:
                 padding_length = padding_length // 2
             if x.shape[2] == 0:
-                return x
+                return self._empty_output(x)
             cached = x[:, :, :1, :, :].repeat((1, 1, padding_length, 1, 1))
         pieces = [ cached, x ]
         if is_end and not causal:
             pieces.append(x[:, :, -1:, :, :].repeat((1, 1, (self.time_kernel_size - 1) // 2, 1, 1)))
+        input_length = sum([piece.shape[2] for piece in pieces])
+        cache_length = (self.time_kernel_size - self.time_stride) + ((input_length - self.time_kernel_size) % self.time_stride)
 
         needs_caching = not is_end
-        if needs_caching and x.shape[2] >= self.time_kernel_size - 1:
+        if needs_caching and cache_length == 0:
+            self.temporal_cache_state[tid] = (x[:, :, :0, :, :], False)
             needs_caching = False
-            self.temporal_cache_state[tid] = (x[:, :, -(self.time_kernel_size - 1):, :, :], False)
+        if needs_caching and x.shape[2] >= cache_length:
+            needs_caching = False
+            self.temporal_cache_state[tid] = (x[:, :, -cache_length:, :, :], False)
 
         x = torch.cat(pieces, dim=2)
+        del pieces
+        del cached
 
         if needs_caching:
-            self.temporal_cache_state[tid] = (x[:, :, -(self.time_kernel_size - 1):, :, :], False)
+            self.temporal_cache_state[tid] = (x[:, :, -cache_length:, :, :], False)
+        elif is_end:
+            self.temporal_cache_state[tid] = (None, True)
 
-        return self.conv(x) if x.shape[2] >= self.time_kernel_size else x[:, :, :0, :, :]
+        return self.conv(x) if x.shape[2] >= self.time_kernel_size else self._empty_output(x)
 
     @property
     def weight(self):

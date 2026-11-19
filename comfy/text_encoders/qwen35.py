@@ -1,0 +1,1349 @@
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from dataclasses import dataclass, field
+from tokenizers import Tokenizer
+from tqdm import tqdm
+import contextlib
+import os
+import time
+
+import comfy.model_management
+import comfy.model_prefetch
+import comfy.ops
+import comfy_kitchen
+from comfy_kitchen.int8_decode import is_available as int8_decode_is_available
+from comfy.quant_ops import QuantizedTensor
+from comfy.ldm.modules.attention import AttentionTensorContainer, ComfyAttention, optimized_attention_for_device
+from comfy import sd1_clip
+import comfy.text_encoders.qwen_vl
+
+from .llama import SPEC_ROWS, BaseLlama, BaseGenerate, FixedKV, FixedKVCache, Int8FixedKVCache, Llama2_, MLP, RMSNorm, apply_penalty, apply_rope, penalty_active, precompute_freqs_cis, rope_matrix
+
+
+@dataclass
+class LinearKV(FixedKV):
+    # DeltaNet state on the FixedKV interface: key=conv_state, value=recurrent_state (fp32)
+    g_decay: torch.Tensor = None
+    dt_bias: torch.Tensor = None
+    norm_weight: torch.Tensor = None
+    # deferred commit (kitchen gated_delta_decode_deferred): a decode step leaves the state untouched
+    # and the next step first replays its ctl[0] still-accepted tokens from the [1 - ctl[1]] side
+    # buffers. ctl and its tracker are shared by every layer.
+    qkv_buf: torch.Tensor = None
+    proj_buf: torch.Tensor = None
+    gates_buf: torch.Tensor = None
+    sumsq_buf: torch.Tensor = None
+    ctl: torch.Tensor = None
+    ctl_tracker: dict = None
+    uncommitted: int = 0
+
+    @staticmethod
+    def deferred_tracker(device):
+        # ctl = {pending, parity, slot[sm], parent[sm], prog[sm]}; without MTP, only row 0 runs.
+        n, sm = comfy_kitchen.gated_delta_ctl_ints, comfy_kitchen.gated_delta_slot_max
+        single = torch.tensor(list(range(sm)) + [-1] * sm + list(range(sm)), dtype=torch.int32)
+        host = torch.zeros((2, n), dtype=torch.int32)
+        # the host rows are pinned and fenced by events only where the copy is asynchronous
+        cuda = torch.device(device).type == "cuda"
+        return {"ctl": torch.zeros((n,), dtype=torch.int32, device=device), "host": host.pin_memory() if cuda else host,
+                "copied": [torch.cuda.Event(), torch.cuda.Event()] if cuda else None, "step": None, "parity": 0, "single": single, "path": None, "tree": None}
+
+    def decode_step(self, num_tokens):
+        return self.index > 0 and num_tokens <= SPEC_ROWS
+
+    def prepare(self, num_tokens):
+        # runs eagerly before the layer (a replayed graph skips its Python): the first linear
+        # layer of a step hands the kernels what to commit, every layer records what it leaves
+        t = self.ctl_tracker
+        if t["step"] != (self.index, num_tokens):
+            t["step"] = (self.index, num_tokens)
+            t["parity"] ^= 1
+            # the pinned row is reused every other step: its previous copy must have landed
+            if t["copied"] is not None:
+                t["copied"][t["parity"]].synchronize()
+            host = t["host"][t["parity"]]
+            host[0] = self.uncommitted
+            host[1] = t["parity"]
+            host[2:] = t["single"]
+            if t["path"] is not None:
+                host[2:2 + len(t["path"])] = torch.tensor(t["path"], dtype=torch.int32)
+                t["path"] = None
+            if t["tree"] is not None:
+                host[-len(t["tree"].ctl):] = t["tree"].ctl  # parent[], prog[]
+            self.ctl.copy_(host, non_blocking=True)
+            if t["copied"] is not None:
+                t["copied"][t["parity"]].record(torch.cuda.current_stream(self.ctl.device))
+        self.uncommitted = num_tokens if self.decode_step(num_tokens) else 0
+
+    def commit_path(self, base, path):
+        # the next step replays the accepted verify rows
+        self.ctl_tracker["path"] = path
+
+    def rollback(self, discard=1):
+        # nothing was written: the next step replays fewer tokens
+        self.index -= discard
+        self.uncommitted -= discard
+
+    @property
+    def conv_state(self):
+        return self.key
+
+    @property
+    def recurrent_state(self):
+        return self.value
+
+
+class VerifyTree:
+    """Shape of one MTP verify step: draft tokens in a tree rooted at the committed next token.
+
+    Built from nested child lists. A node's first child is the MTP argmax, later children its
+    runner-ups, and only argmax-chain nodes have children. Rows are numbered depth-first, first
+    child first, so the chain is rows 0..chain and no row sits above its depth.
+    """
+
+    def __init__(self, spec, capacity, device):
+        self.device = device
+        self.rows = capacity
+        self.mask = self.positions = None
+        self.update(spec)
+
+    def update(self, spec):
+        # Equal-row topology changes retain the addresses captured by CUDA graphs.
+        self.parent, self.children, self.depth = [], [], []
+
+        def add(node, parent):
+            r = len(self.parent)
+            self.parent.append(parent)
+            self.children.append([])
+            self.depth.append(0 if parent < 0 else self.depth[parent] + 1)
+            if parent >= 0:
+                self.children[parent].append(r)
+            for child in node:
+                add(child, r)
+
+        add(spec, -1)
+        count = len(self.parent)
+        self.chain = 0  # drafts on the argmax chain
+        while self.children[self.chain]:
+            self.chain = self.children[self.chain][0]
+        self.fanout = max(len(c) for c in self.children)
+        self.parent.extend([-1] * (self.rows - count))
+        self.children.extend([] for _ in range(self.rows - count))
+        self.depth.extend([0] * (self.rows - count))
+        # kitchen flash_attention_decode_tree_merge: bit t of row r's mask lets it attend row t
+        mask = []
+        for r in range(self.rows):
+            bits, a = 0, r
+            while a >= 0:
+                bits |= 1 << a
+                a = self.parent[a]
+            mask.append(bits)
+        mask = torch.tensor(mask, dtype=torch.int32, device=self.device)
+        if self.mask is None:
+            self.mask = mask
+        else:
+            self.mask.copy_(mask)
+        # kitchen gated_delta_decode_deferred program: a chain row commits (bit 5) after its
+        # children's leaves ran against its state without committing
+        prog = []
+        for r in range(self.chain + 1):
+            prog.append(r | (32 if self.children[r] else 0))
+            prog.extend(self.children[r][1:])
+        sm = comfy_kitchen.gated_delta_slot_max
+        self.ctl = torch.tensor(self.parent + [-1] * (sm - self.rows) + prog + list(range(count, sm)), dtype=torch.int32)
+        positions = torch.tensor([self.depth], dtype=torch.long, device=self.device)
+        if self.positions is None:
+            self.positions = positions
+        else:
+            self.positions.copy_(positions)
+
+
+# Verify capacity and topology. A fixed depth is a tree with one child per node.
+MTP_MODES = {
+    "2": (4, [[[]]]),
+    "3": (4, [[[[]]]]),
+    "4": (8, [[[[[]]]]]),
+    "5": (8, [[[[[[]]]]]]),
+    "tree2s1": (8, [[[], []], []]),
+    "tree2s2": (8, [[[], [], []], [], []]),
+    "tree3s1": (8, [[[[], []], []], []]),
+    "tree4s1m8": (8, [[[[[]], []], []], []]),
+    "auto": (8, None),
+}
+
+# Every positive composition of seven: a primary chain with terminal siblings.
+_SHAPES = []
+for _cuts in range(64):
+    _ends = [0] + [i for i in range(1, 7) if _cuts & (1 << (i - 1))] + [7]
+    _SHAPES.append(tuple(b - a for a, b in zip(_ends, _ends[1:])))
+
+
+def tree_spec(widths):
+    node = []
+    for width in reversed(widths):
+        node = [node] + [[] for _ in range(width - 1)]
+    return node
+
+
+def best_widths(widths, hits, draft_ms, verify_ms):
+    """Reallocate seven draft rows using conditional rank hits and measured GPU cost."""
+    probabilities = []
+    prior = [0.125] * 8
+    for row in hits:
+        count = sum(row)
+        prior = [(hit + 4 * p) / (count + 4) for hit, p in zip(row, prior)]
+        probabilities.append(prior)
+
+    def score(shape):
+        reach, emitted = 1.0, 1.0
+        for width, probability in zip(shape, probabilities):
+            emitted += reach * sum(probability[:width])
+            reach *= probability[0]
+        return emitted / (verify_ms + len(shape) * draft_ms)
+
+    best = max(_SHAPES, key=score)
+    return best if score(best) > 1.03 * score(widths) else widths
+
+
+def _qwen35_layer_types(n):
+    return [("full_attention" if (i + 1) % 4 == 0 else "linear_attention") for i in range(n)]
+
+@dataclass
+class Qwen35Config:
+    vocab_size: int = 248320
+    hidden_size: int = 2048
+    intermediate_size: int = 6144
+    num_hidden_layers: int = 24
+    # Full attention params
+    num_attention_heads: int = 8
+    num_key_value_heads: int = 2
+    head_dim: int = 256
+    partial_rotary_factor: float = 0.25
+    # Linear attention (DeltaNet) params
+    linear_num_key_heads: int = 16
+    linear_num_value_heads: int = 16
+    linear_key_head_dim: int = 128
+    linear_value_head_dim: int = 128
+    conv_kernel_size: int = 4
+    # Shared params
+    max_position_embeddings: int = 32768
+    rms_norm_eps: float = 1e-6
+    rope_theta: float = 10000000.0
+    mrope_section: list = field(default_factory=lambda: [11, 11, 10])
+    layer_types: list = field(default_factory=lambda: _qwen35_layer_types(24))
+    rms_norm_add: bool = True
+    mlp_activation: str = "silu"
+    qkv_bias: bool = False
+    final_norm: bool = True
+    lm_head: bool = False
+    stop_tokens: list = field(default_factory=lambda: [248044, 248046])
+    # These are needed for BaseLlama/BaseGenerate compatibility but unused directly
+    transformer_type: str = "qwen35_2b"
+    rope_dims: list = None
+    rope_scale: float = None
+    mtp: bool = False
+
+QWEN35_VISION_DEFAULTS = dict(hidden_size=1024, num_heads=16, intermediate_size=4096, depth=24, patch_size=16, temporal_patch_size=2, in_channels=3, spatial_merge_size=2, num_position_embeddings=2304)
+
+QWEN35_MODELS = {
+    "qwen35_08b": dict(hidden_size=1024, intermediate_size=3584, vision=dict(hidden_size=768, num_heads=12, intermediate_size=3072, depth=12)),
+    "qwen35_2b": dict(hidden_size=2048, intermediate_size=6144, num_hidden_layers=24, num_attention_heads=8, num_key_value_heads=2, linear_num_value_heads=16),
+    "qwen35_4b": dict(hidden_size=2560, intermediate_size=9216, num_hidden_layers=32, num_attention_heads=16, num_key_value_heads=4, linear_num_value_heads=32),
+    "qwen35_9b": dict(hidden_size=4096, intermediate_size=12288, num_hidden_layers=32, num_attention_heads=16, num_key_value_heads=4, linear_num_value_heads=32, lm_head=True, vision=dict(hidden_size=1152, intermediate_size=4304, depth=27)),
+    "qwen35_27b": dict(hidden_size=5120, intermediate_size=17408, num_hidden_layers=64, num_attention_heads=24, num_key_value_heads=4, linear_num_value_heads=48, lm_head=True, vision=dict(hidden_size=1152, intermediate_size=4304, depth=27)),
+}
+
+
+def _make_config(model_type, config_dict={}):
+    overrides = QWEN35_MODELS.get(model_type, {}).copy()
+    overrides.pop("vision", None)
+    if "num_hidden_layers" in overrides:
+        overrides["layer_types"] = _qwen35_layer_types(overrides["num_hidden_layers"])
+    overrides.update(config_dict)
+    return Qwen35Config(**overrides)
+
+
+class RMSNormGated(RMSNorm):
+    def forward(self, x, gate):
+        return super().forward(x) * F.silu(gate.to(x.dtype))
+
+def torch_chunk_gated_delta_rule(query, key, value, g, beta, chunk_size=64, initial_state=None, output_final_state=False):
+    initial_dtype = query.dtype
+    query = F.normalize(query, dim=-1)
+    key = F.normalize(key, dim=-1)
+    query, key, value, beta, g = [x.transpose(1, 2).contiguous().to(torch.float32) for x in (query, key, value, beta, g)]
+
+    batch_size, num_heads, sequence_length, k_head_dim = key.shape
+    v_head_dim = value.shape[-1]
+    pad_size = (chunk_size - sequence_length % chunk_size) % chunk_size
+    query = F.pad(query, (0, 0, 0, pad_size))
+    key = F.pad(key, (0, 0, 0, pad_size))
+    value = F.pad(value, (0, 0, 0, pad_size))
+    beta = F.pad(beta, (0, pad_size))
+    g = F.pad(g, (0, pad_size))
+    total_sequence_length = sequence_length + pad_size
+    scale = 1 / (query.shape[-1] ** 0.5)
+    query = query * scale
+
+    v_beta = value * beta.unsqueeze(-1)
+    k_beta = key * beta.unsqueeze(-1)
+    query, key, value, k_beta, v_beta = [x.reshape(x.shape[0], x.shape[1], -1, chunk_size, x.shape[-1]) for x in (query, key, value, k_beta, v_beta)]
+    g = g.reshape(g.shape[0], g.shape[1], -1, chunk_size)
+    mask = torch.triu(torch.ones(chunk_size, chunk_size, dtype=torch.bool, device=query.device), diagonal=0)
+
+    g = g.cumsum(dim=-1)
+    decay_mask = ((g.unsqueeze(-1) - g.unsqueeze(-2)).tril().exp().float()).tril()
+    attn = -((k_beta @ key.transpose(-1, -2)) * decay_mask).masked_fill(mask, 0)
+    for i in range(1, chunk_size):
+        row = attn[..., i, :i].clone()
+        sub = attn[..., :i, :i].clone()
+        attn[..., i, :i] = row + (row.unsqueeze(-1) * sub).sum(-2)
+    attn = attn + torch.eye(chunk_size, dtype=attn.dtype, device=attn.device)
+    value = attn @ v_beta
+    k_cumdecay = attn @ (k_beta * g.exp().unsqueeze(-1))
+    last_recurrent_state = (
+        torch.zeros(batch_size, num_heads, k_head_dim, v_head_dim).to(value)
+        if initial_state is None
+        else initial_state.to(value)
+    )
+    core_attn_out = torch.zeros_like(value)
+    mask = torch.triu(torch.ones(chunk_size, chunk_size, dtype=torch.bool, device=query.device), diagonal=1)
+
+    for i in range(0, total_sequence_length // chunk_size):
+        q_i, k_i, v_i = query[:, :, i], key[:, :, i], value[:, :, i]
+        attn = (q_i @ k_i.transpose(-1, -2) * decay_mask[:, :, i]).masked_fill_(mask, 0)
+        v_prime = (k_cumdecay[:, :, i]) @ last_recurrent_state
+        v_new = v_i - v_prime
+        attn_inter = (q_i * g[:, :, i, :, None].exp()) @ last_recurrent_state
+        core_attn_out[:, :, i] = attn_inter + attn @ v_new
+        last_recurrent_state = (
+            last_recurrent_state * g[:, :, i, -1, None, None].exp()
+            + (k_i * (g[:, :, i, -1, None] - g[:, :, i]).exp()[..., None]).transpose(-1, -2) @ v_new
+        )
+
+    if not output_final_state:
+        last_recurrent_state = None
+    core_attn_out = core_attn_out.reshape(core_attn_out.shape[0], core_attn_out.shape[1], -1, core_attn_out.shape[-1])
+    core_attn_out = core_attn_out[:, :, :sequence_length]
+    core_attn_out = core_attn_out.transpose(1, 2).contiguous().to(initial_dtype)
+    return core_attn_out, last_recurrent_state
+
+
+# GatedDeltaNet - Linear Attention Layer
+
+class GatedDeltaNet(nn.Module):
+    def __init__(self, config, device=None, dtype=None, ops=None):
+        super().__init__()
+
+        hidden = config.hidden_size
+        self.num_key_heads = config.linear_num_key_heads
+        self.num_value_heads = config.linear_num_value_heads
+        self.key_head_dim = config.linear_key_head_dim
+        self.value_head_dim = config.linear_value_head_dim
+        self.conv_kernel_size = config.conv_kernel_size
+
+        key_dim = self.num_key_heads * self.key_head_dim
+        value_dim = self.num_value_heads * self.value_head_dim
+        self.key_dim = key_dim
+        self.value_dim = value_dim
+        conv_dim = key_dim * 2 + value_dim
+
+        self.in_proj_qkv = ops.Linear(hidden, conv_dim, bias=False, device=device, dtype=dtype)
+        self.in_proj_z = ops.Linear(hidden, value_dim, bias=False, device=device, dtype=dtype)
+        self.combined_qkvz = comfy.ops.CombinedLinear((self.in_proj_qkv, self.in_proj_z))
+        self.in_proj_b = ops.Linear(hidden, self.num_value_heads, bias=False, device=device, dtype=dtype)
+        self.in_proj_a = ops.Linear(hidden, self.num_value_heads, bias=False, device=device, dtype=dtype)
+        self.out_proj = ops.Linear(value_dim, hidden, bias=False, device=device, dtype=dtype)
+
+        self.dt_bias = nn.Parameter(torch.empty(self.num_value_heads, device=device, dtype=dtype))
+        self.A_log = nn.Parameter(torch.empty(self.num_value_heads, device=device, dtype=dtype))
+
+        self.conv1d = ops.Conv1d(in_channels=conv_dim, out_channels=conv_dim, bias=False, kernel_size=self.conv_kernel_size,
+            groups=conv_dim, padding=self.conv_kernel_size - 1, device=device, dtype=dtype)
+
+        self.norm = RMSNormGated(self.value_head_dim, eps=config.rms_norm_eps, device=device, dtype=dtype)
+
+    def forward(self, x, past_key_value=None, **kwargs):
+        batch_size, seq_len, _ = x.shape
+
+        # Projections (shared)
+        qkvz = self.combined_qkvz.forward(x)
+        if qkvz is NotImplemented:
+            proj = self.in_proj_qkv(x)  # [B, seq_len, conv_dim]
+            z = self.in_proj_z(x)
+        else:
+            proj, z = qkvz.split((self.key_dim * 2 + self.value_dim, self.value_dim), dim=-1)
+
+        if past_key_value is not None and past_key_value.decode_step(seq_len):
+            # decode: conv step into the side buffer, then gates + delta rule + gated norm in one
+            # kernel; both first commit the previous step's accepted tokens
+            kv = past_key_value
+            with comfy.ops.CastBiasWeightContext(self.conv1d, proj, offloadable=True) as (conv_weight, conv_bias):
+                comfy_kitchen.deltanet_conv_step_deferred(proj, kv.conv_state, conv_weight, conv_bias, kv.proj_buf, kv.qkv_buf, kv.ctl)
+            with comfy.ops.CastBiasWeightContext(self.in_proj_a, x, offloadable=True) as (w_a, _), \
+                 comfy.ops.CastBiasWeightContext(self.in_proj_b, x, offloadable=True) as (w_b, _):
+                if isinstance(w_a, QuantizedTensor):
+                    w_a = w_a.dequantize()
+                if isinstance(w_b, QuantizedTensor):
+                    w_b = w_b.dequantize()
+                core_attn_out = comfy_kitchen.gated_delta_decode_deferred(
+                    x, w_a, w_b, kv.dt_bias, kv.g_decay, kv.recurrent_state,
+                    self.key_dim, self.num_key_heads, self.key_head_dim ** -0.5, z, kv.norm_weight, self.norm.eps,
+                    kv.qkv_buf, kv.gates_buf, kv.sumsq_buf, kv.ctl)
+            return self.out_proj(core_attn_out.reshape(batch_size, seq_len, -1)), past_key_value
+
+        mixed_qkv = proj.transpose(1, 2)  # [B, conv_dim, seq_len]
+        b = self.in_proj_b(x)
+        a = self.in_proj_a(x)
+
+        # Conv1d
+        if past_key_value is not None:
+            conv_state = past_key_value.conv_state
+            conv_state_init = F.pad(mixed_qkv, (self.conv_kernel_size - mixed_qkv.shape[-1], 0))
+            conv_state.copy_(conv_state_init[:, :, -conv_state.shape[-1]:])
+        mixed_qkv = F.silu(self.conv1d(mixed_qkv)[:, :, :seq_len])
+
+        # Split QKV and compute beta/g
+        mixed_qkv = mixed_qkv.transpose(1, 2)  # [B, seq_len, conv_dim]
+        query, key, value = mixed_qkv.split([self.key_dim, self.key_dim, self.value_dim], dim=-1)
+        g_decay = -comfy.model_management.cast_to_device(self.A_log, x.device, torch.float32).exp()
+        dt_bias = comfy.model_management.cast_to_device(self.dt_bias, x.device, torch.float32)
+        if past_key_value is not None:
+            past_key_value.g_decay = g_decay
+            past_key_value.dt_bias = dt_bias
+            past_key_value.norm_weight = comfy.model_management.cast_to(self.norm.weight, dtype=x.dtype, device=x.device)
+
+        beta = b.sigmoid()
+        g = g_decay * F.softplus(a.float() + dt_bias)
+        query = query.reshape(batch_size, seq_len, self.num_key_heads, self.key_head_dim)
+        key = key.reshape(batch_size, seq_len, self.num_key_heads, self.key_head_dim)
+        value = value.reshape(batch_size, seq_len, self.num_value_heads, self.value_head_dim)
+        if self.num_value_heads != self.num_key_heads:
+            rep = self.num_value_heads // self.num_key_heads
+            query = query.repeat_interleave(rep, dim=2)
+            key = key.repeat_interleave(rep, dim=2)
+
+        # Delta rule
+        core_attn_out, last_recurrent_state = torch_chunk_gated_delta_rule(
+            query, key, value, g=g, beta=beta,
+            initial_state=None,
+            output_final_state=past_key_value is not None,
+        )
+
+        present_key_value = None
+        if past_key_value is not None:
+            if last_recurrent_state is not None:
+                past_key_value.recurrent_state.copy_(last_recurrent_state.to(past_key_value.recurrent_state.dtype))
+            present_key_value = past_key_value
+
+        # Gated norm + output projection (shared)
+        core_attn_out = self.norm(core_attn_out.reshape(-1, self.value_head_dim), z.reshape(-1, self.value_head_dim))
+        output = self.out_proj(core_attn_out.reshape(batch_size, seq_len, -1))
+        return output, present_key_value
+
+
+# GatedAttention - Full Attention with output gating
+def apply_partial_rope(xq, xk, freqs_cis, rotary_dim):
+    """Apply RoPE to only the first rotary_dim dimensions."""
+    xq_rot = xq[..., :rotary_dim]
+    xq_pass = xq[..., rotary_dim:]
+    xk_rot = xk[..., :rotary_dim]
+    xk_pass = xk[..., rotary_dim:]
+
+    xq_rot, xk_rot = apply_rope(xq_rot, xk_rot, freqs_cis)
+
+    xq = torch.cat([xq_rot, xq_pass], dim=-1)
+    xk = torch.cat([xk_rot, xk_pass], dim=-1)
+    return xq, xk
+
+
+class GatedAttention(nn.Module):
+    def __init__(self, config, device=None, dtype=None, ops=None):
+        super().__init__()
+
+        self.num_heads = config.num_attention_heads
+        self.num_kv_heads = config.num_key_value_heads
+        self.head_dim = config.head_dim
+        self.hidden_size = config.hidden_size
+        self.inner_size = self.num_heads * self.head_dim
+        self.rotary_dim = int(self.head_dim * config.partial_rotary_factor)
+
+        # q_proj outputs 2x: query + gate
+        self.q_proj = ops.Linear(config.hidden_size, self.inner_size * 2, bias=config.qkv_bias, device=device, dtype=dtype)
+        self.k_proj = ops.Linear(config.hidden_size, self.num_kv_heads * self.head_dim, bias=config.qkv_bias, device=device, dtype=dtype)
+        self.v_proj = ops.Linear(config.hidden_size, self.num_kv_heads * self.head_dim, bias=config.qkv_bias, device=device, dtype=dtype)
+        self.combined_qkv = comfy.ops.CombinedLinear((self.q_proj, self.k_proj, self.v_proj))
+        self.o_proj = ops.Linear(self.inner_size, config.hidden_size, bias=False, device=device, dtype=dtype)
+
+        # QK norms with (1+weight) scaling
+        self.q_norm = RMSNorm(self.head_dim, eps=config.rms_norm_eps, add=config.rms_norm_add, device=device, dtype=dtype)
+        self.k_norm = RMSNorm(self.head_dim, eps=config.rms_norm_eps, add=config.rms_norm_add, device=device, dtype=dtype)
+        self.comfy_attention = ComfyAttention()
+
+    def kv_cache_type(self, device, dtype):
+        method = self.comfy_attention.method
+        if method == "comfy_kitchen_int8" or method is None and comfy.model_management.comfy_kitchen_attention_enabled():
+            if dtype == torch.bfloat16 and self.head_dim == 256 and int8_decode_is_available(device):
+                return Int8FixedKVCache
+        return FixedKVCache
+
+    def init_kv_cache(self, batch, capacity, device, dtype, shared):
+        cache_type = self.kv_cache_type(device, dtype)
+        if cache_type not in shared:
+            shared[cache_type] = cache_type.shared(batch, device)
+        return cache_type.zeros(batch, self.num_kv_heads, capacity, self.head_dim, device, dtype, shared[cache_type])
+
+    def forward(self, x, attention_mask=None, freqs_cis=None, optimized_attention=None, past_key_value=None):
+        batch_size, seq_length, _ = x.shape
+
+        # Project Q (with gate), K, V
+        qkv = self.combined_qkv.forward(x)
+        if qkv is NotImplemented:
+            qg = self.q_proj(x)
+            xk = self.k_proj(x)
+            xv = self.v_proj(x)
+        else:
+            kv_size = self.num_kv_heads * self.head_dim
+            qg, xk, xv = qkv.split((self.inner_size * 2, kv_size, kv_size), dim=-1)
+        # Split into query and gate: each is [B, seq, inner_size]
+        qg = qg.view(batch_size, seq_length, self.num_heads, self.head_dim * 2)
+        xq, gate = qg[..., :self.head_dim], qg[..., self.head_dim:]
+        gate = gate.reshape(batch_size, seq_length, -1)  # [B, seq, inner_size]
+
+        xq = self.q_norm(xq).transpose(1, 2)  # [B, heads, seq, head_dim]
+        xk = self.k_norm(xk.view(batch_size, seq_length, self.num_kv_heads, self.head_dim)).transpose(1, 2)
+        xv = xv.view(batch_size, seq_length, self.num_kv_heads, self.head_dim).transpose(1, 2)
+
+        # Apply partial RoPE
+        xq, xk = apply_partial_rope(xq, xk, freqs_cis, self.rotary_dim)
+
+        # KV cache
+        present_key_value = past_key_value
+        decode = past_key_value is not None and seq_length <= SPEC_ROWS and attention_mask is None
+        if decode:
+            past_key_value.write(xk, xv)
+
+        if decode and (isinstance(past_key_value, Int8FixedKVCache) or
+                       self.comfy_attention.method is None and not comfy.model_management.comfy_kitchen_attention_enabled()):
+            output = past_key_value.attend(xq, xk, xv)
+        else:
+            if decode:
+                xk, xv = past_key_value.key, past_key_value.value
+                attention_mask = past_key_value.mask(seq_length)
+                optimized_attention = optimized_attention_for_device(x.device)
+            elif past_key_value is not None:
+                xk, xv = past_key_value.append(xk, xv)
+            gqa_kwargs = {"enable_gqa": True} if self.num_heads != self.num_kv_heads else {}
+            q, k, v = map(AttentionTensorContainer, (xq, xk, xv))
+            del xq, xk, xv
+            output = optimized_attention(q, k, v, self.num_heads, mask=attention_mask, skip_reshape=True,
+                                         preferred_attention=self.comfy_attention, **gqa_kwargs)
+
+        output = output * gate.sigmoid()
+        return self.o_proj(output), present_key_value
+
+
+# Hybrid Transformer Block
+class Qwen35TransformerBlock(nn.Module):
+    def __init__(self, config, index, device=None, dtype=None, ops=None):
+        super().__init__()
+        self.layer_type = config.layer_types[index]
+        if self.layer_type == "linear_attention":
+            self.linear_attn = GatedDeltaNet(config, device=device, dtype=dtype, ops=ops)
+        else:
+            self.self_attn = GatedAttention(config, device=device, dtype=dtype, ops=ops)
+        self.mlp = MLP(config, device=device, dtype=dtype, ops=ops)
+        self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps, add=config.rms_norm_add, device=device, dtype=dtype)
+        self.post_attention_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps, add=config.rms_norm_add, device=device, dtype=dtype)
+
+    def forward(self, x, attention_mask=None, freqs_cis=None, optimized_attention=None, past_key_value=None):
+        output = x
+        if self.layer_type == "linear_attention":
+            h, present_key_value = self.linear_attn(self.input_layernorm(x), attention_mask=attention_mask, past_key_value=past_key_value)
+        else:
+            h, present_key_value = self.self_attn(self.input_layernorm(x), attention_mask=attention_mask, freqs_cis=freqs_cis, optimized_attention=optimized_attention, past_key_value=past_key_value)
+
+        # in-place into the input buffer so CUDA-graph replays land in the static x
+        x = torch.add(x, h, out=output)
+        x = torch.add(x, self.mlp(x, norm=self.post_attention_layernorm), out=output)
+        return x, present_key_value
+
+
+# Qwen35 Transformer Backbone
+class Qwen35Transformer(Llama2_):
+    def __init__(self, config, device=None, dtype=None, ops=None):
+        nn.Module.__init__(self)
+        self.config = config
+        self.prefetch_dynamic_vbars = True
+        self.graph_dynamic_vbar_blocks = True
+        self.vocab_size = config.vocab_size
+        self.embed_tokens = ops.Embedding(config.vocab_size, config.hidden_size, device=device, dtype=dtype)
+        self.layers = nn.ModuleList([
+            Qwen35TransformerBlock(config, index=i, device=device, dtype=dtype, ops=ops)
+            for i in range(config.num_hidden_layers)
+        ])
+
+        if config.final_norm:
+            self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps, add=config.rms_norm_add, device=device, dtype=dtype)
+        else:
+            self.norm = None
+
+        if config.lm_head:
+            self.lm_head = ops.Linear(config.hidden_size, config.vocab_size, bias=False, device=device, dtype=dtype)
+
+    def compute_freqs_cis(self, position_ids, device):
+        rotary_dim = int(self.config.head_dim * self.config.partial_rotary_factor)
+        return precompute_freqs_cis(rotary_dim, position_ids, self.config.rope_theta,
+                                    rope_dims=self.config.mrope_section, interleaved_mrope=True, device=device)
+
+
+# Vision Encoder
+class Qwen35VisionPatchEmbed(nn.Module):
+    def __init__(self, config, device=None, dtype=None, ops=None):
+        super().__init__()
+        self.patch_size = config["patch_size"]
+        self.temporal_patch_size = config["temporal_patch_size"]
+        self.in_channels = config["in_channels"]
+        self.embed_dim = config["hidden_size"]
+        kernel_size = [self.temporal_patch_size, self.patch_size, self.patch_size]
+        self.proj = ops.Conv3d(self.in_channels, self.embed_dim, kernel_size=kernel_size, stride=kernel_size, bias=True, device=device, dtype=dtype)
+
+    def forward(self, x):
+        x = x.view(-1, self.in_channels, self.temporal_patch_size, self.patch_size, self.patch_size)
+        return self.proj(x).view(-1, self.embed_dim)
+
+
+class Qwen35VisionMLP(nn.Module):
+    def __init__(self, hidden_size, intermediate_size, device=None, dtype=None, ops=None):
+        super().__init__()
+
+        self.linear_fc1 = ops.Linear(hidden_size, intermediate_size, bias=True, device=device, dtype=dtype)
+        self.linear_fc2 = ops.Linear(intermediate_size, hidden_size, bias=True, device=device, dtype=dtype)
+
+    def forward(self, hidden_state):
+        return self.linear_fc2(F.gelu(self.linear_fc1(hidden_state), approximate="tanh"))
+
+
+class Qwen35VisionRotaryEmbedding(nn.Module):
+    def __init__(self, dim, theta=10000.0):
+        super().__init__()
+        self.dim = dim
+        inv_freq = 1.0 / (theta ** (torch.arange(0, dim, 2, dtype=torch.float) / dim))
+        self.register_buffer("inv_freq", inv_freq, persistent=False)
+
+    def forward(self, seqlen):
+        seq = torch.arange(seqlen, device=self.inv_freq.device, dtype=self.inv_freq.dtype)
+        freqs = torch.outer(seq, self.inv_freq)
+        return freqs
+
+
+class Qwen35VisionAttention(nn.Module):
+    def __init__(self, hidden_size, num_heads, device=None, dtype=None, ops=None):
+        super().__init__()
+
+        self.dim = hidden_size
+        self.num_heads = num_heads
+        self.head_dim = self.dim // self.num_heads
+        self.qkv = ops.Linear(self.dim, self.dim * 3, bias=True, device=device, dtype=dtype)
+        self.proj = ops.Linear(self.dim, self.dim, device=device, dtype=dtype)
+
+    def forward(self, x, cu_seqlens, position_embeddings, optimized_attention=None):
+        seq_length = x.shape[0]
+        query_states, key_states, value_states = (
+            self.qkv(x).reshape(seq_length, 3, self.num_heads, -1).permute(1, 0, 2, 3).unbind(0)
+        )
+        query_states, key_states = apply_rope(query_states, key_states, position_embeddings)
+
+        # Process per-sequence attention
+        lengths = (cu_seqlens[1:] - cu_seqlens[:-1]).tolist()
+        q_splits = torch.split(query_states, lengths, dim=0)
+        k_splits = torch.split(key_states, lengths, dim=0)
+        v_splits = torch.split(value_states, lengths, dim=0)
+
+        attn_outputs = []
+        for q, k, v in zip(q_splits, k_splits, v_splits):
+            q = q.transpose(0, 1).unsqueeze(0)
+            k = k.transpose(0, 1).unsqueeze(0)
+            v = v.transpose(0, 1).unsqueeze(0)
+            attn_outputs.append(optimized_attention(q, k, v, self.num_heads, skip_reshape=True))
+
+        attn_output = torch.cat(attn_outputs, dim=1)
+        attn_output = attn_output.reshape(seq_length, -1)
+        return self.proj(attn_output)
+
+
+class Qwen35VisionBlock(nn.Module):
+    def __init__(self, hidden_size, num_heads, intermediate_size, device=None, dtype=None, ops=None):
+        super().__init__()
+
+        self.norm1 = ops.LayerNorm(hidden_size, eps=1e-6, device=device, dtype=dtype)
+        self.norm2 = ops.LayerNorm(hidden_size, eps=1e-6, device=device, dtype=dtype)
+        self.attn = Qwen35VisionAttention(hidden_size, num_heads, device=device, dtype=dtype, ops=ops)
+        self.mlp = Qwen35VisionMLP(hidden_size, intermediate_size, device=device, dtype=dtype, ops=ops)
+
+    def forward(self, x, cu_seqlens, position_embeddings, optimized_attention=None):
+        x = x + self.attn(self.norm1(x), cu_seqlens=cu_seqlens, position_embeddings=position_embeddings, optimized_attention=optimized_attention)
+        return x + self.mlp(self.norm2(x))
+
+
+class Qwen35VisionPatchMerger(nn.Module):
+    def __init__(self, hidden_size, spatial_merge_size, out_hidden_size, device=None, dtype=None, ops=None):
+        super().__init__()
+
+        merge_dim = hidden_size * (spatial_merge_size ** 2)
+        self.norm = ops.LayerNorm(hidden_size, eps=1e-6, device=device, dtype=dtype)
+        self.linear_fc1 = ops.Linear(merge_dim, merge_dim, device=device, dtype=dtype)
+        self.linear_fc2 = ops.Linear(merge_dim, out_hidden_size, device=device, dtype=dtype)
+        self.merge_dim = merge_dim
+
+    def forward(self, x):
+        x = self.norm(x).view(-1, self.merge_dim)
+        return self.linear_fc2(F.gelu(self.linear_fc1(x)))
+
+
+class Qwen35VisionModel(nn.Module):
+    def __init__(self, config, device=None, dtype=None, ops=None):
+        super().__init__()
+        self.spatial_merge_size = config["spatial_merge_size"]
+        self.patch_size = config["patch_size"]
+        self.spatial_merge_unit = self.spatial_merge_size * self.spatial_merge_size
+
+        self.hidden_size = config["hidden_size"]
+        self.num_heads = config["num_heads"]
+        self.num_position_embeddings = config["num_position_embeddings"]
+
+        self.patch_embed = Qwen35VisionPatchEmbed(config, device=device, dtype=dtype, ops=ops)
+        self.pos_embed = ops.Embedding(self.num_position_embeddings, self.hidden_size, device=device, dtype=dtype)
+        self.num_grid_per_side = int(self.num_position_embeddings ** 0.5)
+        self.rotary_pos_emb = Qwen35VisionRotaryEmbedding(self.hidden_size // self.num_heads // 2)
+        self.blocks = nn.ModuleList([
+            Qwen35VisionBlock(self.hidden_size, self.num_heads, config["intermediate_size"], device=device, dtype=dtype, ops=ops)
+            for _ in range(config["depth"])
+        ])
+        self.merger = Qwen35VisionPatchMerger(self.hidden_size, self.spatial_merge_size, config["out_hidden_size"], device=device, dtype=dtype, ops=ops)
+        self.deepstack_visual_indexes = [] # DeepStack, per-layer visual features (Qwen3-VL)
+        self.deepstack_merger_list = None
+
+    def rot_pos_emb(self, grid_thw):
+        merge_size = self.spatial_merge_size
+        grid_thw_list = grid_thw.tolist()
+        max_hw = max(max(h, w) for _, h, w in grid_thw_list)
+        freq_table = self.rotary_pos_emb(max_hw)
+        device = freq_table.device
+        total_tokens = sum(int(t * h * w) for t, h, w in grid_thw_list)
+        pos_ids = torch.empty((total_tokens, 2), dtype=torch.long, device=device)
+        offset = 0
+        for num_frames, height, width in grid_thw_list:
+            num_frames, height, width = int(num_frames), int(height), int(width)
+            merged_h, merged_w = height // merge_size, width // merge_size
+            block_rows = torch.arange(merged_h, device=device)
+            block_cols = torch.arange(merged_w, device=device)
+            intra_row = torch.arange(merge_size, device=device)
+            intra_col = torch.arange(merge_size, device=device)
+            row_idx = block_rows[:, None, None, None] * merge_size + intra_row[None, None, :, None]
+            col_idx = block_cols[None, :, None, None] * merge_size + intra_col[None, None, None, :]
+            row_idx = row_idx.expand(merged_h, merged_w, merge_size, merge_size).reshape(-1)
+            col_idx = col_idx.expand(merged_h, merged_w, merge_size, merge_size).reshape(-1)
+            coords = torch.stack((row_idx, col_idx), dim=-1)
+            if num_frames > 1:
+                coords = coords.repeat(num_frames, 1)
+            num_tokens = coords.shape[0]
+            pos_ids[offset:offset + num_tokens] = coords
+            offset += num_tokens
+        embeddings = freq_table[pos_ids]
+        embeddings = embeddings.flatten(1)
+        return embeddings
+
+    def fast_pos_embed_interpolate(self, grid_thw):
+        grid_thw_list = grid_thw.tolist()
+        grid_ts = [int(row[0]) for row in grid_thw_list]
+        grid_hs = [int(row[1]) for row in grid_thw_list]
+        grid_ws = [int(row[2]) for row in grid_thw_list]
+        device = self.pos_embed.weight.device
+        idx_list = [[] for _ in range(4)]
+        weight_list = [[] for _ in range(4)]
+        for t, h, w in grid_thw_list:
+            h, w = int(h), int(w)
+            h_idxs = torch.linspace(0, self.num_grid_per_side - 1, h, device=device)
+            w_idxs = torch.linspace(0, self.num_grid_per_side - 1, w, device=device)
+            h_idxs_floor = h_idxs.int()
+            w_idxs_floor = w_idxs.int()
+            h_idxs_ceil = (h_idxs.int() + 1).clip(max=self.num_grid_per_side - 1)
+            w_idxs_ceil = (w_idxs.int() + 1).clip(max=self.num_grid_per_side - 1)
+            dh = h_idxs - h_idxs_floor
+            dw = w_idxs - w_idxs_floor
+            base_h = h_idxs_floor * self.num_grid_per_side
+            base_h_ceil = h_idxs_ceil * self.num_grid_per_side
+            indices = [
+                (base_h[None].T + w_idxs_floor[None]).flatten(),
+                (base_h[None].T + w_idxs_ceil[None]).flatten(),
+                (base_h_ceil[None].T + w_idxs_floor[None]).flatten(),
+                (base_h_ceil[None].T + w_idxs_ceil[None]).flatten(),
+            ]
+            weights = [
+                ((1 - dh)[None].T * (1 - dw)[None]).flatten(),
+                ((1 - dh)[None].T * dw[None]).flatten(),
+                (dh[None].T * (1 - dw)[None]).flatten(),
+                (dh[None].T * dw[None]).flatten(),
+            ]
+            for j in range(4):
+                idx_list[j].extend(indices[j].tolist())
+                weight_list[j].extend(weights[j].tolist())
+        idx_tensor = torch.tensor(idx_list, dtype=torch.long, device=device)
+        weight_tensor = torch.tensor(weight_list, dtype=self.pos_embed.weight.dtype, device=device)
+        pos_embeds = self.pos_embed(idx_tensor).to(device) * weight_tensor[:, :, None]
+        patch_pos_embeds = pos_embeds[0] + pos_embeds[1] + pos_embeds[2] + pos_embeds[3]
+        patch_pos_embeds = patch_pos_embeds.split([h * w for h, w in zip(grid_hs, grid_ws)])
+        patch_pos_embeds_permute = []
+        merge_size = self.spatial_merge_size
+        for pos_embed, t, h, w in zip(patch_pos_embeds, grid_ts, grid_hs, grid_ws):
+            pos_embed = pos_embed.repeat(t, 1)
+            pos_embed = (
+                pos_embed.view(t, h // merge_size, merge_size, w // merge_size, merge_size, -1)
+                .permute(0, 1, 3, 2, 4, 5)
+                .flatten(0, 4)
+            )
+            patch_pos_embeds_permute.append(pos_embed)
+        return torch.cat(patch_pos_embeds_permute)
+
+    def forward(self, x, grid_thw, premerge=None):
+        # premerge: optional {block index: None}, filled with those blocks' outputs (before any merger)
+        x = self.patch_embed(x)
+        pos_embeds = self.fast_pos_embed_interpolate(grid_thw).to(x.device)
+        x = x + pos_embeds
+        rotary_pos_emb = self.rot_pos_emb(grid_thw).to(x.device)
+        seq_len = x.shape[0]
+        x = x.reshape(seq_len, -1)
+        rotary_pos_emb = rotary_pos_emb.reshape(seq_len, -1)
+        emb = torch.cat((rotary_pos_emb, rotary_pos_emb), dim=-1)
+        cos = emb.cos().unsqueeze(-2)
+        sin = emb.sin().unsqueeze(-2)
+        sin_half = sin.shape[-1] // 2
+        position_embeddings = (cos, sin[..., :sin_half], -sin[..., sin_half:])
+        cu_seqlens = torch.repeat_interleave(
+            grid_thw[:, 1] * grid_thw[:, 2], grid_thw[:, 0]
+        ).cumsum(dim=0, dtype=torch.int32)
+        cu_seqlens = F.pad(cu_seqlens, (1, 0), value=0)
+        optimized_attention = optimized_attention_for_device(x.device, mask=False, small_input=True)
+        deepstack_features = []
+        for layer_num, blk in enumerate(self.blocks):
+            x = blk(x, cu_seqlens=cu_seqlens, position_embeddings=position_embeddings, optimized_attention=optimized_attention)
+            if self.deepstack_merger_list is not None and layer_num in self.deepstack_visual_indexes:
+                deepstack_features.append(self.deepstack_merger_list[self.deepstack_visual_indexes.index(layer_num)](x))
+            if premerge is not None and layer_num in premerge:
+                premerge[layer_num] = x
+        merged = self.merger(x)
+        if self.deepstack_merger_list is not None:
+            return merged, deepstack_features
+        return merged
+
+class MTPHead(nn.Module):
+    # MTP draft head: fc(cat[norm(embed), norm(hidden)]) -> attention block (own KV) -> norm
+    def __init__(self, config, device=None, dtype=None, ops=None):
+        super().__init__()
+        self.fc = ops.Linear(config.hidden_size * 2, config.hidden_size, bias=False, device=device, dtype=dtype)
+        self.pre_fc_norm_embedding = RMSNorm(config.hidden_size, eps=config.rms_norm_eps, add=config.rms_norm_add, device=device, dtype=dtype)
+        self.pre_fc_norm_hidden = RMSNorm(config.hidden_size, eps=config.rms_norm_eps, add=config.rms_norm_add, device=device, dtype=dtype)
+        self.layers = nn.ModuleList([Qwen35TransformerBlock(config, index=3, device=device, dtype=dtype, ops=ops)])
+        self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps, add=config.rms_norm_add, device=device, dtype=dtype)
+
+    def forward(self, embeds, hidden, freqs_cis, past_key_value):
+        x = self.fc(torch.cat([self.pre_fc_norm_embedding(embeds), self.pre_fc_norm_hidden(hidden)], dim=-1))
+        attention = optimized_attention_for_device(x.device, mask=False, small_input=True)
+        x, _ = self.layers[0](x, attention_mask=None, freqs_cis=freqs_cis, optimized_attention=attention, past_key_value=past_key_value)
+        return self.norm(x), x  # (for logits, pre-norm hidden for recursive drafting)
+
+
+# Model Wrapper
+class Qwen35(BaseLlama, BaseGenerate, torch.nn.Module):
+    model_type = "qwen35_2b"
+
+    def __init__(self, config_dict, dtype, device, operations):
+        super().__init__()
+        config = _make_config(self.model_type, config_dict)
+        self.num_layers = config.num_hidden_layers
+        self.model = Qwen35Transformer(config, device=device, dtype=dtype, ops=operations)
+        self.mtp = None
+        if config.mtp:
+            self.mtp = MTPHead(config, device=device, dtype=dtype, ops=operations)
+        # Prefer small-M execution for autoregressive linears, including the draft/head.
+        decode_units = [self.model.layers] + ([self.mtp] if config.mtp else []) + ([self.model.lm_head] if config.lm_head else [])
+        for unit in decode_units:
+            for m in unit.modules():
+                if isinstance(m, comfy.ops.MixedPrecisionOp):
+                    m.comfy_gemv_optimized = True
+                    if m._combined_linear is not None:
+                        m._combined_linear.comfy_gemv_optimized = True
+        vision_overrides = QWEN35_MODELS.get(self.model_type, {}).get("vision", {})
+        vision_config = {**QWEN35_VISION_DEFAULTS, **vision_overrides, "out_hidden_size": config.hidden_size}
+        self.visual = Qwen35VisionModel(vision_config, device=device, dtype=dtype, ops=operations)
+        self.dtype = dtype
+
+    def get_dynamic_vram__units(self):
+        units, last_units = self.model.get_dynamic_vram__units()
+        # head and MTP draft weights run every decode step: fault them resident ahead of the body.
+        # a separate embedding goes last: evicted, its rows are gathered from the host copy instead.
+        # a tied table is the head, so it stays first.
+        head = self.model.lm_head if hasattr(self.model, "lm_head") else self.model.embed_tokens
+        hot = head if self.mtp is None else (head, self.mtp)
+        if hasattr(self.model, "lm_head"):
+            return [hot, *units], [*last_units, self.model.embed_tokens]
+        return [hot, *units], last_units
+
+    def preprocess_embed(self, embed, device):
+        if embed["type"] == "image":
+            # Qwen3.5 normalizes to [-1, 1] (mean/std 0.5), same as Qwen3-VL.
+            image, grid = comfy.text_encoders.qwen_vl.process_qwen2vl_images(embed["data"], patch_size=16, image_mean=[0.5, 0.5, 0.5], image_std=[0.5, 0.5, 0.5])
+            return self.visual(image.to(device, dtype=torch.float32), grid), grid
+        if embed["type"] == "video":
+            height, width = embed["size"]
+            video, grid = comfy.text_encoders.qwen_vl.process_qwen2vl_video(embed["data"], height, width, patch_size=16, image_mean=[0.5, 0.5, 0.5], image_std=[0.5, 0.5, 0.5])
+            return self.visual(video.to(device, dtype=torch.float32), grid), grid
+        return None, None
+
+    def forward(self, x, attention_mask=None, embeds=None, num_tokens=None, intermediate_output=None, final_layer_norm_intermediate=True, dtype=None, embeds_info=[], past_key_values=None):
+        position_ids = comfy.text_encoders.qwen_vl.qwen2vl_mrope_position_ids(embeds_info, embeds.shape[1], embeds.device)
+        return super().forward(x, attention_mask=attention_mask, embeds=embeds, num_tokens=num_tokens, intermediate_output=intermediate_output, final_layer_norm_intermediate=final_layer_norm_intermediate, dtype=dtype, position_ids=position_ids, past_key_values=past_key_values)
+
+    def generate(self, embeds=None, do_sample=True, max_length=256, temperature=1.0, top_k=50, top_p=0.9, min_p=0.0, repetition_penalty=1.0, seed=42, stop_tokens=None, **kwargs):
+        mtp = kwargs.pop("mtp", True)
+        if self.mtp is None or not mtp or kwargs.get("initial_input_ids") is not None:
+            return super().generate(embeds=embeds, do_sample=do_sample, max_length=max_length, temperature=temperature,
+                                    top_k=top_k, top_p=top_p, min_p=min_p, repetition_penalty=repetition_penalty,
+                                    seed=seed, stop_tokens=stop_tokens, **kwargs)
+        sampling = None
+        if do_sample and temperature != 0.0:
+            sampling = {"temperature": temperature, "top_k": top_k, "top_p": top_p, "min_p": min_p,
+                        "seed": seed if seed is not None else 42}
+        return self._generate_mtp(embeds, max_length, stop_tokens, mtp, sampling=sampling, position_ids=kwargs.get("position_ids"),
+                                  repetition_penalty=repetition_penalty, presence_penalty=kwargs.get("presence_penalty", 0.0) or 0.0)
+
+    def _generate_mtp(self, embeds, max_length, stop_tokens, mtp, sampling=None, position_ids=None, repetition_penalty=1.0, presence_penalty=0.0):
+        device = embeds.device
+        cfg = self.model.config
+        if stop_tokens is None:
+            stop_tokens = cfg.stop_tokens
+        dt = torch.bfloat16 if comfy.model_management.should_use_bf16(device) else torch.float32
+        embeds = embeds.to(dt)
+        if embeds.ndim == 2:
+            embeds = embeds.unsqueeze(0)
+        cap = embeds.shape[1] + max_length + 7
+        pkv = self.init_kv_cache(embeds.shape[0], cap, device, dt)
+        # repair window: drafting ahead plus a near-full rollback
+        mtp_kv = self.mtp.layers[0].self_attn.init_kv_cache(embeds.shape[0], cap, device, dt, {})
+        head = self.model.lm_head if hasattr(self.model, "lm_head") else self.model.embed_tokens
+
+        def verify_logits(x):
+            if not head.comfy_cast_weights:
+                return F.linear(x, head.weight.to(x), None)
+            with comfy.ops.CastBiasWeightContext(head, x, offloadable=True) as (w, _bias):
+                return F.linear(x, w)
+
+        generator = None
+        if sampling is not None:
+            generator = torch.Generator(device=device).manual_seed(sampling["seed"])
+        penalized = penalty_active(repetition_penalty, presence_penalty)
+
+        # after an image, text positions run behind the cache index (MRoPE); decode continues from the last prefill position
+        rope_offset = 0 if position_ids is None else int(position_ids[:, -1].max()) + 1 - embeds.shape[1]
+
+        # rope table once per generate, sliced per draft
+        ftab = rope_matrix(self.model.compute_freqs_cis(torch.arange(rope_offset, cap + rope_offset, device=device, dtype=torch.float).unsqueeze(0), device))
+
+        def freqs_at(p, n=1):
+            return ftab[:, :, p:p + n]
+
+        # cross-step state lives in static carriers: nothing allocated inside a step may outlive it
+        nt_buf = torch.empty((embeds.shape[0], 1), device=device, dtype=torch.long)
+        h_buf = torch.empty((embeds.shape[0], 1, cfg.hidden_size), device=device, dtype=dt)
+        x, _, _ = self.model.forward(None, embeds=embeds, attention_mask=None, past_key_values=pkv, position_ids=position_ids)
+        lg0 = self.logits(x)[:, -1]
+        if sampling is None:
+            nt_buf.copy_(lg0.argmax(dim=-1, keepdim=True))
+        else:
+            nt_buf.copy_(self.sample_token(lg0, sampling["temperature"], sampling["top_k"], sampling["top_p"], sampling["min_p"],
+                                           1.0, [], generator))
+        pen_mask = torch.zeros((lg0.shape[-1],), device=device, dtype=torch.bool) if penalized else None
+        h_buf.copy_(x[:, -1:, :])
+        del x, lg0
+        if hasattr(self.model.embed_tokens, "_v"):
+            vbar = self.model.embed_tokens._v[0]
+            comfy.model_management.reset_cast_buffers()
+            vbar.set_watermark(vbar.max_size)
+        ids = [nt_buf[0].item()]
+        if penalized:
+            pen_mask.index_fill_(0, nt_buf.reshape(-1), True)
+        pos = embeds.shape[1]
+        progress = comfy.utils.ProgressBar(max_length)
+        console = tqdm(total=max_length, desc="Generating tokens", initial=1)
+
+        def update_progress(n):
+            progress.update(n)
+            console.update(n)
+
+        adaptive = mtp is True
+        # auto: seven draft rows as a chain of widths, reshaped from rank hits and measured step cost
+        widths = (4, 3)
+        hits = [[0.0] * 8 for _ in range(7)]
+        steps, draft_ms, verify_ms = 0, 0.0, 0.0
+        draft_ranks = torch.zeros((7, 7), device=device, dtype=torch.long) if adaptive else None
+        timers = [torch.cuda.Event(enable_timing=True) for _ in range(3)] if adaptive and device.type == "cuda" else None
+        clocks = [0.0] * 3
+        capacity, spec = MTP_MODES["auto" if adaptive else mtp]
+        tree = VerifyTree(tree_spec(widths) if adaptive else spec, capacity, device)
+        depth = tree.chain
+        for kv in pkv:
+            if isinstance(kv, LinearKV):
+                kv.ctl_tracker["tree"] = tree
+            else:
+                kv.tracker["tree"] = tree
+        verify_tokens = torch.zeros((embeds.shape[0], tree.rows), device=device, dtype=torch.long)
+        verify_buffers = (torch.empty((embeds.shape[0], tree.rows, cfg.hidden_size), device=device, dtype=dt), freqs_at(pos, tree.rows).clone())
+        draft_top = torch.empty((embeds.shape[0], 7 if adaptive else tree.fanout), device=device, dtype=torch.long)
+        use_graph = self.model.graph_dynamic_vbar_blocks
+        compile_allocations = use_graph and comfy.model_prefetch.malloc_graph_enabled(device)
+        embed = self.model.embed_tokens
+        draft_token = torch.empty_like(nt_buf)
+        draft_emb = torch.empty_like(h_buf)
+        draft_hidden = torch.empty_like(h_buf)
+        draft_freqs = freqs_at(pos).clone()
+
+        def draft(token, hidden, p):
+            # one drafted token (and its runner-ups for a tree): mtp head + lm_head, graph-replayed when resident
+            mtp_kv.prepare(1)
+            draft_token.copy_(token)
+            draft_hidden.copy_(hidden)
+            draft_freqs.copy_(freqs_at(p))
+            host_rows = hasattr(embed, "_v") and embed.weight_lowvram_function is None and len(embed.weight_function) == 0 and comfy.ops.vbar_above_watermark(embed)
+            queue = comfy.model_prefetch.make_prefetch_queue(
+                [None if host_rows else embed, [head, self.mtp]], device,
+                {"prefetch_dynamic_vbars": self.model.prefetch_dynamic_vbars})
+
+            def embed_core():
+                draft_emb.copy_(embed.host_rows(draft_token, out_dtype=dt) if host_rows else embed(draft_token).to(dt))
+
+            def core():
+                n1, r1 = self.mtp(draft_emb, draft_hidden, draft_freqs, mtp_kv)
+                draft_hidden.copy_(r1)
+                logits = self.logits(n1)[:, -1]
+                if adaptive:
+                    draft_top.copy_(logits.topk(7, dim=-1).indices)
+                    draft_token.copy_(draft_top[:, :1])
+                else:
+                    draft_token.copy_(logits.argmax(dim=-1, keepdim=True))
+                if tree.fanout > 1 and not adaptive:
+                    draft_top.copy_(logits.topk(tree.fanout, dim=-1).indices)
+
+            # Host rows stay eager; a tied table uses its graph slot for MTP + head.
+            comfy.model_prefetch.prefetch_queue_pop(queue, device, embed, dt, core=embed_core,
+                                                  enable_graph=use_graph and not host_rows and embed is not head, malloc_scope="mtp")
+            comfy.model_prefetch.prefetch_queue_pop(queue, device, head, dt, core=core,
+                                                  enable_graph=use_graph, malloc_scope="mtp")
+            comfy.model_prefetch.prefetch_queue_pop(queue, device, None, malloc_scope="mtp")
+            mtp_kv.advance(1)
+            return draft_token, draft_top, draft_hidden
+
+        def verify_sample(lg):
+            s = sampling
+            rows = lg[0] if s is None else lg[0].float()
+            if penalized:
+                # Each row sees committed history and its own path, never siblings.
+                mask = pen_mask.unsqueeze(0).repeat(tree.rows, 1)
+                for r in range(1, tree.rows):
+                    mask[r].copy_(mask[tree.parent[r]])
+                    mask[r].index_fill_(0, verify_tokens[:, r], True)
+                rows = torch.where(mask, apply_penalty(rows, repetition_penalty, presence_penalty), rows)
+            if s is None:
+                return rows.argmax(dim=-1).unsqueeze(0)
+            return self.sample_token(rows, s["temperature"], s["top_k"], s["top_p"], s["min_p"],
+                                     1.0, [], generator).transpose(0, 1)
+
+        def step():
+            # scoped so every temporary dies before the compiler bracket closes
+            nonlocal pos
+            if adaptive:
+                if timers:
+                    timers[0].record(torch.cuda.current_stream(device))
+                else:
+                    clocks[0] = time.perf_counter()
+            # chain draft k fills row k + 1, its runner-ups that node's sibling rows
+            verify_tokens[:, :1].copy_(nt_buf)
+            hid_in = h_buf
+            for k in range(depth):
+                dk, top, hid_in = draft(verify_tokens[:, k:k + 1], hid_in, pos + k)
+                if adaptive:
+                    draft_ranks[k].copy_(top[0])
+                children = tree.children[k]
+                verify_tokens[:, children[0]:children[0] + 1].copy_(dk)
+                for j, c in enumerate(children[1:], 1):
+                    verify_tokens[:, c:c + 1].copy_(top[:, j:j + 1])
+            if adaptive:
+                if timers:
+                    timers[1].record(torch.cuda.current_stream(device))
+                else:
+                    clocks[1] = time.perf_counter()
+            embed = self.model.embed_tokens
+            if hasattr(embed, "_v") and embed.weight_lowvram_function is None and len(embed.weight_function) == 0 and comfy.ops.vbar_above_watermark(embed):
+                ev = embed.host_rows(verify_tokens, out_dtype=dt)
+            else:
+                ev = embed(verify_tokens).to(dt)
+            verify_pos = tree.positions + pos + rope_offset
+            x, _, _ = self.model.forward(None, embeds=ev, attention_mask=None, past_key_values=pkv, position_ids=verify_pos, decode_buffers=verify_buffers)
+            # all verify positions in one lm_head GEMV, accept decided GPU-side, one sync
+            lg = verify_logits(x)
+            toks = lg.argmax(dim=-1) if sampling is None and not penalized else verify_sample(lg)
+            if adaptive:
+                if timers:
+                    timers[2].record(torch.cuda.current_stream(device))
+                else:
+                    clocks[2] = time.perf_counter()
+            packet = [toks[0], verify_tokens[0, 1:]]
+            if adaptive:
+                packet.append(draft_ranks.reshape(-1))
+            vals = torch.cat(packet).tolist()
+            t, dr = vals[:tree.rows], [None] + vals[tree.rows:2 * tree.rows - 1]
+            # Continue only along a child containing the main model's chosen token.
+            path = [0]
+            while True:
+                node = next((c for c in tree.children[path[-1]] if dr[c] == t[path[-1]]), None)
+                if node is None:
+                    break
+                path.append(node)
+            ranks = []
+            if adaptive:
+                for node in path:
+                    if node >= depth:
+                        break
+                    candidates = vals[15 + 7 * node:22 + 7 * node]
+                    ranks.append(next((r for r, token in enumerate(candidates) if token == t[node]), 7))
+                if timers:
+                    clocks[0], clocks[1], clocks[2] = 0.0, timers[0].elapsed_time(timers[1]), timers[0].elapsed_time(timers[2])
+                else:
+                    clocks[:] = [t * 1000 for t in clocks]
+            commit = tuple(dr[r] for r in path[1:]) + (t[path[-1]],)
+            row = path[-1]
+            next_tok = toks[:, row:row + 1]
+            if len(path) < tree.rows:
+                for kv in pkv:
+                    kv.rollback(tree.rows - len(path))
+            on_chain = row == len(path) - 1
+            if not on_chain:
+                for kv in pkv:
+                    kv.commit_path(pos, path)
+            # mtp entries fed by a rejected or off-chain draft token
+            kept = min(len(path) if on_chain else len(path) - 1, depth)
+            if kept < depth:
+                mtp_kv.rollback(depth - kept)
+            nt_buf.copy_(next_tok)
+            h_buf.copy_(x[:, row:row + 1, :])
+            if penalized:
+                for r in path[1:]:
+                    pen_mask.index_fill_(0, verify_tokens[:, r], True)
+                pen_mask.index_fill_(0, nt_buf.reshape(-1), True)
+            pos += len(commit)
+            return commit, ranks
+
+        try:
+            while len(ids) < max_length and ids[-1] not in stop_tokens:
+                with (comfy.model_prefetch.malloc_graph_scope(device) if compile_allocations else contextlib.nullcontext()):
+                    commit, ranks = step()
+                if adaptive:
+                    steps += 1
+                    for row in hits:
+                        for r in range(8):
+                            row[r] *= 0.984375
+                    for level, rank in enumerate(ranks):
+                        hits[level][rank] += 1
+                    # Do not learn graph capture cost as steady-state execution cost.
+                    if steps > 8:
+                        mix = 1.0 if steps == 9 else 0.125
+                        draft_ms += mix * ((clocks[1] - clocks[0]) / len(widths) - draft_ms)
+                        verify_ms += mix * (clocks[2] - clocks[1] - verify_ms)
+                    if steps % 32 == 0:
+                        best = best_widths(widths, hits, draft_ms, verify_ms)
+                        if best != widths:
+                            widths = best
+                            tree.update(tree_spec(widths))
+                            depth = tree.chain
+                commit = list(commit[:max_length - len(ids)])
+                stop = next((i for i, t in enumerate(commit) if t in stop_tokens), None)
+                if stop is not None:
+                    del commit[stop + 1:]
+                ids.extend(commit)
+                update_progress(len(commit))
+        finally:
+            console.close()
+            comfy.model_prefetch.cleanup_prefetch_queues()
+        return ids
+
+    def init_kv_cache(self, batch, max_cache_len, device, execution_dtype):
+        model_config = self.model.config
+        past_key_values = []
+        shared = {}
+        tracker = LinearKV.deferred_tracker(device)
+        for i in range(model_config.num_hidden_layers):
+            if model_config.layer_types[i] == "linear_attention":
+                recurrent_state = torch.zeros(
+                    [batch, model_config.linear_num_value_heads, model_config.linear_key_head_dim, model_config.linear_value_head_dim],
+                    device=device, dtype=torch.float32
+                )
+                conv_dim = model_config.linear_num_key_heads * model_config.linear_key_head_dim * 2 + model_config.linear_num_value_heads * model_config.linear_value_head_dim
+                conv_state = torch.zeros(
+                    [batch, conv_dim, model_config.conv_kernel_size - 1],
+                    device=device, dtype=execution_dtype
+                )
+                kv = LinearKV(conv_state, recurrent_state, 0, None, None)
+                kv.qkv_buf, kv.proj_buf, kv.gates_buf, kv.sumsq_buf = comfy_kitchen.gated_delta_deferred_buffers(
+                    batch, conv_dim, model_config.linear_num_value_heads, model_config.linear_num_key_heads, execution_dtype, device)
+                kv.ctl, kv.ctl_tracker = tracker["ctl"], tracker
+                past_key_values.append(kv)
+            else:
+                past_key_values.append(self.model.layers[i].self_attn.init_kv_cache(batch, max_cache_len, device, execution_dtype, shared))
+        return past_key_values
+
+# Tokenizer and Text Encoder Wrappers
+
+class Qwen35Tokenizer(sd1_clip.SDTokenizer):
+    def __init__(self, embedding_directory=None, tokenizer_data={}, embedding_size=2048, embedding_key="qwen35_2b"):
+        from transformers import Qwen2Tokenizer
+        tokenizer_path = os.path.join(os.path.dirname(os.path.realpath(__file__)), "qwen35_tokenizer")
+        super().__init__(tokenizer_path, pad_with_end=False, embedding_directory=embedding_directory, embedding_size=embedding_size, embedding_key=embedding_key, tokenizer_class=Qwen2Tokenizer,
+            has_start_token=False, has_end_token=False, pad_to_max_length=False, max_length=99999999, min_length=1, tokenizer_data=tokenizer_data)
+        self.pad_token = self.tokenizer.get_vocab()["<|endoftext|>"]
+
+
+class Qwen35ImageTokenizer(sd1_clip.SD1Tokenizer):
+    def __init__(self, embedding_directory=None, tokenizer_data={}, model_type="qwen35_2b"):
+        embedding_size = QWEN35_MODELS.get(model_type, {}).get("hidden_size", 2048)
+        tokenizer = lambda *a, **kw: Qwen35Tokenizer(*a, **kw, embedding_size=embedding_size, embedding_key=model_type)
+        super().__init__(embedding_directory=embedding_directory, tokenizer_data=tokenizer_data, name=model_type, tokenizer=tokenizer)
+        vocab = getattr(self, self.clip).tokenizer.get_vocab()
+        self.image_token_id = vocab["<|image_pad|>"]
+        self.video_token_id = vocab.get("<|video_pad|>")
+        self.llama_template = "<|im_start|>user\n{}<|im_end|>\n<|im_start|>assistant\n"
+        self.llama_template_images = "<|im_start|>user\n<|vision_start|><|image_pad|><|vision_end|>{}<|im_end|>\n<|im_start|>assistant\n"
+
+    def video_embeds(self, frames, fps):
+        # Qwen3-VL sampling: 2 fps, 4 to 768 frames, consecutive pairs form one temporal patch
+        # introduced by its midpoint timestamp. Returns (prompt text, one embed per pair).
+        total = frames.shape[0]
+        num_frames = min(max(int(total / fps * 2), 4), 768, total)
+        indices = [round(i * (total - 1) / max(num_frames - 1, 1)) for i in range(num_frames)]
+        if len(indices) % 2 == 1:
+            indices.append(indices[-1])
+        height, width = comfy.text_encoders.qwen_vl.qwen2vl_video_smart_resize(num_frames, frames.shape[1], frames.shape[2])
+        text = ""
+        embeds = []
+        for i in range(0, len(indices), 2):
+            seconds = (indices[i] + indices[i + 1]) / (2 * fps)
+            text += f"<{seconds:.1f} seconds><|vision_start|><|video_pad|><|vision_end|>"
+            embeds.append({"type": "video", "data": frames[indices[i:i + 2]], "size": (height, width), "original_type": "video"})
+        return text, embeds
+
+    def tokenize_with_weights(self, text, return_word_ids=False, llama_template=None, images=[], videos=[], prevent_empty_text=False, thinking=False, system_prompt="", **kwargs):
+        image = kwargs.get("image", None)
+        if image is not None and len(images) == 0:
+            images = [image[i:i + 1] for i in range(image.shape[0])]
+        video = kwargs.get("video", None)
+        if video is not None and len(videos) == 0:
+            videos = [video]
+        video_text = ""
+        video_embeds = []
+        for v in videos:
+            t, e = self.video_embeds(v, kwargs.get("fps", 24))
+            video_text += t
+            video_embeds += e
+
+        skip_template = False
+        if text.startswith('<|im_start|>'):
+            skip_template = True
+        if prevent_empty_text and text == '':
+            text = ' '
+
+        if skip_template:
+            llama_text = text
+        else:
+            if llama_template is not None:
+                template = llama_template
+            elif len(images) == 0 and len(video_embeds) == 0:
+                template = self.llama_template
+            else:
+                template = self.llama_template_images
+                vision_block = "<|vision_start|><|image_pad|><|vision_end|>"
+                template = template.replace(vision_block, vision_block * len(images) + video_text, 1)
+            llama_text = template.format(text)
+            if system_prompt:
+                llama_text = "<|im_start|>system\n" + system_prompt + "<|im_end|>\n" + llama_text
+            if llama_template is None:  # chat template: thinking opens the block, otherwise an empty block disables reasoning
+                llama_text += "<think>\n" if thinking else "<think>\n\n</think>\n\n"
+
+        tokens = super().tokenize_with_weights(llama_text, return_word_ids=return_word_ids, disable_weights=True, **kwargs)
+        key_name = next(iter(tokens))
+        embed_count = 0
+        video_count = 0
+        qwen_tokens = tokens[key_name]
+        for r in qwen_tokens:
+            for i in range(len(r)):
+                if isinstance(r[i][0], (int, float)) and r[i][0] == self.image_token_id:
+                    if len(images) > embed_count:
+                        r[i] = ({"type": "image", "data": images[embed_count], "original_type": "image"},) + r[i][1:]
+                        embed_count += 1
+                elif isinstance(r[i][0], (int, float)) and r[i][0] == self.video_token_id:
+                    if len(video_embeds) > video_count:
+                        r[i] = (video_embeds[video_count],) + r[i][1:]
+                        video_count += 1
+        return tokens
+
+
+class Qwen35ClipModel(sd1_clip.SDClipModel):
+    def __init__(self, device="cpu", layer="hidden", layer_idx=-2, dtype=None, attention_mask=True, model_options={}, model_type="qwen35_2b", mtp=False):
+        class Qwen35_(Qwen35):
+            pass
+        Qwen35_.model_type = model_type
+
+        super().__init__(device=device, layer=layer, layer_idx=layer_idx, textmodel_json_config={"mtp": True} if mtp else {},
+            dtype=dtype, special_tokens={}, layer_norm_hidden_state=False,
+            model_class=Qwen35_, enable_attention_masks=attention_mask, return_attention_masks=attention_mask, model_options=model_options)
+        self.special_tokens = {"pad": self.transformer.model.config.stop_tokens[0]}
+
+    def generate(self, tokens, do_sample, max_length, temperature, top_k, top_p, min_p, repetition_penalty, seed, presence_penalty=0.0, mtp=True):
+        if isinstance(tokens, dict):
+            tokens = next(iter(tokens.values()))
+        tokens_only = [[t[0] for t in b] for b in tokens]
+        embeds, _, _, embeds_info = self.process_tokens(tokens_only, self.execution_device)
+        position_ids = comfy.text_encoders.qwen_vl.qwen2vl_mrope_position_ids(embeds_info, embeds.shape[1], embeds.device)
+        return self.transformer.generate(embeds, do_sample, max_length, temperature, top_k, top_p, min_p, repetition_penalty, seed,
+                                         presence_penalty=presence_penalty, position_ids=position_ids, mtp=mtp)
+
+
+class Qwen35TEModel(sd1_clip.SD1ClipModel):
+    def __init__(self, device="cpu", dtype=None, model_options={}, model_type="qwen35_2b", mtp=False):
+        clip_model = lambda **kw: Qwen35ClipModel(**kw, model_type=model_type, mtp=mtp)
+        super().__init__(device=device, dtype=dtype, name=model_type, clip_model=clip_model, model_options=model_options)
+
+
+def tokenizer(model_type="qwen35_2b"):
+    class Qwen35ImageTokenizer_(Qwen35ImageTokenizer):
+        def __init__(self, embedding_directory=None, tokenizer_data={}):
+            super().__init__(embedding_directory=embedding_directory, tokenizer_data=tokenizer_data, model_type=model_type)
+    return Qwen35ImageTokenizer_
+
+
+def te(dtype_llama=None, llama_quantization_metadata=None, model_type="qwen35_2b", mtp=False, vocab_size=Qwen35Config.vocab_size, tokenizer_json=None):
+    config = {"vocab_size": vocab_size}
+    if tokenizer_json is not None:
+        vocab = Tokenizer.from_str(tokenizer_json).get_vocab()
+        config["stop_tokens"] = [vocab["<|endoftext|>"], vocab["<|im_end|>"]]
+
+    class Qwen35TEModel_(Qwen35TEModel):
+        def __init__(self, device="cpu", dtype=None, model_options={}):
+            if dtype_llama is not None:
+                dtype = dtype_llama
+            model_options = model_options.copy()
+            config_key = "{}_model_config".format(model_type)
+            model_options[config_key] = {**config, **model_options.get(config_key, {})}
+            if llama_quantization_metadata is not None:
+                model_options["quantization_metadata"] = llama_quantization_metadata
+            super().__init__(device=device, dtype=dtype, model_options=model_options, model_type=model_type, mtp=mtp)
+    return Qwen35TEModel_

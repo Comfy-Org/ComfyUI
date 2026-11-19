@@ -12,7 +12,6 @@ const int RADIAL_SAMPLES = 12;
 const float RADIAL_STRENGTH = 0.0003;
 
 uniform sampler2D u_image0;
-uniform vec2 u_resolution;
 uniform int u_int0;      // Blur type (BLUR_GAUSSIAN, BLUR_BOX, BLUR_RADIAL)
 uniform float u_float0;  // Blur radius/amount
 uniform int u_pass;      // Pass index (0 = horizontal, 1 = vertical)
@@ -25,7 +24,7 @@ float gaussian(float x, float sigma) {
 }
 
 void main() {
-    vec2 texelSize = 1.0 / u_resolution;
+    vec2 texelSize = 1.0 / vec2(textureSize(u_image0, 0));
     float radius = max(u_float0, 0.0);
 
     // Radial (angular) blur - single pass, doesn't use separable

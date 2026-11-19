@@ -64,7 +64,13 @@ class LongCatImageBaseTokenizer(Qwen25_7BVLITokenizer):
         return [output]
 
 
+IMAGE_PAD_TOKEN_ID = 151655
+
 class LongCatImageTokenizer(sd1_clip.SD1Tokenizer):
+    T2I_PREFIX = "<|im_start|>system\nAs an image captioning expert, generate a descriptive text prompt based on an image content, suitable for input to a text-to-image model.<|im_end|>\n<|im_start|>user\n"
+    EDIT_PREFIX = "<|im_start|>system\nAs an image editing expert, first analyze the content and attributes of the input image(s). Then, based on the user's editing instructions, clearly and precisely determine how to modify the given image(s), ensuring that only the specified parts are altered and all other aspects remain consistent with the original(s).<|im_end|>\n<|im_start|>user\n<|vision_start|><|image_pad|><|vision_end|>"
+    SUFFIX = "<|im_end|>\n<|im_start|>assistant\n"
+
     def __init__(self, embedding_directory=None, tokenizer_data={}):
         super().__init__(
             embedding_directory=embedding_directory,
@@ -72,10 +78,8 @@ class LongCatImageTokenizer(sd1_clip.SD1Tokenizer):
             name="qwen25_7b",
             tokenizer=LongCatImageBaseTokenizer,
         )
-        self.longcat_template_prefix = "<|im_start|>system\nAs an image captioning expert, generate a descriptive text prompt based on an image content, suitable for input to a text-to-image model.<|im_end|>\n<|im_start|>user\n"
-        self.longcat_template_suffix = "<|im_end|>\n<|im_start|>assistant\n"
 
-    def tokenize_with_weights(self, text, return_word_ids=False, **kwargs):
+    def tokenize_with_weights(self, text, return_word_ids=False, images=None, **kwargs):
         skip_template = False
         if text.startswith("<|im_start|>"):
             skip_template = True
@@ -90,11 +94,14 @@ class LongCatImageTokenizer(sd1_clip.SD1Tokenizer):
                 text, return_word_ids=return_word_ids, disable_weights=True, **kwargs
             )
         else:
+            has_images = images is not None and len(images) > 0
+            template_prefix = self.EDIT_PREFIX if has_images else self.T2I_PREFIX
+
             prefix_ids = base_tok.tokenizer(
-                self.longcat_template_prefix, add_special_tokens=False
+                template_prefix, add_special_tokens=False
             )["input_ids"]
             suffix_ids = base_tok.tokenizer(
-                self.longcat_template_suffix, add_special_tokens=False
+                self.SUFFIX, add_special_tokens=False
             )["input_ids"]
 
             prompt_tokens = base_tok.tokenize_with_weights(
@@ -106,6 +113,14 @@ class LongCatImageTokenizer(sd1_clip.SD1Tokenizer):
             suffix_pairs = [(t, 1.0) for t in suffix_ids]
 
             combined = prefix_pairs + prompt_pairs + suffix_pairs
+
+            if has_images:
+                embed_count = 0
+                for i in range(len(combined)):
+                    if combined[i][0] == IMAGE_PAD_TOKEN_ID and embed_count < len(images):
+                        combined[i] = ({"type": "image", "data": images[embed_count], "original_type": "image"}, combined[i][1])
+                        embed_count += 1
+
             tokens = {"qwen25_7b": [combined]}
 
         return tokens

@@ -1,4 +1,3 @@
-from __future__ import annotations
 import json
 import os
 import re
@@ -6,6 +5,8 @@ import uuid
 import glob
 import shutil
 import logging
+import tempfile
+import mimetypes
 from aiohttp import web
 from urllib import parse
 from comfy.cli_args import args
@@ -27,8 +28,8 @@ def get_file_info(path: str, relative_to: str) -> FileInfo:
     return {
         "path": os.path.relpath(path, relative_to).replace(os.sep, '/'),
         "size": os.path.getsize(path),
-        "modified": os.path.getmtime(path),
-        "created": os.path.getctime(path)
+        "modified": int(os.path.getmtime(path) * 1000),
+        "created": int(os.path.getctime(path) * 1000),
     }
 
 
@@ -336,7 +337,29 @@ class UserManager():
             if not isinstance(path, str):
                 return path
 
-            return web.FileResponse(path)
+            # User data files are arbitrary user-supplied content and are never
+            # meant to render inline. Disable MIME sniffing and force a download
+            # so uploaded markup/scripts can't execute in the app origin (stored
+            # XSS). Content-Disposition: attachment is the load-bearing guard;
+            # the content-type override and nosniff are defence in depth.
+            content_type = mimetypes.guess_type(path)[0] or 'application/octet-stream'
+
+            user_root = self.get_request_user_filepath(request, None, create_dir=False)
+            is_user_css = path == os.path.abspath(os.path.join(user_root, "user.css"))
+
+            if is_user_css:
+                content_type = "text/css"
+                disposition = "inline"
+            else:
+                if folder_paths.is_dangerous_content_type(content_type):
+                    content_type = 'application/octet-stream'
+                disposition = "attachment"
+
+            return web.FileResponse(path, headers={
+                "Content-Type": content_type,
+                "X-Content-Type-Options": "nosniff",
+                "Content-Disposition": disposition,
+            })
 
         @routes.post("/userdata/{file}")
         async def post_userdata(request):
@@ -377,8 +400,15 @@ class UserManager():
             try:
                 body = await request.read()
 
-                with open(path, "wb") as f:
-                    f.write(body)
+                dir_name = os.path.dirname(path)
+                fd, tmp_path = tempfile.mkstemp(dir=dir_name)
+                try:
+                    with os.fdopen(fd, "wb") as f:
+                        f.write(body)
+                    os.replace(tmp_path, path)
+                except:
+                    os.unlink(tmp_path)
+                    raise
             except OSError as e:
                 logging.warning(f"Error saving file '{path}': {e}")
                 return web.Response(

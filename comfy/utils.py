@@ -20,7 +20,11 @@
 import torch
 import math
 import struct
+import ctypes
+import os
 import comfy.memory_management
+import comfy.storage
+from comfy.anonymous_file import create_anonymous_file
 import safetensors.torch
 import numpy as np
 from PIL import Image
@@ -32,7 +36,7 @@ from einops import rearrange
 from comfy.cli_args import args
 import json
 import time
-import mmap
+import threading
 import warnings
 
 MMAP_TORCH_FILES = args.mmap_torch_files
@@ -80,15 +84,79 @@ _TYPES = {
     "U16": torch.uint16,
 }
 
+_SAFETENSORS_MAX_HEADER_SIZE = 100_000_000
+
+
+def create_safetensors(tensors, metadata=None):
+    """Return zero-valued tensor descriptors and their open backing file, owned by the caller."""
+    types = {dtype: name for name, dtype in _TYPES.items()}
+    header = {} if metadata is None else {"__metadata__": metadata}
+    offset = 0
+    for name, tensor in sorted(tensors.items(), key=lambda item: (-item[1].element_size(), item[0])):
+        size = tensor.numel() * tensor.element_size()
+        header[name] = {"dtype": types[tensor.dtype], "shape": list(tensor.shape), "data_offsets": [offset, offset + size]}
+        offset += size
+
+    encoded = json.dumps(header, separators=(",", ":")).encode("utf-8")
+    encoded += b" " * (-len(encoded) % 8)
+    data_offset = 8 + len(encoded)
+
+    f = create_anonymous_file(data_offset + offset)
+    try:
+        f.write(struct.pack("<Q", len(encoded)))
+        f.write(encoded)
+
+        lock = threading.Lock()
+        state_dict = {}
+        for name, tensor in tensors.items():
+            start, end = header[name]["data_offsets"]
+            value = torch.empty(tensor.shape, dtype=tensor.dtype, device="meta")
+            value.untyped_storage()._comfy_tensor_file_slice = comfy.memory_management.TensorFileSlice(f, lock, data_offset + start, end - start)
+            state_dict[name] = value
+        return state_dict, f
+    except BaseException:
+        f.close()
+        raise
+
+
+def _invalid_safetensors_error(message, ckpt):
+    return ValueError("{}\n\nFile path: {}\n\nThe safetensors file is corrupt or invalid. Make sure this is actually a safetensors file and not a ckpt or pt or other filetype.".format(message, ckpt))
+
+
+def _incomplete_safetensors_error(message, ckpt):
+    return ValueError("{}\n\nFile path: {}\n\nThe safetensors file is corrupt/incomplete. Check the file size and make sure you have copied/downloaded it correctly.".format(message, ckpt))
+
+
 def load_safetensors(ckpt):
-    f = open(ckpt, "rb")
-    mapping = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ)
-    mv = memoryview(mapping)
+    import comfy_aimdo.model_mmap
 
-    header_size = struct.unpack("<Q", mapping[:8])[0]
-    header = json.loads(mapping[8:8+header_size].decode("utf-8"))
+    file_size = os.path.getsize(ckpt)
+    if file_size < 8:
+        raise _incomplete_safetensors_error("The safetensors header is incomplete.", ckpt)
 
-    mv = mv[8 + header_size:]
+    file_lock = threading.Lock()
+    model_mmap = comfy_aimdo.model_mmap.ModelMMAP(ckpt)
+    f = model_mmap.get_file_handle()
+    mv = memoryview((ctypes.c_uint8 * file_size).from_address(model_mmap.get()))
+
+    header_size = struct.unpack("<Q", mv[:8])[0]
+    if header_size > _SAFETENSORS_MAX_HEADER_SIZE:
+        raise _invalid_safetensors_error("The safetensors header is too large.", ckpt)
+
+    data_base_offset = 8 + header_size
+    if data_base_offset > file_size:
+        raise _incomplete_safetensors_error("The safetensors header is incomplete.", ckpt)
+
+    try:
+        header = json.loads(mv[8:data_base_offset].tobytes().decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as e:
+        raise _invalid_safetensors_error(str(e), ckpt) from e
+
+    if not isinstance(header, dict):
+        raise _invalid_safetensors_error("The safetensors header is invalid.", ckpt)
+
+    mv = mv[data_base_offset:]
+    data_size = len(mv)
 
     sd = {}
     for name, info in header.items():
@@ -96,13 +164,27 @@ def load_safetensors(ckpt):
             continue
 
         start, end = info["data_offsets"]
+        dtype = _TYPES[info["dtype"]]
+        if start < 0 or end < start:
+            raise _invalid_safetensors_error("Tensor '{}' has invalid data offsets.".format(name), ckpt)
+        if end > data_size:
+            raise _incomplete_safetensors_error("Tensor '{}' extends past the end of the file.".format(name), ckpt)
+        if math.prod(info["shape"]) * dtype.itemsize != end - start:
+            raise _invalid_safetensors_error("Tensor '{}' does not match its declared shape and dtype.".format(name), ckpt)
+
         if start == end:
-            sd[name] = torch.empty(info["shape"], dtype =_TYPES[info["dtype"]])
+            sd[name] = torch.empty(info["shape"], dtype=dtype)
         else:
             with warnings.catch_warnings():
                 #We are working with read-only RAM by design
                 warnings.filterwarnings("ignore", message="The given buffer is not writable")
-                sd[name] = torch.frombuffer(mv[start:end], dtype=_TYPES[info["dtype"]]).view(info["shape"])
+                tensor = torch.frombuffer(mv[start:end], dtype=dtype).view(info["shape"])
+                storage = tensor.untyped_storage()
+                setattr(storage,
+                        "_comfy_tensor_file_slice",
+                        comfy.memory_management.TensorFileSlice(f, file_lock, data_base_offset + start, end - start))
+                setattr(storage, "_comfy_tensor_mmap_refs", (model_mmap, mv))
+                sd[name] = tensor
 
     return sd, header.get("__metadata__", {}),
 
@@ -131,9 +213,9 @@ def load_torch_file(ckpt, safe_load=False, device=None, return_metadata=False):
             if len(e.args) > 0:
                 message = e.args[0]
                 if "HeaderTooLarge" in message:
-                    raise ValueError("{}\n\nFile path: {}\n\nThe safetensors file is corrupt or invalid. Make sure this is actually a safetensors file and not a ckpt or pt or other filetype.".format(message, ckpt))
+                    raise _invalid_safetensors_error(message, ckpt)
                 if "MetadataIncompleteBuffer" in message:
-                    raise ValueError("{}\n\nFile path: {}\n\nThe safetensors file is corrupt/incomplete. Check the file size and make sure you have copied/downloaded it correctly.".format(message, ckpt))
+                    raise _incomplete_safetensors_error(message, ckpt)
             raise e
     else:
         torch_args = {}
@@ -152,6 +234,7 @@ def load_torch_file(ckpt, safe_load=False, device=None, return_metadata=False):
                     sd = pl_sd
             else:
                 sd = pl_sd
+    comfy.storage.annotate_state_dict(sd, ckpt)
     return (sd, metadata) if return_metadata else sd
 
 def save_torch_file(sd, ckpt, metadata=None):
@@ -806,6 +889,44 @@ def z_image_to_diffusers(mmdit_config, output_prefix=""):
 
     return key_map
 
+def krea2_to_diffusers(mmdit_config, output_prefix=""):
+    n_layers = mmdit_config.get("layers", 0)
+    n_txt_layerwise = 2  # TextFusionTransformer hardcodes 2 layerwise + 2 refiner blocks
+    n_txt_refiner = 2
+    key_map = {}
+
+    def add_block(prefix_to, prefix_from):
+        block_map = {
+            "attn.to_q": "attn.wq", "attn.to_k": "attn.wk", "attn.to_v": "attn.wv",
+            "attn.to_gate": "attn.gate", "attn.to_out.0": "attn.wo",
+            "attn.to_out": "attn.wo",  # some tools drop the ".0" on to_out
+            "ff.gate": "mlp.gate", "ff.up": "mlp.up", "ff.down": "mlp.down",
+        }
+        for d, c in block_map.items():
+            key_map["{}.{}.weight".format(prefix_to, d)] = "{}{}.{}.weight".format(output_prefix, prefix_from, c)
+
+    for i in range(n_layers):
+        add_block("transformer_blocks.{}".format(i), "blocks.{}".format(i))
+    for i in range(n_txt_layerwise):
+        add_block("text_fusion.layerwise_blocks.{}".format(i), "txtfusion.layerwise_blocks.{}".format(i))
+    for i in range(n_txt_refiner):
+        add_block("text_fusion.refiner_blocks.{}".format(i), "txtfusion.refiner_blocks.{}".format(i))
+
+    MAP_BASIC = [
+        ("img_in", "first"),
+        ("time_embed.linear_1", "tmlp.0"),
+        ("time_embed.linear_2", "tmlp.2"),
+        ("time_mod_proj", "tproj.1"),
+        ("txt_in.linear_1", "txtmlp.1"),
+        ("txt_in.linear_2", "txtmlp.3"),
+        ("text_fusion.projector", "txtfusion.projector"),
+        ("final_layer.linear", "last.linear"),
+    ]
+    for d, c in MAP_BASIC:
+        key_map["{}.weight".format(d)] = "{}{}.weight".format(output_prefix, c)
+
+    return key_map
+
 def repeat_to_batch_size(tensor, batch_size, dim=0):
     if tensor.shape[dim] > batch_size:
         return tensor.narrow(dim, 0, batch_size)
@@ -885,6 +1006,10 @@ def set_attr(obj, attr, value):
     return prev
 
 def set_attr_param(obj, attr, value):
+    # Clone inference tensors (created under torch.inference_mode) since
+    # their version counter is frozen and nn.Parameter() cannot wrap them.
+    if (not torch.is_inference_mode_enabled()) and value.is_inference():
+        value = value.clone()
     return set_attr(obj, attr, torch.nn.Parameter(value, requires_grad=False))
 
 def set_attr_buffer(obj, attr, value):
@@ -1004,10 +1129,11 @@ def bislerp(samples, width, height):
 
 def lanczos(samples, width, height):
     #the below API is strict and expects grayscale to be squeezed
-    samples = samples.squeeze(1) if samples.shape[1] == 1 else samples.movedim(1, -1)
+    if samples.ndim == 4:
+        samples = samples.squeeze(1) if samples.shape[1] == 1 else samples.movedim(1, -1)
     images = [Image.fromarray(np.clip(255. * image.cpu().numpy(), 0, 255).astype(np.uint8)) for image in samples]
     images = [image.resize((width, height), resample=Image.Resampling.LANCZOS) for image in images]
-    images = [torch.from_numpy(np.array(image).astype(np.float32) / 255.0).movedim(-1, 0) for image in images]
+    images = [torch.from_numpy(t).movedim(-1, 0) if (t := np.array(image).astype(np.float32) / 255.0).ndim == 3 else torch.from_numpy(t) for image in images]
     result = torch.stack(images)
     return result.to(samples.device, samples.dtype)
 
@@ -1119,8 +1245,8 @@ def tiled_scale_multidim(samples, function, tile=(64, 64), overlap=8, upscale_am
                 pbar.update(1)
             continue
 
-        out = torch.zeros([s.shape[0], out_channels] + mult_list_upscale(s.shape[2:]), device=output_device)
-        out_div = torch.zeros([s.shape[0], out_channels] + mult_list_upscale(s.shape[2:]), device=output_device)
+        out = output[b:b+1].zero_()
+        out_div = torch.zeros([s.shape[0], 1] + mult_list_upscale(s.shape[2:]), device=output_device)
 
         positions = [range(0, s.shape[d+2] - overlap[d], tile[d] - overlap[d]) if s.shape[d+2] > tile[d] else [0] for d in range(dims)]
 
@@ -1135,7 +1261,7 @@ def tiled_scale_multidim(samples, function, tile=(64, 64), overlap=8, upscale_am
                 upscaled.append(round(get_pos(d, pos)))
 
             ps = function(s_in).to(output_device)
-            mask = torch.ones_like(ps)
+            mask = torch.ones([1, 1] + list(ps.shape[2:]), device=output_device)
 
             for d in range(2, dims + 2):
                 feather = round(get_scale(d - 2, overlap[d - 2]))
@@ -1148,17 +1274,23 @@ def tiled_scale_multidim(samples, function, tile=(64, 64), overlap=8, upscale_am
 
             o = out
             o_d = out_div
+            ps_view = ps
+            mask_view = mask
             for d in range(dims):
-                o = o.narrow(d + 2, upscaled[d], mask.shape[d + 2])
-                o_d = o_d.narrow(d + 2, upscaled[d], mask.shape[d + 2])
+                l = min(ps_view.shape[d + 2], o.shape[d + 2] - upscaled[d])
+                o = o.narrow(d + 2, upscaled[d], l)
+                o_d = o_d.narrow(d + 2, upscaled[d], l)
+                if l < ps_view.shape[d + 2]:
+                    ps_view = ps_view.narrow(d + 2, 0, l)
+                    mask_view = mask_view.narrow(d + 2, 0, l)
 
-            o.add_(ps * mask)
-            o_d.add_(mask)
+            o.add_(ps_view * mask_view)
+            o_d.add_(mask_view)
 
             if pbar is not None:
                 pbar.update(1)
 
-        output[b:b+1] = out/out_div
+        out.div_(out_div)
     return output
 
 def tiled_scale(samples, function, tile_x=64, tile_y=64, overlap = 8, upscale_amount = 4, out_channels = 3, output_device="cpu", pbar = None):
@@ -1180,7 +1312,7 @@ def model_trange(*args, **kwargs):
             pbar.i1_time = time.time()
             pbar.set_postfix_str(" Model Initialization complete!  ")
         elif pbar._i == 2:
-            #bring forward the effective start time based the the diff between first and second iteration
+            #bring forward the effective start time based the diff between first and second iteration
             #to attempt to remove load overhead from the final step rate estimate.
             pbar.start_t = pbar.i1_time - (time.time() - pbar.i1_time)
             pbar.set_postfix_str("")
@@ -1374,7 +1506,7 @@ def convert_old_quants(state_dict, model_prefix="", metadata={}):
                     k_out = "{}.weight_scale".format(layer)
 
                 if layer is not None:
-                    layer_conf = {"format": "float8_e4m3fn"}  # TODO: check if anyone did some non e4m3fn scaled checkpoints
+                    layer_conf = {"format": "float8_e4m3fn"}
                     if full_precision_matrix_mult:
                         layer_conf["full_precision_matrix_mult"] = full_precision_matrix_mult
                     layers[layer] = layer_conf
@@ -1430,10 +1562,9 @@ def deepcopy_list_dict(obj, memo=None):
     memo[obj_id] = res
     return res
 
-def normalize_image_embeddings(embeds, embeds_info, scale_factor):
-    """Normalize image embeddings to match text embedding scale"""
-    for info in embeds_info:
-        if info.get("type") == "image":
-            start_idx = info["index"]
-            end_idx = start_idx + info["size"]
-            embeds[:, start_idx:end_idx, :] /= scale_factor
+def bit_reverse_range(index, bits):
+    result = 0
+    for _ in range(bits):
+        result = (result << 1) | (index & 1)
+        index >>= 1
+    return result

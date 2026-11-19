@@ -1,1 +1,588 @@
-{"revision": 0, "last_node_id": 22, "last_link_id": 0, "nodes": [{"id": 22, "type": "3324cf54-bcff-405f-a4bf-c5122c72fe56", "pos": [4800, -1180], "size": [250, 154], "flags": {}, "order": 4, "mode": 0, "inputs": [{"label": "image", "localized_name": "images.image0", "name": "images.image0", "type": "IMAGE", "link": null}], "outputs": [{"label": "IMAGE", "localized_name": "IMAGE0", "name": "IMAGE0", "type": "IMAGE", "links": []}], "title": "Film Grain", "properties": {"proxyWidgets": [["17", "value"], ["18", "value"], ["19", "value"], ["20", "value"], ["21", "choice"]]}, "widgets_values": []}], "links": [], "version": 0.4, "definitions": {"subgraphs": [{"id": "3324cf54-bcff-405f-a4bf-c5122c72fe56", "version": 1, "state": {"lastGroupId": 0, "lastNodeId": 21, "lastLinkId": 30, "lastRerouteId": 0}, "revision": 0, "config": {}, "name": "Film Grain", "inputNode": {"id": -10, "bounding": [4096.671470760602, -948.2184031393472, 120, 60]}, "outputNode": {"id": -20, "bounding": [4900, -948.2184031393472, 120, 60]}, "inputs": [{"id": "062968ea-da25-47e7-a180-d913c267f148", "name": "images.image0", "type": "IMAGE", "linkIds": [22], "localized_name": "images.image0", "label": "image", "pos": [4196.671470760602, -928.2184031393472]}], "outputs": [{"id": "43247d06-a39f-4733-9828-c39400fe02a4", "name": "IMAGE0", "type": "IMAGE", "linkIds": [23], "localized_name": "IMAGE0", "label": "IMAGE", "pos": [4920, -928.2184031393472]}], "widgets": [], "nodes": [{"id": 15, "type": "GLSLShader", "pos": [4510, -1180], "size": [330, 272], "flags": {}, "order": 5, "mode": 0, "inputs": [{"label": "image0", "localized_name": "images.image0", "name": "images.image0", "type": "IMAGE", "link": 22}, {"label": "image1", "localized_name": "images.image1", "name": "images.image1", "shape": 7, "type": "IMAGE", "link": null}, {"label": "u_float0", "localized_name": "floats.u_float0", "name": "floats.u_float0", "shape": 7, "type": "FLOAT", "link": 26}, {"label": "u_float1", "localized_name": "floats.u_float1", "name": "floats.u_float1", "shape": 7, "type": "FLOAT", "link": 27}, {"label": "u_float2", "localized_name": "floats.u_float2", "name": "floats.u_float2", "shape": 7, "type": "FLOAT", "link": 28}, {"label": "u_float3", "localized_name": "floats.u_float3", "name": "floats.u_float3", "shape": 7, "type": "FLOAT", "link": 29}, {"label": "u_float4", "localized_name": "floats.u_float4", "name": "floats.u_float4", "shape": 7, "type": "FLOAT", "link": null}, {"label": "u_int0", "localized_name": "ints.u_int0", "name": "ints.u_int0", "shape": 7, "type": "INT", "link": 30}, {"label": "u_int1", "localized_name": "ints.u_int1", "name": "ints.u_int1", "shape": 7, "type": "INT", "link": null}, {"localized_name": "fragment_shader", "name": "fragment_shader", "type": "STRING", "widget": {"name": "fragment_shader"}, "link": null}, {"localized_name": "size_mode", "name": "size_mode", "type": "COMFY_DYNAMICCOMBO_V3", "widget": {"name": "size_mode"}, "link": null}], "outputs": [{"localized_name": "IMAGE0", "name": "IMAGE0", "type": "IMAGE", "links": [23]}, {"localized_name": "IMAGE1", "name": "IMAGE1", "type": "IMAGE", "links": null}, {"localized_name": "IMAGE2", "name": "IMAGE2", "type": "IMAGE", "links": null}, {"localized_name": "IMAGE3", "name": "IMAGE3", "type": "IMAGE", "links": null}], "properties": {"Node name for S&R": "GLSLShader"}, "widgets_values": ["#version 300 es\nprecision highp float;\n\nuniform sampler2D u_image0;\nuniform vec2 u_resolution;\nuniform float u_float0; // grain amount      [0.0 – 1.0]   typical: 0.2–0.8\nuniform float u_float1; // grain size        [0.3 – 3.0]   lower = finer grain\nuniform float u_float2; // color amount      [0.0 – 1.0]   0 = monochrome, 1 = RGB grain\nuniform float u_float3; // luminance bias    [0.0 – 1.0]   0 = uniform, 1 = shadows only\nuniform int   u_int0;   // noise mode        [0 or 1]      0 = smooth, 1 = grainy\n\nin vec2 v_texCoord;\nlayout(location = 0) out vec4 fragColor0;\n\n// High-quality integer hash (pcg-like)\nuint pcg(uint v) {\n    uint state = v * 747796405u + 2891336453u;\n    uint word = ((state >> ((state >> 28u) + 4u)) ^ state) * 277803737u;\n    return (word >> 22u) ^ word;\n}\n\n// 2D -> 1D hash input\nuint hash2d(uvec2 p) {\n    return pcg(p.x + pcg(p.y));\n}\n\n// Hash to float [0, 1]\nfloat hashf(uvec2 p) {\n    return float(hash2d(p)) / float(0xffffffffu);\n}\n\n// Hash to float with offset (for RGB channels)\nfloat hashf(uvec2 p, uint offset) {\n    return float(pcg(hash2d(p) + offset)) / float(0xffffffffu);\n}\n\n// Convert uniform [0,1] to roughly Gaussian distribution\n// Using simple approximation: average of multiple samples\nfloat toGaussian(uvec2 p) {\n    float sum = hashf(p, 0u) + hashf(p, 1u) + hashf(p, 2u) + hashf(p, 3u);\n    return (sum - 2.0) * 0.7;  // Centered, scaled\n}\n\nfloat toGaussian(uvec2 p, uint offset) {\n    float sum = hashf(p, offset) + hashf(p, offset + 1u) \n              + hashf(p, offset + 2u) + hashf(p, offset + 3u);\n    return (sum - 2.0) * 0.7;\n}\n\n// Smooth noise with better interpolation\nfloat smoothNoise(vec2 p) {\n    vec2 i = floor(p);\n    vec2 f = fract(p);\n    \n    // Quintic interpolation (less banding than cubic)\n    f = f * f * f * (f * (f * 6.0 - 15.0) + 10.0);\n    \n    uvec2 ui = uvec2(i);\n    float a = toGaussian(ui);\n    float b = toGaussian(ui + uvec2(1u, 0u));\n    float c = toGaussian(ui + uvec2(0u, 1u));\n    float d = toGaussian(ui + uvec2(1u, 1u));\n    \n    return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);\n}\n\nfloat smoothNoise(vec2 p, uint offset) {\n    vec2 i = floor(p);\n    vec2 f = fract(p);\n    \n    f = f * f * f * (f * (f * 6.0 - 15.0) + 10.0);\n    \n    uvec2 ui = uvec2(i);\n    float a = toGaussian(ui, offset);\n    float b = toGaussian(ui + uvec2(1u, 0u), offset);\n    float c = toGaussian(ui + uvec2(0u, 1u), offset);\n    float d = toGaussian(ui + uvec2(1u, 1u), offset);\n    \n    return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);\n}\n\nvoid main() {\n    vec4 color = texture(u_image0, v_texCoord);\n    \n    // Luminance (Rec.709)\n    float luma = dot(color.rgb, vec3(0.2126, 0.7152, 0.0722));\n    \n    // Grain UV (resolution-independent)\n    vec2 grainUV = v_texCoord * u_resolution / max(u_float1, 0.01);\n    uvec2 grainPixel = uvec2(grainUV);\n    \n    float g;\n    vec3 grainRGB;\n    \n    if (u_int0 == 1) {\n        // Grainy mode: pure hash noise (no interpolation = no banding)\n        g = toGaussian(grainPixel);\n        grainRGB = vec3(\n            toGaussian(grainPixel, 100u),\n            toGaussian(grainPixel, 200u),\n            toGaussian(grainPixel, 300u)\n        );\n    } else {\n        // Smooth mode: interpolated with quintic curve\n        g = smoothNoise(grainUV);\n        grainRGB = vec3(\n            smoothNoise(grainUV, 100u),\n            smoothNoise(grainUV, 200u),\n            smoothNoise(grainUV, 300u)\n        );\n    }\n    \n    // Luminance weighting (less grain in highlights)\n    float lumWeight = mix(1.0, 1.0 - luma, clamp(u_float3, 0.0, 1.0));\n    \n    // Strength\n    float strength = u_float0 * 0.15;\n    \n    // Color vs monochrome grain\n    vec3 grainColor = mix(vec3(g), grainRGB, clamp(u_float2, 0.0, 1.0));\n    \n    color.rgb += grainColor * strength * lumWeight;\n    fragColor0 = vec4(clamp(color.rgb, 0.0, 1.0), color.a);\n}\n", "from_input"]}, {"id": 21, "type": "CustomCombo", "pos": [4280, -780], "size": [210, 153.8888931274414], "flags": {}, "order": 0, "mode": 0, "inputs": [{"label": "grain_mode", "localized_name": "choice", "name": "choice", "type": "COMBO", "widget": {"name": "choice"}, "link": null}], "outputs": [{"localized_name": "STRING", "name": "STRING", "type": "STRING", "links": null}, {"localized_name": "INDEX", "name": "INDEX", "type": "INT", "links": [30]}], "properties": {"Node name for S&R": "CustomCombo"}, "widgets_values": ["Smooth", 0, "Smooth", "Grainy", ""]}, {"id": 17, "type": "PrimitiveFloat", "pos": [4276.671470760602, -1180.3256994061358], "size": [210, 58], "flags": {}, "order": 1, "mode": 0, "inputs": [{"label": "grain_amount", "localized_name": "value", "name": "value", "type": "FLOAT", "widget": {"name": "value"}, "link": null}], "outputs": [{"localized_name": "FLOAT", "name": "FLOAT", "type": "FLOAT", "links": [26]}], "title": "Grain amount", "properties": {"Node name for S&R": "PrimitiveFloat", "min": 0, "max": 1, "step": 0.05, "precision": 2}, "widgets_values": [0.25]}, {"id": 18, "type": "PrimitiveFloat", "pos": [4280, -1080], "size": [210, 58], "flags": {}, "order": 2, "mode": 0, "inputs": [{"label": "grain_size", "localized_name": "value", "name": "value", "type": "FLOAT", "widget": {"name": "value"}, "link": null}], "outputs": [{"localized_name": "FLOAT", "name": "FLOAT", "type": "FLOAT", "links": [27]}], "title": "Grain size", "properties": {"Node name for S&R": "PrimitiveFloat", "min": 0.05, "max": 3, "precision": 2, "step": 0.05}, "widgets_values": [0.1]}, {"id": 19, "type": "PrimitiveFloat", "pos": [4280, -980], "size": [210, 58], "flags": {}, "order": 3, "mode": 0, "inputs": [{"label": "color_amount", "localized_name": "value", "name": "value", "type": "FLOAT", "widget": {"name": "value"}, "link": null}], "outputs": [{"localized_name": "FLOAT", "name": "FLOAT", "type": "FLOAT", "links": [28]}], "title": "Color amount", "properties": {"Node name for S&R": "PrimitiveFloat", "min": 0, "max": 1, "precision": 2, "step": 0.05}, "widgets_values": [0]}, {"id": 20, "type": "PrimitiveFloat", "pos": [4280, -880], "size": [210, 58], "flags": {}, "order": 4, "mode": 0, "inputs": [{"label": "shadow_focus", "localized_name": "value", "name": "value", "type": "FLOAT", "widget": {"name": "value"}, "link": null}], "outputs": [{"localized_name": "FLOAT", "name": "FLOAT", "type": "FLOAT", "links": [29]}], "title": "Luminance bias", "properties": {"Node name for S&R": "PrimitiveFloat", "min": 0, "max": 1, "precision": 2, "step": 0.05}, "widgets_values": [0]}], "groups": [], "links": [{"id": 26, "origin_id": 17, "origin_slot": 0, "target_id": 15, "target_slot": 2, "type": "FLOAT"}, {"id": 27, "origin_id": 18, "origin_slot": 0, "target_id": 15, "target_slot": 3, "type": "FLOAT"}, {"id": 28, "origin_id": 19, "origin_slot": 0, "target_id": 15, "target_slot": 4, "type": "FLOAT"}, {"id": 29, "origin_id": 20, "origin_slot": 0, "target_id": 15, "target_slot": 5, "type": "FLOAT"}, {"id": 30, "origin_id": 21, "origin_slot": 1, "target_id": 15, "target_slot": 7, "type": "INT"}, {"id": 22, "origin_id": -10, "origin_slot": 0, "target_id": 15, "target_slot": 0, "type": "IMAGE"}, {"id": 23, "origin_id": 15, "origin_slot": 0, "target_id": -20, "target_slot": 0, "type": "IMAGE"}], "extra": {"workflowRendererVersion": "LG"}, "category": "Image Tools/Color adjust"}]}}
+{
+  "revision": 0,
+  "last_node_id": 22,
+  "last_link_id": 0,
+  "nodes": [
+    {
+      "id": 22,
+      "type": "3324cf54-bcff-405f-a4bf-c5122c72fe56",
+      "pos": [
+        4800,
+        -1180
+      ],
+      "size": [
+        250,
+        154
+      ],
+      "flags": {},
+      "order": 4,
+      "mode": 0,
+      "inputs": [
+        {
+          "label": "image",
+          "localized_name": "images.image0",
+          "name": "images.image0",
+          "type": "IMAGE",
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "label": "IMAGE",
+          "localized_name": "IMAGE0",
+          "name": "IMAGE0",
+          "type": "IMAGE",
+          "links": []
+        }
+      ],
+      "title": "Film Grain",
+      "properties": {
+        "proxyWidgets": [
+          [
+            "17",
+            "value"
+          ],
+          [
+            "18",
+            "value"
+          ],
+          [
+            "19",
+            "value"
+          ],
+          [
+            "20",
+            "value"
+          ],
+          [
+            "21",
+            "choice"
+          ]
+        ]
+      },
+      "widgets_values": []
+    }
+  ],
+  "links": [],
+  "version": 0.4,
+  "definitions": {
+    "subgraphs": [
+      {
+        "id": "3324cf54-bcff-405f-a4bf-c5122c72fe56",
+        "version": 1,
+        "state": {
+          "lastGroupId": 0,
+          "lastNodeId": 21,
+          "lastLinkId": 30,
+          "lastRerouteId": 0
+        },
+        "revision": 0,
+        "config": {},
+        "name": "Film Grain",
+        "inputNode": {
+          "id": -10,
+          "bounding": [
+            4096.671470760602,
+            -948.2184031393472,
+            120,
+            60
+          ]
+        },
+        "outputNode": {
+          "id": -20,
+          "bounding": [
+            4900,
+            -948.2184031393472,
+            120,
+            60
+          ]
+        },
+        "inputs": [
+          {
+            "id": "062968ea-da25-47e7-a180-d913c267f148",
+            "name": "images.image0",
+            "type": "IMAGE",
+            "linkIds": [
+              22
+            ],
+            "localized_name": "images.image0",
+            "label": "image",
+            "pos": [
+              4196.671470760602,
+              -928.2184031393472
+            ]
+          }
+        ],
+        "outputs": [
+          {
+            "id": "43247d06-a39f-4733-9828-c39400fe02a4",
+            "name": "IMAGE0",
+            "type": "IMAGE",
+            "linkIds": [
+              23
+            ],
+            "localized_name": "IMAGE0",
+            "label": "IMAGE",
+            "pos": [
+              4920,
+              -928.2184031393472
+            ]
+          }
+        ],
+        "widgets": [],
+        "nodes": [
+          {
+            "id": 15,
+            "type": "GLSLShader",
+            "pos": [
+              4510,
+              -1180
+            ],
+            "size": [
+              330,
+              272
+            ],
+            "flags": {},
+            "order": 5,
+            "mode": 0,
+            "inputs": [
+              {
+                "label": "image0",
+                "localized_name": "images.image0",
+                "name": "images.image0",
+                "type": "IMAGE",
+                "link": 22
+              },
+              {
+                "label": "image1",
+                "localized_name": "images.image1",
+                "name": "images.image1",
+                "shape": 7,
+                "type": "IMAGE",
+                "link": null
+              },
+              {
+                "label": "u_float0",
+                "localized_name": "floats.u_float0",
+                "name": "floats.u_float0",
+                "shape": 7,
+                "type": "FLOAT",
+                "link": 26
+              },
+              {
+                "label": "u_float1",
+                "localized_name": "floats.u_float1",
+                "name": "floats.u_float1",
+                "shape": 7,
+                "type": "FLOAT",
+                "link": 27
+              },
+              {
+                "label": "u_float2",
+                "localized_name": "floats.u_float2",
+                "name": "floats.u_float2",
+                "shape": 7,
+                "type": "FLOAT",
+                "link": 28
+              },
+              {
+                "label": "u_float3",
+                "localized_name": "floats.u_float3",
+                "name": "floats.u_float3",
+                "shape": 7,
+                "type": "FLOAT",
+                "link": 29
+              },
+              {
+                "label": "u_float4",
+                "localized_name": "floats.u_float4",
+                "name": "floats.u_float4",
+                "shape": 7,
+                "type": "FLOAT",
+                "link": null
+              },
+              {
+                "label": "u_int0",
+                "localized_name": "ints.u_int0",
+                "name": "ints.u_int0",
+                "shape": 7,
+                "type": "INT",
+                "link": 30
+              },
+              {
+                "label": "u_int1",
+                "localized_name": "ints.u_int1",
+                "name": "ints.u_int1",
+                "shape": 7,
+                "type": "INT",
+                "link": null
+              },
+              {
+                "localized_name": "fragment_shader",
+                "name": "fragment_shader",
+                "type": "STRING",
+                "widget": {
+                  "name": "fragment_shader"
+                },
+                "link": null
+              },
+              {
+                "localized_name": "size_mode",
+                "name": "size_mode",
+                "type": "COMFY_DYNAMICCOMBO_V3",
+                "widget": {
+                  "name": "size_mode"
+                },
+                "link": null
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "IMAGE0",
+                "name": "IMAGE0",
+                "type": "IMAGE",
+                "links": [
+                  23
+                ]
+              },
+              {
+                "localized_name": "IMAGE1",
+                "name": "IMAGE1",
+                "type": "IMAGE",
+                "links": null
+              },
+              {
+                "localized_name": "IMAGE2",
+                "name": "IMAGE2",
+                "type": "IMAGE",
+                "links": null
+              },
+              {
+                "localized_name": "IMAGE3",
+                "name": "IMAGE3",
+                "type": "IMAGE",
+                "links": null
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "GLSLShader"
+            },
+            "widgets_values": [
+              "#version 300 es\nprecision highp float;\n\nuniform sampler2D u_image0;\nuniform vec2 u_resolution;\nuniform float u_float0; // grain amount      [0.0 – 1.0]   typical: 0.2–0.8\nuniform float u_float1; // grain size        [0.3 – 3.0]   lower = finer grain\nuniform float u_float2; // color amount      [0.0 – 1.0]   0 = monochrome, 1 = RGB grain\nuniform float u_float3; // luminance bias    [0.0 – 1.0]   0 = uniform, 1 = shadows only\nuniform int   u_int0;   // noise mode        [0 or 1]      0 = smooth, 1 = grainy\n\nin vec2 v_texCoord;\nlayout(location = 0) out vec4 fragColor0;\n\n// High-quality integer hash (pcg-like)\nuint pcg(uint v) {\n    uint state = v * 747796405u + 2891336453u;\n    uint word = ((state >> ((state >> 28u) + 4u)) ^ state) * 277803737u;\n    return (word >> 22u) ^ word;\n}\n\n// 2D -> 1D hash input\nuint hash2d(uvec2 p) {\n    return pcg(p.x + pcg(p.y));\n}\n\n// Hash to float [0, 1]\nfloat hashf(uvec2 p) {\n    return float(hash2d(p)) / float(0xffffffffu);\n}\n\n// Hash to float with offset (for RGB channels)\nfloat hashf(uvec2 p, uint offset) {\n    return float(pcg(hash2d(p) + offset)) / float(0xffffffffu);\n}\n\n// Convert uniform [0,1] to roughly Gaussian distribution\n// Using simple approximation: average of multiple samples\nfloat toGaussian(uvec2 p) {\n    float sum = hashf(p, 0u) + hashf(p, 1u) + hashf(p, 2u) + hashf(p, 3u);\n    return (sum - 2.0) * 0.7;  // Centered, scaled\n}\n\nfloat toGaussian(uvec2 p, uint offset) {\n    float sum = hashf(p, offset) + hashf(p, offset + 1u) \n              + hashf(p, offset + 2u) + hashf(p, offset + 3u);\n    return (sum - 2.0) * 0.7;\n}\n\n// Smooth noise with better interpolation\nfloat smoothNoise(vec2 p) {\n    vec2 i = floor(p);\n    vec2 f = fract(p);\n    \n    // Quintic interpolation (less banding than cubic)\n    f = f * f * f * (f * (f * 6.0 - 15.0) + 10.0);\n    \n    uvec2 ui = uvec2(i);\n    float a = toGaussian(ui);\n    float b = toGaussian(ui + uvec2(1u, 0u));\n    float c = toGaussian(ui + uvec2(0u, 1u));\n    float d = toGaussian(ui + uvec2(1u, 1u));\n    \n    return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);\n}\n\nfloat smoothNoise(vec2 p, uint offset) {\n    vec2 i = floor(p);\n    vec2 f = fract(p);\n    \n    f = f * f * f * (f * (f * 6.0 - 15.0) + 10.0);\n    \n    uvec2 ui = uvec2(i);\n    float a = toGaussian(ui, offset);\n    float b = toGaussian(ui + uvec2(1u, 0u), offset);\n    float c = toGaussian(ui + uvec2(0u, 1u), offset);\n    float d = toGaussian(ui + uvec2(1u, 1u), offset);\n    \n    return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);\n}\n\nvoid main() {\n    vec4 color = texture(u_image0, v_texCoord);\n    \n    // Luminance (Rec.709)\n    float luma = dot(color.rgb, vec3(0.2126, 0.7152, 0.0722));\n    \n    // Grain UV (resolution-independent)\n    vec2 grainUV = v_texCoord * u_resolution / max(u_float1, 0.01);\n    uvec2 grainPixel = uvec2(grainUV);\n    \n    float g;\n    vec3 grainRGB;\n    \n    if (u_int0 == 1) {\n        // Grainy mode: pure hash noise (no interpolation = no banding)\n        g = toGaussian(grainPixel);\n        grainRGB = vec3(\n            toGaussian(grainPixel, 100u),\n            toGaussian(grainPixel, 200u),\n            toGaussian(grainPixel, 300u)\n        );\n    } else {\n        // Smooth mode: interpolated with quintic curve\n        g = smoothNoise(grainUV);\n        grainRGB = vec3(\n            smoothNoise(grainUV, 100u),\n            smoothNoise(grainUV, 200u),\n            smoothNoise(grainUV, 300u)\n        );\n    }\n    \n    // Luminance weighting (less grain in highlights)\n    float lumWeight = mix(1.0, 1.0 - luma, clamp(u_float3, 0.0, 1.0));\n    \n    // Strength\n    float strength = u_float0 * 0.15;\n    \n    // Color vs monochrome grain\n    vec3 grainColor = mix(vec3(g), grainRGB, clamp(u_float2, 0.0, 1.0));\n    \n    color.rgb += grainColor * strength * lumWeight;\n    fragColor0 = vec4(clamp(color.rgb, 0.0, 1.0), color.a);\n}\n",
+              "from_input"
+            ]
+          },
+          {
+            "id": 21,
+            "type": "CustomCombo",
+            "pos": [
+              4280,
+              -780
+            ],
+            "size": [
+              210,
+              153.8888931274414
+            ],
+            "flags": {},
+            "order": 0,
+            "mode": 0,
+            "inputs": [
+              {
+                "label": "grain_mode",
+                "localized_name": "choice",
+                "name": "choice",
+                "type": "COMBO",
+                "widget": {
+                  "name": "choice"
+                },
+                "link": null
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "STRING",
+                "name": "STRING",
+                "type": "STRING",
+                "links": null
+              },
+              {
+                "localized_name": "INDEX",
+                "name": "INDEX",
+                "type": "INT",
+                "links": [
+                  30
+                ]
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "CustomCombo"
+            },
+            "widgets_values": [
+              "Smooth",
+              0,
+              "Smooth",
+              "Grainy",
+              ""
+            ]
+          },
+          {
+            "id": 17,
+            "type": "PrimitiveFloat",
+            "pos": [
+              4276.671470760602,
+              -1180.3256994061358
+            ],
+            "size": [
+              210,
+              58
+            ],
+            "flags": {},
+            "order": 1,
+            "mode": 0,
+            "inputs": [
+              {
+                "label": "grain_amount",
+                "localized_name": "value",
+                "name": "value",
+                "type": "FLOAT",
+                "widget": {
+                  "name": "value"
+                },
+                "link": null
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "FLOAT",
+                "name": "FLOAT",
+                "type": "FLOAT",
+                "links": [
+                  26
+                ]
+              }
+            ],
+            "title": "Grain amount",
+            "properties": {
+              "Node name for S&R": "PrimitiveFloat",
+              "min": 0,
+              "max": 1,
+              "step": 0.05,
+              "precision": 2
+            },
+            "widgets_values": [
+              0.25
+            ]
+          },
+          {
+            "id": 18,
+            "type": "PrimitiveFloat",
+            "pos": [
+              4280,
+              -1080
+            ],
+            "size": [
+              210,
+              58
+            ],
+            "flags": {},
+            "order": 2,
+            "mode": 0,
+            "inputs": [
+              {
+                "label": "grain_size",
+                "localized_name": "value",
+                "name": "value",
+                "type": "FLOAT",
+                "widget": {
+                  "name": "value"
+                },
+                "link": null
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "FLOAT",
+                "name": "FLOAT",
+                "type": "FLOAT",
+                "links": [
+                  27
+                ]
+              }
+            ],
+            "title": "Grain size",
+            "properties": {
+              "Node name for S&R": "PrimitiveFloat",
+              "min": 0.05,
+              "max": 3,
+              "precision": 2,
+              "step": 0.05
+            },
+            "widgets_values": [
+              0.1
+            ]
+          },
+          {
+            "id": 19,
+            "type": "PrimitiveFloat",
+            "pos": [
+              4280,
+              -980
+            ],
+            "size": [
+              210,
+              58
+            ],
+            "flags": {},
+            "order": 3,
+            "mode": 0,
+            "inputs": [
+              {
+                "label": "color_amount",
+                "localized_name": "value",
+                "name": "value",
+                "type": "FLOAT",
+                "widget": {
+                  "name": "value"
+                },
+                "link": null
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "FLOAT",
+                "name": "FLOAT",
+                "type": "FLOAT",
+                "links": [
+                  28
+                ]
+              }
+            ],
+            "title": "Color amount",
+            "properties": {
+              "Node name for S&R": "PrimitiveFloat",
+              "min": 0,
+              "max": 1,
+              "precision": 2,
+              "step": 0.05
+            },
+            "widgets_values": [
+              0
+            ]
+          },
+          {
+            "id": 20,
+            "type": "PrimitiveFloat",
+            "pos": [
+              4280,
+              -880
+            ],
+            "size": [
+              210,
+              58
+            ],
+            "flags": {},
+            "order": 4,
+            "mode": 0,
+            "inputs": [
+              {
+                "label": "shadow_focus",
+                "localized_name": "value",
+                "name": "value",
+                "type": "FLOAT",
+                "widget": {
+                  "name": "value"
+                },
+                "link": null
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "FLOAT",
+                "name": "FLOAT",
+                "type": "FLOAT",
+                "links": [
+                  29
+                ]
+              }
+            ],
+            "title": "Luminance bias",
+            "properties": {
+              "Node name for S&R": "PrimitiveFloat",
+              "min": 0,
+              "max": 1,
+              "precision": 2,
+              "step": 0.05
+            },
+            "widgets_values": [
+              0
+            ]
+          }
+        ],
+        "groups": [],
+        "links": [
+          {
+            "id": 26,
+            "origin_id": 17,
+            "origin_slot": 0,
+            "target_id": 15,
+            "target_slot": 2,
+            "type": "FLOAT"
+          },
+          {
+            "id": 27,
+            "origin_id": 18,
+            "origin_slot": 0,
+            "target_id": 15,
+            "target_slot": 3,
+            "type": "FLOAT"
+          },
+          {
+            "id": 28,
+            "origin_id": 19,
+            "origin_slot": 0,
+            "target_id": 15,
+            "target_slot": 4,
+            "type": "FLOAT"
+          },
+          {
+            "id": 29,
+            "origin_id": 20,
+            "origin_slot": 0,
+            "target_id": 15,
+            "target_slot": 5,
+            "type": "FLOAT"
+          },
+          {
+            "id": 30,
+            "origin_id": 21,
+            "origin_slot": 1,
+            "target_id": 15,
+            "target_slot": 7,
+            "type": "INT"
+          },
+          {
+            "id": 22,
+            "origin_id": -10,
+            "origin_slot": 0,
+            "target_id": 15,
+            "target_slot": 0,
+            "type": "IMAGE"
+          },
+          {
+            "id": 23,
+            "origin_id": 15,
+            "origin_slot": 0,
+            "target_id": -20,
+            "target_slot": 0,
+            "type": "IMAGE"
+          }
+        ],
+        "extra": {
+          "workflowRendererVersion": "LG"
+        },
+        "category": "Image Tools/Color adjust",
+        "description": "Adds procedural film grain texture for a cinematic look via GPU fragment shader."
+      }
+    ]
+  }
+}

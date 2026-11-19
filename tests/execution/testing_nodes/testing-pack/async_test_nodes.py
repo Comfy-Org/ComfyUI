@@ -21,7 +21,7 @@ class TestAsyncValidation(ComfyNodeABC):
 
     RETURN_TYPES = ("IMAGE",)
     FUNCTION = "process"
-    CATEGORY = "_for_testing/async"
+    CATEGORY = "experimental/async"
 
     @classmethod
     async def VALIDATE_INPUTS(cls, value, threshold):
@@ -53,7 +53,7 @@ class TestAsyncError(ComfyNodeABC):
 
     RETURN_TYPES = (IO.ANY,)
     FUNCTION = "error_execution"
-    CATEGORY = "_for_testing/async"
+    CATEGORY = "experimental/async"
 
     async def error_execution(self, value, error_after):
         await asyncio.sleep(error_after)
@@ -74,7 +74,7 @@ class TestAsyncValidationError(ComfyNodeABC):
 
     RETURN_TYPES = ("IMAGE",)
     FUNCTION = "process"
-    CATEGORY = "_for_testing/async"
+    CATEGORY = "experimental/async"
 
     @classmethod
     async def VALIDATE_INPUTS(cls, value, max_value):
@@ -105,7 +105,7 @@ class TestAsyncTimeout(ComfyNodeABC):
 
     RETURN_TYPES = (IO.ANY,)
     FUNCTION = "timeout_execution"
-    CATEGORY = "_for_testing/async"
+    CATEGORY = "experimental/async"
 
     async def timeout_execution(self, value, timeout, operation_time):
         try:
@@ -129,7 +129,7 @@ class TestSyncError(ComfyNodeABC):
 
     RETURN_TYPES = (IO.ANY,)
     FUNCTION = "sync_error"
-    CATEGORY = "_for_testing/async"
+    CATEGORY = "experimental/async"
 
     def sync_error(self, value):
         raise RuntimeError("Intentional sync execution error for testing")
@@ -150,7 +150,7 @@ class TestAsyncLazyCheck(ComfyNodeABC):
 
     RETURN_TYPES = ("IMAGE",)
     FUNCTION = "process"
-    CATEGORY = "_for_testing/async"
+    CATEGORY = "experimental/async"
 
     async def check_lazy_status(self, condition, input1, input2):
         # Simulate async checking (e.g., querying remote service)
@@ -184,7 +184,7 @@ class TestDynamicAsyncGeneration(ComfyNodeABC):
 
     RETURN_TYPES = ("IMAGE",)
     FUNCTION = "generate_async_workflow"
-    CATEGORY = "_for_testing/async"
+    CATEGORY = "experimental/async"
 
     def generate_async_workflow(self, image1, image2, num_async_nodes, sleep_duration):
         g = GraphBuilder()
@@ -229,7 +229,7 @@ class TestAsyncResourceUser(ComfyNodeABC):
 
     RETURN_TYPES = (IO.ANY,)
     FUNCTION = "use_resource"
-    CATEGORY = "_for_testing/async"
+    CATEGORY = "experimental/async"
 
     async def use_resource(self, value, resource_id, duration):
         # Check if resource is already in use
@@ -265,7 +265,7 @@ class TestAsyncBatchProcessing(ComfyNodeABC):
 
     RETURN_TYPES = ("IMAGE",)
     FUNCTION = "process_batch"
-    CATEGORY = "_for_testing/async"
+    CATEGORY = "experimental/async"
 
     async def process_batch(self, images, process_time_per_item, unique_id):
         batch_size = images.shape[0]
@@ -305,7 +305,7 @@ class TestAsyncConcurrentLimit(ComfyNodeABC):
 
     RETURN_TYPES = (IO.ANY,)
     FUNCTION = "limited_execution"
-    CATEGORY = "_for_testing/async"
+    CATEGORY = "experimental/async"
 
     async def limited_execution(self, value, duration, node_id):
         async with self._semaphore:

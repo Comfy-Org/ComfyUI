@@ -1,1 +1,323 @@
-{"revision": 0, "last_node_id": 29, "last_link_id": 0, "nodes": [{"id": 29, "type": "4c9d6ea4-b912-40e5-8766-6793a9758c53", "pos": [1970, -230], "size": [180, 86], "flags": {}, "order": 5, "mode": 0, "inputs": [{"label": "image", "localized_name": "images.image0", "name": "images.image0", "type": "IMAGE", "link": null}], "outputs": [{"label": "R", "localized_name": "IMAGE0", "name": "IMAGE0", "type": "IMAGE", "links": []}, {"label": "G", "localized_name": "IMAGE1", "name": "IMAGE1", "type": "IMAGE", "links": []}, {"label": "B", "localized_name": "IMAGE2", "name": "IMAGE2", "type": "IMAGE", "links": []}, {"label": "A", "localized_name": "IMAGE3", "name": "IMAGE3", "type": "IMAGE", "links": []}], "title": "Image Channels", "properties": {"proxyWidgets": []}, "widgets_values": []}], "links": [], "version": 0.4, "definitions": {"subgraphs": [{"id": "4c9d6ea4-b912-40e5-8766-6793a9758c53", "version": 1, "state": {"lastGroupId": 0, "lastNodeId": 28, "lastLinkId": 39, "lastRerouteId": 0}, "revision": 0, "config": {}, "name": "Image Channels", "inputNode": {"id": -10, "bounding": [1820, -185, 120, 60]}, "outputNode": {"id": -20, "bounding": [2460, -215, 120, 120]}, "inputs": [{"id": "3522932b-2d86-4a1f-a02a-cb29f3a9d7fe", "name": "images.image0", "type": "IMAGE", "linkIds": [39], "localized_name": "images.image0", "label": "image", "pos": [1920, -165]}], "outputs": [{"id": "605cb9c3-b065-4d9b-81d2-3ec331889b2b", "name": "IMAGE0", "type": "IMAGE", "linkIds": [26], "localized_name": "IMAGE0", "label": "R", "pos": [2480, -195]}, {"id": "fb44a77e-0522-43e9-9527-82e7465b3596", "name": "IMAGE1", "type": "IMAGE", "linkIds": [27], "localized_name": "IMAGE1", "label": "G", "pos": [2480, -175]}, {"id": "81460ee6-0131-402a-874f-6bf3001fc4ff", "name": "IMAGE2", "type": "IMAGE", "linkIds": [28], "localized_name": "IMAGE2", "label": "B", "pos": [2480, -155]}, {"id": "ae690246-80d4-4951-b1d9-9306d8a77417", "name": "IMAGE3", "type": "IMAGE", "linkIds": [29], "localized_name": "IMAGE3", "label": "A", "pos": [2480, -135]}], "widgets": [], "nodes": [{"id": 23, "type": "GLSLShader", "pos": [2000, -330], "size": [400, 172], "flags": {}, "order": 0, "mode": 0, "inputs": [{"label": "image", "localized_name": "images.image0", "name": "images.image0", "type": "IMAGE", "link": 39}, {"localized_name": "fragment_shader", "name": "fragment_shader", "type": "STRING", "widget": {"name": "fragment_shader"}, "link": null}, {"localized_name": "size_mode", "name": "size_mode", "type": "COMFY_DYNAMICCOMBO_V3", "widget": {"name": "size_mode"}, "link": null}, {"label": "image1", "localized_name": "images.image1", "name": "images.image1", "shape": 7, "type": "IMAGE", "link": null}], "outputs": [{"label": "R", "localized_name": "IMAGE0", "name": "IMAGE0", "type": "IMAGE", "links": [26]}, {"label": "G", "localized_name": "IMAGE1", "name": "IMAGE1", "type": "IMAGE", "links": [27]}, {"label": "B", "localized_name": "IMAGE2", "name": "IMAGE2", "type": "IMAGE", "links": [28]}, {"label": "A", "localized_name": "IMAGE3", "name": "IMAGE3", "type": "IMAGE", "links": [29]}], "properties": {"Node name for S&R": "GLSLShader"}, "widgets_values": ["#version 300 es\nprecision highp float;\n\nuniform sampler2D u_image0;\n\nin vec2 v_texCoord;\nlayout(location = 0) out vec4 fragColor0;\nlayout(location = 1) out vec4 fragColor1;\nlayout(location = 2) out vec4 fragColor2;\nlayout(location = 3) out vec4 fragColor3;\n\nvoid main() {\n  vec4 color = texture(u_image0, v_texCoord);\n  // Output each channel as grayscale to separate render targets\n  fragColor0 = vec4(vec3(color.r), 1.0);  // Red channel\n  fragColor1 = vec4(vec3(color.g), 1.0);  // Green channel\n  fragColor2 = vec4(vec3(color.b), 1.0);  // Blue channel\n  fragColor3 = vec4(vec3(color.a), 1.0);  // Alpha channel\n}\n", "from_input"]}], "groups": [], "links": [{"id": 39, "origin_id": -10, "origin_slot": 0, "target_id": 23, "target_slot": 0, "type": "IMAGE"}, {"id": 26, "origin_id": 23, "origin_slot": 0, "target_id": -20, "target_slot": 0, "type": "IMAGE"}, {"id": 27, "origin_id": 23, "origin_slot": 1, "target_id": -20, "target_slot": 1, "type": "IMAGE"}, {"id": 28, "origin_id": 23, "origin_slot": 2, "target_id": -20, "target_slot": 2, "type": "IMAGE"}, {"id": 29, "origin_id": 23, "origin_slot": 3, "target_id": -20, "target_slot": 3, "type": "IMAGE"}], "extra": {"workflowRendererVersion": "LG"}, "category": "Image Tools/Color adjust"}]}}
+{
+  "revision": 0,
+  "last_node_id": 29,
+  "last_link_id": 0,
+  "nodes": [
+    {
+      "id": 29,
+      "type": "4c9d6ea4-b912-40e5-8766-6793a9758c53",
+      "pos": [
+        1970,
+        -230
+      ],
+      "size": [
+        180,
+        86
+      ],
+      "flags": {},
+      "order": 5,
+      "mode": 0,
+      "inputs": [
+        {
+          "label": "image",
+          "localized_name": "images.image0",
+          "name": "images.image0",
+          "type": "IMAGE",
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "label": "R",
+          "localized_name": "IMAGE0",
+          "name": "IMAGE0",
+          "type": "IMAGE",
+          "links": []
+        },
+        {
+          "label": "G",
+          "localized_name": "IMAGE1",
+          "name": "IMAGE1",
+          "type": "IMAGE",
+          "links": []
+        },
+        {
+          "label": "B",
+          "localized_name": "IMAGE2",
+          "name": "IMAGE2",
+          "type": "IMAGE",
+          "links": []
+        },
+        {
+          "label": "A",
+          "localized_name": "IMAGE3",
+          "name": "IMAGE3",
+          "type": "IMAGE",
+          "links": []
+        }
+      ],
+      "title": "Image Channels",
+      "properties": {
+        "proxyWidgets": []
+      },
+      "widgets_values": []
+    }
+  ],
+  "links": [],
+  "version": 0.4,
+  "definitions": {
+    "subgraphs": [
+      {
+        "id": "4c9d6ea4-b912-40e5-8766-6793a9758c53",
+        "version": 1,
+        "state": {
+          "lastGroupId": 0,
+          "lastNodeId": 28,
+          "lastLinkId": 39,
+          "lastRerouteId": 0
+        },
+        "revision": 0,
+        "config": {},
+        "name": "Image Channels",
+        "inputNode": {
+          "id": -10,
+          "bounding": [
+            1820,
+            -185,
+            120,
+            60
+          ]
+        },
+        "outputNode": {
+          "id": -20,
+          "bounding": [
+            2460,
+            -215,
+            120,
+            120
+          ]
+        },
+        "inputs": [
+          {
+            "id": "3522932b-2d86-4a1f-a02a-cb29f3a9d7fe",
+            "name": "images.image0",
+            "type": "IMAGE",
+            "linkIds": [
+              39
+            ],
+            "localized_name": "images.image0",
+            "label": "image",
+            "pos": [
+              1920,
+              -165
+            ]
+          }
+        ],
+        "outputs": [
+          {
+            "id": "605cb9c3-b065-4d9b-81d2-3ec331889b2b",
+            "name": "IMAGE0",
+            "type": "IMAGE",
+            "linkIds": [
+              26
+            ],
+            "localized_name": "IMAGE0",
+            "label": "R",
+            "pos": [
+              2480,
+              -195
+            ]
+          },
+          {
+            "id": "fb44a77e-0522-43e9-9527-82e7465b3596",
+            "name": "IMAGE1",
+            "type": "IMAGE",
+            "linkIds": [
+              27
+            ],
+            "localized_name": "IMAGE1",
+            "label": "G",
+            "pos": [
+              2480,
+              -175
+            ]
+          },
+          {
+            "id": "81460ee6-0131-402a-874f-6bf3001fc4ff",
+            "name": "IMAGE2",
+            "type": "IMAGE",
+            "linkIds": [
+              28
+            ],
+            "localized_name": "IMAGE2",
+            "label": "B",
+            "pos": [
+              2480,
+              -155
+            ]
+          },
+          {
+            "id": "ae690246-80d4-4951-b1d9-9306d8a77417",
+            "name": "IMAGE3",
+            "type": "IMAGE",
+            "linkIds": [
+              29
+            ],
+            "localized_name": "IMAGE3",
+            "label": "A",
+            "pos": [
+              2480,
+              -135
+            ]
+          }
+        ],
+        "widgets": [],
+        "nodes": [
+          {
+            "id": 23,
+            "type": "GLSLShader",
+            "pos": [
+              2000,
+              -330
+            ],
+            "size": [
+              400,
+              172
+            ],
+            "flags": {},
+            "order": 0,
+            "mode": 0,
+            "inputs": [
+              {
+                "label": "image",
+                "localized_name": "images.image0",
+                "name": "images.image0",
+                "type": "IMAGE",
+                "link": 39
+              },
+              {
+                "localized_name": "fragment_shader",
+                "name": "fragment_shader",
+                "type": "STRING",
+                "widget": {
+                  "name": "fragment_shader"
+                },
+                "link": null
+              },
+              {
+                "localized_name": "size_mode",
+                "name": "size_mode",
+                "type": "COMFY_DYNAMICCOMBO_V3",
+                "widget": {
+                  "name": "size_mode"
+                },
+                "link": null
+              },
+              {
+                "label": "image1",
+                "localized_name": "images.image1",
+                "name": "images.image1",
+                "shape": 7,
+                "type": "IMAGE",
+                "link": null
+              }
+            ],
+            "outputs": [
+              {
+                "label": "R",
+                "localized_name": "IMAGE0",
+                "name": "IMAGE0",
+                "type": "IMAGE",
+                "links": [
+                  26
+                ]
+              },
+              {
+                "label": "G",
+                "localized_name": "IMAGE1",
+                "name": "IMAGE1",
+                "type": "IMAGE",
+                "links": [
+                  27
+                ]
+              },
+              {
+                "label": "B",
+                "localized_name": "IMAGE2",
+                "name": "IMAGE2",
+                "type": "IMAGE",
+                "links": [
+                  28
+                ]
+              },
+              {
+                "label": "A",
+                "localized_name": "IMAGE3",
+                "name": "IMAGE3",
+                "type": "IMAGE",
+                "links": [
+                  29
+                ]
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "GLSLShader"
+            },
+            "widgets_values": [
+              "#version 300 es\nprecision highp float;\n\nuniform sampler2D u_image0;\n\nin vec2 v_texCoord;\nlayout(location = 0) out vec4 fragColor0;\nlayout(location = 1) out vec4 fragColor1;\nlayout(location = 2) out vec4 fragColor2;\nlayout(location = 3) out vec4 fragColor3;\n\nvoid main() {\n  vec4 color = texture(u_image0, v_texCoord);\n  // Output each channel as grayscale to separate render targets\n  fragColor0 = vec4(vec3(color.r), 1.0);  // Red channel\n  fragColor1 = vec4(vec3(color.g), 1.0);  // Green channel\n  fragColor2 = vec4(vec3(color.b), 1.0);  // Blue channel\n  fragColor3 = vec4(vec3(color.a), 1.0);  // Alpha channel\n}\n",
+              "from_input"
+            ]
+          }
+        ],
+        "groups": [],
+        "links": [
+          {
+            "id": 39,
+            "origin_id": -10,
+            "origin_slot": 0,
+            "target_id": 23,
+            "target_slot": 0,
+            "type": "IMAGE"
+          },
+          {
+            "id": 26,
+            "origin_id": 23,
+            "origin_slot": 0,
+            "target_id": -20,
+            "target_slot": 0,
+            "type": "IMAGE"
+          },
+          {
+            "id": 27,
+            "origin_id": 23,
+            "origin_slot": 1,
+            "target_id": -20,
+            "target_slot": 1,
+            "type": "IMAGE"
+          },
+          {
+            "id": 28,
+            "origin_id": 23,
+            "origin_slot": 2,
+            "target_id": -20,
+            "target_slot": 2,
+            "type": "IMAGE"
+          },
+          {
+            "id": 29,
+            "origin_id": 23,
+            "origin_slot": 3,
+            "target_id": -20,
+            "target_slot": 3,
+            "type": "IMAGE"
+          }
+        ],
+        "extra": {
+          "workflowRendererVersion": "LG"
+        },
+        "category": "Image Tools/Color adjust",
+        "description": "Manipulates individual RGBA channels for masking, compositing, and channel effects."
+      }
+    ]
+  }
+}

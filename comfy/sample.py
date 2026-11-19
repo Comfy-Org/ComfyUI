@@ -8,12 +8,12 @@ import comfy.nested_tensor
 
 def prepare_noise_inner(latent_image, generator, noise_inds=None):
     if noise_inds is None:
-        return torch.randn(latent_image.size(), dtype=latent_image.dtype, layout=latent_image.layout, generator=generator, device="cpu")
+        return torch.randn(latent_image.size(), dtype=torch.float32, layout=latent_image.layout, generator=generator, device="cpu").to(dtype=latent_image.dtype)
 
     unique_inds, inverse = np.unique(noise_inds, return_inverse=True)
     noises = []
     for i in range(unique_inds[-1]+1):
-        noise = torch.randn([1] + list(latent_image.size())[1:], dtype=latent_image.dtype, layout=latent_image.layout, generator=generator, device="cpu")
+        noise = torch.randn([1] + list(latent_image.size())[1:], dtype=torch.float32, layout=latent_image.layout, generator=generator, device="cpu").to(dtype=latent_image.dtype)
         if i in unique_inds:
             noises.append(noise)
     noises = [noises[i] for i in inverse]
@@ -37,11 +37,17 @@ def prepare_noise(latent_image, seed, noise_inds=None):
 
     return noises
 
-def fix_empty_latent_channels(model, latent_image, downscale_ratio_spacial=None):
+def prepare_empty_noise(latent_image):
+    if latent_image.is_nested:
+        return comfy.nested_tensor.NestedTensor([torch.zeros_like(t, device="cpu") for t in latent_image.unbind()])
+    return torch.zeros_like(latent_image, device="cpu")
+
+def fix_empty_latent_channels(model, latent_image, downscale_ratio_spacial=None, downscale_ratio_temporal=None):
     if latent_image.is_nested:
         return latent_image
-    latent_format = model.get_model_object("latent_format") #Resize the empty latent image so it has the right number of channels
-    if torch.count_nonzero(latent_image) == 0:
+    latent_format = model.get_model_object("latent_format")
+    is_empty = torch.count_nonzero(latent_image) == 0
+    if is_empty:
         if latent_format.latent_channels != latent_image.shape[1]:
             latent_image = comfy.utils.repeat_to_batch_size(latent_image, latent_format.latent_channels, dim=1)
         if downscale_ratio_spacial is not None:
@@ -51,6 +57,16 @@ def fix_empty_latent_channels(model, latent_image, downscale_ratio_spacial=None)
 
     if latent_format.latent_dimensions == 3 and latent_image.ndim == 4:
         latent_image = latent_image.unsqueeze(2)
+
+    if is_empty and downscale_ratio_temporal is not None:
+        if downscale_ratio_temporal != latent_format.temporal_downscale_ratio:
+            ratio = downscale_ratio_temporal / latent_format.temporal_downscale_ratio
+            new_t = max(1, round(latent_image.shape[2] * ratio))
+            latent_image = comfy.utils.repeat_to_batch_size(latent_image, new_t, dim=2)
+
+    if is_empty:
+        latent_image = latent_format.fix_empty_latent(latent_image)
+
     return latent_image
 
 def prepare_sampling(model, noise_shape, positive, negative, noise_mask):
@@ -64,10 +80,10 @@ def sample(model, noise, steps, cfg, sampler_name, scheduler, positive, negative
     sampler = comfy.samplers.KSampler(model, steps=steps, device=model.load_device, sampler=sampler_name, scheduler=scheduler, denoise=denoise, model_options=model.model_options)
 
     samples = sampler.sample(noise, positive, negative, cfg=cfg, latent_image=latent_image, start_step=start_step, last_step=last_step, force_full_denoise=force_full_denoise, denoise_mask=noise_mask, sigmas=sigmas, callback=callback, disable_pbar=disable_pbar, seed=seed)
-    samples = samples.to(comfy.model_management.intermediate_device())
+    samples = samples.to(device=comfy.model_management.intermediate_device(), dtype=comfy.model_management.intermediate_dtype())
     return samples
 
 def sample_custom(model, noise, cfg, sampler, sigmas, positive, negative, latent_image, noise_mask=None, callback=None, disable_pbar=False, seed=None):
     samples = comfy.samplers.sample(model, noise, positive, negative, cfg, model.load_device, sampler, sigmas, model_options=model.model_options, latent_image=latent_image, denoise_mask=noise_mask, callback=callback, disable_pbar=disable_pbar, seed=seed)
-    samples = samples.to(comfy.model_management.intermediate_device())
+    samples = samples.to(device=comfy.model_management.intermediate_device(), dtype=comfy.model_management.intermediate_dtype())
     return samples

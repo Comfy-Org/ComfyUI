@@ -9,10 +9,15 @@ class ImageGenerationRequest(BaseModel):
     seed: int = Field(...)
     response_format: str = Field("url")
     resolution: str = Field(...)
+    quality: str | None = Field(None)
 
 
 class InputUrlObject(BaseModel):
     url: str = Field(...)
+
+
+class VoiceReferenceObject(BaseModel):
+    voice_id: str = Field(...)
 
 
 class ImageEditRequest(BaseModel):
@@ -24,16 +29,26 @@ class ImageEditRequest(BaseModel):
     seed: int = Field(...)
     response_format: str = Field("url")
     aspect_ratio: str | None = Field(...)
+    quality: str | None = Field(None)
 
 
 class VideoGenerationRequest(BaseModel):
     model: str = Field(...)
     prompt: str = Field(...)
-    image: InputUrlObject | None = Field(...)
+    image: InputUrlObject | None = Field(None)
+    reference_images: list[InputUrlObject] | None = Field(None)
+    reference_audios: list[VoiceReferenceObject] | None = Field(None)
     duration: int = Field(...)
     aspect_ratio: str | None = Field(...)
     resolution: str = Field(...)
     seed: int = Field(...)
+
+
+class VideoExtensionRequest(BaseModel):
+    prompt: str = Field(...)
+    video: InputUrlObject = Field(...)
+    duration: int = Field(default=6)
+    model: str | None = Field(default=None)
 
 
 class VideoEditRequest(BaseModel):

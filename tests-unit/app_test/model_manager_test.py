@@ -24,6 +24,28 @@ def app(model_manager):
     app.add_routes(routes)
     return app
 
+async def test_get_model_folders_includes_registered_extensions(aiohttp_client, app, tmp_path):
+    """Folders expose their registered extension set verbatim; an empty list
+    means match-all (filter_files_extensions semantics)."""
+    with patch('folder_paths.folder_names_and_paths', {
+        'test_checkpoints': ([str(tmp_path)], {'.safetensors', '.ckpt'}),
+        'test_configs': ([str(tmp_path)], ['.yaml']),
+        'test_match_all': ([str(tmp_path)], set()),
+        'configs': ([str(tmp_path)], ['.yaml']),
+    }):
+        client = await aiohttp_client(app)
+        response = await client.get('/experiment/models')
+
+        assert response.status == 200
+        folders = {f['name']: f for f in await response.json()}
+
+        assert 'configs' not in folders  # blocklisted
+        assert folders['test_checkpoints']['folders'] == [str(tmp_path)]
+        assert folders['test_checkpoints']['extensions'] == ['.ckpt', '.safetensors']
+        assert folders['test_configs']['extensions'] == ['.yaml']
+        # Match-all registrations are exposed honestly, not substituted.
+        assert folders['test_match_all']['extensions'] == []
+
 async def test_get_model_preview_safetensors(aiohttp_client, app, tmp_path):
     img = Image.new('RGB', (100, 100), 'white')
     img_byte_arr = BytesIO()

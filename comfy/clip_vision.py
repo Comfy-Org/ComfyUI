@@ -6,9 +6,12 @@ import logging
 import comfy.ops
 import comfy.model_patcher
 import comfy.model_management
+import comfy.storage
 import comfy.utils
 import comfy.clip_model
 import comfy.image_encoders.dino2
+import comfy.image_encoders.dino3
+from comfy.image_encoders.naf import NAF
 
 class Output:
     def __getitem__(self, key):
@@ -23,12 +26,16 @@ IMAGE_ENCODERS = {
     "siglip_vision_model": comfy.clip_model.CLIPVisionModelProjection,
     "siglip2_vision_model": comfy.clip_model.CLIPVisionModelProjection,
     "dinov2": comfy.image_encoders.dino2.Dinov2Model,
+    "dinov3": comfy.image_encoders.dino3.DINOv3ViTModel,
 }
 
 class ClipVisionModel():
-    def __init__(self, json_config):
-        with open(json_config) as f:
-            config = json.load(f)
+    def __init__(self, json_config, fast_disk=False):
+        if isinstance(json_config, dict):
+            config = json_config
+        else:
+            with open(json_config) as f:
+                config = json.load(f)
 
         self.image_size = config.get("image_size", 224)
         self.image_mean = config.get("image_mean", [0.48145466, 0.4578275, 0.40821073])
@@ -47,7 +54,8 @@ class ClipVisionModel():
         self.model = model_class(config, self.dtype, offload_device, comfy.ops.manual_cast)
         self.model.eval()
 
-        self.patcher = comfy.model_patcher.CoreModelPatcher(self.model, load_device=self.load_device, offload_device=offload_device)
+        self.patcher = comfy.model_patcher.CoreModelPatcher(self.model, load_device=self.load_device, offload_device=offload_device, fast_disk=fast_disk)
+        self.naf = None
 
     def load_sd(self, sd):
         return self.model.load_state_dict(sd, strict=False, assign=self.patcher.is_dynamic())
@@ -134,10 +142,14 @@ def load_clipvision_from_sd(sd, prefix="", convert_keys=False):
         json_config = os.path.join(os.path.join(os.path.dirname(os.path.realpath(__file__)), "image_encoders"), "dino2_giant.json")
     elif 'encoder.layer.23.layer_scale2.lambda1' in sd:
         json_config = os.path.join(os.path.join(os.path.dirname(os.path.realpath(__file__)), "image_encoders"), "dino2_large.json")
+    elif 'layer.0.mlp.gate_proj.weight' in sd and 'layer.31.norm1.weight' in sd: # Dinov3 ViT-H/16+ (SwiGLU gated MLP, 32 layers)
+        json_config = comfy.image_encoders.dino3.DINOV3_VITH_CONFIG
+    elif 'layer.23.attention.o_proj.bias' in sd: # dinov3 large (24 layers)
+        json_config = os.path.join(os.path.join(os.path.dirname(os.path.realpath(__file__)), "image_encoders"), "dino3_large.json")
     else:
         return None
 
-    clip = ClipVisionModel(json_config)
+    clip = ClipVisionModel(json_config, fast_disk=comfy.storage.state_dict_fast_disk(sd))
     m, u = clip.load_sd(sd)
     if len(m) > 0:
         logging.warning("missing clip vision: {}".format(m))
@@ -146,6 +158,14 @@ def load_clipvision_from_sd(sd, prefix="", convert_keys=False):
     for k in keys:
         if k not in u:
             sd.pop(k)
+    # NAF feature upsampler bundled into the DINOv3 file under the `naf.` prefix.
+    naf_keys = [k for k in sd if k.startswith("naf.")]
+    if naf_keys:
+        naf_sd = {k[len("naf."):]: sd.pop(k) for k in naf_keys}
+        naf = NAF(operations=comfy.ops.manual_cast).eval()
+        naf.load_state_dict(naf_sd)
+        naf.to(comfy.model_management.text_encoder_dtype(clip.load_device))
+        clip.naf = comfy.model_patcher.CoreModelPatcher(naf, load_device=clip.load_device, offload_device=comfy.model_management.text_encoder_offload_device(), fast_disk=comfy.storage.state_dict_fast_disk(naf_sd))
     return clip
 
 def load(ckpt_path):

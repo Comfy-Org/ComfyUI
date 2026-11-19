@@ -67,15 +67,6 @@ class RunwayImageToVideoResponse(BaseModel):
     id: Optional[str] = Field(None, description='Task ID')
 
 
-class RunwayTaskStatusEnum(str, Enum):
-    SUCCEEDED = 'SUCCEEDED'
-    RUNNING = 'RUNNING'
-    FAILED = 'FAILED'
-    PENDING = 'PENDING'
-    CANCELLED = 'CANCELLED'
-    THROTTLED = 'THROTTLED'
-
-
 class RunwayTaskStatusResponse(BaseModel):
     createdAt: datetime = Field(..., description='Task creation timestamp')
     id: str = Field(..., description='Task ID')
@@ -86,7 +77,7 @@ class RunwayTaskStatusResponse(BaseModel):
         ge=0.0,
         le=1.0,
     )
-    status: RunwayTaskStatusEnum
+    status: str = Field(..., description="SUCCEEDED, RUNNING, FAILED, PENDING, CANCELLED or THROTTLED")
 
 
 class Model4(str, Enum):
@@ -125,3 +116,144 @@ class RunwayTextToImageRequest(BaseModel):
 
 class RunwayTextToImageResponse(BaseModel):
     id: Optional[str] = Field(None, description='Task ID')
+
+
+class RunwayAleph2IO:
+    """Custom socket types for chaining Aleph2 guidance images."""
+
+    KEYFRAME = "RUNWAY_ALEPH2_KEYFRAME"
+    PROMPT_IMAGE = "RUNWAY_ALEPH2_PROMPT_IMAGE"
+
+
+# Keyframe timing modes (anchored to the INPUT video). Stored on the chain item and used to
+# choose the request model below. The values match the Aleph2 keyframe union field names.
+KEYFRAME_MODE_SECONDS = "seconds"  # absolute time, in seconds, from the start of the input video
+KEYFRAME_MODE_AT = "at"  # fraction [0.0, 1.0] of the input video duration
+
+# Prompt-image position modes (anchored to the OUTPUT video). Values match the Aleph2 position `type`.
+PROMPT_IMAGE_MODE_TIMESTAMP = "timestamp"  # absolute time, in seconds, from the start of the output video
+PROMPT_IMAGE_MODE_POSITION = "position"  # fraction [0.0, 1.0] of the output video duration
+
+
+class RunwayAleph2KeyframeItem:
+    """A guidance image anchored to a point of the INPUT video (one Aleph2 ``keyframe``)."""
+
+    def __init__(self, image, mode: str, value: float):
+        self.image = image
+        self.mode = mode  # KEYFRAME_MODE_SECONDS | KEYFRAME_MODE_AT
+        self.value = value
+
+
+class RunwayAleph2KeyframeChain:
+    """An ordered collection of keyframes, built by chaining Runway Aleph2 Keyframe nodes."""
+
+    def __init__(self):
+        self.items: list[RunwayAleph2KeyframeItem] = []
+
+    def add(self, item: RunwayAleph2KeyframeItem) -> None:
+        self.items.append(item)
+
+    def clone(self) -> "RunwayAleph2KeyframeChain":
+        c = RunwayAleph2KeyframeChain()
+        c.items = list(self.items)
+        return c
+
+
+class RunwayAleph2PromptImageItem:
+    """A guidance image anchored to a point of the OUTPUT video (one Aleph2 ``promptImage``)."""
+
+    def __init__(self, image, mode: str, value: float):
+        self.image = image
+        self.mode = mode  # PROMPT_IMAGE_MODE_TIMESTAMP | PROMPT_IMAGE_MODE_POSITION
+        self.value = value
+
+
+class RunwayAleph2PromptImageChain:
+    """An ordered collection of prompt images, built by chaining Runway Aleph2 Prompt Image nodes."""
+
+    def __init__(self):
+        self.items: list[RunwayAleph2PromptImageItem] = []
+
+    def add(self, item: RunwayAleph2PromptImageItem) -> None:
+        self.items.append(item)
+
+    def clone(self) -> "RunwayAleph2PromptImageChain":
+        c = RunwayAleph2PromptImageChain()
+        c.items = list(self.items)
+        return c
+
+
+class RunwayAleph2KeyframeSeconds(BaseModel):
+    seconds: float = Field(
+        ...,
+        description="Absolute timestamp in seconds from the start of the input video when this guidance image should apply.",
+        ge=0.0,
+    )
+    uri: str = Field(...)
+
+
+class RunwayAleph2KeyframeAt(BaseModel):
+    at: float = Field(
+        ...,
+        description="Position as a fraction [0.0, 1.0] of the input video duration.",
+        ge=0.0,
+        le=1.0,
+    )
+    uri: str = Field(...)
+
+
+class RunwayAleph2TimestampPosition(BaseModel):
+    type: str = Field(default="timestamp")
+    timestampSeconds: float = Field(
+        ...,
+        description="Absolute timestamp in seconds from the start of the output video.",
+        ge=0.0,
+    )
+
+
+class RunwayAleph2RelativePosition(BaseModel):
+    type: str = Field(default="position")
+    positionPercentage: float = Field(
+        ...,
+        description="Position as a fraction [0.0, 1.0] of the total output video duration.",
+        ge=0.0,
+        le=1.0,
+    )
+
+
+class RunwayAleph2PromptImage(BaseModel):
+    position: RunwayAleph2TimestampPosition | RunwayAleph2RelativePosition
+    uri: str = Field(...)
+
+
+class RunwayAleph2ContentModeration(BaseModel):
+    publicFigureThreshold: str = Field(
+        ...,
+        description='When set to "low", the content moderation system is less strict about '
+        'recognizable public figures. One of "auto" or "low".',
+    )
+
+
+class RunwayAleph2Request(BaseModel):
+    model: str = Field(default="aleph2")
+    promptText: str = Field(
+        ...,
+        description="A non-empty string describing what should appear in the output.",
+        min_length=1,
+        max_length=1000,
+    )
+    videoUri: str = Field(...)
+    seed: int = Field(..., description="Random seed for generation", ge=0, le=4294967295)
+    contentModeration: RunwayAleph2ContentModeration = Field(...)
+    keyframes: list[RunwayAleph2KeyframeSeconds | RunwayAleph2KeyframeAt] | None = Field(
+        None,
+        description="Timed guidance images placed at specific points in the input video. Up to 5.",
+    )
+    promptImage: list[RunwayAleph2PromptImage] | None = Field(
+        None,
+        description="Up to 5 image keyframes for guiding the edit at specific points in the output video.",
+    )
+
+
+class RunwayAleph2Response(BaseModel):
+    id: str | None = Field(None, description="Task ID")

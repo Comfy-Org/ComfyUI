@@ -1,1 +1,310 @@
-{"revision": 0, "last_node_id": 25, "last_link_id": 0, "nodes": [{"id": 25, "type": "621ba4e2-22a8-482d-a369-023753198b7b", "pos": [4610, -790], "size": [230, 58], "flags": {}, "order": 4, "mode": 0, "inputs": [{"label": "image", "localized_name": "images.image0", "name": "images.image0", "type": "IMAGE", "link": null}], "outputs": [{"label": "IMAGE", "localized_name": "IMAGE0", "name": "IMAGE0", "type": "IMAGE", "links": []}], "title": "Sharpen", "properties": {"proxyWidgets": [["24", "value"]]}, "widgets_values": []}], "links": [], "version": 0.4, "definitions": {"subgraphs": [{"id": "621ba4e2-22a8-482d-a369-023753198b7b", "version": 1, "state": {"lastGroupId": 0, "lastNodeId": 24, "lastLinkId": 36, "lastRerouteId": 0}, "revision": 0, "config": {}, "name": "Sharpen", "inputNode": {"id": -10, "bounding": [4090, -825, 120, 60]}, "outputNode": {"id": -20, "bounding": [5150, -825, 120, 60]}, "inputs": [{"id": "37011fb7-14b7-4e0e-b1a0-6a02e8da1fd7", "name": "images.image0", "type": "IMAGE", "linkIds": [34], "localized_name": "images.image0", "label": "image", "pos": [4190, -805]}], "outputs": [{"id": "e9182b3f-635c-4cd4-a152-4b4be17ae4b9", "name": "IMAGE0", "type": "IMAGE", "linkIds": [35], "localized_name": "IMAGE0", "label": "IMAGE", "pos": [5170, -805]}], "widgets": [], "nodes": [{"id": 24, "type": "PrimitiveFloat", "pos": [4280, -1240], "size": [270, 58], "flags": {}, "order": 0, "mode": 0, "inputs": [{"label": "strength", "localized_name": "value", "name": "value", "type": "FLOAT", "widget": {"name": "value"}, "link": null}], "outputs": [{"localized_name": "FLOAT", "name": "FLOAT", "type": "FLOAT", "links": [36]}], "properties": {"Node name for S&R": "PrimitiveFloat", "min": 0, "max": 3, "precision": 2, "step": 0.05}, "widgets_values": [0.5]}, {"id": 23, "type": "GLSLShader", "pos": [4570, -1240], "size": [370, 192], "flags": {}, "order": 1, "mode": 0, "inputs": [{"label": "image0", "localized_name": "images.image0", "name": "images.image0", "type": "IMAGE", "link": 34}, {"label": "image1", "localized_name": "images.image1", "name": "images.image1", "shape": 7, "type": "IMAGE", "link": null}, {"label": "u_float0", "localized_name": "floats.u_float0", "name": "floats.u_float0", "shape": 7, "type": "FLOAT", "link": 36}, {"label": "u_float1", "localized_name": "floats.u_float1", "name": "floats.u_float1", "shape": 7, "type": "FLOAT", "link": null}, {"label": "u_int0", "localized_name": "ints.u_int0", "name": "ints.u_int0", "shape": 7, "type": "INT", "link": null}, {"localized_name": "fragment_shader", "name": "fragment_shader", "type": "STRING", "widget": {"name": "fragment_shader"}, "link": null}, {"localized_name": "size_mode", "name": "size_mode", "type": "COMFY_DYNAMICCOMBO_V3", "widget": {"name": "size_mode"}, "link": null}], "outputs": [{"localized_name": "IMAGE0", "name": "IMAGE0", "type": "IMAGE", "links": [35]}, {"localized_name": "IMAGE1", "name": "IMAGE1", "type": "IMAGE", "links": null}, {"localized_name": "IMAGE2", "name": "IMAGE2", "type": "IMAGE", "links": null}, {"localized_name": "IMAGE3", "name": "IMAGE3", "type": "IMAGE", "links": null}], "properties": {"Node name for S&R": "GLSLShader"}, "widgets_values": ["#version 300 es\nprecision highp float;\n\nuniform sampler2D u_image0;\nuniform vec2 u_resolution;\nuniform float u_float0;  // strength [0.0 – 2.0] typical: 0.3–1.0\n\nin vec2 v_texCoord;\nlayout(location = 0) out vec4 fragColor0;\n\nvoid main() {\n    vec2 texel = 1.0 / u_resolution;\n    \n    // Sample center and neighbors\n    vec4 center = texture(u_image0, v_texCoord);\n    vec4 top    = texture(u_image0, v_texCoord + vec2( 0.0, -texel.y));\n    vec4 bottom = texture(u_image0, v_texCoord + vec2( 0.0,  texel.y));\n    vec4 left   = texture(u_image0, v_texCoord + vec2(-texel.x,  0.0));\n    vec4 right  = texture(u_image0, v_texCoord + vec2( texel.x,  0.0));\n    \n    // Edge enhancement (Laplacian)\n    vec4 edges = center * 4.0 - top - bottom - left - right;\n    \n    // Add edges back scaled by strength\n    vec4 sharpened = center + edges * u_float0;\n    \n    fragColor0 = vec4(clamp(sharpened.rgb, 0.0, 1.0), center.a);\n}", "from_input"]}], "groups": [], "links": [{"id": 36, "origin_id": 24, "origin_slot": 0, "target_id": 23, "target_slot": 2, "type": "FLOAT"}, {"id": 34, "origin_id": -10, "origin_slot": 0, "target_id": 23, "target_slot": 0, "type": "IMAGE"}, {"id": 35, "origin_id": 23, "origin_slot": 0, "target_id": -20, "target_slot": 0, "type": "IMAGE"}], "extra": {"workflowRendererVersion": "LG"}, "category": "Image Tools/Sharpen"}]}}
+{
+  "revision": 0,
+  "last_node_id": 25,
+  "last_link_id": 0,
+  "nodes": [
+    {
+      "id": 25,
+      "type": "621ba4e2-22a8-482d-a369-023753198b7b",
+      "pos": [
+        4610,
+        -790
+      ],
+      "size": [
+        230,
+        58
+      ],
+      "flags": {},
+      "order": 4,
+      "mode": 0,
+      "inputs": [
+        {
+          "label": "image",
+          "localized_name": "images.image0",
+          "name": "images.image0",
+          "type": "IMAGE",
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "label": "IMAGE",
+          "localized_name": "IMAGE0",
+          "name": "IMAGE0",
+          "type": "IMAGE",
+          "links": []
+        }
+      ],
+      "title": "Sharpen",
+      "properties": {
+        "proxyWidgets": [
+          [
+            "24",
+            "value"
+          ]
+        ]
+      },
+      "widgets_values": []
+    }
+  ],
+  "links": [],
+  "version": 0.4,
+  "definitions": {
+    "subgraphs": [
+      {
+        "id": "621ba4e2-22a8-482d-a369-023753198b7b",
+        "version": 1,
+        "state": {
+          "lastGroupId": 0,
+          "lastNodeId": 24,
+          "lastLinkId": 36,
+          "lastRerouteId": 0
+        },
+        "revision": 0,
+        "config": {},
+        "name": "Sharpen",
+        "inputNode": {
+          "id": -10,
+          "bounding": [
+            4090,
+            -825,
+            120,
+            60
+          ]
+        },
+        "outputNode": {
+          "id": -20,
+          "bounding": [
+            5150,
+            -825,
+            120,
+            60
+          ]
+        },
+        "inputs": [
+          {
+            "id": "37011fb7-14b7-4e0e-b1a0-6a02e8da1fd7",
+            "name": "images.image0",
+            "type": "IMAGE",
+            "linkIds": [
+              34
+            ],
+            "localized_name": "images.image0",
+            "label": "image",
+            "pos": [
+              4190,
+              -805
+            ]
+          }
+        ],
+        "outputs": [
+          {
+            "id": "e9182b3f-635c-4cd4-a152-4b4be17ae4b9",
+            "name": "IMAGE0",
+            "type": "IMAGE",
+            "linkIds": [
+              35
+            ],
+            "localized_name": "IMAGE0",
+            "label": "IMAGE",
+            "pos": [
+              5170,
+              -805
+            ]
+          }
+        ],
+        "widgets": [],
+        "nodes": [
+          {
+            "id": 24,
+            "type": "PrimitiveFloat",
+            "pos": [
+              4280,
+              -1240
+            ],
+            "size": [
+              270,
+              58
+            ],
+            "flags": {},
+            "order": 0,
+            "mode": 0,
+            "inputs": [
+              {
+                "label": "strength",
+                "localized_name": "value",
+                "name": "value",
+                "type": "FLOAT",
+                "widget": {
+                  "name": "value"
+                },
+                "link": null
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "FLOAT",
+                "name": "FLOAT",
+                "type": "FLOAT",
+                "links": [
+                  36
+                ]
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "PrimitiveFloat",
+              "min": 0,
+              "max": 3,
+              "precision": 2,
+              "step": 0.05
+            },
+            "widgets_values": [
+              0.5
+            ]
+          },
+          {
+            "id": 23,
+            "type": "GLSLShader",
+            "pos": [
+              4570,
+              -1240
+            ],
+            "size": [
+              370,
+              192
+            ],
+            "flags": {},
+            "order": 1,
+            "mode": 0,
+            "inputs": [
+              {
+                "label": "image0",
+                "localized_name": "images.image0",
+                "name": "images.image0",
+                "type": "IMAGE",
+                "link": 34
+              },
+              {
+                "label": "image1",
+                "localized_name": "images.image1",
+                "name": "images.image1",
+                "shape": 7,
+                "type": "IMAGE",
+                "link": null
+              },
+              {
+                "label": "u_float0",
+                "localized_name": "floats.u_float0",
+                "name": "floats.u_float0",
+                "shape": 7,
+                "type": "FLOAT",
+                "link": 36
+              },
+              {
+                "label": "u_float1",
+                "localized_name": "floats.u_float1",
+                "name": "floats.u_float1",
+                "shape": 7,
+                "type": "FLOAT",
+                "link": null
+              },
+              {
+                "label": "u_int0",
+                "localized_name": "ints.u_int0",
+                "name": "ints.u_int0",
+                "shape": 7,
+                "type": "INT",
+                "link": null
+              },
+              {
+                "localized_name": "fragment_shader",
+                "name": "fragment_shader",
+                "type": "STRING",
+                "widget": {
+                  "name": "fragment_shader"
+                },
+                "link": null
+              },
+              {
+                "localized_name": "size_mode",
+                "name": "size_mode",
+                "type": "COMFY_DYNAMICCOMBO_V3",
+                "widget": {
+                  "name": "size_mode"
+                },
+                "link": null
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "IMAGE0",
+                "name": "IMAGE0",
+                "type": "IMAGE",
+                "links": [
+                  35
+                ]
+              },
+              {
+                "localized_name": "IMAGE1",
+                "name": "IMAGE1",
+                "type": "IMAGE",
+                "links": null
+              },
+              {
+                "localized_name": "IMAGE2",
+                "name": "IMAGE2",
+                "type": "IMAGE",
+                "links": null
+              },
+              {
+                "localized_name": "IMAGE3",
+                "name": "IMAGE3",
+                "type": "IMAGE",
+                "links": null
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "GLSLShader"
+            },
+            "widgets_values": [
+              "#version 300 es\nprecision highp float;\n\nuniform sampler2D u_image0;\nuniform float u_float0;  // strength [0.0 – 2.0] typical: 0.3–1.0\n\nin vec2 v_texCoord;\nlayout(location = 0) out vec4 fragColor0;\n\nvoid main() {\n    vec2 texel = 1.0 / vec2(textureSize(u_image0, 0));\n    \n    // Sample center and neighbors\n    vec4 center = texture(u_image0, v_texCoord);\n    vec4 top    = texture(u_image0, v_texCoord + vec2( 0.0, -texel.y));\n    vec4 bottom = texture(u_image0, v_texCoord + vec2( 0.0,  texel.y));\n    vec4 left   = texture(u_image0, v_texCoord + vec2(-texel.x,  0.0));\n    vec4 right  = texture(u_image0, v_texCoord + vec2( texel.x,  0.0));\n    \n    // Edge enhancement (Laplacian)\n    vec4 edges = center * 4.0 - top - bottom - left - right;\n    \n    // Add edges back scaled by strength\n    vec4 sharpened = center + edges * u_float0;\n    \n    fragColor0 = vec4(clamp(sharpened.rgb, 0.0, 1.0), center.a);\n}",
+              "from_input"
+            ]
+          }
+        ],
+        "groups": [],
+        "links": [
+          {
+            "id": 36,
+            "origin_id": 24,
+            "origin_slot": 0,
+            "target_id": 23,
+            "target_slot": 2,
+            "type": "FLOAT"
+          },
+          {
+            "id": 34,
+            "origin_id": -10,
+            "origin_slot": 0,
+            "target_id": 23,
+            "target_slot": 0,
+            "type": "IMAGE"
+          },
+          {
+            "id": 35,
+            "origin_id": 23,
+            "origin_slot": 0,
+            "target_id": -20,
+            "target_slot": 0,
+            "type": "IMAGE"
+          }
+        ],
+        "extra": {
+          "workflowRendererVersion": "LG"
+        },
+        "category": "Image Tools/Sharpen",
+        "description": "Sharpens image details using a GPU fragment shader for enhanced clarity."
+      }
+    ]
+  }
+}

@@ -13,7 +13,7 @@ class wanBlockSwap(io.ComfyNode):
         return io.Schema(
             node_id="wanBlockSwap",
             category="",
-            description="NOP",
+            description="Intercept wanBlockSwap custom node that causes major instability and make it no-op.",
             inputs=[
                 io.Model.Input("model"),
             ],

@@ -10,7 +10,8 @@ class AudioEncoderLoader(io.ComfyNode):
     def define_schema(cls) -> io.Schema:
         return io.Schema(
             node_id="AudioEncoderLoader",
-            category="loaders",
+            display_name="Load Audio Encoder",
+            category="model/loaders",
             inputs=[
                 io.Combo.Input(
                     "audio_encoder_name",
@@ -35,7 +36,7 @@ class AudioEncoderEncode(io.ComfyNode):
     def define_schema(cls) -> io.Schema:
         return io.Schema(
             node_id="AudioEncoderEncode",
-            category="conditioning",
+            category="model/conditioning",
             inputs=[
                 io.AudioEncoder.Input("audio_encoder"),
                 io.Audio.Input("audio"),
@@ -49,12 +50,34 @@ class AudioEncoderEncode(io.ComfyNode):
         return io.NodeOutput(output)
 
 
+class SheetSage2AudioToABC(io.ComfyNode):
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="SheetSage2AudioToABC",
+            display_name="SheetSage2 Audio to ABC",
+            category="model/conditioning/yue2",
+            description="Transcribes vocal and instrumental melodies from music into ABC notation. Connect abc output to YuE2 Generate Music node and use the matching mode.",
+            inputs=[
+                io.AudioEncoder.Input("audio_encoder"),
+                io.Audio.Input("audio"),
+                io.Combo.Input("mode", options=["melody", "full"], tooltip="full: generates melody and chords; melody: generates melody only, recommended for covers."),
+            ],
+            outputs=[io.String.Output(display_name="abc", is_output_list=True)],
+        )
+
+    @classmethod
+    def execute(cls, audio_encoder, audio, mode):
+        return io.NodeOutput(audio_encoder.generate_abc(audio["waveform"], audio["sample_rate"], melody_only=mode == "melody"))
+
+
 class AudioEncoder(ComfyExtension):
     @override
     async def get_node_list(self) -> list[type[io.ComfyNode]]:
         return [
             AudioEncoderLoader,
             AudioEncoderEncode,
+            SheetSage2AudioToABC,
         ]
 
 

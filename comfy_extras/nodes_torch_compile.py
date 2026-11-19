@@ -10,7 +10,7 @@ class TorchCompileModel(io.ComfyNode):
     def define_schema(cls) -> io.Schema:
         return io.Schema(
             node_id="TorchCompileModel",
-            category="_for_testing",
+            category="experimental",
             inputs=[
                 io.Model.Input("model"),
                 io.Combo.Input(

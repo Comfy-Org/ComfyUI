@@ -46,7 +46,7 @@ def porter_duff_composite(src_image: torch.Tensor, src_alpha: torch.Tensor, dst_
         out_image = torch.zeros_like(dst_image)
     elif mode == PorterDuffMode.DARKEN:
         out_alpha = src_alpha + dst_alpha - src_alpha * dst_alpha
-        out_image = (1 - dst_alpha) * src_image + (1 - src_alpha) * dst_image + torch.min(src_image, dst_image)
+        out_image = (1 - dst_alpha) * src_image + (1 - src_alpha) * dst_image + torch.min(src_image * dst_alpha, dst_image * src_alpha)
     elif mode == PorterDuffMode.DST:
         out_alpha = dst_alpha
         out_image = dst_image
@@ -64,14 +64,15 @@ def porter_duff_composite(src_image: torch.Tensor, src_alpha: torch.Tensor, dst_
         out_image = dst_image + (1 - dst_alpha) * src_image
     elif mode == PorterDuffMode.LIGHTEN:
         out_alpha = src_alpha + dst_alpha - src_alpha * dst_alpha
-        out_image = (1 - dst_alpha) * src_image + (1 - src_alpha) * dst_image + torch.max(src_image, dst_image)
+        out_image = (1 - dst_alpha) * src_image + (1 - src_alpha) * dst_image + torch.max(src_image * dst_alpha, dst_image * src_alpha)
     elif mode == PorterDuffMode.MULTIPLY:
-        out_alpha = src_alpha * dst_alpha
-        out_image = src_image * dst_image
+        out_alpha = src_alpha + dst_alpha - src_alpha * dst_alpha
+        out_image = (1 - dst_alpha) * src_image + (1 - src_alpha) * dst_image + src_image * dst_image
     elif mode == PorterDuffMode.OVERLAY:
         out_alpha = src_alpha + dst_alpha - src_alpha * dst_alpha
-        out_image = torch.where(2 * dst_image < dst_alpha, 2 * src_image * dst_image,
-            src_alpha * dst_alpha - 2 * (dst_alpha - src_image) * (src_alpha - dst_image))
+        overlap = torch.where(2 * dst_image < dst_alpha, 2 * src_image * dst_image,
+            src_alpha * dst_alpha - 2 * (src_alpha - src_image) * (dst_alpha - dst_image))
+        out_image = (1 - dst_alpha) * src_image + (1 - src_alpha) * dst_image + overlap
     elif mode == PorterDuffMode.SCREEN:
         out_alpha = src_alpha + dst_alpha - src_alpha * dst_alpha
         out_image = src_image + dst_image - src_image * dst_image
@@ -111,7 +112,7 @@ class PorterDuffImageComposite(io.ComfyNode):
             node_id="PorterDuffImageComposite",
             search_aliases=["alpha composite", "blend modes", "layer blend", "transparency blend"],
             display_name="Porter-Duff Image Composite",
-            category="mask/compositing",
+            category="image/compositing",
             inputs=[
                 io.Image.Input("source"),
                 io.Mask.Input("source_alpha"),
@@ -168,7 +169,7 @@ class SplitImageWithAlpha(io.ComfyNode):
             node_id="SplitImageWithAlpha",
             search_aliases=["extract alpha", "separate transparency", "remove alpha"],
             display_name="Split Image with Alpha",
-            category="mask/compositing",
+            category="image/compositing",
             inputs=[
                 io.Image.Input("image"),
             ],
@@ -185,6 +186,35 @@ class SplitImageWithAlpha(io.ComfyNode):
         return io.NodeOutput(torch.stack(out_images), 1.0 - torch.stack(out_alphas))
 
 
+class SplitImageChannels(io.ComfyNode):
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="SplitImageChannels",
+            search_aliases=["convert to grayscale", "extract channels", "grayscale", "split channels", "RGB channels"],
+            display_name="Split Image Channels",
+            category="image/compositing",
+            description="Splits an image into red, green, and blue images and an alpha mask.",
+            inputs=[
+                io.Image.Input("image"),
+            ],
+            outputs=[
+                io.Image.Output(display_name="red"),
+                io.Image.Output(display_name="green"),
+                io.Image.Output(display_name="blue"),
+                io.Mask.Output(display_name="alpha")
+            ],
+        )
+
+    @classmethod
+    def execute(cls, image: torch.Tensor) -> io.NodeOutput:
+        if image.shape[-1] == 1:
+            image = image.expand(*image.shape[:-1], 3)
+        alpha = 1.0 - image[..., 3] if image.shape[-1] > 3 else torch.zeros_like(image[..., 0])
+        shape = (*image.shape[:-1], 3)
+        return io.NodeOutput(image[..., 0:1].expand(shape), image[..., 1:2].expand(shape), image[..., 2:3].expand(shape), alpha)
+
+
 class JoinImageWithAlpha(io.ComfyNode):
     @classmethod
     def define_schema(cls):
@@ -192,7 +222,7 @@ class JoinImageWithAlpha(io.ComfyNode):
             node_id="JoinImageWithAlpha",
             search_aliases=["add transparency", "apply alpha", "composite alpha", "RGBA"],
             display_name="Join Image with Alpha",
-            category="mask/compositing",
+            category="image/compositing",
             inputs=[
                 io.Image.Input("image"),
                 io.Mask.Input("alpha"),
@@ -202,14 +232,11 @@ class JoinImageWithAlpha(io.ComfyNode):
 
     @classmethod
     def execute(cls, image: torch.Tensor, alpha: torch.Tensor) -> io.NodeOutput:
-        batch_size = min(len(image), len(alpha))
-        out_images = []
-
-        alpha = 1.0 - resize_mask(alpha, image.shape[1:])
-        for i in range(batch_size):
-           out_images.append(torch.cat((image[i][:,:,:3], alpha[i].unsqueeze(2)), dim=2))
-
-        return io.NodeOutput(torch.stack(out_images))
+        batch_size = max(len(image), len(alpha))
+        alpha = 1.0 - resize_mask(alpha.to(image), image.shape[1:])
+        alpha = comfy.utils.repeat_to_batch_size(alpha, batch_size)
+        image = comfy.utils.repeat_to_batch_size(image, batch_size)
+        return io.NodeOutput(torch.cat((image[..., :3], alpha.unsqueeze(-1)), dim=-1))
 
 
 class CompositingExtension(ComfyExtension):
@@ -217,6 +244,7 @@ class CompositingExtension(ComfyExtension):
     async def get_node_list(self) -> list[type[io.ComfyNode]]:
         return [
             PorterDuffImageComposite,
+            SplitImageChannels,
             SplitImageWithAlpha,
             JoinImageWithAlpha,
         ]
