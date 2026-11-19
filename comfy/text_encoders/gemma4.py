@@ -705,7 +705,7 @@ class Gemma4Base(BaseLlama, BaseGenerate, torch.nn.Module):
         if embed["type"] == "image":
             image = embed.pop("data").movedim(-1, 1)  # [B, H, W, C] -> [B, C, H, W]
             max_soft_tokens = embed.get("max_soft_tokens", None)
-            vision_out = self.vision_model(image.to(device, dtype=torch.float32), max_soft_tokens=max_soft_tokens)
+            vision_out = self.vision_model(image.to(device, dtype=comfy.model_management.text_encoder_compute_dtype(device)), max_soft_tokens=max_soft_tokens)
             return self.multi_modal_projector(vision_out), None
         return None, None
 

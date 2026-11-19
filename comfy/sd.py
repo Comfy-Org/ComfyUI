@@ -280,8 +280,8 @@ class CLIP:
         te_disable_dynamic = disable_dynamic or getattr(self.cond_stage_model, "disable_offload", False)
         ModelPatcher = comfy.model_patcher.ModelPatcher if te_disable_dynamic else comfy.model_patcher.CoreModelPatcher
         self.patcher = ModelPatcher(self.cond_stage_model, load_device=load_device, offload_device=offload_device, fast_disk=comfy.storage.state_dict_fast_disk(state_dict))
-        #Match torch.float32 hardcode upcast in TE implemention
-        self.patcher.set_model_compute_dtype(torch.float32)
+        #Match the TE compute dtype (see text_encoder_compute_dtype)
+        self.patcher.set_model_compute_dtype(model_management.text_encoder_compute_dtype(load_device))
         self.patcher.hook_mode = comfy.hooks.EnumHookMode.MinVram
         self.patcher.is_clip = True
         self.apply_hooks_to_conds = None
