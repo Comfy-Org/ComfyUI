@@ -2927,7 +2927,7 @@ paths:
                                         description: 'Local ComfyUI only: lifecycle of the optional local agent host. Present only when the agent is enabled.'
                                         properties:
                                             reason:
-                                                description: Why the host failed. Present only when state is failed.
+                                                description: Why the host failed or crashed. Present whenever set, in any state (including starting after a crash).
                                                 type: string
                                             state:
                                                 enum:
