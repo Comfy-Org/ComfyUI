@@ -487,10 +487,16 @@ def _plan_pass(device, free_memory, frame_pixels, latents, working_bytes, slice_
             return latents, CausalMemoryCache()
         # the other dtypes' tails are not stored this way
         compiled = dtype == torch.float16 and spare >= tail_bytes and comfy.model_prefetch.malloc_graph_enabled(device)
-        if compiled:
+        offload = not compiled and _offload_caches_for(frame_pixels)
+        # Non-accumulating HIP fp16 keeps standard-layout convolution tails on the device:
+        # CausalMemoryCache cannot pack or offload them. Budget their fixed residency
+        # before choosing the slice length, even when other cache entries are offloaded.
+        if compiled or (offload and dtype == torch.float16 and torch.version.hip
+                        and not getattr(torch.backends.cuda.matmul, "allow_fp16_accumulation", False)):
             spare -= tail_bytes
         slice_latents = max(0, min(SEEDVR2_MAX_SLICE_LATENTS, int(spare / slice_bytes)))
-    offload = not compiled and _offload_caches_for(frame_pixels)
+    else:
+        offload = _offload_caches_for(frame_pixels)
     return slice_latents if compiled or offload else 0, CausalMemoryCache(offload=offload, compiled=compiled)
 
 
