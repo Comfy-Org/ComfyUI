@@ -169,15 +169,15 @@ def _capacity(need):
 
 
 def _padded(tensors, model_sd):
-    """CPU tensors shaped like model_sd: equal shapes pass through, attention caches (capacity on dim 2) are copied into
-    zeros of the new capacity, cut to it if longer."""
+    """CPU tensors shaped like model_sd: equal shapes are copied, attention caches (capacity on dim 2) are copied into
+    zeros of the new capacity, cut to it if longer. Nothing returned views tensors, which may map a deleted file."""
     out = {}
     for name, like in model_sd.items():
         t = tensors.get(name)
         if t is None:
             out[name] = torch.zeros(like.shape, dtype=like.dtype)
         elif tuple(t.shape) == tuple(like.shape):
-            out[name] = t
+            out[name] = t.clone()
         else:
             z = torch.zeros(like.shape, dtype=like.dtype)
             n = min(t.shape[2], like.shape[2])
@@ -231,16 +231,18 @@ def _file_tensors(entry_tensors, checkpoints):
 
 def _write(path, tensors, meta):
     os.makedirs(os.path.dirname(path), exist_ok=True)
+    _trim_disk(reserve=sum(t.numel() * t.element_size() for t in tensors.values()))
     tmp = path + f".tmp{os.getpid()}"
     safetensors.torch.save_file(tensors, tmp, {"llm_state_cache": json.dumps(meta)})
     os.replace(tmp, path)
-    _trim_disk(path)
+    _trim_disk(keep=path)
 
 
-def _trim_disk(keep):
-    """Delete the least recently used cache files past DISK_BUDGET, never keep; a spilled entry whose file goes is
-    dropped. Partial writes count once they are an hour old."""
-    files = []
+def _trim_disk(keep=None, reserve=0):
+    """Delete the least recently used cache files until the folder, plus reserve bytes about to be written, fits
+    DISK_BUDGET; never keep. A spilled entry whose file goes is dropped. Partial writes count toward the folder, and
+    are deleted once they are an hour old."""
+    files, writing = [], 0
     for name in os.listdir(CACHE_DIR):
         path = os.path.join(CACHE_DIR, name)
         if not name.startswith(("prefix-", "spill-")) or path == keep:
@@ -250,9 +252,10 @@ def _trim_disk(keep):
         except OSError:
             continue
         if not name.endswith(".safetensors") and time.time() - st.st_mtime < 3600:
+            writing += st.st_size
             continue
         files.append((st.st_mtime, st.st_size, path))
-    total = sum(size for _, size, _ in files) + os.path.getsize(keep)
+    total = sum(size for _, size, _ in files) + writing + reserve + (os.path.getsize(keep) if keep else 0)
     for _, size, path in sorted(files):
         if total <= DISK_BUDGET:
             break
@@ -262,7 +265,9 @@ def _trim_disk(keep):
 
 
 def _read(path):
-    """(tensors, checkpoints, metadata) from a cache file, or None if it is gone or unreadable."""
+    """(tensors, checkpoints, metadata) from a cache file, or None if it is gone or unreadable. The tensors view the
+    file's mapping, so drop them before deleting the file, and _padded copies them; the checkpoints, kept as they are,
+    are copies."""
     try:
         with safetensors.safe_open(path, "pt") as f:
             meta = json.loads(f.metadata()["llm_state_cache"])
@@ -270,13 +275,16 @@ def _read(path):
             for name in f.keys():
                 if name.startswith("ckpt."):
                     _, pos, i, kind = name.split(".")
-                    cps.setdefault(int(pos), {}).setdefault(int(i), [None, None])[0 if kind == "conv" else 1] = f.get_tensor(name)
+                    cps.setdefault(int(pos), {}).setdefault(int(i), [None, None])[0 if kind == "conv" else 1] = f.get_tensor(name).clone()
                 else:
                     tensors[name] = f.get_tensor(name)
-        os.utime(path)
     except (OSError, safetensors.SafetensorError, KeyError, ValueError) as e:
         logging.warning("llm state cache: could not read %s: %s", path, e)
         return None
+    try:
+        os.utime(path)
+    except OSError:  # deleted by another server since the read, which is complete
+        pass
     return tensors, {p: {i: tuple(v) for i, v in st.items()} for p, st in cps.items()}, meta
 
 
@@ -330,7 +338,10 @@ def _enforce_budget(keep):
         if total <= BUDGET and len(resident) <= MAX_ENTRIES:
             break
         total -= e.nbytes()
-        _spill(e)
+        if DISK_BUDGET > 0:
+            _spill(e)
+        else:
+            _drop(e)
         resident = [r for r in resident if r is not e]
     spilled = [e for e in _entries if e.state is None]
     spilled.sort(key=lambda e: e.used)
@@ -349,16 +360,18 @@ def _take(model, key, ids, need, device, dtype):
     if entry is not None:
         _entries.remove(entry)
         if entry.state is None:
-            loaded = _read(entry.file)
-            _remove(entry.file)
-            entry.file = None
+            spill, entry.file = entry.file, None
+            loaded = _read(spill)
             if loaded is None:  # deleted past the disk budget, by this or another server
+                _remove(spill)
                 entry, n = None, 0
     if entry is not None:
         if entry.state is None:
             tensors, cps, _ = loaded
             cap = max(_capacity(need), entry.capacity)
             entry.state, kvm = _load(model, cap, device, dtype, tensors)
+            del tensors, loaded  # Windows doesn't free a file deleted while a view of its mapping lives
+            _remove(spill)
             entry.capacity = cap
             entry.checkpoints = {p: cps[p] for p in cps if p in entry.checkpoints}
             stats["restore"] = "from-disk"
@@ -480,7 +493,7 @@ def prefill(model, embeds, ids, need, forward, position_ids=None):
 def _save_shared_start(model, kvm, key, ids, pos, linear_states, device):
     """Write the shared start (KV up to pos + the DeltaNet states at pos) once, if no file has it."""
     path = _prefix_path(key, ids[:pos])
-    if os.path.exists(path):
+    if DISK_BUDGET <= 0 or os.path.exists(path):
         return
     linear = _linear(kvm)
     attn = {i: kv for i, kv in enumerate(kvm.caches) if i not in linear}
