@@ -1,15 +1,13 @@
-"""Run with unittest; no model weights or CUDA allocations are needed."""
+"""Workspace tests without model weights or CUDA allocations.
+
+Run through test_memory.py to keep CPU setup in a separate process.
+"""
 import copy
 from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
 
 import torch
-
-from comfy.cli_args import args
-
-if not torch.cuda.is_available():
-    args.cpu = True
 
 import comfy.sd
 from comfy.quant_ops import QuantizedTensor, get_layout_class
