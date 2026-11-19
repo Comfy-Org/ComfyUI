@@ -132,6 +132,7 @@ _nodes_lt_stub.get_noise_mask = _get_noise_mask
 _nodes_lt_stub.get_keyframe_idxs = _get_keyframe_idxs
 _nodes_lt_stub._append_guide_attention_entry = _append_guide_attention_entry
 _nodes_lt_stub.LTXVAddGuide = _StubAddGuide
+_nodes_lt_stub.video_vae_downscale_factors = lambda vae: vae.downscale_index_formula
 
 def _import_keyframes_against_stub():
     """Import the module under test with comfy_extras.nodes_lt stubbed, then put it back.
