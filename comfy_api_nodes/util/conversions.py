@@ -271,17 +271,19 @@ def audio_ndarray_to_bytesio(
     """
     audio_bytes_io = BytesIO()
     with av.open(audio_bytes_io, mode="w", format=container_format) as output_container:
-        audio_stream = output_container.add_stream(codec_name, rate=sample_rate)
-        frame = av.AudioFrame.from_ndarray(
-            audio_data_np,
-            format="fltp",
-            layout="stereo" if audio_data_np.shape[0] > 1 else "mono",
-        )
-        frame.sample_rate = sample_rate
-        frame.pts = 0
-
-        for packet in audio_stream.encode(frame):
-            output_container.mux(packet)
+        rates = av.codec.Codec(codec_name, "w").audio_rates
+        audio_stream = output_container.add_stream(codec_name, rate=min(sample_rate, max(rates)) if rates else sample_rate)
+        layout = "3.0" if audio_data_np.shape[0] == 3 else f"{audio_data_np.shape[0]}c"
+        for start in range(0, max(audio_data_np.shape[1], 1), 1 << 20):
+            frame = av.AudioFrame.from_ndarray(
+                np.ascontiguousarray(audio_data_np[:, start : start + (1 << 20)].T).reshape(1, -1),
+                format="flt",
+                layout=layout,
+            )
+            frame.sample_rate = sample_rate
+            frame.pts = start
+            for packet in audio_stream.encode(frame):
+                output_container.mux(packet)
 
         # Flush stream
         for packet in audio_stream.encode(None):
@@ -322,17 +324,19 @@ def audio_input_to_mp3(audio: Input.Audio) -> BytesIO:
     output_buffer = BytesIO()
     output_container = av.open(output_buffer, mode="w", format="mp3")
 
-    out_stream = output_container.add_stream("libmp3lame", rate=sample_rate)
+    out_stream = output_container.add_stream("libmp3lame", rate=min(sample_rate, 48000))
     out_stream.bit_rate = 320000
 
-    frame = av.AudioFrame.from_ndarray(
-        audio_data_np,
-        format="fltp",
-        layout="stereo" if audio_data_np.shape[0] > 1 else "mono",
-    )
-    frame.sample_rate = sample_rate
-    frame.pts = 0
-    output_container.mux(out_stream.encode(frame))
+    layout = "3.0" if audio_data_np.shape[0] == 3 else f"{audio_data_np.shape[0]}c"
+    for start in range(0, max(audio_data_np.shape[1], 1), 1 << 20):
+        frame = av.AudioFrame.from_ndarray(
+            np.ascontiguousarray(audio_data_np[:, start : start + (1 << 20)].T).reshape(1, -1),
+            format="flt",
+            layout=layout,
+        )
+        frame.sample_rate = sample_rate
+        frame.pts = start
+        output_container.mux(out_stream.encode(frame))
     output_container.mux(out_stream.encode(None))
     output_container.close()
     output_buffer.seek(0)
