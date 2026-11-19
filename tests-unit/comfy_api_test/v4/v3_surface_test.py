@@ -13,13 +13,17 @@ import inspect
 import sys
 from pathlib import Path
 
+# So this also works run directly (python tests-unit/.../v3_surface_test.py), not only under
+# pytest's own path setup.
+sys.path.insert(0, str(Path(__file__).parents[3]))
+
+from comfy_api import latest, v4  # noqa: E402
+
 RECORDED = Path(__file__).with_name("v3_surface.txt")
 NESTING = 3
 
 
 def roots() -> dict[str, object]:
-    from comfy_api import latest, v4
-
     passed_through = {
         name: getattr(v4, name)
         for name in ("io", "ui", "Input", "InputImpl", "Types")
@@ -97,29 +101,36 @@ def _resolve(path: str) -> object:
     return obj
 
 
-def _parameters(call: str) -> tuple[list[str], dict[str, bool]]:
-    """A recorded call as its positional names in order, and every name with whether it has a default."""
+def _parameters(call: str) -> tuple[list[str], dict[str, bool], bool, bool]:
+    """A recorded call as its positional names in order, every name with whether it has a
+    default, whether it takes `*args`, and whether it takes `**kwargs`."""
     positional, defaults, keyword_only = [], {}, False
+    var_positional = var_keyword = False
     for word in filter(None, call.strip("()").split(", ")):
         if word == "*":
             keyword_only = True
+        elif word.startswith("**"):
+            var_keyword = True
         elif word.startswith("*"):
-            keyword_only = keyword_only or not word.startswith("**")
+            var_positional = True
+            keyword_only = True
         else:
             name = word.rstrip("=")
             defaults[name] = word.endswith("=")
             if not keyword_only:
                 positional.append(name)
-    return positional, defaults
+    return positional, defaults, var_positional, var_keyword
 
 
 def _still_called_as(recorded: str, current: str) -> bool:
     """Whether every call the recorded form allowed is still allowed."""
-    old_positional, old = _parameters(recorded)
-    new_positional, new = _parameters(current)
-    takes_any_keyword = "**" in current
+    old_positional, old, old_var_positional, old_var_keyword = _parameters(recorded)
+    new_positional, new, new_var_positional, new_var_keyword = _parameters(current)
+    takes_any_keyword = new_var_keyword
     return (
         new_positional[: len(old_positional)] == old_positional
+        and (not old_var_positional or new_var_positional)
+        and (not old_var_keyword or new_var_keyword)
         and all(name in new or takes_any_keyword for name in old)
         and all(
             new.get(name, True) or not had_default for name, had_default in old.items()
@@ -145,6 +156,10 @@ def broken(recorded: dict[str, str], current: dict[str, str]) -> list[str]:
         if was.startswith("(") and now.startswith("("):
             if not _still_called_as(was, now):
                 problems.append(f"{path}{was} is now {path}{now}")
+        elif now == "value" and (was.startswith("(") or was == "class"):
+            # A callable or class recorded here becoming a plain value breaks a pack that
+            # called or instantiated it; "value" -> anything else stays tolerated below.
+            problems.append(f"{path} was a {was} and is now a {now}")
         elif was != now and "value" not in (was, now):
             problems.append(f"{path} was a {was} and is now a {now}")
     return problems
@@ -189,6 +204,5 @@ def test_a_new_optional_parameter_or_a_new_name_is_not_a_break():
 
 
 if __name__ == "__main__":
-    sys.path.insert(0, str(Path(__file__).parents[3]))
     lines = [f"{path} {what}" for path, what in sorted(surface().items())]
     RECORDED.write_text("\n".join(lines) + "\n", encoding="utf-8", newline="\n")

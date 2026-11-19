@@ -5,12 +5,17 @@ The calls that take a path take any path, as `folder_paths` does.
 """
 
 import os
+import threading
 from collections.abc import Callable, Collection, Mapping
 from functools import partial
 from types import MappingProxyType
 from typing import Literal
 
 import folder_paths as _folder_paths
+
+# Serializes _add_directory's read-mutate-diff of folder_paths' table, so a concurrent V4
+# registration cannot be mistaken for this call's own addition (or vice versa).
+_table_lock = threading.Lock()
 
 # Arguments go to ComfyUI by name, so a parameter renamed there fails here instead of shifting;
 # only `map_legacy`, which takes one, is called by position.
@@ -187,26 +192,27 @@ def _add_directory(
             f"not {folder_name!r} and {full_folder_path!r}"
         )
     table = _folder_paths.folder_names_and_paths
-    before = {name: list(entry[0]) for name, entry in table.items()}
-    _folder_paths.add_model_folder_path(
-        folder_name=folder_name,
-        full_folder_path=directory,
-        is_default=is_default,
-    )
-    added = [
-        (name, added_directory, name not in before)
-        for name, entry in table.items()
-        for added_directory in entry[0]
-        if added_directory not in before.get(name, ())
-    ]
-    # (folder, the directory now first, the one it followed) where the call only moved one.
-    moved = [
-        (name, now[0], order[order.index(now[0]) - 1])
-        for name, order in before.items()
-        for now in [table.get(name, ([],))[0]]
-        if now and order and now != order and now[0] != order[0] and now[0] in order
-        if not any(a[0] == name for a in added)
-    ]
+    with _table_lock:
+        before = {name: list(entry[0]) for name, entry in table.items()}
+        _folder_paths.add_model_folder_path(
+            folder_name=folder_name,
+            full_folder_path=directory,
+            is_default=is_default,
+        )
+        added = [
+            (name, added_directory, name not in before)
+            for name, entry in table.items()
+            for added_directory in entry[0]
+            if added_directory not in before.get(name, ())
+        ]
+        # (folder, the directory now first, the one it followed) where the call only moved one.
+        moved = [
+            (name, now[0], order[order.index(now[0]) - 1])
+            for name, order in before.items()
+            for now in [table.get(name, ([],))[0]]
+            if now and order and now != order and now[0] != order[0] and now[0] in order
+            if not any(a[0] == name for a in added)
+        ]
     return partial(_remove_directories, added, moved)
 
 
@@ -216,19 +222,20 @@ def _remove_directories(
     """Take out the directories an `add_model_folder_path` call added, and put a directory it
     only moved to the front back behind the one it followed, if both are still listed."""
     table = _folder_paths.folder_names_and_paths
-    for name, directory, followed in moved:
-        order = table[name][0] if name in table else []
-        if directory in order and followed in order:
-            order.remove(directory)
-            order.insert(order.index(followed) + 1, directory)
-    for name, directory, created in added:
-        entry = table.get(name)
-        if entry is not None and directory in entry[0]:
-            entry[0].remove(directory)
-            if created and not entry[0]:
-                del table[name]
-        # ComfyUI's cached list of a folder's files notices a directory added, not one removed.
-        _folder_paths.filename_list_cache.pop(name, None)
+    with _table_lock:
+        for name, directory, followed in moved:
+            order = table[name][0] if name in table else []
+            if directory in order and followed in order:
+                order.remove(directory)
+                order.insert(order.index(followed) + 1, directory)
+        for name, directory, created in added:
+            entry = table.get(name)
+            if entry is not None and directory in entry[0]:
+                entry[0].remove(directory)
+                if created and not entry[0]:
+                    del table[name]
+            # ComfyUI's cached list of a folder's files notices a directory added, not one removed.
+            _folder_paths.filename_list_cache.pop(name, None)
 
 
 def filter_files_content_types(

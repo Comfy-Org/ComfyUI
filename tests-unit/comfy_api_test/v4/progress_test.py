@@ -292,7 +292,6 @@ async def test_a_pass_that_begins_part_way_up_after_one_that_stopped_short_is_sh
 @pytest.mark.asyncio
 async def test_a_slow_pass_after_one_too_quick_to_show_is_shown(run_node):
     executor, server = await run_node(
-        "import time\n"
         "for i in range(10):\n"
         "    {call}.progress.update(i, 10)\n"
         "for i in range(10):\n"
@@ -371,8 +370,6 @@ async def test_update_reports_through_comfyuis_progress_hook_as_its_progress_bar
     monkeypatch.setattr(comfy.utils, "PROGRESS_BAR_HOOK", hook)
 
     executor, server = await run_node(
-        "from PIL import Image\n"
-        "from comfy.cli_args import args\n"
         "image = ('JPEG', Image.new('RGB', (4, 4)), args.preview_size)\n"
         "comfy.utils.ProgressBar(2, node_id='v4').update_absolute(1, 2, image)\n"
         "{call}.progress.update(1, 2, torch.zeros(1, 4, 4, 3))",

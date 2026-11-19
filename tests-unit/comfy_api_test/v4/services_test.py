@@ -6,6 +6,10 @@ import pytest
 from app.node_replace_manager import NodeReplaceManager
 from comfy_api import v4
 from comfy_api.latest import ComfyAPI_latest
+from comfy_execution.cache_provider import (
+    _get_cache_providers,
+    unregister_cache_provider,
+)
 from server import PromptServer
 
 
@@ -67,11 +71,6 @@ def test_a_change_to_a_v3_service_call_does_not_change_the_v4_call(monkeypatch):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("synchronous", [False, True])
 async def test_v4_cache_registration_is_visible_to_the_existing_host(synchronous):
-    from comfy_execution.cache_provider import (
-        _get_cache_providers,
-        unregister_cache_provider,
-    )
-
     caching = v4.ComfyAPISync().caching if synchronous else v4.engine.caching
 
     class Provider(v4.CacheProvider):
@@ -133,11 +132,6 @@ async def test_the_first_replacement_applies_only_to_ids_no_node_has_and_repeats
 async def test_registering_a_provider_again_or_removing_an_unknown_one_does_nothing(
     synchronous,
 ):
-    from comfy_execution.cache_provider import (
-        _get_cache_providers,
-        unregister_cache_provider,
-    )
-
     caching = v4.ComfyAPISync().caching if synchronous else v4.engine.caching
 
     class Provider(v4.CacheProvider):

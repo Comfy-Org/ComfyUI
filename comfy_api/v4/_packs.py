@@ -86,6 +86,12 @@ def _loading_pack(load_custom_node):
             if not loaded:
                 if pack.added:
                     _remove_pack(module_path)
+                else:
+                    # on_load (or an earlier step) failed before _add_pack ran: _add_pack's own
+                    # folder-table bookkeeping never started, but the loader may already have
+                    # filled WEB_DIRECTORY/module-dir entries for this path. Give those back too.
+                    name, folder = _identity(module_path)
+                    _give_back_folders(module_path, name, folder)
                 _take_back(pack)
             else:
                 with _registering:
@@ -202,6 +208,10 @@ def _add_routes(pack: _Pack, routes: list[Route]) -> str | None:
             return f"route {method} {path} has no handler"
         try:
             addresses = [_parse(method, path), _parse(method, "/api" + path)]
+            if method == "GET":
+                # aiohttp's GET registration answers HEAD on the same resource too, so a HEAD
+                # route elsewhere on the same address is a real conflict once both are mounted.
+                addresses += [_parse("HEAD", path), _parse("HEAD", "/api" + path)]
         except ValueError as error:
             return f"route path {path!r}: {error}"
         # aiohttp prefers a literal path to a pattern, so one pack may have both.
@@ -425,7 +435,10 @@ def _mount_routes(server) -> None:
     what answered that route goes on answering it.
     """
     global _serving
-    served = _served(server.app)
+    # _served() walks the filesystem for static directories mounted at "/"; skip it when no V4
+    # pack has a route to conflict-check, so a frontend directory that forbids listing (but
+    # still allows access by filename) cannot abort server setup for packs that never need this.
+    served = _served(server.app) if any(pack.addresses for pack in _packs.values()) else []
     for pack in list(_packs.values()):
         problem = _conflict(pack.addresses, served)
         if problem is not None:

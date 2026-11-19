@@ -1099,12 +1099,11 @@ Extension.on_load = on_load
 
 @pytest.mark.asyncio
 async def test_a_pack_that_does_not_load_leaves_nothing_a_task_it_started_registers(
-    host, load, registered
+    host, load, registered, tmp_path
 ):
-    import asyncio
-
     assert not await load("beta", [], extra=REGISTERS.format(then="pass") + LATER)
-    await asyncio.sleep(0.01)
+    module = sys.modules[str(tmp_path / "beta").replace(".", "_x_")]
+    await module.LATER[0]
 
     assert registered() == ([], False, False)
 
@@ -1258,7 +1257,8 @@ async def test_a_pack_taken_away_leaves_nothing_a_task_it_started_registers_afte
     assert await load("alpha", [], extra=REGISTERS.format(then="pass") + LATER_STILL)
     _packs._remove_pack(str(tmp_path / "alpha"))
 
-    sys.modules[str(tmp_path / "alpha")].GO.set()
-    await asyncio.sleep(0.01)
+    module = sys.modules[str(tmp_path / "alpha").replace(".", "_x_")]
+    module.GO.set()
+    await module.LATER[0]
 
     assert registered() == ([], False, False)

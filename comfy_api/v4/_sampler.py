@@ -118,8 +118,10 @@ class Sampler(ProxiedSingleton):
     async def sigmas(
         self, model: io.Model.Type, scheduler: str, steps: int, denoise: float = 1.0
     ) -> torch.Tensor:
-        """Return the `steps + 1` noise levels a named scheduler gives this model, on the CPU.
+        """Return the noise levels a named scheduler gives this model, on the CPU.
 
+        Usually `steps + 1` entries, but a scheduler may return fewer (for example, "beta" removes
+        duplicate rounded indices): get the actual step count from `len(sigmas) - 1`.
         `denoise` below 1 keeps the end of a longer schedule; 0 gives an empty tensor.
         Raises `ValueError` for a name that is not one of `scheduler_names()`.
         """

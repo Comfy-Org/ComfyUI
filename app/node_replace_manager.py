@@ -35,11 +35,11 @@ class NodeReplaceManager:
         # A node registers from the prompt thread while the server lists them on its own.
         self._lock = threading.Lock()
 
-    def register(self, node_replace: NodeReplace):
-        """Register a node replacement mapping.
+    def register(self, node_replace: NodeReplace) -> bool:
+        """Register a node replacement mapping. Returns whether it inserted a new mapping.
 
         Idempotent: if a replacement with the same (old_node_id, new_node_id)
-        is already registered, the duplicate is ignored. This prevents stale
+        is already registered, the duplicate is ignored (returns False). This prevents stale
         entries from accumulating when custom nodes are reloaded in the same
         process (e.g. via ComfyUI-Manager).
         """
@@ -51,9 +51,10 @@ class NodeReplaceManager:
                         "Node replacement %s -> %s already registered, ignoring duplicate.",
                         node_replace.old_node_id, node_replace.new_node_id,
                     )
-                    return
+                    return False
             # A new list: one that was handed out is not changed while it is read.
             self._replacements[node_replace.old_node_id] = [*existing, node_replace]
+            return True
 
     def unregister(self, node_replace: NodeReplace):
         """Remove a node replacement mapping that `register` added; does nothing otherwise."""

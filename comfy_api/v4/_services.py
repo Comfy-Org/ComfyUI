@@ -4,6 +4,11 @@ from functools import partial
 
 from comfy_api.internal.singleton import ProxiedSingleton
 from comfy_api.latest import ComfyAPI_latest, io
+from comfy_execution.cache_provider import (
+    _get_cache_providers,
+    register_cache_provider,
+    unregister_cache_provider,
+)
 
 CacheProvider = ComfyAPI_latest.Caching.CacheProvider
 CacheContext = ComfyAPI_latest.Caching.CacheContext
@@ -27,8 +32,8 @@ class NodeReplacement(ProxiedSingleton):
         from . import _packs
 
         manager = PromptServer.instance.node_replace_manager
-        manager.register(node_replace)
-        _packs._registered(partial(manager.unregister, node_replace))
+        if manager.register(node_replace):
+            _packs._registered(partial(manager.unregister, node_replace))
 
 
 @dataclass(eq=False)
@@ -49,8 +54,6 @@ def _used(provider: CacheProvider) -> bool:
 
 
 def _stop_using(use: _Use) -> None:
-    from comfy_execution.cache_provider import unregister_cache_provider
-
     with _provider_lock:
         if use not in _provider_uses:
             return
@@ -74,11 +77,6 @@ class Caching(ProxiedSingleton):
         registered from a node or a route, or on a thread started another way, which ComfyUI
         cannot tell is the pack's.
         """
-        from comfy_execution.cache_provider import (
-            _get_cache_providers,
-            register_cache_provider,
-        )
-
         from . import _packs
 
         use = _Use(provider)
@@ -97,8 +95,6 @@ class Caching(ProxiedSingleton):
 
         Stores already handed to it still finish.
         """
-        from comfy_execution.cache_provider import unregister_cache_provider
-
         with _provider_lock:
             _provider_uses[:] = [use for use in _provider_uses if use.provider != provider]
             unregister_cache_provider(provider)

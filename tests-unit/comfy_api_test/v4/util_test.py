@@ -1,6 +1,8 @@
+import datetime
 import inspect
 import logging
 import os
+import pickle
 import subprocess
 import sys
 from pathlib import Path
@@ -227,7 +229,12 @@ def test_file_filters_and_searches_inspect_names_and_folders(comfy_folders):
     (comfy_folders / "input" / "clips" / "day").mkdir(parents=True)
     outside = comfy_folders / "outside"
     outside.mkdir()
-    (first / "link").symlink_to(outside)
+    try:
+        (first / "link").symlink_to(outside)
+        has_link = True
+    except OSError:
+        # Unelevated Windows without Developer Mode or symlink privilege refuses this.
+        has_link = False
 
     files, directories = util.folders.recursive_search(
         str(first), excluded_dir_names=[".git"]
@@ -245,11 +252,15 @@ def test_file_filters_and_searches_inspect_names_and_folders(comfy_folders):
         "c.txt",
         os.path.join("sub", "b.safetensors"),
     ]
-    assert set(directories) == {str(first), str(first / "sub"), str(first / "link")}
+    expected_directories = {str(first), str(first / "sub")}
+    if has_link:
+        expected_directories.add(str(first / "link"))
+    assert set(directories) == expected_directories
     assert util.folders.recursive_search(str(first / "c.txt")) == ([], {})
     assert util.folders.is_within_directory(str(first), str(first / "sub" / "x"))
     assert util.folders.is_within_directory(str(first), str(first))
-    assert not util.folders.is_within_directory(str(first), str(first / "link" / "x"))
+    if has_link:
+        assert not util.folders.is_within_directory(str(first), str(first / "link" / "x"))
     assert util.folders.get_input_subfolders() == ["clips", "clips/day"]
 
 
@@ -694,7 +705,6 @@ def test_comfyui_still_accepts_every_argument_a_wrapper_passes(wrapper, original
 @pytest.mark.asyncio
 async def test_a_node_saves_an_image_through_util_folders(run_node, comfy_folders):
     executor, _ = await run_node(
-        "from comfy_api.v4 import util\n"
         "output = util.folders.get_output_directory()\n"
         "folder, name, counter, subfolder, prefix = util.folders.get_save_image_path('v4/shot', output, 8, 6)\n"
         "image = util.image.common_upscale(torch.rand(1, 3, 4, 4), 8, 6, 'bilinear', 'center')\n"
@@ -710,9 +720,6 @@ async def test_a_node_saves_an_image_through_util_folders(run_node, comfy_folder
 def test_a_torch_file_holding_more_than_weights_is_refused_whatever_safe_load_says(
     tmp_path,
 ):
-    import datetime
-    import pickle
-
     path = tmp_path / "pickled.pt"
     torch.save({"w": torch.ones(1), "when": datetime.date(2020, 1, 1)}, path)
 

@@ -24,15 +24,19 @@ from server import PromptServer
 
 PACK = """\
 import asyncio
+import time
 
 import comfy.model_management
 import torch
+from comfy.cli_args import args
+from PIL import Image
 from comfy_api.v4 import (
     ComfyAPISync,
     ComfyExtension,
     InterruptProcessingException,
     engine,
     io,
+    util,
 )
 
 api = {api}

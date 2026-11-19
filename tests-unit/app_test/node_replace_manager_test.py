@@ -1,6 +1,7 @@
 """Tests for NodeReplaceManager registration behavior."""
 import importlib
 import sys
+import threading
 import types
 
 import pytest
@@ -135,8 +136,6 @@ def test_the_replacements_handed_out_for_a_node_are_not_changed_afterwards(NodeR
 
 
 def test_listing_while_another_thread_registers_does_not_fail(NodeReplaceManager):
-    import threading
-
     manager = NodeReplaceManager()
     failures = []
 

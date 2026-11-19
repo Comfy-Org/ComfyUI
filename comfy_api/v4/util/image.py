@@ -104,10 +104,19 @@ def tiled_scale(
     """
     _refuse_sizes(tile, overlap if isinstance(overlap, Sequence) else (overlap,))
     _refuse_overlaps(samples.shape[2:], tile, overlap)
+    # The native helper only recognizes list/tuple as a per-dim vector; any other Sequence (such
+    # as a range) would be treated as a scalar instead and fail during its own arithmetic.
+    overlap = tuple(overlap) if isinstance(overlap, Sequence) else overlap
+    upscale_amount = (
+        tuple(upscale_amount) if isinstance(upscale_amount, Sequence) else upscale_amount
+    )
+    index_formulas = (
+        tuple(index_formulas) if isinstance(index_formulas, Sequence) else index_formulas
+    )
     return _comfy_utils.tiled_scale_multidim(
         samples=samples,
         function=function,
-        tile=tile,
+        tile=tuple(tile),
         overlap=overlap,
         upscale_amount=upscale_amount,
         out_channels=out_channels,
