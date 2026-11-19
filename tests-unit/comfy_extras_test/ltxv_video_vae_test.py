@@ -8,7 +8,7 @@ from comfy.cli_args import args
 if not torch.cuda.is_available():
     args.cpu = True
 
-from comfy_extras.nodes_lt import LTXVAddGuide, LTXVImgToVideoInplace  # noqa: E402
+from comfy_extras.nodes_lt import LTXVAddGuide, LTXVImgToVideoInplace, video_vae_downscale_factors  # noqa: E402
 
 
 IMAGE_VAE = SimpleNamespace(downscale_index_formula=None)
@@ -29,5 +29,4 @@ def test_add_guide_names_the_wrong_vae():
 
 
 def test_video_vae_still_unpacks():
-    from comfy_extras.nodes_lt import video_vae_downscale_factors
     assert video_vae_downscale_factors(SimpleNamespace(downscale_index_formula=(8, 32, 32))) == (8, 32, 32)
