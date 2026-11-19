@@ -14,6 +14,8 @@ from comfy.cli_args import args
 if not torch.cuda.is_available():
     args.cpu = True
 
+import comfy.ldm.qwen_image21.model as qwen_image21  # noqa: E402
+import comfy.memory_management  # noqa: E402
 import comfy.model_management  # noqa: E402
 import comfy.model_prefetch  # noqa: E402
 import comfy.ops  # noqa: E402
@@ -136,8 +138,6 @@ def test_unpin_error_during_unwind_keeps_the_original_error(vbar, failing_cast, 
 
 
 def test_prefix_cache_layer_cleans_slots_when_pinning_fails(monkeypatch):
-    import comfy.ldm.qwen_image21.model as qwen_image21
-
     slot = SimpleNamespace(comfy_cast_weights=True)
 
     def pin_modules(modules, device):
@@ -174,3 +174,38 @@ def test_direct_cast_resolve_failure_releases_pin_and_marker(vbar, monkeypatch):
         comfy.ops.cast_bias_weight(s, dtype=torch.float32, device=torch.device("meta"), bias_dtype=torch.float32, offloadable=True)
     assert vbar.pinned == []
     assert not hasattr(s, "_prefetch")
+
+
+def test_prefix_cache_cleanup_error_keeps_the_pinning_error(monkeypatch):
+    slot = SimpleNamespace(comfy_cast_weights=True)
+
+    def pin_modules(modules, device):
+        raise RuntimeError("Pin registration failed")
+
+    def cleanup(module, modules):
+        raise RuntimeError("VBAR unpin failed")
+    monkeypatch.setattr(comfy.model_prefetch, "pin_modules", pin_modules)
+    monkeypatch.setattr(comfy.model_prefetch, "cleanup_prefetched_modules", cleanup)
+
+    cache = qwen_image21.PrefixCache([[slot]])
+    with pytest.raises(RuntimeError, match="Pin registration failed"):
+        with cache.layer(0, "cpu", write=False):
+            pass
+
+
+def test_resolve_failure_does_not_record_the_new_signature():
+    s = _module("weight", signature="old")
+    s.weight = torch.ones(4)
+    s.bias = None
+    geometry = comfy.memory_management.tensors_to_geometries([s.weight, s.bias])
+    xfer_dest = torch.zeros(comfy.memory_management.vram_aligned_size([s.weight, s.bias]), dtype=torch.uint8)
+
+    def lowvram(x):
+        raise RuntimeError("LoRA patch failed")
+    s.weight_lowvram_function = lowvram
+    s._prefetch = {"signature": "new", "resident": False, "xfer_dest": xfer_dest, "cast_dest": None,
+                   "cast_geometry": geometry, "needs_cast": False}
+    with pytest.raises(RuntimeError, match="LoRA patch failed"):
+        comfy.ops.resolve_cast_module_with_vbar(s, torch.float32, torch.device("cpu"), torch.float32, None, False)
+    # A retry that faults the same signature must not treat the half-patched weight as resident.
+    assert s._v_signature is None

@@ -1,5 +1,7 @@
 # https://github.com/huggingface/diffusers (Apache 2.0) Qwen-Image 2.1
 import contextlib
+import functools
+import logging
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -259,6 +261,17 @@ class KVCacheModel(nn.Module):
         return [layer for slot in self.slots for layer in slot], []
 
 
+def _cleanup_slots(cache, modules, exc_type, exc, tb):
+    try:
+        comfy.model_prefetch.cleanup_prefetched_modules(cache, modules)
+    except Exception:
+        if exc is None:
+            raise
+        # Keep the error that is already propagating; a cleanup failure must not replace it.
+        logging.exception("Failed to clean up prefix cache slots")
+    return False
+
+
 class PrefixCache:
     """Forward-local views; every layer of a selected prefix is retained or filled together."""
     def __init__(self, slots):
@@ -278,7 +291,7 @@ class PrefixCache:
             unprefetched = [slot[i] for slot in self.slots if slot[i].comfy_cast_weights and not hasattr(slot[i], "_prefetch")]
             if unprefetched:
                 # Register cleanup first: pin_modules can fail after marking some of the slots.
-                stack.callback(comfy.model_prefetch.cleanup_prefetched_modules, self, unprefetched)
+                stack.push(functools.partial(_cleanup_slots, self, unprefetched))
                 comfy.model_prefetch.pin_modules(unprefetched, device)
             self.values = []
             for slot in self.slots:

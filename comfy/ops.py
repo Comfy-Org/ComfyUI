@@ -332,8 +332,9 @@ def cast_modules_with_vbar(comfy_modules, dtype, device, bias_dtype, non_blockin
 def resolve_cast_module_with_vbar(s, dtype, device, bias_dtype, compute_dtype, want_requant, return_weights=True):
 
     prefetch = getattr(s, "_prefetch", None)
+    resident = prefetch["resident"]
 
-    if prefetch["resident"]:
+    if resident:
         weight = s._v_weight
         bias = s._v_bias
     else:
@@ -353,7 +354,8 @@ def resolve_cast_module_with_vbar(s, dtype, device, bias_dtype, compute_dtype, w
             s._v_weight = weight
             s._v_bias = bias
             s._v_relayout = False
-        s._v_signature = prefetch["signature"]
+        # Set at the end: if a cast below fails, a retry must not match this signature as resident.
+        s._v_signature = None
 
     def post_cast(s, param_key, x, dtype, resident, update_weight):
         lowvram_fn = getattr(s, param_key + "_lowvram_function", None)
@@ -394,6 +396,8 @@ def resolve_cast_module_with_vbar(s, dtype, device, bias_dtype, compute_dtype, w
     if bias is not None:
         bias = post_cast(s, "bias", bias, bias_dtype, prefetch["resident"], update_weight)
 
+    if not resident:
+        s._v_signature = prefetch["signature"]
     if prefetch["signature"] is not None:
         prefetch["resident"] = True
 
