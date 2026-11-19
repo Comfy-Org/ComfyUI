@@ -9,6 +9,7 @@ import traceback
 from enum import Enum
 from typing import TYPE_CHECKING, List, Literal, NamedTuple, Optional, Union
 import asyncio
+import contextlib
 
 import torch
 
@@ -673,11 +674,23 @@ class PromptRun:
     def __init__(self, prompt_id, client_id):
         self.prompt_id = prompt_id
         self.client_id = client_id
+        self.blocked = False
+        self.interrupted = False
+        self.last_node_id = None
         self.model_tracker = comfy.model_patcher.PromptModelTracker()
         self.pending_async_nodes = {} # TODO - Unify this with pending_subgraph_results
         self.status_messages = []
         self.success = True
         self.history_result = {}
+
+    def can_progress(self):
+        if not self.blocked:
+            return True
+        # A finished async node makes the run ready again as soon as the event loop processes it
+        for results in self.pending_async_nodes.values():
+            if all(r.done() for r in results if isinstance(r, asyncio.Task)):
+                return True
+        return False
 
 
 class PromptExecutor:
@@ -686,10 +699,56 @@ class PromptExecutor:
         self.cache_type = cache_type
         self.server = server
         self.asset_manager = asset_manager if asset_manager is not None else NoAssets(args)
+        self.runs = []
+        self.turn_holder = None
+        self.turn_changed = asyncio.Condition()
         self.reset()
 
     def reset(self):
+        assert not self.runs
         self.caches = CacheSet(cache_type=self.cache_type, cache_args=self.cache_args)
+
+    def interrupt(self, prompt_id=None):
+        """Interrupt the in-flight prompt with this id, or every in-flight prompt."""
+        for run in self.runs:
+            if prompt_id is None or run.prompt_id == prompt_id:
+                run.interrupted = True
+                if run is self.turn_holder:
+                    nodes.interrupt_processing()
+
+    def can_start(self):
+        """A new prompt may start only while every in-flight prompt is blocked on async work."""
+        return self.turn_holder is None and not any(run.can_progress() for run in self.runs)
+
+    async def wait_for_start(self):
+        async with self.turn_changed:
+            await self.turn_changed.wait_for(self.can_start)
+
+    async def acquire_turn(self, run):
+        # Let the loop process finished async work first so an earlier run that is ready reclaims the turn.
+        await asyncio.sleep(0)
+        def earlier_runs_blocked():
+            # Evaluated on every wake-up: a run that finished meanwhile has left self.runs.
+            return self.turn_holder is None and not any(r.can_progress() for r in self.runs[:self.runs.index(run)])
+        async with self.turn_changed:
+            self.turn_changed.notify_all()
+            await self.turn_changed.wait_for(earlier_runs_blocked)
+            self.turn_holder = run
+        run.blocked = False
+        nodes.interrupt_processing(run.interrupted)
+        activate_progress_state(run.prompt_id)
+        self.server.client_id = run.client_id
+        self.server.last_prompt_id = run.prompt_id
+        self.server.last_node_id = run.last_node_id
+
+    async def release_turn(self, run, blocked=False):
+        run.blocked = blocked
+        run.last_node_id = self.server.last_node_id
+        run.interrupted = comfy.model_management.processing_interrupted()
+        if self.turn_holder is run:
+            self.turn_holder = None
+        async with self.turn_changed:
+            self.turn_changed.notify_all()
 
     def add_message(self, run, event, data: dict, broadcast: bool):
         data = {
@@ -742,34 +801,31 @@ class PromptExecutor:
                 _cache_logger.warning(f"Cache provider {provider.__class__.__name__} error on {event}: {e}")
 
     def execute(self, prompt, prompt_id, extra_data={}, execute_outputs=[]):
-        return asyncio.run(self.execute_async(prompt, prompt_id, extra_data, execute_outputs))
+        with torch.inference_mode():
+            return asyncio.run(self.execute_async(prompt, prompt_id, extra_data, execute_outputs))
 
     async def execute_async(self, prompt, prompt_id, extra_data={}, execute_outputs=[]):
+        """Execute one prompt. Several prompts may be in flight on the same event loop; a prompt
+        executes nodes only while every earlier prompt is blocked waiting for async nodes, and
+        hands the turn back as soon as an earlier prompt can progress. Returns the PromptRun."""
         current_prompt_id.set(prompt_id)
         run = PromptRun(prompt_id, extra_data.get("client_id"))
-        set_preview_method(extra_data.get("preview_method"))
-
-        nodes.interrupt_processing(False)
-
-        if "client_id" in extra_data:
-            self.server.client_id = extra_data["client_id"]
-        else:
-            self.server.client_id = None
-
-        self.add_message(run, "execution_start", { "prompt_id": prompt_id}, broadcast=False)
-
-        self._notify_prompt_lifecycle("start", prompt_id)
-        ram_headroom = int(self.cache_args["ram"] * (1024 ** 3))
-        ram_inactive_headroom = int(self.cache_args["ram_inactive"] * (1024 ** 3))
-        ram_release_callback = self.caches.outputs.ram_release if self.cache_type == CacheType.RAM_PRESSURE else None
-        comfy.memory_management.set_ram_cache_release_state(ram_release_callback, ram_headroom)
-
+        self.runs.append(run)
+        dynamic_prompt = DynamicPrompt(prompt)
+        reset_progress_state(prompt_id, dynamic_prompt, run.client_id)
+        add_progress_handler(WebUIProgressHandler(self.server))
         try:
-            with torch.inference_mode():
-                dynamic_prompt = DynamicPrompt(prompt)
-                reset_progress_state(prompt_id, dynamic_prompt, run.client_id)
-                activate_progress_state(prompt_id)
-                add_progress_handler(WebUIProgressHandler(self.server))
+            await self.acquire_turn(run)
+            set_preview_method(extra_data.get("preview_method"))
+            self.add_message(run, "execution_start", { "prompt_id": prompt_id}, broadcast=False)
+
+            self._notify_prompt_lifecycle("start", prompt_id)
+            ram_headroom = int(self.cache_args["ram"] * (1024 ** 3))
+            ram_inactive_headroom = int(self.cache_args["ram_inactive"] * (1024 ** 3))
+            ram_release_callback = self.caches.outputs.ram_release if self.cache_type == CacheType.RAM_PRESSURE else None
+            comfy.memory_management.set_ram_cache_release_state(ram_release_callback, ram_headroom)
+
+            with contextlib.nullcontext():  # FIXME: remove this after real review
                 is_changed_cache = IsChangedCache(prompt_id, dynamic_prompt, self.caches.outputs)
                 for cache in self.caches.all:
                     await cache.set_prompt(dynamic_prompt, prompt.keys(), is_changed_cache)
@@ -797,7 +853,11 @@ class PromptExecutor:
                     execution_list.add_node(node_id)
 
                 while not execution_list.is_empty():
+                    # Each node is a scheduling point: an earlier prompt that became ready goes first,
+                    # and a later prompt may start while this one waits for async nodes.
+                    await self.release_turn(run, blocked=execution_list.is_blocked())
                     node_id, error, ex = await execution_list.stage_node_execution()
+                    await self.acquire_turn(run)
                     if error is not None:
                         run.success = False
                         self.handle_execution_error(run, dynamic_prompt.original_prompt, current_outputs, executed, error, ex)
@@ -853,14 +913,17 @@ class PromptExecutor:
                 if comfy.model_management.DISABLE_SMART_MEMORY:
                     comfy.model_management.unload_all_models()
         finally:
+            self.runs.remove(run)
             for cache in self.caches.all:
                 cache.end_prompt()
             clear_progress_state(prompt_id)
             if self.cache_type == CacheType.RAM_PRESSURE:
                 detail("RAM cache evictions: prompt=%s active=%s full=%s", prompt_id, self.caches.outputs.active_evictions, self.caches.outputs.full_evictions)
-            comfy.memory_management.set_ram_cache_release_state(None, 0)
+            if not self.runs:
+                comfy.memory_management.set_ram_cache_release_state(None, 0)
             run.model_tracker.end()
             self._notify_prompt_lifecycle("end", prompt_id)
+            await self.release_turn(run)
         return run
 
 
@@ -1330,12 +1393,16 @@ class PromptQueue:
         self.currently_running = {}
         self.history = {}
         self.flags = {}
+        # Hooks the worker installs: wake it on any change, and route interrupts to its executor.
+        self.on_change = lambda: None
+        self.interrupt_prompt = lambda prompt_id: nodes.interrupt_processing()
 
     def put(self, item):
         with self.mutex:
             heapq.heappush(self.queue, item)
             self.server.queue_updated()
             self.not_empty.notify()
+            self.on_change()
 
     def get(self, timeout=None):
         with self.not_empty:
@@ -1376,6 +1443,7 @@ class PromptQueue:
             }
             self.history[prompt[1]].update(history_result)
             self.server.queue_updated()
+            self.on_change()
 
     # Note: slow
     def get_current_queue(self):
@@ -1396,18 +1464,14 @@ class PromptQueue:
         """Interrupt the running prompt with this id, atomically.
 
         Checks the live running set and signals the interrupt under the queue
-        mutex, so the worker cannot move the job to done (and start the next
-        prompt) in between. Returns True if a matching job was running and an
-        interrupt was signalled, False otherwise. The atomicity is what keeps a
-        cancel from landing on an unrelated prompt that started after a separate
-        is-running check: the global interrupt flag is reset at the start of
-        every prompt (execute_async), so a job that finishes before consuming
-        the flag cannot leak the interrupt onto its successor.
+        mutex, so the worker cannot move the job to done in between. Returns
+        True if a matching job was running and an interrupt was signalled,
+        False otherwise.
         """
         with self.mutex:
             for item in self.currently_running.values():
                 if item[1] == prompt_id:
-                    nodes.interrupt_processing()
+                    self.interrupt_prompt(prompt_id)
                     return True
         return False
 
@@ -1472,6 +1536,7 @@ class PromptQueue:
         with self.mutex:
             self.flags[name] = data
             self.not_empty.notify()
+            self.on_change()
 
     def get_flags(self, reset=True):
         with self.mutex:
