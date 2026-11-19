@@ -148,7 +148,8 @@ def pin_modules(comfy_modules, device, dtype=None):
             storage = comfy_aimdo.torch.aimdo_to_tensor(s._v, device)
             if s.comfy_gemv_optimized:
                 s._v_weight = s._v_weight.optimize_for_gemv(storage)
-            s._v_weight = s._v_weight.optimize_for_gemm(storage)
+            else:
+                s._v_weight = s._v_weight.optimize_for_gemm(storage)
     return offload_stream, fully_faulted
 
 def cleanup_prefetched_modules(module, comfy_modules):
