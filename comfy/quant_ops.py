@@ -188,9 +188,24 @@ class TensorCoreFP8E5M2Layout(_TensorCoreFP8LayoutBase):
     FP8_DTYPE = torch.float8_e5m2
 
 
+class TensorWiseINT8Layout(_CKTensorWiseINT8Layout):
+    @classmethod
+    def linear_input_act(cls, weight, x, bias=None,
+                         input_act=None, input_act_weight=None, input_act_eps=0.0,
+                         residual=None, residual_scale=None):
+        params = weight._params
+        if params.transposed:
+            return NotImplemented
+        qdata, scale = cls.get_plain_tensors(weight)
+        return torch.ops.comfy_kitchen.int8_linear(
+            x, qdata, scale, bias, ck.DTYPE_TO_CODE[x.dtype],
+            params.convrot, params.convrot_groupsize,
+            input_act, input_act_weight, input_act_eps, residual, residual_scale,
+        )
+
+
 # Backward compatibility alias - default to E4M3
 TensorCoreFP8Layout = TensorCoreFP8E4M3Layout
-TensorWiseINT8Layout = _CKTensorWiseINT8Layout
 TensorCoreConvRotW4A4Layout = _CKTensorCoreConvRotW4A4Layout
 AsymW4A8Int8Layout = _CKAsymW4A8Int8Layout
 
@@ -202,7 +217,7 @@ register_layout_class("TensorCoreFP8Layout", TensorCoreFP8Layout)
 register_layout_class("TensorCoreFP8E4M3Layout", TensorCoreFP8E4M3Layout)
 register_layout_class("TensorCoreFP8E5M2Layout", TensorCoreFP8E5M2Layout)
 register_layout_class("TensorCoreNVFP4Layout", TensorCoreNVFP4Layout)
-register_layout_class("TensorWiseINT8Layout", _CKTensorWiseINT8Layout)
+register_layout_class("TensorWiseINT8Layout", TensorWiseINT8Layout)
 register_layout_class("TensorCoreConvRotW4A4Layout", _CKTensorCoreConvRotW4A4Layout)
 if _CK_MXFP8_AVAILABLE:
     register_layout_class("TensorCoreMXFP8Layout", TensorCoreMXFP8Layout)
