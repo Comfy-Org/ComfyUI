@@ -388,10 +388,7 @@ def cast_bias_weight(s, input=None, dtype=None, device=None, bias_dtype=None, of
     # will add async-offload support to your cast and improve performance.
     if input is not None:
         if dtype is None:
-            if isinstance(input, QuantizedTensor):
-                dtype = input.params.orig_dtype
-            else:
-                dtype = input.dtype
+            dtype = input.dtype
         if bias_dtype is None:
             bias_dtype = dtype
         if device is None:

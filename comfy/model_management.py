@@ -463,6 +463,28 @@ def is_amd():
             return True
     return False
 
+def cuda_version_warning():
+    if not is_nvidia():
+        return
+
+    device = get_torch_device()
+    cuda_version = torch.version.cuda
+    if device.type == "cuda" and int(cuda_version.split(".")[0]) < 13:
+        capability = torch.cuda.get_device_capability(device)
+        if capability >= (7, 5):
+            logging.warning(
+                "\n========================================================================\n"
+                "WARNING: PYTORCH CUDA VERSION BELOW 13.0\n"
+                "Your GPU has compute capability %s.%s (Turing or newer).\n"
+                "PyTorch is using CUDA %s.\n"
+                "Performance will be terrible with PyTorch CUDA versions below 13.0.\n"
+                "Please upgrade PyTorch to a CUDA 13.0 or newer build (cu130 or newer).\n"
+                "Update your NVIDIA driver if needed to use that build.\n"
+                "========================================================================",
+                *capability, cuda_version,
+                extra={'color': 'yellow'},
+            )
+
 def amd_min_version(device=None, min_rdna_version=0):
     if not is_amd():
         return False
