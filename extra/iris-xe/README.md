@@ -19,7 +19,7 @@ python -m pip check
 python -c 'import torch; print(torch.__version__, torch.xpu.get_device_name(0))'
 ```
 
-The separate `gguf-gemma4.patch` adds Gemma 4 to the custom node's GGUF text loader. Apply it in the same checkout only if you use that loader with Gemma 4. The LTX workflow using a safetensors text encoder uses the built-in CLIPLoader.
+The separate `gguf-gemma4.patch` adds Gemma 4 to the custom node's GGUF text loader. Apply it in the same checkout for Gemma 4 GGUF text encoders that embed the full Hugging Face tokenizer in the `tokenizer.huggingface.json` metadata field. The LTX workflow using a safetensors text encoder uses the built-in CLIPLoader.
 
 ## Run
 

@@ -1224,6 +1224,7 @@ class LTXVModel(LTXBaseModel):
         if self.keyframes_abs_pos_embedding is None:
             return x
 
+        # PyTorch 2.15.0+xpu on Iris Xe raises Level Zero error 45 casting the boolean keyframe mask to float32.
         if pixel_coords.device.type == "xpu" and os.environ.get("LTX25_IRIS_CPU_UNPACK") == "1":
             cpu_grid = None if grid_mask is None else grid_mask.cpu()
             mask = self.keyframes_abs_pos_mask(pixel_coords.cpu(), orig_shape, cpu_grid, num_guide_tokens, generated_keyframes)

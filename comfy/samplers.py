@@ -1227,6 +1227,7 @@ class CFGGuider:
             count_input = latent_image.cpu()
         if count_input is not None and torch.count_nonzero(count_input) > 0: #Don't shift the empty latent image.
             latent_image = self.inner_model.process_latent_in(latent_image)
+        del count_input
 
         self.conds = process_conds(self.inner_model, noise, self.conds, device, latent_image, denoise_mask, seed, latent_shapes=latent_shapes)
 
