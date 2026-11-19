@@ -693,12 +693,24 @@ async def test_scenario_26_list_by_hash(tmp_path):
             make_mocked_request("GET", f"/api/assets?hash={wanted}.png")
         )
         missing, missing_total = await names("hash=blake3:" + "0" * 64)
+        blank = await routes.list_assets_route(
+            make_mocked_request("GET", "/api/assets?hash=")
+        )
+        whitespace = await routes.list_assets_route(
+            make_mocked_request("GET", "/api/assets?hash=%20%20")
+        )
+        everything, everything_total = await names("")
     engine.dispose()
 
     assert both == ["second.png", "first.png"] and total == 2
     assert exact == ["second.png"] and exact_total == 1
     assert rejected.status == 400, "a filename is not a hash, and it should not match silently"
     assert missing == [] and missing_total == 0
+    assert blank.status == 400, "a supplied empty hash must not fall back to an unfiltered page"
+    assert whitespace.status == 400, "a whitespace-only hash must not fall back to an unfiltered page"
+    assert everything == ["second.png", "first.png"] and everything_total == 2, (
+        "an omitted hash still lists everything"
+    )
 
 
 def test_scenario_27_fail_closed_previews_fromhash(session, tmp_path):

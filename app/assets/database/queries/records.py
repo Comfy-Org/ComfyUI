@@ -37,12 +37,14 @@ class RecordPageSpec(NamedTuple):
     any_tags: tuple[str, ...] = ()
     none_tags: tuple[str, ...] = ()
     name_contains: str | None = None
-    content_hash: str | None = None
     limit: int = 20
     offset: int = 0
     sort: RecordSortField = "created_at"
     order: RecordSortOrder = "desc"
     after: RecordCursorBoundary | None = None
+    # Kept last: this is a NamedTuple, so a field inserted earlier would change
+    # the meaning of the positional calls that already exist.
+    content_hash: str | None = None
 
 
 _LIVE_PATH_UNIQUE_INDEX = "uq_asset_contents_path_live"

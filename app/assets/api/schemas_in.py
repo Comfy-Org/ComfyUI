@@ -88,7 +88,10 @@ class ListAssetsQuery(BaseModel):
             return None
         v = v.strip().lower()
         if not v:
-            return None
+            # `?hash=` and whitespace-only values are a filter the caller did ask
+            # for, and dropping them answered with an unfiltered page, where any
+            # asset could be mistaken for a match. An omitted hash stays optional.
+            raise ValueError("hash must be 'blake3:<hex>'")
         return validate_blake3_hash(v if ":" in v else f"blake3:{v}")
 
     @field_validator(
