@@ -113,8 +113,6 @@ parser.add_argument("--fp16-intermediates", action="store_true", help="Experimen
 
 parser.add_argument("--force-channels-last", action="store_true", help="Force channels last format when inferencing the models.")
 
-parser.add_argument("--directml", type=int, nargs="?", metavar="DIRECTML_DEVICE", const=-1, help="Use torch-directml.")
-
 parser.add_argument("--oneapi-device-selector", type=str, default=None, metavar="SELECTOR_STRING", help="Sets the oneAPI device(s) this instance will use.")
 parser.add_argument("--supports-fp8-compute", action="store_true", help="ComfyUI will act like if the device supports fp8 compute.")
 parser.add_argument("--enable-triton-backend", action="store_true", help="ComfyUI will enable the use of Triton backend in comfy-kitchen. Is disabled at launch by default.")
@@ -144,6 +142,8 @@ cache_group.add_argument("--cache-lru", type=int, default=0, help="Use LRU cachi
 cache_group.add_argument("--cache-none", action="store_true", help="Reduced RAM/VRAM usage at the expense of executing every node for each run.")
 cache_group.add_argument("--high-ram", action="store_true", help="Can improve performance slightly on high RAM or on systems where pagefile use is preferred over model loading.")
 
+parser.add_argument("--force-output-rerun", action="store_true", help="Re-execute output nodes (OUTPUT_NODE=True) on every run even when their result is cached, so they write their output files again. Upstream nodes stay cached. API nodes are excluded because re-running them repeats a paid external call. Intended for multi-tenant servers that remove output files after each job.")
+
 attn_group = parser.add_mutually_exclusive_group()
 attn_group.add_argument("--use-split-cross-attention", action="store_true", help="Use the split cross attention optimization. Ignored when xformers is used.")
 attn_group.add_argument("--use-quad-cross-attention", action="store_true", help="Use the sub-quadratic cross attention optimization . Ignored when xformers is used.")
@@ -160,6 +160,7 @@ upcast.add_argument("--dont-upcast-attention", action="store_true", help="Disabl
 
 
 parser.add_argument("--enable-manager", action="store_true", help="Enable the ComfyUI-Manager feature.")
+parser.add_argument("--enable-agent", action="store_true", help="Enable the ComfyUI agent feature.")
 manager_group = parser.add_mutually_exclusive_group()
 manager_group.add_argument("--disable-manager-ui", action="store_true", help="Disables only the ComfyUI-Manager UI and endpoints. Scheduled installations and similar background tasks will still operate.")
 manager_group.add_argument("--enable-manager-legacy-ui", action="store_true", help="Enables the legacy UI of ComfyUI-Manager. Implies --enable-manager.")
@@ -209,6 +210,7 @@ parser.add_argument("--mmap-torch-files", action="store_true", help="Use mmap wh
 parser.add_argument("--disable-mmap", action="store_true", help="Don't use mmap when loading safetensors.")
 
 parser.add_argument("--dont-print-server", action="store_true", help="Don't print server output.")
+parser.add_argument("--disable-product-tips", action="store_true", help="Hide console tips about new products from Comfy-Org. Same as setting the env var COMFYUI_DISABLE_PRODUCT_TIPS=1.")
 parser.add_argument("--quick-test-for-ci", action="store_true", help="Quick test for CI.")
 parser.add_argument("--windows-standalone-build", action="store_true", help="Windows standalone build: Enable convenient things that most people using the standalone windows build will probably enjoy (like auto opening the page on startup and turning on the assets system; --disable-assets turns it off).")
 

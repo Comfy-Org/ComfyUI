@@ -1,26 +1,37 @@
+import math
+
 from typing_extensions import override
 
-from comfy_api.latest import IO, ComfyExtension
+from comfy_api.latest import IO, ComfyExtension, Input
 from comfy_api_nodes.apis.clarityai import (
     CrystalUpscalerRequest,
     CrystalUpscalerResult,
     CrystalUpscalerStatusResponse,
     CrystalUpscalerSubmitResponse,
+    CrystalVideoUpscalerRequest,
+    CrystalVideoUpscalerResult,
 )
 from comfy_api_nodes.util import (
     ApiEndpoint,
     download_url_to_image_tensor,
+    download_url_to_video_output,
     get_image_dimensions,
     get_number_of_images,
     poll_op,
     sync_op,
     upload_image_to_comfyapi,
+    upload_video_to_comfyapi,
     validate_image_dimensions,
+    validate_video_dimensions,
 )
 
 CRYSTAL_UPSCALER_ENDPOINT = "/proxy/fal/clarityai/crystal-upscaler"
 MAX_OUTPUT_PIXELS = 100_000_000
 MAX_OUTPUT_SIDE = 65535
+CRYSTAL_VIDEO_UPSCALER_ENDPOINT = "/proxy/fal/clarityai/crystal-video-upscaler"
+MAX_VIDEO_FRAME_PIXELS = 9_000_000
+MAX_VIDEO_PIXEL_SECONDS = 360_000_000
+MAX_VIDEO_SIDE = 5120
 
 
 class ClarityCrystalUpscaleNode(IO.ComfyNode):
@@ -118,10 +129,100 @@ class ClarityCrystalUpscaleNode(IO.ComfyNode):
         return IO.NodeOutput(await download_url_to_image_tensor(result.images[0].url))
 
 
+class ClarityCrystalVideoUpscaleNode(IO.ComfyNode):
+    @classmethod
+    def define_schema(cls):
+        return IO.Schema(
+            node_id="ClarityCrystalVideoUpscaleNode",
+            display_name="Clarity AI Crystal Video Upscale",
+            category="partner/video/Clarity AI",
+            description="Upscale a video with Clarity AI's Crystal Video Upscaler, a high-fidelity upscaler that stays "
+            "faithful to the source. Output is limited to 9 megapixels per frame (for example 4000x2250), and long "
+            "clips come back at a lower resolution. Clips above 30 fps cost 2x, above 60 fps 3x, and so on.",
+            inputs=[
+                IO.DynamicCombo.Input(
+                    "model",
+                    options=[
+                        IO.DynamicCombo.Option(
+                            "crystal-video-upscaler",
+                            [
+                                IO.Video.Input("video"),
+                                IO.Float.Input(
+                                    "scale_factor",
+                                    default=2.0,
+                                    min=1.0,
+                                    max=200.0,
+                                    step=0.1,
+                                    display_mode=IO.NumberDisplay.number,
+                                    tooltip="Factor to multiply the video width and height by. The output is "
+                                    "limited to 9 megapixels per frame and 360 megapixel-seconds per clip, so "
+                                    "large or long videos are upscaled by less.",
+                                ),
+                            ],
+                        ),
+                    ],
+                    tooltip="Model to use.",
+                ),
+            ],
+            outputs=[IO.Video.Output()],
+            hidden=[
+                IO.Hidden.auth_token_comfy_org,
+                IO.Hidden.api_key_comfy_org,
+                IO.Hidden.unique_id,
+            ],
+            is_api_node=True,
+            price_badge=IO.PriceBadge(
+                expr='{"type":"range_usd","min_usd":0.2965,"max_usd":1.287,"format":{"approximate":true,"suffix":"/s","note":"(1080p-4K output)"}}',
+            ),
+        )
+
+    @classmethod
+    async def execute(cls, model: dict) -> IO.NodeOutput:
+        video: Input.Video = model["video"]
+        validate_video_dimensions(video, max_width=MAX_VIDEO_SIDE, max_height=MAX_VIDEO_SIDE)
+        width, height = video.get_dimensions()
+        if width * height > MAX_VIDEO_FRAME_PIXELS:
+            raise ValueError(
+                f"The video is {width}x{height} pixels, but at most 9 megapixels per frame are supported "
+                "(for example 4000x2250). Use a smaller video."
+            )
+        duration = video.get_duration()
+        frame_rate = video.get_frame_rate()
+        max_duration = MAX_VIDEO_PIXEL_SECONDS / (width * height * math.ceil(frame_rate / 30))
+        if duration > max_duration:
+            raise ValueError(
+                f"A {width}x{height} video at {float(frame_rate):.2f} fps can be at most {max_duration:.1f} seconds "
+                f"long, got {duration:.1f} seconds. Use a shorter, smaller or lower frame rate video."
+            )
+        submit = await sync_op(
+            cls,
+            ApiEndpoint(path=CRYSTAL_VIDEO_UPSCALER_ENDPOINT, method="POST"),
+            response_model=CrystalUpscalerSubmitResponse,
+            data=CrystalVideoUpscalerRequest(
+                video_url=await upload_video_to_comfyapi(cls, video),
+                scale_factor=min(model["scale_factor"], math.floor(MAX_VIDEO_SIDE / max(width, height) * 100) / 100),
+            ),
+        )
+        await poll_op(
+            cls,
+            ApiEndpoint(path=f"{CRYSTAL_VIDEO_UPSCALER_ENDPOINT}/requests/{submit.request_id}/status"),
+            response_model=CrystalUpscalerStatusResponse,
+            status_extractor=lambda r: r.status,
+            completed_statuses=["COMPLETED"],
+            queued_statuses=["IN_QUEUE"],
+        )
+        result = await sync_op(
+            cls,
+            ApiEndpoint(path=f"{CRYSTAL_VIDEO_UPSCALER_ENDPOINT}/requests/{submit.request_id}"),
+            response_model=CrystalVideoUpscalerResult,
+        )
+        return IO.NodeOutput(await download_url_to_video_output(result.video.url))
+
+
 class ClarityAIExtension(ComfyExtension):
     @override
     async def get_node_list(self) -> list[type[IO.ComfyNode]]:
-        return [ClarityCrystalUpscaleNode]
+        return [ClarityCrystalUpscaleNode, ClarityCrystalVideoUpscaleNode]
 
 
 async def comfy_entrypoint() -> ClarityAIExtension:

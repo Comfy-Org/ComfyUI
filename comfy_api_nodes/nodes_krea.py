@@ -16,7 +16,7 @@ from comfy_api_nodes.apis.krea import (
 from comfy_api_nodes.util import (
     ApiEndpoint,
     download_url_to_image_tensor,
-    poll_op,
+    router_op,
     sync_op,
     tensor_to_bytesio,
     validate_string,
@@ -44,16 +44,15 @@ async def _upload_image_to_krea_assets(cls: type[IO.ComfyNode], image: Input.Ima
 _MODEL_MEDIUM = "Krea 2 Medium"
 _MODEL_MEDIUM_TURBO = "Krea 2 Medium Turbo"
 _MODEL_LARGE = "Krea 2 Large"
-_MODEL_ENDPOINTS: dict[str, str] = {
-    _MODEL_MEDIUM: "/proxy/krea/generate/image/krea/krea-2/medium",
-    _MODEL_MEDIUM_TURBO: "/proxy/krea/generate/image/krea/krea-2/medium-turbo",
-    _MODEL_LARGE: "/proxy/krea/generate/image/krea/krea-2/large",
+_MODEL_IDS: dict[str, str] = {
+    _MODEL_MEDIUM: "krea/krea-2-medium",
+    _MODEL_MEDIUM_TURBO: "krea/krea-2-medium-turbo",
+    _MODEL_LARGE: "krea/krea-2-large",
 }
 
 _ASPECT_RATIOS = ["1:1", "4:3", "3:2", "16:9", "2.35:1", "4:5", "2:3", "9:16"]
 _RESOLUTIONS = ["1K"]
 _CREATIVITY_LEVELS = ["raw", "low", "medium", "high"]
-_KREA_QUEUED_STATUSES = ["backlogged", "queued", "scheduled"]
 
 _UUID_RE = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
 
@@ -109,8 +108,8 @@ def _krea_model_inputs() -> list:
         IO.Float.Input(
             "moodboard_strength",
             default=0.35,
-            min=-0.5,
-            max=1.5,
+            min=0.0,
+            max=1.0,
             step=0.05,
             tooltip="Moodboard influence; ignored when moodboard_id is empty.",
             optional=True,
@@ -201,8 +200,8 @@ class Krea2ImageNode(IO.ComfyNode):
         validate_string(prompt, strip_whitespace=False, min_length=1)
 
         model_choice = model["model"]
-        endpoint_path = _MODEL_ENDPOINTS.get(model_choice)
-        if endpoint_path is None:
+        model_id = _MODEL_IDS.get(model_choice)
+        if model_id is None:
             raise ValueError(f"Unknown Krea 2 model: {model_choice!r}")
 
         moodboards: list[KreaMoodboard] | None = None
@@ -221,9 +220,9 @@ class Krea2ImageNode(IO.ComfyNode):
             image_style_references = [
                 KreaImageStyleReference(url=ref["url"], strength=float(ref["strength"])) for ref in style_reference
             ]
-        initial = await sync_op(
+        job = await router_op(
             cls,
-            ApiEndpoint(path=endpoint_path, method="POST"),
+            model_id,
             response_model=KreaJob,
             data=KreaGenerateImageRequest(
                 prompt=prompt,
@@ -234,13 +233,6 @@ class Krea2ImageNode(IO.ComfyNode):
                 moodboards=moodboards,
                 image_style_references=image_style_references,
             ),
-        )
-        job = await poll_op(
-            cls,
-            ApiEndpoint(path=f"/proxy/krea/jobs/{initial.job_id}", method="GET"),
-            response_model=KreaJob,
-            status_extractor=lambda r: r.status,
-            queued_statuses=_KREA_QUEUED_STATUSES,
         )
         if not job.result or not job.result.urls:
             raise RuntimeError(f"Krea 2 job {job.job_id} completed without any image URLs.")
@@ -269,10 +261,9 @@ class Krea2StyleReferenceNode(IO.ComfyNode):
                 IO.Float.Input(
                     "strength",
                     default=1.0,
-                    min=-2.0,
-                    max=2.0,
+                    min=0.0,
+                    max=1.0,
                     step=0.05,
-                    tooltip="Reference strength; negative values invert the style influence.",
                 ),
                 IO.Custom(KreaIO.STYLE_REF).Input(
                     "style_reference",
@@ -341,7 +332,7 @@ class Krea3ImageNode(IO.ComfyNode):
                                     "aspect_ratio",
                                     options=_KREA3_ASPECT_RATIOS,
                                     default="auto",
-                                    tooltip="auto follows the first image, or the prompt when no image is connected.",
+                                    tooltip="auto lets Krea pick the shape from the connected images and the prompt.",
                                 ),
                                 IO.Combo.Input(
                                     "resolution",
@@ -350,10 +341,12 @@ class Krea3ImageNode(IO.ComfyNode):
                                 ),
                                 IO.Combo.Input(
                                     "thinking_mode",
-                                    options=["fast", "high"],
+                                    options=["fast", "high", "ultra"],
                                     default="fast",
                                     tooltip="fast is recommended. "
-                                    "high plans complex edits in more detail and takes longer.",
+                                    "high plans complex edits in more detail and takes longer. "
+                                    "ultra generates several candidates and returns the best one; "
+                                    "it needs at least one image, always outputs 2K and does not support precise_edit.",
                                 ),
                                 IO.Boolean.Input(
                                     "precise_edit",
@@ -389,12 +382,13 @@ class Krea3ImageNode(IO.ComfyNode):
                 ),
                 expr="""
                 (
-                  $res := $lookup(widgets, "model.resolution");
-                  $high := $lookup(widgets, "model.thinking_mode") = "high";
+                  $mode := $lookup(widgets, "model.thinking_mode");
+                  $is1k := $lookup(widgets, "model.resolution") = "1k" and $mode != "ultra";
                   $refs := $lookup(inputGroups, "model.images");
-                  $base := $res = "1k" ? ($high ? 0.0715 : 0.0429) : ($high ? 0.1144 : 0.0858);
+                  $base := $mode = "ultra" ? 0.3718
+                    : $is1k ? ($mode = "high" ? 0.0715 : 0.0429) : ($mode = "high" ? 0.1144 : 0.0858);
                   $min := $base + 0.0286 * $refs;
-                  ($res = "1k" or $refs = 0)
+                  ($is1k or $refs = 0)
                     ? {"type":"usd","usd": $min}
                     : {"type":"range_usd","min_usd": $min,"max_usd": $base + 0.1001 * $refs}
                 )
@@ -405,32 +399,30 @@ class Krea3ImageNode(IO.ComfyNode):
     @classmethod
     async def execute(cls, model: dict) -> IO.NodeOutput:
         validate_string(model["prompt"], min_length=1)
+        ultra = model["thinking_mode"] == "ultra"
+        if ultra and not model["images"]:
+            raise ValueError("thinking_mode ultra needs at least one image.")
+        if ultra and model["precise_edit"]:
+            raise ValueError("precise_edit is not supported with thinking_mode ultra.")
         prompt = _resolve_image_refs(model["prompt"], len(model["images"]))
-        reference_pixels = 1024 * 1024 if model["resolution"] == "1K" else 2048 * 2048
+        resolution = "2K" if ultra else model["resolution"]
+        reference_pixels = 1024 * 1024 if resolution == "1K" else 2048 * 2048
         image_urls = [
             await _upload_image_to_krea_assets(cls, image, reference_pixels) for image in model["images"].values()
         ]
-        initial = await sync_op(
+        job = await router_op(
             cls,
-            ApiEndpoint(path="/proxy/krea/generate/image/krea/krea-3", method="POST"),
+            "krea/krea-3",
             response_model=KreaJob,
             data=Krea3GenerateImageRequest(
                 prompt=prompt,
                 thinking_mode=model["thinking_mode"],
-                resolution=model["resolution"].lower(),
+                resolution=resolution.lower(),
                 aspect_ratio=None if model["aspect_ratio"] == "auto" else model["aspect_ratio"],
                 seed=model["seed"],
                 image_urls=image_urls or None,
-                regional_edit=model["precise_edit"],
+                regional_edit=None if ultra or not image_urls else model["precise_edit"],
             ),
-        )
-        job = await poll_op(
-            cls,
-            ApiEndpoint(path=f"/proxy/krea/jobs/{initial.job_id}", method="GET"),
-            response_model=KreaJob,
-            status_extractor=lambda r: r.status,
-            queued_statuses=_KREA_QUEUED_STATUSES,
-            poll_interval=1.0,
         )
         return IO.NodeOutput(await download_url_to_image_tensor(job.result.urls[0]))
 

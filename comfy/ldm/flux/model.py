@@ -44,6 +44,28 @@ class FluxParams:
     txt_norm: bool = False
 
 
+def views_to_grid(x, grid):
+    """[B*n, C, h, w] views -> [B, C, rows*h, cols*w]: view i of every n-group is the tile at grid[i] = (row, col)."""
+    n = len(grid)
+    b, c, h, w = x.shape
+    rows, cols = max(r for r, _ in grid) + 1, max(col for _, col in grid) + 1
+    out = x.new_zeros((b // n, c, rows * h, cols * w))
+    for i, (r, col) in enumerate(grid):
+        out[:, :, r * h:(r + 1) * h, col * w:(col + 1) * w] = x[i::n]
+    return out
+
+
+def grid_to_views(x, grid, h, w):
+    return torch.stack([x[:, :, r * h:(r + 1) * h, col * w:(col + 1) * w] for r, col in grid], dim=1).flatten(0, 1)
+
+
+def foreground_tokens(mask, h, w):
+    """Token-grid foreground [n, 1, h, w] of masks [n, H, W] (UltraTex): any coverage after an antialiased resize,
+    dilated by one token right and down."""
+    m = torch.nn.functional.interpolate(mask[:, None].float(), size=(h, w), mode="bilinear", antialias=True) > 0.5 / 255
+    return torch.nn.functional.max_pool2d(torch.nn.functional.pad(m.float(), (1, 0, 1, 0)), 2, stride=1) > 0
+
+
 def invert_slices(slices, length):
     sorted_slices = sorted(slices)
     result = []
@@ -341,6 +363,19 @@ class Flux(nn.Module):
         img_ids[:, :, 2] = img_ids[:, :, 2] + torch.linspace(w_offset, w_len - 1 + w_offset, steps=steps_w, device=x.device, dtype=torch.float32).unsqueeze(0)
         return img, repeat(img_ids, "h w c -> b (h w) c", b=bs)
 
+    def preprocess_token_masks(self, token_masks, view_grid, latent_shape, ref_shapes, background):
+        """Background token dropping (UltraTex), once per conditioning: the token indices kept of the target (over
+        its view grid) and of each reference (None without a mask), and the patchified background latent the
+        dropped target tokens predict."""
+        patch_size = self.patch_size
+        tokens = lambda s: (s + patch_size // 2) // patch_size
+        keep = views_to_grid(foreground_tokens(token_masks["target"], tokens(latent_shape[-2]), tokens(latent_shape[-1])), view_grid)
+        background = comfy.ldm.common_dit.pad_to_patch_size(background, (patch_size, patch_size))
+        background = views_to_grid(background.expand(len(view_grid), -1, -1, -1), view_grid)
+        refs =[None if m is None else foreground_tokens(m, tokens(shape[-2]), tokens(shape[-1])).flatten().nonzero().flatten()
+                for m, shape in zip(token_masks["refs"], ref_shapes)]
+        return {"target": keep.flatten().nonzero().flatten(), "refs": refs, "background": self.process_img(background)[0]}
+
     def forward(self, x, timestep, context, y=None, guidance=None, ref_latents=None, control=None, transformer_options={}, **kwargs):
         return comfy.patcher_extension.WrapperExecutor.new_class_executor(
             self._forward,
@@ -349,12 +384,33 @@ class Flux(nn.Module):
         ).execute(x, timestep, context, y, guidance, ref_latents, control, transformer_options, **kwargs)
 
     def _forward(self, x, timestep, context, y=None, guidance=None, ref_latents=None, control=None, transformer_options={}, **kwargs):
-        bs, c, h_orig, w_orig = x.shape
         patch_size = self.patch_size
+        view_grid = kwargs.get("view_grid", None)
+        if view_grid is not None:
+            # Consecutive batch items are the views of one sample, attended jointly as the tiles of one image.
+            n = len(view_grid)
+            if x.shape[0] % n:
+                raise ValueError(f"view_grid: the latent batch ({x.shape[0]}) must hold all {n} views of each sample.")
+            h_view, w_view = x.shape[-2:]
+            x = comfy.ldm.common_dit.pad_to_patch_size(x, (patch_size, patch_size))  # tiles on patch boundaries
+            h_tile, w_tile = x.shape[-2:]
+            x = views_to_grid(x, view_grid)
+            timestep, context = timestep[::n], context[::n]
+            y = y[::n] if y is not None else None
+            guidance = guidance[::n] if guidance is not None else None
+            ref_latents = [r[::n] for r in ref_latents] if ref_latents is not None else None
+        bs, c, h_orig, w_orig = x.shape
 
         h_len = ((h_orig + (patch_size // 2)) // patch_size)
         w_len = ((w_orig + (patch_size // 2)) // patch_size)
         img, img_ids = self.process_img(x, transformer_options=transformer_options)
+
+        # Background token dropping: only foreground tokens of the target and the references enter the transformer.
+        token_keep = kwargs.get("token_keep", None)
+        if token_keep is not None:
+            keep = token_keep["target"]
+            img_full = img
+            img, img_ids = img[:, keep], img_ids[:, keep]
         img_tokens = img.shape[1]
         timestep_zero_index = None
         if ref_latents is not None:
@@ -364,9 +420,15 @@ class Flux(nn.Module):
             index = 0
             ref_latents_method = kwargs.get("ref_latents_method", self.params.default_ref_method)
             timestep_zero = ref_latents_method == "index_timestep_zero"
-            for ref in ref_latents:
+            reference_views = kwargs.get("reference_views", None)
+            view_index = None
+            for i, ref in enumerate(ref_latents):
+                # references appended after UltraTex Conditioning have no view or mask entry
+                view = reference_views[i] if reference_views is not None and i < len(reference_views) else None
+                ref_keep = token_keep["refs"][i] if token_keep is not None and i < len(token_keep["refs"]) else None
                 if ref_latents_method in ("index", "index_timestep_zero"):
-                    index += self.params.ref_index_scale
+                    if view is None or view_index is None:    # view references are the tiles of one reference: one index
+                        index += self.params.ref_index_scale
                     h_offset = 0
                     w_offset = 0
                 elif ref_latents_method == "uxo":
@@ -386,7 +448,12 @@ class Flux(nn.Module):
                     h = max(h, ref.shape[-2] + h_offset)
                     w = max(w, ref.shape[-1] + w_offset)
 
+                if view is not None:                          # placed over its view's tile (UltraTex)
+                    view_index = index
+                    h_offset, w_offset = view_grid[view][0] * h_tile, view_grid[view][1] * w_tile
                 kontext, kontext_ids = self.process_img(ref, index=index, h_offset=h_offset, w_offset=w_offset, transformer_options=transformer_options)
+                if ref_keep is not None:
+                    kontext, kontext_ids = kontext[:, ref_keep], kontext_ids[:, ref_keep]
                 img = torch.cat([img, kontext], dim=1)
                 img_ids = torch.cat([img_ids, kontext_ids], dim=1)
                 ref_num_tokens.append(kontext.shape[1])
@@ -405,4 +472,13 @@ class Flux(nn.Module):
 
         out = self.forward_orig(img, img_ids, context, txt_ids, timestep, y, guidance, control, timestep_zero_index=timestep_zero_index, transformer_options=transformer_options, attn_mask=kwargs.get("attention_mask", None))
         out = out[:, :img_tokens]
-        return rearrange(out, "b (h w) (c ph pw) -> b c (h ph) (w pw)", h=h_len, w=w_len, ph=self.patch_size, pw=self.patch_size)[:,:,:h_orig,:w_orig]
+        if token_keep is not None:
+            # Dropped target tokens predict the background latent, so sampling lands on it there.
+            sigma = timestep[:bs].float()[:, None, None]
+            full = img_full.float().sub_(token_keep["background"]).div_(sigma).to(out.dtype)
+            full[:, keep] = out
+            out = full
+        out = rearrange(out, "b (h w) (c ph pw) -> b c (h ph) (w pw)", h=h_len, w=w_len, ph=self.patch_size, pw=self.patch_size)[:,:,:h_orig,:w_orig]
+        if view_grid is not None:
+            out = grid_to_views(out, view_grid, h_tile, w_tile)[:, :, :h_view, :w_view]
+        return out

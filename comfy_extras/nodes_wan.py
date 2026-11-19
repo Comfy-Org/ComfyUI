@@ -7,6 +7,7 @@ import comfy.utils
 import comfy.latent_formats
 import comfy.clip_vision
 import comfy.ldm.wan.model_animate2
+import comfy.ldm.wan.model_vsr
 import comfy.patcher_extension
 import json
 import numpy as np
@@ -1459,6 +1460,58 @@ class Wan22ImageToVideoLatent(io.ComfyNode):
         return io.NodeOutput(out_latent)
 
 
+class RelayVSRConditioning(io.ComfyNode):
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="RelayVSRConditioning",
+            category="model/conditioning/wan",
+            description="Conditioning and empty latent for RelayVSR video upscaling, sample with 1 step at cfg 1. Only every 15th frame goes through the model, VSR Decode restores all of them.",
+            inputs=[
+                io.Model.Input("model"),
+                io.Image.Input("images", tooltip="The low-quality video at its native resolution, the model decides the upscale factor."),
+            ],
+            outputs=[
+                io.Conditioning.Output(display_name="positive"),
+                io.Latent.Output(display_name="latent"),
+            ],
+        )
+
+    @classmethod
+    def execute(cls, model, images) -> io.NodeOutput:
+        diffusion_model = model.model.diffusion_model
+        keyframes = comfy.ldm.wan.model_vsr.relay_keyframes(images.shape[0])
+        positive = [[diffusion_model.positive_conditioning.unsqueeze(0).clone(), {"lq_images": images[keyframes]}]]
+        latent_size = comfy.ldm.wan.model_vsr.relay_latent_size(images.shape[1], images.shape[2], diffusion_model.latent_stride)
+        latent = torch.zeros([1, model.model.latent_format.latent_channels, len(keyframes), *latent_size], device=comfy.model_management.intermediate_device())
+        return io.NodeOutput(positive, {"samples": latent})
+
+
+class VSRDecode(io.ComfyNode):
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="VSRDecode",
+            display_name="VSR Decode",
+            category="latent",
+            description="Decode RelayVSR latents with the RelayVSR Flash decoder, which also reads the low-quality frames.",
+            inputs=[
+                io.Vae.Input("vae"),
+                io.Latent.Input("samples"),
+                io.Image.Input("images", tooltip="The same low-quality video given to the conditioning node."),
+                io.Float.Input("detail", default=1.0, min=0.0, max=1.0, step=0.01, tooltip="How much of the detail the decoder adds to the bicubic upscale of each frame is kept, 1 is the full model output."),
+            ],
+            outputs=[
+                io.Image.Output(),
+            ],
+        )
+
+    @classmethod
+    def execute(cls, vae, samples, images, detail=1.0) -> io.NodeOutput:
+        decoded = vae.decode(samples["samples"], vae_options={"lq_images": images, "detail": detail})
+        return io.NodeOutput(decoded.reshape(-1, *decoded.shape[-3:]))
+
+
 from comfy.ldm.wan.model_multitalk import InfiniteTalkOuterSampleWrapper, MultiTalkCrossAttnPatch, MultiTalkGetAttnMapPatch, project_audio_features
 class WanInfiniteTalkToVideo(io.ComfyNode):
     class DCValues(TypedDict):
@@ -1646,6 +1699,8 @@ class WanExtension(ComfyExtension):
             WanAnimate2Cache,
             Wan22ImageToVideoLatent,
             WanInfiniteTalkToVideo,
+            RelayVSRConditioning,
+            VSRDecode,
         ]
 
 async def comfy_entrypoint() -> WanExtension:

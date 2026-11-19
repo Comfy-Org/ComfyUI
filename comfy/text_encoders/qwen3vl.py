@@ -8,10 +8,11 @@ from transformers import Qwen2Tokenizer
 from comfy import sd1_clip
 import comfy.text_encoders.qwen_vl
 from .qwen35 import Qwen35VisionModel
-from .llama import BaseLlama, BaseQwen3, BaseGenerate, Llama2_, Qwen3VL_4BConfig, Qwen3VL_8BConfig, Qwen3VL_32BConfig
+from .llama import BaseLlama, BaseQwen3, BaseGenerate, Llama2_, Qwen3VL_2BConfig, Qwen3VL_4BConfig, Qwen3VL_8BConfig, Qwen3VL_32BConfig
 
 
 QWEN3VL_VISION = {
+    "qwen3vl_2b": dict(hidden_size=1024, intermediate_size=4096, depth=24, deepstack_visual_indexes=[5, 11, 17]),
     "qwen3vl_4b": dict(hidden_size=1024, intermediate_size=4096, depth=24, deepstack_visual_indexes=[5, 11, 17]),
     "qwen3vl_8b": dict(hidden_size=1152, intermediate_size=4304, depth=27, deepstack_visual_indexes=[8, 16, 24]),
     "qwen3vl_32b": dict(hidden_size=1152, intermediate_size=4304, depth=27, deepstack_visual_indexes=[8, 16, 24]),
@@ -19,7 +20,7 @@ QWEN3VL_VISION = {
 QWEN3VL_VISION_COMMON = dict(num_heads=16, patch_size=16, temporal_patch_size=2, in_channels=3,
                              spatial_merge_size=2, num_position_embeddings=2304)
 
-QWEN3VL_CONFIGS = {"qwen3vl_4b": Qwen3VL_4BConfig, "qwen3vl_8b": Qwen3VL_8BConfig, "qwen3vl_32b": Qwen3VL_32BConfig}
+QWEN3VL_CONFIGS = {"qwen3vl_2b": Qwen3VL_2BConfig, "qwen3vl_4b": Qwen3VL_4BConfig, "qwen3vl_8b": Qwen3VL_8BConfig, "qwen3vl_32b": Qwen3VL_32BConfig}
 
 
 class Qwen3VLDeepstackMerger(nn.Module):
@@ -113,18 +114,21 @@ class Qwen3VL(BaseLlama, BaseQwen3, BaseGenerate, torch.nn.Module):
         )
 
 
-def _make_qwen3vl_model(model_type):
-    class Qwen3VL_(Qwen3VL):
+def _make_qwen3vl_model(model_type, base):
+    class Qwen3VL_(base):
         pass
     Qwen3VL_.model_type = model_type
     return Qwen3VL_
 
 
 class Qwen3VLClipModel(sd1_clip.SDClipModel):
+    model_class = Qwen3VL
+    penalize_prompt = False  # True: the repetition penalty also counts the prompt tokens, as transformers does
+
     def __init__(self, device="cpu", layer="hidden", layer_idx=-1, dtype=None, attention_mask=True, model_options={}, model_type="qwen3vl_8b"):
         super().__init__(device=device, layer=layer, layer_idx=layer_idx, textmodel_json_config={},
                          dtype=dtype, special_tokens={"pad": 151643}, layer_norm_hidden_state=False,
-                         model_class=_make_qwen3vl_model(model_type), enable_attention_masks=attention_mask,
+                         model_class=_make_qwen3vl_model(model_type, self.model_class), enable_attention_masks=attention_mask,
                          return_attention_masks=attention_mask, model_options=model_options)
 
     def generate(self, tokens, do_sample, max_length, temperature, top_k, top_p, min_p, repetition_penalty, seed, presence_penalty=0.0, mtp=True):
@@ -133,14 +137,17 @@ class Qwen3VLClipModel(sd1_clip.SDClipModel):
         tokens_only = [[t[0] for t in b] for b in tokens]
         embeds, _, _, embeds_info = self.process_tokens(tokens_only, self.execution_device)
         position_ids, visual_pos_masks, deepstack = self.transformer.build_image_inputs(embeds, embeds_info)
+        initial_tokens = [t for t in tokens_only[0] if isinstance(t, int)] if self.penalize_prompt else []
         return self.transformer.generate(embeds, do_sample, max_length, temperature, top_k, top_p, min_p, repetition_penalty, seed,
-                                         presence_penalty=presence_penalty, position_ids=position_ids,
+                                         initial_tokens=initial_tokens, presence_penalty=presence_penalty, position_ids=position_ids,
                                          visual_pos_masks=visual_pos_masks, deepstack_embeds=deepstack)
 
 
 class Qwen3VLTEModel(sd1_clip.SD1ClipModel):
+    clip_model_class = Qwen3VLClipModel
+
     def __init__(self, device="cpu", dtype=None, model_options={}, model_type="qwen3vl_8b"):
-        clip_model = lambda **kw: Qwen3VLClipModel(**kw, model_type=model_type)
+        clip_model = lambda **kw: self.clip_model_class(**kw, model_type=model_type)
         super().__init__(device=device, dtype=dtype, name=model_type, clip_model=clip_model, model_options=model_options)
 
 
@@ -153,7 +160,7 @@ class Qwen3VLSDTokenizer(sd1_clip.SDTokenizer):
 
 class Qwen3VLTokenizer(sd1_clip.SD1Tokenizer):
     def __init__(self, embedding_directory=None, tokenizer_data={}, model_type="qwen3vl_8b"):
-        embedding_size = 2560 if model_type == "qwen3vl_4b" else 4096
+        embedding_size = {"qwen3vl_2b": 2048, "qwen3vl_4b": 2560}.get(model_type, 4096)
         tokenizer = lambda *a, **kw: Qwen3VLSDTokenizer(*a, **kw, embedding_size=embedding_size, embedding_key=model_type)
         super().__init__(embedding_directory=embedding_directory, tokenizer_data=tokenizer_data, name=model_type, tokenizer=tokenizer)
         self.llama_template = "<|im_start|>user\n{}<|im_end|>\n<|im_start|>assistant\n"
@@ -196,15 +203,15 @@ class Qwen3VLTokenizer(sd1_clip.SD1Tokenizer):
         return tokens
 
 
-def tokenizer(model_type="qwen3vl_8b"):
-    class Qwen3VLTokenizer_(Qwen3VLTokenizer):
+def tokenizer(model_type="qwen3vl_8b", base=Qwen3VLTokenizer):
+    class Qwen3VLTokenizer_(base):
         def __init__(self, embedding_directory=None, tokenizer_data={}):
             super().__init__(embedding_directory=embedding_directory, tokenizer_data=tokenizer_data, model_type=model_type)
     return Qwen3VLTokenizer_
 
 
-def te(dtype_llama=None, llama_quantization_metadata=None, model_type="qwen3vl_8b"):
-    class Qwen3VLTEModel_(Qwen3VLTEModel):
+def te(dtype_llama=None, llama_quantization_metadata=None, model_type="qwen3vl_8b", base=Qwen3VLTEModel):
+    class Qwen3VLTEModel_(base):
         def __init__(self, device="cpu", dtype=None, model_options={}):
             if dtype_llama is not None:
                 dtype = dtype_llama
