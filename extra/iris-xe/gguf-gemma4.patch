@@ -1,0 +1,28 @@
+--- a/loader.py
++++ b/loader.py
+@@ -11,5 +11,5 @@
+ 
+ IMG_ARCH_LIST = {"flux", "sd1", "sdxl", "sd3", "aura", "hidream", "cosmos", "ltxv", "hyvid", "wan", "lumina2", "qwen_image"}
+-TXT_ARCH_LIST = {"t5", "t5encoder", "llama", "qwen2vl", "qwen3", "qwen3vl", "gemma3"}
++TXT_ARCH_LIST = {"t5", "t5encoder", "llama", "qwen2vl", "qwen3", "qwen3vl", "gemma3", "gemma4"}
+ VIS_TYPE_LIST = {"clip-vision", "mmproj"}
+ 
+@@ -480,5 +480,10 @@
+             sd[temb_key] = dequantize_tensor(sd[temb_key], dtype=torch.float16)
+         sd = sd_map_replace(sd, T5_SD_MAP)
+-    elif arch in {"llama", "qwen2vl", "qwen3", "qwen3vl", "gemma3"}:
++    elif arch in {"llama", "qwen2vl", "qwen3", "qwen3vl", "gemma3", "gemma4"}:
++        if arch == "gemma4":
++            tokenizer_json = extra["metadata"].get("tokenizer.huggingface.json")
++            if not isinstance(tokenizer_json, str) or not tokenizer_json.strip():
++                raise ValueError("Gemma 4 GGUF requires tokenizer.huggingface.json metadata")
++            sd["tokenizer_json"] = torch.frombuffer(bytearray(tokenizer_json, "utf-8"), dtype=torch.uint8)
+         # TODO: pass model_options["vocab_size"] to loader somehow
+         temb_key = "token_embd.weight"
+@@ -492,5 +497,5 @@
+             logging.warning(f"Dequantizing {temb_key} to prevent runtime OOM.")
+             sd[temb_key] = dequantize_tensor(sd[temb_key], dtype=torch.float16)
+-        if arch == "gemma3":
++        if arch in {"gemma3", "gemma4"}:
+             sd = sd_map_replace(sd, GEMMA3_SD_MAP)
+             sd = gemma3_norm_corrections(sd)

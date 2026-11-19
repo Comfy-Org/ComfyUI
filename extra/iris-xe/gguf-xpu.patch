@@ -1,0 +1,39 @@
+--- a/dequant.py
++++ b/dequant.py
+@@ -1,3 +1,5 @@
+ # (c) City96 || Apache-2.0 (apache.org/licenses/LICENSE-2.0)
++import os
++
+ import gguf
+ import torch
+@@ -21,4 +23,9 @@
+     elif qtype in dequantize_functions:
+         dequant_dtype = dtype if dequant_dtype == "target" else dequant_dtype
++        if (tensor.device.type == "xpu"
++                and qtype in (gguf.GGMLQuantizationType.Q4_K, gguf.GGMLQuantizationType.Q6_K)
++                and os.environ.get("LTX25_IRIS_CPU_UNPACK") == "1"):
++            packed = tensor.data.as_subclass(torch.Tensor).cpu()
++            return dequantize(packed, qtype, oshape, dtype=dequant_dtype).to(dtype).to(tensor.device)
+         return dequantize(tensor.data, qtype, oshape, dtype=dequant_dtype).to(dtype)
+     else:
+--- a/ops.py
++++ b/ops.py
+@@ -3,4 +3,5 @@
+ import torch
+ import logging
++import os
+ 
+ import comfy.ops
+@@ -56,5 +57,11 @@
+ 
+     def to(self, *args, **kwargs):
+-        new = super().to(*args, **kwargs)
++        dtype = args[0] if len(args) == 1 and not kwargs else kwargs.get("dtype")
++        dtype_only = (len(args) == 1 and not kwargs) or (not args and set(kwargs) == {"dtype"})
++        if (self.device.type == "xpu" and dtype_only and dtype == torch.float32
++                and self.dtype == torch.float16 and os.environ.get("LTX25_IRIS_CPU_UNPACK") == "1"):
++            new = self.as_subclass(torch.Tensor).cpu().float().to(self.device).as_subclass(GGMLTensor)
++        else:
++            new = super().to(*args, **kwargs)
+         new.tensor_type = getattr(self, "tensor_type", None)
+         new.tensor_shape = getattr(self, "tensor_shape", new.data.shape)

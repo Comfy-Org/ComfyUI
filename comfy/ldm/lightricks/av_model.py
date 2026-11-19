@@ -1,3 +1,4 @@
+import os
 from typing import Tuple
 import torch
 import torch.nn as nn
@@ -869,6 +870,13 @@ class LTXAVModel(LTXVModel):
         return [v_context, a_context], attention_mask
 
     def _prepare_positional_embeddings(self, pixel_coords, frame_rate, x_dtype):
+        device = pixel_coords[0].device
+        # PyTorch 2.15.0+xpu on Iris Xe raises Level Zero error 45 casting int64 pixel coordinates to float32.
+        if device.type == "xpu" and os.environ.get("LTX25_IRIS_CPU_UNPACK") == "1":
+            coords = [coord.cpu() for coord in pixel_coords]
+            rate = frame_rate.cpu() if torch.is_tensor(frame_rate) else frame_rate
+            tables = self._prepare_positional_embeddings(coords, rate, x_dtype)
+            return [tuple((matrix.to(device), split) for matrix, split in pair) for pair in tables]
         v_pixel_coords = pixel_coords[0]
         v_pe = super()._prepare_positional_embeddings(v_pixel_coords, frame_rate, x_dtype)
 

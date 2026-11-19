@@ -104,6 +104,9 @@ if __name__ == "__main__":
         os.environ["ASCEND_RT_VISIBLE_DEVICES"] = str(args.cuda_device)
         logging.info("Set cuda device to: {}".format(args.cuda_device))
 
+    if args.intel_iris_xe:
+        os.environ["LTX25_IRIS_CPU_UNPACK"] = "1"
+
     if args.oneapi_device_selector is not None:
         os.environ['ONEAPI_DEVICE_SELECTOR'] = args.oneapi_device_selector
         logging.info("Set oneapi device selector to: {}".format(args.oneapi_device_selector))

@@ -1,0 +1,4 @@
+--index-url https://download.pytorch.org/whl/xpu
+torch==2.15.0+xpu
+torchvision==0.29.2+xpu
+torchaudio==2.11.1+xpu

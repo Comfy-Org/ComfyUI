@@ -11,6 +11,7 @@ if TYPE_CHECKING:
 import torch
 from functools import partial
 import collections
+import os
 import math
 import logging
 import comfy.sampler_helpers
@@ -1220,8 +1221,13 @@ class CFGGuider:
     def inner_sample(self, noise, latent_image, device, sampler, sigmas, denoise_mask, callback, disable_pbar, seed, latent_shapes=None):
         self.inner_model.latent_shapes = latent_shapes
 
-        if latent_image is not None and torch.count_nonzero(latent_image) > 0: #Don't shift the empty latent image.
+        # PyTorch 2.15.0+xpu on Iris Xe fails count_nonzero with Level Zero error 45.
+        count_input = latent_image
+        if latent_image is not None and latent_image.device.type == "xpu" and os.environ.get("LTX25_IRIS_CPU_UNPACK") == "1":
+            count_input = latent_image.cpu()
+        if count_input is not None and torch.count_nonzero(count_input) > 0: #Don't shift the empty latent image.
             latent_image = self.inner_model.process_latent_in(latent_image)
+        del count_input
 
         self.conds = process_conds(self.inner_model, noise, self.conds, device, latent_image, denoise_mask, seed, latent_shapes=latent_shapes)
 
