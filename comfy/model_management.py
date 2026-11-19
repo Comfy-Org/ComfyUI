@@ -1265,7 +1265,8 @@ def text_encoder_compute_dtype(device=None):
     # plain FMA at a fraction of the bf16 rate; compute in bf16 there.
     if args.fp32_text_enc_compute or args.force_fp32:
         return torch.float32
-    if amd_min_version(device, min_rdna_version=3):
+    # gfx125x passes amd_min_version as "RDNA4" but is not RDNA and has fp32 WMMA.
+    if amd_min_version(device, min_rdna_version=3) and not torch.cuda.get_device_properties(device).gcnArchName.startswith("gfx125"):
         return torch.bfloat16
     return torch.float32
 
