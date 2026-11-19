@@ -102,3 +102,48 @@ jobs:
         env:
           RUNPOD_API_KEY: ${{ secrets.RUNPOD_API_KEY }}
           GCS_SERVICE_ACCOUNT_JSON: ${{ secrets.GCS_SERVICE_ACCOUNT_JSON }}
+
+      # run_regression.py's own exit code (what the step above just acted on)
+      # only turns non-zero for a confirmed `fail`/`execution_error` verdict,
+      # or, on the worker's nightly/weekly lanes only, a workflow that stayed
+      # untested. This push-triggered lane isn't one of those, so a run where
+      # every workflow comes back `no_baseline` (this lane has no golden
+      # reference to compare against yet) or `infra_error` (the backend never
+      # produced a comparable result) exits 0 from the action: a green check
+      # that compared nothing. A gate must not pass vacuously on an empty or
+      # wrong corpus, so re-open the action's own summary (written by
+      # --summary-out before it exits, whatever the verdict) and fail here
+      # instead. `if: always()` is deliberate: it makes this step run even
+      # when the step above already failed on a confirmed regression, so the
+      # categories below stay distinct instead of the job quietly stopping
+      # after the first failure with only part of the picture reported.
+      - name: Reject a vacuous pass (no goldens, or infra broke the run)
+        if: always() && needs.preflight.outputs.configured == 'true'
+        run: |
+          summary="$RUNNER_TEMP/summary.json"
+          if [ ! -f "$summary" ]; then
+            echo "::error::GPU regression summary not found at $summary -- the action did not publish a result, so nothing was verified."
+            exit 1
+          fi
+
+          # workflow_id -> verdict, bucketed. A `no_baseline`/`infra_error`
+          # verdict means "this workflow was not checked", which must never
+          # be reported the same way as a `fail`/`execution_error` verdict,
+          # which means "this workflow regressed".
+          failed=$(jq -r '.workflows | to_entries[] | select(.value.verdict == "fail" or .value.verdict == "execution_error") | .key' "$summary")
+          no_baseline=$(jq -r '.workflows | to_entries[] | select(.value.verdict == "no_baseline") | .key' "$summary")
+          infra_error=$(jq -r '.workflows | to_entries[] | select(.value.verdict == "infra_error") | .key' "$summary")
+
+          if [ -n "$failed" ]; then
+            echo "::error::GPU regression confirmed a regression in: $(echo "$failed" | tr '\n' ' ')"
+          fi
+          if [ -n "$no_baseline" ]; then
+            echo "::error::GPU regression has no golden reference to compare against for: $(echo "$no_baseline" | tr '\n' ' ') -- these workflows were not verified, not confirmed passing."
+          fi
+          if [ -n "$infra_error" ]; then
+            echo "::error::GPU regression hit an infrastructure error (not a confirmed regression) for: $(echo "$infra_error" | tr '\n' ' ')."
+          fi
+
+          if [ -n "$failed$no_baseline$infra_error" ]; then
+            exit 1
+          fi
