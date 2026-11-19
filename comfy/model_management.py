@@ -442,8 +442,8 @@ def amd_min_version(device=None, min_rdna_version=0):
     if is_device_cpu(device):
         return False
 
-    arch = torch.cuda.get_device_properties(device).gcnArchName
-    if arch.startswith('gfx') and len(arch) == 7:
+    arch = torch.cuda.get_device_properties(device).gcnArchName.split(':')[0]
+    if arch.startswith('gfx') and len(arch) == 7 and not arch.startswith('gfx125'):  # gfx125x is not RDNA
         try:
             cmp_rdna_version = int(arch[4]) + 2
         except:
@@ -1265,8 +1265,7 @@ def text_encoder_compute_dtype(device=None):
     # plain FMA at a fraction of the bf16 rate; compute in bf16 there.
     if args.fp32_text_enc_compute or args.force_fp32:
         return torch.float32
-    # gfx125x passes amd_min_version as "RDNA4" but is not RDNA and has fp32 WMMA.
-    if amd_min_version(device, min_rdna_version=3) and not torch.cuda.get_device_properties(device).gcnArchName.startswith("gfx125"):
+    if amd_min_version(device, min_rdna_version=3):
         return torch.bfloat16
     return torch.float32
 
