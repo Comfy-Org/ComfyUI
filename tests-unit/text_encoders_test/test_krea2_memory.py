@@ -6,6 +6,11 @@ from unittest.mock import Mock, patch
 
 import torch
 
+from comfy.cli_args import args
+
+if not torch.cuda.is_available():
+    args.cpu = True
+
 import comfy.sd
 from comfy.text_encoders import krea2, qwen3vl
 
