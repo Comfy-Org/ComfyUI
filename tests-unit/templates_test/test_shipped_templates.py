@@ -205,14 +205,57 @@ def slot_name(slot: dict[str, Any]) -> str | None:
     return (slot.get("widget") or {}).get("name") or slot.get("name")
 
 
+def autogrow_names(entry: Any) -> list[str] | None:
+    """The concrete child names an Autogrow input accepts, or None if `entry` isn't one.
+
+    Autogrow's child names are fixed by the class declaration itself (a
+    `TemplateNames` list or a `TemplatePrefix` range) -- never by what a
+    particular template instance happens to use -- so they can be read
+    straight off the static schema, with no live node state needed.
+    """
+    if not isinstance(entry, (list, tuple)) or len(entry) < 2 or entry[0] != "COMFY_AUTOGROW_V3":
+        return None
+    template = (entry[1] or {}).get("template") or {}
+    if "names" in template:
+        return list(template["names"])
+    if "prefix" in template:
+        return [f"{template['prefix']}{i}" for i in range(template.get("max", 0))]
+    return None
+
+
+def autogrow_child_type(entry: Any) -> Any | None:
+    """The declared type every child of an Autogrow input shares.
+
+    Every name an Autogrow template produces clones the same template input,
+    so there is exactly one child type to find, regardless of which name is
+    asked about.
+    """
+    template = (entry[1] or {}).get("template") or {}
+    inner = template.get("input") or {}
+    for section in ("required", "optional"):
+        for inner_entry in (inner.get(section) or {}).values():
+            return inner_entry[0]
+    return None
+
+
 def declares(declared: dict[str, Any], name: str) -> bool:
     """Whether `name` is one of the node's inputs.
 
     A V3 dynamic input contributes `<name>.<sub>` slots -- `values.a` on an
     autogrow, `format.bit_depth` once a dynamic combo picks png -- which the
-    class declares only under the parent name.
+    class declares only under the parent name. For an Autogrow parent, `<sub>`
+    is checked against its actual declared names, since those are statically
+    known and a removed one should not keep passing just because `values`
+    itself is still declared.
     """
-    return name in declared or name.split(".")[0] in declared
+    if name in declared:
+        return True
+    parent, _, child = name.partition(".")
+    entry = declared.get(parent)
+    names = autogrow_names(entry)
+    if names is not None:
+        return child in names
+    return entry is not None
 
 
 def type_names(declared_type: Any) -> set[str]:
@@ -230,7 +273,18 @@ def types_connect(source: Any, target: Any) -> bool:
 
 
 def input_type(declared: dict[str, Any], name: str) -> Any | None:
-    entry = declared.get(name) or declared.get(name.split(".")[0])
+    """The type `name` resolves to, favoring an Autogrow child's own type over its parent's marker.
+
+    `accepted_type` otherwise sees the parent's `COMFY_AUTOGROW_V3` wildcard
+    for every child, which `types_connect` treats as "accepts anything" --
+    silently skipping a real mismatch on a retyped child.
+    """
+    entry = declared.get(name)
+    if entry is None:
+        parent = declared.get(name.split(".")[0])
+        if autogrow_names(parent) is not None:
+            return autogrow_child_type(parent)
+        entry = parent
     if isinstance(entry, (list, tuple)) and entry:
         return entry[0]
     return None
@@ -479,11 +533,43 @@ def test_types_connect_follows_comfyuis_own_rules(source, target, connects):
 
 
 def test_a_dynamic_inputs_sub_slots_count_as_declared():
-    """format.bit_depth and values.a exist on the node, not in the class."""
-    declared = {"format": ["COMFY_DYNAMICCOMBO_V3"], "values": ["COMFY_AUTOGROW_V3"]}
+    """format.bit_depth exists on the node, not the class; values.a only while the template still names it."""
+    declared = {
+        "format": ("COMFY_DYNAMICCOMBO_V3", {}),
+        "values": (
+            "COMFY_AUTOGROW_V3",
+            {"template": {"names": ["a", "b"], "input": {"required": {"value": ("IMAGE", {})}}}},
+        ),
+    }
     assert declares(declared, "format.bit_depth")
     assert declares(declared, "values.a")
+    assert declares(declared, "values.b")
+    assert not declares(declared, "values.c")
     assert not declares(declared, "quality")
+
+
+def test_an_autogrow_prefix_templates_names_from_its_range():
+    declared = {
+        "rows": (
+            "COMFY_AUTOGROW_V3",
+            {"template": {"prefix": "row_", "max": 2, "input": {"required": {"row": ("STRING", {})}}}},
+        ),
+    }
+    assert declares(declared, "rows.row_0")
+    assert declares(declared, "rows.row_1")
+    assert not declares(declared, "rows.row_2")
+
+
+def test_a_retyped_autogrow_child_is_not_hidden_behind_the_parent_marker():
+    """values.a resolves to the template's own type, not the COMFY_AUTOGROW_V3 wildcard."""
+    declared = {
+        "values": (
+            "COMFY_AUTOGROW_V3",
+            {"template": {"names": ["a"], "input": {"required": {"value": ("IMAGE", {})}}}},
+        ),
+    }
+    assert input_type(declared, "values.a") == "IMAGE"
+    assert not types_connect("LATENT", input_type(declared, "values.a"))
 
 
 @pytest.mark.parametrize(
