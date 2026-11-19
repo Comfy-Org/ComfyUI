@@ -32,14 +32,20 @@ class VideoInput(ABC):
         crf: float | None = None,
         color_space: str | None = None,
         preset: str | None = None,
+        chroma_subsampling: str | None = None,
     ):
         """
         Abstract method to save the video input to a file.
 
-        bit_depth selects the encoded bit depth; None keeps the video's native depth.
+        bit_depth requests the encoded bit depth; unsupported depths use the encoder's highest
+        supported depth with a warning. None keeps the video's native depth where supported.
         crf selects the H.264 or AV1 constant rate factor; None uses 18 for H.264 or 24 for AV1 when encoding.
         preset selects the H.264 encoder speed/compression trade-off (e.g. "ultrafast");
         None uses the encoder default. Ignored for other codecs.
+        chroma_subsampling selects 444, 422, or 420. None keeps the video's requested or native
+        subsampling; unspecified tensor inputs use 444 for ProRes and 420 for H.264/AV1.
+        An explicit choice forces re-encoding. Unsupported choices use the closest supported mode
+        with a warning.
         color_space="sRGB" selects SDR BT.709/sRGB, "HDR" selects BT.2020/HLG, and "HDR PQ"
         selects BT.2020/PQ. Bit depth is selected independently.
         Tensor-created videos default to sRGB when color_space is None. Loaded videos keep matching recognized native color
@@ -50,6 +56,10 @@ class VideoInput(ABC):
     def get_color_space(self) -> str:
         """Return the video's color space as sRGB, HDR, HDR PQ, or auto when unspecified."""
         return "auto"
+
+    def get_chroma_subsampling(self) -> str | None:
+        """Return requested or native chroma subsampling, or None for codec defaults."""
+        return None
 
     @abstractmethod
     def as_trimmed(
@@ -103,6 +113,7 @@ class VideoInput(ABC):
                 else None,
             ),
             bit_depth=self.get_bit_depth(),
+            chroma_subsampling=self.get_chroma_subsampling(),
         )
 
     def get_stream_source(self) -> Union[str, io.BytesIO]:

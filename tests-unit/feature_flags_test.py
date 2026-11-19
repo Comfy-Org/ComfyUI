@@ -10,8 +10,9 @@ from comfy_api.feature_flags import (
     SERVER_FEATURE_FLAGS,
     _coerce_flag_value,
     _parse_cli_feature_flags,
+    _server_feature_flags,
 )
-from comfy.comfy_api_env import (
+from app.comfy_api_env import (
     environment_overrides_for_base,
     get_environment_overrides,
     normalize_comfy_api_base,
@@ -160,6 +161,11 @@ class TestParseCliFeatureFlags:
         result = _parse_cli_feature_flags()
         assert result == {"show_signin_button": True}
 
+    @pytest.mark.parametrize("key", ["partner_node_token", "local_web_sso"])
+    def test_frontend_strict_bool_flags_parse_to_bool(self, monkeypatch, key):
+        monkeypatch.setattr("comfy_api.feature_flags.args", type("Args", (), {"feature_flag": [f"{key}=true"]})())
+        assert _parse_cli_feature_flags()[key] is True
+
     def test_missing_equals_defaults_to_true(self, monkeypatch):
         """Bare flag without '=' is treated as the string 'true' (and coerced if registered)."""
         monkeypatch.setattr("comfy_api.feature_flags.args", type("Args", (), {"feature_flag": ["show_signin_button", "valid=1"]})())
@@ -187,6 +193,25 @@ class TestParseCliFeatureFlags:
 
 class TestCliFeatureFlagRegistry:
     """Test suite for the CLI feature flag registry."""
+
+    @pytest.mark.parametrize("key", ["partner_node_token", "local_web_sso"])
+    def test_local_sso_flags_are_on_by_default(self, key):
+        assert CLI_FEATURE_FLAG_REGISTRY[key]["default"] is True
+
+    def test_server_features_report_registry_defaults(self, monkeypatch):
+        monkeypatch.setattr("comfy_api.feature_flags.args", type("Args", (), {"feature_flag": []})())
+        features = _server_feature_flags()
+        for key, info in CLI_FEATURE_FLAG_REGISTRY.items():
+            assert features[key] == info["default"], key
+
+    @pytest.mark.parametrize("key", ["partner_node_token", "local_web_sso"])
+    def test_cli_flag_turns_a_default_on_flag_off(self, monkeypatch, key):
+        monkeypatch.setattr("comfy_api.feature_flags.args", type("Args", (), {"feature_flag": [f"{key}=false"]})())
+        assert _server_feature_flags()[key] is False
+
+    def test_cli_flags_cannot_override_core_flags(self, monkeypatch):
+        monkeypatch.setattr("comfy_api.feature_flags.args", type("Args", (), {"feature_flag": ["node_replacements=false"]})())
+        assert _server_feature_flags()["node_replacements"] is True
 
     def test_registry_entries_have_required_fields(self):
         for key, info in CLI_FEATURE_FLAG_REGISTRY.items():
@@ -232,7 +257,7 @@ class TestComfyApiEnv:
     def test_environment_overrides_only_for_staging_tier(self, monkeypatch):
         def set_base(url):
             monkeypatch.setattr(
-                "comfy.comfy_api_env.args",
+                "app.comfy_api_env.args",
                 type("Args", (), {"comfy_api_base": url})(),
             )
 
@@ -248,7 +273,7 @@ class TestComfyApiEnv:
     def test_server_features_never_carry_env_overrides(self, monkeypatch):
         """The WebSocket capability handshake must stay free of routing keys."""
         monkeypatch.setattr(
-            "comfy.comfy_api_env.args",
+            "app.comfy_api_env.args",
             type("Args", (), {"comfy_api_base": "https://pr-7.testenvs.comfy.org"})(),
         )
         features = get_server_features()

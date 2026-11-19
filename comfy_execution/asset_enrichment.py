@@ -60,8 +60,29 @@ def _enrich_in_place(
                 result = register(abs_path, job_id)
                 if result is not None:
                     entry["id"] = result.id
+                    if result.preview_id:
+                        entry["preview_id"] = result.preview_id
             except Exception:
                 logging.warning("Asset registration failed for output: %s", entry.get("filename"), exc_info=True)
+
+
+def take_asset_previews(output_ui: dict) -> dict[str, dict]:
+    """Pop the previews save nodes named for their outputs, by output path, so none reaches clients or the cache."""
+    previews: dict[str, dict] = {}
+    for entries in output_ui.values():
+        if not isinstance(entries, list):
+            continue
+        for entry in entries:
+            if not isinstance(entry, dict) or "asset_preview" not in entry:
+                continue
+            preview = entry.pop("asset_preview")
+            try:
+                abs_path = _resolve_output_path(entry)
+            except Exception:
+                continue
+            if abs_path is not None:
+                previews[abs_path] = preview
+    return previews
 
 
 def _strip_ids(output_ui: dict) -> None:
@@ -71,14 +92,20 @@ def _strip_ids(output_ui: dict) -> None:
         for entry in entries:
             if isinstance(entry, dict):
                 entry.pop("id", None)
+                entry.pop("preview_id", None)
 
 
-def register_executed_outputs(output_ui: dict, job_id: str, asset_manager: "AssetManager") -> dict:
+def register_executed_outputs(output_ui: dict, job_id: str, asset_manager: "AssetManager", asset_previews: dict[str, dict] | None = None) -> dict:
     enriched = copy.deepcopy(output_ui)
     if not asset_manager.enabled:
         return enriched
 
-    _enrich_in_place(enriched, job_id, asset_manager.register_executed_output)
+    previews = asset_previews or {}
+    _enrich_in_place(
+        enriched,
+        job_id,
+        lambda path, job: asset_manager.register_executed_output(path, job, preview_ref=previews.get(path)),
+    )
     return enriched
 
 
@@ -99,17 +126,20 @@ def register_cached_outputs(ui_wrapper: dict | None, job_id: str, asset_manager:
     return enriched
 
 
-def emit_cached_output(server: "ExecutionServer", node_id: str, display_node_id: str, cached: "CacheEntry", prompt_id: str, ui_outputs: dict, asset_manager: "AssetManager") -> None:
+def emit_cached_output(server: "ExecutionServer", node_id: str, meta: dict, cached: "CacheEntry", prompt_id: str, ui_outputs: dict, asset_manager: "AssetManager") -> None:
     if node_id in ui_outputs:
         return
     enriched = register_cached_outputs(cached.ui, prompt_id, asset_manager)
     if enriched is not None:
+        # The cache entry may have been written by another node with the same
+        # inputs, so record this node's meta rather than the writer's.
+        enriched["meta"] = meta
         ui_outputs[node_id] = enriched
     if server.client_id is None:
         return
     output = enriched.get("output") if enriched is not None else None
     server.send_sync(
         "executed",
-        {"node": node_id, "display_node": display_node_id, "output": output, "prompt_id": prompt_id},
+        {"node": node_id, "display_node": meta["display_node"], "output": output, "prompt_id": prompt_id},
         server.client_id,
     )

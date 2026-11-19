@@ -36,11 +36,11 @@ import logging
 
 import mimetypes
 from comfy.cli_args import args
-from comfy.deploy_environment import get_deploy_environment
 import comfy.utils
 import comfy.model_management
 from comfy_api import feature_flags
-from comfy.comfy_api_env import get_environment_overrides
+from app.comfy_api_env import get_environment_overrides
+from app.deploy_environment import get_deploy_environment
 import node_helpers
 from comfyui_version import __version__
 from app.frontend_management import FrontendManager, parse_version
@@ -49,17 +49,22 @@ from app.assets.event_log import emit
 from app.database.db import dependencies_available
 
 if dependencies_available():
+    from app.assets.previews import generate_upload_preview
     from app.assets.services.asset_management import (
         get_export_file,
+        get_preview_file_paths,
         list_job_export_files,
         resolve_hash_to_path,
     )
+    from app.assets.services.preview_rules import preview_fields
     from app.asset_export import AssetExportManager
 
+from app import agent_host
 from app.user_manager import UserManager
 from app.model_manager import ModelFileManager
 from app.custom_node_manager import CustomNodeManager
 from app.subgraph_manager import SubgraphManager
+from app import deploy_to_cloud
 from app.node_replace_manager import NodeReplaceManager
 from typing import TYPE_CHECKING, Optional, Union
 from api_server.routes.internal.internal_routes import InternalRoutes
@@ -263,6 +268,7 @@ class PromptServer():
         self.subgraph_manager = SubgraphManager()
         self.node_replace_manager = NodeReplaceManager()
         self.internal_routes = InternalRoutes(self)
+        self.deploy_to_cloud_routes = deploy_to_cloud.DeployToCloudRoutes(self)
         self.supports = ["custom_nodes_from_web"]
         self.prompt_queue = execution.PromptQueue(self)
         self.loop = loop
@@ -456,6 +462,11 @@ class PromptServer():
             return False
 
         def image_upload(post, image_save_function=None):
+            resp, _, _ = store_image_upload(post, image_save_function)
+            return resp if isinstance(resp, web.Response) else web.json_response(resp)
+
+        def store_image_upload(post, image_save_function=None):
+            """(response dict or error Response, registered asset view or None, file path)."""
             image = post.get("image")
             overwrite = post.get("overwrite")
             image_is_duplicate = False
@@ -466,14 +477,14 @@ class PromptServer():
             if image and image.file:
                 filename = image.filename
                 if not filename:
-                    return web.Response(status=400)
+                    return web.Response(status=400), None, None
 
                 subfolder = post.get("subfolder", "")
                 full_output_folder = os.path.join(upload_dir, os.path.normpath(subfolder))
                 filepath = os.path.abspath(os.path.join(full_output_folder, filename))
 
                 if os.path.commonpath((upload_dir, filepath)) != upload_dir:
-                    return web.Response(status=400)
+                    return web.Response(status=400), None, None
 
                 if not os.path.exists(full_output_folder):
                     os.makedirs(full_output_folder)
@@ -518,14 +529,25 @@ class PromptServer():
                         "tags": view.tags,
                     }
 
-                return web.json_response(resp)
+                return resp, view, filepath
             else:
-                return web.Response(status=400)
+                return web.Response(status=400), None, None
 
         @routes.post("/upload/image")
         async def upload_image(request):
             post = await request.post()
-            return image_upload(post)
+            resp, view, filepath = store_image_upload(post)
+            if view is not None:
+                preview_id = await generate_upload_preview(view.asset.id, filepath, view.asset.preview_id)
+                live_previews = get_preview_file_paths([preview_id]) if preview_id else {}
+                preview_id, preview_url = preview_fields(
+                    view.asset.id, preview_id, view.mime_type, filepath, False, live_previews
+                )
+                if preview_url is not None:
+                    resp["asset"]["preview_url"] = preview_url
+                if preview_id is not None:
+                    resp["asset"]["preview_id"] = preview_id
+            return resp if isinstance(resp, web.Response) else web.json_response(resp)
 
 
         @routes.post("/upload/mask")
@@ -809,6 +831,10 @@ class PromptServer():
             if overrides:
                 features.update(overrides)
             return web.json_response(features)
+
+        @routes.get("/default_workflow")
+        async def get_default_workflow(request):
+            return web.FileResponse(os.path.join(os.path.dirname(os.path.realpath(__file__)), "default_workflow.json"), headers={"Cache-Control": "no-cache"})
 
         @routes.get("/prompt")
         async def get_prompt(request):
@@ -1202,6 +1228,9 @@ class PromptServer():
                             sensitive[sensitive_val] = extra_data.pop(sensitive_val)
                     extra_data["create_time"] = int(time.time() * 1000)  # timestamp in milliseconds
                     self.prompt_queue.put((number, prompt_id, prompt, extra_data, outputs_to_execute, sensitive))
+                    # The frontend can queue with an empty client_id before its socket id arrives.
+                    if not json_data.get("client_id") and extra_data.get("comfy_usage_source") != "comfyui-frontend":
+                        deploy_to_cloud.mark_used_headlessly()
                     response = {"prompt_id": prompt_id, "number": number, "node_errors": valid[3]}
                     return web.json_response(response)
                 else:
@@ -1291,6 +1320,12 @@ class PromptServer():
         self.client_session = aiohttp.ClientSession(timeout=timeout)
 
     def add_routes(self):
+        # The comfy-agent host mounts its own /api/agent and /api/workflows
+        # routes (the proxy + trust boundary now live in the wheel). Do it before
+        # the '/' static catch-all below so those prefixes win, and before the
+        # router freezes in start_multi_address().
+        if args.enable_agent:
+            agent_host.register(self.app)
         self.user_manager.add_routes(self.routes)
         self.model_file_manager.add_routes(self.routes)
         self.custom_node_manager.add_routes(self.routes, self.app, nodes.LOADED_MODULE_DIRS.items())
@@ -1311,6 +1346,8 @@ class PromptServer():
                 api_routes.route(route.method, "/api" + route.path)(route.handler, **route.kwargs)
         self.app.add_routes(api_routes)
         self.app.add_routes(self.routes)
+        # Registered after the /api duplication above, so these exist only under /api.
+        self.deploy_to_cloud_routes.add_routes(self.app)
 
         # Add routes from web extensions.
         for name, dir in nodes.EXTENSION_WEB_DIRS.items():

@@ -23,11 +23,14 @@ import torch.nn.functional as F
 from einops import rearrange
 from torch import nn
 import comfy.model_management
+import comfy.ops
 
 from comfy.ldm.lightricks.model import get_timestep_embedding
 from .causal_video_autoencoder import Encoder, processor
 
 import comfy_kitchen
+
+ops = comfy.ops.disable_weight_init
 
 # Token chunk for the SwiGLU MLP (bounds the [chunk, hidden] workspace).
 MLP_TOKEN_CHUNK = 65536
@@ -123,8 +126,8 @@ class NeighborhoodAttention3D(nn.Module):
         self.rope_split = default_rope_dim_split(head_dim)
         self.rope_base = rope_base
 
-        self.qkv = nn.Linear(dim, dim * 3, bias=True)
-        self.proj = nn.Linear(dim, dim, bias=True)
+        self.qkv = ops.Linear(dim, dim * 3, bias=True)
+        self.proj = ops.Linear(dim, dim, bias=True)
         self.q_norm = RMSNorm(head_dim, eps=1e-6)
         self.k_norm = RMSNorm(head_dim, eps=1e-6)
 
@@ -177,9 +180,9 @@ class SwiGLU(nn.Module):
 
     def __init__(self, dim, hidden_dim):
         super().__init__()
-        self.w_up = nn.Linear(dim, hidden_dim, bias=False)
-        self.w_gate = nn.Linear(dim, hidden_dim, bias=False)
-        self.w_down = nn.Linear(hidden_dim, dim, bias=False)
+        self.w_up = ops.Linear(dim, hidden_dim, bias=False)
+        self.w_gate = ops.Linear(dim, hidden_dim, bias=False)
+        self.w_down = ops.Linear(hidden_dim, dim, bias=False)
 
     def forward(self, x, pre=None, add_to=None):
         """``pre``/``add_to`` as in ``NeighborhoodAttention3D.forward``."""
@@ -224,7 +227,7 @@ class AdaLNZero(nn.Module):
 
     def __init__(self, dim, t_emb_dim):
         super().__init__()
-        self.proj = nn.Linear(t_emb_dim, self.NUM_CHUNKS * dim, bias=True)
+        self.proj = ops.Linear(t_emb_dim, self.NUM_CHUNKS * dim, bias=True)
 
     def forward(self, t_emb):
         h = self.proj(F.silu(t_emb))
@@ -236,7 +239,7 @@ class DiffusionNABlock(nn.Module):
 
     def __init__(self, dim, kernel_size, context_channels, head_dim=64, mlp_ratio=4.0):
         super().__init__()
-        self.context_proj = nn.Linear(context_channels, dim, bias=True)
+        self.context_proj = ops.Linear(context_channels, dim, bias=True)
         self.scale_shift_table = nn.Parameter(torch.zeros(AdaLNZero.NUM_CHUNKS, dim))
         self.norm1 = RMSNorm(dim, eps=1e-6)
         self.attn = NeighborhoodAttention3D(dim, kernel_size, head_dim=head_dim)
@@ -245,8 +248,9 @@ class DiffusionNABlock(nn.Module):
         self.mlp = SwiGLU(dim, hidden)
 
     def forward(self, x, latent_context, modulation):
+        table = comfy.ops.cast_to_input(self.scale_shift_table, modulation[0], copy=False)
         scale_msa, shift_msa, _, scale_mlp, shift_mlp, _, _ = [
-            modulation[i] + self.scale_shift_table[i].view(1, 1, 1, 1, -1) for i in range(AdaLNZero.NUM_CHUNKS)
+            modulation[i] + table[i].view(1, 1, 1, 1, -1) for i in range(AdaLNZero.NUM_CHUNKS)
         ]
         chunk = max(1, MLP_TOKEN_CHUNK // max(x.shape[2] * x.shape[3], 1))
         for t0 in range(0, x.shape[1], chunk):
@@ -263,7 +267,7 @@ class LinearPixelShuffleUpsample(nn.Module):
         self.stride = tuple(stride)
         proj_out_channels = math.prod(stride) * in_channels // out_channels_reduction_factor
         self.out_channels = proj_out_channels // math.prod(stride)
-        self.proj = nn.Linear(in_channels, proj_out_channels, bias=True)
+        self.proj = ops.Linear(in_channels, proj_out_channels, bias=True)
 
     def forward(self, x, drop_leading_frame=True):
         batch, t, h, w, _ = x.shape
@@ -289,9 +293,9 @@ class TimestepEmbedder(nn.Module):
         super().__init__()
         self.freq_dim = freq_dim
         self.mlp = nn.Sequential(
-            nn.Linear(freq_dim, t_emb_dim, bias=True),
+            ops.Linear(freq_dim, t_emb_dim, bias=True),
             nn.SiLU(),
-            nn.Linear(t_emb_dim, t_emb_dim, bias=True),
+            ops.Linear(t_emb_dim, t_emb_dim, bias=True),
         )
 
     def forward(self, timestep, dtype):
@@ -339,7 +343,7 @@ class NADiffusionDecoder(nn.Module):
         # frame through stages 1-4, crop the appendix off the context after.
         self.trailing_pad_latent_frames = (stage_kernels[0][0] // 2) * 2
 
-        self.conv_in = nn.Linear(in_channels, stage_channels[0], bias=True)
+        self.conv_in = ops.Linear(in_channels, stage_channels[0], bias=True)
 
         self.det_stages = nn.ModuleList()
         self.upsamples = nn.ModuleList()
@@ -356,14 +360,14 @@ class NADiffusionDecoder(nn.Module):
         c5 = stage_channels[-1]
         self.context_channels = c5
         noised_pixel_channels = out_channels * (patch_size ** 2)
-        self.conv_in_x_t = nn.Linear(noised_pixel_channels, c5, bias=True)
+        self.conv_in_x_t = ops.Linear(noised_pixel_channels, c5, bias=True)
         self.shared_adaln = AdaLNZero(c5, t_emb_dim)
         self.diff_blocks = nn.ModuleList([
             DiffusionNABlock(c5, stage5_kernel, context_channels=c5, head_dim=head_dim)
             for _ in range(stage_depths[-1])
         ])
         self.norm_out = RMSNorm(c5, eps=1e-6)
-        self.conv_out = nn.Linear(c5, noised_pixel_channels, bias=True)
+        self.conv_out = ops.Linear(c5, noised_pixel_channels, bias=True)
 
     def forward_pre_diffusion(self, z, drop_leading_frame=True, pad_trailing=True):
         """Stages 1-4: latent -> stage-5 context, channels-last.
