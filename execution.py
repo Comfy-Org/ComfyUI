@@ -41,8 +41,8 @@ from comfy_execution.graph import (
 )
 from comfy_execution.graph_utils import GraphBuilder, is_link
 from comfy_execution.validation import LoopValidationError, validate_loops, validate_node_input
-from comfy_execution.progress import get_progress_state, reset_progress_state, add_progress_handler, WebUIProgressHandler
-from comfy_execution.utils import CurrentNodeContext
+from comfy_execution.progress import get_progress_state, reset_progress_state, activate_progress_state, clear_progress_state, add_progress_handler, WebUIProgressHandler
+from comfy_execution.utils import CurrentNodeContext, current_prompt_id
 from comfy_execution.asset_enrichment import register_executed_outputs, emit_cached_output, take_asset_previews
 from comfy_execution.media_enrichment import enrich_output_with_media_metadata
 from comfy_api.internal import _ComfyNodeInternal, _NodeOutputInternal, first_real_override, is_class, make_locked_method_func
@@ -736,6 +736,7 @@ class PromptExecutor:
         asyncio.run(self.execute_async(prompt, prompt_id, extra_data, execute_outputs))
 
     async def execute_async(self, prompt, prompt_id, extra_data={}, execute_outputs=[]):
+        current_prompt_id.set(prompt_id)
         set_preview_method(extra_data.get("preview_method"))
 
         nodes.interrupt_processing(False)
@@ -758,7 +759,8 @@ class PromptExecutor:
         try:
             with torch.inference_mode():
                 dynamic_prompt = DynamicPrompt(prompt)
-                reset_progress_state(prompt_id, dynamic_prompt)
+                reset_progress_state(prompt_id, dynamic_prompt, self.server.client_id)
+                activate_progress_state(prompt_id)
                 add_progress_handler(WebUIProgressHandler(self.server))
                 is_changed_cache = IsChangedCache(prompt_id, dynamic_prompt, self.caches.outputs)
                 for cache in self.caches.all:
@@ -844,6 +846,7 @@ class PromptExecutor:
                 if comfy.model_management.DISABLE_SMART_MEMORY:
                     comfy.model_management.unload_all_models()
         finally:
+            clear_progress_state(prompt_id)
             if self.cache_type == CacheType.RAM_PRESSURE:
                 detail("RAM cache evictions: prompt=%s active=%s full=%s", prompt_id, self.caches.outputs.active_evictions, self.caches.outputs.full_evictions)
             comfy.memory_management.set_ram_cache_release_state(None, 0)
