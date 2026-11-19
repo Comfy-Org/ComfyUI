@@ -253,6 +253,8 @@ This is the command to install the Pytorch xpu nightly which might have some per
 
 ```pip install --pre torch torchvision torchaudio --index-url https://download.pytorch.org/whl/nightly/xpu```
 
+For LTX on Iris Xe integrated graphics, see the [experimental Linux installation and launch instructions](extra/iris-xe/README.md) for `--intel-iris-xe`.
+
 ### NVIDIA
 
 Nvidia users should install stable pytorch using this command:
