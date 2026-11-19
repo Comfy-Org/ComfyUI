@@ -108,6 +108,7 @@ fpte_group.add_argument("--fp8_e5m2-text-enc", action="store_true", help="Store 
 fpte_group.add_argument("--fp16-text-enc", action="store_true", help="Store text encoder weights in fp16.")
 fpte_group.add_argument("--fp32-text-enc", action="store_true", help="Store text encoder weights in fp32.")
 fpte_group.add_argument("--bf16-text-enc", action="store_true", help="Store text encoder weights in bf16.")
+parser.add_argument("--fp32-text-enc-compute", action="store_true", help="Always compute text encoders in fp32. By default AMD RDNA3 and newer compute them in bf16.")
 
 parser.add_argument("--fp16-intermediates", action="store_true", help="Experimental: Use fp16 for intermediate tensors between nodes instead of fp32.")
 

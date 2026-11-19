@@ -895,11 +895,11 @@ class Qwen35(BaseLlama, BaseGenerate, torch.nn.Module):
         if embed["type"] == "image":
             # Qwen3.5 normalizes to [-1, 1] (mean/std 0.5), same as Qwen3-VL.
             image, grid = comfy.text_encoders.qwen_vl.process_qwen2vl_images(embed["data"], patch_size=16, image_mean=[0.5, 0.5, 0.5], image_std=[0.5, 0.5, 0.5])
-            return self.visual(image.to(device, dtype=torch.float32), grid), grid
+            return self.visual(image.to(device, dtype=comfy.model_management.text_encoder_compute_dtype(device)), grid), grid
         if embed["type"] == "video":
             height, width = embed["size"]
             video, grid = comfy.text_encoders.qwen_vl.process_qwen2vl_video(embed["data"], height, width, patch_size=16, image_mean=[0.5, 0.5, 0.5], image_std=[0.5, 0.5, 0.5])
-            return self.visual(video.to(device, dtype=torch.float32), grid), grid
+            return self.visual(video.to(device, dtype=comfy.model_management.text_encoder_compute_dtype(device)), grid), grid
         return None, None
 
     def forward(self, x, attention_mask=None, embeds=None, num_tokens=None, intermediate_output=None, final_layer_norm_intermediate=True, dtype=None, embeds_info=[], past_key_values=None):

@@ -1260,6 +1260,16 @@ def text_encoder_dtype(device=None):
     return torch.float16
 
 
+def text_encoder_compute_dtype(device=None):
+    # Text encoders run in fp32. RDNA3 and newer have no fp32 WMMA, so fp32 GEMM / attention fall back to
+    # plain FMA at a fraction of the bf16 rate; compute in bf16 there.
+    if args.fp32_text_enc_compute or args.force_fp32:
+        return torch.float32
+    if amd_min_version(device, min_rdna_version=3):
+        return torch.bfloat16
+    return torch.float32
+
+
 def intermediate_device():
     if args.gpu_only:
         return get_torch_device()
