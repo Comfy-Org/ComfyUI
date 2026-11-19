@@ -41,11 +41,11 @@ def validate_image_aspect_ratio(
     strict: bool = True,  # True -> (min, max); False -> [min, max]
 ) -> float:
     """Validates that image aspect ratio is within min and max. If a bound is None, that side is not checked."""
-    w, h = get_image_dimensions(image)
+    h, w = get_image_dimensions(image)
     if w <= 0 or h <= 0:
         raise ValueError(f"Invalid image dimensions: {w}x{h}")
     ar = w / h
-    _assert_ratio_bounds(ar, min_ratio=min_ratio, max_ratio=max_ratio, strict=strict)
+    _assert_ratio_bounds(ar, f"{w}x{h}", min_ratio=min_ratio, max_ratio=max_ratio, strict=strict)
     return ar
 
 
@@ -64,18 +64,17 @@ def validate_images_aspect_ratio_closeness(
 
     Returns the computed closeness factor C.
     """
-    w1, h1 = get_image_dimensions(first_image)
-    w2, h2 = get_image_dimensions(second_image)
+    h1, w1 = get_image_dimensions(first_image)
+    h2, w2 = get_image_dimensions(second_image)
     if min(w1, h1, w2, h2) <= 0:
         raise ValueError("Invalid image dimensions")
-    ar1 = w1 / h1
-    ar2 = w2 / h2
-    closeness = max(ar1, ar2) / min(ar1, ar2)
+    a, b = w1 * h2, w2 * h1
+    closeness = max(a, b) / min(a, b)
     limit = max(max_rel, 1.0 / min_rel)
     if (closeness >= limit) if strict else (closeness > limit):
         raise ValueError(
-            f"Aspect ratios must be close: ar1/ar2={ar1/ar2:.2g}, "
-            f"allowed range {min_rel}–{max_rel} (limit {limit:.2g})."
+            f"The two images' aspect ratios must differ by {'less than' if strict else 'at most'} {limit:g}x, "
+            f"got {w1}x{h1} and {w2}x{h2}."
         )
     return closeness
 
@@ -89,7 +88,7 @@ def validate_aspect_ratio_string(
 ) -> float:
     """Parses 'X:Y' and validates it against optional bounds. Returns the numeric ratio."""
     ar = _parse_aspect_ratio_string(aspect_ratio)
-    _assert_ratio_bounds(ar, min_ratio=min_ratio, max_ratio=max_ratio, strict=strict)
+    _assert_ratio_bounds(ar, aspect_ratio, min_ratio=min_ratio, max_ratio=max_ratio, strict=strict)
     return ar
 
 
@@ -206,8 +205,13 @@ def _ratio_from_tuple(r: tuple[float, float]) -> float:
     return a / b
 
 
+def _format_ratio(ratio: float) -> str:
+    return f"{ratio:g}:1" if ratio >= 1 else f"1:{1 / ratio:g}"
+
+
 def _assert_ratio_bounds(
     ar: float,
+    got: str,
     *,
     min_ratio: tuple[float, float] | None = None,
     max_ratio: tuple[float, float] | None = None,
@@ -220,14 +224,17 @@ def _assert_ratio_bounds(
     if lo is not None and hi is not None and lo > hi:
         lo, hi = hi, lo  # normalize order if caller swapped them
 
-    if lo is not None:
-        if (ar <= lo) if strict else (ar < lo):
-            op = "<" if strict else "≤"
-            raise ValueError(f"Aspect ratio `{ar:.2g}` must be {op} {lo:.2g}.")
-    if hi is not None:
-        if (ar >= hi) if strict else (ar > hi):
-            op = "<" if strict else "≤"
-            raise ValueError(f"Aspect ratio `{ar:.2g}` must be {op} {hi:.2g}.")
+    too_low = lo is not None and ((ar <= lo) if strict else (ar < lo))
+    too_high = hi is not None and ((ar >= hi) if strict else (ar > hi))
+    if not (too_low or too_high):
+        return
+    if lo is not None and hi is not None:
+        allowed = f"between {_format_ratio(lo)} and {_format_ratio(hi)}" + (" (exclusive)" if strict else "")
+    elif lo is not None:
+        allowed = f"{'greater than' if strict else 'at least'} {_format_ratio(lo)}"
+    else:
+        allowed = f"{'less than' if strict else 'at most'} {_format_ratio(hi)}"
+    raise ValueError(f"Aspect ratio must be {allowed}, got {got}.")
 
 
 def _parse_aspect_ratio_string(ar_str: str) -> float:
