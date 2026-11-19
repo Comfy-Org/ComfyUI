@@ -1,4 +1,5 @@
 import math
+import os
 import sys
 import inspect
 import json
@@ -969,12 +970,30 @@ register_attention_function("sub_quad", attention_sub_quad)
 register_attention_function("split", attention_split)
 
 
+@wrap_attn
+def attention_chunked(q, k, v, heads, mask=None, attn_precision=None, skip_reshape=False, skip_output_reshape=False, **kwargs):
+    """attention_basic over query chunks, so the fp32 scores + softmax of one chunk stay below COMFY_ATTN_CHUNK_MB.
+
+    For "small" inputs that can get large anyway, e.g. vision towers on high-resolution reference images
+    (2048x2048 = 16384 tokens would need 32 GiB of scores in one piece). Masked attention is not chunked.
+    """
+    budget = int(os.environ.get("COMFY_ATTN_CHUNK_MB", "512")) * 1024 * 1024
+    n, n_k = (q.shape[2], k.shape[2]) if skip_reshape else (q.shape[1], k.shape[1])
+    rows = max(1, budget // (q.shape[0] * heads * n_k * 4 * 2))
+    if mask is not None or rows >= n:
+        return attention_basic(q, k, v, heads, mask=mask, attn_precision=attn_precision, skip_reshape=skip_reshape, skip_output_reshape=skip_output_reshape, **kwargs)
+    q_dim = 2 if skip_reshape else 1
+    out_dim = 2 if skip_output_reshape else 1
+    return torch.cat([attention_basic(q.narrow(q_dim, i, min(rows, n - i)), k, v, heads, attn_precision=attn_precision, skip_reshape=skip_reshape,
+                                      skip_output_reshape=skip_output_reshape, **kwargs) for i in range(0, n, rows)], dim=out_dim)
+
+
 def optimized_attention_for_device(device, mask=False, small_input=False):
     if small_input:
         if model_management.pytorch_attention_enabled():
             return attention_pytorch #TODO: need to confirm but this is probably slightly faster for small inputs in all cases
         else:
-            return attention_basic
+            return attention_chunked
 
     if device == torch.device("cpu"):
         return attention_sub_quad
