@@ -72,7 +72,8 @@ class Krea2TEModel(sd1_clip.SD1ClipModel):
 
         batch = len(sections) + int(weighted)  # ClipTokenWeightEncoder adds an empty section for weights.
         seq = max(max(lengths), max(map(len, sections)))
-        config = getattr(self, self.clip).transformer.model.config
+        language_model = getattr(self, self.clip).transformer.model
+        config = language_model.config
         hidden = config.hidden_size
         query = config.num_attention_heads * config.head_dim
         kv = config.num_key_value_heads * config.head_dim
@@ -87,7 +88,12 @@ class Krea2TEModel(sd1_clip.SD1ClipModel):
         attention = 2 * batch * config.num_attention_heads * seq * seq * 4
         cast_weight = hidden * max(config.intermediate_size, query) * 4
         # Language-model workspace only; image placeholders are expanded without running the visual encoder.
-        return retained + activations + masks + attention + cast_weight
+        language_peak = retained + activations + masks + attention + cast_weight
+        if language_model.embed_tokens.weight.dtype in (torch.float8_e4m3fn, torch.float8_e5m2):
+            # Raw FP8 embeddings cast the full table; row-dequantized weights expose their compute dtype.
+            embedding_peak = retained + config.vocab_size * hidden * 4
+            return max(language_peak, embedding_peak)
+        return language_peak
 
     def encode_token_weights(self, token_weight_pairs, template_end=-1):
         out, pooled, extra = super().encode_token_weights(token_weight_pairs)  # out: (B, 12, seq, 2560)
