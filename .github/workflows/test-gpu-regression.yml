@@ -1,0 +1,104 @@
+# Runs the curated GPU workflow corpus for this commit on RunPod serverless and
+# compares the fixed-seed outputs against blessed golden references, publishing
+# to ci.comfy.org.
+#
+# This is step 7 of comfyci-runpod-worker's README, which has prescribed it for
+# a while: until now that corpus has been tested by the worker repo polling this
+# repo's master every five minutes, which means ~240 runs a day and, more to the
+# point, verdicts that live beside the commit instead of on it. Running it here
+# puts them on the commit and on release branches, which is what the stable
+# release bar needs from "the default workflow fails to run" and "a template
+# stops working".
+#
+# It is a new workflow rather than a job inside test-ci.yml, which is where the
+# README says to put it. test-ci.yml drives the older comfy-action corpus, its
+# push trigger is commented out, and its last six runs failed, so adding a job
+# there would either never run or arrive red. Those jobs are the ones step 7
+# means to retire; retiring them is a separate call for whoever owns them.
+#
+# Release branches get their own results path and previous-run chain, comparing
+# against the same per-workflow goldens as master.
+name: GPU regression
+
+on:
+  push:
+    branches:
+      - master
+      - release/**
+    # Same ignore list test-ci.yml already uses for the older corpus. The
+    # corpus submits API prompts straight to the backend, so none of these can
+    # change what a sampler emits.
+    paths-ignore:
+      - '**/*.md'
+      - 'app/**'
+      - 'input/**'
+      - 'notebooks/**'
+      - 'output/**'
+      - 'script_examples/**'
+      - 'web/**'
+  workflow_dispatch:
+    inputs:
+      workflows:
+        description: 'csv of workflow ids to run (empty = every enabled one)'
+        required: false
+        type: string
+        default: ''
+
+permissions:
+  contents: read
+
+concurrency:
+  # One run per commit; a newer commit does not cancel an in-flight GPU run,
+  # because a half-finished suite publishes a partial verdict.
+  group: ${{ github.workflow }}-${{ github.sha }}
+  cancel-in-progress: false
+
+jobs:
+  # The suite cannot run without RUNPOD_API_KEY, and a missing secret must not
+  # read as a green gate. This reports it as a warning and skips, so the
+  # workflow can land before the secret exists and starts working the moment it
+  # does.
+  preflight:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      configured: ${{ steps.secrets.outputs.configured }}
+    steps:
+      - name: Check the RunPod credentials are present
+        id: secrets
+        env:
+          RUNPOD_API_KEY: ${{ secrets.RUNPOD_API_KEY }}
+          GCS_SERVICE_ACCOUNT_JSON: ${{ secrets.GCS_SERVICE_ACCOUNT_JSON }}
+        run: |
+          missing=""
+          [ -n "$RUNPOD_API_KEY" ] || missing="$missing RUNPOD_API_KEY"
+          [ -n "$GCS_SERVICE_ACCOUNT_JSON" ] || missing="$missing GCS_SERVICE_ACCOUNT_JSON"
+          if [ -n "$missing" ]; then
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::GPU regression skipped: missing secret(s)$missing. Until these are set this gate verifies nothing."
+          else
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  gpu-regression:
+    needs: preflight
+    if: needs.preflight.outputs.configured == 'true'
+    runs-on: ubuntu-latest
+    # The suite submits to a serverless GPU and waits; the slowest enabled
+    # workflow allows 1800s on its own, and models may need syncing first.
+    timeout-minutes: 120
+    steps:
+      - name: RunPod regression suite
+        uses: comfy-org/comfyci-runpod-worker@main
+        with:
+          comfy-commit: ${{ github.sha }}
+          branch: ${{ github.ref_name }}
+          gcs-bucket: comfy-ci-results
+          workflows: ${{ inputs.workflows || 'all' }}
+          # The action's default lane resolves to the retired layout-1 lane and
+          # is refused, so the lane is explicit. `primary` in the worker's
+          # manifest/lanes.json; update both together.
+          lane: py313-torch2.14.1-cu130
+        env:
+          RUNPOD_API_KEY: ${{ secrets.RUNPOD_API_KEY }}
+          GCS_SERVICE_ACCOUNT_JSON: ${{ secrets.GCS_SERVICE_ACCOUNT_JSON }}
