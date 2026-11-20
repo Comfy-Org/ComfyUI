@@ -22,6 +22,7 @@ from comfy_api_nodes.util import (
     download_url_to_image_tensor,
     download_url_to_video_output,
     downscale_image_tensor_by_max_side,
+    downscale_video_to_max_pixels,
     get_number_of_images,
     poll_op_raw,
     sync_op_raw,
@@ -45,6 +46,22 @@ _LOOKS_PATH = "/proxy/heygen/v3/avatars/looks"
 _MODEL_VOICES_PATH = "/proxy/heygen/v3/models/audio/voices"
 _MODEL_TTS_PATH = "/proxy/heygen/v3/models/audio/tts"
 _MODEL_AVATARS_PATH = "/proxy/heygen/v3/models/avatars"
+_MODEL_DECISIONS_PATH = "/proxy/heygen/v3/models/decisions"
+
+_DECISION_MODELS = ["heygen-decision-1", "heygen-decision-1-turbo"]
+_DECISION_MAX_IMAGES = 4
+_DECISION_PRICE_BADGE = IO.PriceBadge(
+    depends_on=IO.PriceBadgeDepends(widgets=["model"]),
+    expr="""
+    (
+      $promo := $now() < "2026-12-01T08:00:00.000Z";
+      $rate := widgets.model = "heygen-decision-1-turbo"
+        ? ($promo ? 0.06006 : 0.1287)
+        : ($promo ? 0.1001 : 0.2002);
+      {"type":"usd","usd":$rate,"format":{"approximate":true,"suffix":" per 1M tokens"}}
+    )
+    """,
+)
 
 _DEFAULT_VOICE_OPTION = "(avatar's default voice)"
 _VOICE_LANGUAGE_OPTIONS = ["auto", *HEYGEN_VOICE_LANGUAGES]
@@ -1666,6 +1683,321 @@ class HeyGenAvatar6IdentityToVideoNode(IO.ComfyNode):
         return IO.NodeOutput(await download_url_to_video_output(video["video_url"]))
 
 
+def _decision_inputs() -> list:
+    return [
+        IO.Autogrow.Input(
+            "images",
+            template=IO.Autogrow.TemplateNames(
+                IO.Image.Input("image"),
+                names=[f"image_{i}" for i in range(1, _DECISION_MAX_IMAGES + 1)],
+                min=0,
+            ),
+            optional=True,
+            tooltip="Up to 4 images in total, counting every frame of a batch. They are numbered "
+            "image_1 to image_4 in order across the sockets, so a batch of 2 on the first socket is image_1 and image_2.",
+        ),
+        IO.Audio.Input("audio_1", optional=True, tooltip="Audio up to 30 minutes."),
+        IO.Video.Input("video_1", optional=True, tooltip="Video up to 60 seconds."),
+        IO.String.Input(
+            "text",
+            multiline=True,
+            force_input=True,
+            optional=True,
+            tooltip="The text the question is about, such as a prompt or an LLM response.",
+        ),
+    ]
+
+
+async def _run_decision(
+    cls: type[IO.ComfyNode],
+    model: str,
+    question: dict,
+    text: str,
+    images: IO.Autogrow.Type,
+    audio: Input.Audio | None,
+    video: Input.Video | None,
+) -> dict:
+    validate_string(question["instructions"], field_name="question", min_length=1, max_length=5000)
+    validate_string(text, field_name="text", max_length=20000)
+    image_tensors = [image for image in images.values() if image is not None]
+    n_images = sum(get_number_of_images(image) for image in image_tensors)
+    if n_images > _DECISION_MAX_IMAGES:
+        raise ValueError(f"HeyGen Decision takes up to {_DECISION_MAX_IMAGES} images; got {n_images}.")
+    if not text.strip() and not n_images and audio is None and video is None:
+        raise ValueError("Connect text, an image, audio or video for the question to be about.")
+    if video is not None:
+        validate_video_duration(video, max_duration=60)
+    if audio is not None:
+        validate_audio_duration(audio, max_duration=1800)
+    assets = {}
+    legend = []
+    if n_images:
+        urls = await upload_images_to_comfyapi(
+            cls, image_tensors, max_images=_DECISION_MAX_IMAGES, mime_type="image/png"
+        )
+        assets["images"] = {f"image_{i}": {"type": "url", "url": url} for i, url in enumerate(urls, 1)}
+        legend.append(
+            f"{n_images} images are attached, numbered image_1 to image_{n_images} in the order they are given."
+            if n_images > 1
+            else "1 image is attached: image_1."
+        )
+    if video is not None:
+        video = downscale_video_to_max_pixels(video, 1280 * 720)
+        assets["videos"] = {"video_1": {"type": "url", "url": await upload_video_to_comfyapi(cls, video)}}
+        legend.append("1 video is attached: video_1.")
+    if audio is not None:
+        assets["audios"] = {"audio_1": {"type": "url", "url": await upload_audio_to_comfyapi(cls, audio)}}
+        legend.append("1 audio clip is attached: audio_1.")
+    state = [text] if text.strip() else []
+    if legend:
+        state.append(" ".join(legend))
+    payload = {"model": model, "state": "\n\n".join(state), "questions": {"decision": question}}
+    if assets:
+        payload["assets"] = assets
+    response = await sync_op_raw(
+        cls,
+        ApiEndpoint(path=_MODEL_DECISIONS_PATH, method="POST"),
+        data=payload,
+    )
+    answer = ((response.get("data") or {}).get("answers") or {}).get("decision")
+    if not answer:
+        raise ValueError(f"HeyGen did not return an answer: {response}")
+    return answer
+
+
+class HeyGenDecisionYesNo(IO.ComfyNode):
+
+    @classmethod
+    def define_schema(cls) -> IO.Schema:
+        return IO.Schema(
+            node_id="HeyGenDecisionYesNo",
+            display_name="HeyGen Decision (Yes/No)",
+            category="partner/text/HeyGen",
+            description="Ask a yes/no question about text, images, audio or video. "
+            "Connect `result` to an If/Else Switch node to choose between two paths.",
+            search_aliases=["if", "condition", "check", "filter", "classify", "verify", "yes no", "boolean"],
+            inputs=[
+                IO.Combo.Input("model", options=_DECISION_MODELS),
+                IO.String.Input(
+                    "question",
+                    multiline=True,
+                    default="Is there a person in the image?",
+                    tooltip="A question with a yes or no answer about what is connected. "
+                    "Ask it so that yes is the case you act on. With several inputs, refer to them as "
+                    "image_1, image_2, audio_1 or video_1, for example 'Does image_2 show the same person as image_1?'",
+                ),
+                IO.Float.Input(
+                    "threshold",
+                    default=0.5,
+                    min=0.01,
+                    max=0.99,
+                    step=0.01,
+                    tooltip="The answer is yes when the probability of yes is at least this value. "
+                    "Clear answers are close to 0 or 1.",
+                ),
+                *_decision_inputs(),
+            ],
+            outputs=[
+                IO.Boolean.Output(display_name="result"),
+                IO.String.Output(display_name="answer"),
+                IO.Float.Output(display_name="probability"),
+            ],
+            hidden=[
+                IO.Hidden.auth_token_comfy_org,
+                IO.Hidden.api_key_comfy_org,
+                IO.Hidden.unique_id,
+            ],
+            is_api_node=True,
+            price_badge=_DECISION_PRICE_BADGE,
+        )
+
+    @classmethod
+    async def execute(
+        cls,
+        model: str,
+        question: str,
+        threshold: float,
+        images: IO.Autogrow.Type,
+        text: str = "",
+        audio_1: Input.Audio | None = None,
+        video_1: Input.Video | None = None,
+    ) -> IO.NodeOutput:
+        answer = await _run_decision(
+            cls, model, {"type": "noul", "instructions": question}, text, images, audio_1, video_1
+        )
+        probability = answer["noul"]
+        result = probability >= threshold
+        verdict = "yes" if result else "no"
+        PromptServer.instance.send_progress_text(f"{verdict} · {probability:.2f}", cls.hidden.unique_id)
+        return IO.NodeOutput(result, verdict, probability)
+
+
+def _parse_decision_options(options: str) -> list[str]:
+    names: list[str] = []
+    folded: dict[str, str] = {}
+    for number, line in enumerate(options.splitlines(), 1):
+        name = line.strip()
+        if not name:
+            continue
+        if len(name) > 128:
+            raise ValueError(f"The option on line {number} is longer than 128 characters.")
+        if not name.isprintable():
+            raise ValueError(f"The option on line {number} contains an invisible or control character.")
+        if name in names:
+            raise ValueError(f"The option '{name}' is listed twice.")
+        if name.casefold() in folded:
+            raise ValueError(f"The options '{folded[name.casefold()]}' and '{name}' differ only in letter case.")
+        folded[name.casefold()] = name
+        names.append(name)
+    if not 2 <= len(names) <= 255:
+        raise ValueError(f"Give 2 to 255 options, one per line. Got {len(names)}.")
+    return names
+
+
+class HeyGenDecisionChoice(IO.ComfyNode):
+
+    @classmethod
+    def define_schema(cls) -> IO.Schema:
+        return IO.Schema(
+            node_id="HeyGenDecisionChoice",
+            display_name="HeyGen Decision (Choice)",
+            category="partner/text/HeyGen",
+            description="Pick one of your options for text, images, audio or video. "
+            "Connect `choice` to a Branch node whose inputs carry the option names, or use `option_index`.",
+            search_aliases=["classify", "category", "route", "select", "label", "choose"],
+            inputs=[
+                IO.Combo.Input("model", options=_DECISION_MODELS),
+                IO.String.Input(
+                    "question",
+                    multiline=True,
+                    default="What style is the image?",
+                    tooltip="The question the options answer. With several inputs, refer to them as "
+                    "image_1, image_2, audio_1 or video_1, for example 'Which season is shown in image_1?'",
+                ),
+                IO.String.Input(
+                    "options",
+                    multiline=True,
+                    default="photo\nillustration\n3d render\nanime\nsketch\nother",
+                    tooltip="One option per line, used exactly as typed. "
+                    "Add an option such as `other` for inputs that fit none of them.",
+                ),
+                *_decision_inputs(),
+            ],
+            outputs=[
+                IO.String.Output(display_name="choice"),
+                IO.Int.Output(
+                    display_name="option_index",
+                    tooltip="Position of the chosen option in the options list, starting at 0.",
+                ),
+                IO.Float.Output(display_name="confidence"),
+            ],
+            hidden=[
+                IO.Hidden.auth_token_comfy_org,
+                IO.Hidden.api_key_comfy_org,
+                IO.Hidden.unique_id,
+            ],
+            is_api_node=True,
+            price_badge=_DECISION_PRICE_BADGE,
+        )
+
+    @classmethod
+    async def execute(
+        cls,
+        model: str,
+        question: str,
+        options: str,
+        images: IO.Autogrow.Type,
+        text: str = "",
+        audio_1: Input.Audio | None = None,
+        video_1: Input.Video | None = None,
+    ) -> IO.NodeOutput:
+        names = _parse_decision_options(options)
+        answer = await _run_decision(
+            cls,
+            model,
+            {"type": "choice", "instructions": question, "criteria": {name: "" for name in names}},
+            text,
+            images,
+            audio_1,
+            video_1,
+        )
+        choice = answer["choice"]
+        confidence = answer["probabilities"][choice]
+        PromptServer.instance.send_progress_text(f"{choice} · {confidence:.2f}", cls.hidden.unique_id)
+        return IO.NodeOutput(choice, names.index(choice), confidence)
+
+
+class HeyGenDecisionScore(IO.ComfyNode):
+
+    @classmethod
+    def define_schema(cls) -> IO.Schema:
+        return IO.Schema(
+            node_id="HeyGenDecisionScore",
+            display_name="HeyGen Decision (Score)",
+            category="partner/text/HeyGen",
+            description="Rate text, images, audio or video from 1 to 10. "
+            "Connect `result` to an If/Else Switch node to act on the score.",
+            search_aliases=["rate", "rating", "quality", "grade", "judge", "evaluate"],
+            inputs=[
+                IO.Combo.Input("model", options=_DECISION_MODELS),
+                IO.String.Input(
+                    "question",
+                    multiline=True,
+                    default="Rate the technical quality of the image from 1 (worst) to 10 (best).",
+                    tooltip="What to rate, on a scale from 1 to 10. Say what 1 and 10 mean, as in the example.",
+                ),
+                IO.Float.Input(
+                    "threshold",
+                    default=6.0,
+                    min=1.0,
+                    max=10.0,
+                    step=0.1,
+                    tooltip="`result` is true when the score is at least this value. "
+                    "Clean, sharp images score about 7, badly damaged ones about 3 to 5.",
+                ),
+                *_decision_inputs(),
+            ],
+            outputs=[
+                IO.Boolean.Output(display_name="result"),
+                IO.Float.Output(display_name="score"),
+            ],
+            hidden=[
+                IO.Hidden.auth_token_comfy_org,
+                IO.Hidden.api_key_comfy_org,
+                IO.Hidden.unique_id,
+            ],
+            is_api_node=True,
+            price_badge=_DECISION_PRICE_BADGE,
+        )
+
+    @classmethod
+    async def execute(
+        cls,
+        model: str,
+        question: str,
+        threshold: float,
+        images: IO.Autogrow.Type,
+        text: str = "",
+        audio_1: Input.Audio | None = None,
+        video_1: Input.Video | None = None,
+    ) -> IO.NodeOutput:
+        answer = await _run_decision(
+            cls,
+            model,
+            {"type": "score", "instructions": question, "criteria": [str(i) for i in range(1, 11)]},
+            text,
+            images,
+            audio_1,
+            video_1,
+        )
+        score = answer["score"] + 1
+        result = score >= threshold
+        PromptServer.instance.send_progress_text(
+            f"{score:.1f} / 10 · {'pass' if result else 'fail'}", cls.hidden.unique_id
+        )
+        return IO.NodeOutput(result, score)
+
+
 class HeyGenExtension(ComfyExtension):
     @override
     async def get_node_list(self) -> list[type[IO.ComfyNode]]:
@@ -1681,6 +2013,9 @@ class HeyGenExtension(ComfyExtension):
             HeyGenVoiceTextToSpeechNode,
             HeyGenAvatar6ReferenceToVideoNode,
             HeyGenAvatar6IdentityToVideoNode,
+            HeyGenDecisionYesNo,
+            HeyGenDecisionChoice,
+            HeyGenDecisionScore,
         ]
 
 
