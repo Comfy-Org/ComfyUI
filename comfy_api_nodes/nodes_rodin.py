@@ -164,8 +164,7 @@ def check_rodin_status(response: Rodin3DCheckStatusResponse) -> str:
     status_list = [str(job.status) for job in response.jobs]
     logging.info("[ Rodin3D API - CheckStatus ] Generate Status: %s", status_list)
     if any(job.status == JobStatus.Failed for job in response.jobs):
-        logging.error("[ Rodin3D API - CheckStatus ] Generate Failed: %s, Please try again.", status_list)
-        raise Exception("[ Rodin3D API ] Generate Failed, Please Try again.")
+        return "failed"
     if all_done:
         return "DONE"
     return "Generating"
