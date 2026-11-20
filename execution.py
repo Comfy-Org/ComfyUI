@@ -680,6 +680,23 @@ async def execute(server: "ExecutionServer", dynprompt, caches, current_item, ex
 
     return (ExecutionResult.SUCCESS, None, None)
 
+class DeferredValidationError(Exception):
+    pass
+
+
+def _deferred_validation_failure(node_id, node_error):
+    details = "\n".join(f"{e['message']}: {e['details']}" for e in node_error["errors"])
+    ex = DeferredValidationError(f"Node {node_id} was requested by a lazy input but failed validation:\n{details}")
+    error_details = {
+        "node_id": node_id,
+        "exception_message": str(ex),
+        "exception_type": full_type_name(DeferredValidationError),
+        "traceback": [],
+        "current_inputs": {},
+    }
+    return (ExecutionResult.FAILURE, error_details, ex)
+
+
 class PromptExecutor:
     def __init__(self, server: "ExecutionServer", cache_type=False, cache_args=None, asset_manager: AssetManager | None = None):
         self.cache_args = cache_args
@@ -810,6 +827,7 @@ class PromptExecutor:
                 pending_subgraph_results = {}
                 pending_async_nodes = {} # TODO - Unify this with pending_subgraph_results
                 ui_node_outputs = {}
+                deferred_node_errors = extra_data.get("deferred_node_errors", {})
 
                 while not execution_list.is_empty():
                     node_id, error, ex = await execution_list.stage_node_execution()
@@ -819,7 +837,10 @@ class PromptExecutor:
                         break
 
                     assert node_id is not None, "Node ID should not be None at this point"
-                    result, error, ex = await execute(self.server, dynamic_prompt, self.caches, node_id, extra_data, executed, prompt_id, execution_list, pending_subgraph_results, pending_async_nodes, ui_node_outputs, self.asset_manager)
+                    if node_id in deferred_node_errors:
+                        result, error, ex = _deferred_validation_failure(node_id, deferred_node_errors[node_id])
+                    else:
+                        result, error, ex = await execute(self.server, dynamic_prompt, self.caches, node_id, extra_data, executed, prompt_id, execution_list, pending_subgraph_results, pending_async_nodes, ui_node_outputs, self.asset_manager)
                     self.success = result != ExecutionResult.FAILURE
                     if result == ExecutionResult.FAILURE:
                         self.handle_execution_error(prompt_id, dynamic_prompt.original_prompt, current_outputs, executed, error, ex)
@@ -875,9 +896,11 @@ class PromptExecutor:
             self._notify_prompt_lifecycle("end", prompt_id)
 
 
-async def validate_inputs(prompt_id, prompt, item, validated, visiting=None):
+async def validate_inputs(prompt_id, prompt, item, validated, visiting=None, deferred_inputs=None):
     if visiting is None:
         visiting = []
+    if deferred_inputs is None:
+        deferred_inputs = {}
 
     unique_id = item
     if unique_id in validated:
@@ -994,16 +1017,13 @@ async def validate_inputs(prompt_id, prompt, item, validated, visiting=None):
             try:
                 visiting.append(unique_id)
                 try:
-                    r = await validate_inputs(prompt_id, prompt, o_id, validated, visiting)
+                    r = await validate_inputs(prompt_id, prompt, o_id, validated, visiting, deferred_inputs)
                 finally:
                     visiting.pop()
-                if r[0] is False:
-                    # `r` will be set in `validated[o_id]` already
-                    valid = False
-                    continue
+                upstream_failed = r[0] is False
             except Exception as ex:
+                upstream_failed = True
                 typ, _, tb = sys.exc_info()
-                valid = False
                 exception_type = full_type_name(typ)
                 reasons = [{
                     "type": "exception_during_inner_validation",
@@ -1019,7 +1039,13 @@ async def validate_inputs(prompt_id, prompt, item, validated, visiting=None):
                     }
                 }]
                 validated[o_id] = (False, reasons, o_id)
-                continue
+            # A lazy input may never be requested, so its upstream failure is
+            # deferred to execution instead of invalidating this node.
+            if upstream_failed:
+                if extra_info.get("lazy"):
+                    deferred_inputs.setdefault(unique_id, set()).add(x)
+                else:
+                    valid = False
         else:
             try:
                 # Unwraps values wrapped in __value__ key or typed wrapper.
@@ -1173,7 +1199,42 @@ def full_type_name(klass):
         return klass.__qualname__
     return module + '.' + klass.__qualname__
 
-async def validate_prompt(prompt_id, prompt, partial_execution_list: Union[list[str], None]):
+def _linked_upstream(prompt, roots, skip_inputs=None):
+    skip_inputs = skip_inputs or {}
+    found = set()
+    pending = list(roots)
+    while pending:
+        node_id = pending.pop()
+        if node_id in found or node_id not in prompt:
+            continue
+        found.add(node_id)
+        skipped = skip_inputs.get(node_id, ())
+        pending.extend(
+            value[0] for name, value in prompt[node_id].get("inputs", {}).items()
+            if is_link(value) and name not in skipped
+        )
+    return found
+
+def _deferred_node_errors(prompt, validated, outputs):
+    """Failed nodes that the given (valid) outputs only reach through lazy inputs."""
+    deferred = {}
+    for o in sorted(outputs):
+        for node_id in sorted(_linked_upstream(prompt, [o])):
+            valid, reasons, _ = validated.get(node_id, (True, [], node_id))
+            if valid is True or len(reasons) == 0:
+                continue
+            entry = deferred.setdefault(node_id, {
+                "errors": reasons,
+                "dependent_outputs": [],
+                "class_type": prompt[node_id]["class_type"],
+            })
+            entry["dependent_outputs"].append(o)
+    return deferred
+
+async def validate_prompt(prompt_id, prompt, partial_execution_list: Union[list[str], None], *, deferred_node_errors: Optional[dict] = None):
+    """If deferred_node_errors is given, it is filled with nodes that failed
+    validation but are only reachable from good outputs through lazy inputs.
+    They don't reject the prompt; execution must refuse to run them."""
     outputs = set()
     for x in prompt:
         if 'class_type' not in prompt[x]:
@@ -1235,11 +1296,12 @@ async def validate_prompt(prompt_id, prompt, partial_execution_list: Union[list[
     errors = []
     node_errors = {}
     validated = {}
+    deferred_inputs = {}
     for o in outputs:
         valid = False
         reasons = []
         try:
-            m = await validate_inputs(prompt_id, prompt, o, validated)
+            m = await validate_inputs(prompt_id, prompt, o, validated, deferred_inputs=deferred_inputs)
             valid = m[0]
             reasons = m[1]
         except Exception as ex:
@@ -1266,7 +1328,10 @@ async def validate_prompt(prompt_id, prompt, partial_execution_list: Union[list[
                 for reason in reasons:
                     logging.error(f"  - {reason['message']}: {reason['details']}")
             errors += [(o, reasons)]
+            reachable = _linked_upstream(prompt, [o], deferred_inputs)
             for node_id, result in validated.items():
+                if node_id not in reachable:
+                    continue
                 valid = result[0]
                 reasons = result[1]
                 # If a node upstream has errors, the nodes downstream will also
@@ -1310,6 +1375,9 @@ async def validate_prompt(prompt_id, prompt, partial_execution_list: Union[list[
             for output_id in dependent_outputs:
                 good_outputs.discard(output_id)
             errors.append((dependent_outputs[0], [ex.error]))
+
+    if deferred_node_errors is not None:
+        deferred_node_errors.update(_deferred_node_errors(prompt, validated, good_outputs))
 
     if len(good_outputs) == 0:
         errors_list = []

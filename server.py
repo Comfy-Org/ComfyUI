@@ -1201,10 +1201,12 @@ class PromptServer():
 
                 self.node_replace_manager.apply_replacements(prompt)
 
-                valid = await execution.validate_prompt(prompt_id, prompt, partial_execution_targets)
+                deferred_node_errors = {}
+                valid = await execution.validate_prompt(prompt_id, prompt, partial_execution_targets, deferred_node_errors=deferred_node_errors)
                 extra_data = {}
                 if "extra_data" in json_data:
                     extra_data = json_data["extra_data"]
+                extra_data.pop("deferred_node_errors", None)
 
                 if "client_id" in json_data:
                     extra_data["client_id"] = json_data["client_id"]
@@ -1227,11 +1229,15 @@ class PromptServer():
                         if sensitive_val in extra_data:
                             sensitive[sensitive_val] = extra_data.pop(sensitive_val)
                     extra_data["create_time"] = int(time.time() * 1000)  # timestamp in milliseconds
+                    if deferred_node_errors:
+                        extra_data["deferred_node_errors"] = deferred_node_errors
                     self.prompt_queue.put((number, prompt_id, prompt, extra_data, outputs_to_execute, sensitive))
                     # The frontend can queue with an empty client_id before its socket id arrives.
                     if not json_data.get("client_id") and extra_data.get("comfy_usage_source") != "comfyui-frontend":
                         deploy_to_cloud.mark_used_headlessly()
                     response = {"prompt_id": prompt_id, "number": number, "node_errors": valid[3]}
+                    if deferred_node_errors:
+                        response["deferred_node_errors"] = deferred_node_errors
                     return web.json_response(response)
                 else:
                     logging.warning("invalid prompt: {}".format(valid[1]))

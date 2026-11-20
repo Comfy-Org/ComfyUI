@@ -74,7 +74,7 @@ def test_cli_feature_flag_cannot_claim_server_reserved_flags(tmp_path):
 def validation(monkeypatch):
     result = {"valid": True}
 
-    async def validate_prompt(prompt_id, prompt, partial_execution_targets):
+    async def validate_prompt(prompt_id, prompt, partial_execution_targets, deferred_node_errors=None):
         if result["valid"]:
             return (True, None, ["1"], {})
         return (False, {"type": "invalid", "message": "bad"}, [], {})
