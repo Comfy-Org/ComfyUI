@@ -12,6 +12,7 @@ class String(io.ComfyNode):
             search_aliases=["text", "string", "text box", "prompt"],
             display_name="Text",
             category="utilities/primitive",
+            passthrough_input="value",
             inputs=[io.String.Input("value")],
             outputs=[io.String.Output()]
         )
@@ -29,6 +30,7 @@ class StringMultiline(io.ComfyNode):
             search_aliases=["text", "string", "text box", "prompt"],
             display_name="Text (Multiline)",
             category="utilities/primitive",
+            passthrough_input="value",
             essentials_category="Basics",
             inputs=[io.String.Input("value", multiline=True)],
             outputs=[io.String.Output()],
@@ -46,6 +48,7 @@ class Int(io.ComfyNode):
             node_id="PrimitiveInt",
             display_name="Int",
             category="utilities/primitive",
+            passthrough_input="value",
             inputs=[
                 io.Int.Input("value", min=-sys.maxsize, max=sys.maxsize, control_after_generate=io.ControlAfterGenerate.fixed),
             ],
@@ -64,6 +67,7 @@ class Float(io.ComfyNode):
             node_id="PrimitiveFloat",
             display_name="Float",
             category="utilities/primitive",
+            passthrough_input="value",
             inputs=[
                 io.Float.Input("value", min=-sys.maxsize, max=sys.maxsize, step=0.1),
             ],
@@ -82,6 +86,7 @@ class Boolean(io.ComfyNode):
             node_id="PrimitiveBoolean",
             display_name="Boolean",
             category="utilities/primitive",
+            passthrough_input="value",
             inputs=[
                 io.Boolean.Input("value"),
             ],
