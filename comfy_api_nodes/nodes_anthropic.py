@@ -16,14 +16,12 @@ from comfy_api_nodes.apis.anthropic import (
     AnthropicThinkingConfig,
 )
 from comfy_api_nodes.util import (
-    ApiEndpoint,
     get_number_of_images,
-    sync_op,
+    router_op,
     upload_images_to_comfyapi,
     validate_string,
 )
 
-ANTHROPIC_MESSAGES_ENDPOINT = "/proxy/anthropic/v1/messages"
 ANTHROPIC_IMAGE_MAX_PIXELS = 1568 * 1568
 CLAUDE_MAX_IMAGES = 20
 
@@ -297,9 +295,9 @@ class ClaudeNode(IO.ComfyNode):
             content.extend(await _build_image_content_blocks(cls, image_tensors))
         content.append(AnthropicTextContent(text=prompt))
 
-        response = await sync_op(
+        response = await router_op(
             cls,
-            ApiEndpoint(path=ANTHROPIC_MESSAGES_ENDPOINT, method="POST"),
+            f"anthropic/{CLAUDE_MODELS[model_label]}",
             response_model=AnthropicMessagesResponse,
             data=AnthropicMessagesRequest(
                 model=CLAUDE_MODELS[model_label],
