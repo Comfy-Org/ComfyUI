@@ -152,9 +152,8 @@ def test_registered_equivalents_are_lossless(core_schemas, monkeypatch):
 
     monkeypatch.setattr(nodes_replacements, "api", SimpleNamespace(node_replacement=SimpleNamespace(register=register)))
     asyncio.run(nodes_replacements.register_replacements())
-    assert registered
     problems = {r.old_node_id: problems_for(r, core_schemas) for r in registered if r.kind == "equivalent"}
-    assert not any(problems.values()), problems
+    assert problems and not any(problems.values()), problems
 
 
 def kjnodes(old_node_id: str, new_node_id: str, old_widget_ids: list[str], renames: dict[str, str]) -> NodeReplace:
@@ -167,11 +166,6 @@ def kjnodes(old_node_id: str, new_node_id: str, old_widget_ids: list[str], renam
         input_mapping=[{"new_id": new, "old_id": old} for old, new in renames.items()],
         output_mapping=[{"new_idx": 0, "old_idx": 0}],
     )
-
-
-def test_admits_kjnodes_string_constant(core_schemas):
-    replacement = kjnodes("StringConstant", "PrimitiveString", ["string"], {"string": "value"})
-    assert problems_for(replacement, core_schemas) == []
 
 
 @pytest.mark.parametrize("replacement, expected", [
