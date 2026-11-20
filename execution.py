@@ -893,11 +893,36 @@ def coerce_literal_input(input_type, val):
     return val
 
 
-async def select_lazy_inputs_statically(prompt_id, unique_id, obj_class, inputs, class_inputs):
+NOT_CONSTANT = object()
+
+
+def fold_constant_link(prompt, link, seen=frozenset()):
+    """Resolve a link through `passthrough_input` nodes to the widget value it will carry, else NOT_CONSTANT."""
+    o_id, output_index = link
+    if output_index != 0 or o_id in seen or o_id not in prompt:
+        return NOT_CONSTANT
+    o_class = nodes.NODE_CLASS_MAPPINGS.get(prompt[o_id]["class_type"])
+    if o_class is None or not issubclass(o_class, _ComfyNodeInternal):
+        return NOT_CONSTANT
+    passthrough = o_class.GET_SCHEMA().passthrough_input
+    if passthrough is None or passthrough not in prompt[o_id]["inputs"]:
+        return NOT_CONSTANT
+    val = prompt[o_id]["inputs"][passthrough]
+    if is_link(val):
+        return fold_constant_link(prompt, val, seen | {o_id})
+    input_type, _, _ = get_input_info(o_class, passthrough)
+    try:
+        return coerce_literal_input(input_type, val)
+    except Exception:
+        return NOT_CONSTANT
+
+
+async def select_lazy_inputs_statically(prompt_id, prompt, unique_id, obj_class, inputs, class_inputs):
     """Find lazy linked inputs that the node's first check_lazy_status call would not request.
 
     Only applies to v3 nodes declaring `static_lazy_selection` whose non-lazy inputs are all
-    literals. Returns `(unrequested_input_names, error)`; error is set if check_lazy_status raised.
+    literals or fold to one via `fold_constant_link`. Returns `(unrequested_input_names, error)`;
+    error is set if check_lazy_status raised.
     """
     if not issubclass(obj_class, _ComfyNodeInternal):
         return set(), None
@@ -914,15 +939,17 @@ async def select_lazy_inputs_statically(prompt_id, unique_id, obj_class, inputs,
         if input_type is None:
             continue
         if is_link(val):
-            if not extra_info.get("lazy", False):
+            if extra_info.get("lazy", False):
+                lazy_links.add(x)
+                first_round_inputs[x] = val
+                continue
+            val = fold_constant_link(prompt, val)
+            if val is NOT_CONSTANT:
                 return set(), None
-            lazy_links.add(x)
-            first_round_inputs[x] = val
-        else:
-            try:
-                first_round_inputs[x] = coerce_literal_input(input_type, val)
-            except Exception:
-                return set(), None
+        try:
+            first_round_inputs[x] = coerce_literal_input(input_type, val)
+        except Exception:
+            return set(), None
     if not lazy_links:
         return set(), None
 
@@ -1007,7 +1034,7 @@ async def validate_inputs(prompt_id, prompt, item, validated, visiting=None):
 
     valid_inputs = set(class_inputs.get('required',{})).union(set(class_inputs.get('optional',{})))
 
-    unrequested_lazy_inputs, lazy_selection_error = await select_lazy_inputs_statically(prompt_id, unique_id, obj_class, inputs, class_inputs)
+    unrequested_lazy_inputs, lazy_selection_error = await select_lazy_inputs_statically(prompt_id, prompt, unique_id, obj_class, inputs, class_inputs)
     if lazy_selection_error is not None:
         errors.append(lazy_selection_error)
 
