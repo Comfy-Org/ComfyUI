@@ -319,6 +319,43 @@ class GeminiInteraction(BaseModel):
     usage: GeminiInteractionUsage | None = Field(None)
 
 
+class GeminiDecisionNoulQuestion(BaseModel):
+    type: Literal["noul"] = "noul"
+    instructions: str = Field(...)
+
+
+class GeminiDecisionChoiceQuestion(BaseModel):
+    type: Literal["choice"] = "choice"
+    instructions: str = Field(...)
+    criteria: dict[str, str] = Field(...)
+
+
+class GeminiDecisionScoreQuestion(BaseModel):
+    type: Literal["score"] = "score"
+    instructions: str = Field(...)
+    criteria: list[str] = Field(...)
+
+
+class GeminiDecisionRequest(BaseModel):
+    model: str = Field(...)
+    input: list[GeminiInteractionTextPart | GeminiInteractionMediaPart] = Field(...)
+    questions: dict[str, GeminiDecisionNoulQuestion | GeminiDecisionChoiceQuestion | GeminiDecisionScoreQuestion] = Field(
+        ...
+    )
+
+
+class GeminiDecisionAnswer(BaseModel):
+    type: str = Field(...)
+    confidence: float = Field(...)
+    noul: float | None = Field(None)
+    choice: str | None = Field(None)
+    score: float | None = Field(None)
+
+
+class GeminiDecisionResponse(BaseModel):
+    answers: dict[str, GeminiDecisionAnswer] = Field(...)
+
+
 class GeminiFile(BaseModel):
     name: str | None = Field(None, description="Resource name of the file, in the form 'files/<id>'.")
     uri: str | None = Field(None)
