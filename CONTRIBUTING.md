@@ -6,7 +6,7 @@ There are several ways in which you can contribute, beyond writing code. The goa
 
 ## Asking Questions
 
-Have a question? Instead of opening an issue, please ask on [Discord](https://comfy.org/discord) or [Matrix](https://app.element.io/#/room/%23comfyui_space%3Amatrix.org) channels. Our team and the community will help you.
+Have a question? Instead of opening an issue, please ask on [Discord](https://comfy.org/discord). Our team and the community will help you.
 
 ## Providing Feedback
 

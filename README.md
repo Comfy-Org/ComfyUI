@@ -7,7 +7,6 @@
 [![Website](https://img.shields.io/badge/comfy.org-4285F4?style=flat)](https://www.comfy.org/)
 [![Discord](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fdiscord.com%2Fapi%2Finvites%2Fcomfyorg%3Fwith_counts%3Dtrue&query=%24.approximate_member_count&logo=discord&logoColor=white&label=Discord&color=green&suffix=%20total)](https://discord.com/invite/comfyorg)
 [![Twitter](https://img.shields.io/twitter/follow/ComfyUI)](https://x.com/ComfyUI)
-[![Matrix](https://img.shields.io/badge/Matrix-000000?style=flat&logo=matrix&logoColor=white)](https://app.element.io/#/room/%23comfyui_space%3Amatrix.org)
 <br>
 [![Release](https://img.shields.io/github/v/release/Comfy-Org/ComfyUI?style=flat&sort=semver)](https://docs.comfy.org/changelog)
 [![Downloads](https://img.shields.io/github/downloads/Comfy-Org/ComfyUI/total?style=flat)](https://github.com/Comfy-Org/ComfyUI/releases)
@@ -101,9 +100,7 @@ requests, and how releases are cut across core, Desktop and the frontend.
 
 ## Community
 
-Ask questions in [#help or #feedback on Discord](https://comfy.org/discord), or on
-[Matrix](https://app.element.io/#/room/%23comfyui_space%3Amatrix.org), which is like
-Discord but open source.
+Ask questions in [#help or #feedback on Discord](https://comfy.org/discord).
 
 _psst, we're hiring:_ [comfy.org/careers](https://www.comfy.org/careers)
 
