@@ -15,6 +15,7 @@ from aiohttp import web
 from aiohttp.test_utils import make_mocked_request
 from sqlalchemy import Engine, create_engine
 from sqlalchemy.orm import Session
+from sqlalchemy.pool import StaticPool
 
 from app.assets.api import routes
 from app.assets.database.models import Asset
@@ -66,7 +67,8 @@ def autoclean_unit_test_assets() -> Iterator[None]:
 
 @pytest.fixture
 def route_database(monkeypatch: pytest.MonkeyPatch) -> Iterator[RouteDatabase]:
-    engine = create_engine("sqlite:///:memory:")
+    # One shared connection: the list route queries from a worker thread.
+    engine = create_engine("sqlite:///:memory:", poolclass=StaticPool, connect_args={"check_same_thread": False})
     Base.metadata.create_all(engine)
     monkeypatch.setattr(routes, "create_session", lambda: Session(engine))
     monkeypatch.setattr(routes, "_ASSETS_ENABLED", True)
