@@ -40,6 +40,18 @@ reviews:
         conventional-commit type and provider apply. Do not require this
         prefix for unrelated changes, even when they touch shared API-node
         infrastructure or tests.
+    custom_checks:
+      - name: "Sensitive Diagnostic Data"
+        mode: "warning"
+        instructions: |
+          Fail only when changed code logs or persists raw command-line
+          arguments, environment variables, authorization headers, credentials,
+          access tokens, signed URLs, private filesystem paths, or other
+          user-provided sensitive values. Pass when diagnostic output contains
+          only explicitly selected non-sensitive fields, such as process IDs,
+          timestamps, process names, executable basenames, and known
+          non-sensitive flags, or when sensitive values are reliably redacted.
+          Do not fail for pre-existing behavior outside the changed lines.
 
   path_filters:
     - "!comfy_api_nodes/apis/**"

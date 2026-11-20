@@ -78,6 +78,18 @@
   not add network access, tracking, persistent identification, or data
   collection behavior.
 
+## Sensitive Diagnostic Data
+
+- Do not persist or log raw command lines, environment variables, authorization
+  headers, credentials, access tokens, signed URLs, private filesystem paths, or
+  other user-provided sensitive values.
+- Log only explicitly selected diagnostic fields that are required to understand
+  the failure. Prefer process IDs, timestamps, process names, executable
+  basenames, and known non-sensitive flags over complete process or request data.
+- When sensitive values can appear inside otherwise useful diagnostic data,
+  redact them before logging or persistence instead of relying on callers to
+  sanitize them.
+
 ## State Ownership
 
 - Keep state and capability flags on the object that owns the behavior using
