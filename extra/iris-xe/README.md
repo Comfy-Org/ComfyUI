@@ -30,3 +30,18 @@ python -u main.py --intel-iris-xe --cpu-vae --fp32-unet --fp32-vae \
 ```
 
 The switch enables the same workarounds as `LTX25_IRIS_CPU_UNPACK=1`. They cover the sampler's empty-latent check, LTX positional tables and keyframe masks, GGUF Q4_K/Q6_K unpacking and GGUF FP16-to-FP32 weight casts. For the 9-frame LTX-2.5 workflow use the CPU device in CLIPLoader. With these flags VideoVAE decodes on the CPU and the latent upscaler runs on XPU in FP32.
+
+## Optional native GGUF weight unpacking
+
+On Linux x86-64 with AVX2 and F16C, an optional CPU decoder unpacks Q4_K and Q6_K weights directly into the FP32 buffer consumed by the XPU denoiser. It preserves the default GGUF decoder's intermediate FP16 rounding. Install it after applying `gguf-xpu.patch`, from the ComfyUI repository root, using GCC with OpenMP support.
+
+```bash
+node=custom_nodes/ComfyUI-GGUF
+git -C "$node" apply --check "$PWD/extra/iris-xe/gguf-native-unpack.patch"
+g++ -O3 -fPIC -shared -fopenmp -ffp-contract=off extra/iris-xe/unpack.cpp -o "$node/libiris_unpack.so"
+git -C "$node" apply "$PWD/extra/iris-xe/gguf-native-unpack.patch"
+```
+
+Set `LTX25_IRIS_NATIVE_UNPACK=1` in the server environment and launch with the same Iris Xe settings as above. Set it to `0` for the standard CPU unpacker. Restart the server between modes. The first eligible tensor logs `Iris Xe: native GGUF CPU unpack active`. This path applies to FP32 output with default or FP16 intermediate precision.
+
+For an end-to-end comparison, render the same fixed-seed 9-frame, 640×384 graph with eight sampling steps in each fresh process. Record both the eight-step sampler time and the complete prompt time. HD refinement can be measured separately by running the matching HD graph immediately after the preview in each process. Verify that the HD log shows just the three refinement steps.
