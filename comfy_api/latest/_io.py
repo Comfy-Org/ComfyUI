@@ -1906,6 +1906,12 @@ class Schema:
     """
     loop_boundary: Literal["start", "end"] | None = None
     """Identifies this node as the start or end of a loop for prompt validation."""
+    static_lazy_selection: bool=False
+    """Declares that check_lazy_status is side-effect free and requests every lazy input it needs in a single call.
+
+    When the node's non-lazy inputs are all widget values, prompt validation calls check_lazy_status
+    with lazy links unresolved (None) and skips validating the lazy inputs it does not request.
+    """
 
     def validate(self):
         '''Validate the schema:
