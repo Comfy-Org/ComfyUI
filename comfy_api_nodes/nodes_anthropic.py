@@ -41,6 +41,7 @@ CLAUDE_MODELS: dict[str, str] = {
 }
 
 _THINKING_UNSUPPORTED = {"Haiku 4.5"}
+_MAX_PROMPT_LENGTHS = {"Haiku 4.5": (100000, 20000)}
 _ALWAYS_THINKING_MODELS = {"Opus 5.5", "Opus 5", "Fable 5.2", "Fable 5.1", "Fable 5"}
 _XHIGH_EFFORT_MODELS = {"Opus 5.5", "Opus 5", "Opus 4.8", "Fable 5.2", "Fable 5.1", "Fable 5", "Sonnet 5.5", "Sonnet 5", "Opus 4.7"}
 _MAX_EFFORT_MODELS = _XHIGH_EFFORT_MODELS | {"Opus 4.6", "Sonnet 4.6"}
@@ -260,8 +261,10 @@ class ClaudeNode(IO.ComfyNode):
         images: dict | None = None,
         system_prompt: str = "",
     ) -> IO.NodeOutput:
-        validate_string(prompt, strip_whitespace=True, min_length=1)
         model_label = model["model"]
+        prompt_max, system_max = _MAX_PROMPT_LENGTHS.get(model_label, (500000, 100000))
+        validate_string(prompt, strip_whitespace=True, min_length=1, max_length=prompt_max)
+        validate_string(system_prompt, strip_whitespace=False, field_name="system_prompt", max_length=system_max)
         max_tokens = model.get("max_tokens", 32768)
         reasoning_effort = model.get("reasoning_effort", "off")
         always_thinking = model_label in _ALWAYS_THINKING_MODELS
