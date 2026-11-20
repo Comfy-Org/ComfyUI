@@ -1,0 +1,777 @@
+{
+  "revision": 0,
+  "last_node_id": 10,
+  "last_link_id": 0,
+  "nodes": [
+    {
+      "id": 12,
+      "type": "7aad998c-49e7-433f-bfb9-b1ac2680aa9e",
+      "pos": [
+        900,
+        730
+      ],
+      "size": [
+        400,
+        470
+      ],
+      "flags": {},
+      "order": 0,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "VIDEO",
+          "type": "VIDEO",
+          "links": []
+        }
+      ],
+      "properties": {
+        "proxyWidgets": [
+          [
+            "7",
+            "text"
+          ],
+          [
+            "5",
+            "width"
+          ],
+          [
+            "5",
+            "height"
+          ],
+          [
+            "5",
+            "length"
+          ],
+          [
+            "8",
+            "seed"
+          ],
+          [
+            "8",
+            "control_after_generate"
+          ],
+          [
+            "4",
+            "unet_name"
+          ],
+          [
+            "6",
+            "vae_name"
+          ],
+          [
+            "1",
+            "clip_name1"
+          ],
+          [
+            "1",
+            "clip_name2"
+          ]
+        ]
+      },
+      "widgets_values": []
+    }
+  ],
+  "links": [],
+  "version": 0.4,
+  "definitions": {
+    "subgraphs": [
+      {
+        "id": "7aad998c-49e7-433f-bfb9-b1ac2680aa9e",
+        "version": 1,
+        "state": {
+          "lastGroupId": 2,
+          "lastNodeId": 11,
+          "lastLinkId": 14,
+          "lastRerouteId": 0
+        },
+        "revision": 0,
+        "config": {},
+        "name": "Text to Video (Kandinsky5)",
+        "inputNode": {
+          "id": -10,
+          "bounding": [
+            150,
+            855.6086185239999,
+            120,
+            40
+          ]
+        },
+        "outputNode": {
+          "id": -20,
+          "bounding": [
+            2543.3334996748745,
+            845.6086185239999,
+            120,
+            60
+          ]
+        },
+        "inputs": [],
+        "outputs": [
+          {
+            "id": "3269ff3b-db7a-40e4-b5b2-52ad249ad50b",
+            "name": "VIDEO",
+            "type": "VIDEO",
+            "linkIds": [
+              14
+            ],
+            "localized_name": "VIDEO",
+            "pos": [
+              20,
+              20
+            ]
+          }
+        ],
+        "widgets": [],
+        "nodes": [
+          {
+            "id": 2,
+            "type": "CLIPTextEncode",
+            "pos": [
+              884.6464438178214,
+              917.8318920966483
+            ],
+            "size": [
+              479.97395833333337,
+              210.91145833333334
+            ],
+            "flags": {},
+            "order": 3,
+            "mode": 0,
+            "inputs": [
+              {
+                "localized_name": "clip",
+                "name": "clip",
+                "type": "CLIP",
+                "link": 1
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "CONDITIONING",
+                "name": "CONDITIONING",
+                "type": "CONDITIONING",
+                "links": [
+                  4
+                ]
+              }
+            ],
+            "title": "CLIP Text Encode (Negative Prompt)",
+            "properties": {
+              "Node name for S&R": "CLIPTextEncode"
+            },
+            "widgets_values": [
+              ""
+            ],
+            "color": "#223",
+            "bgcolor": "#335"
+          },
+          {
+            "id": 1,
+            "type": "DualCLIPLoader",
+            "pos": [
+              344.6467588070548,
+              957.8319160455486
+            ],
+            "size": [
+              500,
+              130
+            ],
+            "flags": {},
+            "order": 0,
+            "mode": 0,
+            "inputs": [],
+            "outputs": [
+              {
+                "localized_name": "CLIP",
+                "name": "CLIP",
+                "type": "CLIP",
+                "links": [
+                  1,
+                  6
+                ]
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "DualCLIPLoader",
+              "models": [
+                {
+                  "name": "qwen_2.5_vl_7b_fp8_scaled.safetensors",
+                  "url": "https://huggingface.co/Comfy-Org/HunyuanVideo_1.5_repackaged/resolve/main/split_files/text_encoders/qwen_2.5_vl_7b_fp8_scaled.safetensors",
+                  "directory": "text_encoders"
+                },
+                {
+                  "name": "clip_l.safetensors",
+                  "url": "https://huggingface.co/comfyanonymous/flux_text_encoders/resolve/main/clip_l.safetensors?download=true",
+                  "directory": "text_encoders"
+                }
+              ]
+            },
+            "widgets_values": [
+              "qwen_2.5_vl_7b_fp8_scaled.safetensors",
+              "clip_l.safetensors",
+              "kandinsky5",
+              "default"
+            ]
+          },
+          {
+            "id": 6,
+            "type": "VAELoader",
+            "pos": [
+              344.6467588070548,
+              797.8318557110248
+            ],
+            "size": [
+              490,
+              58
+            ],
+            "flags": {},
+            "order": 1,
+            "mode": 0,
+            "inputs": [],
+            "outputs": [
+              {
+                "localized_name": "VAE",
+                "name": "VAE",
+                "type": "VAE",
+                "links": [
+                  5,
+                  12
+                ]
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "VAELoader",
+              "models": [
+                {
+                  "name": "hunyuan_video_vae_bf16.safetensors",
+                  "url": "https://huggingface.co/Kijai/HunyuanVideo_comfy/resolve/main/hunyuan_video_vae_bf16.safetensors",
+                  "directory": "vae"
+                }
+              ]
+            },
+            "widgets_values": [
+              "hunyuan_video_vae_bf16.safetensors"
+            ]
+          },
+          {
+            "id": 7,
+            "type": "CLIPTextEncode",
+            "pos": [
+              884.6464438178214,
+              607.831812875903
+            ],
+            "size": [
+              479.97395833333337,
+              210.91145833333334
+            ],
+            "flags": {},
+            "order": 4,
+            "mode": 0,
+            "inputs": [
+              {
+                "localized_name": "clip",
+                "name": "clip",
+                "type": "CLIP",
+                "link": 6
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "CONDITIONING",
+                "name": "CONDITIONING",
+                "type": "CONDITIONING",
+                "links": [
+                  3
+                ]
+              }
+            ],
+            "title": "CLIP Text Encode (Positive Prompt)",
+            "properties": {
+              "Node name for S&R": "CLIPTextEncode"
+            },
+            "widgets_values": [
+              "Rim light, side light, soft light, medium close-up, dusk, sunset, central composition, warm tones with low saturation, telephoto lens. A woman with fluffy brown curly hair stands elegantly in front of a magnificent stained glass window. She is wearing a flowing white dress, her hair neatly combed back, and her soft facial contours are gently illuminated by the colorful light filtering through the window from outside. The woman is talking to someone off-camera, yet there is a hint of sadness in her eyes, adding a layer of depth to her mysterious temperament. The background is dim, with a strong contrast between light and shadow, further emphasizing the tension of the character's emotions. The stained glass, under the glow of the setting sun, casts colorful light and shadows, enhancing the artistic sense and atmosphere of the overall picture."
+            ],
+            "color": "#232",
+            "bgcolor": "#353"
+          },
+          {
+            "id": 9,
+            "type": "VAEDecode",
+            "pos": [
+              2173.3334719192007,
+              620.0000154949549
+            ],
+            "size": [
+              230,
+              46
+            ],
+            "flags": {},
+            "order": 8,
+            "mode": 0,
+            "inputs": [
+              {
+                "localized_name": "samples",
+                "name": "samples",
+                "type": "LATENT",
+                "link": 11
+              },
+              {
+                "localized_name": "vae",
+                "name": "vae",
+                "type": "VAE",
+                "link": 12
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "IMAGE",
+                "name": "IMAGE",
+                "type": "IMAGE",
+                "links": [
+                  13
+                ]
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "VAEDecode"
+            },
+            "widgets_values": []
+          },
+          {
+            "id": 3,
+            "type": "ModelSamplingSD3",
+            "pos": [
+              1434.6466135403523,
+              597.8318778108319
+            ],
+            "size": [
+              320,
+              58
+            ],
+            "flags": {},
+            "order": 5,
+            "mode": 0,
+            "inputs": [
+              {
+                "localized_name": "model",
+                "name": "model",
+                "type": "MODEL",
+                "link": 2
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "MODEL",
+                "name": "MODEL",
+                "type": "MODEL",
+                "slot_index": 0,
+                "links": [
+                  7
+                ]
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "ModelSamplingSD3",
+              "cnr_id": "comfy-core",
+              "ver": "0.3.68"
+            },
+            "widgets_values": [
+              5
+            ]
+          },
+          {
+            "id": 8,
+            "type": "KSampler",
+            "pos": [
+              1814.6469961959506,
+              617.8318203813332
+            ],
+            "size": [
+              335.9375,
+              603.3854166666667
+            ],
+            "flags": {},
+            "order": 7,
+            "mode": 0,
+            "inputs": [
+              {
+                "localized_name": "model",
+                "name": "model",
+                "type": "MODEL",
+                "link": 7
+              },
+              {
+                "localized_name": "positive",
+                "name": "positive",
+                "type": "CONDITIONING",
+                "link": 8
+              },
+              {
+                "localized_name": "negative",
+                "name": "negative",
+                "type": "CONDITIONING",
+                "link": 9
+              },
+              {
+                "localized_name": "latent_image",
+                "name": "latent_image",
+                "type": "LATENT",
+                "link": 10
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "LATENT",
+                "name": "LATENT",
+                "type": "LATENT",
+                "links": [
+                  11
+                ]
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "KSampler",
+              "cnr_id": "comfy-core",
+              "ver": "0.3.71"
+            },
+            "widgets_values": [
+              102704842425568,
+              "randomize",
+              50,
+              5,
+              "euler_ancestral",
+              "beta",
+              1
+            ]
+          },
+          {
+            "id": 5,
+            "type": "Kandinsky5ImageToVideo",
+            "pos": [
+              1434.6466135403523,
+              757.8319026842786
+            ],
+            "size": [
+              330,
+              190
+            ],
+            "flags": {},
+            "order": 6,
+            "mode": 0,
+            "inputs": [
+              {
+                "localized_name": "positive",
+                "name": "positive",
+                "type": "CONDITIONING",
+                "link": 3
+              },
+              {
+                "localized_name": "negative",
+                "name": "negative",
+                "type": "CONDITIONING",
+                "link": 4
+              },
+              {
+                "localized_name": "vae",
+                "name": "vae",
+                "type": "VAE",
+                "link": 5
+              },
+              {
+                "localized_name": "start_image",
+                "name": "start_image",
+                "shape": 7,
+                "type": "IMAGE",
+                "link": null
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "positive",
+                "name": "positive",
+                "type": "CONDITIONING",
+                "links": [
+                  8
+                ]
+              },
+              {
+                "localized_name": "negative",
+                "name": "negative",
+                "type": "CONDITIONING",
+                "links": [
+                  9
+                ]
+              },
+              {
+                "localized_name": "latent",
+                "name": "latent",
+                "type": "LATENT",
+                "links": [
+                  10
+                ]
+              },
+              {
+                "localized_name": "cond_latent",
+                "name": "cond_latent",
+                "type": "LATENT",
+                "links": []
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "Kandinsky5ImageToVideo"
+            },
+            "widgets_values": [
+              768,
+              512,
+              121,
+              1
+            ]
+          },
+          {
+            "id": 10,
+            "type": "CreateVideo",
+            "pos": [
+              2173.3334996748745,
+              770.00011240937
+            ],
+            "size": [
+              310,
+              78
+            ],
+            "flags": {
+              "collapsed": false
+            },
+            "order": 9,
+            "mode": 0,
+            "inputs": [
+              {
+                "localized_name": "images",
+                "name": "images",
+                "type": "IMAGE",
+                "link": 13
+              },
+              {
+                "localized_name": "audio",
+                "name": "audio",
+                "shape": 7,
+                "type": "AUDIO",
+                "link": null
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "VIDEO",
+                "name": "VIDEO",
+                "type": "VIDEO",
+                "links": [
+                  14
+                ]
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "CreateVideo",
+              "cnr_id": "comfy-core",
+              "ver": "0.3.68"
+            },
+            "widgets_values": [
+              24
+            ]
+          },
+          {
+            "id": 4,
+            "type": "UNETLoader",
+            "pos": [
+              344.6467588070548,
+              607.831812875903
+            ],
+            "size": [
+              490,
+              90
+            ],
+            "flags": {},
+            "order": 2,
+            "mode": 0,
+            "inputs": [],
+            "outputs": [
+              {
+                "localized_name": "MODEL",
+                "name": "MODEL",
+                "type": "MODEL",
+                "slot_index": 0,
+                "links": [
+                  2
+                ]
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "UNETLoader",
+              "cnr_id": "comfy-core",
+              "ver": "0.3.68",
+              "models": [
+                {
+                  "name": "kandinsky5lite_t2v_sft_5s.safetensors",
+                  "url": "https://huggingface.co/kandinskylab/Kandinsky-5.0-T2V-Lite-sft-5s/resolve/main/model/kandinsky5lite_t2v_sft_5s.safetensors",
+                  "directory": "diffusion_models"
+                }
+              ]
+            },
+            "widgets_values": [
+              "kandinsky5lite_t2v_sft_5s.safetensors",
+              "default"
+            ]
+          }
+        ],
+        "groups": [
+          {
+            "id": 1,
+            "title": "Load models",
+            "bounding": [
+              330,
+              530,
+              514.6034734835969,
+              604.32
+            ],
+            "color": "#3f789e",
+            "font_size": 24,
+            "flags": {}
+          },
+          {
+            "id": 2,
+            "title": "Prompt",
+            "bounding": [
+              870,
+              530,
+              500,
+              608.3333333333334
+            ],
+            "color": "#3f789e",
+            "font_size": 24,
+            "flags": {}
+          }
+        ],
+        "links": [
+          {
+            "id": 1,
+            "origin_id": 1,
+            "origin_slot": 0,
+            "target_id": 2,
+            "target_slot": 0,
+            "type": "CLIP"
+          },
+          {
+            "id": 6,
+            "origin_id": 1,
+            "origin_slot": 0,
+            "target_id": 7,
+            "target_slot": 0,
+            "type": "CLIP"
+          },
+          {
+            "id": 11,
+            "origin_id": 8,
+            "origin_slot": 0,
+            "target_id": 9,
+            "target_slot": 0,
+            "type": "LATENT"
+          },
+          {
+            "id": 12,
+            "origin_id": 6,
+            "origin_slot": 0,
+            "target_id": 9,
+            "target_slot": 1,
+            "type": "VAE"
+          },
+          {
+            "id": 2,
+            "origin_id": 4,
+            "origin_slot": 0,
+            "target_id": 3,
+            "target_slot": 0,
+            "type": "MODEL"
+          },
+          {
+            "id": 7,
+            "origin_id": 3,
+            "origin_slot": 0,
+            "target_id": 8,
+            "target_slot": 0,
+            "type": "MODEL"
+          },
+          {
+            "id": 8,
+            "origin_id": 5,
+            "origin_slot": 0,
+            "target_id": 8,
+            "target_slot": 1,
+            "type": "CONDITIONING"
+          },
+          {
+            "id": 9,
+            "origin_id": 5,
+            "origin_slot": 1,
+            "target_id": 8,
+            "target_slot": 2,
+            "type": "CONDITIONING"
+          },
+          {
+            "id": 10,
+            "origin_id": 5,
+            "origin_slot": 2,
+            "target_id": 8,
+            "target_slot": 3,
+            "type": "LATENT"
+          },
+          {
+            "id": 3,
+            "origin_id": 7,
+            "origin_slot": 0,
+            "target_id": 5,
+            "target_slot": 0,
+            "type": "CONDITIONING"
+          },
+          {
+            "id": 4,
+            "origin_id": 2,
+            "origin_slot": 0,
+            "target_id": 5,
+            "target_slot": 1,
+            "type": "CONDITIONING"
+          },
+          {
+            "id": 5,
+            "origin_id": 6,
+            "origin_slot": 0,
+            "target_id": 5,
+            "target_slot": 2,
+            "type": "VAE"
+          },
+          {
+            "id": 13,
+            "origin_id": 9,
+            "origin_slot": 0,
+            "target_id": 10,
+            "target_slot": 0,
+            "type": "IMAGE"
+          },
+          {
+            "id": 14,
+            "origin_id": 10,
+            "origin_slot": 0,
+            "target_id": -20,
+            "target_slot": 0,
+            "type": "VIDEO"
+          }
+        ],
+        "extra": {
+          "workflowRendererVersion": "LG"
+        },
+        "category": "Video generation/Text to video",
+        "description": "Generates video from text prompts using Kandinsky5."
+      }
+    ]
+  },
+  "extra": {}
+}

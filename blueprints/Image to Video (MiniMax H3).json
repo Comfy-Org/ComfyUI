@@ -161,7 +161,7 @@
         757358688076805,
         "minimax_h3_fl2va_pruned_int8_convrot.safetensors",
         "qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors",
-        "minimax_h3_video_vae_fp16.safetensors",
+        "minimax_h3_video_vae_int8_convrot.safetensors",
         "minimax_h3_audio_vae_fp32.safetensors",
         false,
         "minimax_h3_fl2v_turbo_8step_v1.0_comfyui_bf16.safetensors",
@@ -466,17 +466,17 @@
               "ver": "0.33.0",
               "models": [
                 {
-                  "name": "minimax_h3_video_vae_fp16.safetensors",
-                  "url": "https://huggingface.co/Comfy-Org/MiniMax-H3/resolve/main/vae/minimax_h3_video_vae_fp16.safetensors",
+                  "name": "minimax_h3_video_vae_int8_convrot.safetensors",
+                  "url": "https://huggingface.co/Comfy-Org/MiniMax-H3/resolve/main/vae/minimax_h3_video_vae_int8_convrot.safetensors",
                   "directory": "vae"
                 }
               ]
             },
             "widgets_values": [
-              "minimax_h3_video_vae_fp16.safetensors"
+              "minimax_h3_video_vae_int8_convrot.safetensors"
             ],
             "widgets_values_named": {
-              "vae_name": "minimax_h3_video_vae_fp16.safetensors"
+              "vae_name": "minimax_h3_video_vae_int8_convrot.safetensors"
             }
           },
           {

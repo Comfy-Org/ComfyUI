@@ -1,0 +1,1668 @@
+{
+  "revision": 0,
+  "last_node_id": 32,
+  "last_link_id": 0,
+  "nodes": [
+    {
+      "id": 18,
+      "type": "3301b744-2960-415a-83b0-fe8a89d99fdb",
+      "pos": [
+        330,
+        0
+      ],
+      "size": [
+        430,
+        680
+      ],
+      "flags": {},
+      "order": 4,
+      "mode": 0,
+      "inputs": [
+        {
+          "label": "positive_prompt",
+          "name": "value",
+          "type": "STRING",
+          "widget": {
+            "name": "value"
+          },
+          "link": null
+        },
+        {
+          "label": "enable_prompt_enhancer",
+          "name": "switch",
+          "type": "BOOLEAN",
+          "widget": {
+            "name": "switch"
+          },
+          "link": null
+        },
+        {
+          "label": "prompt_enhancer_seed",
+          "name": "sampling_mode.seed",
+          "type": "INT",
+          "widget": {
+            "name": "sampling_mode.seed"
+          },
+          "link": null
+        },
+        {
+          "label": "negative_prompt",
+          "name": "text",
+          "type": "STRING",
+          "widget": {
+            "name": "text"
+          },
+          "link": null
+        },
+        {
+          "name": "width",
+          "type": "INT",
+          "widget": {
+            "name": "width"
+          },
+          "link": null
+        },
+        {
+          "name": "height",
+          "type": "INT",
+          "widget": {
+            "name": "height"
+          },
+          "link": null
+        },
+        {
+          "label": "SLG",
+          "name": "switch_1",
+          "type": "BOOLEAN",
+          "widget": {
+            "name": "switch_1"
+          },
+          "link": null
+        },
+        {
+          "label": "unet_model",
+          "name": "unet_name",
+          "type": "COMBO",
+          "widget": {
+            "name": "unet_name"
+          },
+          "link": null
+        },
+        {
+          "label": "clip_model",
+          "name": "clip_name",
+          "type": "COMBO",
+          "widget": {
+            "name": "clip_name"
+          },
+          "link": null
+        },
+        {
+          "label": "vae_model",
+          "name": "vae_name",
+          "type": "COMBO",
+          "widget": {
+            "name": "vae_name"
+          },
+          "link": null
+        },
+        {
+          "label": "ref_image (for llm)",
+          "name": "image",
+          "shape": 7,
+          "type": "IMAGE",
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "name": "IMAGE",
+          "type": "IMAGE",
+          "links": []
+        }
+      ],
+      "properties": {
+        "previewExposures": []
+      },
+      "widgets_values": [
+        "",
+        true,
+        0,
+        "nsfw, worst quality, bad anatomy, watermark, jpeg artifact",
+        1024,
+        1024,
+        524391326626742,
+        25,
+        2.5,
+        true,
+        "er_sde",
+        "simple",
+        "moss_image_base_int8_convrot.safetensors",
+        "qwen3.5_9b_w4a8_gptq.safetensors",
+        "flux2-vae_small.safetensors"
+      ],
+      "widgets_values_named": {
+        "value": "Black-and-white grunge event poster: a model in an oversized black hoodie and wide black trousers sits low on a concrete floor, photographed from a low wide angle so the sneakers are huge in the foreground, grey concrete wall behind, torn newspapers lying scattered on the floor around them. The word \"MOSS\" is set in gigantic heavy condensed capitals filling the top half of the poster behind the figure, slightly cropped by the frame edges. Along the bottom a grid of small info blocks separated by thin rules: \"SATURDAY\" and \"01 SEPT 2026\" and \"DOORS OPEN 10:00 PM\" on the left, \"MOSS IMAGE\" with \"TEXT / LAYOUT / TYPE\" in the middle,  \"SUPPORTING ACT\" with \"MOSS\" on the right, and a barcode block in the bottom right corner. Monochrome, high contrast, fine film grain, editorial print, paper texture.",
+        "switch": true,
+        "sampling_mode.seed": 0,
+        "text": "nsfw, worst quality, bad anatomy, watermark, jpeg artifact",
+        "width": 1024,
+        "height": 1024,
+        "seed": 524391326626742,
+        "steps": 25,
+        "cfg": 2.5,
+        "switch_1": true,
+        "sampler_name": "er_sde",
+        "scheduler": "simple",
+        "unet_name": "moss_image_base_int8_convrot.safetensors",
+        "clip_name": "qwen3.5_9b_w4a8_gptq.safetensors",
+        "vae_name": "flux2-vae_small.safetensors"
+      }
+    }
+  ],
+  "links": [],
+  "version": 0.4,
+  "definitions": {
+    "subgraphs": [
+      {
+        "id": "3301b744-2960-415a-83b0-fe8a89d99fdb",
+        "version": 1,
+        "state": {
+          "lastGroupId": 5,
+          "lastNodeId": 33,
+          "lastLinkId": 53,
+          "lastRerouteId": 0
+        },
+        "revision": 0,
+        "config": {},
+        "name": "Text to Image (MOSS-Image)",
+        "inputNode": {
+          "id": -10,
+          "bounding": [
+            -860,
+            -240,
+            191.44921875,
+            368
+          ]
+        },
+        "outputNode": {
+          "id": -20,
+          "bounding": [
+            1790,
+            30,
+            128,
+            68
+          ]
+        },
+        "inputs": [
+          {
+            "id": "35437e31-565b-4d42-bc06-d95c5929e7d8",
+            "name": "value",
+            "type": "STRING",
+            "linkIds": [
+              25
+            ],
+            "label": "positive_prompt",
+            "pos": [
+              -692.55078125,
+              -216
+            ]
+          },
+          {
+            "id": "853a4192-ebce-42de-bdff-77c36b59cc1a",
+            "name": "switch",
+            "type": "BOOLEAN",
+            "linkIds": [
+              26
+            ],
+            "label": "enable_prompt_enhancer",
+            "pos": [
+              -692.55078125,
+              -196
+            ]
+          },
+          {
+            "id": "797699a1-b4c0-41e5-bd36-750801f89c5f",
+            "name": "sampling_mode.seed",
+            "type": "INT",
+            "linkIds": [
+              52
+            ],
+            "label": "prompt_enhancer_seed",
+            "pos": [
+              -692.55078125,
+              -176
+            ]
+          },
+          {
+            "id": "c11f1876-7b42-4679-a736-8deaa8f21fd7",
+            "name": "text",
+            "type": "STRING",
+            "linkIds": [
+              43
+            ],
+            "label": "negative_prompt",
+            "pos": [
+              -692.55078125,
+              -156
+            ]
+          },
+          {
+            "id": "1514590b-7a78-450b-82b4-cfbe7820a9db",
+            "name": "width",
+            "type": "INT",
+            "linkIds": [
+              27
+            ],
+            "pos": [
+              -692.55078125,
+              -136
+            ]
+          },
+          {
+            "id": "f2e18bfe-65b0-4d24-9c78-bec0b9573e97",
+            "name": "height",
+            "type": "INT",
+            "linkIds": [
+              28
+            ],
+            "pos": [
+              -692.55078125,
+              -116
+            ]
+          },
+          {
+            "id": "32c26da2-7e60-44bf-851a-72690937b4b4",
+            "name": "seed",
+            "type": "INT",
+            "linkIds": [
+              30
+            ],
+            "pos": [
+              -692.55078125,
+              -96
+            ]
+          },
+          {
+            "id": "dae5d571-ced0-46d6-8a0a-5a71b8ca945a",
+            "name": "steps",
+            "type": "INT",
+            "linkIds": [
+              42
+            ],
+            "pos": [
+              -692.55078125,
+              -76
+            ]
+          },
+          {
+            "id": "6c064d6f-9925-4808-83cc-7e3409190ca7",
+            "name": "cfg",
+            "type": "FLOAT",
+            "linkIds": [
+              44
+            ],
+            "pos": [
+              -692.55078125,
+              -56
+            ]
+          },
+          {
+            "id": "e3037e0e-7d1a-43ce-9585-b255c7017615",
+            "name": "switch_1",
+            "type": "BOOLEAN",
+            "linkIds": [
+              51
+            ],
+            "label": "SLG",
+            "pos": [
+              -692.55078125,
+              -36
+            ]
+          },
+          {
+            "id": "46e71c72-9f95-4c32-89d2-2dab4b63b284",
+            "name": "sampler_name",
+            "type": "COMBO",
+            "linkIds": [
+              33
+            ],
+            "pos": [
+              -692.55078125,
+              -16
+            ]
+          },
+          {
+            "id": "8ba10fc2-8e73-4ece-8f77-27515bbe2698",
+            "name": "scheduler",
+            "type": "COMBO",
+            "linkIds": [
+              34
+            ],
+            "pos": [
+              -692.55078125,
+              4
+            ]
+          },
+          {
+            "id": "bc8e2627-1b51-4333-9d88-0cb6307f7545",
+            "name": "unet_name",
+            "type": "COMBO",
+            "linkIds": [
+              35
+            ],
+            "label": "unet_model",
+            "pos": [
+              -692.55078125,
+              24
+            ]
+          },
+          {
+            "id": "fe422dee-acbe-4c34-898b-62bb878ddb83",
+            "name": "clip_name",
+            "type": "COMBO",
+            "linkIds": [
+              36
+            ],
+            "label": "clip_model",
+            "pos": [
+              -692.55078125,
+              44
+            ]
+          },
+          {
+            "id": "29a73fdf-7b55-4612-8966-bba0b4cab854",
+            "name": "vae_name",
+            "type": "COMBO",
+            "linkIds": [
+              37
+            ],
+            "label": "vae_model",
+            "pos": [
+              -692.55078125,
+              64
+            ]
+          },
+          {
+            "id": "bd56b9df-d740-4ec9-a30b-20e60baf4f3e",
+            "name": "image",
+            "type": "IMAGE",
+            "linkIds": [
+              53
+            ],
+            "label": "ref_image (for llm)",
+            "pos": [
+              -692.55078125,
+              84
+            ]
+          }
+        ],
+        "outputs": [
+          {
+            "id": "fa9fefe4-677e-4f8b-aba5-35459b097c37",
+            "name": "IMAGE",
+            "type": "IMAGE",
+            "linkIds": [
+              6
+            ],
+            "localized_name": "IMAGE",
+            "pos": [
+              1814,
+              54
+            ]
+          }
+        ],
+        "widgets": [],
+        "nodes": [
+          {
+            "id": 17,
+            "type": "PrimitiveStringMultiline",
+            "pos": [
+              -120,
+              -780
+            ],
+            "size": [
+              490,
+              280
+            ],
+            "flags": {},
+            "order": 13,
+            "mode": 0,
+            "inputs": [
+              {
+                "localized_name": "value",
+                "name": "value",
+                "type": "STRING",
+                "widget": {
+                  "name": "value"
+                },
+                "link": 25
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "STRING",
+                "name": "STRING",
+                "type": "STRING",
+                "links": [
+                  15,
+                  17
+                ]
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "PrimitiveStringMultiline"
+            },
+            "widgets_values": [
+              ""
+            ],
+            "widgets_values_named": {
+              "value": ""
+            }
+          },
+          {
+            "id": 14,
+            "type": "PrimitiveStringMultiline",
+            "pos": [
+              -120,
+              -430
+            ],
+            "size": [
+              470,
+              270
+            ],
+            "flags": {},
+            "order": 0,
+            "mode": 0,
+            "inputs": [],
+            "outputs": [
+              {
+                "localized_name": "STRING",
+                "name": "STRING",
+                "type": "STRING",
+                "links": [
+                  13
+                ]
+              }
+            ],
+            "title": "Text (System prompt)",
+            "properties": {
+              "Node name for S&R": "PrimitiveStringMultiline"
+            },
+            "widgets_values": [
+              "You are a prompt engineer for an image generation model. The user sends a short, rough request in Chinese, sometimes with brand names, exact copy to render, or bounding boxes. Expand it into a detailed, self-contained English caption that can go straight into the image model, and make every piece of visible text appear verbatim.\n\nOutput only the caption. No title, preamble, explanation, alternatives, questions, code fences, or restatement of these instructions.\n\nOpening: always start the caption with the medium and the subject, for example \"Anime-style digital illustration of ...\", \"Studio photograph of ...\", \"Mixed-media poster of ...\". Never start with a verb. If the request is an edit, work out the final scene and open on it directly.\n\nHard rule: the caption always describes the finished picture as it looks. It is never an instruction to an editor and never a report of what changed. Never write \"replace\", \"remove\", \"keep\", \"preserve\", \"unchanged\", \"the original\", \"the reference image\", \"the source\" or \"same as\".\n\nPreserve everything the user specifies: number of subjects, identity, action, clothing, style, era, composition, palette, exclusions, and any Chinese copy they quote. Add only plausible visual detail the user left open. Never add new people, plot, or dialogue, never change relationships, and never invent real product specifications, prices, certifications, event details, or real people's names or titles.\n\nBuild the caption from these eight facets. Cover a facet only when the scene has content for it; skip it rather than inventing, and never repeat one to pad length:\n\n1. Subject: appearance, age range, build, hairstyle, each garment and its material, accessories, skin or surface texture.\n2. Action: body orientation, limb positions, weight distribution, what the hands are doing, gaze, expression. The pose must hold in a single frame and never contradict itself.\n3. Space: what sits in the foreground, midground and background, relative positions, occlusion, distances, and what appears at the frame edges.\n4. Setting: architecture and interior elements, furniture, props, signs of use, and the details that place the scene in a time and place (signage, windows, road surface, weather).\n5. Framing: shot size, camera height, viewing angle (level, high, low), perspective strength, where the subject sits in the frame, and the empty space around it.\n6. Light: direction and height of the key light, hardness, color temperature, any practical sources (neon, window light, screens), and how the light falls on skin, fabric, glass, metal and wet ground.\n7. Tone: palette, contrast, grain, medium (digital, film, print, 3D render, painting), texture detail, atmosphere.\n8. Text: see the next section. This is the most common failure point.\n\nText rules:\n- Keep the user's wording verbatim in its original language (Chinese stays Chinese) and write the full string inside double quotes. Never rewrite, translate, shorten, or paste the same copy twice.\n- For each text block state: exact content, carrier (sign, poster, card face, packaging, screen), position and relative size, typeface style and color, and legibility (clearly readable, slightly blurred, partly occluded).\n- When the user gives no copy but the scene clearly needs text (signs, menus, cards, interfaces), author short, scene-appropriate specific wording and give it verbatim. Never write placeholders such as \"headline here\" or \"some text\".\n\nWriting:\n- Flowing natural language, ordered by space or by the viewer's eye, in two to four paragraphs. No tag soup, no \"masterpiece, 8k, best quality\", no empty quality words.\n- Every sentence must add new visible information. Never restate a feature to reach length, and never drop a key detail just to stay brief.\n- Length: aim for 220 to 320 words for a single-subject scene, 320 to 500 for posters, cards, multi-subject scenes and text-heavy layouts, and never fewer than 200 words. A one-word request such as \"1girl\" still gets a full caption of at least 200 words. Do not pad: if you fall short, add the missing visible detail from the eight facets instead of repeating what you already wrote.\n- Describe only what is visible. No tool steps, generation parameters, or coordinate arithmetic.\n- Even when the request contains canvas sizes, resolution, pixels, or wording like \"3:4\" or \"1024x1024\", never repeat any size, ratio or canvas information in the caption.\n\nReference image:\n- Decide whether the supplied image is a content source or a style source. It is a content source when the workflow feeds an image in, or when the user says \"this image\", \"reproduce it\", \"copy it\", \"same as this\", \"only change the background\" or \"only change the copy\". Treat its visible content as the baseline and describe it item by item: subject (hair, hair color, eye color, face, build), every garment (outer layer, inner layer, bottoms, footwear, accessories), props and weapons, pose (body orientation, limb positions, how the hands hold things, weight), framing and how much of the frame the subject fills, background elements and palette, light direction, and art style. Change only what the user asks to change and keep the rest.\n- Describe specifically enough to rebuild, never \"a similar character\" or \"a girl in a similar style\". Correct level of detail: \"a girl with short tousled teal-green hair and long uneven bangs, green eyes, an oversized bright red high-collared jacket with black inner panels over a short black dress, bare legs, chunky black ankle boots with red accents, both hands gripping a massive black blade with neon yellow-green edges, full-body frontal view, white background with red, black and lime-green ink splashes\".\n- When the user asks for the style only (style transfer, \"in this style\", \"same look\"), take the medium, palette, lighting, texture, brushwork and layout logic, and build a new subject and composition instead of copying the original.\n- When the user's text conflicts with the image, the text wins (blue hair means blue hair); everything the text does not mention follows the image.\n- With a very short request such as \"1girl\" plus a reference image, do not improvise: appearance, clothing, palette, background and style all come from the image, and your job is only to write them out as a complete English caption. Do not add accessories, weapons, props or scenery the image does not show.\n- If a detail in the image is unreadable, leave it out rather than guessing. Never guess brands, identities or real names.\n- Text inside the reference image: keep readable wording verbatim under the text rules; write unreadable marks as \"illegible blurred lettering\" instead of inventing content.\n- Never copy watermarks, platform badges or logos the user did not ask for.\n- If this context contains no image at all, do not pretend you saw one: expand the text only, keep every feature the user already gave, and invent no character details.\n- A reference is evidence, not the deliverable. Write the caption as a description of the finished picture, never as an editing instruction to an image editor. Ban edit verbs and comparative pointers: no \"replace\", \"remove\", \"keep\", \"preserve\", \"unchanged\", \"same as\", \"as in the reference\", \"the original\", \"the source\", \"just like\". State the result as plain visible fact instead: the character has short green hair, the background is a night street, the style is loose angular brushwork.\n- Keep the number of subjects consistent with what the user asks for. When they ask to replace the subject, the original subject must not appear in the caption at all.\n\nBounding boxes:\n- Boxes are absolute pixel xyxy (top-left, bottom-right) and are placement instructions only. Use them as given: never normalize, center, reorder, percentage-convert or recompute them.\n- One box only: describe just what is inside that box, one to three sentences, with no coordinates, no numbering, no commentary. Text boxes also state typeface, color, carrier and legibility, with the copy verbatim in double quotes.\n- Several boxes at once: one line per box in the given order, formatted as \"index | English description\", describing only the content inside that box. No coordinates, no JSON, no prose paragraphs.\n- A box marks a placement, not a border, panel, divider or sticker to draw. Overlap and natural occlusion are allowed.\n- With no boxes, write a normal caption and never invent coordinates."
+            ],
+            "widgets_values_named": {
+              "value": "You are a prompt engineer for an image generation model. The user sends a short, rough request in Chinese, sometimes with brand names, exact copy to render, or bounding boxes. Expand it into a detailed, self-contained English caption that can go straight into the image model, and make every piece of visible text appear verbatim.\n\nOutput only the caption. No title, preamble, explanation, alternatives, questions, code fences, or restatement of these instructions.\n\nOpening: always start the caption with the medium and the subject, for example \"Anime-style digital illustration of ...\", \"Studio photograph of ...\", \"Mixed-media poster of ...\". Never start with a verb. If the request is an edit, work out the final scene and open on it directly.\n\nHard rule: the caption always describes the finished picture as it looks. It is never an instruction to an editor and never a report of what changed. Never write \"replace\", \"remove\", \"keep\", \"preserve\", \"unchanged\", \"the original\", \"the reference image\", \"the source\" or \"same as\".\n\nPreserve everything the user specifies: number of subjects, identity, action, clothing, style, era, composition, palette, exclusions, and any Chinese copy they quote. Add only plausible visual detail the user left open. Never add new people, plot, or dialogue, never change relationships, and never invent real product specifications, prices, certifications, event details, or real people's names or titles.\n\nBuild the caption from these eight facets. Cover a facet only when the scene has content for it; skip it rather than inventing, and never repeat one to pad length:\n\n1. Subject: appearance, age range, build, hairstyle, each garment and its material, accessories, skin or surface texture.\n2. Action: body orientation, limb positions, weight distribution, what the hands are doing, gaze, expression. The pose must hold in a single frame and never contradict itself.\n3. Space: what sits in the foreground, midground and background, relative positions, occlusion, distances, and what appears at the frame edges.\n4. Setting: architecture and interior elements, furniture, props, signs of use, and the details that place the scene in a time and place (signage, windows, road surface, weather).\n5. Framing: shot size, camera height, viewing angle (level, high, low), perspective strength, where the subject sits in the frame, and the empty space around it.\n6. Light: direction and height of the key light, hardness, color temperature, any practical sources (neon, window light, screens), and how the light falls on skin, fabric, glass, metal and wet ground.\n7. Tone: palette, contrast, grain, medium (digital, film, print, 3D render, painting), texture detail, atmosphere.\n8. Text: see the next section. This is the most common failure point.\n\nText rules:\n- Keep the user's wording verbatim in its original language (Chinese stays Chinese) and write the full string inside double quotes. Never rewrite, translate, shorten, or paste the same copy twice.\n- For each text block state: exact content, carrier (sign, poster, card face, packaging, screen), position and relative size, typeface style and color, and legibility (clearly readable, slightly blurred, partly occluded).\n- When the user gives no copy but the scene clearly needs text (signs, menus, cards, interfaces), author short, scene-appropriate specific wording and give it verbatim. Never write placeholders such as \"headline here\" or \"some text\".\n\nWriting:\n- Flowing natural language, ordered by space or by the viewer's eye, in two to four paragraphs. No tag soup, no \"masterpiece, 8k, best quality\", no empty quality words.\n- Every sentence must add new visible information. Never restate a feature to reach length, and never drop a key detail just to stay brief.\n- Length: aim for 220 to 320 words for a single-subject scene, 320 to 500 for posters, cards, multi-subject scenes and text-heavy layouts, and never fewer than 200 words. A one-word request such as \"1girl\" still gets a full caption of at least 200 words. Do not pad: if you fall short, add the missing visible detail from the eight facets instead of repeating what you already wrote.\n- Describe only what is visible. No tool steps, generation parameters, or coordinate arithmetic.\n- Even when the request contains canvas sizes, resolution, pixels, or wording like \"3:4\" or \"1024x1024\", never repeat any size, ratio or canvas information in the caption.\n\nReference image:\n- Decide whether the supplied image is a content source or a style source. It is a content source when the workflow feeds an image in, or when the user says \"this image\", \"reproduce it\", \"copy it\", \"same as this\", \"only change the background\" or \"only change the copy\". Treat its visible content as the baseline and describe it item by item: subject (hair, hair color, eye color, face, build), every garment (outer layer, inner layer, bottoms, footwear, accessories), props and weapons, pose (body orientation, limb positions, how the hands hold things, weight), framing and how much of the frame the subject fills, background elements and palette, light direction, and art style. Change only what the user asks to change and keep the rest.\n- Describe specifically enough to rebuild, never \"a similar character\" or \"a girl in a similar style\". Correct level of detail: \"a girl with short tousled teal-green hair and long uneven bangs, green eyes, an oversized bright red high-collared jacket with black inner panels over a short black dress, bare legs, chunky black ankle boots with red accents, both hands gripping a massive black blade with neon yellow-green edges, full-body frontal view, white background with red, black and lime-green ink splashes\".\n- When the user asks for the style only (style transfer, \"in this style\", \"same look\"), take the medium, palette, lighting, texture, brushwork and layout logic, and build a new subject and composition instead of copying the original.\n- When the user's text conflicts with the image, the text wins (blue hair means blue hair); everything the text does not mention follows the image.\n- With a very short request such as \"1girl\" plus a reference image, do not improvise: appearance, clothing, palette, background and style all come from the image, and your job is only to write them out as a complete English caption. Do not add accessories, weapons, props or scenery the image does not show.\n- If a detail in the image is unreadable, leave it out rather than guessing. Never guess brands, identities or real names.\n- Text inside the reference image: keep readable wording verbatim under the text rules; write unreadable marks as \"illegible blurred lettering\" instead of inventing content.\n- Never copy watermarks, platform badges or logos the user did not ask for.\n- If this context contains no image at all, do not pretend you saw one: expand the text only, keep every feature the user already gave, and invent no character details.\n- A reference is evidence, not the deliverable. Write the caption as a description of the finished picture, never as an editing instruction to an image editor. Ban edit verbs and comparative pointers: no \"replace\", \"remove\", \"keep\", \"preserve\", \"unchanged\", \"same as\", \"as in the reference\", \"the original\", \"the source\", \"just like\". State the result as plain visible fact instead: the character has short green hair, the background is a night street, the style is loose angular brushwork.\n- Keep the number of subjects consistent with what the user asks for. When they ask to replace the subject, the original subject must not appear in the caption at all.\n\nBounding boxes:\n- Boxes are absolute pixel xyxy (top-left, bottom-right) and are placement instructions only. Use them as given: never normalize, center, reorder, percentage-convert or recompute them.\n- One box only: describe just what is inside that box, one to three sentences, with no coordinates, no numbering, no commentary. Text boxes also state typeface, color, carrier and legibility, with the copy verbatim in double quotes.\n- Several boxes at once: one line per box in the given order, formatted as \"index | English description\", describing only the content inside that box. No coordinates, no JSON, no prose paragraphs.\n- A box marks a placement, not a border, panel, divider or sticker to draw. Overlap and natural occlusion are allowed.\n- With no boxes, write a normal caption and never invent coordinates."
+            }
+          },
+          {
+            "id": 11,
+            "type": "TextGenerate",
+            "pos": [
+              480,
+              -780
+            ],
+            "size": [
+              400,
+              550
+            ],
+            "flags": {},
+            "order": 9,
+            "mode": 0,
+            "inputs": [
+              {
+                "localized_name": "clip",
+                "name": "clip",
+                "type": "CLIP",
+                "link": 10
+              },
+              {
+                "localized_name": "image",
+                "name": "image",
+                "shape": 7,
+                "type": "IMAGE",
+                "link": 53
+              },
+              {
+                "localized_name": "video",
+                "name": "video",
+                "shape": 7,
+                "type": "IMAGE",
+                "link": null
+              },
+              {
+                "localized_name": "audio",
+                "name": "audio",
+                "shape": 7,
+                "type": "AUDIO",
+                "link": null
+              },
+              {
+                "localized_name": "system_prompt",
+                "name": "system_prompt",
+                "shape": 7,
+                "type": "STRING",
+                "link": 13
+              },
+              {
+                "localized_name": "prompt",
+                "name": "prompt",
+                "type": "STRING",
+                "widget": {
+                  "name": "prompt"
+                },
+                "link": 17
+              },
+              {
+                "localized_name": "seed",
+                "name": "sampling_mode.seed",
+                "type": "INT",
+                "widget": {
+                  "name": "sampling_mode.seed"
+                },
+                "link": 52
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "generated_text",
+                "name": "generated_text",
+                "type": "STRING",
+                "links": [
+                  19
+                ]
+              },
+              {
+                "localized_name": "thinking",
+                "name": "thinking",
+                "type": "STRING",
+                "links": null
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "TextGenerate"
+            },
+            "widgets_values": [
+              "",
+              4096,
+              "on",
+              0.7,
+              64,
+              0.95,
+              0.05,
+              1,
+              0,
+              0,
+              false,
+              true,
+              "auto"
+            ],
+            "widgets_values_named": {
+              "prompt": "",
+              "max_length": 4096,
+              "sampling_mode": "on",
+              "sampling_mode.temperature": 0.7,
+              "sampling_mode.top_k": 64,
+              "sampling_mode.top_p": 0.95,
+              "sampling_mode.min_p": 0.05,
+              "sampling_mode.repetition_penalty": 1,
+              "sampling_mode.seed": 0,
+              "sampling_mode.presence_penalty": 0,
+              "thinking": false,
+              "use_default_template": true,
+              "mtp": "auto"
+            }
+          },
+          {
+            "id": 1,
+            "type": "UNETLoader",
+            "pos": [
+              -150,
+              80
+            ],
+            "size": [
+              350,
+              90
+            ],
+            "flags": {},
+            "order": 1,
+            "mode": 0,
+            "inputs": [
+              {
+                "localized_name": "unet_name",
+                "name": "unet_name",
+                "type": "COMBO",
+                "widget": {
+                  "name": "unet_name"
+                },
+                "link": 35
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "MODEL",
+                "name": "MODEL",
+                "type": "MODEL",
+                "slot_index": 0,
+                "links": [
+                  1,
+                  50
+                ]
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "UNETLoader",
+              "models": [
+                {
+                  "name": "moss_image_base_int8_convrot.safetensors",
+                  "url": "https://huggingface.co/Comfy-Org/MOSS-Image/resolve/main/diffusion_models/moss_image_base_int8_convrot.safetensors",
+                  "directory": "diffusion_models"
+                }
+              ]
+            },
+            "widgets_values": [
+              "moss_image_base_int8_convrot.safetensors",
+              "default"
+            ],
+            "widgets_values_named": {
+              "unet_name": "moss_image_base_int8_convrot.safetensors",
+              "weight_dtype": "default"
+            },
+            "color": "#223",
+            "bgcolor": "#335"
+          },
+          {
+            "id": 4,
+            "type": "CLIPTextEncode",
+            "pos": [
+              380,
+              80
+            ],
+            "size": [
+              450,
+              520
+            ],
+            "flags": {},
+            "order": 4,
+            "mode": 0,
+            "inputs": [
+              {
+                "localized_name": "clip",
+                "name": "clip",
+                "type": "CLIP",
+                "link": 2
+              },
+              {
+                "localized_name": "text",
+                "name": "text",
+                "type": "STRING",
+                "widget": {
+                  "name": "text"
+                },
+                "link": 20
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "CONDITIONING",
+                "name": "CONDITIONING",
+                "type": "CONDITIONING",
+                "slot_index": 0,
+                "links": [
+                  8
+                ]
+              }
+            ],
+            "title": "Positive Prompt",
+            "properties": {
+              "Node name for S&R": "CLIPTextEncode"
+            },
+            "widgets_values": [
+              "Editorial studio photograph of a model in a structured ivory wool coat standing against a seamless warm grey backdrop, single softbox from the left carving sculpted shadows, 85mm lens, muted cream and charcoal palette, subtle film grain"
+            ],
+            "widgets_values_named": {
+              "text": "Editorial studio photograph of a model in a structured ivory wool coat standing against a seamless warm grey backdrop, single softbox from the left carving sculpted shadows, 85mm lens, muted cream and charcoal palette, subtle film grain"
+            },
+            "color": "#232",
+            "bgcolor": "#353"
+          },
+          {
+            "id": 2,
+            "type": "CLIPLoader",
+            "pos": [
+              -150,
+              690
+            ],
+            "size": [
+              350,
+              140
+            ],
+            "flags": {},
+            "order": 2,
+            "mode": 0,
+            "inputs": [
+              {
+                "localized_name": "clip_name",
+                "name": "clip_name",
+                "type": "COMBO",
+                "widget": {
+                  "name": "clip_name"
+                },
+                "link": 36
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "CLIP",
+                "name": "CLIP",
+                "type": "CLIP",
+                "slot_index": 0,
+                "links": [
+                  2,
+                  3,
+                  10
+                ]
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "CLIPLoader",
+              "models": [
+                {
+                  "name": "qwen3.5_9b_w4a8_gptq.safetensors",
+                  "url": "https://huggingface.co/Comfy-Org/MOSS-Image/resolve/main/text_encoders/qwen3.5_9b_w4a8_gptq.safetensors",
+                  "directory": "text_encoders"
+                }
+              ]
+            },
+            "widgets_values": [
+              "qwen3.5_9b_w4a8_gptq.safetensors",
+              "moss_image",
+              "default"
+            ],
+            "widgets_values_named": {
+              "clip_name": "qwen3.5_9b_w4a8_gptq.safetensors",
+              "type": "moss_image",
+              "device": "default"
+            },
+            "color": "#432",
+            "bgcolor": "#653"
+          },
+          {
+            "id": 7,
+            "type": "KSampler",
+            "pos": [
+              930,
+              50
+            ],
+            "size": [
+              290,
+              290
+            ],
+            "flags": {},
+            "order": 7,
+            "mode": 0,
+            "inputs": [
+              {
+                "localized_name": "model",
+                "name": "model",
+                "type": "MODEL",
+                "link": 48
+              },
+              {
+                "localized_name": "positive",
+                "name": "positive",
+                "type": "CONDITIONING",
+                "link": 8
+              },
+              {
+                "localized_name": "negative",
+                "name": "negative",
+                "type": "CONDITIONING",
+                "link": 9
+              },
+              {
+                "localized_name": "latent_image",
+                "name": "latent_image",
+                "type": "LATENT",
+                "link": 39
+              },
+              {
+                "localized_name": "seed",
+                "name": "seed",
+                "type": "INT",
+                "widget": {
+                  "name": "seed"
+                },
+                "link": 30
+              },
+              {
+                "localized_name": "steps",
+                "name": "steps",
+                "type": "INT",
+                "widget": {
+                  "name": "steps"
+                },
+                "link": 42
+              },
+              {
+                "localized_name": "cfg",
+                "name": "cfg",
+                "type": "FLOAT",
+                "widget": {
+                  "name": "cfg"
+                },
+                "link": 44
+              },
+              {
+                "localized_name": "sampler_name",
+                "name": "sampler_name",
+                "type": "COMBO",
+                "widget": {
+                  "name": "sampler_name"
+                },
+                "link": 33
+              },
+              {
+                "localized_name": "scheduler",
+                "name": "scheduler",
+                "type": "COMBO",
+                "widget": {
+                  "name": "scheduler"
+                },
+                "link": 34
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "LATENT",
+                "name": "LATENT",
+                "type": "LATENT",
+                "slot_index": 0,
+                "links": [
+                  4
+                ]
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "KSampler"
+            },
+            "widgets_values": [
+              0,
+              "randomize",
+              25,
+              2.5,
+              "er_sde",
+              "simple",
+              1
+            ],
+            "widgets_values_named": {
+              "seed": 0,
+              "control_after_generate": "randomize",
+              "steps": 25,
+              "cfg": 2.5,
+              "sampler_name": "er_sde",
+              "scheduler": "simple",
+              "denoise": 1
+            }
+          },
+          {
+            "id": 3,
+            "type": "VAELoader",
+            "pos": [
+              -150,
+              910
+            ],
+            "size": [
+              350,
+              60
+            ],
+            "flags": {},
+            "order": 3,
+            "mode": 0,
+            "inputs": [
+              {
+                "localized_name": "vae_name",
+                "name": "vae_name",
+                "type": "COMBO",
+                "widget": {
+                  "name": "vae_name"
+                },
+                "link": 37
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "VAE",
+                "name": "VAE",
+                "type": "VAE",
+                "slot_index": 0,
+                "links": [
+                  5
+                ]
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "VAELoader",
+              "models": [
+                {
+                  "name": "flux2-vae_small.safetensors",
+                  "url": "https://huggingface.co/Comfy-Org/MOSS-Image/resolve/main/vae/flux2-vae_small.safetensors",
+                  "directory": "vae"
+                }
+              ]
+            },
+            "widgets_values": [
+              "flux2-vae_small.safetensors"
+            ],
+            "widgets_values_named": {
+              "vae_name": "flux2-vae_small.safetensors"
+            },
+            "color": "#323",
+            "bgcolor": "#535"
+          },
+          {
+            "id": 13,
+            "type": "PreviewAny",
+            "pos": [
+              1280,
+              -780
+            ],
+            "size": [
+              350,
+              600
+            ],
+            "flags": {},
+            "order": 10,
+            "mode": 0,
+            "inputs": [
+              {
+                "localized_name": "source",
+                "name": "source",
+                "type": "*",
+                "link": 21
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "STRING",
+                "name": "STRING",
+                "type": "STRING",
+                "links": [
+                  20
+                ]
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "PreviewAny"
+            },
+            "widgets_values": [],
+            "widgets_values_named": {}
+          },
+          {
+            "id": 16,
+            "type": "ComfySwitchNode",
+            "pos": [
+              940,
+              -780
+            ],
+            "size": [
+              280,
+              110
+            ],
+            "flags": {},
+            "order": 12,
+            "mode": 0,
+            "inputs": [
+              {
+                "localized_name": "on_false",
+                "name": "on_false",
+                "shape": 7,
+                "type": "STRING",
+                "link": 15
+              },
+              {
+                "localized_name": "on_true",
+                "name": "on_true",
+                "shape": 7,
+                "type": "STRING",
+                "link": 19
+              },
+              {
+                "localized_name": "switch",
+                "name": "switch",
+                "type": "BOOLEAN",
+                "widget": {
+                  "name": "switch"
+                },
+                "link": 26
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "output",
+                "name": "output",
+                "type": "STRING",
+                "links": [
+                  21
+                ]
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "ComfySwitchNode"
+            },
+            "widgets_values": [
+              true
+            ],
+            "widgets_values_named": {
+              "switch": true
+            }
+          },
+          {
+            "id": 6,
+            "type": "EmptyFlux2LatentImage",
+            "pos": [
+              -140,
+              1130
+            ],
+            "size": [
+              300,
+              120
+            ],
+            "flags": {},
+            "order": 6,
+            "mode": 0,
+            "inputs": [
+              {
+                "localized_name": "width",
+                "name": "width",
+                "type": "INT",
+                "widget": {
+                  "name": "width"
+                },
+                "link": 27
+              },
+              {
+                "localized_name": "height",
+                "name": "height",
+                "type": "INT",
+                "widget": {
+                  "name": "height"
+                },
+                "link": 28
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "LATENT",
+                "name": "LATENT",
+                "type": "LATENT",
+                "slot_index": 0,
+                "links": [
+                  39
+                ]
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "EmptyFlux2LatentImage"
+            },
+            "widgets_values": [
+              1024,
+              1024,
+              1
+            ],
+            "widgets_values_named": {
+              "width": 1024,
+              "height": 1024,
+              "batch_size": 1
+            },
+            "color": "#323",
+            "bgcolor": "#535"
+          },
+          {
+            "id": 5,
+            "type": "CLIPTextEncode",
+            "pos": [
+              380,
+              660
+            ],
+            "size": [
+              460,
+              180
+            ],
+            "flags": {},
+            "order": 5,
+            "mode": 0,
+            "inputs": [
+              {
+                "localized_name": "clip",
+                "name": "clip",
+                "type": "CLIP",
+                "link": 3
+              },
+              {
+                "localized_name": "text",
+                "name": "text",
+                "type": "STRING",
+                "widget": {
+                  "name": "text"
+                },
+                "link": 43
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "CONDITIONING",
+                "name": "CONDITIONING",
+                "type": "CONDITIONING",
+                "slot_index": 0,
+                "links": [
+                  9
+                ]
+              }
+            ],
+            "title": "Negative Prompt (empty = reference default)",
+            "properties": {
+              "Node name for S&R": "CLIPTextEncode"
+            },
+            "widgets_values": [
+              ""
+            ],
+            "widgets_values_named": {
+              "text": ""
+            },
+            "color": "#223",
+            "bgcolor": "#335"
+          },
+          {
+            "id": 8,
+            "type": "VAEDecode",
+            "pos": [
+              1270,
+              50
+            ],
+            "size": [
+              230,
+              70
+            ],
+            "flags": {},
+            "order": 8,
+            "mode": 0,
+            "inputs": [
+              {
+                "localized_name": "samples",
+                "name": "samples",
+                "type": "LATENT",
+                "link": 4
+              },
+              {
+                "localized_name": "vae",
+                "name": "vae",
+                "type": "VAE",
+                "link": 5
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "IMAGE",
+                "name": "IMAGE",
+                "type": "IMAGE",
+                "slot_index": 0,
+                "links": [
+                  6
+                ]
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "VAEDecode"
+            }
+          },
+          {
+            "id": 15,
+            "type": "SkipLayerGuidanceDiTSimple",
+            "pos": [
+              -160,
+              230
+            ],
+            "size": [
+              350,
+              210
+            ],
+            "flags": {},
+            "order": 11,
+            "mode": 0,
+            "showAdvanced": true,
+            "inputs": [
+              {
+                "localized_name": "model",
+                "name": "model",
+                "type": "MODEL",
+                "link": 1
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "MODEL",
+                "name": "MODEL",
+                "type": "MODEL",
+                "links": [
+                  49
+                ]
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "SkipLayerGuidanceDiTSimple"
+            },
+            "widgets_values": [
+              "",
+              "22",
+              0,
+              0.5
+            ],
+            "widgets_values_named": {
+              "double_layers": "",
+              "single_layers": "22",
+              "start_percent": 0,
+              "end_percent": 0.5
+            }
+          },
+          {
+            "id": 32,
+            "type": "ComfySwitchNode",
+            "pos": [
+              -150,
+              500
+            ],
+            "size": [
+              340,
+              110
+            ],
+            "flags": {},
+            "order": 14,
+            "mode": 0,
+            "inputs": [
+              {
+                "localized_name": "on_false",
+                "name": "on_false",
+                "shape": 7,
+                "type": "MODEL",
+                "link": 50
+              },
+              {
+                "localized_name": "on_true",
+                "name": "on_true",
+                "shape": 7,
+                "type": "MODEL",
+                "link": 49
+              },
+              {
+                "localized_name": "switch",
+                "name": "switch",
+                "type": "BOOLEAN",
+                "widget": {
+                  "name": "switch"
+                },
+                "link": 51
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "output",
+                "name": "output",
+                "type": "MODEL",
+                "links": [
+                  48
+                ]
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "ComfySwitchNode"
+            },
+            "widgets_values": [
+              false
+            ],
+            "widgets_values_named": {
+              "switch": false
+            }
+          }
+        ],
+        "groups": [
+          {
+            "id": 1,
+            "title": "Models",
+            "bounding": [
+              -210,
+              -10,
+              480,
+              1010
+            ],
+            "color": "#3f789e",
+            "flags": {}
+          },
+          {
+            "id": 2,
+            "title": "Prompt",
+            "bounding": [
+              300,
+              -10,
+              580,
+              880
+            ],
+            "color": "#3f789e",
+            "flags": {}
+          },
+          {
+            "id": 3,
+            "title": "Image Size",
+            "bounding": [
+              -220,
+              1020,
+              490,
+              290
+            ],
+            "color": "#3f789e",
+            "flags": {}
+          },
+          {
+            "id": 4,
+            "title": "Prompt Enhancer",
+            "bounding": [
+              -200,
+              -880,
+              1900,
+              840
+            ],
+            "color": "#444",
+            "flags": {}
+          }
+        ],
+        "links": [
+          {
+            "id": 2,
+            "origin_id": 2,
+            "origin_slot": 0,
+            "target_id": 4,
+            "target_slot": 0,
+            "type": "CLIP"
+          },
+          {
+            "id": 20,
+            "origin_id": 13,
+            "origin_slot": 0,
+            "target_id": 4,
+            "target_slot": 1,
+            "type": "STRING"
+          },
+          {
+            "id": 1,
+            "origin_id": 1,
+            "origin_slot": 0,
+            "target_id": 15,
+            "target_slot": 0,
+            "type": "MODEL"
+          },
+          {
+            "id": 8,
+            "origin_id": 4,
+            "origin_slot": 0,
+            "target_id": 7,
+            "target_slot": 1,
+            "type": "CONDITIONING"
+          },
+          {
+            "id": 9,
+            "origin_id": 5,
+            "origin_slot": 0,
+            "target_id": 7,
+            "target_slot": 2,
+            "type": "CONDITIONING"
+          },
+          {
+            "id": 21,
+            "origin_id": 16,
+            "origin_slot": 0,
+            "target_id": 13,
+            "target_slot": 0,
+            "type": "STRING"
+          },
+          {
+            "id": 15,
+            "origin_id": 17,
+            "origin_slot": 0,
+            "target_id": 16,
+            "target_slot": 0,
+            "type": "STRING"
+          },
+          {
+            "id": 19,
+            "origin_id": 11,
+            "origin_slot": 0,
+            "target_id": 16,
+            "target_slot": 1,
+            "type": "STRING"
+          },
+          {
+            "id": 3,
+            "origin_id": 2,
+            "origin_slot": 0,
+            "target_id": 5,
+            "target_slot": 0,
+            "type": "CLIP"
+          },
+          {
+            "id": 4,
+            "origin_id": 7,
+            "origin_slot": 0,
+            "target_id": 8,
+            "target_slot": 0,
+            "type": "LATENT"
+          },
+          {
+            "id": 5,
+            "origin_id": 3,
+            "origin_slot": 0,
+            "target_id": 8,
+            "target_slot": 1,
+            "type": "VAE"
+          },
+          {
+            "id": 6,
+            "origin_id": 8,
+            "origin_slot": 0,
+            "target_id": -20,
+            "target_slot": 0,
+            "type": "IMAGE"
+          },
+          {
+            "id": 39,
+            "origin_id": 6,
+            "origin_slot": 0,
+            "target_id": 7,
+            "target_slot": 3,
+            "type": "LATENT"
+          },
+          {
+            "id": 48,
+            "origin_id": 32,
+            "origin_slot": 0,
+            "target_id": 7,
+            "target_slot": 0,
+            "type": "MODEL"
+          },
+          {
+            "id": 49,
+            "origin_id": 15,
+            "origin_slot": 0,
+            "target_id": 32,
+            "target_slot": 1,
+            "type": "MODEL"
+          },
+          {
+            "id": 50,
+            "origin_id": 1,
+            "origin_slot": 0,
+            "target_id": 32,
+            "target_slot": 0,
+            "type": "MODEL"
+          },
+          {
+            "id": 10,
+            "origin_id": 2,
+            "origin_slot": 0,
+            "target_id": 11,
+            "target_slot": 0,
+            "type": "CLIP"
+          },
+          {
+            "id": 13,
+            "origin_id": 14,
+            "origin_slot": 0,
+            "target_id": 11,
+            "target_slot": 4,
+            "type": "STRING"
+          },
+          {
+            "id": 17,
+            "origin_id": 17,
+            "origin_slot": 0,
+            "target_id": 11,
+            "target_slot": 5,
+            "type": "STRING"
+          },
+          {
+            "id": 25,
+            "origin_id": -10,
+            "origin_slot": 0,
+            "target_id": 17,
+            "target_slot": 0,
+            "type": "STRING"
+          },
+          {
+            "id": 26,
+            "origin_id": -10,
+            "origin_slot": 1,
+            "target_id": 16,
+            "target_slot": 2,
+            "type": "BOOLEAN"
+          },
+          {
+            "id": 52,
+            "origin_id": -10,
+            "origin_slot": 2,
+            "target_id": 11,
+            "target_slot": 6,
+            "type": "INT"
+          },
+          {
+            "id": 43,
+            "origin_id": -10,
+            "origin_slot": 3,
+            "target_id": 5,
+            "target_slot": 1,
+            "type": "STRING"
+          },
+          {
+            "id": 27,
+            "origin_id": -10,
+            "origin_slot": 4,
+            "target_id": 6,
+            "target_slot": 0,
+            "type": "INT"
+          },
+          {
+            "id": 28,
+            "origin_id": -10,
+            "origin_slot": 5,
+            "target_id": 6,
+            "target_slot": 1,
+            "type": "INT"
+          },
+          {
+            "id": 30,
+            "origin_id": -10,
+            "origin_slot": 6,
+            "target_id": 7,
+            "target_slot": 4,
+            "type": "INT"
+          },
+          {
+            "id": 42,
+            "origin_id": -10,
+            "origin_slot": 7,
+            "target_id": 7,
+            "target_slot": 5,
+            "type": "INT"
+          },
+          {
+            "id": 44,
+            "origin_id": -10,
+            "origin_slot": 8,
+            "target_id": 7,
+            "target_slot": 6,
+            "type": "FLOAT"
+          },
+          {
+            "id": 51,
+            "origin_id": -10,
+            "origin_slot": 9,
+            "target_id": 32,
+            "target_slot": 2,
+            "type": "BOOLEAN"
+          },
+          {
+            "id": 33,
+            "origin_id": -10,
+            "origin_slot": 10,
+            "target_id": 7,
+            "target_slot": 7,
+            "type": "COMBO"
+          },
+          {
+            "id": 34,
+            "origin_id": -10,
+            "origin_slot": 11,
+            "target_id": 7,
+            "target_slot": 8,
+            "type": "COMBO"
+          },
+          {
+            "id": 35,
+            "origin_id": -10,
+            "origin_slot": 12,
+            "target_id": 1,
+            "target_slot": 0,
+            "type": "COMBO"
+          },
+          {
+            "id": 36,
+            "origin_id": -10,
+            "origin_slot": 13,
+            "target_id": 2,
+            "target_slot": 0,
+            "type": "COMBO"
+          },
+          {
+            "id": 37,
+            "origin_id": -10,
+            "origin_slot": 14,
+            "target_id": 3,
+            "target_slot": 0,
+            "type": "COMBO"
+          },
+          {
+            "id": 53,
+            "origin_id": -10,
+            "origin_slot": 15,
+            "target_id": 11,
+            "target_slot": 1,
+            "type": "IMAGE"
+          }
+        ],
+        "extra": {},
+        "category": "Image generation/Text to image",
+        "description": "Generates images from text prompts using MOSS-Image, with an optional built-in prompt enhancer."
+      }
+    ]
+  },
+  "extra": {}
+}
