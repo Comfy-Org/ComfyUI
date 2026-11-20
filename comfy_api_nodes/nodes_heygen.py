@@ -54,7 +54,7 @@ _DECISION_PRICE_BADGE = IO.PriceBadge(
     depends_on=IO.PriceBadgeDepends(widgets=["model"]),
     expr="""
     (
-      $promo := $now() < "2026-12-01T00:00:00.000Z";
+      $promo := $now() < "2026-12-01T08:00:00.000Z";
       $rate := widgets.model = "heygen-decision-1-turbo"
         ? ($promo ? 0.06006 : 0.1287)
         : ($promo ? 0.1001 : 0.2002);
