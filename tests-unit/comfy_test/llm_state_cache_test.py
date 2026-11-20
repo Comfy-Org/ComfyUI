@@ -91,3 +91,26 @@ def test_missing_or_broken_file_is_a_miss(cache_dir):
     broken = cache_dir / "prefix-broken.safetensors"
     broken.write_bytes(b"not a safetensors file")
     assert cache._read(str(broken)) is None
+
+
+def test_generate_without_mtp_head_drops_cache_ids(monkeypatch):
+    # a model with no MTP head (e.g. Qwen Image 2.1's prompt enhancer) takes the plain generate path, which has no
+    # cache_ids argument: mtp auto must not pass it through
+    from comfy.cli_args import args
+    monkeypatch.setattr(args, "cpu", True)  # importing the model code must not need a GPU
+    from comfy.text_encoders import qwen35, llama
+    seen = {}
+
+    def plain_generate(self, embeds=None, do_sample=True, max_length=256, temperature=1.0, top_k=50, top_p=0.9,
+                       min_p=0.0, repetition_penalty=1.0, seed=42, stop_tokens=None, model_state=None, position_ids=None,
+                       presence_penalty=0.0):
+        seen.update(model_state=model_state, position_ids=position_ids)
+        return "ok"
+
+    monkeypatch.setattr(llama.BaseGenerate, "generate", plain_generate)
+    model = qwen35.Qwen35.__new__(qwen35.Qwen35)
+    torch.nn.Module.__init__(model)
+    model.mtp = None
+    out = model.generate(embeds=None, mtp=True, cache_ids=("a", "b"), model_state="state", position_ids="pos")
+    assert out == "ok"
+    assert seen == {"model_state": "state", "position_ids": "pos"}

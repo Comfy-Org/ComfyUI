@@ -947,6 +947,7 @@ class Qwen35(BaseLlama, BaseGenerate, torch.nn.Module):
     def generate(self, embeds=None, do_sample=True, max_length=256, temperature=1.0, top_k=50, top_p=0.9, min_p=0.0, repetition_penalty=1.0, seed=42, stop_tokens=None, **kwargs):
         mtp = kwargs.pop("mtp", True)
         if self.mtp is None or not mtp or kwargs.get("initial_input_ids") is not None:
+            kwargs.pop("cache_ids", None)  # the prompt state cache keys only the MTP path; the plain path has no such argument
             return super().generate(embeds=embeds, do_sample=do_sample, max_length=max_length, temperature=temperature,
                                     top_k=top_k, top_p=top_p, min_p=min_p, repetition_penalty=repetition_penalty,
                                     seed=seed, stop_tokens=stop_tokens, **kwargs)
@@ -1363,7 +1364,7 @@ class Qwen35ClipModel(sd1_clip.SDClipModel):
         if resume:
             position_ids = torch.arange(state["position"], state["position"] + embeds.shape[1], device=embeds.device).unsqueeze(0)
         extra = {}
-        if llm_state_cache.enabled() and not state and mtp and len(tokens_only) == 1:
+        if llm_state_cache.enabled() and not state and mtp and self.transformer.mtp is not None and len(tokens_only) == 1:
             # no explicit state: the prompt state cache finds a matching prefix itself (image positions are hashed)
             cache_ids = llm_state_cache.prompt_ids(tokens_only[0], embeds_info, embeds.shape[1])
             if cache_ids is not None:
