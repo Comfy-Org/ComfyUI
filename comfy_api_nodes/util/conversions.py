@@ -409,6 +409,7 @@ def _apply_video_scale(video: Input.Video, scale_dims: tuple[int, int]) -> Input
     # get_stream_source() is untrimmed, so apply the trim window in this same pass.
     # start_time is normalized (>= 0); duration == 0 means "until the end".
     start_time, duration = video.get_active_trim_window()
+    crop_rect = video.get_active_crop_rect()
     trimming = bool(start_time or duration)
 
     try:
@@ -442,6 +443,12 @@ def _apply_video_scale(video: Input.Video, scale_dims: tuple[int, int]) -> Input
                     continue
                 if end_pts is not None and frame.pts >= end_pts:
                     break
+            if crop_rect is not None:
+                x, y, w, h = crop_rect
+                planes = frame.to_ndarray(format="yuv444p")
+                if frame.rotation:
+                    planes = np.rot90(planes, k=int(round(frame.rotation // 90)) % 4, axes=(1, 2))
+                frame = av.VideoFrame.from_ndarray(np.ascontiguousarray(planes[:, y:y + h, x:x + w]), format="yuv444p")
             frame = frame.reformat(width=out_w, height=out_h, format="yuv420p")
             # Re-wrap as a fresh frame: dropping irregular source timestamps (VFR/AVI/GIF/...)
             # lets the encoder assign clean ones and avoids mp4 muxer errors.
