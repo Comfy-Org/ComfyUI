@@ -99,32 +99,21 @@ def test_register_keeps_same_type_from_different_packs(NodeReplaceManager):
     assert {r.old_pack for r in manager.get_replacement("StringConstant")} == {"pack-a", "pack-b"}
 
 
-@pytest.mark.parametrize("node_pack, expected_pack", [
-    ("pack-b", "pack-b"),
-    ("pack-c", None),
-    (None, None),
+@pytest.mark.parametrize("entry_packs, node_pack, expected", [
+    (["pack-a", "pack-b"], "pack-b", "New-pack-b"),
+    (["pack-a", "pack-b"], "pack-c", None),
+    (["pack-a", "pack-b"], None, None),
+    (["pack-a", None], "pack-z", "New-None"),
+    (["pack-a", None], "pack-a", "New-pack-a"),
+    (["pack-a"], None, "New-pack-a"),
+    (["pack-a"], "pack-b", None),
 ])
-def test_select_replacement_matches_node_pack(NodeReplaceManager, node_pack, expected_pack):
+def test_select_replacement_matches_node_pack(NodeReplaceManager, entry_packs, node_pack, expected):
     manager = NodeReplaceManager()
-    for pack in ("pack-a", "pack-b"):
+    for pack in entry_packs:
         manager.register(FakeNodeReplace(new_node_id=f"New-{pack}", old_node_id="Old", old_pack=pack))
     selected = manager.select_replacement("Old", node_pack)
-    assert (selected.old_pack if selected else None) == expected_pack
-
-
-def test_select_replacement_falls_back_to_packless_entry(NodeReplaceManager):
-    manager = NodeReplaceManager()
-    manager.register(FakeNodeReplace(new_node_id="FromPack", old_node_id="Old", old_pack="pack-a"))
-    manager.register(FakeNodeReplace(new_node_id="Generic", old_node_id="Old"))
-    assert manager.select_replacement("Old", "pack-z").new_node_id == "Generic"
-    assert manager.select_replacement("Old", "pack-a").new_node_id == "FromPack"
-
-
-def test_select_replacement_uses_sole_pack_for_node_without_pack(NodeReplaceManager):
-    manager = NodeReplaceManager()
-    manager.register(FakeNodeReplace(new_node_id="PrimitiveString", old_node_id="StringConstant", old_pack="pack-a"))
-    assert manager.select_replacement("StringConstant", None).new_node_id == "PrimitiveString"
-    assert manager.select_replacement("StringConstant", "pack-b") is None
+    assert (selected.new_node_id if selected else None) == expected
 
 
 def test_apply_replacements_selects_by_prompt_pack(NodeReplaceManager):
@@ -141,5 +130,5 @@ def test_apply_replacements_selects_by_prompt_pack(NodeReplaceManager):
     }
     manager.apply_replacements(prompt)
     assert prompt["1"]["class_type"] == "NewB"
-    assert prompt["2"]["class_type"] == "NewA"
+    assert prompt["2"]["class_type"] == "Old"
     assert prompt["1"]["inputs"] == {"value": "hi"}

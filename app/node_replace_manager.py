@@ -51,18 +51,16 @@ class NodeReplaceManager:
         existing.append(node_replace)
 
     def select_replacement(self, old_node_id: str, old_pack: str | None) -> NodeReplace | None:
-        """Pick the replacement for a node of old_node_id saved from old_pack.
+        """Pick the replacement for a node of old_node_id saved from the pack with cnr_id old_pack.
 
         Prefers an entry for that pack, then an entry with no pack. A node saved without
         pack identity only matches pack entries when every entry names the same pack.
         """
         candidates = self._replacements.get(old_node_id, [])
-        for entry in candidates:
-            if entry.old_pack is not None and entry.old_pack == old_pack:
-                return entry
-        for entry in candidates:
-            if entry.old_pack is None:
-                return entry
+        for pack in (old_pack, None):
+            for entry in candidates:
+                if entry.old_pack == pack:
+                    return entry
         if old_pack is None and len({entry.old_pack for entry in candidates}) == 1:
             return candidates[0]
         return None
@@ -93,8 +91,7 @@ class NodeReplaceManager:
         for node_number in need_replacement:
             node_struct = prompt[node_number]
             class_type = node_struct["class_type"]
-            meta = node_struct.get("_meta", {})
-            replacement = self.select_replacement(class_type, meta.get("cnr_id") or meta.get("aux_id"))
+            replacement = self.select_replacement(class_type, node_struct.get("_meta", {}).get("cnr_id"))
             if replacement is None:
                 continue
             new_node_id = replacement.new_node_id
