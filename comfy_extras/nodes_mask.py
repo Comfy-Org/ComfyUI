@@ -275,7 +275,7 @@ class MaskComposite(IO.ComfyNode):
 
         left, top = (x, y,)
         right, bottom = (min(left + source.shape[-1], destination.shape[-1]), min(top + source.shape[-2], destination.shape[-2]))
-        visible_width, visible_height = (right - left, bottom - top,)
+        visible_width, visible_height = (max(0, right - left), max(0, bottom - top),)
 
         source_portion = source[:, :visible_height, :visible_width]
         destination_portion = output[:, top:bottom, left:right]
