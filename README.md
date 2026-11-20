@@ -40,7 +40,7 @@ ComfyUI is the AI creation engine for visual professionals who demand control ov
 - Reusable subgraphs, workflow templates, [App Mode](https://docs.comfy.org/interface/app-mode), and a [local API](https://docs.comfy.org/development/comfyui-server/api-examples) for integrating workflows into applications.
 - Load complete checkpoints or separate diffusion models, VAEs, text encoders, LoRAs, ControlNets, adapters, and upscalers from supported model formats.
 - Built-in tools for inpainting, outpainting, reference conditioning, masks and compositing, model merging, upscaling, frame interpolation, segmentation, depth estimation, and media processing.
-- Save and load workflows as JSON, or recover complete workflows and seeds from supported generated media.
+- Save and load workflows as JSON. You can also drag any image, video, audio, or 3D file made with ComfyUI onto the canvas to get back the full workflow that made it, seeds included.
 - Runs fully offline: core does not download anything unless you request it. Use `--offline` to disable the optional paid [Comfy API nodes](https://docs.comfy.org/tutorials/api-nodes/overview) and force all built-in functionality to stay offline, or `--disable-partner-nodes` to only disable the API nodes.
 - Extend ComfyUI with custom nodes, installed and updated through [ComfyUI-Manager](docs/installation.md#comfyui-manager).
 - Configure additional model locations with [`extra_model_paths.yaml`](extra_model_paths.yaml.example).
