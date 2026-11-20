@@ -8,7 +8,7 @@ post-install options that are easy to miss.
 > ComfyUI, and [comfy-cli](https://www.comfy.org/cli)
 > (`pip install comfy-cli && comfy install`) covers most of the rest.
 
-Visit the [README](../README.md#install) for a condensed version of the install options.
+Visit the [README](../README.md#installing) for a condensed version of the install options.
 
 Or visit the [Manual Installation](https://docs.comfy.org/installation/manual_install)
 guide on Comfy Docs for additional installation instructions with navigation and

@@ -58,18 +58,19 @@ ComfyUI is the AI creation engine for visual professionals who demand control ov
 | [Comfy CLI](https://www.comfy.org/cli) | Driving the whole engine from a terminal. Built for CI jobs, scripting, and piping outputs somewhere else. |
 | [Comfy Enterprise](https://www.comfy.org/enterprise) | Organizations standardizing ComfyUI across teams: one approved reproducible build everywhere, dedicated GPU capacity and SLAs, commercial licensing and security review. |
 
-## Install
+## Installing
 
-**[Comfy Desktop](https://www.comfy.org/download) is the recommended way to install
-ComfyUI.** It is the easiest and best way to get started, on Windows and macOS.
+### [Comfy Desktop](https://www.comfy.org/download) is the recommended way to install ComfyUI
+
+It is the easiest and best way to get started, on Windows and macOS.
 
 Other paths:
 
+- **[Windows Portable](docs/installation.md#windows-portable)** for a self-contained build you can unzip and run.
 - **[Comfy Cloud](https://www.comfy.org/cloud)** if you would rather not run it locally at all.
 - **[comfy-cli](https://www.comfy.org/cli)** if you prefer a CLI: `pip install comfy-cli && comfy install`.
 - **[Developer Platform](https://www.comfy.org/platform)** if you are deploying a workflow as a production API endpoint rather than running the app yourself.
 - **Manual install**, below, when you need control over your Python and Torch versions.
-- **[Windows Portable](docs/installation.md#windows-portable)** for a self-contained build you can unzip and run.
 
 ### Manual install
 
