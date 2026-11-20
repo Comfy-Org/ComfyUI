@@ -66,6 +66,8 @@ class AssetContent(Base):
             unique=True,
             sqlite_where=text("is_missing = 0"),
         ),
+        # Prefix queries over every row, missing ones included (the startup temp wipe).
+        Index("ix_asset_contents_path", "path"),
     )
 
 
