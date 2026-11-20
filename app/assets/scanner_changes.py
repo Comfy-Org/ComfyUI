@@ -259,12 +259,15 @@ def drain_pending_verifications(session: Session, limit: int | None = None) -> i
     return processed
 
 
-def live_contents_under_prefixes(session: Session, prefixes: list[str]) -> Iterator[AssetContent]:
+def live_contents_under_prefixes(session: Session, prefixes: list[str]) -> Iterator[sa.Row]:
     """Stream the live contents under the prefixes in batches; consume it inside the session."""
     seen: set[str] = set()
     for under_prefixes in sql_path_under_prefix_batches(AssetContent.path, prefixes):
-        stmt = sa.select(AssetContent).where(AssetContent.is_missing.is_(False), under_prefixes)
-        for content in session.scalars(stmt.execution_options(yield_per=500)):
+        # Columns, not entities: building an ORM object per row costs ~7x the query on large catalogs.
+        stmt = sa.select(
+            AssetContent.id, AssetContent.path, AssetContent.size_bytes, AssetContent.mtime_ns
+        ).where(AssetContent.is_missing.is_(False), under_prefixes)
+        for content in session.execute(stmt.execution_options(yield_per=500)):
             if content.id not in seen:
                 seen.add(content.id)
                 yield content
