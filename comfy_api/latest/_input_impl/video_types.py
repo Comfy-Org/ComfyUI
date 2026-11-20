@@ -467,6 +467,11 @@ class VideoFromFile(VideoInput):
             start_time = max(self._get_raw_duration() + start_time, 0.0)
         return float(start_time), float(self.__duration)
 
+    def get_active_crop_rect(self) -> tuple[int, int, int, int] | None:
+        if self.__crop is None:
+            return None
+        return normalize_crop_rect(*self.__crop, *self._get_display_dimensions())
+
     def get_dimensions(self) -> tuple[int, int]:
         """
         Returns the dimensions of the video input.
