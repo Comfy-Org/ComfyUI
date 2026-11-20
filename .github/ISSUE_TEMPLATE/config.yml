@@ -3,9 +3,6 @@ contact_links:
   - name: ComfyUI Frontend Issues
     url: https://github.com/Comfy-Org/ComfyUI_frontend/issues
     about: Issues related to the ComfyUI frontend (display issues, user interaction bugs), please go to the frontend repo to file the issue
-  - name: ComfyUI Matrix Space
-    url: https://app.element.io/#/room/%23comfyui_space%3Amatrix.org
-    about: The ComfyUI Matrix Space is available for support and general discussion related to ComfyUI (Matrix is like Discord but open source).
   - name: Comfy Org Discord
     url: https://discord.gg/comfyorg
     about: The Comfy Org Discord is available for support and general discussion related to ComfyUI.
