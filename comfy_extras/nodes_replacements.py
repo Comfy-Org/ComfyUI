@@ -14,7 +14,6 @@ async def register_replacements():
     await register_replacements_svdimg2vid()
     await register_replacements_conditioningavg()
     await register_replacements_textgenerate()
-    await register_replacements_kjnodes()
 
 async def register_replacements_longeredge():
     # No dynamic inputs here
@@ -109,18 +108,6 @@ async def register_replacements_textgenerate():
                 {"new_id": "sampling_mode.presence_penalty", "set_value": 0.0},
                 *[{"new_id": name, "old_id": name} for name in ["clip", "system_prompt", *widgets]],
             ],
-        ))
-
-async def register_replacements_kjnodes():
-    # Lossless equivalents, checked by tests-unit/node_equivalents_test
-    await api.node_replacement.register(io.NodeReplace(
-            new_node_id="PrimitiveString",
-            old_node_id="StringConstant",
-            old_pack="comfyui-kjnodes",
-            kind="equivalent",
-            old_widget_ids=["string"],
-            input_mapping=[{"new_id": "value", "old_id": "string"}],
-            output_mapping=[{"new_idx": 0, "old_idx": 0}],
         ))
 
 class NodeReplacementsExtension(ComfyExtension):
