@@ -10,6 +10,7 @@ if not torch.cuda.is_available():
     args.cpu = True
 
 import nodes
+from comfy_api.latest import io
 from comfy_extras.nodes_logic import BranchNode, SwitchNode
 from comfy_extras.nodes_primitive import Boolean
 from execution import validate_prompt
@@ -44,6 +45,18 @@ class UnmarkedSwitch(SwitchNode):
         return dataclasses.replace(SwitchNode.define_schema(), node_id="UnmarkedSwitch", static_lazy_selection=False)
 
 
+class HiddenPromptSwitch(SwitchNode):
+    @classmethod
+    def define_schema(cls):
+        return dataclasses.replace(SwitchNode.define_schema(), node_id="HiddenPromptSwitch", hidden=[io.Hidden.prompt])
+
+
+class AcceptAllSwitch(SwitchNode):
+    @classmethod
+    def define_schema(cls):
+        return dataclasses.replace(SwitchNode.define_schema(), node_id="AcceptAllSwitch", accept_all_inputs=True)
+
+
 @pytest.fixture(autouse=True)
 def test_nodes(monkeypatch):
     for class_type, cls in {
@@ -52,6 +65,8 @@ def test_nodes(monkeypatch):
         "ComfySwitchNode": SwitchNode,
         "BranchNode": BranchNode,
         "UnmarkedSwitch": UnmarkedSwitch,
+        "HiddenPromptSwitch": HiddenPromptSwitch,
+        "AcceptAllSwitch": AcceptAllSwitch,
         "PrimitiveBoolean": Boolean,
     }.items():
         monkeypatch.setitem(nodes.NODE_CLASS_MAPPINGS, class_type, cls)
@@ -140,8 +155,9 @@ def test_switch_with_linked_selector_validates_both_inputs():
     assert error_types(node_errors, "broken") == ["value_not_in_list"]
 
 
-def test_unmarked_lazy_node_validates_both_inputs():
-    valid, _, _, node_errors = validate(switch_prompt(True, switch_class="UnmarkedSwitch"))
+@pytest.mark.parametrize("switch_class", ["UnmarkedSwitch", "HiddenPromptSwitch", "AcceptAllSwitch"])
+def test_lazy_node_without_static_selection_validates_both_inputs(switch_class):
+    valid, _, _, node_errors = validate(switch_prompt(True, switch_class=switch_class))
 
     assert not valid
     assert error_types(node_errors, "broken") == ["value_not_in_list"]

@@ -1911,6 +1911,7 @@ class Schema:
 
     When the node's non-lazy inputs are all widget values, prompt validation calls check_lazy_status
     with lazy links unresolved (None) and skips validating the lazy inputs it does not request.
+    Ignored for nodes with accept_all_inputs or hidden inputs, whose run-time arguments validation cannot reproduce.
     """
 
     def validate(self):

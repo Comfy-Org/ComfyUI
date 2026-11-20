@@ -899,7 +899,10 @@ async def select_lazy_inputs_statically(prompt_id, unique_id, obj_class, inputs,
     Only applies to v3 nodes declaring `static_lazy_selection` whose non-lazy inputs are all
     literals. Returns `(unrequested_input_names, error)`; error is set if check_lazy_status raised.
     """
-    if not issubclass(obj_class, _ComfyNodeInternal) or not obj_class.GET_SCHEMA().static_lazy_selection:
+    if not issubclass(obj_class, _ComfyNodeInternal):
+        return set(), None
+    schema = obj_class.GET_SCHEMA()
+    if not schema.static_lazy_selection or schema.accept_all_inputs or schema.hidden:
         return set(), None
     if any(x not in inputs for x in class_inputs.get("required", {})):
         return set(), None
