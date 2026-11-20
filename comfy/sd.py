@@ -36,6 +36,7 @@ import math
 import os
 
 import comfy.utils
+import comfy.checkpoint_convert
 import comfy.ops
 import comfy.model_prefetch
 import comfy.storage
@@ -47,6 +48,7 @@ from . import model_detection
 
 from . import sd1_clip
 from . import sdxl_clip
+import comfy.text_encoders.sensenova
 import comfy.text_encoders.sd2_clip
 import comfy.text_encoders.sd3_clip
 import comfy.text_encoders.sa_t5
@@ -97,6 +99,7 @@ import comfy.text_encoders.gpt_oss
 import comfy.text_encoders.joyimage
 import comfy.text_encoders.moss_image
 import comfy.text_encoders.fibo2
+import comfy.text_encoders.pan2
 
 import comfy.model_patcher
 import comfy.lora
@@ -273,6 +276,7 @@ class CLIP:
         model_management.archive_model_dtypes(self.cond_stage_model)
 
         self.tokenizer = tokenizer(embedding_directory=embedding_directory, tokenizer_data=tokenizer_data)
+        self.tokenizer_metadata = {k: v for k, v in tokenizer_data.items() if k.endswith("_tokenizer_json") and isinstance(v, str)}
         te_disable_dynamic = disable_dynamic or getattr(self.cond_stage_model, "disable_offload", False)
         ModelPatcher = comfy.model_patcher.ModelPatcher if te_disable_dynamic else comfy.model_patcher.CoreModelPatcher
         self.patcher = ModelPatcher(self.cond_stage_model, load_device=load_device, offload_device=offload_device, fast_disk=comfy.storage.state_dict_fast_disk(state_dict))
@@ -314,6 +318,7 @@ class CLIP:
         n.patcher = self.patcher.clone(disable_dynamic=disable_dynamic)
         n.cond_stage_model = self.cond_stage_model
         n.tokenizer = self.tokenizer
+        n.tokenizer_metadata = self.tokenizer_metadata.copy()
         n.layer_idx = self.layer_idx
         n.tokenizer_options = self.tokenizer_options.copy()
         n.use_clip_schedule = self.use_clip_schedule
@@ -1707,6 +1712,7 @@ class CLIPType(Enum):
     FLUX3 = 37
     MOSS_IMAGE = 38
     FIBO2 = 39
+    PAN2 = 40
 
 
 
@@ -1716,12 +1722,18 @@ def load_clip_model_patcher(ckpt_paths, embedding_directory=None, clip_type=CLIP
 
 def load_clip(ckpt_paths, embedding_directory=None, clip_type=CLIPType.STABLE_DIFFUSION, model_options={}, disable_dynamic=False):
     clip_data = []
+    tokenizer_data = {}
     for p in ckpt_paths:
         sd, metadata = comfy.utils.load_torch_file(p, safe_load=True, return_metadata=True)
         if model_options.get("custom_operations", None) is None:
             sd, metadata = comfy.utils.convert_old_quants(sd, model_prefix="", metadata=metadata)
+        for k, v in (metadata or {}).items():
+            if k.endswith("_tokenizer_json"):
+                if k in tokenizer_data and tokenizer_data[k] != v:
+                    raise ValueError("Conflicting embedded tokenizer: {}".format(k))
+                tokenizer_data[k] = v
         clip_data.append(sd)
-    clip = load_text_encoder_state_dicts(clip_data, embedding_directory=embedding_directory, clip_type=clip_type, model_options=model_options, disable_dynamic=disable_dynamic)
+    clip = load_text_encoder_state_dicts(clip_data, embedding_directory=embedding_directory, clip_type=clip_type, model_options=model_options, disable_dynamic=disable_dynamic, tokenizer_data=tokenizer_data)
     clip.patcher.cached_patcher_init = (load_clip_model_patcher, (ckpt_paths, embedding_directory, clip_type, model_options))
     return clip
 
@@ -1884,8 +1896,9 @@ def llama_detect(clip_data):
 
     return {}
 
-def load_text_encoder_state_dicts(state_dicts=[], embedding_directory=None, clip_type=CLIPType.STABLE_DIFFUSION, model_options={}, disable_dynamic=False):
+def load_text_encoder_state_dicts(state_dicts=[], embedding_directory=None, clip_type=CLIPType.STABLE_DIFFUSION, model_options={}, disable_dynamic=False, tokenizer_data={}):
     clip_data = state_dicts
+    tokenizer_data = tokenizer_data.copy()
 
     class EmptyClass:
         pass
@@ -1899,7 +1912,6 @@ def load_text_encoder_state_dicts(state_dicts=[], embedding_directory=None, clip
         if "lm_head.weight" in clip_data[i]:
             clip_data[i]["model.lm_head.weight"] = clip_data[i].pop("lm_head.weight") # prefix missing in some models
 
-    tokenizer_data = {}
     clip_target = EmptyClass()
     clip_target.params = {}
     if len(clip_data) == 1:
@@ -1918,6 +1930,10 @@ def load_text_encoder_state_dicts(state_dicts=[], embedding_directory=None, clip
             clip_target.params["projection_config"] = comfy.text_encoders.minimax_music.detect_merged_config(clip_data[0])
             clip_target.clip = comfy.text_encoders.minimax_music.MiniMaxMusic3TEModel
             clip_target.tokenizer = comfy.text_encoders.minimax_music.MiniMaxMusic3Tokenizer
+        elif "language_model.model.embed_tokens.weight" in clip_data[0] and "language_model.model.norm.weight" in clip_data[0] and "language_model.model.layers.0.self_attn.q_norm_hw.weight" in clip_data[0]:
+            clip_target.clip = comfy.text_encoders.sensenova.SenseNovaTextEncoder
+            clip_target.tokenizer = comfy.text_encoders.sensenova.SenseNovaTokenizer
+            clip_target.params = comfy.text_encoders.sensenova.clip_parameters(clip_data[0])
         elif te_model == TEModel.CLIP_G:
             if clip_type == CLIPType.STABLE_CASCADE:
                 clip_target.clip = sdxl_clip.StableCascadeClipModel
@@ -2068,9 +2084,13 @@ def load_text_encoder_state_dicts(state_dicts=[], embedding_directory=None, clip
             if clip_type == CLIPType.MOSS_IMAGE and te_model == TEModel.QWEN35_9B:  # MOSS-Image: stock Qwen3.5-9B, last hidden state, open think block.
                 clip_target.clip = comfy.text_encoders.moss_image.te(**llama_detect(clip_data), mtp="mtp.fc.weight" in clip_data[0])
                 clip_target.tokenizer = comfy.text_encoders.moss_image.MOSSImageTokenizer
+            elif clip_type == CLIPType.PAN2 and te_model == TEModel.QWEN35_9B:  # PAN 2: stock Qwen3.5-9B, layer 30 of 32, the caption span after the system turn.
+                clip_target.clip = comfy.text_encoders.pan2.te(**llama_detect(clip_data), mtp="mtp.fc.weight" in clip_data[0])
+                clip_target.tokenizer = comfy.text_encoders.pan2.PAN2Tokenizer
             else:
                 qwen35_type = {TEModel.QWEN35_08B: "qwen35_08b", TEModel.QWEN35_2B: "qwen35_2b", TEModel.QWEN35_4B: "qwen35_4b", TEModel.QWEN35_9B: "qwen35_9b", TEModel.QWEN35_27B: "qwen35_27b"}[te_model]
-                clip_target.clip = comfy.text_encoders.qwen35.te(**llama_detect(clip_data), model_type=qwen35_type, mtp="mtp.fc.weight" in clip_data[0])
+                clip_target.clip = comfy.text_encoders.qwen35.te(**llama_detect(clip_data), model_type=qwen35_type, mtp="mtp.fc.weight" in clip_data[0],
+                    vocab_size=clip_data[0]["model.embed_tokens.weight"].shape[0], tokenizer_json=tokenizer_data.get("{}_tokenizer_json".format(qwen35_type)))
                 clip_target.tokenizer = comfy.text_encoders.qwen35.tokenizer(model_type=qwen35_type)
         elif te_model in (TEModel.QWEN3VL_2B, TEModel.QWEN3VL_4B, TEModel.QWEN3VL_8B):
             if clip_type == CLIPType.IDEOGRAM4 and te_model == TEModel.QWEN3VL_8B:  # Ideogram4 reuses the full Qwen3-VL-8B (13-layer tap for conditioning + multimodal generate).
@@ -2289,6 +2309,7 @@ def load_checkpoint(config_path=None, ckpt_path=None, output_vae=True, output_cl
 
 def load_checkpoint_guess_config(ckpt_path, output_vae=True, output_clip=True, output_clipvision=False, embedding_directory=None, output_model=True, model_options={}, te_model_options={}, disable_dynamic=False):
     sd, metadata = comfy.utils.load_torch_file(ckpt_path, return_metadata=True)
+    sd = comfy.checkpoint_convert.convert_checkpoint(sd)
     out = load_state_dict_guess_config(sd, output_vae, output_clip, output_clipvision, embedding_directory, output_model, model_options, te_model_options=te_model_options, metadata=metadata, disable_dynamic=disable_dynamic)
     if out is None:
         raise RuntimeError("ERROR: Could not detect model type of: {}\n{}".format(ckpt_path, model_detection_error_hint(ckpt_path, sd)))
@@ -2441,7 +2462,8 @@ def load_state_dict_guess_config(sd, output_vae=True, output_clip=True, output_c
             clip_sd = model_config.process_clip_state_dict(sd)
             if len(clip_sd) > 0:
                 parameters = comfy.utils.calculate_parameters(clip_sd)
-                clip = CLIP(clip_target, embedding_directory=embedding_directory, tokenizer_data=clip_sd, parameters=parameters, state_dict=clip_sd, model_options=te_model_options, disable_dynamic=disable_dynamic)
+                tokenizer_data = {**clip_sd, **{k: v for k, v in (metadata or {}).items() if k.endswith("_tokenizer_json")}}
+                clip = CLIP(clip_target, embedding_directory=embedding_directory, tokenizer_data=tokenizer_data, parameters=parameters, state_dict=clip_sd, model_options=te_model_options, disable_dynamic=disable_dynamic)
             else:
                 logging.warning("no CLIP/text encoder weights in checkpoint, the text encoder model will not be loaded.")
 
@@ -2603,6 +2625,8 @@ def save_checkpoint(output_path, model, clip=None, vae=None, clip_vision=None, m
 
     if metadata is None:
         metadata = {}
+    if clip is not None:
+        metadata = {**metadata, **clip.tokenizer_metadata}
 
     model_management.load_models_gpu(load_models)
     clip_vision_sd = clip_vision.get_sd() if clip_vision is not None else None

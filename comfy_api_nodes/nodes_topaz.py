@@ -1,5 +1,6 @@
 import builtins
 from io import BytesIO
+from uuid import UUID
 
 import aiohttp
 from typing_extensions import override
@@ -37,6 +38,7 @@ from comfy_api_nodes.util import (
     upload_images_to_comfyapi,
     validate_container_format_is_mp4,
 )
+from comfy_api_nodes.util.client import PollingTimeoutError
 
 UPSCALER_MODELS_MAP = {
     "Astra 2": "ast-2",
@@ -51,6 +53,27 @@ AST2_MAX_FRAMES_WITH_PROMPT = 450
 IMAGE_MAX_UPSCALE_FACTOR = {"Bloom 2": 12, "Wonder 3.5": 6, "Wonder 4": 6}
 IMAGE_MAX_OUTPUT_PIXELS = 178_956_970
 IMAGE_MAX_OUTPUT_SIDE = 32000
+
+
+async def _poll_video(cls: type[IO.ComfyNode], request_id: str) -> VideoStatusResponse:
+    try:
+        return await poll_op(
+            cls,
+            ApiEndpoint(path=f"/proxy/topaz/video/{request_id}/status"),
+            response_model=VideoStatusResponse,
+            status_extractor=lambda x: x.status,
+            progress_extractor=lambda x: getattr(x, "progress", 0),
+            poll_interval=10.0,
+        )
+    except PollingTimeoutError as error:
+        try:
+            safe_request_id = str(UUID(request_id))
+        except ValueError:
+            raise error from None
+        raise PollingTimeoutError(
+            f"{error} Topaz may still complete this request and charge for it. "
+            f"Contact support with request ID {safe_request_id} before starting another paid request."
+        ) from error
 
 
 class TopazImageEnhance(IO.ComfyNode):
@@ -833,14 +856,7 @@ class TopazVideoEnhance(IO.ComfyNode):
             wait_label="Finalizing upload",
             final_label_on_success="Upload completed",
         )
-        final_response = await poll_op(
-            cls,
-            ApiEndpoint(path=f"/proxy/topaz/video/{initial_res.requestId}/status"),
-            response_model=VideoStatusResponse,
-            status_extractor=lambda x: x.status,
-            progress_extractor=lambda x: getattr(x, "progress", 0),
-            poll_interval=10.0,
-        )
+        final_response = await _poll_video(cls, initial_res.requestId)
         return IO.NodeOutput(await download_url_to_video_output(final_response.download.url))
 
 
@@ -1176,14 +1192,7 @@ class TopazVideoEnhanceV2(IO.ComfyNode):
             wait_label="Finalizing upload",
             final_label_on_success="Upload completed",
         )
-        final_response = await poll_op(
-            cls,
-            ApiEndpoint(path=f"/proxy/topaz/video/{initial_res.requestId}/status"),
-            response_model=VideoStatusResponse,
-            status_extractor=lambda x: x.status,
-            progress_extractor=lambda x: getattr(x, "progress", 0),
-            poll_interval=10.0,
-        )
+        final_response = await _poll_video(cls, initial_res.requestId)
         return IO.NodeOutput(await download_url_to_video_output(final_response.download.url))
 
 

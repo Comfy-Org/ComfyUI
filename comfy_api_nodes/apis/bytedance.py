@@ -342,6 +342,10 @@ SEEDANCE2_REF_VIDEO_PIXEL_LIMITS = {
         "1080p": {"min": 409_600, "max": 8_295_044},
         "4k": {"min": 409_600, "max": 8_295_044},
     },
+    "dreamina-seedance-2-5-flash-261115": {
+        "480p": {"min": 407_696, "max": 8_295_044},
+        "720p": {"min": 407_696, "max": 8_295_044},
+    },
 }
 
 SEEDANCE2_REFERENCE_LIMITS_DEFAULT = {
@@ -355,6 +359,12 @@ SEEDANCE2_REFERENCE_LIMITS = {
         "max_images": 30,
         "max_videos": 10,
         "max_audios": 10,
+        "max_total_seconds": 30.1,
+    },
+    "dreamina-seedance-2-5-flash-261115": {
+        "max_images": 10,
+        "max_videos": 5,
+        "max_audios": 5,
         "max_total_seconds": 30.1,
     },
 }
