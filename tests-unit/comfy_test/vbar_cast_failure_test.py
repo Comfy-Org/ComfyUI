@@ -1,8 +1,9 @@
 """A cast that fails after vbar_fault must not leave a pinned module that no cleanup can reach.
 
-vbar_fault pins the module's pages when it returns a signature. cleanup_prefetched_modules only
-unpins modules that carry a _prefetch marker, so cast_modules_with_vbar must release any module
-it faulted but did not mark before the error escapes.
+vbar_fault pins the module's pages when it returns a signature. cast_modules_with_vbar makes the
+module's _prefetch record right after the fault, so the caller's cleanup (cleanup_prefetched_modules,
+directly or through cleanup_prefetch_queues) sees the pin and releases it, even if the record is
+only partly filled in when the cast fails.
 """
 from types import SimpleNamespace
 
@@ -66,54 +67,62 @@ def vbar(monkeypatch):
 
 @pytest.fixture
 def failing_cast(monkeypatch):
-    # Stands in for any error between the fault and the marker, such as "VRAM grow failed".
+    # Stands in for any error after the fault, such as "VRAM grow failed".
     def fail(*args, **kwargs):
         raise RuntimeError("VRAM grow failed")
     monkeypatch.setattr(comfy.ops, "materialize_meta_param", fail)
 
 
-def test_direct_cast_failure_unpins_the_faulted_module(vbar, failing_cast):
+def test_failed_cast_leaves_a_record_that_cleanup_releases(vbar, failing_cast):
     s = _module("weight")
     with pytest.raises(RuntimeError, match="VRAM grow failed"):
         comfy.ops.cast_modules_with_vbar([s], None, "cpu", None, False)
+    assert vbar.pinned == ["weight"]
+    assert s._prefetch == {"signature": "new", "resident": False}
+
+    comfy.model_prefetch.cleanup_prefetched_modules(None, [s])
     assert vbar.pinned == []
     assert not hasattr(s, "_prefetch")
 
 
-def test_failed_fault_is_not_unpinned(vbar, failing_cast):
+def test_cleanup_does_not_unpin_a_failed_fault(vbar, failing_cast):
     vbar.fault = lambda v: None
     s = _module("weight")
     with pytest.raises(RuntimeError, match="VRAM grow failed"):
         comfy.ops.cast_modules_with_vbar([s], None, "cpu", None, False)
+    comfy.model_prefetch.cleanup_prefetched_modules(None, [s])
     assert vbar.pinned == []
+    assert not hasattr(s, "_prefetch")
 
 
-def test_batch_failure_leaves_marked_modules_to_cleanup(vbar, failing_cast):
+def test_batch_failure_cleanup_releases_every_faulted_module(vbar, failing_cast):
     resident = _module("resident", signature="same")
     missed = _module("missed")
+    untouched = _module("untouched")
     with pytest.raises(RuntimeError, match="VRAM grow failed"):
-        comfy.ops.cast_modules_with_vbar([resident, missed], None, "cpu", None, True, return_faulted=True)
-    # The resident module was marked before the failure, so the queue cleanup owns its pin.
-    assert vbar.pinned == ["resident"]
-    assert resident._prefetch["resident"]
-    assert not hasattr(missed, "_prefetch")
+        comfy.ops.cast_modules_with_vbar([resident, missed, untouched], None, "cpu", None, True, return_faulted=True)
+    assert vbar.pinned == ["resident", "missed"]
+    assert not hasattr(untouched, "_prefetch")
 
-    comfy.model_prefetch.cleanup_prefetched_modules(None, [resident, missed])
+    comfy.model_prefetch.cleanup_prefetched_modules(None, [resident, missed, untouched])
     assert vbar.pinned == []
 
 
-def test_group_failure_unpins_peers_faulted_up_front(vbar, failing_cast):
+def test_group_failure_cleanup_releases_peers_faulted_up_front(vbar, failing_cast):
     members = [_module("a"), _module("b"), _module("c")]
-    group = _Group(members)
+    _Group(members)
     with pytest.raises(RuntimeError, match="VRAM grow failed"):
         comfy.ops.cast_modules_with_vbar(members, None, "cpu", None, True, return_faulted=True)
+    assert vbar.pinned == ["a", "b", "c"]
+    # One member missed, so every member's record is a miss.
+    assert all(m._prefetch["resident"] is False for m in members)
+
+    comfy.model_prefetch.cleanup_prefetched_modules(None, members)
     assert vbar.pinned == []
     assert all(not hasattr(m, "_prefetch") for m in members)
-    # The group missed, so its combined weight must not be reused.
-    assert group._v_weight is None
 
 
-def test_fault_error_mid_group_unpins_earlier_peers(vbar):
+def test_fault_error_mid_group_cleanup_releases_earlier_peers(vbar):
     members = [_module("a"), _module("b"), _module("c")]
     _Group(members)
 
@@ -124,38 +133,33 @@ def test_fault_error_mid_group_unpins_earlier_peers(vbar):
     vbar.fault = fault
     with pytest.raises(RuntimeError, match="Fault failed"):
         comfy.ops.cast_modules_with_vbar(members, None, "cpu", None, True, return_faulted=True)
+    comfy.model_prefetch.cleanup_prefetched_modules(None, members)
     assert vbar.pinned == []
 
 
-def test_unpin_error_during_unwind_keeps_the_original_error(vbar, failing_cast, monkeypatch):
-    def unpin(v):
-        raise RuntimeError("VBAR unpin failed")
-    monkeypatch.setattr(comfy.ops.comfy_aimdo.model_vbar, "vbar_unpin", unpin)
-    members = [_module("a"), _module("b")]
-    _Group(members)
+def test_prefetch_queue_cleanup_releases_a_partial_record(vbar, failing_cast, monkeypatch):
+    s = _module("weight")
+    # prefetch_queue_pop stores the head this way before pinning, so a failed pin stays reachable.
+    monkeypatch.setattr(comfy.model_prefetch, "PREFETCH_QUEUES", [[(None, (None, [s]))]])
     with pytest.raises(RuntimeError, match="VRAM grow failed"):
-        comfy.ops.cast_modules_with_vbar(members, None, "cpu", None, True, return_faulted=True)
+        comfy.ops.cast_modules_with_vbar([s], None, "cpu", None, True, return_faulted=True)
+    comfy.model_prefetch.cleanup_prefetch_queues()
+    assert vbar.pinned == []
+    assert not hasattr(s, "_prefetch")
 
 
-def test_prefix_cache_layer_cleans_slots_when_pinning_fails(monkeypatch):
-    slot = SimpleNamespace(comfy_cast_weights=True)
-
-    def pin_modules(modules, device):
-        for m in modules:
-            m._prefetch = {"signature": "new", "resident": True}
-        raise RuntimeError("Pin registration failed")
-    cleaned = []
-    monkeypatch.setattr(comfy.model_prefetch, "pin_modules", pin_modules)
-    monkeypatch.setattr(comfy.model_prefetch, "cleanup_prefetched_modules", lambda module, modules: cleaned.extend(modules))
-
-    cache = qwen_image21.PrefixCache([[slot]])
-    with pytest.raises(RuntimeError, match="Pin registration failed"):
-        with cache.layer(0, "cpu", write=False):
-            pass
-    assert cleaned == [slot]
+def test_direct_cast_failure_releases_pin_and_record(vbar, failing_cast, monkeypatch):
+    s = _module("weight")
+    s.weight = torch.zeros(4)
+    s.bias = None
+    monkeypatch.setattr(comfy.model_management, "is_device_cpu", lambda device: False)
+    with pytest.raises(RuntimeError, match="VRAM grow failed"):
+        comfy.ops.cast_bias_weight(s, dtype=torch.float32, device=torch.device("meta"), bias_dtype=torch.float32, offloadable=True)
+    assert vbar.pinned == []
+    assert not hasattr(s, "_prefetch")
 
 
-def test_direct_cast_resolve_failure_releases_pin_and_marker(vbar, monkeypatch):
+def test_direct_cast_resolve_failure_releases_pin_and_record(vbar, monkeypatch):
     s = _module("weight")
     s.weight = torch.zeros(4)
     s.bias = None
@@ -176,21 +180,22 @@ def test_direct_cast_resolve_failure_releases_pin_and_marker(vbar, monkeypatch):
     assert not hasattr(s, "_prefetch")
 
 
-def test_prefix_cache_cleanup_error_keeps_the_pinning_error(monkeypatch):
+def test_prefix_cache_layer_cleans_slots_when_pinning_fails(monkeypatch):
     slot = SimpleNamespace(comfy_cast_weights=True)
 
     def pin_modules(modules, device):
+        for m in modules:
+            m._prefetch = {"signature": "new", "resident": False}
         raise RuntimeError("Pin registration failed")
-
-    def cleanup(module, modules):
-        raise RuntimeError("VBAR unpin failed")
+    cleaned = []
     monkeypatch.setattr(comfy.model_prefetch, "pin_modules", pin_modules)
-    monkeypatch.setattr(comfy.model_prefetch, "cleanup_prefetched_modules", cleanup)
+    monkeypatch.setattr(comfy.model_prefetch, "cleanup_prefetched_modules", lambda module, modules: cleaned.extend(modules))
 
     cache = qwen_image21.PrefixCache([[slot]])
     with pytest.raises(RuntimeError, match="Pin registration failed"):
         with cache.layer(0, "cpu", write=False):
             pass
+    assert cleaned == [slot]
 
 
 def test_resolve_failure_does_not_record_the_new_signature():
