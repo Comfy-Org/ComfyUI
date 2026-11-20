@@ -2571,6 +2571,8 @@ class OutputMap(TypedDict):
     new_idx: int
     old_idx: int
 
+NodeReplaceKind = Literal["deprecated", "equivalent"]
+
 class NodeReplace:
     """
     Defines a possible node replacement, mapping inputs and outputs of the old node to the new node.
@@ -2586,6 +2588,10 @@ class NodeReplace:
             replacement system to correctly identify widget values during node migration.
         input_mapping: List of input mappings from old node to new node.
         output_mapping: List of output mappings from old node to new node.
+        old_pack: Registry ID (cnr_id) of the pack that defines old_node_id. None for core nodes.
+            Entries only apply to old nodes from this pack.
+        kind: "deprecated" when the old node is superseded, "equivalent" when a pack node has a
+            lossless core equivalent. Equivalent entries must set old_pack.
     """
     def __init__(self,
         new_node_id: str,
@@ -2593,12 +2599,20 @@ class NodeReplace:
         old_widget_ids: list[str] | None=None,
         input_mapping: list[InputMap] | None=None,
         output_mapping: list[OutputMap] | None=None,
+        old_pack: str | None=None,
+        kind: NodeReplaceKind="deprecated",
     ):
+        if kind not in ("deprecated", "equivalent"):
+            raise ValueError(f"Unknown node replacement kind: {kind!r}")
+        if kind == "equivalent" and old_pack is None:
+            raise ValueError(f"Equivalent replacement for {old_node_id!r} must set old_pack")
         self.new_node_id = new_node_id
         self.old_node_id = old_node_id
         self.old_widget_ids = old_widget_ids
         self.input_mapping = input_mapping
         self.output_mapping = output_mapping
+        self.old_pack = old_pack
+        self.kind = kind
 
     def as_dict(self):
         """Create serializable representation of the node replacement."""
@@ -2608,6 +2622,8 @@ class NodeReplace:
             "old_widget_ids": self.old_widget_ids,
             "input_mapping": list(self.input_mapping) if self.input_mapping else None,
             "output_mapping": list(self.output_mapping) if self.output_mapping else None,
+            "old_pack": self.old_pack,
+            "kind": self.kind,
         }
 
 

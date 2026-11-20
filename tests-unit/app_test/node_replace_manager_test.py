@@ -29,12 +29,14 @@ def NodeReplaceManager(monkeypatch):
 class FakeNodeReplace:
     """Lightweight stand-in for comfy_api.latest._io.NodeReplace."""
     def __init__(self, new_node_id, old_node_id, old_widget_ids=None,
-                 input_mapping=None, output_mapping=None):
+                 input_mapping=None, output_mapping=None, old_pack=None, kind="deprecated"):
         self.new_node_id = new_node_id
         self.old_node_id = old_node_id
         self.old_widget_ids = old_widget_ids
         self.input_mapping = input_mapping
         self.output_mapping = output_mapping
+        self.old_pack = old_pack
+        self.kind = kind
 
 
 def test_register_adds_replacement(NodeReplaceManager):
@@ -88,3 +90,56 @@ def test_register_dedupe_does_not_affect_other_old_nodes(NodeReplaceManager):
     manager.register(FakeNodeReplace(new_node_id="NewB", old_node_id="OldB"))
     assert len(manager.get_replacement("OldA")) == 1
     assert len(manager.get_replacement("OldB")) == 1
+
+
+def test_register_keeps_same_type_from_different_packs(NodeReplaceManager):
+    manager = NodeReplaceManager()
+    manager.register(FakeNodeReplace(new_node_id="PrimitiveString", old_node_id="StringConstant", old_pack="pack-a"))
+    manager.register(FakeNodeReplace(new_node_id="PrimitiveString", old_node_id="StringConstant", old_pack="pack-b"))
+    assert {r.old_pack for r in manager.get_replacement("StringConstant")} == {"pack-a", "pack-b"}
+
+
+@pytest.mark.parametrize("node_pack, expected_pack", [
+    ("pack-b", "pack-b"),
+    ("pack-c", None),
+    (None, None),
+])
+def test_select_replacement_matches_node_pack(NodeReplaceManager, node_pack, expected_pack):
+    manager = NodeReplaceManager()
+    for pack in ("pack-a", "pack-b"):
+        manager.register(FakeNodeReplace(new_node_id=f"New-{pack}", old_node_id="Old", old_pack=pack))
+    selected = manager.select_replacement("Old", node_pack)
+    assert (selected.old_pack if selected else None) == expected_pack
+
+
+def test_select_replacement_falls_back_to_packless_entry(NodeReplaceManager):
+    manager = NodeReplaceManager()
+    manager.register(FakeNodeReplace(new_node_id="FromPack", old_node_id="Old", old_pack="pack-a"))
+    manager.register(FakeNodeReplace(new_node_id="Generic", old_node_id="Old"))
+    assert manager.select_replacement("Old", "pack-z").new_node_id == "Generic"
+    assert manager.select_replacement("Old", "pack-a").new_node_id == "FromPack"
+
+
+def test_select_replacement_uses_sole_pack_for_node_without_pack(NodeReplaceManager):
+    manager = NodeReplaceManager()
+    manager.register(FakeNodeReplace(new_node_id="PrimitiveString", old_node_id="StringConstant", old_pack="pack-a"))
+    assert manager.select_replacement("StringConstant", None).new_node_id == "PrimitiveString"
+    assert manager.select_replacement("StringConstant", "pack-b") is None
+
+
+def test_apply_replacements_selects_by_prompt_pack(NodeReplaceManager):
+    nodes = sys.modules["nodes"]
+    nodes.NODE_CLASS_MAPPINGS = {"NewA": object, "NewB": object}
+    manager = NodeReplaceManager()
+    manager.register(FakeNodeReplace(new_node_id="NewA", old_node_id="Old", old_pack="pack-a",
+                                     input_mapping=[{"new_id": "value", "old_id": "string"}]))
+    manager.register(FakeNodeReplace(new_node_id="NewB", old_node_id="Old", old_pack="pack-b",
+                                     input_mapping=[{"new_id": "value", "old_id": "string"}]))
+    prompt = {
+        "1": {"class_type": "Old", "inputs": {"string": "hi"}, "_meta": {"cnr_id": "pack-b"}},
+        "2": {"class_type": "Old", "inputs": {"string": "yo"}, "_meta": {"aux_id": "pack-a"}},
+    }
+    manager.apply_replacements(prompt)
+    assert prompt["1"]["class_type"] == "NewB"
+    assert prompt["2"]["class_type"] == "NewA"
+    assert prompt["1"]["inputs"] == {"value": "hi"}
