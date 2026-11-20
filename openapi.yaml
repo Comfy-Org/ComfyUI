@@ -932,9 +932,15 @@ components:
                     description: Index of the path where this model is located
                     example: 0
                     type: integer
+                size:
+                    description: File size in bytes
+                    example: 1048576
+                    minimum: 0
+                    type: integer
             required:
                 - name
                 - pathIndex
+                - size
             type: object
         ModelFolder:
             description: Represents a folder containing models
