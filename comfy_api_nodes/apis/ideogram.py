@@ -273,6 +273,7 @@ class Ideogram45Request(BaseModel):
     size: str | None = None
     magic_prompt: str | None = None
     context_window: str | None = None
+    background: str | None = None
 
 
 class IdeogramVectorGenerateRequest(BaseModel):
