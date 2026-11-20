@@ -1,0 +1,14 @@
+--- a/dequant.py
++++ b/dequant.py
+@@ -39,4 +39,11 @@
+     elif qtype in dequantize_functions:
+         dequant_dtype = dtype if dequant_dtype == "target" else dequant_dtype
++        # Iris Xe, torch 2.15.0+xpu: these packed formats hit Level Zero error 45.
++        if (tensor.device.type == "xpu" and os.environ.get("LTX25_IRIS_CPU_UNPACK") == "1"
++                and qtype in (gguf.GGMLQuantizationType.BF16, gguf.GGMLQuantizationType.Q2_K,
++                              gguf.GGMLQuantizationType.Q3_K, gguf.GGMLQuantizationType.Q5_K,
++                              gguf.GGMLQuantizationType.Q8_0)):
++            packed = tensor.data.as_subclass(torch.Tensor).cpu()
++            return dequantize(packed, qtype, oshape, dtype=dequant_dtype).to(dtype).to(tensor.device)
+         if (tensor.device.type == "xpu"
+                 and qtype in (gguf.GGMLQuantizationType.Q4_K, gguf.GGMLQuantizationType.Q6_K)

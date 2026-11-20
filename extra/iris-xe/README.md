@@ -4,6 +4,12 @@ This opt-in configuration targets the Iris Xe integrated GPU in the Core i5-1340
 
 ## Install
 
+If importing the four exported ComfyUI commits into another checkout, their base is `995456d0188ffb51032c28f41527cfa82d87d8a9`. On a branch at that revision, import the numbered mail patches with the following command. The embedded GGUF diffs contain CRLF context matching the pinned custom node. Preserving those bytes lets the subsequent GGUF installation apply cleanly.
+
+```bash
+git am --keep-cr --3way /path/to/outpatches/000[1-4]-*.patch
+```
+
 From the ComfyUI repository root, use a Python 3.12 environment with an Intel compute driver and access to the GPU render device:
 
 ```bash
@@ -30,6 +36,20 @@ python -u main.py --intel-iris-xe --cpu-vae --fp32-unet --fp32-vae \
 ```
 
 The switch enables the same workarounds as `LTX25_IRIS_CPU_UNPACK=1`. They cover the sampler's empty-latent check, LTX positional tables and keyframe masks, GGUF Q4_K/Q6_K unpacking and GGUF FP16-to-FP32 weight casts. For the 9-frame LTX-2.5 workflow use the CPU device in CLIPLoader. With these flags VideoVAE decodes on the CPU and the latent upscaler runs on XPU in FP32.
+
+For the 9-frame 640×384 text-to-video benchmark on the i5-1340P, omit `--cpu-vae` to run the FP32 VideoVAE on XPU as well. Use the same VAE device for both sides of a sampler comparison.
+
+## Mixed-quantization LTX GGUF files
+
+For `ltx-2.5-22b-distilled-UD-Q5_K_XL.gguf`, apply the following additional diff to the custom node after the Iris Xe and native unpack patches. The checkpoint also uses BF16, Q2_K, Q3_K and Q8_0. On the tested Iris Xe, GPU unpacking of these four formats and Q5_K fails with Level Zero error 45. This fallback uses the plugin's existing CPU decoder for those formats and transfers the result back to the XPU. Q4_K and Q6_K retain the previously selected path.
+
+```bash
+node=custom_nodes/ComfyUI-GGUF
+git -C "$node" apply --check "$PWD/extra/iris-xe/gguf-mixed-qtypes.patch"
+git -C "$node" apply "$PWD/extra/iris-xe/gguf-mixed-qtypes.patch"
+```
+
+Restart the server to load the plugin edit. Keep the original CFG++ workflow to use both positive and negative conditioning at CFG 1.
 
 ## Optional native GGUF weight unpacking
 
