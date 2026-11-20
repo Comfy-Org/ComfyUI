@@ -902,8 +902,10 @@ def free_memory(memory_required, device, keep_loaded=[], for_dynamic=False, pins
 
     can_unload_sorted = sorted(can_unload)
     for x in can_unload_sorted:
-        #the indexes can't be used past this point, unloading can run the cleanup_models finalizer which pops from current_loaded_models
+        #unloading can free other models, their finalizer pops from current_loaded_models so the indexes can't be used here
         shift_model = x[-1]
+        if shift_model.model is None:
+            continue
         memory_to_free = 1e32
         if not DISABLE_SMART_MEMORY or device is None:
             memory_to_free = 0 if device is None else memory_required - get_free_memory(device)
