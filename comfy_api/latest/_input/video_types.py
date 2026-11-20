@@ -138,6 +138,9 @@ class VideoInput(ABC):
         """
         return 0.0, 0.0
 
+    def get_active_crop_rect(self) -> tuple[int, int, int, int] | None:
+        return None
+
     # Provide a default implementation, but subclasses can provide optimized versions
     # if possible.
     def get_dimensions(self) -> tuple[int, int]:
