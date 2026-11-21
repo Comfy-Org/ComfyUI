@@ -750,22 +750,29 @@ class _AssetSeeder:
 
             # Phase 1: Fast scan (stub records)
             if phase in (ScanPhase.FAST, ScanPhase.FULL):
-                created, skipped, paths = self._run_fast_phase(roots)
-                total_created, skipped_existing, total_paths = created, skipped, paths
+                # Models get their own pass, so the model library fills before a large input folder is walked.
+                rest = tuple(r for r in roots if r != "models")
+                passes = [("models",), rest] if "models" in roots and rest else [roots]
+                for pass_roots in passes:
+                    # The output pass of a models+output scan is not the output-only rescan.
+                    created, skipped, paths = self._run_fast_phase(pass_roots, rescans_output_by_listing(roots))
+                    total_created += created
+                    skipped_existing += skipped
+                    total_paths += paths
 
-                if self._check_pause_and_cancel(_ScanStage.FAST_SCAN):
-                    cancelled = True
-                    return
+                    if self._check_pause_and_cancel(_ScanStage.FAST_SCAN):
+                        cancelled = True
+                        return
 
-                self._emit_event(
-                    "assets.seed.fast_complete",
-                    {
-                        "roots": list(roots),
-                        "created": total_created,
-                        "skipped": skipped_existing,
-                        "total": total_paths,
-                    },
-                )
+                    self._emit_event(
+                        "assets.seed.fast_complete",
+                        {
+                            "roots": list(pass_roots),
+                            "created": created,
+                            "skipped": skipped,
+                            "total": paths,
+                        },
+                    )
 
             # Phase 2: Enrichment scan (metadata + hashes)
             if phase in (ScanPhase.ENRICH, ScanPhase.FULL):
@@ -903,7 +910,7 @@ class _AssetSeeder:
                 root=root,
             )
 
-    def _run_fast_phase(self, roots: tuple[RootType, ...]) -> tuple[int, int, int]:
+    def _run_fast_phase(self, roots: tuple[RootType, ...], by_listing: bool) -> tuple[int, int, int]:
         """Run phase 1: fast scan to create stub records.
 
         Returns:
@@ -913,12 +920,13 @@ class _AssetSeeder:
         total_created = 0
         skipped_existing = 0
 
-        by_listing = rescans_output_by_listing(roots)
         live_references: dict[str, list] = {}
         existing_paths: set[str] = set()
         t_sync = time.perf_counter()
         assert self._scan_state is not None
         scan_state = self._scan_state
+        # Progress counts accumulate across the passes of one scan.
+        base = _snapshot_progress(scan_state)
         for r in roots:
             if self._check_pause_and_cancel(_ScanStage.FAST_SCAN):
                 return total_created, skipped_existing, 0
@@ -973,7 +981,7 @@ class _AssetSeeder:
                 unlisted,
             )
         total_paths = len(paths)
-        self._update_progress(total=total_paths)
+        self._update_progress(total=base.total + total_paths)
 
         self._emit_event(
             "assets.seed.started",
@@ -995,7 +1003,7 @@ class _AssetSeeder:
             len(specs),
             skipped_existing,
         )
-        self._update_progress(skipped=skipped_existing)
+        self._update_progress(skipped=base.skipped + skipped_existing)
 
         if self._check_pause_and_cancel(_ScanStage.FAST_SCAN):
             return total_created, skipped_existing, total_paths
@@ -1043,7 +1051,7 @@ class _AssetSeeder:
 
             scanned = i + len(batch)
             now = time.perf_counter()
-            self._update_progress(scanned=scanned, created=total_created)
+            self._update_progress(scanned=base.scanned + scanned, created=base.created + total_created)
 
             if now - last_progress_time >= progress_interval:
                 self._emit_event(
@@ -1060,7 +1068,7 @@ class _AssetSeeder:
             if scanned < len(specs):
                 time.sleep(INSERT_PAUSE_SECONDS)
 
-        self._update_progress(scanned=len(specs), created=total_created)
+        self._update_progress(scanned=base.scanned + len(specs), created=base.created + total_created)
         tick_watch_list(scan_state)
         logging.info(
             "Fast scan complete: %.3fs total (created=%d, skipped=%d, total_paths=%d)",
