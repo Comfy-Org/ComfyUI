@@ -137,8 +137,8 @@ import gc
 import numpy as np
 from comfy_api.input_impl.video_types import VideoFromFile
 components = VideoFromFile(sys.argv[1]).get_components()
-assert hasattr(components.images.untyped_storage(), "_comfy_hostbuf")
-assert components.alpha is None or hasattr(components.alpha.untyped_storage(), "_comfy_hostbuf")
+assert hasattr(components.images.untyped_storage(), "_comfy_hostbuf"), "images not on a host buffer"
+assert components.alpha is None or hasattr(components.alpha.untyped_storage(), "_comfy_hostbuf"), "alpha not on a host buffer"
 arrays = {"head": components.images[:1].clone().numpy()}
 if components.alpha is not None:
     arrays["alpha"] = components.alpha.clone().numpy()
@@ -234,8 +234,8 @@ address_space = psutil.Process().memory_info().vms + 3 * reservation
 resource.setrlimit(resource.RLIMIT_AS, (address_space, resource.getrlimit(resource.RLIMIT_AS)[1]))
 held = [video_types.VideoFromFile(sys.argv[1]).get_components() for _ in range(300)]
 video = video_types.VideoFromFile(sys.argv[2]).get_components()
-assert hasattr(video.images.untyped_storage(), "_comfy_hostbuf")
-assert hasattr(video.alpha.untyped_storage(), "_comfy_hostbuf")
+assert hasattr(video.images.untyped_storage(), "_comfy_hostbuf"), "the video's images not on a host buffer"
+assert hasattr(video.alpha.untyped_storage(), "_comfy_hostbuf"), "the video's alpha not on a host buffer"
 np.savez(sys.argv[3], images=held[-1].images.numpy(), alpha=held[-1].alpha.numpy())
 """
 
@@ -254,10 +254,7 @@ def test_held_pictures_leave_address_space_for_a_video(tmp_path):
         assert np.array_equal(held["alpha"], expected.alpha.numpy())
 
 
-STILL_PICTURE_DECODE = """
-import numpy as np
-import psutil
-import torch
+COUNT_RESERVATIONS = """
 from comfy_api.latest._input_impl import video_types
 reserve, calls = video_types.reserve_host_buffer, []
 def reserve_and_count():  # only reservations that succeed, so a refused one fails the count
@@ -265,10 +262,29 @@ def reserve_and_count():  # only reservations that succeed, so a refused one fai
     calls.append(None)
     return hostbuf
 video_types.reserve_host_buffer = reserve_and_count
+"""
+
+STILL_PICTURE_DECODE = COUNT_RESERVATIONS + """
+import numpy as np
+import psutil
+import torch
+import weakref
+append, make_tensor, last_frame, buffers = video_types.HostFrames.append, video_types.HostFrames.tensor, [], []
+def append_and_watch(self, frame):
+    last_frame[:] = [weakref.ref(frame)]
+    append(self, frame)
+def tensor_once_the_rest_has_gone(self):
+    assert all(frame() is None for frame in last_frame), "the last decoded frame is still held when a tensor is made"
+    assert all(hostbuf() is None for hostbuf in buffers), "the images' host buffer is still held while the alpha is made"
+    buffers.append(weakref.ref(self.hostbuf))
+    return make_tensor(self)
+video_types.HostFrames.append, video_types.HostFrames.tensor = append_and_watch, tensor_once_the_rest_has_gone
 address_space = psutil.Process().memory_info().vms
 components = video_types.VideoFromFile(sys.argv[1]).get_components()
 assert len(calls) == 2, calls
-assert psutil.Process().memory_info().vms - address_space < 2**30  # both reservations given back
+assert last_frame and len(buffers) == 1 + (components.alpha is not None), f"the watched append and tensor did not both run: {len(last_frame)} frames, {len(buffers)} tensors"
+grown = psutil.Process().memory_info().vms - address_space
+assert grown < 2**30, f"a reservation is still held after the decode: the address space grew by {grown} bytes"
 arrays = {}
 for name, t in (("images", components.images), ("alpha", components.alpha)):
     if t is not None:
@@ -317,16 +333,16 @@ def test_still_pictures_decode_the_same_with_aimdo(tmp_path, name, pix_fmt):
             assert still["alpha"].dtype == np.float32 and np.array_equal(still["alpha"], expected.alpha.numpy())
 
 
-CROPPED_STILL_DECODE = """
+CROPPED_STILL_DECODE = COUNT_RESERVATIONS + """
 import tracemalloc
 import numpy as np
-from comfy_api.latest._input_impl import video_types
 tracemalloc.start()
 images = video_types.VideoFromFile(sys.argv[1], crop=(0, 64, 1024, 2)).get_components().images
+assert len(calls) == 2, calls
 numpy_memory = tracemalloc.take_snapshot().filter_traces([tracemalloc.DomainFilter(True, np.lib.tracemalloc_domain)])
 held = sum(trace.size for trace in numpy_memory.traces)
 assert held <= 2 * images.numel() * images.element_size(), f"the whole decoded frame is still alive behind a full-width crop: {held} bytes held for {tuple(images.shape)}"
-assert images.untyped_storage().nbytes() == images.numel() * images.element_size()
+assert images.untyped_storage().nbytes() == images.numel() * images.element_size(), "storage bigger than the crop"
 np.save(sys.argv[2], images.numpy())
 """
 
