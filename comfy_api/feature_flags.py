@@ -45,6 +45,11 @@ CLI_FEATURE_FLAG_REGISTRY: dict[str, FeatureFlagInfo] = {
         "default": True,
         "description": "Offer Sign in with browser (Cloud OAuth + PKCE) on Local ComfyUI opened at localhost or 127.0.0.1",
     },
+    "agent-chat-redesign": {
+        "type": "bool",
+        "default": False,
+        "description": "Show the redesigned agent chat, including its full screen mode, in the frontend",
+    },
 }
 
 

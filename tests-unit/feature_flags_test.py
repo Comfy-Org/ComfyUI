@@ -161,7 +161,7 @@ class TestParseCliFeatureFlags:
         result = _parse_cli_feature_flags()
         assert result == {"show_signin_button": True}
 
-    @pytest.mark.parametrize("key", ["partner_node_token", "local_web_sso"])
+    @pytest.mark.parametrize("key", ["partner_node_token", "local_web_sso", "agent-chat-redesign"])
     def test_frontend_strict_bool_flags_parse_to_bool(self, monkeypatch, key):
         monkeypatch.setattr("comfy_api.feature_flags.args", type("Args", (), {"feature_flag": [f"{key}=true"]})())
         assert _parse_cli_feature_flags()[key] is True
