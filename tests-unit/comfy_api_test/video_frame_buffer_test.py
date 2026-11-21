@@ -17,8 +17,6 @@ REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 
 @pytest.fixture(autouse=True)
 def _blocks_path(monkeypatch):
-    """Decodes in this process take the blocks path, which the aimdo decodes are compared with, even where an import
-    elsewhere in the suite has switched aimdo on."""
     monkeypatch.setattr(comfy.memory_management, "aimdo_enabled", False)
 
 
@@ -337,7 +335,7 @@ def test_a_cropped_float_still_keeps_only_its_own_pixels(tmp_path):
     path = str(tmp_path / "rgb48.png")
     _write_16_bit_png(path, np.random.default_rng(0).integers(0, 65535, (256, 1024, 3), dtype=np.uint16), "rgb48be")
     output = str(tmp_path / "crop.npy")
-    _run_with_aimdo(CROPPED_STILL_DECODE, path, output)  # full width, two rows: a view of the whole decoded frame
+    _run_with_aimdo(CROPPED_STILL_DECODE, path, output)
     expected = VideoFromFile(path, crop=(0, 64, 1024, 2)).get_components().images
     assert np.array_equal(np.load(output), expected.numpy())
 

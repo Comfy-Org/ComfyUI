@@ -151,8 +151,7 @@ def reserve_host_buffer() -> FrameHostBuffer:
 
 
 class HostFrames:
-    """Frames written into reserved address space, committed as they arrive so the buffer never moves or overallocates,
-    8-bit frames made float as they are written. A single frame is copied out, so a held picture keeps no reservation."""
+    """Frames written into reserved address space, committed as they arrive so the buffer never moves or overallocates. A single frame is copied out, so a held picture keeps no reservation."""
 
     def __init__(self):
         self.hostbuf = reserve_host_buffer()
