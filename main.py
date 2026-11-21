@@ -489,7 +489,7 @@ def hijack_progress(server_instance):
     comfy.utils.set_progress_bar_global_hook(hook)
 
 
-def setup_database(asset_manager):
+def setup_database(asset_manager, database_initialized=False):
     if not dependencies_available():
         return
 
@@ -500,7 +500,8 @@ def setup_database(asset_manager):
         return
 
     try:
-        init_db()
+        if not database_initialized:
+            init_db()
         asset_manager.startup()
     except Exception as e:
         failure, message = database_failure_message(e, get_database_url())
@@ -594,6 +595,20 @@ def start_comfyui(asyncio_loop=None):
         missing = ", ".join(missing_dependencies()) or "run with --verbose DEBUG to see the import error"
         stop_startup("missing_packages", f"The assets system needs packages that could not be imported: {missing}.\n"
                                          f"{get_missing_requirements_message()}\n{WITHOUT_ASSETS}")
+    database_initialized = False
+    if args.assets_implicitly_enabled and not args.disable_assets:
+        try:
+            init_db()
+        except Exception as e:
+            failure, message = database_failure_message(e, get_database_url())
+            if failure == "in_use":
+                args.disable_assets = True
+            else:
+                if failure != "unsupported_url":
+                    logging.debug("Asset database startup failed", exc_info=True)
+                stop_startup(failure, message)
+        else:
+            database_initialized = True
     asset_manager: AssetManager = default_asset_manager()
     feature_flags.set_server_feature("assets", asset_manager.enabled)
     if not asset_manager.enabled:
@@ -622,7 +637,7 @@ def start_comfyui(asyncio_loop=None):
     hook_breaker_ac10a0.restore_functions()
 
     cuda_malloc_warning()
-    setup_database(asset_manager)
+    setup_database(asset_manager, database_initialized)
 
     prompt_server.add_routes()
     hijack_progress(prompt_server)
