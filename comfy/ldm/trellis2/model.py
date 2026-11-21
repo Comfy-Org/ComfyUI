@@ -1,6 +1,7 @@
 import torch
 import torch.nn.functional as F
 import torch.nn as nn
+import comfy.gemm_chunk
 import comfy.model_management
 import comfy.ops
 from comfy.ldm.trellis2.vae import SparseTensor, SparseLinear, sparse_cat, VarLenTensor
@@ -750,7 +751,7 @@ def _project_points_to_image(points_world: torch.Tensor, transform_matrix: torch
     ones = torch.ones((B, N, 1), device=points_world.device, dtype=points_world.dtype)
     homo = torch.cat([points_world, ones], dim=-1)
     world_to_camera = torch.linalg.inv(transform_matrix.float()).to(transform_matrix.dtype)
-    p_cam = torch.bmm(homo, world_to_camera.transpose(-2, -1))[..., :3]
+    p_cam = comfy.gemm_chunk.bmm(homo, world_to_camera.transpose(-2, -1))[..., :3]
     x_cam, y_cam, z_cam = p_cam.unbind(dim=-1)
     depth = -z_cam
     sensor_width = 32.0
