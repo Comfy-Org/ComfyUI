@@ -1,4 +1,5 @@
 import argparse
+from importlib.metadata import PackageNotFoundError
 from types import SimpleNamespace
 from unittest.mock import Mock, patch, mock_open
 
@@ -468,3 +469,67 @@ def test_template_asset_map_skips_missing_assets():
         asset_map = FrontendManager.template_asset_map()
 
     assert asset_map == {"example.json": "/templates/example.json"}
+
+
+def test_served_version_of_a_downloaded_frontend():
+    root = FrontendManager.CUSTOM_FRONTENDS_ROOT
+    assert FrontendManager.served_version(f"{root}/Comfy-Org_ComfyUI_frontend/1.59.0") == "1.59.0"
+    assert FrontendManager.served_version(f"{root}/comfy-org_comfyui_frontend/1.57.0") == "1.57.0"
+
+
+def test_served_version_ignores_other_downloaded_frontends():
+    root = FrontendManager.CUSTOM_FRONTENDS_ROOT
+    assert FrontendManager.served_version(f"{root}/someone_ComfyUI_frontend/1.2.3") is None
+
+
+def test_served_version_of_the_default_frontend():
+    with patch.object(FrontendManager, "_package_frontend_path", return_value="/site/static"):
+        with patch("app.frontend_management.version", return_value="1.57.6") as installed:
+            assert FrontendManager.served_version("/site/static") == "1.57.6"
+    installed.assert_called_once_with("comfyui-frontend-package")
+
+
+def test_served_version_does_not_exit_without_the_frontend_package():
+    with patch.object(FrontendManager, "_package_frontend_path", return_value=None):
+        with patch.object(FrontendManager, "default_frontend_path", side_effect=SystemExit(-1)):
+            assert FrontendManager.served_version("/some/other/frontend") is None
+
+
+def test_served_version_does_not_exit_when_the_frontend_package_fails_to_import():
+    real_import = __import__
+
+    def broken_import(name, *args, **kwargs):
+        if name == "comfyui_frontend_package":
+            raise ImportError("broken install")
+        return real_import(name, *args, **kwargs)
+
+    with patch("builtins.__import__", side_effect=broken_import):
+        assert FrontendManager.served_version("/some/other/frontend") is None
+
+
+def test_served_version_survives_a_frontend_package_that_raises_on_import():
+    # Not an ImportError: a broken install can raise anything on import.
+    with patch.object(FrontendManager, "_package_frontend_path", side_effect=SyntaxError("broken install")):
+        assert FrontendManager.served_version("/some/other/frontend") is None
+
+
+def test_served_version_is_unknown_when_the_package_metadata_is_missing():
+    with patch.object(FrontendManager, "_package_frontend_path", return_value="/site/static"):
+        with patch("app.frontend_management.version", side_effect=PackageNotFoundError("comfyui-frontend-package")):
+            assert FrontendManager.served_version("/site/static") is None
+
+
+def test_served_version_logs_an_unexpected_metadata_error(caplog):
+    with patch.object(FrontendManager, "_package_frontend_path", return_value="/site/static"):
+        with patch("app.frontend_management.version", side_effect=ValueError("bad metadata")):
+            with caplog.at_level("WARNING"):
+                assert FrontendManager.served_version("/site/static") is None
+    assert "bad metadata" in caplog.text
+
+
+def test_serves_bundled_only_for_the_package_frontend():
+    with patch.object(FrontendManager, "_package_frontend_path", return_value="/site/static"):
+        assert FrontendManager.serves_bundled("/site/static") is True
+        assert FrontendManager.serves_bundled(f"{FrontendManager.CUSTOM_FRONTENDS_ROOT}/Comfy-Org_ComfyUI_frontend/1.59.0") is False
+    with patch.object(FrontendManager, "_package_frontend_path", side_effect=SyntaxError("broken install")):
+        assert FrontendManager.serves_bundled("/site/static") is False
