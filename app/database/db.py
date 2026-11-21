@@ -225,6 +225,11 @@ def _is_memory_db(db_url):
     return db_url in ("sqlite:///:memory:", "sqlite://")
 
 
+def is_memory_db():
+    """True for the in-memory database, whose sessions all share one connection."""
+    return _is_memory_db(get_database_url())
+
+
 def init_db():
     db_url = get_database_url()
 
