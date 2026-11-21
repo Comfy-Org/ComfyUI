@@ -8,10 +8,18 @@ import pytest
 import torch
 from PIL import Image
 
+import comfy.memory_management
 from comfy_api.input_impl.video_types import VideoFromFile
 from comfy_api.latest._input_impl.video_types import FrameChunks
 
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+
+
+@pytest.fixture(autouse=True)
+def _blocks_path(monkeypatch):
+    """Decodes in this process take the blocks path, which the aimdo decodes are compared with, even where an import
+    elsewhere in the suite has switched aimdo on."""
+    monkeypatch.setattr(comfy.memory_management, "aimdo_enabled", False)
 
 
 def _write_video(path, frames, codec=None, pix_fmt="yuv420p", img_format="rgb24", options=None):
@@ -131,6 +139,8 @@ import gc
 import numpy as np
 from comfy_api.input_impl.video_types import VideoFromFile
 components = VideoFromFile(sys.argv[1]).get_components()
+assert hasattr(components.images.untyped_storage(), "_comfy_hostbuf")
+assert components.alpha is None or hasattr(components.alpha.untyped_storage(), "_comfy_hostbuf")
 arrays = {"head": components.images[:1].clone().numpy()}
 if components.alpha is not None:
     arrays["alpha"] = components.alpha.clone().numpy()
@@ -227,6 +237,7 @@ resource.setrlimit(resource.RLIMIT_AS, (address_space, resource.getrlimit(resour
 held = [video_types.VideoFromFile(sys.argv[1]).get_components() for _ in range(300)]
 video = video_types.VideoFromFile(sys.argv[2]).get_components()
 assert hasattr(video.images.untyped_storage(), "_comfy_hostbuf")
+assert hasattr(video.alpha.untyped_storage(), "_comfy_hostbuf")
 np.savez(sys.argv[3], images=held[-1].images.numpy(), alpha=held[-1].alpha.numpy())
 """
 
@@ -251,7 +262,11 @@ import psutil
 import torch
 from comfy_api.latest._input_impl import video_types
 reserve, calls = video_types.reserve_host_buffer, []
-video_types.reserve_host_buffer = lambda: calls.append(None) or reserve()
+def reserve_and_count():  # only reservations that succeed, so a refused one fails the count
+    hostbuf = reserve()
+    calls.append(None)
+    return hostbuf
+video_types.reserve_host_buffer = reserve_and_count
 address_space = psutil.Process().memory_info().vms
 components = video_types.VideoFromFile(sys.argv[1]).get_components()
 assert len(calls) == 2, calls
@@ -261,7 +276,7 @@ for name, t in (("images", components.images), ("alpha", components.alpha)):
     if t is not None:
         assert t.dtype == torch.float32 and t.is_contiguous(), (name, t.dtype, t.stride())
         assert not hasattr(t.untyped_storage(), "_comfy_hostbuf"), name
-        assert t.untyped_storage().nbytes() == t.numel() * t.element_size(), name  # owns exactly its pixels
+        assert t.untyped_storage().nbytes() == t.numel() * t.element_size(), name  # storage no bigger than the tensor
         arrays[name] = t.numpy()
 np.savez(sys.argv[2], **arrays)
 """

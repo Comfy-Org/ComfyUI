@@ -246,6 +246,7 @@ def frame_store() -> "HostFrames | FrameChunks":
 def frames_to_tensor(frames, store: "HostFrames | FrameChunks") -> torch.Tensor:
     for frame in frames:
         store.append(frame)
+    frame = None  # let the last decoded frame go before the tensor is made
     if isinstance(store, HostFrames):
         return store.tensor() if store.count > 0 else torch.zeros(0, 0, 0, 3)
     return store.tensor() if len(store) else torch.zeros(0, 0, 0, 3)
@@ -829,6 +830,7 @@ class VideoFromFile(VideoInput):
         alphas = frame_store()
 
         images = frames_to_tensor(self._decode_frames(container, video_stream, audio_stream, audio_frames, alphas), frames)
+        del frames  # with a single frame copied out, its host buffer goes now, before the alpha is finished
         if isinstance(alphas, HostFrames):
             alphas = alphas.tensor() if alphas.count > 0 else None
         else:
