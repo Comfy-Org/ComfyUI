@@ -33,6 +33,16 @@ def _run_chart(device):
     return parameterize.lscm_charts_batch(*_one_triangle_chart(), n_charts=1, device=device)[0]
 
 
+def _run_charts(device, count):
+    verts, uv_pins, faces_gl, face_pos, _, _, _, _ = _one_triangle_chart()
+    return parameterize.lscm_charts_batch(
+        np.tile(verts, (count, 1)), np.tile(uv_pins, (count, 1)),
+        np.concatenate([faces_gl + 3 * i for i in range(count)]),
+        np.tile(face_pos, count), np.arange(count), np.repeat(np.arange(count), 3),
+        np.arange(count + 1) * 3, np.arange(count), n_charts=count, device=device,
+    )
+
+
 @pytest.fixture
 def cpu_backed_gpu(monkeypatch):
     """Run the GPU branch's tensor algebra without claiming hardware validation."""
@@ -80,6 +90,26 @@ def test_rocm_workspace_failure_falls_back_for_one_batch(monkeypatch, cpu_backed
     np.testing.assert_allclose(_run_chart(cpu_backed_gpu), expected, atol=1e-6)
     np.testing.assert_allclose(_run_chart(cpu_backed_gpu), expected, atol=1e-6)
     assert len(calls) == 2
+
+
+@pytest.mark.parametrize("count,calls_expected", [(4, [4, 2, 2]), (5, [5, 2, 3, 1, 2])])
+def test_rocm_workspace_failure_retries_smaller_gpu_batches(monkeypatch, cpu_backed_gpu, count, calls_expected):
+    expected = _run_charts(torch.device("cpu"), count)
+    monkeypatch.setattr(comfy.model_management, "is_amd", lambda: True)
+    solve = torch.linalg.solve
+    calls = []
+
+    def fail_large_batch(a, b):
+        calls.append(a.shape[0])
+        if a.shape[0] > 2:
+            raise RuntimeError("HIPBLAS_STATUS_ALLOC_FAILED")
+        return solve(a, b)
+
+    monkeypatch.setattr(torch.linalg, "solve", fail_large_batch)
+    actual = _run_charts(cpu_backed_gpu, count)
+    assert calls == calls_expected
+    for chart_id in expected:
+        np.testing.assert_allclose(actual[chart_id], expected[chart_id], atol=1e-6)
 
 
 @pytest.mark.parametrize("is_amd,message", [
