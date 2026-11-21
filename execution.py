@@ -875,6 +875,76 @@ class PromptExecutor:
             self._notify_prompt_lifecycle("end", prompt_id)
 
 
+def coerce_literal_input(input_type, val):
+    # Unwraps values wrapped in __value__ key or typed wrapper.
+    # This is used to pass list widget values to execution,
+    # as by default list value is reserved to represent the
+    # connection between nodes.
+    if isinstance(val, dict) and "__value__" in val:
+        val = val["__value__"]
+    if input_type == "INT":
+        return int(val)
+    if input_type == "FLOAT":
+        return float(val)
+    if input_type == "STRING":
+        return str(val)
+    if input_type == "BOOLEAN":
+        return bool(val)
+    return val
+
+
+async def select_lazy_inputs_statically(prompt_id, unique_id, obj_class, inputs, class_inputs):
+    """Find lazy linked inputs that the node's first check_lazy_status call would not request.
+
+    Only applies to v3 nodes declaring `static_lazy_selection` whose non-lazy inputs are all
+    literals. Returns `(unrequested_input_names, error)`; error is set if check_lazy_status raised.
+    """
+    if not issubclass(obj_class, _ComfyNodeInternal):
+        return set(), None
+    schema = obj_class.GET_SCHEMA()
+    if not schema.static_lazy_selection or schema.accept_all_inputs or schema.hidden:
+        return set(), None
+    if any(x not in inputs for x in class_inputs.get("required", {})):
+        return set(), None
+
+    lazy_links = set()
+    first_round_inputs = {}
+    for x, val in inputs.items():
+        input_type, _, extra_info = get_input_info(obj_class, x, class_inputs)
+        if input_type is None:
+            continue
+        if is_link(val):
+            if not extra_info.get("lazy", False):
+                return set(), None
+            lazy_links.add(x)
+            first_round_inputs[x] = val
+        else:
+            try:
+                first_round_inputs[x] = coerce_literal_input(input_type, val)
+            except Exception:
+                return set(), None
+    if not lazy_links:
+        return set(), None
+
+    input_data_all, _, v3_data = get_input_data(first_round_inputs, obj_class, unique_id)
+    v3_data["create_dynamic_tuple"] = True
+    try:
+        results = await _async_map_node_over_list(prompt_id, unique_id, obj_class, input_data_all, "check_lazy_status", v3_data=v3_data)
+        results = await resolve_map_node_over_list_results(results)
+    except Exception as ex:
+        return set(), {
+            "type": "lazy_selection_failed",
+            "message": "Failed to select lazy inputs",
+            "details": str(ex),
+            "extra_info": {
+                "exception_message": str(ex),
+                "exception_type": full_type_name(type(ex)),
+            },
+        }
+    requested = {name for result in results if isinstance(result, list) for name in result}
+    return lazy_links - requested, None
+
+
 async def validate_inputs(prompt_id, prompt, item, validated, visiting=None):
     if visiting is None:
         visiting = []
@@ -937,6 +1007,10 @@ async def validate_inputs(prompt_id, prompt, item, validated, visiting=None):
 
     valid_inputs = set(class_inputs.get('required',{})).union(set(class_inputs.get('optional',{})))
 
+    unrequested_lazy_inputs, lazy_selection_error = await select_lazy_inputs_statically(prompt_id, unique_id, obj_class, inputs, class_inputs)
+    if lazy_selection_error is not None:
+        errors.append(lazy_selection_error)
+
     for x in valid_inputs:
         input_type, input_category, extra_info = get_input_info(obj_class, x, class_inputs)
         assert extra_info is not None
@@ -991,6 +1065,8 @@ async def validate_inputs(prompt_id, prompt, item, validated, visiting=None):
                 }
                 errors.append(error)
                 continue
+            if x in unrequested_lazy_inputs:
+                continue
             try:
                 visiting.append(unique_id)
                 try:
@@ -1022,27 +1098,8 @@ async def validate_inputs(prompt_id, prompt, item, validated, visiting=None):
                 continue
         else:
             try:
-                # Unwraps values wrapped in __value__ key or typed wrapper.
-                # This is used to pass list widget values to execution,
-                # as by default list value is reserved to represent the
-                # connection between nodes.
-                if isinstance(val, dict):
-                    if "__value__" in val:
-                        val = val["__value__"]
-                        inputs[x] = val
-
-                if input_type == "INT":
-                    val = int(val)
-                    inputs[x] = val
-                if input_type == "FLOAT":
-                    val = float(val)
-                    inputs[x] = val
-                if input_type == "STRING":
-                    val = str(val)
-                    inputs[x] = val
-                if input_type == "BOOLEAN":
-                    val = bool(val)
-                    inputs[x] = val
+                val = coerce_literal_input(input_type, val)
+                inputs[x] = val
             except Exception as ex:
                 error = {
                     "type": "invalid_input_type",
