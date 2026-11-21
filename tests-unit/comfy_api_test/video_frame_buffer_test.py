@@ -1,6 +1,8 @@
 import os
 import subprocess
 import sys
+import tracemalloc
+import weakref
 
 import av
 import numpy as np
@@ -8,10 +10,19 @@ import pytest
 import torch
 from PIL import Image
 
+import comfy.memory_management
 from comfy_api.input_impl.video_types import VideoFromFile
+from comfy_api.latest._input_impl import video_types
 from comfy_api.latest._input_impl.video_types import FrameChunks, _float_frame
 
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+
+
+@pytest.fixture(autouse=True)
+def _blocks_path(monkeypatch):
+    """Decodes in this process take the blocks path, which the aimdo decodes are compared with, even where an import
+    elsewhere in the suite has switched aimdo on."""
+    monkeypatch.setattr(comfy.memory_management, "aimdo_enabled", False)
 
 
 def _write_video(path, frames, codec=None, pix_fmt="yuv420p", img_format="rgb24", options=None):
@@ -108,8 +119,18 @@ def test_a_soundtrack_longer_than_the_video_adds_no_frames(tmp_path):
     assert VideoFromFile(path).get_components().images.shape[0] == 48
 
 
+AIMDO_PREAMBLE = """
+import sys
+import comfy_aimdo.control
+if not comfy_aimdo.control.init():
+    sys.exit("comfy-aimdo unavailable")
+import comfy.memory_management
+comfy.memory_management.aimdo_enabled = True
+"""
+
+
 def _run_with_aimdo(script, *args):
-    result = subprocess.run([sys.executable, "-c", script, *args], cwd=REPO_ROOT,
+    result = subprocess.run([sys.executable, "-c", AIMDO_PREAMBLE + script, *args], cwd=REPO_ROOT,
                             capture_output=True, text=True, env={**os.environ, "PYTHONPATH": REPO_ROOT})
     if "comfy-aimdo unavailable" in result.stderr:
         pytest.skip("comfy-aimdo unavailable")
@@ -117,15 +138,9 @@ def _run_with_aimdo(script, *args):
 
 
 HOST_BUFFER_DECODE = """
-import sys
-import comfy_aimdo.control
-if not comfy_aimdo.control.init():
-    sys.exit("comfy-aimdo unavailable")
 import gc
 import numpy as np
-import comfy.memory_management
 from comfy_api.input_impl.video_types import VideoFromFile
-comfy.memory_management.aimdo_enabled = True
 components = VideoFromFile(sys.argv[1]).get_components()
 arrays = {"head": components.images[:1].clone().numpy()}
 if components.alpha is not None:
@@ -161,14 +176,8 @@ def test_host_buffer_and_fromiter_decode_the_same_frames(tmp_path, name):
 
 REFUSED_RESERVATION_DECODE = """
 import resource
-import sys
-import comfy_aimdo.control
-if not comfy_aimdo.control.init():
-    sys.exit("comfy-aimdo unavailable")
 import psutil
-import comfy.memory_management
 from comfy_api.latest._input_impl import video_types
-comfy.memory_management.aimdo_enabled = True
 address_space = psutil.Process().memory_info().vms + 2**30
 resource.setrlimit(resource.RLIMIT_AS, (address_space, resource.getrlimit(resource.RLIMIT_AS)[1]))
 components = video_types.VideoFromFile(sys.argv[1]).get_components()
@@ -186,14 +195,8 @@ def test_a_refused_reservation_falls_back_to_plain_arrays(tmp_path):
 
 
 ONE_REFUSED_RESERVATION_DECODE = """
-import sys
-import comfy_aimdo.control
-if not comfy_aimdo.control.init():
-    sys.exit("comfy-aimdo unavailable")
 import torch
-import comfy.memory_management
 from comfy_api.latest._input_impl import video_types
-comfy.memory_management.aimdo_enabled = True
 expected = video_types.VideoFromFile(sys.argv[1]).get_components()
 reserve, calls = video_types.reserve_host_buffer, []
 def reserve_or_refuse():
@@ -241,15 +244,9 @@ def test_8_bit_images_decode_the_same_when_one_reservation_is_refused(tmp_path, 
 
 HELD_PICTURES_DECODE = """
 import resource
-import sys
-import comfy_aimdo.control
-if not comfy_aimdo.control.init():
-    sys.exit("comfy-aimdo unavailable")
 import numpy as np
 import psutil
-import comfy.memory_management
 from comfy_api.latest._input_impl import video_types
-comfy.memory_management.aimdo_enabled = True
 reservation = psutil.virtual_memory().total + psutil.swap_memory().total
 address_space = psutil.Process().memory_info().vms + 3 * reservation
 resource.setrlimit(resource.RLIMIT_AS, (address_space, resource.getrlimit(resource.RLIMIT_AS)[1]))
@@ -274,27 +271,18 @@ def test_held_pictures_leave_address_space_for_a_video(tmp_path):
         assert np.array_equal(held["alpha"], expected.alpha.numpy())
 
 
-STILL_PICTURE_DECODE = """
-import sys
-import comfy_aimdo.control
-if not comfy_aimdo.control.init():
-    sys.exit("comfy-aimdo unavailable")
-import numpy as np
-import torch
-import comfy.memory_management
-from comfy_api.latest._input_impl import video_types
-comfy.memory_management.aimdo_enabled = True
-calls = []
-video_types.reserve_host_buffer = lambda: calls.append(None)
-components = video_types.VideoFromFile(sys.argv[1]).get_components()
-assert not calls
-arrays = {}
-for name, t in (("images", components.images), ("alpha", components.alpha)):
-    if t is not None:
-        assert t.dtype == torch.float32 and t.is_contiguous(), (name, t.dtype, t.stride())
-        arrays[name] = t.numpy()
-np.savez(sys.argv[2], **arrays)
-"""
+def _decode_still_with_aimdo(monkeypatch, path, crop=None):
+    # One frame never reaches aimdo, so this runs here. Calls are counted, so a reservation fails the test even where
+    # a fallback catches what the stub raises.
+    calls = []
+    def reserve():
+        calls.append(None)
+        raise AssertionError("a still picture made a reservation")
+    monkeypatch.setattr(comfy.memory_management, "aimdo_enabled", True)
+    monkeypatch.setattr(video_types, "reserve_host_buffer", reserve)
+    components = VideoFromFile(path, crop=crop).get_components()
+    assert not calls
+    return components
 
 
 def _write_16_bit_png(path, pixels, pix_fmt):
@@ -311,7 +299,7 @@ def _write_16_bit_png(path, pixels, pix_fmt):
     ("rgb.png", "rgb24"), ("rgba.png", "rgba"), ("palette.png", "pal8"), ("lossy.webp", "yuv420p"),
     ("rgb48.png", "rgb48be"), ("rgba64.png", "rgba64be"),
 ])
-def test_still_pictures_decode_the_same_with_aimdo(tmp_path, name, pix_fmt):
+def test_still_pictures_decode_the_same_with_aimdo(tmp_path, monkeypatch, name, pix_fmt):
     path = str(tmp_path / name)
     rng = np.random.default_rng(0)
     pixels = rng.integers(0, 255, (48, 64, 4), dtype=np.uint8)
@@ -324,56 +312,48 @@ def test_still_pictures_decode_the_same_with_aimdo(tmp_path, name, pix_fmt):
     else:
         Image.fromarray(pixels).convert({"rgb.png": "RGB", "rgba.png": "RGBA", "palette.png": "P"}[name]).save(path)
     assert _decoded_format(path) == pix_fmt
-    output = str(tmp_path / "picture.npz")
-    _run_with_aimdo(STILL_PICTURE_DECODE, path, output)
     expected = VideoFromFile(path).get_components()
-    with np.load(output) as still:
-        assert still["images"].dtype == np.float32 and np.array_equal(still["images"], expected.images.numpy())
-        assert ("alpha" in still) == (expected.alpha is not None)
-        if expected.alpha is not None:
-            assert still["alpha"].dtype == np.float32 and np.array_equal(still["alpha"], expected.alpha.numpy())
+    still = _decode_still_with_aimdo(monkeypatch, path)
+    for part, t, e in (("images", still.images, expected.images), ("alpha", still.alpha, expected.alpha)):
+        assert (t is None) == (e is None), part
+        if t is not None:
+            assert t.dtype == torch.float32 and t.is_contiguous(), (part, t.dtype, t.stride())
+            assert torch.equal(t, e), part
 
 
-CROPPED_STILL_DECODE = """
-import sys
-import tracemalloc
-import comfy_aimdo.control
-if not comfy_aimdo.control.init():
-    sys.exit("comfy-aimdo unavailable")
-import numpy as np
-import comfy.memory_management
-from comfy_api.latest._input_impl import video_types
-comfy.memory_management.aimdo_enabled = True
-tracemalloc.start()
-images = video_types.VideoFromFile(sys.argv[1], crop=(0, 64, 1024, 2)).get_components().images
-numpy_memory = tracemalloc.take_snapshot().filter_traces([tracemalloc.DomainFilter(True, np.lib.tracemalloc_domain)])
-held = sum(trace.size for trace in numpy_memory.traces)
-assert held <= 2 * images.numel() * images.element_size(), (held, tuple(images.shape))
-np.save(sys.argv[2], images.numpy())
-"""
-
-
-def test_a_cropped_float_still_keeps_only_its_own_pixels(tmp_path):
+def test_a_cropped_float_still_keeps_only_its_own_pixels(tmp_path, monkeypatch):
     path = str(tmp_path / "rgb48.png")
     _write_16_bit_png(path, np.random.default_rng(0).integers(0, 65535, (256, 1024, 3), dtype=np.uint16), "rgb48be")
-    output = str(tmp_path / "crop.npy")
-    _run_with_aimdo(CROPPED_STILL_DECODE, path, output)  # full width, two rows: a view of the whole decoded frame
-    expected = VideoFromFile(path, crop=(0, 64, 1024, 2)).get_components().images
-    assert np.array_equal(np.load(output), expected.numpy())
-
-
-# ---- without aimdo: blocks of frames, copied into one tensor at the end ---------------------------------------
+    crop = (0, 64, 1024, 2)  # full width, two rows: a view of the whole decoded frame
+    expected = VideoFromFile(path, crop=crop).get_components().images
+    tracemalloc.start()
+    try:
+        images = _decode_still_with_aimdo(monkeypatch, path, crop).images
+        numpy_memory = tracemalloc.take_snapshot().filter_traces([tracemalloc.DomainFilter(True, np.lib.tracemalloc_domain)])
+    finally:
+        tracemalloc.stop()
+    held = sum(trace.size for trace in numpy_memory.traces)
+    assert held <= 2 * images.numel() * images.element_size(), (held, tuple(images.shape))
+    assert torch.equal(images, expected)
 
 
 def test_float_frame_copies_a_view_but_not_an_array_that_owns_its_pixels():
     frame = np.random.default_rng(0).random((4, 6, 3), dtype=np.float32)
     assert _float_frame(frame) is frame
-    rows = _float_frame(frame[1:3])
-    assert rows.base is None and np.array_equal(rows, frame[1:3])
-    rgb = _float_frame(np.ascontiguousarray(np.concatenate([frame, frame[..., :1]], -1))[..., :3])
-    assert rgb.base is None and rgb.flags.c_contiguous and np.array_equal(rgb, frame)
+    rows, rgb_of_rgba = (lambda: frame.copy(), lambda a: a[1:3]), (lambda: np.concatenate([frame, frame[..., :1]], -1), lambda a: a[..., :3])
+    for make, view in (rows, rgb_of_rgba):
+        source = make()
+        expected, kept = view(source).copy(), weakref.ref(source)
+        result = _float_frame(view(source))
+        source[...] = -1  # the result doesn't follow its source
+        del source
+        assert kept() is None  # and doesn't keep it alive
+        assert result.flags.c_contiguous and np.array_equal(result, expected)
     eight_bit = np.full((2, 2, 3), 51, dtype=np.uint8)
     assert np.array_equal(_float_frame(eight_bit), np.full((2, 2, 3), 0.2, dtype=np.float32))
+
+
+# ---- without aimdo: blocks of frames, copied into one tensor at the end ---------------------------------------
 
 
 def _frames(n, shape=(2, 3, 3)):

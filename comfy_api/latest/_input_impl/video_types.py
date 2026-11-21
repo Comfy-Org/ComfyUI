@@ -152,13 +152,17 @@ def reserve_host_buffer() -> FrameHostBuffer:
 
 def _float_frame(frame: np.ndarray, out: np.ndarray | None = None) -> np.ndarray:
     """A decoded frame as float32, 8-bit ones divided by 255, written into out if given. Otherwise the result owns
-    exactly its pixels: a view of a larger frame (a crop, the colour of an RGBA frame) is copied, not kept alive."""
+    exactly its pixels: a float frame that already does is returned as it is, anything else goes into a new array
+    from _host_empty, so a view of a larger frame (a crop, the colour of an RGBA frame) is not kept alive."""
+    if out is None:
+        if frame.dtype != np.uint8 and frame.base is None and frame.flags.c_contiguous:
+            return frame
+        out = _host_empty(frame.shape, np.empty(0, dtype=np.float32))
     if frame.dtype == np.uint8:
-        return np.divide(frame, 255.0, out=out, dtype=np.float32)
-    if out is not None:
+        np.divide(frame, 255.0, out=out, dtype=np.float32)
+    else:
         np.copyto(out, frame)
-        return out
-    return frame if frame.base is None and frame.flags.c_contiguous else frame.copy()
+    return out
 
 
 class HostFrames:
