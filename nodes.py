@@ -2508,6 +2508,7 @@ async def init_builtin_extra_nodes():
         "nodes_joyimage.py",
         "nodes_boogu.py",
         "nodes_moss_image.py",
+        "nodes_tensorfold.py",
         "nodes_fibo2.py",
         "nodes_chroma_radiance.py",
         "nodes_pid.py",
