@@ -170,8 +170,8 @@ from comfy_api.latest._input_impl import video_types
 comfy.memory_management.aimdo_enabled = True
 address_space = psutil.Process().memory_info().vms + 2**30
 resource.setrlimit(resource.RLIMIT_AS, (address_space, resource.getrlimit(resource.RLIMIT_AS)[1]))
-assert video_types.host_frames() is None
 components = video_types.VideoFromFile(sys.argv[1]).get_components()
+assert not hasattr(components.images.untyped_storage(), "_comfy_hostbuf")
 assert components.images.shape == (4, 48, 64, 3), components.images.shape
 assert components.alpha.shape == (4, 48, 64, 1), components.alpha.shape
 """
@@ -202,20 +202,61 @@ def reserve_or_refuse():
     return reserve()
 video_types.reserve_host_buffer = reserve_or_refuse
 components = video_types.VideoFromFile(sys.argv[1]).get_components()
-assert len(calls) == 2
+assert len(calls) >= int(sys.argv[2])
 assert torch.equal(components.images, expected.images)
 assert (components.alpha is None) == (expected.alpha is None)
 assert components.alpha is None or torch.equal(components.alpha, expected.alpha)
 """
 
 
-@pytest.mark.parametrize("mode, extension", [("RGB", ".png"), ("RGBA", ".png"), ("P", ".png"), ("RGB", ".jpg")])
-@pytest.mark.parametrize("refused", [1, 2])  # the images' reservation, then the alpha's
+# Two frames each: a still picture reserves nothing. Without alpha only the images reserve.
+@pytest.mark.parametrize("mode, extension, refused", [
+    ("RGB", ".png", 1), ("RGBA", ".png", 1), ("RGBA", ".png", 2), ("P", ".png", 1), ("P", ".png", 2), ("RGB", ".mkv", 1),
+])
 def test_8_bit_images_decode_the_same_when_one_reservation_is_refused(tmp_path, mode, extension, refused):
     path = str(tmp_path / ("image" + extension))
-    pixels = np.random.default_rng(0).integers(0, 255, (48, 64, 4), dtype=np.uint8)
-    Image.fromarray(pixels).convert(mode).save(path)
+    pixels = np.random.default_rng(0).integers(0, 255, (2, 48, 64, 4), dtype=np.uint8)
+    if extension == ".mkv":
+        _write_video(path, [np.ascontiguousarray(p[..., :3]) for p in pixels], codec="mjpeg", pix_fmt="yuvj420p")
+    else:
+        first, second = (Image.fromarray(p).convert(mode) for p in pixels)
+        first.save(path, save_all=True, append_images=[second])
     _run_with_aimdo(ONE_REFUSED_RESERVATION_DECODE, path, str(refused))
+
+
+HELD_PICTURES_DECODE = """
+import resource
+import sys
+import comfy_aimdo.control
+if not comfy_aimdo.control.init():
+    sys.exit("comfy-aimdo unavailable")
+import numpy as np
+import psutil
+import comfy.memory_management
+from comfy_api.latest._input_impl import video_types
+comfy.memory_management.aimdo_enabled = True
+reservation = psutil.virtual_memory().total + psutil.swap_memory().total
+address_space = psutil.Process().memory_info().vms + 3 * reservation
+resource.setrlimit(resource.RLIMIT_AS, (address_space, resource.getrlimit(resource.RLIMIT_AS)[1]))
+held = [video_types.VideoFromFile(sys.argv[1]).get_components() for _ in range(300)]
+video = video_types.VideoFromFile(sys.argv[2]).get_components()
+assert hasattr(video.images.untyped_storage(), "_comfy_hostbuf")
+np.savez(sys.argv[3], images=held[-1].images.numpy(), alpha=held[-1].alpha.numpy())
+"""
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="address space limits need the resource module")
+def test_held_pictures_leave_address_space_for_a_video(tmp_path):
+    picture = str(tmp_path / "image.png")
+    Image.fromarray(np.random.default_rng(0).integers(0, 255, (48, 64, 4), dtype=np.uint8)).save(picture)
+    video = str(tmp_path / "video.mov")
+    _write_rgba_video(video, 4)
+    output = str(tmp_path / "picture.npz")
+    _run_with_aimdo(HELD_PICTURES_DECODE, picture, video, output)
+    expected = VideoFromFile(picture).get_components()
+    with np.load(output) as held:
+        assert np.array_equal(held["images"], expected.images.numpy())
+        assert np.array_equal(held["alpha"], expected.alpha.numpy())
 
 
 # ---- without aimdo: blocks of frames, copied into one tensor at the end ---------------------------------------

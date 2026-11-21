@@ -151,34 +151,55 @@ def reserve_host_buffer() -> FrameHostBuffer:
 
 
 class HostFrames:
-    """Frames written into reserved address space, committed as they arrive so the buffer never moves or overallocates."""
+    """Frames written into reserved address space, committed as they arrive so the buffer never moves or overallocates,
+    8-bit frames made float as they are written. The space is reserved when a second frame arrives, so a still picture
+    holds no reservation; if it can't be reserved, the frames go into blocks instead."""
 
     def __init__(self):
-        self.hostbuf = reserve_host_buffer()
+        self.first = None
+        self.hostbuf = None
+        self.chunks = None
         self.shape = None
         self.count = 0
 
     def append(self, frame: np.ndarray) -> None:
-        self.shape = self.shape or frame.shape
-        address = self.hostbuf.extend(frame.nbytes, reallocate=self.count == 0, register=False)
-        row = (ctypes.c_uint8 * frame.nbytes).from_address(address)
-        np.copyto(np.frombuffer(row, dtype=np.float32).reshape(self.shape), frame)
         self.count += 1
+        if self.count == 1:
+            self.first = frame
+            return
+        if self.count == 2:
+            try:
+                self.hostbuf = reserve_host_buffer()
+            except RuntimeError:
+                logging.warning("Could not reserve a host buffer for video frames")
+                self.chunks = FrameChunks()
+            self.write(self.first)
+            self.first = None
+        self.write(frame)
+
+    def write(self, frame: np.ndarray) -> None:
+        if self.chunks is not None:
+            self.chunks.append(frame)
+            return
+        nbytes = frame.size * 4
+        address = self.hostbuf.extend(nbytes, reallocate=self.shape is None, register=False)
+        self.shape = self.shape or frame.shape
+        row = (ctypes.c_uint8 * nbytes).from_address(address)
+        out = np.frombuffer(row, dtype=np.float32).reshape(self.shape)
+        if frame.dtype == np.uint8:
+            np.divide(frame, 255.0, out=out, dtype=np.float32)
+        else:
+            np.copyto(out, frame)
 
     def tensor(self) -> torch.Tensor:
+        if self.first is not None:
+            first = np.divide(self.first, 255.0, dtype=np.float32) if self.first.dtype == np.uint8 else np.ascontiguousarray(self.first)
+            return torch.from_numpy(first).unsqueeze(0)
+        if self.chunks is not None:
+            return self.chunks.tensor()
         frames = comfy_aimdo.torch.hostbuf_to_tensor(self.hostbuf).view(torch.float32).view(self.count, *self.shape)
         frames.untyped_storage()._comfy_hostbuf = self.hostbuf
         return frames
-
-
-def host_frames() -> HostFrames | None:
-    if not comfy.memory_management.aimdo_enabled:
-        return None
-    try:
-        return HostFrames()
-    except RuntimeError:
-        logging.warning("Could not reserve a host buffer for video frames")
-        return None
 
 
 def _host_empty(shape: tuple[int, ...], like: np.ndarray) -> np.ndarray:
@@ -231,7 +252,7 @@ class FrameChunks:
 
 def frame_store() -> "HostFrames | FrameChunks":
     """Where decoded frames go: aimdo's host buffer when aimdo is on, else blocks copied together at the end."""
-    return host_frames() or FrameChunks()
+    return HostFrames() if comfy.memory_management.aimdo_enabled else FrameChunks()
 
 
 def frames_to_tensor(frames, store: "HostFrames | FrameChunks") -> torch.Tensor:
@@ -673,7 +694,7 @@ class VideoFromFile(VideoInput):
         with av.open(self.__file, mode='r') as container:
             return container.format.name
 
-    def _decode_frames(self, container, video_stream, audio_stream, audio_frames, frames, alphas):
+    def _decode_frames(self, container, video_stream, audio_stream, audio_frames, alphas):
         start_time, duration = self.get_active_trim_window()
 
         start_pts = int(start_time / video_stream.time_base)
@@ -683,7 +704,6 @@ class VideoFromFile(VideoInput):
             container.seek(start_pts, stream=video_stream)
 
         image_format = 'gbrpf32le'
-        process_image_format = lambda a: a
         align_graph = None
 
         streams = [video_stream]
@@ -723,14 +743,11 @@ class VideoFromFile(VideoInput):
                                     alpha_channel = True
                                     break
                             if frame.format.name in ("yuvj420p", "yuvj422p", "yuvj444p", "rgb24", "rgba", "pal8"):
-                                if isinstance(frames, HostFrames) or isinstance(alphas, HostFrames):  # host buffers hold float32; blocks keep 8 bits until tensor()
-                                    process_image_format = lambda a: np.divide(a, 255.0, dtype=np.float32)
                                 if alpha_channel:
                                     image_format = 'rgba'
                                 else:
                                     image_format = 'rgb24'
                             else:
-                                process_image_format = lambda a: a
                                 if alpha_channel:
                                     image_format = 'gbrapf32le'
                                 else:
@@ -785,7 +802,6 @@ class VideoFromFile(VideoInput):
                             if crop_rect is not None:
                                 cx, cy, cw, ch = crop_rect
                                 img = np.ascontiguousarray(img[cy:cy + ch, cx:cx + cw])
-                        img = process_image_format(img)
                         if alpha_channel:
                             alphas.append(img[..., -1:].copy())
                             img = img[..., :-1]
@@ -824,7 +840,7 @@ class VideoFromFile(VideoInput):
         frames = frame_store()
         alphas = frame_store()
 
-        images = frames_to_tensor(self._decode_frames(container, video_stream, audio_stream, audio_frames, frames, alphas), frames)
+        images = frames_to_tensor(self._decode_frames(container, video_stream, audio_stream, audio_frames, alphas), frames)
         if isinstance(alphas, HostFrames):
             alphas = alphas.tensor() if alphas.count > 0 else None
         else:
