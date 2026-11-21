@@ -171,6 +171,7 @@ class SDClipModel(torch.nn.Module, ClipTokenWeightEncoder):
         self.execution_device = None
 
     def process_tokens(self, tokens, device):
+        compute_dtype = model_management.text_encoder_compute_dtype(device)
         end_token = self.special_tokens.get("end", None)
         pad_token = self.special_tokens.get("pad", -1)
         if end_token is None:
@@ -211,7 +212,7 @@ class SDClipModel(torch.nn.Module, ClipTokenWeightEncoder):
                 index += 1
 
             tokens_embed = torch.tensor([tokens_temp], device=device, dtype=torch.long)
-            tokens_embed = self.transformer.get_input_embeddings()(tokens_embed, out_dtype=torch.float32)
+            tokens_embed = self.transformer.get_input_embeddings()(tokens_embed, out_dtype=compute_dtype)
             index = 0
             pad_extra = 0
             embeds_info = []
@@ -235,7 +236,7 @@ class SDClipModel(torch.nn.Module, ClipTokenWeightEncoder):
                     continue
 
                 ind = index + o[0]
-                emb = emb.view(1, -1, emb.shape[-1]).to(device=device, dtype=torch.float32)
+                emb = emb.view(1, -1, emb.shape[-1]).to(device=device, dtype=compute_dtype)
                 emb_shape = emb.shape[1]
                 if emb.shape[-1] == tokens_embed.shape[-1]:
                     tokens_embed = torch.cat([tokens_embed[:, :ind], emb, tokens_embed[:, ind:]], dim=1)
@@ -248,7 +249,7 @@ class SDClipModel(torch.nn.Module, ClipTokenWeightEncoder):
                     logging.warning("WARNING: shape mismatch when trying to apply embedding, embedding will be ignored {} != {}".format(emb.shape[-1], tokens_embed.shape[-1]))
 
             if pad_extra > 0:
-                padd_embed = self.transformer.get_input_embeddings()(torch.tensor([[self.special_tokens["pad"]] * pad_extra], device=device, dtype=torch.long), out_dtype=torch.float32)
+                padd_embed = self.transformer.get_input_embeddings()(torch.tensor([[self.special_tokens["pad"]] * pad_extra], device=device, dtype=torch.long), out_dtype=compute_dtype)
                 tokens_embed = torch.cat([tokens_embed, padd_embed], dim=1)
                 attention_mask = attention_mask + [0] * pad_extra
 
@@ -277,7 +278,7 @@ class SDClipModel(torch.nn.Module, ClipTokenWeightEncoder):
         else:
             intermediate_output = self.layer_idx
 
-        outputs = self.transformer(None, attention_mask_model, embeds=embeds, num_tokens=num_tokens, intermediate_output=intermediate_output, final_layer_norm_intermediate=self.layer_norm_hidden_state, dtype=torch.float32, embeds_info=embeds_info)
+        outputs = self.transformer(None, attention_mask_model, embeds=embeds, num_tokens=num_tokens, intermediate_output=intermediate_output, final_layer_norm_intermediate=self.layer_norm_hidden_state, dtype=model_management.text_encoder_compute_dtype(device), embeds_info=embeds_info)
 
         if self.layer == "last":
             z = outputs[0].float()

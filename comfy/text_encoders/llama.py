@@ -1491,7 +1491,7 @@ class Qwen25_7BVLI(BaseLlama, BaseGenerate, torch.nn.Module):
     def preprocess_embed(self, embed, device):
         if embed["type"] == "image":
             image, grid = qwen_vl.process_qwen2vl_images(embed["data"])
-            return self.visual(image.to(device, dtype=torch.float32), grid), grid
+            return self.visual(image.to(device, dtype=comfy.model_management.text_encoder_compute_dtype(device)), grid), grid
         return None, None
 
     def forward(self, x, attention_mask=None, embeds=None, num_tokens=None, intermediate_output=None, final_layer_norm_intermediate=True, dtype=None, embeds_info=[]):
@@ -1561,7 +1561,7 @@ class Gemma3_4B_Vision(BaseLlama, BaseGenerate, torch.nn.Module):
     def preprocess_embed(self, embed, device):
         if embed["type"] == "image":
             image = comfy.clip_model.clip_preprocess(embed["data"], size=self.image_size, mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5], crop=True)
-            return self.multi_modal_projector(self.vision_model(image.to(device, dtype=torch.float32))[0]), None
+            return self.multi_modal_projector(self.vision_model(image.to(device, dtype=comfy.model_management.text_encoder_compute_dtype(device)))[0]), None
         return None, None
 
 class Gemma3_12B(BaseLlama, BaseGenerate, torch.nn.Module):
@@ -1579,5 +1579,5 @@ class Gemma3_12B(BaseLlama, BaseGenerate, torch.nn.Module):
     def preprocess_embed(self, embed, device):
         if embed["type"] == "image":
             image = comfy.clip_model.clip_preprocess(embed["data"], size=self.image_size, mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5], crop=True)
-            return self.multi_modal_projector(self.vision_model(image.to(device, dtype=torch.float32))[0]), None
+            return self.multi_modal_projector(self.vision_model(image.to(device, dtype=comfy.model_management.text_encoder_compute_dtype(device)))[0]), None
         return None, None

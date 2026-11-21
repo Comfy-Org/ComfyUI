@@ -2,6 +2,7 @@ import torch
 
 from comfy import sd1_clip
 import comfy.text_encoders.qwen_vl
+import comfy.model_management
 from comfy.text_encoders.qwen3vl import Qwen3VL, Qwen3VLTokenizer
 
 JOYIMAGE_VISION_BLOCK = "<|vision_start|><|image_pad|><|vision_end|>"
@@ -30,7 +31,7 @@ class Qwen3VL8B_JoyImage(Qwen3VL):
                 image_mean=[0.5, 0.5, 0.5], image_std=[0.5, 0.5, 0.5],
                 interpolation="bicubic",
             )
-            merged, deepstack = self.visual(image.to(device, dtype=torch.float32), grid)
+            merged, deepstack = self.visual(image.to(device, dtype=comfy.model_management.text_encoder_compute_dtype(device)), grid)
             return merged, {"grid": grid, "deepstack": deepstack}
         return None, None
 
