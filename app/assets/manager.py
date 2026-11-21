@@ -83,6 +83,11 @@ def _shutdown_assets() -> None:
     run_shutdown()
 
 
+async def _assets_disabled(request: web.Request) -> web.Response:
+    message = "Assets system is disabled because the server was started with --disable-assets."
+    return web.json_response({"error": {"code": "SERVICE_DISABLED", "message": message, "details": {}}}, status=503)
+
+
 class NoAssets:
     def __init__(self, args: _ArgsLike) -> None:
         self._args = args
@@ -102,6 +107,8 @@ class NoAssets:
         self, app: web.Application, user_manager: UserManager | None
     ) -> None:
         if not dependencies_available():
+            # The real routes need the database packages; answer the same way so clients see why.
+            app.router.add_route("*", "/api/assets{tail:.*}", _assets_disabled)
             return
         register_assets_routes(app)
         asset_seeder.disable()
