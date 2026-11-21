@@ -125,8 +125,6 @@ class ModelFileManager:
             return None
         if not os.path.isdir(folder):
             return None
-        if os.path.getmtime(folder) != model_file_list_cache[1]:
-            return None
         for x in model_file_list_cache[1]:
             time_modified = model_file_list_cache[1][x]
             folder = x
@@ -145,6 +143,11 @@ class ModelFileManager:
 
         result: list[str] = []
         dirs: dict[str, float] = {}
+
+        try:
+            dirs[directory] = os.path.getmtime(directory)
+        except FileNotFoundError:
+            logging.warning(f"Warning: Unable to access {directory}. Skipping this path.")
 
         for dirpath, subdirs, filenames in os.walk(directory, followlinks=True, topdown=True):
             subdirs[:] = [d for d in subdirs if d not in excluded_dir_names]
