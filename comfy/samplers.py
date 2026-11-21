@@ -41,7 +41,7 @@ def get_area_and_mult(conds, x_in, timestep_in):
             return None
     if 'timestep_end' in conds:
         timestep_end = conds['timestep_end']
-        if timestep_in[0] < timestep_end:
+        if timestep_in[0] <= timestep_end:
             return None
     if 'area' in conds:
         area = list(conds['area'])

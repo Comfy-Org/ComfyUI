@@ -201,7 +201,7 @@ class AnimaLLLitePatch:
         sigmas = transformer_options.get("sigmas")
         if sigmas is not None:
             sigma = float(sigmas.max().item())
-            if not self.sigma_end <= sigma <= self.sigma_start:
+            if not self.sigma_end < sigma <= self.sigma_start:
                 return args
         if x.shape[2] != 1:
             raise ValueError(f"Anima LLLite only supports T=1, got T={x.shape[2]}")
