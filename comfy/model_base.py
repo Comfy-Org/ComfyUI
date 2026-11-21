@@ -386,6 +386,7 @@ class BaseModel(torch.nn.Module):
         if len(m) > 0:
             logging.warning("unet missing: {}".format(m))
 
+        u = [ i for i in u if not i.endswith('.comfy_quant') ]
         if len(u) > 0:
             logging.warning("unet unexpected: {}".format(u))
         del to_load
