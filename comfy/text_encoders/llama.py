@@ -1180,11 +1180,13 @@ class BaseLlama:
         return self.model(input_ids, *args, **kwargs)
 
 def penalty_active(repetition_penalty, presence_penalty):
-    return repetition_penalty != 1.0 or (presence_penalty is not None and presence_penalty != 0.0)
+    return 0.0 < repetition_penalty != 1.0 or (presence_penalty is not None and presence_penalty != 0.0)
 
 
 def apply_penalty(logits, repetition_penalty, presence_penalty):
-    if repetition_penalty != 1.0:
+    # a zero or negative penalty means "off": dividing by 0 maps every positive
+    # logit to inf and turns the whole softmax distribution into NaN
+    if 0.0 < repetition_penalty != 1.0:
         logits = torch.where(logits < 0, logits * repetition_penalty, logits / repetition_penalty)
     if presence_penalty is not None and presence_penalty != 0.0:
         logits = logits - presence_penalty
