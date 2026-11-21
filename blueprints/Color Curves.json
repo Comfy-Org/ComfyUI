@@ -176,7 +176,21 @@
             "properties": {
               "Node name for S&R": "CurveEditor"
             },
-            "widgets_values": []
+            "widgets_values": [
+              {
+                "points": [
+                  [
+                    0.0,
+                    0.0
+                  ],
+                  [
+                    1.0,
+                    1.0
+                  ]
+                ],
+                "interpolation": "monotone_cubic"
+              }
+            ]
           },
           {
             "id": 5,
@@ -226,7 +240,21 @@
             "properties": {
               "Node name for S&R": "CurveEditor"
             },
-            "widgets_values": []
+            "widgets_values": [
+              {
+                "points": [
+                  [
+                    0.0,
+                    0.0
+                  ],
+                  [
+                    1.0,
+                    1.0
+                  ]
+                ],
+                "interpolation": "monotone_cubic"
+              }
+            ]
           },
           {
             "id": 6,
@@ -276,7 +304,21 @@
             "properties": {
               "Node name for S&R": "CurveEditor"
             },
-            "widgets_values": []
+            "widgets_values": [
+              {
+                "points": [
+                  [
+                    0.0,
+                    0.0
+                  ],
+                  [
+                    1.0,
+                    1.0
+                  ]
+                ],
+                "interpolation": "monotone_cubic"
+              }
+            ]
           },
           {
             "id": 7,
@@ -326,7 +368,21 @@
             "properties": {
               "Node name for S&R": "CurveEditor"
             },
-            "widgets_values": []
+            "widgets_values": [
+              {
+                "points": [
+                  [
+                    0.0,
+                    0.0
+                  ],
+                  [
+                    1.0,
+                    1.0
+                  ]
+                ],
+                "interpolation": "monotone_cubic"
+              }
+            ]
           },
           {
             "id": 8,
