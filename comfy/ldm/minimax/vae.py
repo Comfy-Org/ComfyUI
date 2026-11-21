@@ -11,6 +11,7 @@ import comfy.ops
 import comfy.quant_ops
 import comfy.rmsnorm
 from comfy.ldm.modules.attention import COMFY_KITCHEN_INT8_ATTENTION_IS_AVAILABLE, optimized_attention
+from comfy.ldm.modules.diffusionmodules.model import fused_norm_served
 
 ops = comfy.ops.disable_weight_init
 
@@ -44,11 +45,8 @@ LATENTS_STD = [
 # 3D causal CNN encoder
 
 def _kitchen_ndhwc(x):
-    # NDHWC when the kitchen pad kernel can feed it and the conv consumes it natively:
-    # cuDNN does, MIOpen converts back and loses more than the fused pad saves
-    ck = getattr(comfy.quant_ops, "ck", None)
-    return (ck is not None and hasattr(ck, "group_norm_silu_pad3d") and torch.version.hip is None
-            and x.is_cuda and x.dtype in (torch.float16, torch.bfloat16))
+    # NDHWC when the kitchen pad kernel can feed it and the conv consumes it natively
+    return hasattr(getattr(comfy.quant_ops, "ck", None), "group_norm_silu_pad3d") and fused_norm_served(x.device, x.dtype)
 
 
 def _fused_norm_pad(x, norm, spatial_pad, front):
@@ -67,10 +65,14 @@ def _fused_norm_pad(x, norm, spatial_pad, front):
 
 
 def _fp16_accum_conv(conv, x, weight, bias, residual):
-    # kitchen fp16-accumulate conv, same opt-in as the fp16 GEMMs
+    # kitchen fp16-accumulate conv, same opt-in as the fp16 GEMMs; the ROCm one accumulates in fp32 and needs none
     ck = comfy.quant_ops.ck
-    if not hasattr(ck, "fp16_conv3d") or not comfy.ops._fp16_linear_wanted(x):
+    if not hasattr(ck, "fp16_conv3d") or not (comfy.ops._fp16_linear_wanted(x) or (torch.version.hip and x.dtype == torch.float16)):
         return None
+    if torch.version.hip and weight.shape[2:] == (1, 1, 1) and tuple(conv.stride) == (1, 1, 1):
+        # the kitchen conv declines pointwise convs and MIOpen is off; the NDHWC channels are a GEMM operand as they are
+        out = F.linear(x.movedim(1, -1), weight.flatten(1), bias).movedim(-1, 1)
+        return out if residual is None else out.add_(residual)
     return ck.fp16_conv3d(x, weight, bias, residual, conv.stride)
 
 
