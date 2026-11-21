@@ -42,6 +42,9 @@ class RecordPageSpec(NamedTuple):
     sort: RecordSortField = "created_at"
     order: RecordSortOrder = "desc"
     after: RecordCursorBoundary | None = None
+    # Kept last: this is a NamedTuple, so a field inserted earlier would change
+    # the meaning of the positional calls that already exist.
+    content_hash: str | None = None
 
 
 _LIVE_PATH_UNIQUE_INDEX = "uq_asset_contents_path_live"
@@ -229,6 +232,8 @@ def list_records_page(
         filters.append(
             Asset.name.ilike(f"%{escaped_name}%", escape=escape_character)
         )
+    if spec.content_hash:
+        filters.append(AssetContent.hash == spec.content_hash)
 
     sort_columns = {
         "name": Asset.name,

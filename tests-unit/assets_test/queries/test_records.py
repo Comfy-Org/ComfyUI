@@ -135,3 +135,30 @@ def test_create_record_links_a_repeated_tag_name_once(session):
     assert list(linked) == ["x"], (
         "a tag name repeated within one call must link once, not raise on the composite PK"
     )
+
+
+def test_listing_filters_by_content_hash(session):
+    first = create_content(session, path="/tmp/hash-filter-1", hash="blake3:" + "a" * 64)
+    second = create_content(session, path="/tmp/hash-filter-2", hash="blake3:" + "b" * 64)
+    first_record = create_record(session, content_id=first.id, name="first")
+    second_record = create_record(session, content_id=second.id, name="second")
+    session.commit()
+
+    results, _, total = list_records_page(
+        session, RecordPageSpec(content_hash="blake3:" + "b" * 64)
+    )
+
+    assert [r.id for r in results] == [second_record.id]
+    assert total == 1
+    assert first_record.id != second_record.id
+
+
+def test_listing_hash_filter_matches_nothing_when_hash_is_unknown(session):
+    content = create_content(session, path="/tmp/hash-filter-3", hash="blake3:" + "a" * 64)
+    create_record(session, content_id=content.id, name="only")
+    session.commit()
+
+    results, _, total = list_records_page(session, RecordPageSpec(content_hash="blake3:" + "0" * 64))
+
+    assert results == []
+    assert total == 0
