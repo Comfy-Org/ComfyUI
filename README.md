@@ -94,6 +94,15 @@ for NVIDIA, AMD ROCm on Linux and Windows, Intel Arc, Apple Silicon, Huawei Asce
 Cambricon MLU and Iluvatar Corex, plus ComfyUI-Manager setup, portable builds, previews
 and TLS.
 
+## Troubleshooting
+
+Here are the most common things you can do to fix ComfyUI performance and other issues:
+
+* Nvidia: Make sure you are on pytorch cu130 or higher.
+* Remove all GGUF related nodes and models and delete them completely from your system. Use ComfyUI native formats like convrot int8 or w6a8 instead, they will be more than 2x faster.
+* Try the --disable-all-custom-nodes to disable all your custom nodes. Temporarily renaming the custom_nodes directory also works.
+* Remove all command line flags from ComfyUI. All of the command line flags that people claim improve performance do the opposite.
+
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for how to ask questions, report issues, open pull
