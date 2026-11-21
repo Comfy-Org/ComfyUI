@@ -1,3 +1,4 @@
+import gc
 import os
 import subprocess
 import sys
@@ -268,14 +269,20 @@ def test_held_pictures_leave_address_space_for_a_video(tmp_path):
 
 
 def _decode_still_with_aimdo(monkeypatch, path, crop=None):
-    calls = []
+    calls, store_kinds, real_store = [], [], video_types.frame_store
     def reserve():
         calls.append(None)
         raise AssertionError("a still picture made a reservation")
+    def frame_store():
+        store = real_store()
+        store_kinds.append(type(store))
+        return store
     monkeypatch.setattr(comfy.memory_management, "aimdo_enabled", True)
     monkeypatch.setattr(video_types, "reserve_host_buffer", reserve)
+    monkeypatch.setattr(video_types, "frame_store", frame_store)
     components = VideoFromFile(path, crop=crop).get_components()
     assert not calls, "a still picture tried to reserve; counted here because a fallback may catch what the stub raises"
+    assert store_kinds and set(store_kinds) == {video_types.HostFrames}, f"the still was not decoded through HostFrames: {store_kinds}"
     return components
 
 
@@ -320,31 +327,45 @@ def test_a_cropped_float_still_keeps_only_its_own_pixels(tmp_path, monkeypatch):
     _write_16_bit_png(path, np.random.default_rng(0).integers(0, 65535, (256, 1024, 3), dtype=np.uint16), "rgb48be")
     crop = (0, 64, 1024, 2)
     expected = VideoFromFile(path, crop=crop).get_components().images
-    tracemalloc.start()
+    started = not tracemalloc.is_tracing()
+    if started:
+        tracemalloc.start()
     try:
+        numpy_domain = [tracemalloc.DomainFilter(True, np.lib.tracemalloc_domain)]
+        gc.collect()
+        before = tracemalloc.take_snapshot().filter_traces(numpy_domain)
         images = _decode_still_with_aimdo(monkeypatch, path, crop).images
-        numpy_memory = tracemalloc.take_snapshot().filter_traces([tracemalloc.DomainFilter(True, np.lib.tracemalloc_domain)])
+        after = tracemalloc.take_snapshot().filter_traces(numpy_domain)
     finally:
-        tracemalloc.stop()
-    held = sum(trace.size for trace in numpy_memory.traces)
+        if started:
+            tracemalloc.stop()
+    held = sum(max(0, stat.size_diff) for stat in after.compare_to(before, "traceback"))
     assert held <= 2 * images.numel() * images.element_size(), f"the whole decoded frame is still alive behind a full-width crop: {held} bytes held for {tuple(images.shape)}"
     assert torch.equal(images, expected)
 
 
-def test_float_frame_copies_a_view_but_not_an_array_that_owns_its_pixels():
+@pytest.mark.parametrize("make, view", [
+    (lambda frame: frame.copy(), lambda a: a[1:3]),
+    (lambda frame: np.concatenate([frame, frame[..., :1]], -1), lambda a: a[..., :3]),
+], ids=["rows", "rgb-of-rgba"])
+def test_float_frame_copies_a_view(make, view):
     frame = np.random.default_rng(0).random((4, 6, 3), dtype=np.float32)
-    assert _float_frame(frame) is frame
-    rows, rgb_of_rgba = (lambda: frame.copy(), lambda a: a[1:3]), (lambda: np.concatenate([frame, frame[..., :1]], -1), lambda a: a[..., :3])
-    for make, view in (rows, rgb_of_rgba):
-        source = make()
-        expected, kept = view(source).copy(), weakref.ref(source)
-        result = _float_frame(view(source))
-        source[...] = -1
-        del source
-        assert kept() is None, "the result keeps its source alive"
-        assert result.flags.c_contiguous and np.array_equal(result, expected), "the result is not a contiguous copy, or it follows its source"
-    eight_bit = np.full((2, 2, 3), 51, dtype=np.uint8)
-    assert np.array_equal(_float_frame(eight_bit), np.full((2, 2, 3), 0.2, dtype=np.float32))
+    source = make(frame)
+    expected, kept = view(source).copy(), weakref.ref(source)
+    result = _float_frame(view(source))
+    source[...] = -1
+    del source
+    assert kept() is None, "the result keeps its source alive"
+    assert result.flags.c_contiguous and np.array_equal(result, expected), "the result is not a contiguous copy, or it follows its source"
+    assert isinstance(result.base, torch.Tensor), "the new array is not from _host_empty"
+
+
+def test_float_frame_keeps_an_array_that_owns_its_pixels_and_divides_8_bit():
+    frame = np.random.default_rng(0).random((4, 6, 3), dtype=np.float32)
+    assert _float_frame(frame) is frame, "a float frame that owns its pixels was copied"
+    eight_bit = _float_frame(np.full((2, 2, 3), 51, dtype=np.uint8))
+    assert np.array_equal(eight_bit, np.full((2, 2, 3), 0.2, dtype=np.float32)), "an 8-bit frame was not divided by 255"
+    assert isinstance(eight_bit.base, torch.Tensor), "the 8-bit frame's new array is not from _host_empty"
 
 
 # ---- without aimdo: blocks of frames, copied into one tensor at the end ---------------------------------------
