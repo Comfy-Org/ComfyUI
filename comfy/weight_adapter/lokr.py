@@ -292,7 +292,7 @@ class LoKrAdapter(WeightAdapterBase):
         w2_b = v[6]
         t2 = v[7]
         dora_scale = v[8]
-        dim = None
+        dim = None if w1 is None or w2 is None else w2.shape[0] // w1.shape[0]
 
         if w1 is None:
             dim = w1_b.shape[0]
@@ -406,7 +406,12 @@ class LoKrAdapter(WeightAdapterBase):
             op = F.linear
 
         # Determine rank and scale
-        rank = w1_b.size(0) if not use_w1 else w2_b.size(0) if not use_w2 else alpha
+        if not use_w1:
+            rank = w1_b.size(0)
+        elif not use_w2:
+            rank = w2_b.size(0)
+        else:
+            rank = w2.size(0) // w1.size(0)
         scale = (alpha / rank if alpha is not None else 1.0) * getattr(
             self, "multiplier", 1.0
         )
