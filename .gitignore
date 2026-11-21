@@ -5,7 +5,9 @@ __pycache__/
 !/input/example.png
 /models/
 /temp/
-/custom_nodes/
+/custom_nodes/*
+!/custom_nodes/
+!/custom_nodes/custom_node.txt
 !custom_nodes/example_node.py.example
 extra_model_paths.yaml
 /.vs
