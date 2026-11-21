@@ -752,7 +752,7 @@ class MiniMaxH3ImageConditioning(io.ComfyNode):
                 io.Vae.Input("vae", optional=True, tooltip="The MiniMax-H3-Image VAE. With it the pictures are also anchored as reference latents, without it they only condition the text encoder."),
                 io.String.Input("prompt", multiline=True, dynamic_prompts=True),
                 io.Int.Input("width", default=0, min=0, max=nodes.MAX_RESOLUTION, step=CANVAS_MULTIPLE,
-                             tooltip="0 uses the width of image_1 after its reference scaling, or 2048 without images. The model is tuned for 2048x2048 pixels of area"),
+                             tooltip="0 uses the width of image_1 after its reference scaling, or 2048 without images. The model works best at about 16 MP (its working range is about 4 to 20 MP); 2048x2048 is the low end of that range"),
                 io.Int.Input("height", default=0, min=0, max=nodes.MAX_RESOLUTION, step=CANVAS_MULTIPLE,
                              tooltip="0 uses the height of image_1 after its reference scaling, or 2048 without images."),
                 io.Autogrow.Input("images", optional=True, template=io.Autogrow.TemplatePrefix(
