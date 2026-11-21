@@ -19,7 +19,7 @@ REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 
 
 @pytest.fixture(autouse=True)
-def _blocks_path(monkeypatch):
+def _aimdo_off_even_if_an_import_enabled_it(monkeypatch):
     monkeypatch.setattr(comfy.memory_management, "aimdo_enabled", False)
 
 
@@ -166,7 +166,7 @@ def test_host_buffer_and_fromiter_decode_the_same_frames(tmp_path, name):
     _run_with_aimdo(HOST_BUFFER_DECODE, path, output)
     expected = VideoFromFile(path).get_components()
     with np.load(output) as frames:
-        assert np.array_equal(frames["head"], expected.images[:1].numpy())
+        assert np.array_equal(frames["head"], expected.images[:1].numpy()), "the first frame, held until the second arrives, differs from the plain decode"
         assert np.array_equal(frames["tail"], expected.images[1:].numpy())
         if expected.alpha is not None:
             assert np.array_equal(frames["alpha"], expected.alpha.numpy())
@@ -204,7 +204,7 @@ def reserve_or_refuse():
     return reserve()
 video_types.reserve_host_buffer = reserve_or_refuse
 components = video_types.VideoFromFile(sys.argv[1]).get_components()
-assert len(calls) == int(sys.argv[3]), calls
+assert len(calls) == int(sys.argv[3]), f"{len(calls)} reservations: two frames reserve once for the images and once more only with alpha"
 refused = int(sys.argv[2])  # the images reserve first, then the alpha
 assert hasattr(components.images.untyped_storage(), "_comfy_hostbuf") == (refused != 1)
 assert components.alpha is None or hasattr(components.alpha.untyped_storage(), "_comfy_hostbuf") == (refused != 2)
@@ -275,7 +275,7 @@ def _decode_still_with_aimdo(monkeypatch, path, crop=None):
     monkeypatch.setattr(comfy.memory_management, "aimdo_enabled", True)
     monkeypatch.setattr(video_types, "reserve_host_buffer", reserve)
     components = VideoFromFile(path, crop=crop).get_components()
-    assert not calls
+    assert not calls, "a still picture tried to reserve; counted here because a fallback may catch what the stub raises"
     return components
 
 
@@ -327,7 +327,7 @@ def test_a_cropped_float_still_keeps_only_its_own_pixels(tmp_path, monkeypatch):
     finally:
         tracemalloc.stop()
     held = sum(trace.size for trace in numpy_memory.traces)
-    assert held <= 2 * images.numel() * images.element_size(), (held, tuple(images.shape))
+    assert held <= 2 * images.numel() * images.element_size(), f"the whole decoded frame is still alive behind a full-width crop: {held} bytes held for {tuple(images.shape)}"
     assert torch.equal(images, expected)
 
 
@@ -341,8 +341,8 @@ def test_float_frame_copies_a_view_but_not_an_array_that_owns_its_pixels():
         result = _float_frame(view(source))
         source[...] = -1
         del source
-        assert kept() is None
-        assert result.flags.c_contiguous and np.array_equal(result, expected)
+        assert kept() is None, "the result keeps its source alive"
+        assert result.flags.c_contiguous and np.array_equal(result, expected), "the result is not a contiguous copy, or it follows its source"
     eight_bit = np.full((2, 2, 3), 51, dtype=np.uint8)
     assert np.array_equal(_float_frame(eight_bit), np.full((2, 2, 3), 0.2, dtype=np.float32))
 
