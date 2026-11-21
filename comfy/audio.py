@@ -61,6 +61,8 @@ def resample(waveform, orig_freq, new_freq, lowpass_filter_width=6, rolloff=0.99
         window = torch.i0(beta * torch.sqrt(1 - (t / lowpass_filter_width) ** 2)) / torch.i0(beta)
     else:
         raise ValueError(f"Unknown resampling method: {resampling_method}")
+    if waveform.shape[-1] == 0:
+        return waveform
     t *= math.pi
     kernel = torch.where(t == 0, 1.0, t.sin() / t)
     kernel *= window * (base_freq / orig_freq)
