@@ -28,6 +28,7 @@ from app.database.db import dependencies_available, get_database_url, get_db_pat
 from app.assets.event_log import error_kind
 from utils.install_util import get_missing_requirements_message
 from app.assets.lifecycle import cleanup_temp_filesystem
+import ipaddress
 import itertools
 import utils.extra_config
 from utils.mime_types import init_mime_types
@@ -580,6 +581,51 @@ ________________________________________________________________________
     )
 
 
+def legacy_manager_pack_will_load():
+    """Check whether a legacy ComfyUI-Manager pack will load as a custom node."""
+    # comfyui_manager.should_be_disabled() only blocks the legacy pack when its
+    # folder name contains "comfyui-manager". The same pack under another name
+    # still loads and registers the manager's unauthenticated routes.
+    for node_path in folder_paths.get_folder_paths("custom_nodes"):
+        for name in os.listdir(node_path):
+            if "comfyui-manager" in name.lower() or name.endswith(".disabled"):
+                continue
+            if args.disable_all_custom_nodes and name not in args.whitelist_custom_nodes:
+                continue
+            if os.path.isfile(os.path.join(node_path, name, "glob", "manager_server.py")):
+                return True
+    return False
+
+
+def warn_if_manager_exposed():
+    """Warn when the unauthenticated manager API is reachable from other machines."""
+    if not args.enable_manager:
+        return
+    if args.disable_manager_ui and not legacy_manager_pack_will_load():
+        return
+    for address in args.listen.split(","):
+        address = address.strip()
+        if address.lower() == "localhost":
+            continue
+        try:
+            if ipaddress.ip_address(address).is_loopback:
+                continue
+        except ValueError:
+            pass
+        app.logger.log_startup_warning(
+            f"""
+________________________________________________________________________
+WARNING WARNING WARNING WARNING WARNING
+
+ComfyUI-Manager is enabled while listening on {args.listen}, which is not a loopback address.
+The manager has no authentication: anyone who can reach this address can install custom nodes, change manager settings and restart ComfyUI.
+Only expose it on a network you trust, or restart with --listen 127.0.0.1.
+________________________________________________________________________
+""".strip()
+        )
+        return
+
+
 def start_comfyui(asyncio_loop=None):
     """
     Starts the ComfyUI server using the provided asyncio event loop or creates a new one.
@@ -604,8 +650,10 @@ def start_comfyui(asyncio_loop=None):
         asyncio.set_event_loop(asyncio_loop)
     prompt_server = server.PromptServer(asyncio_loop, asset_manager)
 
-    if args.enable_manager and not args.disable_manager_ui:
-        comfyui_manager.start()
+    if args.enable_manager:
+        warn_if_manager_exposed()
+        if not args.disable_manager_ui:
+            comfyui_manager.start()
 
     hook_breaker_ac10a0.save_functions()
     asyncio_loop.run_until_complete(nodes.init_extra_nodes(
