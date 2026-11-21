@@ -174,7 +174,10 @@ class LTXVImgToVideoInplace(io.ComfyNode):
         conditioning_latent_frames_mask = get_noise_mask(latent)
         conditioning_latent_frames_mask[:, :, :t.shape[2]] = 1.0 - strength
 
-        return io.NodeOutput({"samples": samples, "noise_mask": conditioning_latent_frames_mask})
+        out = latent.copy()
+        out["samples"] = samples
+        out["noise_mask"] = conditioning_latent_frames_mask
+        return io.NodeOutput(out)
 
     generate = execute  # TODO: remove
 
@@ -517,7 +520,10 @@ class LTXVAddGuide(io.ComfyNode):
             attention_mask=attention_mask,
         )
 
-        return io.NodeOutput(positive, negative, {"samples": latent_image, "noise_mask": noise_mask})
+        out = latent.copy()
+        out["samples"] = latent_image
+        out["noise_mask"] = noise_mask
+        return io.NodeOutput(positive, negative, out)
 
     generate = execute  # TODO: remove
 
@@ -671,7 +677,10 @@ class LTXVCropGuides(io.ComfyNode):
 
         _, num_keyframes = get_keyframe_idxs(positive, latent_image.shape)
         if num_keyframes == 0:
-            return io.NodeOutput(positive, negative, {"samples": latent_image, "noise_mask": noise_mask},)
+            out = latent.copy()
+            out["samples"] = latent_image
+            out["noise_mask"] = noise_mask
+            return io.NodeOutput(positive, negative, out)
 
         latent_image = latent_image[:, :, :-num_keyframes]
         noise_mask = noise_mask[:, :, :-num_keyframes]
@@ -685,7 +694,10 @@ class LTXVCropGuides(io.ComfyNode):
             "guide_attention_entries": None,
         })
 
-        return io.NodeOutput(positive, negative, {"samples": latent_image, "noise_mask": noise_mask})
+        out = latent.copy()
+        out["samples"] = latent_image
+        out["noise_mask"] = noise_mask
+        return io.NodeOutput(positive, negative, out)
 
     crop = execute  # TODO: remove
 
