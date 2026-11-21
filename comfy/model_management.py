@@ -1259,6 +1259,12 @@ def text_encoder_dtype(device=None):
 
     return torch.float16
 
+def text_encoder_compute_dtype():
+    if args.text_enc_compute_dtype is not None:
+        return {"fp32": torch.float32, "bf16": torch.bfloat16, "fp16": torch.float16}[args.text_enc_compute_dtype]
+
+    return torch.float32
+
 
 def intermediate_device():
     if args.gpu_only:
