@@ -106,7 +106,8 @@ class Blur(io.ComfyNode):
         kernel = gaussian_kernel(kernel_size, sigma, device=image.device, dtype=image.dtype).repeat(channels, 1, 1).unsqueeze(1)
 
         image = image.permute(0, 3, 1, 2) # Torch wants (B, C, H, W) we use (B, H, W, C)
-        padded_image = F.pad(image, (blur_radius,blur_radius,blur_radius,blur_radius), 'reflect')
+        pad_mode = 'reflect' if blur_radius < min(height, width) else 'replicate'
+        padded_image = F.pad(image, (blur_radius,blur_radius,blur_radius,blur_radius), pad_mode)
         blurred = F.conv2d(padded_image, kernel, padding=kernel_size // 2, groups=channels)[:,:,blur_radius:-blur_radius, blur_radius:-blur_radius]
         blurred = blurred.permute(0, 2, 3, 1)
 
@@ -216,7 +217,8 @@ class Sharpen(io.ComfyNode):
         kernel = kernel.repeat(channels, 1, 1).unsqueeze(1)
 
         tensor_image = image.permute(0, 3, 1, 2) # Torch wants (B, C, H, W) we use (B, H, W, C)
-        tensor_image = F.pad(tensor_image, (sharpen_radius,sharpen_radius,sharpen_radius,sharpen_radius), 'reflect')
+        pad_mode = 'reflect' if sharpen_radius < min(height, width) else 'replicate'
+        tensor_image = F.pad(tensor_image, (sharpen_radius,sharpen_radius,sharpen_radius,sharpen_radius), pad_mode)
         sharpened = F.conv2d(tensor_image, kernel, padding=center, groups=channels)[:,:,sharpen_radius:-sharpen_radius, sharpen_radius:-sharpen_radius]
         sharpened = sharpened.permute(0, 2, 3, 1)
 
