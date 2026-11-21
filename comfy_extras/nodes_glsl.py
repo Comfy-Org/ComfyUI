@@ -38,6 +38,10 @@ os.environ.setdefault("PYOPENGL_PLATFORM", "egl")
 
 import OpenGL
 OpenGL.USE_ACCELERATE = False
+logging.getLogger("OpenGL.acceleratesupport").setLevel(logging.WARNING)
+logger.info(
+    "Using ComfyUI GLSL ANGLE/EGL backend; optional PyOpenGL wrapper acceleration is disabled for compatibility. GPU shader rendering remains enabled."
+)
 
 
 def _patch_find_library():
