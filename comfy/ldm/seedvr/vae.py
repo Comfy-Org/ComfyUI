@@ -56,8 +56,13 @@ _CL = torch.channels_last_3d
 
 
 def _ck_eligible(x):
-    """fp16 on CUDA: the channels_last_3d path; the kitchen conv itself needs the fp16-accumulate opt-in."""
-    return x.is_cuda and x.dtype == torch.float16 and x.dim() == 5
+    """Keep fp16 channels_last_3d except on HIP without opted-in fp16 accumulation.
+
+    ROCm's non-accumulating F.conv3d path can create very large whole-slice
+    column buffers; use the bounded standard-layout path instead.
+    """
+    return (x.is_cuda and x.dtype == torch.float16 and x.dim() == 5
+            and (not torch.version.hip or _fp16_accumulate_wanted(x)))
 
 
 def _fp16_accumulate_wanted(x):
@@ -451,8 +456,16 @@ class CausalMemoryCache:
 
 
 def _eager_factor(dtype, factor):
-    """The memory figures are fitted on the fp16 channels-last path; other dtypes take the eager path."""
-    return 1 if dtype == torch.float16 else factor * dtype.itemsize / 2
+    """Use bounded-path memory estimates for HIP fp16 without acceleration.
+
+    Preserve the original fp16 estimate on CUDA and accelerated HIP, and
+    preserve eager estimates for all other dtypes.
+    """
+    if dtype == torch.float16:
+        if torch.version.hip and not getattr(torch.backends.cuda.matmul, "allow_fp16_accumulation", False):
+            return factor * dtype.itemsize / 2
+        return 1
+    return factor * dtype.itemsize / 2
 
 
 def _offload_caches_for(frame_pixels):
@@ -474,10 +487,16 @@ def _plan_pass(device, free_memory, frame_pixels, latents, working_bytes, slice_
             return latents, CausalMemoryCache()
         # the other dtypes' tails are not stored this way
         compiled = dtype == torch.float16 and spare >= tail_bytes and comfy.model_prefetch.malloc_graph_enabled(device)
-        if compiled:
+        offload = not compiled and _offload_caches_for(frame_pixels)
+        # Non-accumulating HIP fp16 keeps standard-layout convolution tails on the device:
+        # CausalMemoryCache cannot pack or offload them. Budget their fixed residency
+        # before choosing the slice length, even when other cache entries are offloaded.
+        if compiled or (offload and dtype == torch.float16 and torch.version.hip
+                        and not getattr(torch.backends.cuda.matmul, "allow_fp16_accumulation", False)):
             spare -= tail_bytes
         slice_latents = max(0, min(SEEDVR2_MAX_SLICE_LATENTS, int(spare / slice_bytes)))
-    offload = not compiled and _offload_caches_for(frame_pixels)
+    else:
+        offload = _offload_caches_for(frame_pixels)
     return slice_latents if compiled or offload else 0, CausalMemoryCache(offload=offload, compiled=compiled)
 
 
@@ -744,9 +763,34 @@ class InflatedCausalConv3d(ops.Conv3d):
                     fused_residual = residual   # otherwise added after: the epilogue wants the output's shape and layout
                 for z0 in range(0, zt, chunk):
                     z1 = min(zt, z0 + chunk)
-                    comfy_kitchen.fp16_conv3d(buf[:, :, z0 * sd:(z1 - 1) * sd + kt], weight_cl, bias,
-                                              residual=None if fused_residual is None else fused_residual[:, :, z0:z1],
-                                              stride=stride, out=out[:, :, z0:z1])
+                    window = buf[:, :, z0 * sd:(z1 - 1) * sd + kt]
+                    # HIP kitchen 0.2.41 declines the decoder's 128-to-3
+                    # 3x3x3 output conv and falls back to one enormous
+                    # F.conv3d allocation. Its buffer is already padded:
+                    # spatial width bands with k-1 overlapping halo columns
+                    # compute the identical output pixels, but each conv's
+                    # temporary column buffer stays bounded.
+                    final_hip_rgb = (torch.version.hip and residual is None
+                                     and weight_cl.shape[:2] == (3, 128)
+                                     and tuple(weight_cl.shape[2:]) == (3, 3, 3)
+                                     and tuple(stride) == (1, 1, 1))
+                    if final_hip_rgb:
+                        kw = weight_cl.size(-1)
+                        out_width = out.size(-1)
+                        bytes_per_col = (window.size(0) * window.size(1) * window.size(2) *
+                                         window.size(3) * window.element_size())
+                        input_cols_budget = max(kw, (256 * 1024 ** 2) // bytes_per_col)
+                        output_cols_budget = max(1, input_cols_budget - kw + 1)
+                    if final_hip_rgb and out_width > output_cols_budget:
+                        for col in range(0, out_width, output_cols_budget):
+                            end = min(col + output_cols_budget, out_width)
+                            band = F.conv3d(window[..., col:end + kw - 1],
+                                            weight_cl, bias, stride=stride)
+                            out[:, :, z0:z1, :, col:end].copy_(band)
+                    else:
+                        comfy_kitchen.fp16_conv3d(window, weight_cl, bias,
+                                                  residual=None if fused_residual is None else fused_residual[:, :, z0:z1],
+                                                  stride=stride, out=out[:, :, z0:z1])
         finally:
             comfy.ops.uncast_bias_weight(self, weight, bias, offload_stream)
         if residual is not None and fused_residual is None:
