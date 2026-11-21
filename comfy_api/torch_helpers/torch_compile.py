@@ -2,6 +2,7 @@ from __future__ import annotations
 import torch
 
 import comfy.utils
+import comfy.quant_ops
 from comfy.patcher_extension import WrappersMP
 from typing import TYPE_CHECKING, Callable, Optional
 if TYPE_CHECKING:
@@ -11,6 +12,35 @@ if TYPE_CHECKING:
 
 COMPILE_KEY = "torch.compile"
 TORCH_COMPILE_KWARGS = "torch_compile_kwargs"
+
+
+def check_torch_compile_compatible(model: ModelPatcher, keys: list[str]):
+    '''
+    Fail fast when installing a torch.compile wrapper on modules with quantized weights.
+
+    QuantizedTensor kernels (weight requantize, input quantize, quantized GEMM) are plain
+    custom kernels, not opaque custom ops, so on CUDA devices Dynamo cannot trace them:
+    torch.compile would install successfully but fail with a torch._dynamo tracing error
+    on the first sampling step. Raising here makes the failure visible when the wrapper is
+    installed instead of silently deferring it. On non-CUDA devices the kernels are pure
+    torch ops that Dynamo can trace, so quantized weights are allowed there.
+    '''
+    load_device = getattr(model, "load_device", None)
+    if load_device is None or load_device.type != "cuda":
+        return
+    for key in keys:
+        module = model.get_model_object(key)
+        quantized = [name for name, param in module.named_parameters() if isinstance(param, comfy.quant_ops.QuantizedTensor)]
+        if quantized:
+            examples = ", ".join(f"'{key}.{name}'" for name in quantized[:3])
+            more = f" (and {len(quantized) - 3} more)" if len(quantized) > 3 else ""
+            raise ValueError(
+                f"torch.compile cannot be applied to '{key}': it has quantized (QuantizedTensor) "
+                f"weights, e.g. {examples}{more}. Quantized weight kernels are not opaque to "
+                "torch.compile on CUDA devices, so the wrapper would install successfully but fail "
+                "with a torch._dynamo tracing error on the first sampling step. Do not apply "
+                "torch.compile to this model."
+            )
 
 
 def apply_torch_compile_factory(compiled_module_dict: dict[str, Callable]) -> Callable:
@@ -39,11 +69,13 @@ def set_torch_compile_wrapper(model: ModelPatcher, backend: str, options: Option
     When keys is None, it will default to using ["diffusion_model"], compiling the whole diffusion_model.
     When a list of keys is provided, it will perform torch.compile on only the selected modules.
     '''
-    # clear out any other torch.compile wrappers
-    model.remove_wrappers_with_key(WrappersMP.APPLY_MODEL, COMPILE_KEY)
     # if no keys, default to 'diffusion_model'
     if not keys:
         keys = ["diffusion_model"]
+    # raise before touching any state if the modules cannot be compiled
+    check_torch_compile_compatible(model, keys)
+    # clear out any other torch.compile wrappers
+    model.remove_wrappers_with_key(WrappersMP.APPLY_MODEL, COMPILE_KEY)
     # create kwargs dict that can be referenced later
     compile_kwargs = {
         "backend": backend,
