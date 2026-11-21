@@ -34,7 +34,7 @@ def composite(destination, source, x, y, mask = None, multiplier = 8, resize_sou
     # of the destination
     visible_width, visible_height = (destination.shape[-1] - left + min(0, x), destination.shape[-2] - top + min(0, y),)
 
-    mask = mask[:, :, :visible_height, :visible_width]
+    mask = mask[..., :visible_height, :visible_width]
     if mask.ndim < source.ndim:
         mask = mask.unsqueeze(1)
 
