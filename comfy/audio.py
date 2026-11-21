@@ -211,3 +211,46 @@ def treble_biquad(waveform, sample_rate, gain, central_freq=3000, Q=0.707):
     a1 = 2 * (A - 1 - temp3)
     a2 = A + 1 - temp2 - temp1
     return _biquad(waveform, b0, b1, b2, a0, a1, a2)
+
+
+def _k_weighting(sample_rate):
+    # ITU-R BS.1770 pre-filter: high shelf followed by RLB high-pass.
+    K = math.tan(math.pi * 1681.9744509555319 / sample_rate)
+    Q = 0.7071752369554196
+    Vh = 10 ** (3.999843853973347 / 20)
+    Vb = Vh ** 0.4996667741545416
+    a0 = 1 + K / Q + K * K
+    shelf_b = [(Vh + Vb * K / Q + K * K) / a0, 2 * (K * K - Vh) / a0, (Vh - Vb * K / Q + K * K) / a0]
+    shelf_a = [1.0, 2 * (K * K - 1) / a0, (1 - K / Q + K * K) / a0]
+
+    K = math.tan(math.pi * 38.13547087613982 / sample_rate)
+    Q = 0.5003270373253953
+    a0 = 1 + K / Q + K * K
+    high_a = [1.0, 2 * (K * K - 1) / a0, (1 - K / Q + K * K) / a0]
+    return (shelf_b, shelf_a), ([1.0, -2.0, 1.0], high_a)
+
+
+def integrated_loudness(waveform, sample_rate):
+    """Gated loudness in LUFS using the ITU-R BS.1770-4 K-weighting of a [channels, samples] waveform.
+
+    Channels are weighted equally; channel layout and LFE are not interpreted.
+    Returns -inf when the clip is shorter than one 400 ms block (or the sample rate is too low
+    to form one) or every block is gated out.
+    """
+    step = round(0.1 * sample_rate)
+    if step == 0 or waveform.shape[-1] < 4 * step:
+        return -math.inf
+
+    x = waveform.detach().cpu().double().numpy()
+    for b, a in _k_weighting(sample_rate):
+        x = scipy.signal.lfilter(b, a, x)
+
+    steps = x.shape[-1] // step
+    power = torch.from_numpy(x[:, :steps * step] ** 2).reshape(x.shape[0], steps, step).sum(-1)
+    energy = power.unfold(1, 4, 1).sum(-1).sum(0) / (4 * step)
+
+    energy = energy[energy > 10 ** ((-70 + 0.691) / 10)]
+    if energy.numel() == 0:
+        return -math.inf
+    energy = energy[energy > energy.mean() * 0.1]
+    return -0.691 + 10 * math.log10(energy.mean().item())
