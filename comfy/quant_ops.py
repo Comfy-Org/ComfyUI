@@ -41,6 +41,27 @@ try:
         ck.registry.disable("triton")
     for k, v in ck.list_backends().items():
         logging.info(f"Found comfy_kitchen backend {k}: {v}")
+
+    def int8_linear_available():
+        """Whether a registered backend runs the INT8 linear GEMM without torch._int_mm.
+
+        The eager backend needs torch._int_mm, which hipBLASLt does not implement for
+        every device. A native backend (Triton) runs the same GEMM without it, so the
+        device is still capable of INT8 compute.
+        """
+        try:
+            return ck.registry.get_capable_backend("int8_linear") != "eager"
+        except ck.exceptions.NoCapableBackendError:
+            return False
+
+    def int8_linear_needs_triton_opt_in():
+        """Whether the INT8 GEMM exists but is unavailable because the opt-in flag is off.
+
+        Lets the caller point at --enable-triton-backend instead of silently dequantizing.
+        """
+        if args.disable_triton_backend or ck.registry.is_available("triton"):
+            return False
+        return ck.list_backends().get("triton", {}).get("available", False)
 except ImportError as e:
     logging.error(f"Failed to import comfy_kitchen, Error: {e}, fp8 and fp4 support will not be available.")
     _CK_AVAILABLE = False
@@ -68,6 +89,12 @@ except ImportError as e:
 
     def get_layout_class(name):
         return None
+
+    def int8_linear_available():
+        return False
+
+    def int8_linear_needs_triton_opt_in():
+        return False
 
 _CK_MXFP8_AVAILABLE = False
 if _CK_AVAILABLE:
