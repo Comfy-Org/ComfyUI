@@ -6,11 +6,12 @@ import weakref
 from fractions import Fraction
 
 import av
+import pytest
 import torch
 
 from comfy_api.input_impl.video_types import VideoFromComponents, VideoFromFile, VideoFromList
 from comfy_api.input.basic_types import AudioInput
-from comfy_api.util.video_types import VideoCodec, VideoComponents
+from comfy_api.util.video_types import VideoCodec, VideoComponents, VideoContainer
 from comfy_extras.nodes_video import ConcatenateVideo, CreateVideo
 
 
@@ -232,6 +233,91 @@ def test_accumulated_video_metadata_and_explicit_materialization():
     assert video.get_components().images.shape == (4, 16, 16, 3)
 
 
+def test_accumulated_video_frame_count_counts_frames_in_owned_buffers():
+    videos = [
+        VideoFromComponents(
+            VideoComponents(images=torch.zeros((frame_count, 16, 16, 3)), frame_rate=Fraction(25))
+        )
+        for frame_count in (10, 15)
+    ]
+
+    assert VideoFromList(videos).get_frame_count() == 25
+
+
+def _create_h264_without_frame_count_metadata(path):
+    VideoFromComponents(
+        VideoComponents(images=torch.zeros((10, 16, 16, 3)), frame_rate=Fraction(25))
+    ).save_to(path, format=VideoContainer.MKV, codec=VideoCodec.H264)
+
+    with av.open(path) as container:
+        stream = container.streams.video[0]
+        assert stream.frames == 0
+        assert stream.duration is None
+
+
+def test_file_frame_count_decodes_when_metadata_is_missing(tmp_path):
+    path = tmp_path / "missing-frame-count.mkv"
+    _create_h264_without_frame_count_metadata(path)
+
+    assert VideoFromFile(path).get_frame_count() == 10
+    assert VideoFromFile(path, start_time=0.08, duration=0.2).get_frame_count() == 5
+
+
+def test_accumulated_frame_count_decodes_children_with_missing_metadata(tmp_path):
+    path = tmp_path / "missing-frame-count.mkv"
+    _create_h264_without_frame_count_metadata(path)
+
+    video = VideoFromList([VideoFromFile(path), VideoFromFile(path)])
+
+    assert video.get_frame_count() == 20
+
+
+@pytest.fixture
+def raw_h264_file(tmp_path):
+    path = tmp_path / "missing-duration.h264"
+    with av.open(path, mode="w", format="h264") as output:
+        stream = output.add_stream("h264", rate=25)
+        stream.width = stream.height = 16
+        stream.pix_fmt = "yuv420p"
+        for index in range(20):
+            frame = av.VideoFrame.from_ndarray(
+                torch.full((16, 16, 3), index * 10, dtype=torch.uint8).numpy(), format="rgb24"
+            )
+            frame.pts = index
+            frame.time_base = Fraction(1, 25)
+            output.mux(stream.encode(frame))
+        output.mux(stream.encode(None))
+
+    with av.open(path) as container:
+        stream = container.streams.video[0]
+        assert container.duration is None
+        assert stream.frames == 0
+        assert stream.duration is None
+        assert stream.average_rate == 25
+        assert all(frame.pts is None for frame in container.decode(stream))
+
+    return path
+
+
+def test_file_duration_decodes_raw_h264_without_timing_metadata(raw_h264_file):
+    assert VideoFromFile(raw_h264_file).get_duration() == 0.8
+
+
+def test_file_frame_count_decodes_raw_h264_without_timing_metadata(raw_h264_file):
+    assert VideoFromFile(raw_h264_file).get_frame_count() == 20
+
+
+@pytest.mark.parametrize("allow_seek", [False, True])
+def test_file_frame_count_rejects_trim_without_raw_h264_timing(raw_h264_file, monkeypatch, allow_seek):
+    if allow_seek:
+        # Let decoding start to exercise the missing-PTS failure after seek.
+        monkeypatch.setattr(av.container.InputContainer, "seek", lambda *args, **kwargs: None)
+    video = VideoFromFile(raw_h264_file, start_time=0.2, duration=0.4)
+
+    with pytest.raises(ValueError, match="trimmed video.*timestamps.*seeking"):
+        video.get_frame_count()
+
+
 def test_accumulated_video_reports_each_incompatible_dimension():
     videos = [
         VideoFromComponents(
@@ -271,6 +357,26 @@ def test_accumulated_video_trims_across_file_boundaries_without_materializing():
         assert isinstance(trimmed, VideoFromList)
         assert len(trimmed.videos) == 2
         assert trimmed.get_duration() == 0.25
+
+
+def test_accumulated_video_trim_preserves_frame_count_and_duration(tmp_path):
+    videos = [
+        VideoFromComponents(
+            VideoComponents(images=torch.zeros((frame_count, 16, 16, 3)), frame_rate=Fraction(25))
+        )
+        for frame_count in (10, 15)
+    ]
+
+    trimmed = VideoFromList(videos).as_trimmed(0.2, 0.4, False)
+
+    assert trimmed is not None
+    assert trimmed.get_frame_count() == 10
+    components = trimmed.get_components()
+    assert len(components.images) / components.frame_rate == Fraction(2, 5)
+
+    output = str(tmp_path / "trimmed.mp4")
+    trimmed.save_to(output)
+    assert VideoFromFile(output).get_duration() == 0.4
 
 
 def test_accumulated_video_trim_slices_complete_audio():
