@@ -180,7 +180,7 @@ def cast_modules_with_vbar(comfy_modules, dtype, device, bias_dtype, non_blockin
         cast_buffer_offset += buffer_size
         return buffer
 
-    group_faults = {}
+    group_faults = set()
     dropped_groups = []
     for s in comfy_modules:
         group = s._combined_linear
@@ -188,9 +188,15 @@ def cast_modules_with_vbar(comfy_modules, dtype, device, bias_dtype, non_blockin
             group._v_weight = None
             for m in group.linears:
                 m._v_signature = None
+        # The prefetch record is made as soon as the fault pins the module, so the caller's
+        # cleanup (cleanup_prefetched_modules) can see and unpin it if the cast fails part way.
+        # The cast fields are added to the record once the transfer is set up.
         if group is None or group._v_weight is None:
             signature = comfy_aimdo.model_vbar.vbar_fault(s._v)
-            resident = comfy_aimdo.model_vbar.vbar_signature_compare(signature, s._v_signature)
+            s._prefetch = {
+                "signature": signature,
+                "resident": comfy_aimdo.model_vbar.vbar_signature_compare(signature, s._v_signature),
+            }
         else:
             # A combined group's members hold each other's bytes, so one member's miss
             # is a miss for all of them. Fault the peers now; each keeps that fault's
@@ -200,23 +206,25 @@ def cast_modules_with_vbar(comfy_modules, dtype, device, bias_dtype, non_blockin
             if s not in group_faults:
                 for m in group.linears:
                     signature = comfy_aimdo.model_vbar.vbar_fault(m._v)
-                    group_faults[m] = (signature, comfy_aimdo.model_vbar.vbar_signature_compare(signature, m._v_signature))
-                if not all(group_faults[m][1] for m in group.linears):
+                    m._prefetch = {
+                        "signature": signature,
+                        "resident": comfy_aimdo.model_vbar.vbar_signature_compare(signature, m._v_signature),
+                    }
+                    group_faults.add(m)
+                if not all(m._prefetch["resident"] for m in group.linears):
                     # Dropped after the loop: a member that already holds its group fault
                     # must not fall into the uncombined branch and take a second pin.
                     dropped_groups.append(group)
                     for m in group.linears:
-                        group_faults[m] = (group_faults[m][0], False)
-            signature, resident = group_faults.pop(s)
+                        m._prefetch["resident"] = False
+            group_faults.remove(s)
+        prefetch = s._prefetch
+        signature = prefetch["signature"]
+        resident = prefetch["resident"]
         if return_faulted and (signature is None or not resident):
             fully_faulted = False
-        prefetch = {
-            "signature": signature,
-            "resident": resident,
-        }
 
         if resident:
-            s._prefetch = prefetch
             continue
 
         materialize_meta_param(s, ["weight", "bias"])
@@ -302,7 +310,6 @@ def cast_modules_with_vbar(comfy_modules, dtype, device, bias_dtype, non_blockin
         prefetch["cast_dest"] = cast_dest
         prefetch["cast_geometry"] = cast_geometry
         prefetch["needs_cast"] = needs_cast
-        s._prefetch = prefetch
 
     for group in dropped_groups:
         group._v_weight = None
@@ -314,8 +321,9 @@ def cast_modules_with_vbar(comfy_modules, dtype, device, bias_dtype, non_blockin
 def resolve_cast_module_with_vbar(s, dtype, device, bias_dtype, compute_dtype, want_requant, return_weights=True):
 
     prefetch = getattr(s, "_prefetch", None)
+    resident = prefetch["resident"]
 
-    if prefetch["resident"]:
+    if resident:
         weight = s._v_weight
         bias = s._v_bias
     else:
@@ -335,7 +343,8 @@ def resolve_cast_module_with_vbar(s, dtype, device, bias_dtype, compute_dtype, w
             s._v_weight = weight
             s._v_bias = bias
             s._v_relayout = False
-        s._v_signature = prefetch["signature"]
+        # Set at the end: if a cast below fails, a retry must not match this signature as resident.
+        s._v_signature = None
 
     def post_cast(s, param_key, x, dtype, resident, update_weight):
         lowvram_fn = getattr(s, param_key + "_lowvram_function", None)
@@ -376,6 +385,8 @@ def resolve_cast_module_with_vbar(s, dtype, device, bias_dtype, compute_dtype, w
     if bias is not None:
         bias = post_cast(s, "bias", bias, bias_dtype, prefetch["resident"], update_weight)
 
+    if not resident:
+        s._v_signature = prefetch["signature"]
     if prefetch["signature"] is not None:
         prefetch["resident"] = True
 
@@ -418,11 +429,18 @@ def cast_bias_weight(s, input=None, dtype=None, device=None, bias_dtype=None, of
         prefetched = hasattr(s, "_prefetch")
         offload_stream = None
         offload_device = None
-        if not prefetched:
-            offload_stream = cast_modules_with_vbar([s], dtype, device, bias_dtype, non_blocking)
-            comfy.model_management.sync_stream(device, offload_stream)
-
-        weight, bias = resolve_cast_module_with_vbar(s, dtype, device, bias_dtype, compute_dtype, want_requant)
+        try:
+            if not prefetched:
+                offload_stream = cast_modules_with_vbar([s], dtype, device, bias_dtype, non_blocking)
+                comfy.model_management.sync_stream(device, offload_stream)
+            weight, bias = resolve_cast_module_with_vbar(s, dtype, device, bias_dtype, compute_dtype, want_requant)
+        except BaseException:
+            if not prefetched:
+                # The cast made a prefetch record for s, possibly a partial one. Release it, or the
+                # pin leaks and the next cast reuses the stale record.
+                import comfy.model_prefetch as model_prefetch  # model_prefetch imports this module
+                model_prefetch.cleanup_prefetched_modules(None, [s])
+            raise
 
         if not prefetched:
             if getattr(s, "_prefetch")["signature"] is not None:
