@@ -455,11 +455,11 @@
             },
             "widgets_values": [
               1.73,
-              "flow"
+              "img_to_img_velocity"
             ],
             "widgets_values_named": {
               "shift": 1.73,
-              "sampling": "flow"
+              "sampling": "img_to_img_velocity"
             },
             "color": "#223",
             "bgcolor": "#335"
