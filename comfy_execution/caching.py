@@ -2,6 +2,7 @@ import asyncio
 import bisect
 import itertools
 import logging
+import math
 import time
 import torch
 from typing import Sequence, Mapping, Dict
@@ -504,6 +505,17 @@ RAM_CACHE_DEFAULT_RAM_USAGE = 0.05
 
 RAM_CACHE_OLD_WORKFLOW_OOM_MULTIPLIER = 1.3
 
+# A float can represent at most ~1.8e308, so `multiplier ** gap` raises
+# OverflowError once the gap passes ~2705 (multiplier 1.3). Score entries in
+# log space instead of exponentiating: log(multiplier) * gap + log(ram_usage)
+# orders entries exactly like multiplier ** gap * ram_usage, but stays finite
+# for any gap and any entry size. Cap the gap as well: entries beyond the cap
+# are all equally stale, and the score is only used to order eviction.
+RAM_CACHE_MAX_AGE_GENERATIONS = (
+    int(700 / math.log(RAM_CACHE_OLD_WORKFLOW_OOM_MULTIPLIER))
+    if RAM_CACHE_OLD_WORKFLOW_OOM_MULTIPLIER > 1.0 else 10 ** 9
+)
+
 RAM_CACHE_LARGE_INTERMEDIATE = 512 * 1024 ** 2
 
 
@@ -561,7 +573,8 @@ class RAMPressureCache(LRUCache):
             if all_outputs_dynamic(cache_entry.outputs) and self.used_generation[key] == self.generation:
                 continue
 
-            oom_score = RAM_CACHE_OLD_WORKFLOW_OOM_MULTIPLIER ** (self.generation - self.used_generation[key])
+            age = self.generation - self.used_generation[key]
+            oom_log_score = min(age, RAM_CACHE_MAX_AGE_GENERATIONS) * math.log(RAM_CACHE_OLD_WORKFLOW_OOM_MULTIPLIER)
 
             ram_usage = RAM_CACHE_DEFAULT_RAM_USAGE
             oom_ram_usage = ram_usage
@@ -600,10 +613,10 @@ class RAMPressureCache(LRUCache):
             if not sizing_failed and ram_usage < min_entry_size:
                 continue
 
-            oom_score *= oom_ram_usage
+            oom_log_score += math.log(oom_ram_usage)
             #In the case where we have no information on the node ram usage at all,
             #break OOM score ties on the last touch timestamp (pure LRU)
-            bisect.insort(clean_list, (oom_score, self.timestamps[key], key, ram_usage))
+            bisect.insort(clean_list, (oom_log_score, self.timestamps[key], key, ram_usage))
 
         freed = 0
         while virtual_memory_available() < target and clean_list:
