@@ -1633,6 +1633,10 @@ if not DISABLE_PINNED_MEMORY and is_integrated_gpu():
     # Integrated GPU VRAM is carved out of system RAM, so pinning host memory only takes RAM from the GPU.
     DISABLE_PINNED_MEMORY = True
 
+if not DISABLE_PINNED_MEMORY and is_intel_xpu():
+    # Pinned host buffers are registered with cudaHostRegister, which XPU builds of pytorch do not have.
+    DISABLE_PINNED_MEMORY = True
+
 if not DISABLE_PINNED_MEMORY:
     if is_nvidia() or is_amd():
         ram = get_total_memory(torch.device("cpu"))
