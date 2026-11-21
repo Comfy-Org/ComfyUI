@@ -23,7 +23,7 @@ def extract_video_metadata(
             with ``video/``, extraction is skipped without touching the file.
 
     Returns:
-        ``{"kind": "video", "width": W, "height": H, ...}`` with optional
+        ``{"kind": "video", "width": W, "height": H, "codec": C, ...}`` with optional
         ``duration`` (seconds), ``fps`` and ``frame_count`` keys when the
         file has a recognizable video stream, otherwise ``None``.
     """
@@ -57,6 +57,7 @@ def extract_video_metadata(
 
             width = stream.codec_context.width
             height = stream.codec_context.height
+            codec = stream.codec_context.name
     except (OSError, ValueError, av.error.FFmpegError) as exc:
         logger.debug("Failed to read video metadata from %s: %s", file_path, exc)
         return None
@@ -69,7 +70,7 @@ def extract_video_metadata(
     ):
         return None
 
-    metadata: dict[str, Any] = {"kind": "video", "width": width, "height": height}
+    metadata: dict[str, Any] = {"kind": "video", "width": width, "height": height, "codec": codec}
     if duration is not None:
         metadata["duration"] = duration
     if fps is not None:

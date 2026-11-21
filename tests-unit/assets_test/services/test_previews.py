@@ -36,7 +36,7 @@ def test_upload_decodes_are_bounded(tmp_path, height, skipped):
     async def uploads():
         # A semaphore made inside this loop, at the module's limit, so the module's stays unbound.
         with patch.object(previews, "_DECODE_SLOTS", asyncio.Semaphore(previews._DECODE_SLOTS._value)):
-            await asyncio.gather(*(previews.generate_upload_preview(f"id{i}", str(tmp_path / f"{i}.exr"), None) for i in range(6)))
+            await asyncio.gather(*(previews.generate_upload_preview(f"id{i}", str(tmp_path / f"{i}.exr"), None, None) for i in range(6)))
 
     with patch.object(previews, "_make_preview", make), patch.object(previews, "_store_and_link", return_value="linked") as store:
         asyncio.run(uploads())

@@ -268,7 +268,7 @@ def _validate_sort_field(requested: str | None) -> RecordSortField:
 
 
 async def _with_upload_preview(result: schemas.UploadResult) -> schemas.UploadResult:
-    preview_id = await generate_upload_preview(result.ref.id, result.ref.file_path, result.ref.preview_id)
+    preview_id = await generate_upload_preview(result.ref.id, result.ref.file_path, result.ref.preview_id, result.ref.system_metadata)
     if preview_id == result.ref.preview_id:
         return result
     return dataclasses.replace(result, ref=dataclasses.replace(result.ref, preview_id=preview_id))
@@ -602,23 +602,11 @@ async def download_asset_content(request: web.Request) -> web.Response:
     # debug, not info: preview_url points here, so every thumbnail render is a fetch.
     logging.debug("download_asset_content: path=%s, type=%s, name=%s", abs_path, content_type, filename)
 
-    file_size = os.path.getsize(abs_path)
-
-    async def stream_file_chunks():
-        chunk_size = 64 * 1024
-        with open(abs_path, "rb") as f:
-            while True:
-                chunk = f.read(chunk_size)
-                if not chunk:
-                    break
-                yield chunk
-
-    return web.Response(
-        body=stream_file_chunks(),
-        content_type=content_type,
+    return web.FileResponse(
+        abs_path,
         headers={
+            "Content-Type": content_type,
             "Content-Disposition": cd,
-            "Content-Length": str(file_size),
             "X-Content-Type-Options": "nosniff",
             **extra_headers,
         },
