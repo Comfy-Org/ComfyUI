@@ -673,7 +673,7 @@ class VideoFromFile(VideoInput):
         with av.open(self.__file, mode='r') as container:
             return container.format.name
 
-    def _decode_frames(self, container, video_stream, audio_stream, audio_frames, alphas):
+    def _decode_frames(self, container, video_stream, audio_stream, audio_frames, frames, alphas):
         start_time, duration = self.get_active_trim_window()
 
         start_pts = int(start_time / video_stream.time_base)
@@ -723,7 +723,7 @@ class VideoFromFile(VideoInput):
                                     alpha_channel = True
                                     break
                             if frame.format.name in ("yuvj420p", "yuvj422p", "yuvj444p", "rgb24", "rgba", "pal8"):
-                                if isinstance(alphas, HostFrames):  # it holds float32; blocks keep 8 bits until tensor()
+                                if isinstance(frames, HostFrames) or isinstance(alphas, HostFrames):  # host buffers hold float32; blocks keep 8 bits until tensor()
                                     process_image_format = lambda a: np.divide(a, 255.0, dtype=np.float32)
                                 if alpha_channel:
                                     image_format = 'rgba'
@@ -824,7 +824,7 @@ class VideoFromFile(VideoInput):
         frames = frame_store()
         alphas = frame_store()
 
-        images = frames_to_tensor(self._decode_frames(container, video_stream, audio_stream, audio_frames, alphas), frames)
+        images = frames_to_tensor(self._decode_frames(container, video_stream, audio_stream, audio_frames, frames, alphas), frames)
         if isinstance(alphas, HostFrames):
             alphas = alphas.tensor() if alphas.count > 0 else None
         else:
