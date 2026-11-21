@@ -127,7 +127,7 @@ import comfy.memory_management
 from comfy_api.input_impl.video_types import VideoFromFile
 comfy.memory_management.aimdo_enabled = True
 components = VideoFromFile(sys.argv[1]).get_components()
-arrays = {}
+arrays = {"head": components.images[:1].clone().numpy()}
 if components.alpha is not None:
     arrays["alpha"] = components.alpha.clone().numpy()
 tail = components.images[1:]
@@ -153,6 +153,7 @@ def test_host_buffer_and_fromiter_decode_the_same_frames(tmp_path, name):
     _run_with_aimdo(HOST_BUFFER_DECODE, path, output)
     expected = VideoFromFile(path).get_components()
     with np.load(output) as frames:
+        assert np.array_equal(frames["head"], expected.images[:1].numpy())  # held until the second frame arrives
         assert np.array_equal(frames["tail"], expected.images[1:].numpy())
         if expected.alpha is not None:
             assert np.array_equal(frames["alpha"], expected.alpha.numpy())
@@ -202,26 +203,37 @@ def reserve_or_refuse():
     return reserve()
 video_types.reserve_host_buffer = reserve_or_refuse
 components = video_types.VideoFromFile(sys.argv[1]).get_components()
-assert len(calls) >= int(sys.argv[2])
+assert len(calls) == int(sys.argv[3]), calls
 assert torch.equal(components.images, expected.images)
 assert (components.alpha is None) == (expected.alpha is None)
 assert components.alpha is None or torch.equal(components.alpha, expected.alpha)
 """
 
 
-# Two frames each: a still picture reserves nothing. Without alpha only the images reserve.
-@pytest.mark.parametrize("mode, extension, refused", [
-    ("RGB", ".png", 1), ("RGBA", ".png", 1), ("RGBA", ".png", 2), ("P", ".png", 1), ("P", ".png", 2), ("RGB", ".mkv", 1),
+def _decoded_format(path):
+    with av.open(path) as container:
+        return next(container.decode(video=0)).format.name
+
+
+# Two frames each, as two PNGs in one file or as MJPEG: a still picture reserves nothing, and without alpha only the
+# images reserve.
+@pytest.mark.parametrize("mode, pix_fmt, refused, reservations", [
+    ("RGB", "rgb24", 1, 1), ("RGBA", "rgba", 1, 2), ("RGBA", "rgba", 2, 2), ("P", "pal8", 1, 2), ("P", "pal8", 2, 2),
+    ("MJPEG", "yuvj420p", 1, 1),
 ])
-def test_8_bit_images_decode_the_same_when_one_reservation_is_refused(tmp_path, mode, extension, refused):
-    path = str(tmp_path / ("image" + extension))
+def test_8_bit_images_decode_the_same_when_one_reservation_is_refused(tmp_path, mode, pix_fmt, refused, reservations):
     pixels = np.random.default_rng(0).integers(0, 255, (2, 48, 64, 4), dtype=np.uint8)
-    if extension == ".mkv":
+    if mode == "MJPEG":
+        path = str(tmp_path / "video.mkv")
         _write_video(path, [np.ascontiguousarray(p[..., :3]) for p in pixels], codec="mjpeg", pix_fmt="yuvj420p")
     else:
-        first, second = (Image.fromarray(p).convert(mode) for p in pixels)
-        first.save(path, save_all=True, append_images=[second])
-    _run_with_aimdo(ONE_REFUSED_RESERVATION_DECODE, path, str(refused))
+        path = tmp_path / "image.png"
+        with open(path, "wb") as f:
+            for p in pixels:
+                Image.fromarray(p).convert(mode).save(f, "PNG")
+        path = str(path)
+    assert _decoded_format(path) == pix_fmt
+    _run_with_aimdo(ONE_REFUSED_RESERVATION_DECODE, path, str(refused), str(reservations))
 
 
 HELD_PICTURES_DECODE = """
@@ -257,6 +269,66 @@ def test_held_pictures_leave_address_space_for_a_video(tmp_path):
     with np.load(output) as held:
         assert np.array_equal(held["images"], expected.images.numpy())
         assert np.array_equal(held["alpha"], expected.alpha.numpy())
+
+
+STILL_PICTURE_DECODE = """
+import sys
+import comfy_aimdo.control
+if not comfy_aimdo.control.init():
+    sys.exit("comfy-aimdo unavailable")
+import numpy as np
+import torch
+import comfy.memory_management
+from comfy_api.latest._input_impl import video_types
+comfy.memory_management.aimdo_enabled = True
+calls = []
+video_types.reserve_host_buffer = lambda: calls.append(None)
+components = video_types.VideoFromFile(sys.argv[1]).get_components()
+assert not calls
+arrays = {}
+for name, t in (("images", components.images), ("alpha", components.alpha)):
+    if t is not None:
+        assert t.dtype == torch.float32 and t.is_contiguous(), (name, t.dtype, t.stride())
+        arrays[name] = t.numpy()
+np.savez(sys.argv[2], **arrays)
+"""
+
+
+def _write_16_bit_png(path, pixels, pix_fmt):
+    with av.open(path, "w") as out:
+        stream = out.add_stream("png", rate=1)
+        stream.width, stream.height, stream.pix_fmt = pixels.shape[1], pixels.shape[0], pix_fmt
+        for packet in stream.encode(av.VideoFrame.from_ndarray(pixels, format=pix_fmt.replace("be", "le"))):
+            out.mux(packet)
+        for packet in stream.encode():
+            out.mux(packet)
+
+
+@pytest.mark.parametrize("name, pix_fmt", [
+    ("rgb.png", "rgb24"), ("rgba.png", "rgba"), ("palette.png", "pal8"), ("lossy.webp", "yuv420p"),
+    ("rgb48.png", "rgb48be"), ("rgba64.png", "rgba64be"),
+])
+def test_still_pictures_decode_the_same_with_aimdo(tmp_path, name, pix_fmt):
+    path = str(tmp_path / name)
+    rng = np.random.default_rng(0)
+    pixels = rng.integers(0, 255, (48, 64, 4), dtype=np.uint8)
+    if name == "rgb48.png":
+        _write_16_bit_png(path, rng.integers(0, 65535, (48, 64, 3), dtype=np.uint16), pix_fmt)
+    elif name == "rgba64.png":
+        _write_16_bit_png(path, rng.integers(0, 65535, (48, 64, 4), dtype=np.uint16), pix_fmt)
+    elif name == "lossy.webp":
+        Image.fromarray(pixels).convert("RGB").save(path, lossless=False)
+    else:
+        Image.fromarray(pixels).convert({"rgb.png": "RGB", "rgba.png": "RGBA", "palette.png": "P"}[name]).save(path)
+    assert _decoded_format(path) == pix_fmt
+    output = str(tmp_path / "picture.npz")
+    _run_with_aimdo(STILL_PICTURE_DECODE, path, output)
+    expected = VideoFromFile(path).get_components()
+    with np.load(output) as still:
+        assert still["images"].dtype == np.float32 and np.array_equal(still["images"], expected.images.numpy())
+        assert ("alpha" in still) == (expected.alpha is not None)
+        if expected.alpha is not None:
+            assert still["alpha"].dtype == np.float32 and np.array_equal(still["alpha"], expected.alpha.numpy())
 
 
 # ---- without aimdo: blocks of frames, copied into one tensor at the end ---------------------------------------
