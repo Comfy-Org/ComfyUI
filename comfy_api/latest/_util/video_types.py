@@ -61,6 +61,20 @@ class VideoComponents:
     alpha: Optional[MaskInput] = None
 
 
+@dataclass
+class VideoChunk:
+    """
+    A run of consecutive frames from VideoInput.decode_chunked.
+    """
+
+    images: ImageInput
+    """Frames as [n, H, W, 3]."""
+    start_frame: int
+    """Index of the first frame in the whole video."""
+    alpha: Optional[MaskInput] = None
+    """Alpha as [n, H, W, 1], or None when the video has none."""
+
+
 def normalize_crop_rect(
     x: int, y: int, width: int, height: int, source_width: int, source_height: int
 ) -> Optional[tuple[int, int, int, int]]:
