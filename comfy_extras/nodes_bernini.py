@@ -80,15 +80,22 @@ class BerniniConditioning(io.ComfyNode):
             ref_vid = _resize_long_edge(reference_video[:length], ref_max_size)  # moving content, native aspect
             context.append(vae.encode(ref_vid[:, :, :, :3]))
 
-        # reference_images is an autogrow dict {reference_image_0: IMAGE, ...}; each slot is a
-        # separate stream at its own native aspect (a multi-image batch in one slot -> one stream per frame).
-        if reference_images:
-            for name in sorted(reference_images):
-                imgs = reference_images[name]
-                if imgs is None:
-                    continue
-                for i in range(imgs.shape[0]):
-                    img = _resize_long_edge(imgs[i:i + 1], ref_max_size)  # native aspect per ref
+        # reference_images is normally an autogrow dict {reference_image_0: IMAGE, ...}; each slot is
+        # a separate stream at its own native aspect (a multi-image batch in one slot -> one stream per
+        # frame). It can also arrive as a raw IMAGE batch tensor when wired directly (e.g. via the API),
+        # in which case each frame of the batch becomes its own stream.
+        if reference_images is not None:
+            if isinstance(reference_images, dict):
+                for name in sorted(reference_images):
+                    imgs = reference_images[name]
+                    if imgs is None:
+                        continue
+                    for i in range(imgs.shape[0]):
+                        img = _resize_long_edge(imgs[i:i + 1], ref_max_size)  # native aspect per ref
+                        context.append(vae.encode(img[:, :, :, :3]))
+            else:
+                for i in range(reference_images.shape[0]):
+                    img = _resize_long_edge(reference_images[i:i + 1], ref_max_size)
                     context.append(vae.encode(img[:, :, :, :3]))
 
         if context:
