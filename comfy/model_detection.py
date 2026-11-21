@@ -424,6 +424,8 @@ def detect_unet_config(state_dict, key_prefix, metadata=None):
             dit_config["adaln_curve_grid"] = table[0]
             dit_config["time_embed_dim"] = table[1]
         else:
+            if not audio:
+                logging.warning("MiniMax H3 Image checkpoint uses the unvalidated full time-embedder layout; use a pruned Comfy-Org checkpoint if output is noise.")
             te = state_dict['{}time_embedder.proj_in.weight'.format(key_prefix)]
             dit_config["timestep_input_dim"] = te.shape[1]
             dit_config["time_embed_hidden_size"] = te.shape[0]
