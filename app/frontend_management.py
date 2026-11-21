@@ -245,7 +245,17 @@ class FrontendManager:
         try:
             import comfyui_frontend_package
 
-            return str(importlib.resources.files(comfyui_frontend_package) / "static")
+            # Package managers that symlink the install site (uv's symlink
+            # link mode points site-packages entries at a cache on another
+            # drive) leave this path behind a symlink, and aiohttp's
+            # web.static refuses to follow symlinks inside the served tree by
+            # design - that guard is what keeps a runtime symlink from
+            # escaping the web root. Resolve the route root to the real
+            # directory once here instead: symlinks created inside the tree
+            # at request time are still refused.
+            return os.path.realpath(
+                str(importlib.resources.files(comfyui_frontend_package) / "static")
+            )
         except ImportError:
             logging.error(
                 f"""
@@ -314,8 +324,11 @@ comfyui-workflow-templates is not installed.
         try:
             import comfyui_workflow_templates
 
-            return str(
-                importlib.resources.files(comfyui_workflow_templates) / "templates"
+            # realpath for the same reason as default_frontend_path: the
+            # route served from this directory must not sit behind an install
+            # symlink
+            return os.path.realpath(
+                str(importlib.resources.files(comfyui_workflow_templates) / "templates")
             )
         except ImportError:
             logging.error(
@@ -337,8 +350,11 @@ comfyui-workflow-templates is not installed.
         try:
             import comfyui_embedded_docs
 
-            return str(
-                importlib.resources.files(comfyui_embedded_docs) / "docs"
+            # realpath for the same reason as default_frontend_path: the
+            # route served from this directory must not sit behind an install
+            # symlink
+            return os.path.realpath(
+                str(importlib.resources.files(comfyui_embedded_docs) / "docs")
             )
         except ImportError:
             logging.info("comfyui-embedded-docs package not found")
