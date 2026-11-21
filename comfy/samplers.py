@@ -461,6 +461,7 @@ def _calc_cond_batch_multigpu(model: BaseModel, conds: list[list[dict]], x_in: t
         area: Any
         batch_chunks: int
         cond_or_uncond: Any
+        copy_event: Any = None
         error: Exception = None
 
     def _handle_batch(device: torch.device, batch_tuple: tuple[comfy.hooks.HookGroup, tuple], results: list[thread_result]):
@@ -524,13 +525,16 @@ def _calc_cond_batch_multigpu(model: BaseModel, conds: list[list[dict]], x_in: t
                         output = model_options['model_function_wrapper'](model_current.apply_model, {"input": input_x, "timestep": timestep_, "c": c, "cond_or_uncond": cond_or_uncond}).to(output_device).chunk(batch_chunks)
                     else:
                         output = model_current.apply_model(input_x, timestep_, **c).to(output_device).chunk(batch_chunks)
-                    # TODO: non-NVIDIA support -- the `.to(output_device)` copies
-                    # above are async on CUDA, so the main thread's aggregation
-                    # could race with in-flight transfers. CUDA-only QA has not
-                    # surfaced this in practice, but before extending multigpu
-                    # beyond NVIDIA add a `torch.cuda.synchronize(output_device)`
-                    # here (guarded by `output_device.type == "cuda"`).
-                    results.append(thread_result(output, mult, area, batch_chunks, cond_or_uncond))
+                    copy_event = None
+                    if device.type == "npu" and device != output_device:
+                        # Cross-NPU copies are queued on the source device's
+                        # current stream. Record completion there and let the
+                        # output stream wait before aggregating the result.
+                        # This preserves asynchronous execution without a
+                        # device-wide synchronize on every diffusion step.
+                        copy_event = torch.npu.Event()
+                        copy_event.record(torch.npu.current_stream(device))
+                    results.append(thread_result(output, mult, area, batch_chunks, cond_or_uncond, copy_event))
         except Exception as e:
             results.append(thread_result(None, None, None, None, None, error=e))
             raise
@@ -561,9 +565,11 @@ def _calc_cond_batch_multigpu(model: BaseModel, conds: list[list[dict]], x_in: t
             raise error
         results.extend(worker_results)
 
-    for output, mult, area, batch_chunks, cond_or_uncond, error in results:
+    for output, mult, area, batch_chunks, cond_or_uncond, copy_event, error in results:
         if error is not None:
             raise error
+        if copy_event is not None:
+            torch.npu.current_stream(output_device).wait_event(copy_event)
         for o in range(batch_chunks):
             cond_index = cond_or_uncond[o]
             a = area[o]
