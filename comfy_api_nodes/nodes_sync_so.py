@@ -9,14 +9,12 @@ from comfy_api_nodes.apis.sync_so import (
     SyncInputItem,
 )
 from comfy_api_nodes.util import (
-    ApiEndpoint,
     download_url_to_video_output,
     downscale_image_tensor,
     downscale_image_tensor_by_max_side,
     get_image_dimensions,
     get_number_of_images,
-    poll_op,
-    sync_op,
+    router_op,
     upload_audio_to_comfyapi,
     upload_image_to_comfyapi,
     upload_video_to_comfyapi,
@@ -165,9 +163,9 @@ class SyncLipSyncNode(IO.ComfyNode):
         video_url = await upload_video_to_comfyapi(cls, video, max_duration=600)
         audio_url = await upload_audio_to_comfyapi(cls, audio)
 
-        generation = await sync_op(
+        generation = await router_op(
             cls,
-            ApiEndpoint(path="/proxy/synclabs/v2/generate", method="POST"),
+            "synclabs/sync-3",
             response_model=SyncGeneration,
             data=SyncGenerationRequest(
                 model=model["model"],
@@ -181,24 +179,6 @@ class SyncLipSyncNode(IO.ComfyNode):
                 ),
             ),
         )
-        generation = await poll_op(
-            cls,
-            ApiEndpoint(path=f"/proxy/synclabs/v2/generate/{generation.id}"),
-            response_model=SyncGeneration,
-            status_extractor=lambda g: g.status,
-            completed_statuses=["COMPLETED", "FAILED", "REJECTED"],
-            failed_statuses=[],
-            queued_statuses=["PENDING"],
-            poll_interval=10.0,
-        )
-        if generation.status != "COMPLETED":
-            code = f" [{generation.errorCode}]" if generation.errorCode else ""
-            raise ValueError(
-                f"sync.so generation {generation.status.lower()}{code}: "
-                f"{generation.error or 'no error details provided'}"
-            )
-        if not generation.outputUrl:
-            raise ValueError("sync.so generation completed but no output URL was returned.")
         return IO.NodeOutput(await download_url_to_video_output(generation.outputUrl))
 
 
@@ -341,9 +321,9 @@ class SyncTalkingImageNode(IO.ComfyNode):
         image_url = await upload_image_to_comfyapi(cls, image, mime_type="image/png", total_pixels=None)
         audio_url = await upload_audio_to_comfyapi(cls, audio)
 
-        generation = await sync_op(
+        generation = await router_op(
             cls,
-            ApiEndpoint(path="/proxy/synclabs/v2/generate", method="POST"),
+            "synclabs/sync-3",
             response_model=SyncGeneration,
             data=SyncGenerationRequest(
                 model=model["model"],
@@ -357,24 +337,6 @@ class SyncTalkingImageNode(IO.ComfyNode):
                 ),
             ),
         )
-        generation = await poll_op(
-            cls,
-            ApiEndpoint(path=f"/proxy/synclabs/v2/generate/{generation.id}"),
-            response_model=SyncGeneration,
-            status_extractor=lambda g: g.status,
-            completed_statuses=["COMPLETED", "FAILED", "REJECTED"],
-            failed_statuses=[],
-            queued_statuses=["PENDING"],
-            poll_interval=10.0,
-        )
-        if generation.status != "COMPLETED":
-            code = f" [{generation.errorCode}]" if generation.errorCode else ""
-            raise ValueError(
-                f"sync.so generation {generation.status.lower()}{code}: "
-                f"{generation.error or 'no error details provided'}"
-            )
-        if not generation.outputUrl:
-            raise ValueError("sync.so generation completed but no output URL was returned.")
         return IO.NodeOutput(await download_url_to_video_output(generation.outputUrl))
 
 

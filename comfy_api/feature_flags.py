@@ -6,6 +6,7 @@ allowing graceful protocol evolution while maintaining backward compatibility.
 """
 
 import logging
+import uuid
 from typing import Any, TypedDict
 
 from comfy.cli_args import args
@@ -121,6 +122,9 @@ _CORE_FEATURE_FLAGS: dict[str, Any] = {
     "node_replacements": True,
     # main.py replaces this at startup with the selected AssetManager's state.
     "assets": not args.disable_assets,
+    # New on every server start. A client that reconnects and sees a different
+    # value knows the server restarted, so its node definitions may be stale.
+    "server_boot_id": uuid.uuid4().hex,
 }
 
 # Owned by app.deploy_to_cloud, which sets it via set_server_feature.
