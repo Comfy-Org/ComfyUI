@@ -159,6 +159,13 @@ def modulated_norm(x, norm, scale, shift, modulation_dims=None):
     return comfy.quant_ops.ck.adaln(x, scale, shift, norm.eps)
 
 
+def gated_residual(x, out, gate, modulation_dims=None):
+    # training must not mutate the stream: the block norm backward and the checkpoint recompute read it
+    if comfy.model_management.in_training:
+        return x + apply_mod(out, gate, None, modulation_dims)
+    return x.add_(apply_mod(out, gate, None, modulation_dims))
+
+
 class SiLUActivation(nn.Module):
     def __init__(self):
         super().__init__()
@@ -252,14 +259,14 @@ class DoubleStreamBlock(nn.Module):
         txt_attn, img_attn = attn[:, : txt.shape[1]], attn[:, txt.shape[1]:]
 
         # calculate the img bloks
-        img += apply_mod(self.img_attn.proj(img_attn), img_mod1.gate, None, modulation_dims_img)
+        img = gated_residual(img, self.img_attn.proj(img_attn), img_mod1.gate, modulation_dims_img)
         del img_attn
-        img += apply_mod(self.img_mlp(modulated_norm(img, self.img_norm2, img_mod2.scale, img_mod2.shift, modulation_dims_img)), img_mod2.gate, None, modulation_dims_img)
+        img = gated_residual(img, self.img_mlp(modulated_norm(img, self.img_norm2, img_mod2.scale, img_mod2.shift, modulation_dims_img)), img_mod2.gate, modulation_dims_img)
 
         # calculate the txt bloks
-        txt += apply_mod(self.txt_attn.proj(txt_attn), txt_mod1.gate, None, modulation_dims_txt)
+        txt = gated_residual(txt, self.txt_attn.proj(txt_attn), txt_mod1.gate, modulation_dims_txt)
         del txt_attn
-        txt += apply_mod(self.txt_mlp(modulated_norm(txt, self.txt_norm2, txt_mod2.scale, txt_mod2.shift, modulation_dims_txt)), txt_mod2.gate, None, modulation_dims_txt)
+        txt = gated_residual(txt, self.txt_mlp(modulated_norm(txt, self.txt_norm2, txt_mod2.scale, txt_mod2.shift, modulation_dims_txt)), txt_mod2.gate, modulation_dims_txt)
 
         if txt.dtype == torch.float16:
             txt = torch.nan_to_num(txt, nan=0.0, posinf=65504, neginf=-65504)
@@ -360,7 +367,7 @@ class SingleStreamBlock(nn.Module):
         else:
             mlp = self.mlp_act(mlp)
         output = self.linear2(torch.cat((attn, mlp), 2))
-        x += apply_mod(output, mod.gate, None, modulation_dims)
+        x = gated_residual(x, output, mod.gate, modulation_dims)
         if x.dtype == torch.float16:
             x = torch.nan_to_num(x, nan=0.0, posinf=65504, neginf=-65504)
         return x
