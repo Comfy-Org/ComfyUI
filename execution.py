@@ -2,6 +2,7 @@ import copy
 import heapq
 import inspect
 import logging
+import os
 import sys
 import threading
 import time
@@ -1095,6 +1096,12 @@ async def validate_inputs(prompt_id, prompt, item, validated, visiting=None):
                     if is_multiselect and isinstance(val, list):
                         invalid_vals = [v for v in val if v not in combo_options]
                     else:
+                        if extra_info.get("model_filename") and isinstance(val, str) and val not in combo_options:
+                            # Keep exact names and only translate to a locally listed filename.
+                            foreign_separator = "/" if os.sep == "\\" else "\\"
+                            local_name = val.replace(foreign_separator, os.sep)
+                            if local_name in combo_options:
+                                val = inputs[x] = local_name
                         invalid_vals = [val] if val not in combo_options else []
                     if invalid_vals:
                         input_config = info
