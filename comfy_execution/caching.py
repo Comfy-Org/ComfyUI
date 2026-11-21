@@ -102,7 +102,11 @@ class CacheKeySetInputSignature(CacheKeySet):
     async def get_node_signature(self, dynprompt, node_id):
         signature = []
         ancestors, order_mapping = self.get_ordered_ancestry(dynprompt, node_id)
-        signature.append(await self.get_immediate_node_signature(dynprompt, node_id, order_mapping))
+        immediate = await self.get_immediate_node_signature(dynprompt, node_id, order_mapping)
+        # Only the node's own key: a descendant reads a linked output, which skipping never changes.
+        if dynprompt.has_node(node_id) and getattr(nodes.NODE_CLASS_MAPPINGS[dynprompt.get_node(node_id)["class_type"]], "SKIP_UNLINKED_OUTPUTS", False):
+            immediate.append(("LINKED_OUTPUTS", tuple(sorted(dynprompt.get_linked_outputs(node_id)))))
+        signature.append(immediate)
         for ancestor_id in ancestors:
             signature.append(await self.get_immediate_node_signature(dynprompt, ancestor_id, order_mapping))
         return to_hashable(signature)

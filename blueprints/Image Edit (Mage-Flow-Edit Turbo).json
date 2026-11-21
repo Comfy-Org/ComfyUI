@@ -1,6 +1,6 @@
 {
   "revision": 0,
-  "last_node_id": "47",
+  "last_node_id": "48",
   "last_link_id": 0,
   "nodes": [
     {
@@ -178,8 +178,8 @@
         "version": 1,
         "state": {
           "lastGroupId": 6,
-          "lastNodeId": 47,
-          "lastLinkId": 62,
+          "lastNodeId": 48,
+          "lastLinkId": 63,
           "lastRerouteId": 0
         },
         "revision": 0,
@@ -689,16 +689,15 @@
                 "name": "positive",
                 "type": "CONDITIONING",
                 "links": [
-                  3
+                  3,
+                  63
                 ]
               },
               {
                 "localized_name": "negative",
                 "name": "negative",
                 "type": "CONDITIONING",
-                "links": [
-                  4
-                ]
+                "links": []
               },
               {
                 "localized_name": "latent",
@@ -728,6 +727,43 @@
             }
           },
           {
+            "id": 48,
+            "type": "ConditioningZeroOut",
+            "pos": [
+              -1030,
+              320
+            ],
+            "size": [
+              210,
+              30
+            ],
+            "flags": {},
+            "order": 4,
+            "mode": 0,
+            "inputs": [
+              {
+                "localized_name": "conditioning",
+                "name": "conditioning",
+                "type": "CONDITIONING",
+                "link": 63
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "CONDITIONING",
+                "name": "CONDITIONING",
+                "type": "CONDITIONING",
+                "links": [
+                  4
+                ]
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "ConditioningZeroOut"
+            },
+            "widgets_values": []
+          },
+          {
             "id": 36,
             "type": "KSampler",
             "pos": [
@@ -739,7 +775,7 @@
               610
             ],
             "flags": {},
-            "order": 4,
+            "order": 5,
             "mode": 0,
             "inputs": [
               {
@@ -865,7 +901,7 @@
               80
             ],
             "flags": {},
-            "order": 5,
+            "order": 6,
             "mode": 0,
             "inputs": [
               {
@@ -907,7 +943,7 @@
               130
             ],
             "flags": {},
-            "order": 6,
+            "order": 7,
             "mode": 0,
             "inputs": [
               {
@@ -968,7 +1004,7 @@
               100
             ],
             "flags": {},
-            "order": 7,
+            "order": 8,
             "mode": 0,
             "inputs": [
               {
@@ -1018,7 +1054,7 @@
               130
             ],
             "flags": {},
-            "order": 8,
+            "order": 9,
             "mode": 0,
             "inputs": [
               {
@@ -1078,7 +1114,7 @@
               130
             ],
             "flags": {},
-            "order": 9,
+            "order": 10,
             "mode": 0,
             "inputs": [
               {
@@ -1138,7 +1174,7 @@
               90
             ],
             "flags": {},
-            "order": 10,
+            "order": 11,
             "mode": 0,
             "inputs": [
               {
@@ -1187,7 +1223,7 @@
               80
             ],
             "flags": {},
-            "order": 11,
+            "order": 12,
             "mode": 0,
             "inputs": [
               {
@@ -1235,7 +1271,7 @@
               90
             ],
             "flags": {},
-            "order": 12,
+            "order": 13,
             "mode": 0,
             "inputs": [
               {
@@ -1283,7 +1319,7 @@
               90
             ],
             "flags": {},
-            "order": 13,
+            "order": 14,
             "mode": 0,
             "inputs": [
               {
@@ -1331,7 +1367,7 @@
               180
             ],
             "flags": {},
-            "order": 14,
+            "order": 15,
             "mode": 0,
             "showAdvanced": true,
             "inputs": [
@@ -1503,8 +1539,8 @@
           },
           {
             "id": 4,
-            "origin_id": 35,
-            "origin_slot": 1,
+            "origin_id": 48,
+            "origin_slot": 0,
             "target_id": 36,
             "target_slot": 2,
             "type": "CONDITIONING"
@@ -1748,6 +1784,14 @@
             "target_id": 35,
             "target_slot": 3,
             "type": "IMAGE"
+          },
+          {
+            "id": 63,
+            "origin_id": 35,
+            "origin_slot": 0,
+            "target_id": 48,
+            "target_slot": 0,
+            "type": "CONDITIONING"
           }
         ],
         "extra": {},
