@@ -1,7 +1,33 @@
+import contextlib
+import time
+
 from comfy_api.latest import ComfyExtension, io
 from typing_extensions import override
 
+import comfy.text_encoders.token_stream as token_stream
+from server import PromptServer
+
 VIDEO_TOOLTIP = "Video frames as image batch. Assumed to be 24 FPS; subsampled to the model's frame rate internally."
+
+class ProgressText:
+    """Shows the text generated so far on the node, for the client that queued the prompt only, at most every
+    INTERVAL seconds (a token_stream listener)."""
+
+    INTERVAL = 0.15
+
+    def __init__(self, clip, node_id):
+        self.clip, self.node_id, self.sent_at = clip, node_id, 0.0
+
+    def __call__(self, token_ids, final=False):
+        now = time.monotonic()
+        if now - self.sent_at < self.INTERVAL and not final:
+            return
+        server = PromptServer.instance
+        if server is None or server.client_id is None:  # never broadcast another client's text
+            return
+        self.sent_at = now
+        server.send_progress_text(self.clip.decode(list(token_ids)), self.node_id, sid=server.client_id)
+
 
 class TextGenerateV2(io.ComfyNode):
     @classmethod
@@ -48,6 +74,7 @@ class TextGenerateV2(io.ComfyNode):
                 io.String.Output(display_name="generated_text"),
                 io.String.Output(display_name="thinking"),
             ],
+            hidden=[io.Hidden.unique_id],
         )
 
     @classmethod
@@ -71,19 +98,23 @@ class TextGenerateV2(io.ComfyNode):
         repetition_penalty = sampling_mode.get("repetition_penalty", 1.0)
         presence_penalty = sampling_mode.get("presence_penalty", 0.0)
 
-        generated_ids = clip.generate(
-            tokens,
-            do_sample=do_sample,
-            max_length=max_length,
-            temperature=temperature,
-            top_k=top_k,
-            top_p=top_p,
-            min_p=min_p,
-            repetition_penalty=repetition_penalty,
-            presence_penalty=presence_penalty,
-            seed=seed,
-            mtp=mtp
-        )
+        progress = ProgressText(clip, cls.hidden.unique_id) if cls.hidden is not None and cls.hidden.unique_id else None
+        with token_stream.listen(progress) if progress is not None else contextlib.nullcontext():
+            generated_ids = clip.generate(
+                tokens,
+                do_sample=do_sample,
+                max_length=max_length,
+                temperature=temperature,
+                top_k=top_k,
+                top_p=top_p,
+                min_p=min_p,
+                repetition_penalty=repetition_penalty,
+                presence_penalty=presence_penalty,
+                seed=seed,
+                mtp=mtp
+            )
+        if progress is not None:
+            progress(generated_ids, final=True)  # the throttle may have held back the last tokens
 
         generated_text = clip.decode(generated_ids)
 
@@ -118,6 +149,7 @@ class TextGenerate(TextGenerateV2):
             is_deprecated=True,
             inputs=[old_inputs.get(i.id, i) for i in parent_schema.inputs],
             outputs=parent_schema.outputs,
+            hidden=parent_schema.hidden,
         )
 
 
@@ -263,6 +295,7 @@ class TextGenerateLTX2Prompt(TextGenerate):
             category=parent_schema.category,
             inputs=parent_schema.inputs,
             outputs=parent_schema.outputs,
+            hidden=parent_schema.hidden,
             search_aliases=["prompt enhance", "LLM", "gemma"],
         )
 

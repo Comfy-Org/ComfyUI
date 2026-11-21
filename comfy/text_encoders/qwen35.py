@@ -17,6 +17,7 @@ from comfy.quant_ops import QuantizedTensor
 from comfy.ldm.modules.attention import AttentionTensorContainer, ComfyAttention, optimized_attention_for_device
 from comfy import sd1_clip
 import comfy.text_encoders.qwen_vl
+import comfy.text_encoders.token_stream as token_stream
 
 from .llama import SPEC_ROWS, BaseLlama, BaseGenerate, FixedKV, FixedKVCache, Int8FixedKVCache, Llama2_, MLP, RMSNorm, apply_penalty, apply_rope, penalty_active, precompute_freqs_cis, rope_matrix
 
@@ -981,6 +982,7 @@ class Qwen35(BaseLlama, BaseGenerate, torch.nn.Module):
         def update_progress(n):
             progress.update(n)
             console.update(n)
+            token_stream.report(ids)
 
         adaptive = mtp is True
         # auto: seven draft rows as a chain of widths, reshaped from rank hits and measured step cost
