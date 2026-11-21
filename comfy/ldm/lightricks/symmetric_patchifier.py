@@ -21,11 +21,9 @@ def latent_to_pixel_coords(
     Returns:
         Tensor: A tensor of pixel coordinates corresponding to the input latent coordinates.
     """
-    shape = [1] * latent_coords.ndim
-    shape[1] = -1
-    pixel_coords = (
-        latent_coords
-        * torch.tensor(scale_factors, device=latent_coords.device).view(*shape)
+    pixel_coords = torch.stack(
+        [latent_coords[:, i] * scale_factors[i] for i in range(latent_coords.shape[1])],
+        dim=1,
     )
     if causal_fix:
         # Fix temporal scale for first frame to 1 due to causality
@@ -75,14 +73,15 @@ class Patchifier(ABC):
             indexing="ij",
         )
         latent_sample_coords_start = torch.stack(latent_sample_coords, dim=0)
-        delta = torch.tensor(self._patch_size, device=latent_sample_coords_start.device, dtype=latent_sample_coords_start.dtype)[:, None, None, None]
-        latent_sample_coords_end = latent_sample_coords_start + delta
 
         latent_sample_coords_start = latent_sample_coords_start.unsqueeze(0).repeat(batch_size, 1, 1, 1, 1)
         latent_sample_coords_start = rearrange(
             latent_sample_coords_start, "b c f h w -> b c (f h w)", b=batch_size
         )
         if self.start_end:
+            latent_sample_coords_end = torch.stack(
+                [latent_sample_coords[i] + self._patch_size[i] for i in range(3)], dim=0
+            )
             latent_sample_coords_end = latent_sample_coords_end.unsqueeze(0).repeat(batch_size, 1, 1, 1, 1)
             latent_sample_coords_end = rearrange(
                 latent_sample_coords_end, "b c f h w -> b c (f h w)", b=batch_size
