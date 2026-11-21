@@ -579,8 +579,9 @@ class SaveGLB(IO.ComfyNode):
             # Handle File3D input - save BytesIO data to output folder
             ext = mesh.format or "glb"
             f = f"{filename}_{counter:05}_.{ext}"
-            mesh.save_to(os.path.join(full_output_folder, f))
-            results.append(UI.SavedResult(f, subfolder, IO.FolderType.output))
+            with UI.output_file(os.path.join(full_output_folder, f)) as output:
+                mesh.save_to(output.path)
+            results.append(UI.SavedResult(output.filename, subfolder, IO.FolderType.output))
             counter += 1
         else:
             # Handle Mesh input - save vertices and faces as GLB; carry optional UVs / colors / texture.
@@ -590,9 +591,10 @@ class SaveGLB(IO.ComfyNode):
                     logging.warning(f"SaveGLB: skipping empty mesh at batch index {i}")
                     continue
                 f = f"{filename}_{counter:05}_.glb"
-                with open(os.path.join(full_output_folder, f), "wb") as fh:
-                    fh.write(glb)
-                results.append(UI.SavedResult(f, subfolder, IO.FolderType.output))
+                with UI.output_file(os.path.join(full_output_folder, f)) as output:
+                    with open(output.path, "wb") as fh:
+                        fh.write(glb)
+                results.append(UI.SavedResult(output.filename, subfolder, IO.FolderType.output))
                 counter += 1
         return IO.NodeOutput(ui=UI.Saved3DModels(results))
 
@@ -874,8 +876,9 @@ def _save_file3d_to_output(model_3d: Types.File3D, filename_prefix: str) -> UI.S
     )
     ext = model_3d.format or "glb"
     saved_filename = f"{filename}_{counter:05}.{ext}"
-    model_3d.save_to(os.path.join(full_output_folder, saved_filename))
-    return UI.SavedResult(saved_filename, subfolder, IO.FolderType.output)
+    with UI.output_file(os.path.join(full_output_folder, saved_filename)) as output:
+        model_3d.save_to(output.path)
+    return UI.SavedResult(output.filename, subfolder, IO.FolderType.output)
 
 
 def execute_save_3d_advanced(model_3d, viewport_state, width, height, filename_prefix, kwargs) -> IO.NodeOutput:

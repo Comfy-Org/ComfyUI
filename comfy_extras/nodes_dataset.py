@@ -10,7 +10,7 @@ from typing_extensions import override
 
 import folder_paths
 import node_helpers
-from comfy_api.latest import ComfyExtension, io, Input, InputImpl, Types
+from comfy_api.latest import ComfyExtension, io, ui, Input, InputImpl, Types
 
 
 def load_and_process_images(image_files, input_dir):
@@ -438,8 +438,9 @@ def save_images_to_folder(image_list, output_dir, prefix="image", overwrite=True
             _, _, counter, _, resolved_prefix = folder_paths.get_save_image_path(prefix, output_dir)
             filename = f"{resolved_prefix}_{counter:05}_{idx:05d}.png"
         filepath = os.path.join(output_dir, filename)
-        img.save(filepath)
-        saved_files.append(filename)
+        with ui.output_file(filepath, overwrite=overwrite) as output:
+            img.save(output.path)
+        saved_files.append(os.path.join(os.path.dirname(filename), output.filename))
 
     return saved_files
 
