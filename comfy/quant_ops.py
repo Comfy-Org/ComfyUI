@@ -19,30 +19,16 @@ try:
         get_layout_class,
     )
     _CK_AVAILABLE = True
-    if torch.version.cuda is None:
-        ck.registry.disable("cuda")
-    else:
-        cuda_version = tuple(map(int, str(torch.version.cuda).split('.')))
-        if cuda_version < (13,):
-            ck.registry.disable("cuda")
-            logging.warning("WARNING: You need pytorch with cu130 or higher to use optimized CUDA operations.\nWARNING WARNING WARNING\nIf you are on nvidia 20 series and above it is required that you update your pytorch to cu130 or higher.\n")
-
-    # comfy-kitchen picks its accelerated backend on import: the HIP backend registers
-    # itself on a supported AMD device and takes dispatch priority there, CUDA on NVIDIA.
-    # Triton is an opt-in override, off by default on every platform.
-    if args.enable_triton_backend and not args.disable_triton_backend:
-        try:
-            import triton
-            logging.info("Found triton %s. Enabling comfy-kitchen triton backend.", triton.__version__)
-        except ImportError as e:
-            logging.error(f"Failed to import triton, Error: {e}, the comfy-kitchen triton backend will not be available.")
-            ck.registry.disable("triton")
-    else:
-        ck.registry.disable("triton")
-    for k, v in ck.list_backends().items():
-        logging.info(f"Found comfy_kitchen backend {k}: {v}")
-except ImportError as e:
-    logging.error(f"Failed to import comfy_kitchen, Error: {e}, fp8 and fp4 support will not be available.")
+except Exception as e:
+    # Not just ImportError: comfy_kitchen registers custom ops in its module body, and
+    # torch.library.custom_op raises ValueError on a PEP-585 annotation (`list[int]`)
+    # before torch 2.7. On an older torch -- the usual case on legacy GPUs -- that
+    # ValueError escaped this guard and killed startup instead of turning fp8/fp4 off,
+    # which is what the fallback below exists for. Broad on purpose, and scoped to the
+    # import alone: the backend selection that used to sit inside this `try` now runs in
+    # the `else` clause, so a registration failure there surfaces instead of being
+    # rewritten as "comfy_kitchen is unavailable".
+    logging.error(f"Failed to load comfy_kitchen ({type(e).__name__}: {e}), fp8 and fp4 support will not be available.")
     _CK_AVAILABLE = False
 
     class QuantizedTensor:
@@ -68,6 +54,30 @@ except ImportError as e:
 
     def get_layout_class(name):
         return None
+else:
+    if torch.version.cuda is None:
+        ck.registry.disable("cuda")
+    else:
+        cuda_version = tuple(map(int, str(torch.version.cuda).split('.')))
+        if cuda_version < (13,):
+            ck.registry.disable("cuda")
+            logging.warning("WARNING: You need pytorch with cu130 or higher to use optimized CUDA operations.\nWARNING WARNING WARNING\nIf you are on nvidia 20 series and above it is required that you update your pytorch to cu130 or higher.\n")
+
+    # comfy-kitchen picks its accelerated backend on import: the HIP backend registers
+    # itself on a supported AMD device and takes dispatch priority there, CUDA on NVIDIA.
+    # Triton is an opt-in override, off by default on every platform.
+    if args.enable_triton_backend and not args.disable_triton_backend:
+        try:
+            import triton
+            logging.info("Found triton %s. Enabling comfy-kitchen triton backend.", triton.__version__)
+        except ImportError as e:
+            logging.error(f"Failed to import triton, Error: {e}, the comfy-kitchen triton backend will not be available.")
+            ck.registry.disable("triton")
+    else:
+        ck.registry.disable("triton")
+    for k, v in ck.list_backends().items():
+        logging.info(f"Found comfy_kitchen backend {k}: {v}")
+
 
 _CK_MXFP8_AVAILABLE = False
 if _CK_AVAILABLE:
