@@ -3,6 +3,28 @@ import yaml
 import folder_paths
 import logging
 
+from .json_util import merge_json_recursive
+
+default_server_config = {
+    'internal': {
+        'modelsDownload': {
+            'allowedSources': [
+                'https://civitai.com/',
+                'https://huggingface.co/'
+            ],
+            'allowedSuffixes': [
+                '.safetensors',
+                '.sft'
+            ],
+            'whitelistedUrls': [
+                'https://huggingface.co/stabilityai/stable-zero123/resolve/main/stable_zero123.ckpt',
+                'https://huggingface.co/TencentARC/T2I-Adapter/resolve/main/models/t2iadapter_depth_sd14v1.pth?download=true',
+                'https://github.com/xinntao/Real-ESRGAN/releases/download/v0.1.0/RealESRGAN_x4plus.pth'
+            ]
+        }
+    }
+}
+
 def load_extra_path_config(yaml_path):
     with open(yaml_path, 'r', encoding='utf-8') as stream:
         config = yaml.safe_load(stream)
@@ -32,3 +54,24 @@ def load_extra_path_config(yaml_path):
                 normalized_path = os.path.normpath(full_path)
                 logging.info("Adding extra search path {} {}".format(x, normalized_path))
                 folder_paths.add_model_folder_path(x, normalized_path, is_default)
+
+def load_server_config(component=None):
+    """
+    Load and returns the server configuration.
+    ensure default configuration is present
+    if a component is specified returns this sub configuration
+
+    Warning: Current merge_json_recursive concatenate arrays and so there is no way to remove default allowed sources for instance
+    """
+    config_path = 'config.yaml'
+    config = dict()
+    try:
+        with open(config_path, 'r', encoding='utf-8') as stream:
+            config = yaml.safe_load(stream)
+    except FileNotFoundError:
+        pass  # Default config could be empty
+
+    config = merge_json_recursive(default_server_config, config)
+    if component is not None:
+        return config.get(component)
+    return config
