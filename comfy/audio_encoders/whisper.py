@@ -179,6 +179,19 @@ class WhisperLargeV3(nn.Module):
         )
 
     def forward(self, audio):
-        mel = self.feature_extractor(audio)
-        x, all_x = self.encoder(mel)
+        # 30 s windows; the extra zero sample makes the last window always end in padding (silence)
+        chunks = F.pad(audio, (0, 1)).split(self.feature_extractor.n_samples, dim=-1)
+        if len(chunks) == 1:
+            return self.encoder(self.feature_extractor(audio))
+        x = all_x = None
+        for i, chunk in enumerate(chunks):
+            out, layers = self.encoder(self.feature_extractor(chunk))
+            if x is None:
+                n = out.shape[1]
+                x = out.new_empty(out.shape[0], n * len(chunks), out.shape[2])
+                all_x = tuple(h.new_empty(h.shape[0], n * len(chunks), h.shape[2]) for h in layers)
+            x[:, i * n:(i + 1) * n] = out
+            for dst, h in zip(all_x, layers):
+                dst[:, i * n:(i + 1) * n] = h
+            del out, layers
         return x, all_x
