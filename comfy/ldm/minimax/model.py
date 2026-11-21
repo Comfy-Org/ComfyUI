@@ -178,7 +178,7 @@ class Attention(nn.Module):
             # VSA gate, unused by the dense forward; consumed by sparse attention patches
             self.to_gate_compress = operations.Linear(hidden, inner, bias=False, dtype=dtype, device=device)
 
-    def forward(self, x, rope_freqs=None, transformer_options={}):
+    def project_qkv(self, x, rope_freqs=None):
         s = x.shape[0]
         q, k, v = self.qkv_proj(x).split(self.heads * self.head_dim, dim=-1)
         v = v.view(s, self.heads, self.head_dim)
@@ -201,11 +201,15 @@ class Attention(nn.Module):
             q = self.q_norm(q.view(s, self.heads, self.head_dim))
             k = self.k_norm(k.view(s, self.heads, self.head_dim))
 
-        q = AttentionTensorContainer(q.transpose(0, 1).unsqueeze(0))
-        k = AttentionTensorContainer(k.transpose(0, 1).unsqueeze(0))
-        v = AttentionTensorContainer(v.transpose(0, 1).unsqueeze(0))
+        return tuple(t.transpose(0, 1).unsqueeze(0) for t in (q, k, v))
+
+    def attend(self, q, k, v, transformer_options={}):
+        q, k, v = (AttentionTensorContainer(t) for t in (q, k, v))
         out = optimized_attention(q, k, v, self.heads, preferred_attention=self.comfy_attention, mask=None, skip_reshape=True, transformer_options=transformer_options)
         return self.out_proj(out.squeeze(0))
+
+    def forward(self, x, rope_freqs=None, transformer_options={}):
+        return self.attend(*self.project_qkv(x, rope_freqs), transformer_options=transformer_options)
 
 
 class MLP(nn.Module):
