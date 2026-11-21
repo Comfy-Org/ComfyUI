@@ -143,30 +143,30 @@ def vbar_above_watermark(s):
 # FIXME: add n=1 cache hit fast path
 def cast_modules_with_vbar(comfy_modules, dtype, device, bias_dtype, non_blocking, return_faulted=False):
     offload_stream = None
-    cast_buffer = None
     cast_buffer_offset = 0
     if return_faulted:
         fully_faulted = all(not getattr(s, param_key + "_function", []) for s in comfy_modules for param_key in ("weight", "bias"))
 
     def ensure_offload_stream(module, required_size, check_largest):
         nonlocal offload_stream
-        nonlocal cast_buffer
 
         if offload_stream is None:
             offload_stream = comfy.model_management.get_offload_stream(device)
         if offload_stream is None or not check_largest or len(comfy_modules) != 1:
             return
 
-        current_size = 0 if cast_buffer is None else cast_buffer.size()
-        if current_size < required_size and module is comfy.model_management.LARGEST_AIMDO_CASTED_WEIGHT[0]:
-            offload_stream = comfy.model_management.get_offload_stream(device)
-            cast_buffer = None
+        if module is comfy.model_management.LARGEST_AIMDO_CASTED_WEIGHT[0]:
+            #Only one stream should grow its cast buffer for the largest
+            #weight. Rotate to the stream whose buffer already fits it.
+            for _ in range(comfy.model_management.NUM_STREAMS - 1):
+                stream_buffer = comfy.model_management.STREAM_AIMDO_CAST_BUFFERS.get(offload_stream, None)
+                if required_size <= (0 if stream_buffer is None else stream_buffer.size()):
+                    break
+                offload_stream = comfy.model_management.get_offload_stream(device)
         if required_size > comfy.model_management.LARGEST_AIMDO_CASTED_WEIGHT[1]:
             comfy.model_management.LARGEST_AIMDO_CASTED_WEIGHT = (module, required_size)
 
     def get_cast_buffer(buffer_size):
-        nonlocal offload_stream
-        nonlocal cast_buffer
         nonlocal cast_buffer_offset
 
         if buffer_size == 0:
