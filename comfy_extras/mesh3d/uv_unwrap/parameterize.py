@@ -10,6 +10,7 @@ import scipy.sparse.linalg as spla
 import torch
 from torch import Tensor
 
+import comfy.model_management
 from . import mesh as _mesh
 
 LSCM_BATCH_MAX_VERTS = 256      # charts above this solve per-chart sparse (lscm_chart)
@@ -175,6 +176,20 @@ def _segment_argmax(vals: np.ndarray, seg: np.ndarray, n: int) -> np.ndarray:
     return np.where(out == np.iinfo(np.int64).max, -1, out)
 
 
+def _solve_batched_gpu(AtA: Tensor, Atb: Tensor) -> Tensor:
+    try:
+        return torch.linalg.solve(AtA, Atb)
+    except RuntimeError as exc:
+        if not comfy.model_management.is_amd() or "HIPBLAS_STATUS_ALLOC_FAILED" not in str(exc):
+            raise
+    if AtA.shape[0] == 1:
+        x = np.linalg.solve(AtA.cpu().numpy(), Atb.cpu().numpy()[..., None])[..., 0]
+        return torch.from_numpy(x).to(Atb.device)
+    half = AtA.shape[0] // 2
+    return torch.cat((_solve_batched_gpu(AtA[:half], Atb[:half]),
+                      _solve_batched_gpu(AtA[half:], Atb[half:])))
+
+
 def lscm_charts_batch(
     verts: np.ndarray,            # (sumV, 3) float64, per-chart concatenated
     uv_pins: np.ndarray,          # (sumV, 2) float64, ortho UVs (pin values + fallback)
@@ -335,7 +350,7 @@ def lscm_charts_batch(
             dsc = 1e-12 * torch.nan_to_num(dpos.nanmedian(dim=1).values, nan=1e-8).clamp_min(1e-20)
             diag += torch.where(con_t, torch.ones_like(diag), dsc[:, None].expand_as(diag))
             Atb = torch.where(con_t, torch.from_numpy(cval).to(device), Atb)
-            x = torch.linalg.solve(AtA, Atb).cpu().numpy()
+            x = _solve_batched_gpu(AtA, Atb).cpu().numpy()
         else:
             At = A.transpose(0, 2, 1)
             AtA = At @ A                             # batched BLAS dgemm
