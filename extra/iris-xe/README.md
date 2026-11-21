@@ -39,6 +39,8 @@ The switch enables the same workarounds as `LTX25_IRIS_CPU_UNPACK=1`. They cover
 
 For the 9-frame 640×384 text-to-video benchmark on the i5-1340P, omit `--cpu-vae` to run the FP32 VideoVAE on XPU as well. Use the same VAE device for both sides of a sampler comparison.
 
+For longer videos, add `--use-quad-cross-attention` to the Iris Xe launch command. On hp8, the default PyTorch SDPA path raised an unsupported free-memory query during the first sampling step at 960×544 and 81 frames. Sub-quadratic attention sizes its blocks using both the XPU allocator estimate and the available system RAM (including the cgroup limit). This accounts for memory shared with CPU models. `--cache-lru 5` controls reuse of node results between prompts in the same process.
+
 ## Mixed-quantization LTX GGUF files
 
 For `ltx-2.5-22b-distilled-UD-Q5_K_XL.gguf`, apply the following additional diff to the custom node after the Iris Xe and native unpack patches. The checkpoint also uses BF16, Q2_K, Q3_K and Q8_0. On the tested Iris Xe, GPU unpacking of these four formats and Q5_K fails with Level Zero error 45. This fallback uses the plugin's existing CPU decoder for those formats and transfers the result back to the XPU. Q4_K and Q6_K retain the previously selected path.

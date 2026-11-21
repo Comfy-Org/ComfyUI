@@ -1,4 +1,5 @@
 import math
+import os
 import sys
 import inspect
 import json
@@ -354,6 +355,10 @@ def attention_sub_quad(query, key, value, heads, mask=None, attn_precision=None,
     _, _, k_tokens = key.shape
 
     mem_free_total, _ = model_management.get_free_memory(query.device, True)
+    if query.device.type == "xpu" and os.environ.get("LTX25_IRIS_CPU_UNPACK") == "1":
+        # Iris Xe allocations share host RAM with the text encoder and the OS.
+        from comfy.system_memory import virtual_memory_available
+        mem_free_total = min(mem_free_total, virtual_memory_available())
 
     kv_chunk_size_min = None
     kv_chunk_size = None
