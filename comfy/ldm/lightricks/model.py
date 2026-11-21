@@ -552,20 +552,20 @@ class BasicTransformerBlock(nn.Module):
         else:
             norm_x = comfy.quant_ops.ck.rms_adaln(x, scale_msa, shift_msa)
 
-        x += self.attn1(norm_x, pe=pe, mask=self_attention_mask, transformer_options=transformer_options) * gate_msa
+        x = gated_residual(x, self.attn1(norm_x, pe=pe, mask=self_attention_mask, transformer_options=transformer_options), gate_msa)
 
         if self.cross_attention_adaln:
             shift_q_mca, scale_q_mca, gate_mca = (self.scale_shift_table[None, None, 6:9].to(device=x.device, dtype=x.dtype) + timestep.reshape(x.shape[0], timestep.shape[1], self.scale_shift_table.shape[0], -1)[:, :, 6:9, :]).unbind(dim=2)
-            x += apply_cross_attention_adaln(
+            x = gated_residual(x, apply_cross_attention_adaln(
                 x, context, self.attn2, shift_q_mca, scale_q_mca, gate_mca,
                 self.prompt_scale_shift_table, prompt_timestep, attention_mask, transformer_options,
-            )
+            ))
         else:
-            x += self.attn2(x, context=context, mask=attention_mask, transformer_options=transformer_options)
+            x = gated_residual(x, self.attn2(x, context=context, mask=attention_mask, transformer_options=transformer_options))
 
         y = comfy.ldm.common_dit.rms_norm(x)
         y = torch.addcmul(y, y, scale_mlp).add_(shift_mlp)
-        x.addcmul_(self.ff(y), gate_mlp)
+        x = gated_residual(x, self.ff(y), gate_mlp)
 
         return x
 
@@ -612,6 +612,14 @@ def apply_cross_attention_adaln(
         attn_input = comfy.quant_ops.ck.rms_adaln(x, q_scale, q_shift)
     encoder_hidden_states = context * (1 + scale_kv) + shift_kv
     return attn(attn_input, context=encoder_hidden_states, mask=attention_mask, transformer_options=transformer_options) * q_gate
+
+
+def gated_residual(x, out, gate=None):
+    # training must not mutate the stream: the norm backward and the checkpoint recompute read it
+    if comfy.model_management.in_training:
+        return x + out if gate is None else x + out * gate
+    return x.add_(out) if gate is None else x.addcmul_(out, gate)
+
 
 def get_fractional_positions(indices_grid, max_pos):
     n_pos_dims = indices_grid.shape[1]
