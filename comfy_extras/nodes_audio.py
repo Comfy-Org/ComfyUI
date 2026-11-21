@@ -1,5 +1,6 @@
 import av
 import comfy.audio
+import comfy.utils
 import torch
 import comfy.model_management
 import folder_paths
@@ -734,6 +735,10 @@ class AudioMerge(IO.ComfyNode):
             pad_shape[-1] = length_1 - length_2
             pad_tensor = torch.zeros(pad_shape, dtype=waveform_2.dtype, device=waveform_2.device)
             waveform_2 = torch.cat((waveform_2, pad_tensor), dim=-1)
+
+        batch_size = max(waveform_1.shape[0], waveform_2.shape[0])
+        waveform_1 = comfy.utils.repeat_to_batch_size(waveform_1, batch_size)
+        waveform_2 = comfy.utils.repeat_to_batch_size(waveform_2, batch_size)
 
         if merge_method == "add":
             waveform = waveform_1 + waveform_2
