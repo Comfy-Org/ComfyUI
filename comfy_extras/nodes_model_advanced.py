@@ -398,6 +398,31 @@ class VAEComputeDtype(io.ComfyNode):
         return io.NodeOutput(vae)
 
 
+class CacheRAMSettings(io.ComfyNode):
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="CacheRAMSettings",
+            display_name="Cache RAM Settings",
+            search_aliases=["cache ram", "ram cache", "memory"],
+            category="advanced/debug",
+            description="Sets how much RAM the cache keeps free during this workflow's runs. Results the run doesn't use (other workflows, bypassed groups) are kept until free RAM drops below the inactive value. Read when the prompt starts, so it doesn't need to be connected. Bypass it to use the defaults; --cache-ram takes precedence.",
+            inputs=[
+                io.Float.Input("active", default=10.0, min=0.0, max=4096.0, step=0.5, socketless=True,
+                               tooltip="Free RAM to keep before evicting this run's own cached results."),
+                io.Float.Input("inactive", default=25.0, min=0.0, max=4096.0, step=0.5, socketless=True,
+                               tooltip="Free RAM to keep before evicting results this run doesn't use. 100 percent keeps none."),
+                io.Combo.Input("unit", options=["percent", "GB"], default="percent", socketless=True,
+                               tooltip="How active and inactive are read: percent of system RAM, or GB."),
+            ],
+            outputs=[],
+        )
+
+    @classmethod
+    def execute(cls, active, inactive, unit):
+        return io.NodeOutput()
+
+
 class ModelAttentionBackend(io.ComfyNode):
     @classmethod
     def define_schema(cls):
@@ -453,4 +478,5 @@ NODE_CLASS_MAPPINGS = {
     "ModelComputeDtype": ModelComputeDtype,
     "VAEComputeDtype": VAEComputeDtype,
     "ModelAttentionBackend": ModelAttentionBackend,
+    "CacheRAMSettings": CacheRAMSettings,
 }
