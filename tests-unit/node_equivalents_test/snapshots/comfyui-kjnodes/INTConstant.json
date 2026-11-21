@@ -1,0 +1,30 @@
+{
+  "name": "INTConstant",
+  "input": {
+    "required": {
+      "value": [
+        "INT",
+        {
+          "default": 0,
+          "min": -18446744073709551615,
+          "max": 18446744073709551615
+        }
+      ]
+    }
+  },
+  "input_order": {
+    "required": [
+      "value"
+    ]
+  },
+  "output": [
+    "INT"
+  ],
+  "output_name": [
+    "value"
+  ],
+  "output_is_list": [
+    false
+  ],
+  "pack_commit": "aa2b5ea5e7f61b51f5d26d726f23c1d74e951016"
+}

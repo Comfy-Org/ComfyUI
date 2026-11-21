@@ -42,13 +42,28 @@ class NodeReplaceManager:
         """
         existing = self._replacements.setdefault(node_replace.old_node_id, [])
         for entry in existing:
-            if entry.new_node_id == node_replace.new_node_id:
+            if entry.new_node_id == node_replace.new_node_id and entry.old_pack == node_replace.old_pack:
                 logging.debug(
-                    "Node replacement %s -> %s already registered, ignoring duplicate.",
-                    node_replace.old_node_id, node_replace.new_node_id,
+                    "Node replacement %s (%s) -> %s already registered, ignoring duplicate.",
+                    node_replace.old_node_id, node_replace.old_pack, node_replace.new_node_id,
                 )
                 return
         existing.append(node_replace)
+
+    def select_replacement(self, old_node_id: str, old_pack: str | None) -> NodeReplace | None:
+        """Pick the replacement for a node of old_node_id saved from the pack with cnr_id old_pack.
+
+        Prefers an entry for that pack, then an entry with no pack. A node saved without
+        pack identity only matches pack entries when every entry names the same pack.
+        """
+        candidates = self._replacements.get(old_node_id, [])
+        for pack in (old_pack, None):
+            for entry in candidates:
+                if entry.old_pack == pack:
+                    return entry
+        if old_pack is None and len({entry.old_pack for entry in candidates}) == 1:
+            return candidates[0]
+        return None
 
     def get_replacement(self, old_node_id: str) -> list[NodeReplace] | None:
         """Get replacements for an old node ID."""
@@ -76,11 +91,9 @@ class NodeReplaceManager:
         for node_number in need_replacement:
             node_struct = prompt[node_number]
             class_type = node_struct["class_type"]
-            replacements = self.get_replacement(class_type)
-            if replacements is None:
+            replacement = self.select_replacement(class_type, node_struct.get("_meta", {}).get("cnr_id"))
+            if replacement is None:
                 continue
-            # just use the first replacement
-            replacement = replacements[0]
             new_node_id = replacement.new_node_id
             # if replacement is not a valid node, skip trying to replace it as will only cause confusion
             if new_node_id not in nodes.NODE_CLASS_MAPPINGS.keys():
