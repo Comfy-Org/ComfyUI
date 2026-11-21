@@ -31,7 +31,7 @@ async def cache_control(
         ".json"
     )
 
-    if request.path.endswith(".js") or request.path.endswith(".css") or is_entry_point:
+    if request.path.endswith((".js", ".mjs", ".css")) or is_entry_point:
         response.headers.setdefault("Cache-Control", "no-store")
         return response
 
