@@ -19,7 +19,6 @@ from app.assets.database.models import AssetContent
 from app.assets.database.queries.records import create_content, create_record
 from app.assets.scanner_admission import _WATCH_LIST
 from app.assets.services import file_utils
-from app.assets.services.file_utils import list_files_recursively, walk_listings
 
 OUTPUT_ONLY = ("output",)
 ALL_ROOTS = ("models", "input", "output")
@@ -160,26 +159,6 @@ def test_a_scan_that_is_not_output_only_still_stats_every_row(roots, session, ca
     assert len(rows) == 2
 
 
-def test_walk_listings_matches_the_os_walk_filtering(temp_dir: Path):
-    base = temp_dir / "tree"
-    _write(base / "a.png")
-    _write(base / ".hidden.png")
-    _write(base / ".hidden_dir" / "x.png")
-    _write(base / "sub" / "empty.png", b"")
-    _write(base / "sub" / "dl.png.part")
-    _write(base / "sub" / "deep" / "d.png")
-    (base / "link_to_sub").symlink_to(base / "sub")
-    (base / "sub" / "loop").symlink_to(base)
-    (base / "broken").symlink_to(base / "nowhere")
-    os.symlink(base / "a.png", base / "file_link.png")
-
-    walk = walk_listings(str(base))
-
-    # The one intended difference: a broken symlink is left out, so its row reads as gone.
-    assert walk.files == [p for p in list_files_recursively(str(base)) if p != str(base / "broken")]
-    assert walk.dirs_listed == len(walk.listings) == 3  # base, sub, sub/deep
-
-
 def _catalog_directly(session, path: Path) -> str:
     """A live row the walk would never produce itself."""
     stat = path.stat()
@@ -260,10 +239,10 @@ def test_dir_failing_to_list_stats_its_rows_while_siblings_are_diffed(
 
     real_list = file_utils._list_visible_entries
 
-    def failing_list(dirpath: str):
+    def failing_list(dirpath: str, interrupted=None):
         if dirpath == str(output / "a"):
             raise OSError("transient listing failure")
-        return real_list(dirpath)
+        return real_list(dirpath, interrupted)
 
     monkeypatch.setattr(file_utils, "_list_visible_entries", failing_list)
     _scan_logged(caplog)
@@ -303,10 +282,10 @@ def test_unlistable_output_root_stats_every_row(roots, session, monkeypatch):
     files[0].unlink()
     real_list = file_utils._list_visible_entries
 
-    def failing_root(dirpath: str):
+    def failing_root(dirpath: str, interrupted=None):
         if dirpath == str(output):
             raise OSError("root unreadable")
-        return real_list(dirpath)
+        return real_list(dirpath, interrupted)
 
     monkeypatch.setattr(file_utils, "_list_visible_entries", failing_root)
     _scan()

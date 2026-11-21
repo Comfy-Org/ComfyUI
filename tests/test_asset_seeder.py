@@ -6,6 +6,7 @@ from unittest.mock import call, patch
 import pytest
 
 from app.assets.seeder import Progress, ScanPhase, _AssetSeeder, State
+from app.assets.services.file_utils import ListingWalk
 
 
 @pytest.fixture()
@@ -214,7 +215,7 @@ class TestPendingScanDrain:
     @patch("app.assets.seeder.dependencies_available", return_value=True)
     @patch("app.assets.seeder.get_owned_prefixes", return_value=[])
     @patch("app.assets.seeder.sync_root_safely", return_value=set())
-    @patch("app.assets.seeder.collect_paths_for_roots", return_value=[])
+    @patch("app.assets.seeder.list_root", return_value=ListingWalk([], {}, 0))
     @patch("app.assets.seeder.build_asset_specs", return_value=([], {}, 0))
     def test_pending_scan_starts_after_scan(self, *_mocks):
         seeder = _AssetSeeder()
@@ -334,7 +335,7 @@ class TestPendingScanDrain:
     @patch("app.assets.seeder.dependencies_available", return_value=True)
     @patch("app.assets.seeder.get_owned_prefixes", return_value=[])
     @patch("app.assets.seeder.sync_root_safely", return_value=set())
-    @patch("app.assets.seeder.collect_paths_for_roots", return_value=[])
+    @patch("app.assets.seeder.list_root", return_value=ListingWalk([], {}, 0))
     @patch("app.assets.seeder.build_asset_specs", return_value=([], {}, 0))
     def test_pending_cleared_even_when_start_fails(self, *_mocks):
         seeder = _AssetSeeder()
@@ -360,7 +361,7 @@ class TestPendingScanDrain:
     @patch("app.assets.seeder.dependencies_available", return_value=True)
     @patch("app.assets.seeder.get_owned_prefixes", return_value=[])
     @patch("app.assets.seeder.sync_root_safely", return_value=set())
-    @patch("app.assets.seeder.collect_paths_for_roots", return_value=[])
+    @patch("app.assets.seeder.list_root", return_value=ListingWalk([], {}, 0))
     @patch("app.assets.seeder.build_asset_specs", return_value=([], {}, 0))
     def test_no_drain_when_no_pending(self, *_mocks):
         seeder = _AssetSeeder()
