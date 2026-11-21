@@ -824,17 +824,21 @@ def _repair_nonmanifold_edges(
 
 
 def _kitchen_op(name: str, tensor: torch.Tensor):
-    """comfy-kitchen's op `name` when its CUDA backend can run it on `tensor`, else None."""
+    """comfy-kitchen's op `name` when one of its GPU backends (CUDA, or HIP on AMD) can run it
+    on `tensor`, else None."""
     ck = getattr(comfy.quant_ops, "ck", None)
     if ck is None or not hasattr(ck, name) or not tensor.is_cuda:
         return None
-    cuda = ck.list_backends().get("cuda", {})
-    if not (cuda.get("available", False) and not cuda.get("disabled", True) and name in cuda.get("capabilities", ())):
-        return None
-    floor = ck.registry.get_constraints("cuda", name).min_compute_capability
-    if floor is not None and torch.cuda.get_device_capability(tensor.device) < floor:
-        return None
-    return getattr(ck, name)
+    backends = ck.list_backends()
+    for backend in ("hip", "cuda"):
+        info = backends.get(backend, {})
+        if not (info.get("available", False) and not info.get("disabled", True) and name in info.get("capabilities", ())):
+            continue
+        floor = ck.registry.get_constraints(backend, name).min_compute_capability
+        if backend == "cuda" and floor is not None and torch.cuda.get_device_capability(tensor.device) < floor:
+            continue
+        return getattr(ck, name)
+    return None
 
 
 def _connected_labels(edges: torch.Tensor, n: int) -> torch.Tensor:
