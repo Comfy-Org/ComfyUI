@@ -1296,9 +1296,9 @@ class VideoTemporalCropNode(io.ComfyNode):
                 io.Int.Input(
                     "start_frame",
                     default=0,
-                    min=0,
+                    min=-99999,
                     max=99999,
-                    tooltip="Starting frame index.",
+                    tooltip="Starting frame index. Negative values count from the end.",
                 ),
                 io.Int.Input(
                     "length",
@@ -1317,7 +1317,9 @@ class VideoTemporalCropNode(io.ComfyNode):
     def execute(cls, video, start_frame, length):
         total_frames = video.get_frame_count()
         fps = float(video.get_frame_rate())
-        start_frame = min(start_frame, max(total_frames - 1, 0))
+        if start_frame < 0:
+            start_frame += total_frames
+        start_frame = max(0, min(start_frame, total_frames - 1))
         length = min(length, total_frames - start_frame)
         return io.NodeOutput(
             video.as_trimmed(start_frame / fps, length / fps, strict_duration=False)
