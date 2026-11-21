@@ -151,9 +151,7 @@ def reserve_host_buffer() -> FrameHostBuffer:
 
 
 def _float_frame(frame: np.ndarray, out: np.ndarray | None = None) -> np.ndarray:
-    """A decoded frame as float32, 8-bit ones divided by 255, written into out if given. Otherwise the result owns
-    exactly its pixels: a float frame that already does is returned as it is, anything else goes into a new array
-    from _host_empty, so a view of a larger frame (a crop, the colour of an RGBA frame) is not kept alive."""
+    """A decoded frame as float32, written into out if given; otherwise the result owns exactly its pixels, so a view of a larger frame (a crop, the colour of an RGBA frame) is not kept alive."""
     if out is None:
         if frame.dtype != np.uint8 and frame.base is None and frame.flags.c_contiguous:
             return frame
@@ -166,9 +164,7 @@ def _float_frame(frame: np.ndarray, out: np.ndarray | None = None) -> np.ndarray
 
 
 class HostFrames:
-    """Frames written into reserved address space, committed as they arrive so the buffer never moves or overallocates,
-    8-bit frames made float as they are written. The space is reserved when a second frame arrives, so a still picture
-    holds no reservation; if it can't be reserved, the frames go into blocks instead."""
+    """Frames written into reserved address space, committed as they arrive so the buffer never moves or overallocates. The space is reserved when a second frame arrives, so a still picture holds no reservation."""
 
     def __init__(self):
         self.first = None

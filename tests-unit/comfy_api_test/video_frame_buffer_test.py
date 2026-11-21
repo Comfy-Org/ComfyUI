@@ -20,8 +20,6 @@ REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 
 @pytest.fixture(autouse=True)
 def _blocks_path(monkeypatch):
-    """Decodes in this process take the blocks path, which the aimdo decodes are compared with, even where an import
-    elsewhere in the suite has switched aimdo on."""
     monkeypatch.setattr(comfy.memory_management, "aimdo_enabled", False)
 
 
@@ -168,7 +166,7 @@ def test_host_buffer_and_fromiter_decode_the_same_frames(tmp_path, name):
     _run_with_aimdo(HOST_BUFFER_DECODE, path, output)
     expected = VideoFromFile(path).get_components()
     with np.load(output) as frames:
-        assert np.array_equal(frames["head"], expected.images[:1].numpy())  # held until the second frame arrives
+        assert np.array_equal(frames["head"], expected.images[:1].numpy())
         assert np.array_equal(frames["tail"], expected.images[1:].numpy())
         if expected.alpha is not None:
             assert np.array_equal(frames["alpha"], expected.alpha.numpy())
@@ -221,8 +219,6 @@ def _decoded_format(path):
         return next(container.decode(video=0)).format.name
 
 
-# Two frames each, as two PNGs in one file or as MJPEG: a still picture reserves nothing, and without alpha only the
-# images reserve.
 @pytest.mark.parametrize("mode, pix_fmt, refused, reservations", [
     ("RGB", "rgb24", 1, 1), ("RGBA", "rgba", 1, 2), ("RGBA", "rgba", 2, 2), ("P", "pal8", 1, 2), ("P", "pal8", 2, 2),
     ("MJPEG", "yuvj420p", 1, 1),
@@ -272,8 +268,6 @@ def test_held_pictures_leave_address_space_for_a_video(tmp_path):
 
 
 def _decode_still_with_aimdo(monkeypatch, path, crop=None):
-    # One frame never reaches aimdo, so this runs here. Calls are counted, so a reservation fails the test even where
-    # a fallback catches what the stub raises.
     calls = []
     def reserve():
         calls.append(None)
@@ -324,7 +318,7 @@ def test_still_pictures_decode_the_same_with_aimdo(tmp_path, monkeypatch, name, 
 def test_a_cropped_float_still_keeps_only_its_own_pixels(tmp_path, monkeypatch):
     path = str(tmp_path / "rgb48.png")
     _write_16_bit_png(path, np.random.default_rng(0).integers(0, 65535, (256, 1024, 3), dtype=np.uint16), "rgb48be")
-    crop = (0, 64, 1024, 2)  # full width, two rows: a view of the whole decoded frame
+    crop = (0, 64, 1024, 2)
     expected = VideoFromFile(path, crop=crop).get_components().images
     tracemalloc.start()
     try:
@@ -345,9 +339,9 @@ def test_float_frame_copies_a_view_but_not_an_array_that_owns_its_pixels():
         source = make()
         expected, kept = view(source).copy(), weakref.ref(source)
         result = _float_frame(view(source))
-        source[...] = -1  # the result doesn't follow its source
+        source[...] = -1
         del source
-        assert kept() is None  # and doesn't keep it alive
+        assert kept() is None
         assert result.flags.c_contiguous and np.array_equal(result, expected)
     eight_bit = np.full((2, 2, 3), 51, dtype=np.uint8)
     assert np.array_equal(_float_frame(eight_bit), np.full((2, 2, 3), 0.2, dtype=np.float32))
