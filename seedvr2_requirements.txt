@@ -1,0 +1,16 @@
+# Pinned custom node: ComfyUI-SeedVR2_VideoUpscaler v2.5.23
+# https://github.com/numz/ComfyUI-SeedVR2_VideoUpscaler/tree/v2.5.23
+torch
+torchvision
+safetensors
+numpy
+tqdm
+psutil
+einops
+omegaconf>=2.3.0
+diffusers>=0.33.1
+peft>=0.17.0
+rotary_embedding_torch>=0.5.3
+opencv-python
+gguf
+matplotlib

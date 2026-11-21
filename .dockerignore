@@ -1,0 +1,30 @@
+.git
+.gitignore
+
+# Runtime data is bind-mounted by docker-compose.
+models
+input
+output
+user
+
+# Local Python/cache artifacts
+__pycache__
+*.py[cod]
+.pytest_cache
+.mypy_cache
+.ruff_cache
+.venv
+venv
+env
+
+# Logs and temporary files
+*.log
+logs
+tmp
+temp
+
+# Node/frontend caches if present
+node_modules
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
