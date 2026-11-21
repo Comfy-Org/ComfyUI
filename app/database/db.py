@@ -4,6 +4,7 @@ import os
 import shutil
 import sqlite3
 import time
+import uuid
 from contextlib import closing
 from app.logger import log_startup_warning
 from filelock import FileLock, Timeout
@@ -234,13 +235,51 @@ def init_db():
         _init_file_db(db_url)
 
 
+# Holds the in-memory database open: SQLite frees a memdb database with its last connection,
+# and the engines' pools close idle connections.
+_memory_db_anchor = None
+
+
+def _open_shared_memdb(name):
+    # Before 3.36 a memdb name is private to its connection, though opening it still succeeds;
+    # before 3.40.1 memdb's locking lets a commit rewrite pages under an active read.
+    if sqlite3.sqlite_version_info < (3, 40, 1):
+        return None
+    try:
+        return sqlite3.connect(f"file:{name}?vfs=memdb", uri=True, check_same_thread=False)
+    except sqlite3.OperationalError:  # built without the memdb VFS
+        return None
+
+
 def _init_memory_db(db_url):
     """Initialize an in-memory SQLite database using metadata.create_all.
 
-    Alembic migrations don't work with in-memory SQLite because each
-    connection gets its own separate database — tables created by Alembic's
-    internal connection are lost immediately.
+    The database lives in SQLite's memdb VFS under a name unique to this init, so every pooled
+    connection sees the same database with normal locking. A single connection shared by all
+    threads interleaves their transactions. Unlike a WAL file database, memdb blocks readers
+    for the whole of a write transaction, so write transactions must stay short. memdb also
+    caps the database at SQLITE_MEMDB_DEFAULT_MAXSIZE (1 GiB unless the build changes it).
     """
+    global _memory_db_anchor
+    name = f"/comfyui-{uuid.uuid4().hex}"
+    _memory_db_anchor = _open_shared_memdb(name)
+    if _memory_db_anchor is None:
+        logging.warning(
+            f"This SQLite build ({sqlite3.sqlite_version}) cannot share an in-memory database "
+            f"between connections (that needs SQLite 3.40.1 or newer, built with the memdb VFS); "
+            f"the in-memory database "
+            f"falls back to one connection shared by all threads, which can fail under "
+            f"concurrent writes."
+        )
+        _init_shared_connection_memory_db(db_url)
+        return
+
+    engine, write_engine = _create_engines(f"sqlite:///file:{name}?vfs=memdb&uri=true")
+    Base.metadata.create_all(engine)
+    _bind_sessions(engine, write_engine)
+
+
+def _init_shared_connection_memory_db(db_url):
     engine = create_engine(
         db_url,
         poolclass=StaticPool,
@@ -254,10 +293,7 @@ def _init_memory_db(db_url):
         cursor.close()
 
     Base.metadata.create_all(engine)
-
-    global Session, WriteSession
-    Session = sessionmaker(bind=engine)
-    WriteSession = Session
+    _bind_sessions(engine, engine)
 
 
 def _init_file_db(db_url):
@@ -297,10 +333,7 @@ def _upgrade_discards_the_catalog(script, target_rev, current_rev):
     )
 
 
-def _migrate_and_bind(db_url, db_path, db_exists):
-    config = get_alembic_config()
-
-    # Check if we need to upgrade
+def _create_engines(db_url):
     engine = create_engine(db_url)
     write_engine = create_engine(db_url)
 
@@ -324,6 +357,15 @@ def _migrate_and_bind(db_url, db_path, db_exists):
     @event.listens_for(write_engine, "begin")
     def begin_immediate(connection):
         connection.exec_driver_sql("BEGIN IMMEDIATE")
+
+    return engine, write_engine
+
+
+def _migrate_and_bind(db_url, db_path, db_exists):
+    config = get_alembic_config()
+
+    # Check if we need to upgrade
+    engine, write_engine = _create_engines(db_url)
 
     conn = engine.connect()
 
@@ -385,6 +427,10 @@ def _migrate_and_bind(db_url, db_path, db_exists):
 
     conn.close()
 
+    _bind_sessions(engine, write_engine)
+
+
+def _bind_sessions(engine, write_engine):
     global Session, WriteSession
     Session = sessionmaker(bind=engine)
     WriteSession = sessionmaker(bind=write_engine)
@@ -398,6 +444,7 @@ def create_write_session():
     """A session whose transactions open with BEGIN IMMEDIATE. Do filesystem work before
     using it: the write lock is held from the first statement until commit. Do not open
     one inside another: the inner one waits out busy_timeout for the outer's lock, then
-    fails with "database is locked", indistinguishable from real contention. Rule out a
+    fails with "database is locked", indistinguishable from real contention. On the
+    in-memory database the same holds for a read session opened inside one. Rule out a
     nested session before investigating lock contention."""
     return WriteSession()
