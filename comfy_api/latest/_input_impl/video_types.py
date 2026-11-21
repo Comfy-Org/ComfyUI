@@ -151,7 +151,8 @@ def reserve_host_buffer() -> FrameHostBuffer:
 
 
 class HostFrames:
-    """Frames written into reserved address space, committed as they arrive so the buffer never moves or overallocates."""
+    """Frames written into reserved address space, committed as they arrive so the buffer never moves or overallocates,
+    8-bit frames made float as they are written. A single frame is copied out, so a held picture keeps no reservation."""
 
     def __init__(self):
         self.hostbuf = reserve_host_buffer()
@@ -160,13 +161,21 @@ class HostFrames:
 
     def append(self, frame: np.ndarray) -> None:
         self.shape = self.shape or frame.shape
-        address = self.hostbuf.extend(frame.nbytes, reallocate=self.count == 0, register=False)
-        row = (ctypes.c_uint8 * frame.nbytes).from_address(address)
-        np.copyto(np.frombuffer(row, dtype=np.float32).reshape(self.shape), frame)
+        nbytes = frame.size * 4
+        address = self.hostbuf.extend(nbytes, reallocate=self.count == 0, register=False)
+        row = np.frombuffer((ctypes.c_uint8 * nbytes).from_address(address), dtype=np.float32).reshape(self.shape)
+        if frame.dtype == np.uint8:
+            np.divide(frame, 255.0, out=row, dtype=np.float32)
+        else:
+            np.copyto(row, frame)
         self.count += 1
 
     def tensor(self) -> torch.Tensor:
         frames = comfy_aimdo.torch.hostbuf_to_tensor(self.hostbuf).view(torch.float32).view(self.count, *self.shape)
+        if self.count == 1:
+            out = _host_empty(tuple(frames.shape), frames.numpy())
+            np.copyto(out, frames.numpy())  # not clone(): its parallel copy leaves the OpenMP threads spinning
+            return torch.from_numpy(out)
         frames.untyped_storage()._comfy_hostbuf = self.hostbuf
         return frames
 
@@ -673,7 +682,7 @@ class VideoFromFile(VideoInput):
         with av.open(self.__file, mode='r') as container:
             return container.format.name
 
-    def _decode_frames(self, container, video_stream, audio_stream, audio_frames, frames, alphas):
+    def _decode_frames(self, container, video_stream, audio_stream, audio_frames, alphas):
         start_time, duration = self.get_active_trim_window()
 
         start_pts = int(start_time / video_stream.time_base)
@@ -683,7 +692,6 @@ class VideoFromFile(VideoInput):
             container.seek(start_pts, stream=video_stream)
 
         image_format = 'gbrpf32le'
-        process_image_format = lambda a: a
         align_graph = None
 
         streams = [video_stream]
@@ -723,14 +731,11 @@ class VideoFromFile(VideoInput):
                                     alpha_channel = True
                                     break
                             if frame.format.name in ("yuvj420p", "yuvj422p", "yuvj444p", "rgb24", "rgba", "pal8"):
-                                if isinstance(frames, HostFrames) or isinstance(alphas, HostFrames):  # host buffers hold float32; blocks keep 8 bits until tensor()
-                                    process_image_format = lambda a: np.divide(a, 255.0, dtype=np.float32)
                                 if alpha_channel:
                                     image_format = 'rgba'
                                 else:
                                     image_format = 'rgb24'
                             else:
-                                process_image_format = lambda a: a
                                 if alpha_channel:
                                     image_format = 'gbrapf32le'
                                 else:
@@ -785,7 +790,6 @@ class VideoFromFile(VideoInput):
                             if crop_rect is not None:
                                 cx, cy, cw, ch = crop_rect
                                 img = np.ascontiguousarray(img[cy:cy + ch, cx:cx + cw])
-                        img = process_image_format(img)
                         if alpha_channel:
                             alphas.append(img[..., -1:].copy())
                             img = img[..., :-1]
@@ -824,7 +828,7 @@ class VideoFromFile(VideoInput):
         frames = frame_store()
         alphas = frame_store()
 
-        images = frames_to_tensor(self._decode_frames(container, video_stream, audio_stream, audio_frames, frames, alphas), frames)
+        images = frames_to_tensor(self._decode_frames(container, video_stream, audio_stream, audio_frames, alphas), frames)
         if isinstance(alphas, HostFrames):
             alphas = alphas.tensor() if alphas.count > 0 else None
         else:
