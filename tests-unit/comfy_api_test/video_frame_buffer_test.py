@@ -16,7 +16,7 @@ REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 
 
 @pytest.fixture(autouse=True)
-def _blocks_path(monkeypatch):
+def _aimdo_off_even_if_an_import_enabled_it(monkeypatch):
     monkeypatch.setattr(comfy.memory_management, "aimdo_enabled", False)
 
 
@@ -325,7 +325,7 @@ tracemalloc.start()
 images = video_types.VideoFromFile(sys.argv[1], crop=(0, 64, 1024, 2)).get_components().images
 numpy_memory = tracemalloc.take_snapshot().filter_traces([tracemalloc.DomainFilter(True, np.lib.tracemalloc_domain)])
 held = sum(trace.size for trace in numpy_memory.traces)
-assert held <= 2 * images.numel() * images.element_size(), (held, tuple(images.shape))
+assert held <= 2 * images.numel() * images.element_size(), f"the whole decoded frame is still alive behind a full-width crop: {held} bytes held for {tuple(images.shape)}"
 assert images.untyped_storage().nbytes() == images.numel() * images.element_size()
 np.save(sys.argv[2], images.numpy())
 """
