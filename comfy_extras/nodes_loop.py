@@ -19,6 +19,7 @@ def _expand_loop(dynprompt, opener_id, body, close_id, values, list_items, initi
     previous_dependencies = []
     previous_progress = None
     result_inputs = {"close_id": close_id}
+    copy_ids = [] # Every iteration's copies of the body nodes
 
     for position, value in enumerate(values):
         item = list_items[position] if list_items is not None else None
@@ -43,6 +44,7 @@ def _expand_loop(dynprompt, opener_id, body, close_id, values, list_items, initi
             copy = graph.node(original["class_type"], f"{position}_{node_id}")
             copy.set_override_display_id(node_id)
             copies[node_id] = copy
+            copy_ids.append(copy.id)
 
         def copied_link(source):
             if not is_link(source):
@@ -99,6 +101,10 @@ def _expand_loop(dynprompt, opener_id, body, close_id, values, list_items, initi
     expanded = graph.finalize()
     for node_id, metadata in loop_metadata.items():
         expanded[node_id].update(metadata)
+    if not reuse_cache:
+        # Iterations that are never reused are dropped from the output cache once their consumers have run.
+        for node_id in copy_ids:
+            expanded[node_id]["_transient"] = True
     return expanded
 
 
