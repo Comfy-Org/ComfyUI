@@ -150,6 +150,17 @@ def reserve_host_buffer() -> FrameHostBuffer:
     return hostbuf
 
 
+def _float_frame(frame: np.ndarray, out: np.ndarray | None = None) -> np.ndarray:
+    """A decoded frame as float32, 8-bit ones divided by 255, written into out if given. Otherwise the result owns
+    exactly its pixels: a view of a larger frame (a crop, the colour of an RGBA frame) is copied, not kept alive."""
+    if frame.dtype == np.uint8:
+        return np.divide(frame, 255.0, out=out, dtype=np.float32)
+    if out is not None:
+        np.copyto(out, frame)
+        return out
+    return frame if frame.base is None and frame.flags.c_contiguous else frame.copy()
+
+
 class HostFrames:
     """Frames written into reserved address space, committed as they arrive so the buffer never moves or overallocates,
     8-bit frames made float as they are written. The space is reserved when a second frame arrives, so a still picture
@@ -185,16 +196,11 @@ class HostFrames:
         address = self.hostbuf.extend(nbytes, reallocate=self.shape is None, register=False)
         self.shape = self.shape or frame.shape
         row = (ctypes.c_uint8 * nbytes).from_address(address)
-        out = np.frombuffer(row, dtype=np.float32).reshape(self.shape)
-        if frame.dtype == np.uint8:
-            np.divide(frame, 255.0, out=out, dtype=np.float32)
-        else:
-            np.copyto(out, frame)
+        _float_frame(frame, out=np.frombuffer(row, dtype=np.float32).reshape(self.shape))
 
     def tensor(self) -> torch.Tensor:
         if self.first is not None:
-            first = np.divide(self.first, 255.0, dtype=np.float32) if self.first.dtype == np.uint8 else np.ascontiguousarray(self.first)
-            return torch.from_numpy(first).unsqueeze(0)
+            return torch.from_numpy(_float_frame(self.first)).unsqueeze(0)
         if self.chunks is not None:
             return self.chunks.tensor()
         frames = comfy_aimdo.torch.hostbuf_to_tensor(self.hostbuf).view(torch.float32).view(self.count, *self.shape)
@@ -251,7 +257,7 @@ class FrameChunks:
 
 
 def frame_store() -> "HostFrames | FrameChunks":
-    """Where decoded frames go: aimdo's host buffer when aimdo is on, else blocks copied together at the end."""
+    """Where decoded frames go: with aimdo on, a lone frame as decoded and more in aimdo's host buffer, else blocks."""
     return HostFrames() if comfy.memory_management.aimdo_enabled else FrameChunks()
 
 
@@ -803,9 +809,11 @@ class VideoFromFile(VideoInput):
                                 cx, cy, cw, ch = crop_rect
                                 img = np.ascontiguousarray(img[cy:cy + ch, cx:cx + cw])
                         if alpha_channel:
-                            alphas.append(img[..., -1:].copy())
+                            alpha = img[..., -1:].copy()
                             img = img[..., :-1]
                         yield img
+                        if alpha_channel:
+                            alphas.append(alpha)  # after the images, so they reserve first when only one fits
                 except av.error.InvalidDataError:
                     logging.info("pyav decode error")
 

@@ -9,7 +9,7 @@ import torch
 from PIL import Image
 
 from comfy_api.input_impl.video_types import VideoFromFile
-from comfy_api.latest._input_impl.video_types import FrameChunks
+from comfy_api.latest._input_impl.video_types import FrameChunks, _float_frame
 
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 
@@ -204,6 +204,9 @@ def reserve_or_refuse():
 video_types.reserve_host_buffer = reserve_or_refuse
 components = video_types.VideoFromFile(sys.argv[1]).get_components()
 assert len(calls) == int(sys.argv[3]), calls
+refused = int(sys.argv[2])  # the images reserve first, then the alpha
+assert hasattr(components.images.untyped_storage(), "_comfy_hostbuf") == (refused != 1)
+assert components.alpha is None or hasattr(components.alpha.untyped_storage(), "_comfy_hostbuf") == (refused != 2)
 assert torch.equal(components.images, expected.images)
 assert (components.alpha is None) == (expected.alpha is None)
 assert components.alpha is None or torch.equal(components.alpha, expected.alpha)
@@ -331,7 +334,46 @@ def test_still_pictures_decode_the_same_with_aimdo(tmp_path, name, pix_fmt):
             assert still["alpha"].dtype == np.float32 and np.array_equal(still["alpha"], expected.alpha.numpy())
 
 
+CROPPED_STILL_DECODE = """
+import sys
+import tracemalloc
+import comfy_aimdo.control
+if not comfy_aimdo.control.init():
+    sys.exit("comfy-aimdo unavailable")
+import numpy as np
+import comfy.memory_management
+from comfy_api.latest._input_impl import video_types
+comfy.memory_management.aimdo_enabled = True
+tracemalloc.start()
+images = video_types.VideoFromFile(sys.argv[1], crop=(0, 64, 1024, 2)).get_components().images
+numpy_memory = tracemalloc.take_snapshot().filter_traces([tracemalloc.DomainFilter(True, np.lib.tracemalloc_domain)])
+held = sum(trace.size for trace in numpy_memory.traces)
+assert held <= 2 * images.numel() * images.element_size(), (held, tuple(images.shape))
+np.save(sys.argv[2], images.numpy())
+"""
+
+
+def test_a_cropped_float_still_keeps_only_its_own_pixels(tmp_path):
+    path = str(tmp_path / "rgb48.png")
+    _write_16_bit_png(path, np.random.default_rng(0).integers(0, 65535, (256, 1024, 3), dtype=np.uint16), "rgb48be")
+    output = str(tmp_path / "crop.npy")
+    _run_with_aimdo(CROPPED_STILL_DECODE, path, output)  # full width, two rows: a view of the whole decoded frame
+    expected = VideoFromFile(path, crop=(0, 64, 1024, 2)).get_components().images
+    assert np.array_equal(np.load(output), expected.numpy())
+
+
 # ---- without aimdo: blocks of frames, copied into one tensor at the end ---------------------------------------
+
+
+def test_float_frame_copies_a_view_but_not_an_array_that_owns_its_pixels():
+    frame = np.random.default_rng(0).random((4, 6, 3), dtype=np.float32)
+    assert _float_frame(frame) is frame
+    rows = _float_frame(frame[1:3])
+    assert rows.base is None and np.array_equal(rows, frame[1:3])
+    rgb = _float_frame(np.ascontiguousarray(np.concatenate([frame, frame[..., :1]], -1))[..., :3])
+    assert rgb.base is None and rgb.flags.c_contiguous and np.array_equal(rgb, frame)
+    eight_bit = np.full((2, 2, 3), 51, dtype=np.uint8)
+    assert np.array_equal(_float_frame(eight_bit), np.full((2, 2, 3), 0.2, dtype=np.float32))
 
 
 def _frames(n, shape=(2, 3, 3)):
