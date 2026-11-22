@@ -1,4 +1,5 @@
 import copy
+import inspect
 import sys
 
 import pytest
@@ -490,8 +491,9 @@ def test_loop_executes_final_carried_value_without_output():
 
 
 def test_loop_runs_more_passes_than_the_recursion_limit_allows():
-    # Each pass chains onto the one before, so 200 passes go deeper than a 300-frame limit.
+    # Each pass chains onto the one before, so 200 passes recurse about 400 frames deeper than this.
     limit = sys.getrecursionlimit()
+    depth = len(inspect.stack(0))
     Increment.calls = []
     Capture.values = []
     prompt = {
@@ -511,7 +513,7 @@ def test_loop_runs_more_passes_than_the_recursion_limit_allows():
         },
         "capture": {"class_type": "TestCapture", "inputs": {"value": ["close", 0]}},
     }
-    sys.setrecursionlimit(300)
+    sys.setrecursionlimit(depth + 150)
     try:
         execute_prompt(prompt, "long-loop-test", ["capture"])
     finally:
