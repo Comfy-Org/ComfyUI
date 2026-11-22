@@ -1,10 +1,25 @@
 from comfy_api.latest import io
+from comfy_execution.caching import count_ancestors
 from comfy_execution.graph_utils import GraphBuilder, is_link
 from server import PromptServer
+
+# Cached passes keep full cache keys, whose total size grows with the square of the unrolled length.
+CACHED_LOOP_KEY_BUDGET = 1_000_000
 
 
 def _cache_enabled(value):
     return value[0] if isinstance(value, list) else value
+
+
+def _check_cached_loop_size(dynprompt, opener_id, body, expanded, passes):
+    nodes = len(expanded)
+    entries = nodes * (count_ancestors(dynprompt, [opener_id, *body]) + nodes // 2)
+    if entries > CACHED_LOOP_KEY_BUDGET:
+        raise ValueError(
+            f"Start Loop has {passes} passes with cache iterations on, which would need about {entries:,} cache key "
+            f"entries (the limit is {CACHED_LOOP_KEY_BUDGET:,}). Turn off cache iterations, or run fewer passes at a "
+            "time, for example by splitting a long clip into shorter parts."
+        )
 
 
 def _expand_loop(dynprompt, opener_id, body, close_id, values, list_items, initial_value, reuse_cache):
@@ -220,6 +235,8 @@ class StartLoop(io.ComfyNode):
             loop["inputs"].get("initial_iteration_value"),
             _cache_enabled(cache_iterations),
         )
+        if _cache_enabled(cache_iterations):
+            _check_cached_loop_size(dynprompt, unique_id, body, graph, len(values))
         close = dynprompt.get_node(close_id)
         close_inputs = close["inputs"].copy()
         for name in tuple(close_inputs):

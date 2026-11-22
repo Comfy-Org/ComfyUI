@@ -1,4 +1,5 @@
 import copy
+from collections import Counter
 import inspect
 import sys
 
@@ -10,7 +11,8 @@ import comfy_extras.nodes_loop as nodes_loop
 from comfy_api.latest import io
 from comfy_execution.graph_utils import GraphBuilder
 from comfy_execution.validation import validate_loops
-from execution import PromptExecutor
+from comfy_execution.caching import CacheKeySetInputSignature
+from execution import CacheType, PromptExecutor
 
 
 class Constant:
@@ -520,6 +522,72 @@ def test_loop_runs_more_passes_than_the_recursion_limit_allows():
         sys.setrecursionlimit(limit)
     assert len(Increment.calls) == 200
     assert Capture.values == [200]
+
+
+def carried_loop(passes, cache_iterations=False):
+    return {
+        "initial": {"class_type": "TestConstant", "inputs": {"value": 0}},
+        "loop": {
+            "class_type": "StartLoop",
+            "inputs": {
+                "mode": "simple",
+                "mode.num_iterations": passes,
+                "initial_iteration_value": ["initial", 0],
+                "cache_iterations": cache_iterations,
+            },
+        },
+        "increment": {"class_type": "TestIncrement", "inputs": {"value": ["loop", 4]}},
+        "close": {
+            "class_type": "EndLoop",
+            "inputs": {"output_value": ["increment", 0], "next_iteration_value": ["increment", 0], "accumulate": False},
+        },
+        "capture": {"class_type": "TestCapture", "inputs": {"value": ["close", 0]}},
+    }
+
+
+def count_calls(monkeypatch, name):
+    calls = Counter()
+    method = getattr(CacheKeySetInputSignature, name)
+
+    async def counted(self, dynprompt, node_id, *args):
+        calls[node_id] += 1
+        return await method(self, dynprompt, node_id, *args)
+
+    monkeypatch.setattr(CacheKeySetInputSignature, name, counted)
+    return calls
+
+
+def test_uncached_loop_keys_its_passes_without_building_their_signatures(monkeypatch):
+    Capture.values = []
+    signature_parts = count_calls(monkeypatch, "get_immediate_node_signature")
+
+    execute_prompt(carried_loop(500), "long-uncached-loop", ["capture"])
+
+    assert Capture.values == [500]
+    assert sum(signature_parts.values()) < 50, "only the submitted nodes get full keys; every pass is uncacheable"
+
+
+def test_ram_pressure_cache_keys_each_unrolled_node_once(monkeypatch):
+    keyed = count_calls(monkeypatch, "get_node_signature")
+    executor = PromptExecutor(Server(), cache_type=CacheType.RAM_PRESSURE, cache_args={"ram": 0, "ram_inactive": 0})
+
+    executor.execute(carried_loop(20, cache_iterations=True), "keyed-once", execute_outputs=["capture"])
+
+    assert executor.success
+    assert max(keyed.values()) == 1
+
+
+def test_cached_loop_over_the_key_budget_fails_before_running(monkeypatch):
+    Increment.calls = []
+    monkeypatch.setattr(nodes_loop, "CACHED_LOOP_KEY_BUDGET", 1000)
+    executor = PromptExecutor(Server(), cache_type=False, cache_args={"ram": 0, "ram_inactive": 0})
+
+    executor.execute(carried_loop(50, cache_iterations=True), "over-budget", execute_outputs=["capture"])
+
+    assert not executor.success
+    errors = [data["exception_message"] for event, data in executor.status_messages if event == "execution_error"]
+    assert len(errors) == 1 and "Turn off cache iterations" in errors[0]
+    assert Increment.calls == []
 
 
 def test_loop_carries_every_item_of_a_heterogeneous_list():

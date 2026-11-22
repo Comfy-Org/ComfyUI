@@ -1,10 +1,20 @@
+import asyncio
 import random
 
 import pytest
 
+import comfy.model_management
+import nodes
+from comfy_execution.cache_provider import _contains_self_unequal
 from comfy_execution.caching import CacheKeySetInputSignature
 from comfy_execution.graph import DynamicPrompt
 from comfy_execution.graph_utils import is_link
+
+
+class PlainNode:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {"required": {}}
 
 
 def recursive_ordered_ancestry(dynprompt, node_id):
@@ -99,3 +109,67 @@ def test_ordered_ancestry_walks_chain_longer_than_recursion_limit():
 
     assert ancestors == [str(index) for index in range(4998, -1, -1)]
     assert order_mapping == {node_id: position for position, node_id in enumerate(ancestors)}
+
+
+class Changed:
+    """An is-changed cache with fixed per-node values."""
+
+    def __init__(self, values):
+        self.values = values
+
+    async def get(self, node_id):
+        return self.values.get(node_id, False)
+
+
+class FullKeys(CacheKeySetInputSignature):
+    """Builds every key in full, as the cache did before small keys for uncacheable nodes."""
+
+    async def is_uncacheable(self, dynprompt, node_id):
+        return False
+
+
+def keyed(key_class, prompt, changed):
+    dynprompt = DynamicPrompt(prompt)
+    keys = key_class(dynprompt, [], Changed(changed))
+    asyncio.run(keys.add_keys(list(prompt)))
+    return keys
+
+
+def prompt_with_uncacheable_values(seed):
+    rng = random.Random(seed)
+    prompt = random_prompt(seed)
+    changed = {}
+    for node_id, value in prompt.items():
+        roll = rng.random()
+        if roll < 0.05:
+            changed[node_id] = float("NaN")
+        elif roll < 0.1:
+            value["inputs"]["object"] = object()
+    return prompt, changed
+
+
+@pytest.mark.parametrize("seed", range(20))
+def test_only_keys_that_could_never_match_change(monkeypatch, seed):
+    monkeypatch.setitem(nodes.NODE_CLASS_MAPPINGS, "Test", PlainNode)
+    prompt, changed = prompt_with_uncacheable_values(seed)
+
+    keys = keyed(CacheKeySetInputSignature, prompt, changed)
+    full = keyed(FullKeys, prompt, changed)
+
+    for node_id in prompt:
+        full_key = full.get_data_key(node_id)
+        assert keys.uncacheable[node_id] == _contains_self_unequal(full_key)
+        if keys.uncacheable[node_id]:
+            assert _contains_self_unequal(keys.get_data_key(node_id))
+        else:
+            assert keys.get_data_key(node_id) == full_key
+
+
+def test_keying_stops_when_processing_is_interrupted(monkeypatch):
+    monkeypatch.setitem(nodes.NODE_CLASS_MAPPINGS, "Test", PlainNode)
+    comfy.model_management.interrupt_current_processing(True)
+    try:
+        with pytest.raises(comfy.model_management.InterruptProcessingException):
+            keyed(CacheKeySetInputSignature, GRAPHS["branching"], {})
+    finally:
+        comfy.model_management.interrupt_current_processing(False)
