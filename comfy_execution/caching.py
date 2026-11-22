@@ -90,11 +90,6 @@ def to_hashable(obj):
         # TODO - Support other objects like tensors?
         return Unhashable()
 
-def contains_unhashable(obj):
-    if isinstance(obj, Unhashable):
-        return True
-    return isinstance(obj, (frozenset, tuple)) and any(contains_unhashable(item) for item in obj)
-
 class CacheKeySetID(CacheKeySet):
     def __init__(self, dynprompt, node_ids, is_changed_cache):
         super().__init__(dynprompt, node_ids, is_changed_cache)
@@ -117,8 +112,7 @@ class CacheKeySetInputSignature(CacheKeySet):
         self.is_changed_cache = is_changed_cache
         # Small keys hold this value, unequal to itself, so they never match another prompt and providers skip them.
         self.small_key_marker = float("NaN")
-        self.canonical_ids = {}
-        self.unique_keys = set()
+        self.uncacheable = {}
 
     def include_node_id_in_input(self) -> bool:
         return False
@@ -126,20 +120,19 @@ class CacheKeySetInputSignature(CacheKeySet):
     async def add_keys(self, node_ids):
         # Decided afresh on each call: a node override between calls can change a node's ancestry.
         self.uncacheable = {}
-        self.small_keys = {}
-        self.input_keys = {}
         for node_id in node_ids:
             if node_id in self.keys:
                 continue
             if not self.dynprompt.has_node(node_id):
                 continue
             node = self.dynprompt.get_node(node_id)
-            self.keys[node_id] = self.input_keys.get(node_id) or await self.get_node_signature(self.dynprompt, node_id)
+            self.keys[node_id] = await self.get_node_signature(self.dynprompt, node_id)
             self.subcache_keys[node_id] = (node_id, node["class_type"])
 
     async def get_node_signature(self, dynprompt, node_id):
         if await self.is_uncacheable(dynprompt, node_id):
-            return self.small_keys[node_id]
+            # Its full key would hold a value unequal to itself and match no other key, so skip building it.
+            return to_hashable([self.small_key_marker, node_id])
         signature = []
         ancestors, order_mapping = self.get_ordered_ancestry(dynprompt, node_id)
         signature.append(await self.get_immediate_node_signature(dynprompt, node_id, order_mapping))
@@ -191,7 +184,7 @@ class CacheKeySetInputSignature(CacheKeySet):
 
     # A node is uncacheable when it or any ancestor has a value unequal to itself (an always-changed
     # fingerprint, an unhashable input, a missing node). One pass per add_keys call, without recursion.
-    async def is_uncacheable(self, dynprompt, node_id, build_small_keys=True):
+    async def is_uncacheable(self, dynprompt, node_id):
         stack = [node_id]
         entered = set()
         while stack:
@@ -206,30 +199,7 @@ class CacheKeySetInputSignature(CacheKeySet):
                 self.uncacheable[current] = await self.is_immediately_uncacheable(dynprompt, current) or any(
                     self.uncacheable.get(ancestor_id, False) for ancestor_id in linked_input_ids(dynprompt, current)
                 )
-                if self.uncacheable[current] and build_small_keys:
-                    self.small_keys[current] = await self.get_small_key(dynprompt, current)
         return self.uncacheable[node_id]
-
-    # Its full key could only ever match within this prompt, so it is built from the node's own signature and
-    # its inputs' keys, interned so that nodes whose full keys would be equal get the same small key.
-    async def get_small_key(self, dynprompt, node_id):
-        unique_key = to_hashable([self.small_key_marker, node_id])
-        input_keys = {}
-        for ancestor_id in linked_input_ids(dynprompt, node_id):
-            if self.uncacheable.get(ancestor_id, True) and ancestor_id not in self.small_keys:
-                return unique_key  # Only a cycle reaches an undecided or unfinished ancestor.
-            key = self.small_keys.get(ancestor_id) or self.keys.get(ancestor_id) or self.input_keys.get(ancestor_id)
-            if key is None:
-                key = self.input_keys[ancestor_id] = await self.get_node_signature(dynprompt, ancestor_id)
-            if key in self.unique_keys:
-                return unique_key
-            input_keys[ancestor_id] = self.canonical_ids.setdefault(key, len(self.canonical_ids))
-        signature = to_hashable(await self.get_immediate_node_signature(dynprompt, node_id, input_keys))
-        if not dynprompt.has_node(node_id) or contains_unhashable(signature):
-            # A full key held a fresh Unhashable or NaN here, so it never matched any other node's key either.
-            self.unique_keys.add(unique_key)
-            return unique_key
-        return to_hashable([self.small_key_marker, self.canonical_ids.setdefault(signature, len(self.canonical_ids))])
 
     async def is_immediately_uncacheable(self, dynprompt, node_id):
         from comfy_execution.cache_provider import _contains_self_unequal
@@ -247,15 +217,14 @@ async def check_full_key_budget(cache, node_ids):
     if not isinstance(cache, BasicCache) or cache.key_class is not CacheKeySetInputSignature:
         return
     keys = CacheKeySetInputSignature(cache.dynprompt, [], cache.is_changed_cache)
-    keys.uncacheable = {}
     entries = 0
     for node_id in node_ids:
-        if not await keys.is_uncacheable(cache.dynprompt, node_id, False):
+        if not await keys.is_uncacheable(cache.dynprompt, node_id):
             entries += 1 + count_ancestors(cache.dynprompt, [node_id])
             if entries > FULL_KEY_BUDGET:
                 raise ValueError(
                     f"The nodes this node created would need more than {FULL_KEY_BUDGET:,} cache key entries. "
-                    "For a Start Loop, turn off cache iterations or run fewer passes at a time."
+                    "If it is a Start Loop, turn off cache iterations or run fewer passes at a time."
                 )
 
 

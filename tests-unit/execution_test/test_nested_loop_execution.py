@@ -586,11 +586,12 @@ def test_ram_pressure_cache_keys_each_unrolled_node_once(monkeypatch):
     assert max(keyed.values()) == 1
 
 
-def test_cached_loop_over_the_key_budget_fails_before_running(monkeypatch):
+@pytest.mark.parametrize("cache_type", [False, CacheType.RAM_PRESSURE])
+def test_cached_loop_over_the_key_budget_fails_before_running(monkeypatch, cache_type):
     Increment.calls = []
     keyed = count_calls(monkeypatch, "get_node_signature")
     monkeypatch.setattr(caching, "FULL_KEY_BUDGET", 1000)
-    executor = PromptExecutor(Server(), cache_type=False, cache_args={"ram": 0, "ram_inactive": 0})
+    executor = PromptExecutor(Server(), cache_type=cache_type, cache_args={"ram": 0, "ram_inactive": 0})
     prompt = carried_loop(50, cache_iterations=True)
 
     executor.execute(prompt, "over-budget", execute_outputs=["capture"])

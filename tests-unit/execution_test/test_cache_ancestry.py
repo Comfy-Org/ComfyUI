@@ -165,41 +165,13 @@ def test_only_keys_that_could_never_match_change(monkeypatch, seed):
             assert keys.get_data_key(node_id) == full_key
 
 
-def test_identical_uncacheable_nodes_still_share_a_key(monkeypatch):
+def test_identical_uncacheable_nodes_each_get_their_own_key(monkeypatch):
     monkeypatch.setitem(nodes.NODE_CLASS_MAPPINGS, "Test", PlainNode)
-    prompt = {
-        "source": node(value=1),
-        "a": node(x=["source", 0]),
-        "b": node(x=["source", 0]),
-        "after_a": node(x=["a", 0]),
-        "after_b": node(x=["b", 0]),
-        "other": node(x=["source", 0], extra=2),
-    }
-    changed = {"source": float("NaN")}
+    prompt = {"source": node(value=1), "a": node(x=["source", 0]), "b": node(x=["source", 0])}
 
-    keys = keyed(CacheKeySetInputSignature, prompt, changed)
-    full = keyed(FullKeys, prompt, changed)
+    keys = keyed(CacheKeySetInputSignature, prompt, {"source": float("NaN")})
 
-    assert full.get_data_key("a") == full.get_data_key("b")
-    assert keys.get_data_key("a") == keys.get_data_key("b")
-    assert keys.get_data_key("after_a") == keys.get_data_key("after_b")
-    assert keys.get_data_key("other") != keys.get_data_key("a")
-
-
-def test_identical_nodes_with_identical_cacheable_inputs_share_a_key_in_any_order(monkeypatch):
-    monkeypatch.setitem(nodes.NODE_CLASS_MAPPINGS, "Test", PlainNode)
-    prompt = {
-        "source": node(value=1),
-        "c1": node(value=2),
-        "c2": node(value=2),
-        "a": node(x=["source", 0], y=["c1", 0]),
-        "b": node(x=["source", 0], y=["c2", 0]),
-    }
-    dynprompt = DynamicPrompt(prompt)
-    keys = CacheKeySetInputSignature(dynprompt, [], Changed({"source": float("NaN")}))
-    asyncio.run(keys.add_keys(["b", "a", "c2", "c1", "source"]))
-
-    assert keys.get_data_key("a") == keys.get_data_key("b")
+    assert keys.get_data_key("a") != keys.get_data_key("b")
 
 
 @pytest.mark.parametrize("never_equal", ["unhashable", "missing"])
@@ -246,7 +218,6 @@ def test_full_keys_keep_their_format(monkeypatch):
 
 def test_key_budget_counts_ancestors_outside_the_new_nodes(monkeypatch):
     monkeypatch.setitem(nodes.NODE_CLASS_MAPPINGS, "Test", PlainNode)
-    monkeypatch.setattr(caching, "FULL_KEY_BUDGET", 60)
     prompt = {"0": node()}
     for index in range(1, 50):
         prompt[str(index)] = node(value=[str(index - 1), 0])
@@ -254,6 +225,9 @@ def test_key_budget_counts_ancestors_outside_the_new_nodes(monkeypatch):
     cache = caching.HierarchicalCache(CacheKeySetInputSignature)
     asyncio.run(cache.set_prompt(DynamicPrompt(prompt), [], Changed({})))
 
+    monkeypatch.setattr(caching, "FULL_KEY_BUDGET", 102)
+    asyncio.run(caching.check_full_key_budget(cache, ["new_a", "new_b"]))
+    monkeypatch.setattr(caching, "FULL_KEY_BUDGET", 101)
     with pytest.raises(ValueError, match="turn off cache iterations"):
         asyncio.run(caching.check_full_key_budget(cache, ["new_a", "new_b"]))
 
