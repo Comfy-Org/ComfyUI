@@ -1293,7 +1293,10 @@ async def validate_prompt(prompt_id, prompt, partial_execution_list: Union[list[
     )
     if has_dependency_cycle:
         # Loop validation is skipped, so no Start Loop is annotated and no output that runs a loop can run.
-        good_outputs.difference_update(outputs_reaching(prompt, outputs, start_nodes | end_nodes))
+        loop_outputs = outputs_reaching(prompt, outputs, start_nodes | end_nodes).intersection(good_outputs)
+        good_outputs.difference_update(loop_outputs)
+        if loop_outputs:
+            logging.error(f"Outputs {', '.join(sorted(loop_outputs))} will be ignored: a dependency cycle skipped loop validation")
     else:
         try:
             validate_loops(prompt, outputs, validated, start_nodes, end_nodes)

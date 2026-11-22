@@ -471,11 +471,21 @@ def valid_loop_with_inner_output(tag):
     }
 
 
+def orphan_end():
+    # An End Loop with no Start Loop has no expansion result, so its output can't run either.
+    return {
+        "z_source": node("Source"),
+        "z_end": node("EndLoop", output_value=["z_source", 0], accumulate=False),
+        "z_output": node("Output", value=["z_end", 0]),
+    }
+
+
 def test_prompt_validation_drops_every_loop_output_when_a_loop_fails(monkeypatch):
     # Start Loops are annotated only when every loop validates, so outputs of the valid loop "a" can't run either.
     register_loop_test_nodes(monkeypatch)
     prompt = {
         **valid_loop_with_inner_output("a"),
+        **orphan_end(),
         "b_start": node("StartLoop", cache_iterations=False),
         "b_body": node("Body", left=["b_start", 0], right=["b_start", 0]),
         "b_unwired_output": node("Output", value=["b_body", 0]),
@@ -487,7 +497,7 @@ def test_prompt_validation_drops_every_loop_output_when_a_loop_fails(monkeypatch
 
     valid, error, good_outputs, node_errors = asyncio.run(validate_prompt("prompt", prompt, None))
 
-    loop_outputs = ["a_inner_output", "a_output", "b_output", "b_unwired_output"]
+    loop_outputs = ["a_inner_output", "a_output", "b_output", "b_unwired_output", "z_output"]
     assert valid
     assert error is None
     assert good_outputs == ["plain_output"]
@@ -502,6 +512,7 @@ def test_prompt_validation_drops_loop_outputs_when_a_cycle_skips_loop_validation
     register_loop_test_nodes(monkeypatch)
     prompt = {
         **valid_loop_with_inner_output("a"),
+        **orphan_end(),
         "x": node("Body", left=["y", 0], right=["y", 0]),
         "y": node("Body", left=["x", 0], right=["x", 0]),
         "cycle_output": node("Output", value=["x", 0]),
@@ -512,4 +523,7 @@ def test_prompt_validation_drops_loop_outputs_when_a_cycle_skips_loop_validation
     valid, error, good_outputs, node_errors = asyncio.run(validate_prompt("prompt", prompt, None))
 
     assert valid
+    assert error is None
     assert good_outputs == ["plain_output"]
+    assert set(node_errors) == {"x", "y"}
+    assert all(value["errors"][0]["type"] == "dependency_cycle" for value in node_errors.values())
