@@ -893,7 +893,11 @@ class ModelPatcher:
                     continue
             bk = self.backup.get(k, None)
             hbk = self.hook_backup.get(k, None)
-            weight, set_func, convert_func = get_key_weight(self.model, k)
+            try:
+                weight, set_func, convert_func = get_key_weight(self.model, k)
+            except AttributeError as e:
+                logging.warning("Skipping state dict key %s during patch collection (%s)", k, e)
+                continue
             if not isinstance(weight, torch.Tensor):
                 continue
             if bk is not None:
@@ -1937,7 +1941,8 @@ class ModelPatcherDynamic(ModelPatcher):
             bk = self.backup.pop(key)
             comfy.utils.set_attr_param(self.model, key, bk.weight)
         for key in list(self.backup_buffers.keys()):
-            comfy.utils.set_attr_buffer(self.model, key, self.backup_buffers.pop(key))
+            owner, buf = self.backup_buffers.pop(key)
+            comfy.utils.set_attr_buffer(owner, key.rsplit(".", 1)[-1], buf)
         self.model.model_loaded_weight_memory = 0
         return restored
 
@@ -2112,9 +2117,9 @@ class ModelPatcherDynamic(ModelPatcher):
                     v_block = None
 
             for key, buf in self.model.named_buffers(recurse=True):
-                if key not in self.backup_buffers:
-                    self.backup_buffers[key] = buf
                 module, buf_name = comfy.utils.resolve_attr(self.model, key)
+                if key not in self.backup_buffers:
+                    self.backup_buffers[key] = (module, buf)
                 model_dtype = getattr(module, buf_name + "_comfy_model_dtype", None)
                 casted_buf = buf.to(dtype=model_dtype, device=device_to)
                 comfy.utils.set_attr_buffer(self.model, key, casted_buf)
