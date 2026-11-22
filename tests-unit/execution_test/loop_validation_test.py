@@ -498,7 +498,7 @@ def test_prompt_validation_drops_every_loop_output_when_a_loop_fails(monkeypatch
     loop_outputs = ["a_inner_output", "a_output", "b_output", "b_unwired_output", "z_output"]
     assert valid
     assert error is None
-    assert good_outputs == ["plain_output"]
+    assert good_outputs == ["plain_output"], "Start Loops are annotated only when every loop validates, so valid loop a's outputs are dropped too"
     assert set(node_errors) == {"b_start", "b_end", "b_unwired_output"}
     for value in node_errors.values():
         assert value["errors"][0]["message"] == "Loop body is not closed"
