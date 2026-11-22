@@ -436,8 +436,7 @@ def cast_bias_weight(s, input=None, dtype=None, device=None, bias_dtype=None, of
             weight, bias = resolve_cast_module_with_vbar(s, dtype, device, bias_dtype, compute_dtype, want_requant)
         except BaseException:
             if not prefetched:
-                # The cast made a prefetch record for s, possibly a partial one. Release it, or the
-                # pin leaks and the next cast reuses the stale record.
+                # FIXME: Make uncast_bias_weight robust enough to handle our partial aborted cast rather than use the prefetcher
                 import comfy.model_prefetch as model_prefetch  # model_prefetch imports this module
                 model_prefetch.cleanup_prefetched_modules(None, [s])
             raise
