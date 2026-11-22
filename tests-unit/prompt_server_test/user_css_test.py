@@ -110,3 +110,15 @@ async def test_root_user_css_missing_and_present(aiohttp_client, tmp_path):
     assert present.content_type == "text/css"
     assert present.headers["Cache-Control"] == "no-cache"
     assert await present.text() == "body { color: blue; }"
+
+    (tmp_path / "user.css").unlink()
+    outside = tmp_path / "outside.css"
+    outside.write_text("root:x:0:0")
+    (tmp_path / "user.css").symlink_to(outside)
+    linked = await client.get("/user.css")
+    assert_empty_stylesheet(linked, await linked.read())
+
+    (tmp_path / "user.css").unlink()
+    (tmp_path / "user.css").mkdir()
+    directory = await client.get("/user.css")
+    assert_empty_stylesheet(directory, await directory.read())

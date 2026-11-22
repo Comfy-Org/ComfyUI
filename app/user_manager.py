@@ -34,7 +34,7 @@ def get_file_info(path: str, relative_to: str) -> FileInfo:
 
 
 def user_css_file_response(path):
-    if os.path.isfile(path):
+    if os.path.isfile(path) and not os.path.islink(path):
         return web.FileResponse(path, headers={
             "Content-Type": "text/css",
             "Cache-Control": "no-cache",
