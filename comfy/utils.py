@@ -22,6 +22,7 @@ import math
 import struct
 import ctypes
 import os
+import sys
 import comfy.memory_management
 import comfy.storage
 from comfy.anonymous_file import create_anonymous_file
@@ -127,6 +128,25 @@ def _incomplete_safetensors_error(message, ckpt):
     return ValueError("{}\n\nFile path: {}\n\nThe safetensors file is corrupt/incomplete. Check the file size and make sure you have copied/downloaded it correctly.".format(message, ckpt))
 
 
+class _PyMMapShim:
+    """Pure-Python stand-in for comfy_aimdo.model_mmap.ModelMMAP on platforms
+    without the native library (e.g. macOS). The mapping is file backed, so the
+    kernel can evict clean pages under memory pressure and re-fault them from
+    disk on demand instead of keeping the whole checkpoint resident."""
+
+    def __init__(self, mm):
+        self._mm = mm
+
+    def get(self):
+        return -1  # address is not meaningful; memoryview already wraps the mapping
+
+    def get_file_handle(self):
+        return self._mm
+
+    def bounce(self):
+        return False
+
+
 def load_safetensors(ckpt):
     import comfy_aimdo.model_mmap
 
@@ -135,9 +155,19 @@ def load_safetensors(ckpt):
         raise _incomplete_safetensors_error("The safetensors header is incomplete.", ckpt)
 
     file_lock = threading.Lock()
-    model_mmap = comfy_aimdo.model_mmap.ModelMMAP(ckpt)
-    f = model_mmap.get_file_handle()
-    mv = memoryview((ctypes.c_uint8 * file_size).from_address(model_mmap.get()))
+    try:
+        model_mmap = comfy_aimdo.model_mmap.ModelMMAP(ckpt)
+        f = model_mmap.get_file_handle()
+        mv = memoryview((ctypes.c_uint8 * file_size).from_address(model_mmap.get()))
+    except Exception:
+        # The comfy-aimdo native library is only available on Windows/Linux;
+        # fall back to a Python mmap so the weights stay in evictable file
+        # pages instead of being copied into anonymous memory.
+        import mmap as _mmap
+        f = open(ckpt, "rb")
+        mm = _mmap.mmap(f.fileno(), 0, access=_mmap.ACCESS_COPY)
+        model_mmap = _PyMMapShim(mm)
+        mv = memoryview(mm)
 
     header_size = struct.unpack("<Q", mv[:8])[0]
     if header_size > _SAFETENSORS_MAX_HEADER_SIZE:
@@ -195,7 +225,7 @@ def load_torch_file(ckpt, safe_load=False, device=None, return_metadata=False):
     metadata = None
     if ckpt.lower().endswith(".safetensors") or ckpt.lower().endswith(".sft"):
         try:
-            if comfy.memory_management.aimdo_enabled:
+            if comfy.memory_management.aimdo_enabled or (MMAP_TORCH_FILES and sys.platform == "darwin"):
                 sd, metadata = load_safetensors(ckpt)
                 if not return_metadata:
                     metadata = None
