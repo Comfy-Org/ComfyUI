@@ -33,6 +33,27 @@ def get_file_info(path: str, relative_to: str) -> FileInfo:
     }
 
 
+def user_css_file_response(path):
+    if os.path.isfile(path):
+        return web.FileResponse(path, headers={
+            "Content-Type": "text/css",
+            "Cache-Control": "no-cache",
+        })
+    return empty_user_css()
+
+
+def empty_user_css():
+    return web.Response(
+        status=200,
+        content_type="text/css",
+        headers={
+            "X-Content-Type-Options": "nosniff",
+            "Content-Disposition": "inline",
+            "Cache-Control": "no-cache",
+        },
+    )
+
+
 class UserManager():
     def __init__(self):
         user_directory = folder_paths.get_user_directory()
@@ -333,8 +354,16 @@ class UserManager():
 
         @routes.get("/userdata/{file}")
         async def getuserdata(request):
-            path = get_user_data_path(request, check_exists=True)
+            file = request.match_info.get("file", None)
+            try:
+                path = get_user_data_path(request, check_exists=True)
+            except KeyError:
+                if file != "user.css":
+                    raise
+                return empty_user_css()
             if not isinstance(path, str):
+                if file == "user.css" and path.status == 404:
+                    return empty_user_css()
                 return path
 
             # User data files are arbitrary user-supplied content and are never
@@ -359,6 +388,7 @@ class UserManager():
                 "Content-Type": content_type,
                 "X-Content-Type-Options": "nosniff",
                 "Content-Disposition": disposition,
+                **({"Cache-Control": "no-cache"} if is_user_css else {}),
             })
 
         @routes.post("/userdata/{file}")
