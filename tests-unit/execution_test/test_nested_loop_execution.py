@@ -588,10 +588,14 @@ def test_ram_pressure_cache_keys_each_unrolled_node_once(monkeypatch):
 
 def test_cached_loop_over_the_key_budget_fails_before_running(monkeypatch):
     Increment.calls = []
+    keyed = count_calls(monkeypatch, "get_node_signature")
     monkeypatch.setattr(caching, "FULL_KEY_BUDGET", 1000)
     executor = PromptExecutor(Server(), cache_type=False, cache_args={"ram": 0, "ram_inactive": 0})
+    prompt = carried_loop(50, cache_iterations=True)
 
-    executor.execute(carried_loop(50, cache_iterations=True), "over-budget", execute_outputs=["capture"])
+    executor.execute(prompt, "over-budget", execute_outputs=["capture"])
+
+    assert set(keyed) <= set(prompt), "the budget is checked before any unrolled node is keyed"
 
     assert not executor.success
     errors = [data["exception_message"] for event, data in executor.status_messages if event == "execution_error"]
