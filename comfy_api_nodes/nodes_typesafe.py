@@ -117,7 +117,7 @@ def _parse_options(options: str) -> list[str]:
             continue
         if len(name) > 40:
             raise ValueError(f"The option on line {number} is longer than 40 characters.")
-        if name.casefold() in (n.casefold() for n in names):
+        if list(map(str.casefold, name)) in (list(map(str.casefold, n)) for n in names):
             raise ValueError(f"The option '{name}' is listed twice. Options must differ by more than letter case.")
         names.append(name)
     if not 2 <= len(names) <= 50:

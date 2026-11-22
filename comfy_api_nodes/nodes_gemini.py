@@ -2427,7 +2427,7 @@ def _parse_decision_options(options: str) -> list[str]:
             raise ValueError(f"The option on line {number} is longer than 128 characters.")
         if not name.isprintable():
             raise ValueError(f"The option on line {number} contains an invisible or control character.")
-        if name.casefold() in (n.casefold() for n in names):
+        if list(map(str.casefold, name)) in (list(map(str.casefold, n)) for n in names):
             raise ValueError(f"The option '{name}' is listed twice. Options must differ by more than letter case.")
         names.append(name)
     if not 2 <= len(names) <= 255:
