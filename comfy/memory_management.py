@@ -1,7 +1,10 @@
 import math
+import collections
 import ctypes
 import dataclasses
+import os
 import torch
+from concurrent.futures import ThreadPoolExecutor
 from typing import NamedTuple
 
 import comfy_aimdo.host_buffer
@@ -115,6 +118,102 @@ def read_tensor_file_slice_into(tensor, destination, stream=None, destination2=N
         return True
     finally:
         view.release()
+
+def _read_file_slice(info, address):
+    """Read a TensorFileSlice into host memory at ``address``."""
+    view = memoryview((ctypes.c_ubyte * info.size).from_address(address))
+    try:
+        done = 0
+        if hasattr(os, "preadv"):
+            # Positional reads need no lock, so several slices of one file can be read at once.
+            fd = info.file_ref.fileno()
+            while done < info.size:
+                n = os.preadv(fd, [view[done:]], info.offset + done)
+                if n <= 0:
+                    raise OSError("unexpected end of file")
+                done += n
+        else:
+            with info.lock:
+                info.file_ref.seek(info.offset)
+                while done < info.size:
+                    n = info.file_ref.readinto(view[done:])
+                    if not n:
+                        raise OSError("unexpected end of file")
+                    done += n
+    finally:
+        view.release()
+
+
+def _mmap_file_slice_tensors(module, seen):
+    """(holder, source, slice) for every CPU tensor of ``module`` that is a whole mmap'd file slice.
+
+    .to() moves a module's whole subtree, and a parent and its child can both be listed,
+    so each tensor goes to the first module that reaches it; ``seen`` holds their ids.
+    """
+    found = []
+    for m in module.modules():
+        for tensors in (m._parameters, m._buffers):
+            for t in tensors.values():
+                if t is None or id(t) in seen:
+                    continue
+                seen.add(id(t))
+                src = t._qdata if isinstance(t, QuantizedTensor) else t
+                info = getattr(src.untyped_storage(), "_comfy_mmap_file_slice", None)
+                if (info is not None and src.device.type == "cpu" and src.storage_offset() == 0
+                        and src.is_contiguous() and src.nbytes == info.size):
+                    found.append((t, src, info))
+    return found
+
+
+def move_modules_reading_files(modules, device, workers=4, prefetch=8):
+    """module.to(device) for each module, reading its mmap'd weights from their file first.
+
+    ROCm copies pageable host memory to the GPU by locking the source pages, which
+    runs at about 2.3 GB/s from an mmap'd checkpoint. Reading the file into pinned
+    memory and copying from there is several times faster. Up to ``prefetch``
+    modules are read ahead on ``workers`` threads while earlier ones are copied.
+    Tensors without a file slice, or whose read fails, move as before.
+    """
+    def read(found):
+        staged = []
+        for holder, src, info in found:
+            try:
+                pinned = torch.empty(src.shape, dtype=src.dtype, pin_memory=True)
+                _read_file_slice(info, pinned.data_ptr())
+            except (OSError, RuntimeError):
+                continue
+            staged.append((holder, src, pinned))
+        return staged
+
+    def move(module, staged):
+        for holder, src, pinned in staged:
+            if isinstance(holder, QuantizedTensor):
+                holder._qdata = pinned
+            else:
+                holder.data = pinned
+        module.to(device)
+        # A holder that .to() replaced rather than moved (quantized modules register new
+        # Parameters) may still be referenced, e.g. as a patch backup. Point it back at
+        # the mmap so the pinned copy is released.
+        for holder, src, pinned in staged:
+            if isinstance(holder, QuantizedTensor):
+                if holder._qdata is pinned:
+                    holder._qdata = src
+            elif holder.device.type == "cpu":
+                holder.data = src
+
+    pending = collections.deque()
+    seen = set()
+    with ThreadPoolExecutor(workers) as pool:
+        for module in modules:
+            pending.append((module, pool.submit(read, _mmap_file_slice_tensors(module, seen))))
+            if len(pending) > prefetch:
+                module, staged = pending.popleft()
+                move(module, staged.result())
+        while pending:
+            module, staged = pending.popleft()
+            move(module, staged.result())
+
 
 class TensorGeometry(NamedTuple):
     shape: any

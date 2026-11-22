@@ -34,6 +34,7 @@ import tqdm
 import comfy.float
 import comfy.hooks
 import comfy.lora
+import comfy.memory_management
 import comfy.model_management
 import comfy.model_prefetch
 import comfy.ops
@@ -1106,8 +1107,11 @@ class ModelPatcher:
                 logging.debug("lowvram: loaded module regularly {} {}".format(n, m))
                 m.comfy_patched_weights = True
 
-            for x in load_completely:
-                x[2].to(device_to)
+            if comfy.model_management.is_amd() and comfy.model_management.is_device_cuda(device_to):
+                comfy.memory_management.move_modules_reading_files([x[2] for x in load_completely], device_to)
+            else:
+                for x in load_completely:
+                    x[2].to(device_to)
 
             for x in offloaded:
                 n = x[1]
