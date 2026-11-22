@@ -1,4 +1,5 @@
 import copy
+import sys
 
 import pytest
 
@@ -486,6 +487,37 @@ def test_loop_executes_final_carried_value_without_output():
     }
     execute_prompt(prompt, "carry-only-loop-test", ["close"])
     assert Increment.calls == [1, 2]
+
+
+def test_loop_runs_more_passes_than_the_recursion_limit_allows():
+    # Each pass chains onto the one before, so 200 passes go deeper than a 300-frame limit.
+    limit = sys.getrecursionlimit()
+    Increment.calls = []
+    Capture.values = []
+    prompt = {
+        "initial": {"class_type": "TestConstant", "inputs": {"value": 0}},
+        "loop": {
+            "class_type": "StartLoop",
+            "inputs": {"mode": "simple", "mode.num_iterations": 200, "initial_iteration_value": ["initial", 0]},
+        },
+        "increment": {"class_type": "TestIncrement", "inputs": {"value": ["loop", 4]}},
+        "close": {
+            "class_type": "EndLoop",
+            "inputs": {
+                "output_value": ["increment", 0],
+                "next_iteration_value": ["increment", 0],
+                "accumulate": False,
+            },
+        },
+        "capture": {"class_type": "TestCapture", "inputs": {"value": ["close", 0]}},
+    }
+    sys.setrecursionlimit(300)
+    try:
+        execute_prompt(prompt, "long-loop-test", ["capture"])
+    finally:
+        sys.setrecursionlimit(limit)
+    assert len(Increment.calls) == 200
+    assert Capture.values == [200]
 
 
 def test_loop_carries_every_item_of_a_heterogeneous_list():
