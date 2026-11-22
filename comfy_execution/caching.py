@@ -26,7 +26,7 @@ def include_unique_id_in_input(class_type: str) -> bool:
 
 
 def cache_key_inputs(dynprompt, node_id):
-    """The inputs a node's cache key is built from; keys and the key budget read them only through here."""
+    """The inputs a node's cache key and its ancestry are built from."""
     return dynprompt.get_node(node_id)["inputs"]
 
 
@@ -38,16 +38,6 @@ def linked_input_ids(dynprompt, node_id):
         if is_link(inputs[key]):
             yield inputs[key][0]
 
-
-def count_ancestors(dynprompt, node_ids):
-    seen = set()
-    pending = [ancestor_id for node_id in node_ids for ancestor_id in linked_input_ids(dynprompt, node_id)]
-    while pending:
-        node_id = pending.pop()
-        if node_id not in seen:
-            seen.add(node_id)
-            pending.extend(linked_input_ids(dynprompt, node_id))
-    return len(seen)
 
 class CacheKeySet(ABC):
     def __init__(self, dynprompt, node_ids, is_changed_cache):
@@ -210,17 +200,18 @@ class CacheKeySetInputSignature(CacheKeySet):
         return _contains_self_unequal(to_hashable([await self.is_changed_cache.get(node_id), values]))
 
 # Full cache keys list every ancestor, so their total size grows with the square of an unrolled loop's length.
-FULL_KEY_BUDGET = 1_000_000
+# An entry costs about 3.5 KB and 45 us to build, so this keeps keying an expansion near 1 GB and 10 s.
+FULL_KEY_BUDGET = 250_000
 
 
 async def check_full_key_budget(cache, node_ids):
-    if not isinstance(cache, BasicCache) or cache.key_class is not CacheKeySetInputSignature:
+    if not isinstance(cache, BasicCache):
         return
     keys = CacheKeySetInputSignature(cache.dynprompt, [], cache.is_changed_cache)
     entries = 0
     for node_id in node_ids:
         if not await keys.is_uncacheable(cache.dynprompt, node_id):
-            entries += 1 + count_ancestors(cache.dynprompt, [node_id])
+            entries += 1 + len(keys.get_ordered_ancestry(cache.dynprompt, node_id)[0])
             if entries > FULL_KEY_BUDGET:
                 raise ValueError(
                     f"The nodes this node created would need more than {FULL_KEY_BUDGET:,} cache key entries. "

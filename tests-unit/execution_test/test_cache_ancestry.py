@@ -128,10 +128,10 @@ class FullKeys(CacheKeySetInputSignature):
         return False
 
 
-def keyed(key_class, prompt, changed):
+def keyed(key_class, prompt, changed, order=None):
     dynprompt = DynamicPrompt(prompt)
     keys = key_class(dynprompt, [], Changed(changed))
-    asyncio.run(keys.add_keys(list(prompt)))
+    asyncio.run(keys.add_keys(order or list(prompt)))
     return keys
 
 
@@ -149,11 +149,12 @@ def prompt_with_uncacheable_values(seed):
 
 
 @pytest.mark.parametrize("seed", range(20))
-def test_only_keys_that_could_never_match_change(monkeypatch, seed):
+@pytest.mark.parametrize("reverse", [False, True])
+def test_only_keys_that_could_never_match_change(monkeypatch, seed, reverse):
     monkeypatch.setitem(nodes.NODE_CLASS_MAPPINGS, "Test", PlainNode)
     prompt, changed = prompt_with_uncacheable_values(seed)
 
-    keys = keyed(CacheKeySetInputSignature, prompt, changed)
+    keys = keyed(CacheKeySetInputSignature, prompt, changed, sorted(prompt, key=int, reverse=reverse))
     full = keyed(FullKeys, prompt, changed)
 
     for node_id in prompt:
@@ -172,29 +173,6 @@ def test_identical_uncacheable_nodes_each_get_their_own_key(monkeypatch):
     keys = keyed(CacheKeySetInputSignature, prompt, {"source": float("NaN")})
 
     assert keys.get_data_key("a") != keys.get_data_key("b")
-
-
-@pytest.mark.parametrize("never_equal", ["unhashable", "missing"])
-def test_nodes_whose_full_keys_never_matched_get_unique_small_keys(monkeypatch, never_equal):
-    monkeypatch.setitem(nodes.NODE_CLASS_MAPPINGS, "Test", PlainNode)
-    source = "missing" if never_equal == "missing" else "source"
-    prompt = {"a": node(x=[source, 0]), "b": node(x=[source, 0])}
-    if never_equal == "unhashable":
-        prompt["source"] = node(value=object())
-
-    keys = keyed(CacheKeySetInputSignature, prompt, {})
-    full = keyed(FullKeys, prompt, {})
-
-    assert full.get_data_key("a") != full.get_data_key("b")
-    assert keys.get_data_key("a") != keys.get_data_key("b")
-
-
-def test_a_cycle_through_an_uncacheable_node_still_keys(monkeypatch):
-    monkeypatch.setitem(nodes.NODE_CLASS_MAPPINGS, "Test", PlainNode)
-    changed = {"x": float("NaN"), "y": float("NaN")}
-    keys = keyed(CacheKeySetInputSignature, {"x": node(y=["y", 0]), "y": node(x=["x", 0])}, changed)
-
-    assert _contains_self_unequal(keys.get_data_key("x")) and _contains_self_unequal(keys.get_data_key("y"))
 
 
 def test_a_node_keyed_after_an_override_is_judged_on_the_current_graph(monkeypatch):

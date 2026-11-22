@@ -499,28 +499,7 @@ def test_loop_runs_more_passes_than_the_recursion_limit_allows():
     depth = len(inspect.stack(0))
     Increment.calls = []
     Capture.values = []
-    prompt = {
-        "initial": {"class_type": "TestConstant", "inputs": {"value": 0}},
-        "loop": {
-            "class_type": "StartLoop",
-            "inputs": {
-                "mode": "simple",
-                "mode.num_iterations": 200,
-                "initial_iteration_value": ["initial", 0],
-                "cache_iterations": True,
-            },
-        },
-        "increment": {"class_type": "TestIncrement", "inputs": {"value": ["loop", 4]}},
-        "close": {
-            "class_type": "EndLoop",
-            "inputs": {
-                "output_value": ["increment", 0],
-                "next_iteration_value": ["increment", 0],
-                "accumulate": False,
-            },
-        },
-        "capture": {"class_type": "TestCapture", "inputs": {"value": ["close", 0]}},
-    }
+    prompt = carried_loop(200, cache_iterations=True)
     sys.setrecursionlimit(depth + 150)
     try:
         execute_prompt(prompt, "long-loop-test", ["capture"])
@@ -566,12 +545,15 @@ def count_calls(monkeypatch, name):
 def test_uncached_loop_keys_in_work_linear_in_its_length(monkeypatch):
     Capture.values = []
     signature_parts = count_calls(monkeypatch, "get_immediate_node_signature")
+    classified = count_calls(monkeypatch, "is_immediately_uncacheable")
     monkeypatch.setattr(caching, "FULL_KEY_BUDGET", 1)
+    prompt = carried_loop(500)
 
-    execute_prompt(carried_loop(500), "long-uncached-loop", ["capture"])
+    execute_prompt(prompt, "long-uncached-loop", ["capture"])
 
     assert Capture.values == [500]
-    assert sum(signature_parts.values()) < 2 * len(signature_parts), "every pass is uncacheable, so no key lists its ancestors"
+    assert set(signature_parts) <= set(prompt), "every pass is uncacheable, so only submitted nodes get full keys"
+    assert max(classified.values()) <= 3, "each key set classifies a node once"
 
 
 def test_ram_pressure_cache_keys_each_unrolled_node_once(monkeypatch):
