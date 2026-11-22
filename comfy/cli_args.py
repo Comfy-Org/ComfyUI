@@ -113,8 +113,6 @@ parser.add_argument("--fp16-intermediates", action="store_true", help="Experimen
 
 parser.add_argument("--force-channels-last", action="store_true", help="Force channels last format when inferencing the models.")
 
-parser.add_argument("--directml", type=int, nargs="?", metavar="DIRECTML_DEVICE", const=-1, help="Use torch-directml.")
-
 parser.add_argument("--oneapi-device-selector", type=str, default=None, metavar="SELECTOR_STRING", help="Sets the oneAPI device(s) this instance will use.")
 parser.add_argument("--supports-fp8-compute", action="store_true", help="ComfyUI will act like if the device supports fp8 compute.")
 parser.add_argument("--enable-triton-backend", action="store_true", help="ComfyUI will enable the use of Triton backend in comfy-kitchen. Is disabled at launch by default.")
@@ -143,6 +141,8 @@ cache_group.add_argument("--cache-classic", action="store_true", help="Use the o
 cache_group.add_argument("--cache-lru", type=int, default=0, help="Use LRU caching with a maximum of N node results cached. May use more RAM/VRAM.")
 cache_group.add_argument("--cache-none", action="store_true", help="Reduced RAM/VRAM usage at the expense of executing every node for each run.")
 cache_group.add_argument("--high-ram", action="store_true", help="Can improve performance slightly on high RAM or on systems where pagefile use is preferred over model loading.")
+
+parser.add_argument("--force-output-rerun", action="store_true", help="Re-execute output nodes (OUTPUT_NODE=True) on every run even when their result is cached, so they write their output files again. Upstream nodes stay cached. API nodes are excluded because re-running them repeats a paid external call. Intended for multi-tenant servers that remove output files after each job.")
 
 attn_group = parser.add_mutually_exclusive_group()
 attn_group.add_argument("--use-split-cross-attention", action="store_true", help="Use the split cross attention optimization. Ignored when xformers is used.")

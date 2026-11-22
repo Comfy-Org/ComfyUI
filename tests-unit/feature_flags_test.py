@@ -213,6 +213,19 @@ class TestCliFeatureFlagRegistry:
         monkeypatch.setattr("comfy_api.feature_flags.args", type("Args", (), {"feature_flag": ["node_replacements=false"]})())
         assert _server_feature_flags()["node_replacements"] is True
 
+    def test_server_features_report_a_boot_id(self):
+        boot_id = get_server_features()["server_boot_id"]
+        assert isinstance(boot_id, str)
+        assert len(boot_id) == 32
+
+    def test_boot_id_is_stable_within_a_process(self, monkeypatch):
+        monkeypatch.setattr("comfy_api.feature_flags.args", type("Args", (), {"feature_flag": []})())
+        assert _server_feature_flags()["server_boot_id"] == get_server_features()["server_boot_id"]
+
+    def test_cli_flags_cannot_override_the_boot_id(self, monkeypatch):
+        monkeypatch.setattr("comfy_api.feature_flags.args", type("Args", (), {"feature_flag": ["server_boot_id=fixed"]})())
+        assert _server_feature_flags()["server_boot_id"] != "fixed"
+
     def test_registry_entries_have_required_fields(self):
         for key, info in CLI_FEATURE_FLAG_REGISTRY.items():
             assert "type" in info, f"{key} missing 'type'"

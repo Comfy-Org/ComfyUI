@@ -16,8 +16,37 @@ class PrunaVideoInput(BaseModel):
     audio: str | None = Field(None)
 
 
+class PrunaReferenceVideoInput(BaseModel):
+    prompt: str = Field(...)
+    image: list[str] | None = Field(None)
+    video: list[str] | None = Field(None)
+    audio: list[str] | None = Field(None)
+    keep_audio: bool = Field(...)
+    first_frame_image: str | None = Field(None)
+    last_frame_image: str | None = Field(None)
+    duration: int = Field(...)
+    resolution: str = Field(...)
+    mode: str = Field(...)
+    aspect_ratio: str = Field(...)
+    prompt_upsampler: str = Field(...)
+    seed: int = Field(...)
+
+
+class PrunaAvatarInput(BaseModel):
+    image: str = Field(...)
+    audio: str | None = Field(None)
+    voice_script: str | None = Field(None)
+    voice: str | None = Field(None)
+    voice_language: str | None = Field(None)
+    voice_prompt: str | None = Field(None)
+    prompt: str | None = Field(None)
+    prompt_upsampling: bool = Field(...)
+    resolution: str = Field(...)
+    seed: int = Field(...)
+
+
 class PrunaPredictionRequest(BaseModel):
-    input: PrunaVideoInput = Field(...)
+    input: PrunaVideoInput | PrunaReferenceVideoInput | PrunaAvatarInput = Field(...)
 
 
 class PrunaUpscaleInput(BaseModel):
