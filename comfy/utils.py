@@ -23,6 +23,7 @@ import struct
 import ctypes
 import os
 import sys
+import mmap
 import comfy.memory_management
 import comfy.storage
 from comfy.anonymous_file import create_anonymous_file
@@ -163,9 +164,8 @@ def load_safetensors(ckpt):
         # The comfy-aimdo native library is only available on Windows/Linux;
         # fall back to a Python mmap so the weights stay in evictable file
         # pages instead of being copied into anonymous memory.
-        import mmap as _mmap
         f = open(ckpt, "rb")
-        mm = _mmap.mmap(f.fileno(), 0, access=_mmap.ACCESS_COPY)
+        mm = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_COPY)
         model_mmap = _PyMMapShim(mm)
         mv = memoryview(mm)
 
@@ -225,7 +225,7 @@ def load_torch_file(ckpt, safe_load=False, device=None, return_metadata=False):
     metadata = None
     if ckpt.lower().endswith(".safetensors") or ckpt.lower().endswith(".sft"):
         try:
-            if comfy.memory_management.aimdo_enabled or (MMAP_TORCH_FILES and sys.platform == "darwin"):
+            if comfy.memory_management.aimdo_enabled or (MMAP_TORCH_FILES and sys.platform == "darwin" and device.type == "cpu"):
                 sd, metadata = load_safetensors(ckpt)
                 if not return_metadata:
                     metadata = None

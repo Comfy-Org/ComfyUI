@@ -1014,7 +1014,7 @@ def load_models_gpu(models, memory_required=0, force_patch_weights=False, minimu
         else:
             vram_set_state = vram_state
         lowvram_model_memory = 0
-        if vram_set_state == VRAMState.SHARED and (args.lowvram or args.novram):
+        if vram_set_state == VRAMState.SHARED and (args.lowvram or args.novram) and not force_full_load:
             # Honor the explicit --lowvram/--novram flags on MPS instead of
             # always loading the whole model into the shared memory pool,
             # which OOMs when the model is larger than the unified memory.
