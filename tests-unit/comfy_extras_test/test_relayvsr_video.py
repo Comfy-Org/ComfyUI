@@ -1,3 +1,4 @@
+import os
 from fractions import Fraction
 from types import SimpleNamespace
 
@@ -100,6 +101,24 @@ def test_relayvsr_save_keeps_concurrent_output(relay_video, tmp_path, monkeypatc
     assert first.read_bytes() == b"another completed output"
     with av.open(str(tmp_path / entry["filename"])) as video:
         assert len(list(video.decode(video=0))) == 1
+
+
+@torch.inference_mode()
+@pytest.mark.skipif(os.name == "nt", reason="Windows uses non-overwriting rename")
+def test_relayvsr_rejects_output_without_hard_links(relay_video, tmp_path, monkeypatch):
+    vae, samples, images = relay_video(2, 1)
+
+    def unsupported_link(*args, **kwargs):
+        raise OSError("Operation not supported")
+
+    def forbid_decode(*args, **kwargs):
+        pytest.fail("Filesystem check must fail before decoding")
+
+    monkeypatch.setattr(os, "link", unsupported_link)
+    monkeypatch.setattr(vae.first_stage_model, "iter_decode_frames", forbid_decode)
+    with pytest.raises(RuntimeError, match="Choose an output directory that supports hard links"):
+        VSRDecodeAndSave.execute(vae, {"samples": samples}, images, 24, "test")
+    assert not list(tmp_path.iterdir())
 
 
 @torch.inference_mode()

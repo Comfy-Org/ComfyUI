@@ -1568,9 +1568,21 @@ class VSRDecodeAndSave(io.ComfyNode):
             filename_prefix, folder_paths.get_output_directory(), width, height
         )
         file = f"{filename}_{counter:05}_.mp4"
+        # Rename refuses to overwrite on Windows. Elsewhere, link the completed file into place.
+        publish = os.rename if os.name == "nt" else os.link
         # Publish only after both streams have been finalized successfully.
         with tempfile.TemporaryDirectory(dir=folder, prefix=".vsr-") as temp_folder, comfy.model_management.cuda_device_context(vae.device):
             path = os.path.join(temp_folder, file)
+            if os.name != "nt":
+                # Check the output filesystem before decoding a potentially long video.
+                with open(path, "xb"):
+                    pass
+                probe = os.path.join(temp_folder, "link-probe")
+                try:
+                    publish(path, probe)
+                except OSError as error:
+                    raise RuntimeError(f"VSR Decode and Save Video could not create a hard link in the output directory. Choose an output directory that supports hard links. {error}") from error
+                os.unlink(probe)
             with av.open(path, mode="w", options={"movflags": "use_metadata_tags+faststart"}) as output:
                 if not args.disable_metadata and cls.hidden is not None:
                     for key, value in (cls.hidden.extra_pnginfo or {}).items():
@@ -1605,8 +1617,6 @@ class VSRDecodeAndSave(io.ComfyNode):
                     frame.pts = 0
                     output.mux(audio_stream.encode(frame))
                     output.mux(audio_stream.encode(None))
-            # Rename refuses to overwrite on Windows. Elsewhere, link the completed file into place.
-            publish = os.rename if os.name == "nt" else os.link
             while True:
                 comfy.model_management.throw_exception_if_processing_interrupted()
                 try:
