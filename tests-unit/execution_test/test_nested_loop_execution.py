@@ -582,7 +582,7 @@ def test_cached_loop_over_the_key_budget_fails_before_running(monkeypatch, cache
 
     assert not executor.success
     errors = [data["exception_message"] for event, data in executor.status_messages if event == "execution_error"]
-    assert len(errors) == 1 and "turn off cache iterations" in errors[0]
+    assert len(errors) == 1 and "Turn off cache iterations" in errors[0]
     assert Increment.calls == []
 
 

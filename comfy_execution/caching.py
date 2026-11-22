@@ -103,6 +103,8 @@ class CacheKeySetInputSignature(CacheKeySet):
         # Small keys hold this value, unequal to itself, so they never match another prompt and providers skip them.
         self.small_key_marker = float("NaN")
         self.uncacheable = {}
+        # Full-key entries built for this prompt's expansions, all of which stay held until the next prompt.
+        self.full_key_entries = 0
 
     def include_node_id_in_input(self) -> bool:
         return False
@@ -208,15 +210,17 @@ async def check_full_key_budget(cache, node_ids):
     if not isinstance(cache, BasicCache):
         return
     keys = CacheKeySetInputSignature(cache.dynprompt, [], cache.is_changed_cache)
-    entries = 0
+    entries = cache.cache_key_set.full_key_entries
     for node_id in node_ids:
         if not await keys.is_uncacheable(cache.dynprompt, node_id):
             entries += 1 + len(keys.get_ordered_ancestry(cache.dynprompt, node_id)[0])
             if entries > FULL_KEY_BUDGET:
                 raise ValueError(
-                    f"The nodes this node created would need more than {FULL_KEY_BUDGET:,} cache key entries. "
-                    "If it is a Start Loop, turn off cache iterations or run fewer passes at a time."
+                    "This prompt's loops with cache iterations on have unrolled too far to cache: their cache keys "
+                    f"would need more than {FULL_KEY_BUDGET:,} entries (about 350 passes of a one-node loop body in "
+                    "total). Turn off cache iterations, or run fewer passes at a time."
                 )
+    cache.cache_key_set.full_key_entries = entries
 
 
 class BasicCache:

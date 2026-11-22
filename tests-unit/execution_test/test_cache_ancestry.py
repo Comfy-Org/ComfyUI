@@ -206,8 +206,26 @@ def test_key_budget_counts_ancestors_outside_the_new_nodes(monkeypatch):
     monkeypatch.setattr(caching, "FULL_KEY_BUDGET", 102)
     asyncio.run(caching.check_full_key_budget(cache, ["new_a", "new_b"]))
     monkeypatch.setattr(caching, "FULL_KEY_BUDGET", 101)
-    with pytest.raises(ValueError, match="turn off cache iterations"):
+    with pytest.raises(ValueError, match="Turn off cache iterations"):
         asyncio.run(caching.check_full_key_budget(cache, ["new_a", "new_b"]))
+
+
+def test_key_budget_adds_up_every_expansion_in_a_prompt(monkeypatch):
+    monkeypatch.setitem(nodes.NODE_CLASS_MAPPINGS, "Test", PlainNode)
+    prompt = {"0": node()}
+    for index in range(1, 50):
+        prompt[str(index)] = node(value=[str(index - 1), 0])
+    prompt.update({"new_a": node(x=["49", 0]), "new_b": node(x=["49", 0])})
+    cache = caching.HierarchicalCache(CacheKeySetInputSignature)
+    asyncio.run(cache.set_prompt(DynamicPrompt(prompt), [], Changed({})))
+    monkeypatch.setattr(caching, "FULL_KEY_BUDGET", 60)
+
+    asyncio.run(caching.check_full_key_budget(cache, ["new_a"]))
+    with pytest.raises(ValueError, match="Turn off cache iterations"):
+        asyncio.run(caching.check_full_key_budget(cache, ["new_b"]))
+
+    asyncio.run(cache.set_prompt(DynamicPrompt(prompt), [], Changed({})))
+    asyncio.run(caching.check_full_key_budget(cache, ["new_a"]))
 
 
 def test_key_budget_accepts_a_wide_expansion_of_independent_nodes(monkeypatch):
