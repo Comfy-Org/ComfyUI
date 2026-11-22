@@ -27,6 +27,8 @@ from comfy_api_nodes.apis.bytedance import (
     MediaKitTaskCreateResponse,
     MediaKitTaskResponse,
     MediaKitVideoEnhanceRequest,
+    OmniHumanTaskRequest,
+    OmniHumanTaskResponse,
     SeedAudioConfig,
     SeedAudioReference,
     SeedAudioRequest,
@@ -4086,6 +4088,111 @@ class ByteDanceVideoEnhanceNode(IO.ComfyNode):
         return IO.NodeOutput(await download_url_to_video_output(task.result.video_url))
 
 
+TALKING_AVATAR_ENDPOINTS = {"OmniHuman 2.0": "/proxy/byteplusomnihuman/v2/tasks"}
+
+
+class ByteDanceTalkingAvatarNode(IO.ComfyNode):
+
+    @classmethod
+    def define_schema(cls) -> IO.Schema:
+        return IO.Schema(
+            node_id="ByteDanceTalkingAvatarNode",
+            display_name="ByteDance Talking Avatar",
+            category="partner/video/ByteDance",
+            description="Animate a portrait into a lip-synced video of the person speaking or singing the audio.",
+            search_aliases=["OmniHuman", "lip sync", "talking head", "talking photo", "avatar"],
+            inputs=[
+                IO.DynamicCombo.Input(
+                    "model",
+                    options=[
+                        IO.DynamicCombo.Option(
+                            "OmniHuman 2.0",
+                            [
+                                IO.Image.Input(
+                                    "image",
+                                    tooltip="Portrait of the person or character to animate. "
+                                    "Each side 300-6000 px, aspect ratio between 1:2.5 and 2.5:1.",
+                                ),
+                                IO.Audio.Input(
+                                    "audio",
+                                    tooltip="Speech or singing that drives the video, 4 to 300 seconds. "
+                                    "The video is as long as the audio, rounded up to whole seconds.",
+                                ),
+                                IO.String.Input(
+                                    "prompt",
+                                    multiline=True,
+                                    default="",
+                                    tooltip="Optional direction for movement, emotion and camera. "
+                                    "With several people in the image, say who speaks, e.g. "
+                                    "'Only the woman on the right is speaking.' A dialogue with two voices "
+                                    "is split between two people automatically.",
+                                ),
+                                IO.Int.Input(
+                                    "seed",
+                                    default=42,
+                                    min=0,
+                                    max=2147483647,
+                                    step=1,
+                                    display_mode=IO.NumberDisplay.number,
+                                    control_after_generate=True,
+                                    tooltip="Seed controls whether the node should re-run; "
+                                    "results are non-deterministic regardless of seed.",
+                                ),
+                            ],
+                        ),
+                    ],
+                ),
+            ],
+            outputs=[IO.Video.Output()],
+            hidden=[
+                IO.Hidden.auth_token_comfy_org,
+                IO.Hidden.api_key_comfy_org,
+                IO.Hidden.unique_id,
+            ],
+            is_api_node=True,
+            price_badge=IO.PriceBadge(
+                expr="""{"type":"usd","usd":0.1001,"format":{"suffix":"/second"}}""",
+            ),
+        )
+
+    @classmethod
+    async def execute(cls, model: dict) -> IO.NodeOutput:
+        image = model["image"]
+        audio = model["audio"]
+        validate_image_dimensions(image, min_width=300, max_width=6000, min_height=300, max_height=6000)
+        validate_image_aspect_ratio(image, (1, 2.5), (2.5, 1), strict=False)
+        validate_audio_duration(audio, min_duration=4, max_duration=300)
+        endpoint = TALKING_AVATAR_ENDPOINTS[model["model"]]
+        request = OmniHumanTaskRequest(
+            image_urls=[await upload_image_to_comfyapi(cls, image, wait_label="Uploading image")],
+            audio_url=await upload_audio_to_comfyapi(
+                cls, audio, container_format="mp3", codec_name="libmp3lame", mime_type="audio/mpeg"
+            ),
+            prompt=model["prompt"].strip() or None,
+            enable_watermark=False,
+        )
+        created = await sync_op(
+            cls,
+            ApiEndpoint(path=endpoint, method="POST"),
+            response_model=OmniHumanTaskResponse,
+            data=request,
+        )
+        if not created.data or not created.data.task_id:
+            raise ValueError(f"Task submission failed: {created.message or created.code}")
+        task = await poll_op(
+            cls,
+            ApiEndpoint(path=f"{endpoint}/{created.data.task_id}"),
+            response_model=OmniHumanTaskResponse,
+            status_extractor=lambda r: r.data.status if str(r.code) == "10000" and r.data else "failed",
+            completed_statuses=["done"],
+            failed_statuses=["failed", "not_found", "expired", "canceled"],
+            queued_statuses=["in_queue"],
+            poll_interval=10.0,
+            max_poll_attempts=720,
+        )
+        return IO.NodeOutput(await download_url_to_video_output(task.data.video_url))
+
+
 class ByteDanceExtension(ComfyExtension):
     @override
     async def get_node_list(self) -> list[type[IO.ComfyNode]]:
@@ -4107,6 +4214,7 @@ class ByteDanceExtension(ComfyExtension):
             ByteDanceCreateVideoAsset,
             ByteDanceSeedAudioNode,
             ByteDanceVideoEnhanceNode,
+            ByteDanceTalkingAvatarNode,
         ]
 
 

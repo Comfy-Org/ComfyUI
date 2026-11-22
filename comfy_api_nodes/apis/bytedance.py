@@ -466,3 +466,22 @@ class MediaKitTaskResponse(BaseModel):
     status: str | None = Field(None)
     result: MediaKitTaskResult | None = Field(None)
     error: MediaKitError | None = Field(None)
+
+
+class OmniHumanTaskRequest(BaseModel):
+    image_urls: list[str] = Field(...)
+    audio_url: str = Field(...)
+    prompt: str | None = Field(None)
+    enable_watermark: bool = Field(...)
+
+
+class OmniHumanTaskData(BaseModel):
+    task_id: str | None = Field(None)
+    status: str | None = Field(None)
+    video_url: str | None = Field(None)
+
+
+class OmniHumanTaskResponse(BaseModel):
+    code: int | str | None = Field(None)
+    message: str | None = Field(None)
+    data: OmniHumanTaskData | None = Field(None)
