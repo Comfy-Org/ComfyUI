@@ -21,7 +21,9 @@ def include_unique_id_in_input(class_type: str) -> bool:
     if class_type in NODE_CLASS_CONTAINS_UNIQUE_ID:
         return NODE_CLASS_CONTAINS_UNIQUE_ID[class_type]
     class_def = nodes.NODE_CLASS_MAPPINGS[class_type]
-    NODE_CLASS_CONTAINS_UNIQUE_ID[class_type] = "UNIQUE_ID" in class_def.INPUT_TYPES().get("hidden", {}).values()
+    hidden = class_def.INPUT_TYPES().get("hidden", {}).values()
+    # V3 schemas list a hidden input as a one-item tuple, V1 nodes as a plain string.
+    NODE_CLASS_CONTAINS_UNIQUE_ID[class_type] = any(value in ("UNIQUE_ID", ("UNIQUE_ID",)) for value in hidden)
     return NODE_CLASS_CONTAINS_UNIQUE_ID[class_type]
 
 class CacheKeySet(ABC):
