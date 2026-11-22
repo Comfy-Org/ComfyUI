@@ -21,11 +21,9 @@ from comfy_api_nodes.util import (
 )
 from server import PromptServer
 
-JEV_MAX_IMAGES = 4
-JEV_PICK_MAX_IMAGES = 32
-JEV_PICK_IMAGE_SIDES = ((4, 1568), (8, 1024), (16, 768), (32, 512))
+JEV_MAX_IMAGES = 32
+JEV_IMAGE_SIDES = ((4, 1568), (8, 1024), (16, 768), (32, 512))
 JEV_MIN_IMAGE_SIDE = 280
-JEV_MAX_IMAGE_SIDE = 1568
 JEV_PRICE_BADGE = IO.PriceBadge(
     expr="""{"type":"usd","usd":0.06006,"format":{"approximate":true,"suffix":" per 1M tokens"}}""",
 )
@@ -52,7 +50,8 @@ def _jev_inputs() -> list[Input]:
                 min=0,
             ),
             optional=True,
-            tooltip=f"The images the question is about. Up to {JEV_MAX_IMAGES} images in total.",
+            tooltip=f"The images the question is about. Up to {JEV_MAX_IMAGES} images in total; "
+            "more than 4 are sent at a smaller size.",
         ),
         IO.String.Input(
             "text",
@@ -67,8 +66,9 @@ def _jev_inputs() -> list[Input]:
 def _jev_state(
     text: str,
     images: dict[str, Input.Image],
-    max_side: int,
 ) -> tuple[dict[str, str | list[str]], dict[str, TypeSafeImageAsset]]:
+    count = sum(get_number_of_images(image) for image in images.values())
+    max_side = next(side for limit, side in JEV_IMAGE_SIDES if count <= limit)
     state: dict[str, str | list[str]] = {}
     if text.strip():
         state["text"] = text.strip()
@@ -181,7 +181,7 @@ class TypeSafeJevYesNo(IO.ComfyNode):
     ) -> IO.NodeOutput:
         validate_string(question, field_name="question", min_length=1, max_length=1000)
         validate_string(text, field_name="text", max_length=3000)
-        state, assets = _jev_state(text, _connected_images(images), JEV_MAX_IMAGE_SIDE)
+        state, assets = _jev_state(text, _connected_images(images))
         answer = await _run_jev(cls, model, TypeSafeNoulQuestion(instructions=question.strip()), state, assets)
         result = answer.noul >= threshold
         verdict = "yes" if result else "no"
@@ -250,7 +250,7 @@ class TypeSafeJevChoice(IO.ComfyNode):
         validate_string(question, field_name="question", min_length=1, max_length=1000)
         validate_string(text, field_name="text", max_length=3000)
         names = _parse_options(options)
-        state, assets = _jev_state(text, _connected_images(images), JEV_MAX_IMAGE_SIDE)
+        state, assets = _jev_state(text, _connected_images(images))
         answer = await _run_jev(
             cls,
             model,
@@ -281,7 +281,7 @@ class TypeSafeJevPickImage(IO.ComfyNode):
                     "If there is no text, which image has the best quality?",
                     tooltip="Which image to pick. Connect the prompt to `text` to pick the image that matches it best.",
                 ),
-                IO.Image.Input("images", tooltip=f"The images to choose from, 2 to {JEV_PICK_MAX_IMAGES}."),
+                IO.Image.Input("images", tooltip=f"The images to choose from, 2 to {JEV_MAX_IMAGES}."),
                 IO.String.Input(
                     "text",
                     multiline=True,
@@ -320,11 +320,10 @@ class TypeSafeJevPickImage(IO.ComfyNode):
         validate_string(question, field_name="question", min_length=1, max_length=1000)
         validate_string(text, field_name="text", max_length=3000)
         count = get_number_of_images(images)
-        if not 2 <= count <= JEV_PICK_MAX_IMAGES:
-            raise ValueError(f"Pick Image takes 2 to {JEV_PICK_MAX_IMAGES} images, got {count}.")
+        if not 2 <= count <= JEV_MAX_IMAGES:
+            raise ValueError(f"Pick Image takes 2 to {JEV_MAX_IMAGES} images, got {count}.")
         names = [f"image_{i}" for i in range(1, count + 1)]
-        side = next(side for limit, side in JEV_PICK_IMAGE_SIDES if count <= limit)
-        state, assets = _jev_state(text, {name: images[i : i + 1] for i, name in enumerate(names)}, side)
+        state, assets = _jev_state(text, {name: images[i : i + 1] for i, name in enumerate(names)})
         answer = await _run_jev(
             cls,
             model,
@@ -391,7 +390,7 @@ class TypeSafeJevScore(IO.ComfyNode):
     ) -> IO.NodeOutput:
         validate_string(question, field_name="question", min_length=1, max_length=1000)
         validate_string(text, field_name="text", max_length=3000)
-        state, assets = _jev_state(text, _connected_images(images), JEV_MAX_IMAGE_SIDE)
+        state, assets = _jev_state(text, _connected_images(images))
         answer = await _run_jev(
             cls,
             model,
