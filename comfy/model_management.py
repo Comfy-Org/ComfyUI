@@ -1660,6 +1660,17 @@ def discard_cuda_async_error():
         #Dump it! We already know about it from the synchronous return
         pass
 
+def weight_staging_bytes(device):
+    """Pinned bytes the legacy loader may stage file reads through for ``device``, or 0.
+
+    Only ROCm needs it (see memory_management.move_modules_reading_files). It follows the
+    pinned-memory policy (--disable-pinned-memory, integrated GPUs) and stays within the
+    unused part of the pinning budget, capped at 512 MiB.
+    """
+    if not is_amd() or not is_device_cuda(device) or MAX_PINNED_MEMORY <= 0:
+        return 0
+    return int(max(0, min(512 * 1024 * 1024, MAX_PINNED_MEMORY - TOTAL_PINNED_MEMORY)))
+
 def pin_memory(tensor, evict_active=True):
     global TOTAL_PINNED_MEMORY
     if MAX_PINNED_MEMORY <= 0:

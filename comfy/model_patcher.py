@@ -1107,8 +1107,9 @@ class ModelPatcher:
                 logging.debug("lowvram: loaded module regularly {} {}".format(n, m))
                 m.comfy_patched_weights = True
 
-            if comfy.model_management.is_amd() and comfy.model_management.is_device_cuda(device_to):
-                comfy.memory_management.move_modules_reading_files([x[2] for x in load_completely], device_to)
+            staging = comfy.model_management.weight_staging_bytes(device_to)
+            if staging > 0:
+                comfy.memory_management.move_modules_reading_files([x[2] for x in load_completely], device_to, staging)
             else:
                 for x in load_completely:
                     x[2].to(device_to)

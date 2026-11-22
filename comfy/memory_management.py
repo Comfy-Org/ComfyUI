@@ -157,7 +157,9 @@ def _mmap_file_slice_tensors(module, seen):
                 if t is None or id(t) in seen:
                     continue
                 seen.add(id(t))
-                src = t._qdata if isinstance(t, QuantizedTensor) else t
+                # .data is a separate tensor on the same storage, so it still points at the
+                # mmap after the holder is swapped to its pinned copy.
+                src = t._qdata if isinstance(t, QuantizedTensor) else t.data
                 info = getattr(src.untyped_storage(), "_comfy_mmap_file_slice", None)
                 if (info is not None and src.device.type == "cpu" and src.storage_offset() == 0
                         and src.is_contiguous() and src.nbytes == info.size):
@@ -165,14 +167,15 @@ def _mmap_file_slice_tensors(module, seen):
     return found
 
 
-def move_modules_reading_files(modules, device, workers=4, prefetch=8):
+def move_modules_reading_files(modules, device, max_staged_bytes, workers=4):
     """module.to(device) for each module, reading its mmap'd weights from their file first.
 
     ROCm copies pageable host memory to the GPU by locking the source pages, which
     runs at about 2.3 GB/s from an mmap'd checkpoint. Reading the file into pinned
-    memory and copying from there is several times faster. Up to ``prefetch``
-    modules are read ahead on ``workers`` threads while earlier ones are copied.
-    Tensors without a file slice, or whose read fails, move as before.
+    memory and copying from there is several times faster. Modules are read ahead on
+    ``workers`` threads while earlier ones are copied, with at most
+    ``max_staged_bytes`` of pinned staging in flight; a module larger than that, and
+    tensors without a file slice or whose read fails, move as before.
     """
     def read(found):
         staged = []
@@ -203,16 +206,30 @@ def move_modules_reading_files(modules, device, workers=4, prefetch=8):
                 holder.data = src
 
     pending = collections.deque()
+    in_flight = 0
     seen = set()
+
+    def finish_oldest():
+        nonlocal in_flight
+        module, size, staged = pending.popleft()
+        move(module, staged.result())
+        in_flight -= size
+
     with ThreadPoolExecutor(workers) as pool:
         for module in modules:
-            pending.append((module, pool.submit(read, _mmap_file_slice_tensors(module, seen))))
-            if len(pending) > prefetch:
-                module, staged = pending.popleft()
-                move(module, staged.result())
+            found = _mmap_file_slice_tensors(module, seen)
+            size = sum(info.size for _, _, info in found)
+            if size > max_staged_bytes:
+                while pending:
+                    finish_oldest()
+                module.to(device)
+                continue
+            while pending and in_flight + size > max_staged_bytes:
+                finish_oldest()
+            pending.append((module, size, pool.submit(read, found)))
+            in_flight += size
         while pending:
-            module, staged = pending.popleft()
-            move(module, staged.result())
+            finish_oldest()
 
 
 class TensorGeometry(NamedTuple):

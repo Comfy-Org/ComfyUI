@@ -1059,6 +1059,10 @@ def copy_to_param(obj, attr, value):
         obj = getattr(obj, name)
     prev = getattr(obj, attrs[-1])
     prev.data.copy_(value)
+    # The storage no longer holds the file's bytes, so it must not be re-read from the file.
+    storage = (prev._qdata if hasattr(prev, "_qdata") else prev).untyped_storage()
+    if hasattr(storage, "_comfy_mmap_file_slice"):
+        del storage._comfy_mmap_file_slice
 
 def get_attr(obj, attr: str):
     """Retrieves a nested attribute from an object using dot notation.
