@@ -2,12 +2,14 @@ from fractions import Fraction
 from types import SimpleNamespace
 
 import av
+from av.video.reformatter import ColorPrimaries, ColorRange, ColorTrc
 import pytest
 import torch
 
 import comfy.model_management as model_management
 import folder_paths
 from comfy.ldm.wan.model_vsr import RelayFlash, relay_keyframes, relay_latent_size
+from comfy_api.latest._input_impl.video_types import BT709_NCL
 from comfy_extras.nodes_wan import VSRDecodeAndSave
 
 
@@ -22,7 +24,7 @@ def relay_video(tmp_path, monkeypatch):
             for param in decoder.parameters():
                 param.zero_()
         # Solid colors make the frame order easy to check even after lossy encoding.
-        images = torch.linspace(0.1, 0.9, count).view(count, 1, 1, 1).expand(count, 9, 11, 3)
+        images = (torch.linspace(0.1, 0.9, count).view(count, 1, 1, 1) * torch.tensor([1.0, 0.25, 0.125])).expand(count, 9, 11, 3)
         height, width = relay_latent_size(9, 11, decoder.latent_stride)
         samples = torch.zeros(1, 4, len(relay_keyframes(count)), height, width)
         vae = SimpleNamespace(
@@ -62,10 +64,15 @@ def test_relayvsr_streamed_video(relay_video, tmp_path, monkeypatch, scale, coun
         stream = video.streams.video[0]
         assert (stream.width, stream.height) == (11 * scale, 9 * scale)
         assert stream.average_rate == Fraction(2997, 100)
+        assert stream.codec_context.colorspace == BT709_NCL
+        assert stream.codec_context.color_primaries == ColorPrimaries.BT709
+        assert stream.codec_context.color_trc == ColorTrc.IEC61966_2_1
+        assert stream.codec_context.color_range == ColorRange.MPEG
         frames = list(video.decode(video=0))
         assert len(frames) == count
-        for frame, expected in zip(frames, images[:, 0, 0, 0]):
-            assert frame.to_ndarray(format="rgb24").mean() == pytest.approx(float(expected) * 255, abs=3)
+        for frame, expected in zip(frames, images[:, 0, 0]):
+            rgb = torch.from_numpy(frame.to_ndarray(format="rgb24").mean(axis=(0, 1))).to(expected)
+            torch.testing.assert_close(rgb, expected * 255, rtol=0, atol=5)
     with av.open(str(path)) as video:
         assert bool(video.streams.audio) == with_audio
         if with_audio:
@@ -73,6 +80,26 @@ def test_relayvsr_streamed_video(relay_video, tmp_path, monkeypatch, scale, coun
             assert stream.layout.name == "stereo"
             assert stream.sample_rate == 48000
             assert float(stream.duration * stream.time_base) == pytest.approx(count / 29.97, abs=1024 / 48000)
+
+
+@torch.inference_mode()
+def test_relayvsr_save_keeps_concurrent_output(relay_video, tmp_path, monkeypatch):
+    vae, samples, images = relay_video(2, 1)
+    decoder = vae.first_stage_model
+    decode_frames = decoder.iter_decode_frames
+    first = tmp_path / "test_00001_.mp4"
+
+    def save_after_counter_selection(*args, **kwargs):
+        first.write_bytes(b"another completed output")
+        return decode_frames(*args, **kwargs)
+
+    monkeypatch.setattr(decoder, "iter_decode_frames", save_after_counter_selection)
+    result = VSRDecodeAndSave.execute(vae, {"samples": samples}, images, 24, "test")
+    entry, = result.ui.as_dict()["images"]
+    assert entry["filename"] == "test_00002_.mp4"
+    assert first.read_bytes() == b"another completed output"
+    with av.open(str(tmp_path / entry["filename"])) as video:
+        assert len(list(video.decode(video=0))) == 1
 
 
 @torch.inference_mode()

@@ -22,6 +22,7 @@ import numpy as np
 from typing import Tuple, TypedDict
 from typing_extensions import override
 from comfy_api.latest import ComfyExtension, io, ui
+from comfy_api.latest._input_impl.video_types import BT709_NCL, set_video_color_properties
 from comfy.cli_args import args
 import logging
 
@@ -1582,6 +1583,7 @@ class VSRDecodeAndSave(io.ComfyNode):
                 video_stream.height = height
                 video_stream.pix_fmt = "yuv420p"
                 video_stream.options = {"crf": "18"}
+                set_video_color_properties(video_stream.codec_context, "sRGB")
                 audio_stream = None
                 if audio is not None and waveform.shape[-1] > 0:
                     audio_stream = output.add_stream("aac", rate=sample_rate, layout=layout)
@@ -1593,7 +1595,8 @@ class VSRDecodeAndSave(io.ComfyNode):
                 with closing(decoder.iter_decode_frames(latent, images, detail)) as frames:
                     for decoded in frames:
                         pixels = (decoded[0].movedim(0, -1).to(output_dtype) * 255).byte().cpu().numpy()
-                        frame = av.VideoFrame.from_ndarray(pixels, format="rgb24").reformat(format="yuv420p")
+                        frame = av.VideoFrame.from_ndarray(pixels, format="rgb24").reformat(format="yuv420p", dst_colorspace=BT709_NCL)
+                        set_video_color_properties(frame, "sRGB")
                         output.mux(video_stream.encode(frame))
                 output.mux(video_stream.encode(None))
                 if audio_stream is not None:
@@ -1602,8 +1605,16 @@ class VSRDecodeAndSave(io.ComfyNode):
                     frame.pts = 0
                     output.mux(audio_stream.encode(frame))
                     output.mux(audio_stream.encode(None))
-            comfy.model_management.throw_exception_if_processing_interrupted()
-            os.replace(path, os.path.join(folder, file))
+            # Rename refuses to overwrite on Windows. Elsewhere, link the completed file into place.
+            publish = os.rename if os.name == "nt" else os.link
+            while True:
+                comfy.model_management.throw_exception_if_processing_interrupted()
+                try:
+                    publish(path, os.path.join(folder, file))
+                    break
+                except FileExistsError:
+                    counter += 1
+                    file = f"{filename}_{counter:05}_.mp4"
 
         return io.NodeOutput(ui=ui.PreviewVideo([ui.SavedResult(file, subfolder, io.FolderType.output)]))
 
