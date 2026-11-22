@@ -1014,6 +1014,11 @@ def load_models_gpu(models, memory_required=0, force_patch_weights=False, minimu
         else:
             vram_set_state = vram_state
         lowvram_model_memory = 0
+        if vram_set_state == VRAMState.SHARED and (args.lowvram or args.novram):
+            # Honor the explicit --lowvram/--novram flags on MPS instead of
+            # always loading the whole model into the shared memory pool,
+            # which OOMs when the model is larger than the unified memory.
+            vram_set_state = VRAMState.NO_VRAM if args.novram else VRAMState.LOW_VRAM
         if (vram_set_state == VRAMState.LOW_VRAM or vram_set_state == VRAMState.NORMAL_VRAM) and not force_full_load:
             loaded_memory = loaded_model.model_loaded_memory()
             current_free_mem = get_free_memory(torch_dev) + loaded_memory
