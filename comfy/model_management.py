@@ -1019,6 +1019,13 @@ def load_models_gpu(models, memory_required=0, force_patch_weights=False, minimu
             # always loading the whole model into the shared memory pool,
             # which OOMs when the model is larger than the unified memory.
             vram_set_state = VRAMState.NO_VRAM if args.novram else VRAMState.LOW_VRAM
+            if not model.is_dynamic() and loaded_model.model_loaded_memory() >= loaded_model.model_memory():
+                # partially_load() keeps an already fully resident model as-is
+                # instead of shrinking it to the streaming budget, so a model
+                # left fully resident by an earlier force_full_load call must
+                # be unloaded first for the requested streaming to happen.
+                logging.info("unloading fully resident {} for streaming reload".format(model.model.__class__.__name__))
+                loaded_model.model_unload()
         if (vram_set_state == VRAMState.LOW_VRAM or vram_set_state == VRAMState.NORMAL_VRAM) and not force_full_load:
             loaded_memory = loaded_model.model_loaded_memory()
             current_free_mem = get_free_memory(torch_dev) + loaded_memory
