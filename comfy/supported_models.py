@@ -1811,21 +1811,14 @@ class SenseNovaU15(supported_models_base.BASE):
     def get_model(self, state_dict, prefix="", device=None):
         return model_base.SenseNovaU15(self, device=device)
 
-    def process_unet_state_dict(self, state_dict):
-        state_dict.pop("language_model.lm_head.weight", None)
-        return state_dict
-
-    def process_vae_state_dict(self, state_dict):
-        return {"pixel_space_vae": torch.tensor(1.0)}
-
-    def process_clip_state_dict(self, state_dict):
-        return {"_sensenova_te_sentinel": torch.zeros(1)}
-
     def clip_target(self, state_dict={}):
-        return supported_models_base.ClipTarget(
-            comfy.text_encoders.sensenova.SenseNovaTokenizer,
-            comfy.text_encoders.sensenova.SenseNovaTextEncoder,
-        )
+        prefix = self.text_encoder_key_prefix[0]
+        if prefix + "language_model.model.embed_tokens.weight" not in state_dict or prefix + "language_model.model.norm.weight" not in state_dict:
+            return None
+        target = supported_models_base.ClipTarget(comfy.text_encoders.sensenova.SenseNovaTokenizer, comfy.text_encoders.sensenova.SenseNovaTextEncoder)
+        target.params = comfy.text_encoders.sensenova.clip_parameters(state_dict, prefix)
+        return target
+
 
 class Chroma(supported_models_base.BASE):
     unet_config = {
