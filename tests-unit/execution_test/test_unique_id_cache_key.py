@@ -1,8 +1,15 @@
+import pytest
 import torch
+
+from comfy.cli_args import args
+
+if not torch.cuda.is_available():
+    args.cpu = True
 
 import comfy_extras.nodes_images as nodes_images
 import comfy_execution.caching as caching
 import nodes
+from comfy_api.latest import io
 from execution import PromptExecutor
 
 
@@ -49,19 +56,32 @@ class ProgressText:
         self.node_ids.append(node_id)
 
 
-class V1UniqueId:
+def v1_node(hidden):
+    return type("V1Node", (), {"INPUT_TYPES": classmethod(lambda cls: {"required": {}, "hidden": hidden})})
+
+
+class V3Output(io.ComfyNode):
     @classmethod
-    def INPUT_TYPES(cls):
-        return {"required": {}, "hidden": {"unique_id": "UNIQUE_ID"}}
+    def define_schema(cls):
+        return io.Schema(node_id="TestV3Output", inputs=[io.Int.Input("value")], is_output_node=True)
+
+    @classmethod
+    def execute(cls, value):
+        return io.NodeOutput()
 
 
-def test_v1_and_v3_nodes_with_a_hidden_unique_id_key_on_their_node_id(monkeypatch):
+@pytest.mark.parametrize(("node_class", "expected"), [
+    (nodes_images.GetImageSize, True),
+    (v1_node({"unique_id": "UNIQUE_ID"}), True),
+    (v1_node({"unique_id": ("UNIQUE_ID",)}), False),
+    (v1_node({"prompt": "PROMPT"}), False),
+    (V3Output, False),
+])
+def test_only_nodes_given_their_unique_id_key_on_it(monkeypatch, node_class, expected):
     monkeypatch.setattr(caching, "NODE_CLASS_CONTAINS_UNIQUE_ID", {})
-    monkeypatch.setitem(nodes.NODE_CLASS_MAPPINGS, "GetImageSize", nodes_images.GetImageSize)
-    monkeypatch.setitem(nodes.NODE_CLASS_MAPPINGS, "TestV1UniqueId", V1UniqueId)
+    monkeypatch.setitem(nodes.NODE_CLASS_MAPPINGS, "TestNode", node_class)
 
-    assert caching.include_unique_id_in_input("GetImageSize")
-    assert caching.include_unique_id_in_input("TestV1UniqueId")
+    assert caching.include_unique_id_in_input("TestNode") == expected
 
 
 def test_identical_get_image_size_nodes_each_run_and_report_their_own_size(monkeypatch):
