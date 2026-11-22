@@ -50,6 +50,10 @@ from comfy_api_nodes.apis.kling import (
     Kling3TurboImage2VideoRequest,
     Kling4Content,
     Kling4ContentsRequest,
+    Kling4ImageRequest,
+    Kling4ImageSettings,
+    Kling4LongImageRequest,
+    Kling4LongImageSettings,
     Kling4Settings,
     Kling4Text2VideoRequest,
     KlingTaskCreateResponse,
@@ -64,7 +68,9 @@ from comfy_api_nodes.apis.kling import (
 )
 from comfy_api_nodes.util import (
     ApiEndpoint,
+    bytesio_to_image_tensor,
     downscale_image_tensor_by_max_side,
+    download_url_as_bytesio,
     download_url_to_image_tensor,
     download_url_to_video_output,
     get_number_of_images,
@@ -82,6 +88,7 @@ from comfy_api_nodes.util import (
     validate_video_dimensions,
     validate_video_duration,
 )
+from comfy_api_nodes.util.client import PollingTimeoutError
 
 
 def _generate_storyboard_inputs(count: int) -> list:
@@ -2129,7 +2136,7 @@ def build_turbo_shot_prompt(multi_prompt: list[MultiPromptEntry]) -> str:
     return "; ".join(f"shot {i}, {int(e.duration)}, {e.prompt}" for i, e in enumerate(multi_prompt, 1)) + ";"
 
 
-async def _run_kling_task(cls: type[IO.ComfyNode], path: str, data: BaseModel) -> IO.NodeOutput:
+async def _kling_task(cls: type[IO.ComfyNode], path: str, data: BaseModel) -> KlingTaskQueryResponse:
     create = await sync_op(
         cls,
         ApiEndpoint(path=path, method="POST"),
@@ -2138,12 +2145,16 @@ async def _run_kling_task(cls: type[IO.ComfyNode], path: str, data: BaseModel) -
     )
     if not (create.data and create.data.id):
         raise RuntimeError(f"Kling task creation failed. Code: {create.code}, Message: {create.message}")
-    response = await poll_op(
+    return await poll_op(
         cls,
         ApiEndpoint(path="/proxy/kling/tasks", query_params={"task_ids": create.data.id}),
         response_model=KlingTaskQueryResponse,
         status_extractor=lambda r: (r.data[0].status if r.data else None),
     )
+
+
+async def _run_kling_task(cls: type[IO.ComfyNode], path: str, data: BaseModel) -> IO.NodeOutput:
+    response = await _kling_task(cls, path, data)
     for output in response.data[0].outputs or []:
         if output.type == "video" and output.url:
             return IO.NodeOutput(await download_url_to_video_output(output.url))
@@ -2650,13 +2661,23 @@ class KlingAvatarNode(IO.ComfyNode):
             raise RuntimeError(
                 f"Kling request failed. Code: {response.code}, Message: {response.message}, Data: {response.data}"
             )
-        final_response = await poll_op(
-            cls,
-            ApiEndpoint(path=f"/proxy/kling/v1/videos/avatar/image2video/{response.data.task_id}"),
-            response_model=TaskStatusResponse,
-            status_extractor=lambda r: (r.data.task_status if r.data else None),
-            max_poll_attempts=800,
-        )
+        task_id = response.data.task_id if response.data else None
+        if not isinstance(task_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", task_id):
+            raise RuntimeError("Kling did not return a valid task ID.")
+        try:
+            final_response = await poll_op(
+                cls,
+                ApiEndpoint(path=f"/proxy/kling/v1/videos/avatar/image2video/{task_id}"),
+                response_model=TaskStatusResponse,
+                status_extractor=lambda r: (r.data.task_status if r.data else None),
+                max_poll_attempts=800,
+            )
+        except PollingTimeoutError as exc:
+            raise RuntimeError(
+                "Timed out waiting for Kling, but the task may still complete."
+                f" Task ID: {task_id}. Contact support to check this existing task. "
+                "Running this node again creates another task and may incur another charge."
+            ) from exc
         return IO.NodeOutput(await download_url_to_video_output(final_response.data.task_result.videos[0].url))
 
 
@@ -2758,10 +2779,17 @@ class KlingTryOnNode(IO.ComfyNode):
 
 
 KLING4_VIDEO_SECONDS_LIMIT = {"kling-4.0": 30, "kling-4.0-flash": 20.4}
+KLING4_RESOLUTIONS = ["720p", "1080p", "4k", "1080p HDR", "4k HDR"]
 
 
 def _kling4_resolution(options: list[str]) -> IO.Combo.Input:
     return IO.Combo.Input("resolution", options=options)
+
+
+def _kling4_resolution_settings(resolution: str) -> dict[str, str]:
+    if resolution.endswith(" HDR"):
+        return {"resolution": resolution.removesuffix(" HDR"), "dynamic_range": "hdr"}
+    return {"resolution": resolution}
 
 
 def _kling4_duration(max_duration: int) -> IO.Int.Input:
@@ -2781,7 +2809,9 @@ def _kling4_seed() -> IO.Int.Input:
 
 
 def _kling4_omni_aspect_ratio(tooltip: str) -> IO.Combo.Input:
-    return IO.Combo.Input("aspect_ratio", options=["adaptive", "16:9", "9:16", "1:1", "21:9"], tooltip=tooltip)
+    return IO.Combo.Input(
+        "aspect_ratio", options=["adaptive", "16:9", "9:16", "1:1", "21:9", "4:3", "3:4"], tooltip=tooltip
+    )
 
 
 def _kling4_reference_images() -> IO.Autogrow.Input:
@@ -2812,9 +2842,13 @@ def _kling4_price_badge() -> IO.PriceBadge:
         depends_on=IO.PriceBadgeDepends(widgets=["model", "model.resolution", "model.duration"]),
         expr="""
         (
-          $rate := $contains(widgets.model, "flash")
-            ? 0.13442
-            : ($lookup(widgets, "model.resolution") = "1080p" ? 0.33605 : 0.22451);
+          $res := $lookup(widgets, "model.resolution");
+          $rate := $contains(widgets.model, "flash") ? 0.13442
+            : $res = "4k hdr" ? 0.89661
+            : $res = "4k" ? 0.78507
+            : $res = "1080p hdr" ? 0.40326
+            : $res = "1080p" ? 0.33605
+            : 0.22451;
           {"type":"usd","usd": $rate * $lookup(widgets, "model.duration")}
         )
         """,
@@ -2833,6 +2867,23 @@ def _kling4_prompt(prompt: str, images: int, videos: int) -> str:
     return re.sub(r"(?<!\w)@(image|video)(\d*)(?!\w)", repl, prompt, flags=re.IGNORECASE | re.ASCII)
 
 
+def _kling4_webpage_prompt(prompt: str, style_image: torch.Tensor | None, subject_image: torch.Tensor | None) -> str:
+    inputs = {1: ("style_image", style_image), 2: ("subject_image", subject_image)}
+
+    def repl(match: re.Match) -> str:
+        index = int(match.group(1) or 1)
+        if index not in inputs:
+            raise ValueError(
+                f"The prompt mentions {match.group(0)}; use @Image1 for style_image and @Image2 for subject_image."
+            )
+        name, image = inputs[index]
+        if image is None:
+            raise ValueError(f"The prompt mentions {match.group(0)}, but {name} is not connected.")
+        return f"@image_{index}"
+
+    return re.sub(r"(?<!\w)@image(\d*)(?!\w)", repl, prompt, flags=re.IGNORECASE | re.ASCII)
+
+
 def _validate_kling4_images(images: list[torch.Tensor]) -> None:
     if len(images) > 10:
         raise ValueError(f"Kling 4.0 accepts at most 10 images, got {len(images)}.")
@@ -2843,6 +2894,8 @@ def _validate_kling4_images(images: list[torch.Tensor]) -> None:
 
 def _validate_kling4_videos(videos: list[Input.Video], max_seconds: float) -> None:
     for video in videos:
+        if video.get_color_space() in ("HDR", "HDR PQ"):
+            raise ValueError("Kling 4.0 does not accept HDR videos as input. Connect an SDR video.")
         validate_video_duration(video, min_duration=3, max_duration=max_seconds)
         validate_video_dimensions(video, min_width=700, min_height=700, max_width=4553, max_height=4553)
         width, height = video.get_dimensions()
@@ -2874,7 +2927,7 @@ def _kling4_text_to_video_inputs(resolutions: list[str], max_duration: int) -> l
     return [
         IO.String.Input("prompt", multiline=True, default=""),
         _kling4_resolution(resolutions),
-        IO.Combo.Input("aspect_ratio", options=["16:9", "9:16", "1:1", "21:9"]),
+        IO.Combo.Input("aspect_ratio", options=["16:9", "9:16", "1:1", "21:9", "4:3", "3:4"]),
         _kling4_duration(max_duration),
         _kling4_seed(),
     ]
@@ -2949,7 +3002,7 @@ class Kling4TextToVideoNode(IO.ComfyNode):
                 IO.DynamicCombo.Input(
                     "model",
                     options=[
-                        IO.DynamicCombo.Option("kling-4.0", _kling4_text_to_video_inputs(["720p", "1080p"], 30)),
+                        IO.DynamicCombo.Option("kling-4.0", _kling4_text_to_video_inputs(KLING4_RESOLUTIONS, 30)),
                         IO.DynamicCombo.Option("kling-4.0-flash", _kling4_text_to_video_inputs(["720p"], 20)),
                     ],
                 ),
@@ -2975,7 +3028,9 @@ class Kling4TextToVideoNode(IO.ComfyNode):
             Kling4Text2VideoRequest(
                 prompt=model["prompt"],
                 settings=Kling4Settings(
-                    resolution=model["resolution"], aspect_ratio=model["aspect_ratio"], duration=model["duration"]
+                    **_kling4_resolution_settings(model["resolution"]),
+                    aspect_ratio=model["aspect_ratio"],
+                    duration=model["duration"],
                 ),
             ),
         )
@@ -3018,7 +3073,7 @@ class Kling4ImageToVideoNode(IO.ComfyNode):
                                     tooltip="Optional. Refer to the frames as @Image1, @Image2, ... "
                                     "in order: first frame, middle frames, last frame.",
                                 ),
-                                _kling4_resolution(["720p", "1080p"]),
+                                _kling4_resolution(KLING4_RESOLUTIONS),
                                 _kling4_duration(30),
                                 _kling4_seed(),
                             ],
@@ -3084,7 +3139,7 @@ class Kling4ImageToVideoNode(IO.ComfyNode):
             f"/proxy/kling/image-to-video/{model['model']}",
             Kling4ContentsRequest(
                 contents=contents,
-                settings=Kling4Settings(resolution=model["resolution"], duration=model["duration"]),
+                settings=Kling4Settings(**_kling4_resolution_settings(model["resolution"]), duration=model["duration"]),
             ),
         )
 
@@ -3106,7 +3161,7 @@ class Kling4ReferenceToVideoNode(IO.ComfyNode):
                     options=[
                         IO.DynamicCombo.Option(
                             "kling-4.0",
-                            _kling4_reference_to_video_inputs(["720p", "1080p"], 30, ["first_frame", "last_frame"]),
+                            _kling4_reference_to_video_inputs(KLING4_RESOLUTIONS, 30, ["first_frame", "last_frame"]),
                         ),
                         IO.DynamicCombo.Option(
                             "kling-4.0-flash",
@@ -3132,15 +3187,31 @@ class Kling4ReferenceToVideoNode(IO.ComfyNode):
                 expr="""
                 (
                   $flash := $contains(widgets.model, "flash");
-                  $hd := $lookup(widgets, "model.resolution") = "1080p";
+                  $res := $lookup(widgets, "model.resolution");
                   $duration := $lookup(widgets, "model.duration");
                   $exists(inputGroups) and $lookup(inputGroups, "model.reference_videos") > 0
                     ? (
-                        $rate := $flash ? 0.09009 : ($hd ? 0.20163 : 0.13442);
+                        $rate := $flash ? 0.09009
+                          : $res = "4k" or $res = "4k hdr" ? 0.47047
+                          : $res = "1080p" or $res = "1080p hdr" ? 0.20163
+                          : 0.13442;
+                        $hdr := $res = "4k hdr" ? 0.11154 : ($res = "1080p hdr" ? 0.06721 : 0);
                         $max_input := $flash ? 20 : 30;
-                        {"type":"range_usd","min_usd": $rate * 2 * $duration,"max_usd": $rate * ($max_input + $duration)}
+                        {
+                          "type":"range_usd",
+                          "min_usd": ($rate * 2 + $hdr) * $duration,
+                          "max_usd": $rate * ($max_input + $duration) + $hdr * $duration
+                        }
                       )
-                    : {"type":"usd","usd": ($flash ? 0.13442 : ($hd ? 0.33605 : 0.22451)) * $duration}
+                    : (
+                        $rate := $flash ? 0.13442
+                          : $res = "4k hdr" ? 0.89661
+                          : $res = "4k" ? 0.78507
+                          : $res = "1080p hdr" ? 0.40326
+                          : $res = "1080p" ? 0.33605
+                          : 0.22451;
+                        {"type":"usd","usd": $rate * $duration}
+                      )
                 )
                 """,
             ),
@@ -3170,7 +3241,9 @@ class Kling4ReferenceToVideoNode(IO.ComfyNode):
             Kling4ContentsRequest(
                 contents=contents,
                 settings=Kling4Settings(
-                    resolution=model["resolution"], aspect_ratio=model["aspect_ratio"], duration=model["duration"]
+                    **_kling4_resolution_settings(model["resolution"]),
+                    aspect_ratio=model["aspect_ratio"],
+                    duration=model["duration"],
                 ),
             ),
         )
@@ -3191,7 +3264,7 @@ class Kling4EditVideoNode(IO.ComfyNode):
                 IO.DynamicCombo.Input(
                     "model",
                     options=[
-                        IO.DynamicCombo.Option("kling-4.0", _kling4_edit_inputs(["720p", "1080p"], 30)),
+                        IO.DynamicCombo.Option("kling-4.0", _kling4_edit_inputs(KLING4_RESOLUTIONS, 30)),
                         IO.DynamicCombo.Option("kling-4.0-flash", _kling4_edit_inputs(["720p"], 20)),
                     ],
                 ),
@@ -3212,12 +3285,20 @@ class Kling4EditVideoNode(IO.ComfyNode):
                 ),
                 expr="""
                 (
-                  $rate := $contains(widgets.model, "flash")
-                    ? 0.09009
-                    : ($lookup(widgets, "model.resolution") = "1080p" ? 0.20163 : 0.13442);
+                  $res := $lookup(widgets, "model.resolution");
+                  $rate := $contains(widgets.model, "flash") ? 0.09009
+                    : $res = "4k" or $res = "4k hdr" ? 0.47047
+                    : $res = "1080p" or $res = "1080p hdr" ? 0.20163
+                    : 0.13442;
+                  $hdr := $res = "4k hdr" ? 0.11154 : ($res = "1080p hdr" ? 0.06721 : 0);
                   $exists(inputGroups) and $lookup(inputGroups, "model.reference_videos") > 0
-                    ? {"type":"range_usd","min_usd": $rate,"max_usd": $rate * 2,"format":{"suffix":"/second of input video"}}
-                    : {"type":"usd","usd": $rate * 2,"format":{"suffix":"/second of input video"}}
+                    ? {
+                        "type":"range_usd",
+                        "min_usd": $rate,
+                        "max_usd": $rate * 2 + $hdr,
+                        "format":{"suffix":"/second of input video"}
+                      }
+                    : {"type":"usd","usd": $rate * 2 + $hdr,"format":{"suffix":"/second of input video"}}
                 )
                 """,
             ),
@@ -3242,11 +3323,241 @@ class Kling4EditVideoNode(IO.ComfyNode):
             Kling4ContentsRequest(
                 contents=[Kling4Content(type="prompt", text=prompt), *await _kling4_media_contents(cls, images, videos)],
                 settings=Kling4Settings(
-                    resolution=model["resolution"],
+                    **_kling4_resolution_settings(model["resolution"]),
                     aspect_ratio=model["aspect_ratio"],
                     audio="original" if model.get("audio") == "original" else None,
                 ),
             ),
+        )
+
+
+async def _run_kling_image_task(cls: type[IO.ComfyNode], path: str, data: BaseModel) -> IO.NodeOutput:
+    response = await _kling_task(cls, path, data)
+    urls = [output.url for output in response.data[0].outputs or [] if output.type == "image" and output.url]
+    if not urls:
+        raise RuntimeError(f"Kling task finished without an image output: {response.model_dump()}")
+    return IO.NodeOutput(
+        torch.cat([bytesio_to_image_tensor(await download_url_as_bytesio(url, cls=cls), mode="RGB") for url in urls])
+    )
+
+
+class Kling4ImageNode(IO.ComfyNode):
+
+    @classmethod
+    def define_schema(cls) -> IO.Schema:
+        return IO.Schema(
+            node_id="Kling4ImageNode",
+            display_name="Kling 4.0 Image",
+            category="partner/image/Kling",
+            description="Generate or edit images from a text prompt and up to 10 reference images, "
+            "as one image or a series of related images.",
+            inputs=[
+                _kling4_reference_images(),
+                IO.String.Input(
+                    "prompt",
+                    multiline=True,
+                    default="",
+                    tooltip="Refer to the reference images as @Image1, @Image2, ...",
+                ),
+                IO.Combo.Input("resolution", options=["2K", "4K", "8K"]),
+                IO.Combo.Input(
+                    "aspect_ratio",
+                    options=["auto", "9:16", "2:3", "3:4", "1:1", "4:3", "3:2", "16:9", "21:9"],
+                    tooltip="auto follows the reference images, otherwise the prompt.",
+                ),
+                IO.Combo.Input(
+                    "series_amount",
+                    options=["disabled", "auto", "2", "3", "4", "5", "6", "7", "8", "9", "10"],
+                    tooltip="Generate a series of related images that keep the same characters and style. "
+                    "auto lets the model choose 2-10 images.",
+                ),
+                _kling4_seed(),
+            ],
+            outputs=[
+                IO.Image.Output(),
+            ],
+            hidden=[
+                IO.Hidden.auth_token_comfy_org,
+                IO.Hidden.api_key_comfy_org,
+                IO.Hidden.unique_id,
+            ],
+            is_api_node=True,
+            price_badge=IO.PriceBadge(
+                depends_on=IO.PriceBadgeDepends(
+                    widgets=["resolution", "series_amount"],
+                    input_groups=["reference_images"],
+                ),
+                expr="""
+                (
+                  $image := $lookup({"2k": 0.09009, "4k": 0.13442, "8k": 0.22451}, widgets.resolution);
+                  $refs := $exists(inputGroups) and $lookup(inputGroups, "reference_images") > 0
+                    ? 0.00429 * $lookup(inputGroups, "reference_images")
+                    : 0;
+                  widgets.series_amount = "disabled"
+                    ? {"type":"usd","usd": $image + $refs}
+                    : widgets.series_amount = "auto"
+                      ? {"type":"range_usd","min_usd": $image * 2 + $refs,"max_usd": $image * 10 + $refs}
+                      : {"type":"usd","usd": $image * $number(widgets.series_amount) + $refs}
+                )
+                """,
+            ),
+        )
+
+    @classmethod
+    async def execute(
+        cls,
+        reference_images: IO.Autogrow.Type,
+        prompt: str,
+        resolution: str,
+        aspect_ratio: str,
+        series_amount: str,
+        seed: int,
+    ) -> IO.NodeOutput:
+        images = [image for batch in reference_images.values() if batch is not None for image in batch]
+        _validate_kling4_images(images)
+        prompt = _kling4_prompt(prompt, len(images), 0)
+        validate_string(prompt, min_length=1, max_length=50000)
+        if series_amount == "disabled":
+            settings = Kling4ImageSettings(
+                result_type="single", n=1, resolution=resolution.lower(), aspect_ratio=aspect_ratio
+            )
+        else:
+            settings = Kling4ImageSettings(
+                result_type="series",
+                series_amount=series_amount if series_amount == "auto" else int(series_amount),
+                resolution=resolution.lower(),
+                aspect_ratio=aspect_ratio,
+            )
+        return await _run_kling_image_task(
+            cls,
+            "/proxy/kling/image-generation/kling-4.0",
+            Kling4ImageRequest(
+                contents=[Kling4Content(type="prompt", text=prompt), *await _kling4_media_contents(cls, images, [])],
+                settings=settings,
+            ),
+        )
+
+
+class Kling4LongImageNode(IO.ComfyNode):
+
+    @classmethod
+    def define_schema(cls) -> IO.Schema:
+        return IO.Schema(
+            node_id="Kling4LongImageNode",
+            display_name="Kling 4.0 Long Image",
+            category="partner/image/Kling",
+            description="Generate one tall image: a webpage design or an e-commerce product detail page.",
+            inputs=[
+                IO.DynamicCombo.Input(
+                    "skill",
+                    options=[
+                        IO.DynamicCombo.Option(
+                            "webpage",
+                            [
+                                IO.Image.Input(
+                                    "style_image",
+                                    optional=True,
+                                    tooltip="Reference for the visual style and layout. Refer to it as @Image1.",
+                                ),
+                                IO.Image.Input(
+                                    "subject_image",
+                                    optional=True,
+                                    tooltip="A subject to keep and design the page around. Refer to it as @Image2.",
+                                ),
+                                IO.String.Input(
+                                    "prompt",
+                                    multiline=True,
+                                    default="",
+                                    tooltip="Refer to the style image as @Image1 and the subject image as @Image2. "
+                                    "Name the language for the page text, e.g. 'All visible text must be in English only.'",
+                                ),
+                                IO.Combo.Input("resolution", options=["1K", "2K"]),
+                                _kling4_seed(),
+                            ],
+                        ),
+                        IO.DynamicCombo.Option(
+                            "ecommerce",
+                            [
+                                IO.Autogrow.Input(
+                                    "product_images",
+                                    template=IO.Autogrow.TemplateNames(
+                                        IO.Image.Input("product_image"),
+                                        names=["image_1", "image_2", "image_3"],
+                                        min=1,
+                                    ),
+                                ),
+                                IO.String.Input(
+                                    "prompt",
+                                    multiline=True,
+                                    default="",
+                                    tooltip="Refer to the product images as @Image1, @Image2, @Image3.",
+                                ),
+                                IO.Combo.Input("length", options=["short", "medium", "long"], default="medium"),
+                                IO.Combo.Input("resolution", options=["1K", "2K"]),
+                                _kling4_seed(),
+                            ],
+                        ),
+                    ],
+                ),
+            ],
+            outputs=[
+                IO.Image.Output(),
+            ],
+            hidden=[
+                IO.Hidden.auth_token_comfy_org,
+                IO.Hidden.api_key_comfy_org,
+                IO.Hidden.unique_id,
+            ],
+            is_api_node=True,
+            price_badge=IO.PriceBadge(
+                depends_on=IO.PriceBadgeDepends(widgets=["skill", "skill.resolution", "skill.length"]),
+                expr="""
+                (
+                  $hd := $lookup(widgets, "skill.resolution") = "2k";
+                  widgets.skill = "ecommerce"
+                    ? {"type":"usd","usd": $lookup(
+                        $hd
+                          ? {"short": 0.40326, "medium": 0.78507, "long": 1.23266}
+                          : {"short": 0.33605, "medium": 0.6721, "long": 1.12112},
+                        $lookup(widgets, "skill.length")
+                      )}
+                    : {"type":"usd","usd": $hd ? 0.85228 : 0.78507}
+                )
+                """,
+            ),
+        )
+
+    @classmethod
+    async def execute(cls, skill: dict) -> IO.NodeOutput:
+        if skill["skill"] == "webpage":
+            refs = [
+                (index, kind, skill[f"{kind}_image"][0])
+                for index, kind in ((1, "style"), (2, "subject"))
+                if skill[f"{kind}_image"] is not None
+            ]
+            _validate_kling4_images([image for _, _, image in refs])
+            prompt = _kling4_webpage_prompt(skill["prompt"], skill["style_image"], skill["subject_image"])
+            validate_string(prompt, min_length=1, max_length=166000)
+            contents = [Kling4Content(type="prompt", text=prompt)]
+            for index, kind, image in refs:
+                url = await upload_image_to_comfyapi(cls, image, wait_label=f"Uploading {kind} image")
+                contents.append(Kling4Content(type=f"{kind}_refer_image", url=url, id=f"image_{index}"))
+            settings = Kling4LongImageSettings(skill="webpage", resolution=skill["resolution"].lower())
+        else:
+            images = [image for batch in skill["product_images"].values() if batch is not None for image in batch]
+            if len(images) > 3:
+                raise ValueError(f"Connect at most 3 product images, got {len(images)}.")
+            _validate_kling4_images(images)
+            prompt = _kling4_prompt(skill["prompt"], len(images), 0)
+            validate_string(prompt, min_length=1, max_length=166000)
+            contents = [Kling4Content(type="prompt", text=prompt), *await _kling4_media_contents(cls, images, [])]
+            settings = Kling4LongImageSettings(
+                skill="ecommerce", resolution=skill["resolution"].lower(), length=skill["length"]
+            )
+        return await _run_kling_image_task(
+            cls,
+            "/proxy/kling/long-image-generation/kling-4.0",
+            Kling4LongImageRequest(contents=contents, settings=settings),
         )
 
 
@@ -3277,6 +3588,8 @@ class KlingExtension(ComfyExtension):
             Kling4ImageToVideoNode,
             Kling4ReferenceToVideoNode,
             Kling4EditVideoNode,
+            Kling4ImageNode,
+            Kling4LongImageNode,
         ]
 
 

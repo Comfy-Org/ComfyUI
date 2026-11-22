@@ -133,6 +133,15 @@ _nodes_lt_stub.get_keyframe_idxs = _get_keyframe_idxs
 _nodes_lt_stub._append_guide_attention_entry = _append_guide_attention_entry
 _nodes_lt_stub.LTXVAddGuide = _StubAddGuide
 
+
+def _video_vae_downscale_factors(vae):
+    if vae.downscale_index_formula is None:
+        raise ValueError("This node needs a video VAE")
+    return vae.downscale_index_formula
+
+
+_nodes_lt_stub.video_vae_downscale_factors = _video_vae_downscale_factors
+
 def _import_keyframes_against_stub():
     """Import the module under test with comfy_extras.nodes_lt stubbed, then put it back.
 
@@ -863,6 +872,20 @@ class TestGeneratedKeyframesToGuides:
         assert decoded == [(2, 2, 1, 4, 4)]
         assert [call["method"] for call in _StubAddGuide.calls] == ["execute", "execute"]
         assert out["samples"].shape[2] == 18
+
+    def test_resize_path_names_an_image_vae_before_decoding(self):
+        decoded = []
+        vae = SimpleNamespace(downscale_index_formula=None, decode=lambda samples: decoded.append(samples))
+        kf = {
+            "samples": _zeros((1, 2, 2, 4, 4)),
+            "generated_keyframe_indices": [24, 48],
+            "generated_keyframe_num_frames": 121,
+        }
+        with pytest.raises(ValueError, match="needs a video VAE"):
+            keyframes.LTXVGeneratedKeyframesToGuides.execute(
+                _cond(), _cond(), vae, _empty_121(), kf, 1.0
+            )
+        assert decoded == []
 
     def test_rejects_count_mismatch(self):
         kf = {
