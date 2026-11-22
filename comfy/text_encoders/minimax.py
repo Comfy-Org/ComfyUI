@@ -133,6 +133,8 @@ class PH3ImageQwen3VL(MiniMaxQwen3VL):
 
 class MiniMaxH3ClipModel(comfy.sd1_clip.SDClipModel):
     def __init__(self, device="cpu", layer="last", layer_idx=None, dtype=None, model_class=MiniMaxQwen3VL, model_options={}):
+        if model_class is MiniMaxQwen3VL and model_options.get("custom_operations") is None and model_options.get("quantization_metadata") is not None:
+            model_options = {**model_options, "custom_operations": comfy.ops.mixed_precision_ops(model_options["quantization_metadata"], dtype, full_precision_mm=False)}
         super().__init__(device=device, layer=layer, layer_idx=None, textmodel_json_config={},
                          dtype=dtype, special_tokens={"pad": 151643}, layer_norm_hidden_state=False,
                          model_class=model_class, enable_attention_masks=False,
