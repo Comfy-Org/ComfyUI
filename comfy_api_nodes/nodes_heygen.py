@@ -1,3 +1,4 @@
+import asyncio
 import re
 
 import torch
@@ -1045,25 +1046,24 @@ class HeyGenReferenceToVideoNode(IO.ComfyNode):
         }
         if model["aspect_ratio"] != "auto":
             payload["aspect_ratio"] = model["aspect_ratio"]
-        if reference_images:
-            urls = await upload_images_to_comfyapi(
-                cls, list(reference_images.values()), max_images=9, mime_type="image/png"
-            )
-            payload["reference_images"] = [{"type": "url", "url": u} for u in urls]
-        if reference_videos:
-            payload["reference_videos"] = [
-                {"type": "url", "url": await upload_video_to_comfyapi(cls, v)} for v in reference_videos.values()
-            ]
-        if reference_audios:
-            payload["reference_audio"] = [
-                {
-                    "type": "url",
-                    "url": await upload_audio_to_comfyapi(
+        image_urls, video_urls, audio_urls = await asyncio.gather(
+            upload_images_to_comfyapi(cls, list(reference_images.values()), max_images=9, mime_type="image/png"),
+            asyncio.gather(*(upload_video_to_comfyapi(cls, v) for v in reference_videos.values())),
+            asyncio.gather(
+                *(
+                    upload_audio_to_comfyapi(
                         cls, a, container_format="mp3", codec_name="libmp3lame", mime_type="audio/mpeg"
-                    ),
-                }
-                for a in reference_audios.values()
-            ]
+                    )
+                    for a in reference_audios.values()
+                )
+            ),
+        )
+        if reference_images:
+            payload["reference_images"] = [{"type": "url", "url": u} for u in image_urls]
+        if reference_videos:
+            payload["reference_videos"] = [{"type": "url", "url": u} for u in video_urls]
+        if reference_audios:
+            payload["reference_audio"] = [{"type": "url", "url": u} for u in audio_urls]
         video = await _create_and_poll_video(cls, _MODEL_VIDEOS_PATH, payload, max_poll_attempts=480)
         return IO.NodeOutput(await download_url_to_video_output(video["video_url"]))
 

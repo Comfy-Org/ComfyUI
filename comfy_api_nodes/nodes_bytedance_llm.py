@@ -3,6 +3,8 @@
 See: https://docs.byteplus.com/en/docs/ModelArk/1585128
 """
 
+import asyncio
+
 from typing_extensions import override
 
 from comfy_api.latest import IO, ComfyExtension, Input
@@ -100,15 +102,10 @@ async def _build_video_content_blocks(
     cls: type[IO.ComfyNode],
     videos: list[Input.Video],
 ) -> list[BytePlusInputVideo]:
-    blocks: list[BytePlusInputVideo] = []
-    total = len(videos)
-    for idx, video in enumerate(videos):
-        label = "Uploading reference video"
-        if total > 1:
-            label = f"{label} ({idx + 1}/{total})"
-        url = await upload_video_to_comfyapi(cls, video, wait_label=label)
-        blocks.append(BytePlusInputVideo(video_url=url))
-    return blocks
+    urls = await asyncio.gather(
+        *(upload_video_to_comfyapi(cls, video, wait_label="Uploading reference video") for video in videos)
+    )
+    return [BytePlusInputVideo(video_url=url) for url in urls]
 
 
 class ByteDanceSeedNode(IO.ComfyNode):
@@ -207,11 +204,11 @@ class ByteDanceSeedNode(IO.ComfyNode):
         if len(video_inputs) > SEED_MAX_VIDEOS:
             raise ValueError(f"Up to {SEED_MAX_VIDEOS} videos are supported per request.")
 
-        content: list[BytePlusMessageContent] = []
-        if image_tensors:
-            content.extend(await _build_image_content_blocks(cls, image_tensors))
-        if video_inputs:
-            content.extend(await _build_video_content_blocks(cls, video_inputs))
+        image_blocks, video_blocks = await asyncio.gather(
+            _build_image_content_blocks(cls, image_tensors),
+            _build_video_content_blocks(cls, video_inputs),
+        )
+        content: list[BytePlusMessageContent] = [*image_blocks, *video_blocks]
         content.append(BytePlusInputText(text=prompt))
 
         response = await sync_op(

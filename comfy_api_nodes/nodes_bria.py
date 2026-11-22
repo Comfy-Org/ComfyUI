@@ -1,3 +1,5 @@
+import asyncio
+
 import torch
 from pydantic import BaseModel
 from typing_extensions import override
@@ -397,14 +399,16 @@ class BriaGenFill(IO.ComfyNode):
         validate_string(prompt, min_length=1)
         _validate_mask_aspect_ratio(mask, image.shape[2], image.shape[1])
         mask_image = _mask_to_binary_image(mask, "fill")
+        image_url, mask_url = await asyncio.gather(
+            upload_image_to_comfyapi(cls, image, total_pixels=None, wait_label="Uploading image"),
+            upload_image_to_comfyapi(cls, mask_image, total_pixels=None, wait_label="Uploading mask"),
+        )
         response = await sync_op(
             cls,
             ApiEndpoint(path="/proxy/bria/v2/image/edit/gen_fill", method="POST"),
             data=BriaGenFillRequest(
-                image=await upload_image_to_comfyapi(cls, image, total_pixels=None, wait_label="Uploading image"),
-                mask=await upload_image_to_comfyapi(
-                    cls, mask_image, total_pixels=None, wait_label="Uploading mask"
-                ),
+                image=image_url,
+                mask=mask_url,
                 prompt=prompt,
                 negative_prompt=negative_prompt if negative_prompt else None,
                 refine_prompt=refine_prompt,
@@ -484,14 +488,16 @@ class BriaEraser(IO.ComfyNode):
     ) -> IO.NodeOutput:
         _validate_mask_aspect_ratio(mask, image.shape[2], image.shape[1])
         mask_image = _mask_to_binary_image(mask, "erase")
+        image_url, mask_url = await asyncio.gather(
+            upload_image_to_comfyapi(cls, image, total_pixels=None, wait_label="Uploading image"),
+            upload_image_to_comfyapi(cls, mask_image, total_pixels=None, wait_label="Uploading mask"),
+        )
         response = await sync_op(
             cls,
             ApiEndpoint(path="/proxy/bria/v2/image/edit/erase", method="POST"),
             data=BriaEraseRequest(
-                image=await upload_image_to_comfyapi(cls, image, total_pixels=None, wait_label="Uploading image"),
-                mask=await upload_image_to_comfyapi(
-                    cls, mask_image, total_pixels=None, wait_label="Uploading mask"
-                ),
+                image=image_url,
+                mask=mask_url,
                 mask_type=mask_type,
                 visual_input_content_moderation=moderation.get("visual_input_moderation", False),
                 visual_output_content_moderation=moderation.get("visual_output_moderation", False),
@@ -1985,16 +1991,18 @@ class BriaProductHolding(IO.ComfyNode):
         moderation: InputModerationSettings,
     ) -> IO.NodeOutput:
         products = _collect_product_images(product_images, "product")
+        person_url, product_urls = await asyncio.gather(
+            upload_image_to_comfyapi(cls, _drop_alpha(person_image), wait_label="Uploading person image"),
+            upload_images_to_comfyapi(
+                cls, products, max_images=BRIA_MAX_PRODUCT_IMAGES, wait_label="Uploading product images"
+            ),
+        )
         return await _run_product_edit(
             cls,
             "/proxy/bria/v2/image/edit/product/holding",
             BriaProductHoldingRequest(
-                person_image=await upload_image_to_comfyapi(
-                    cls, _drop_alpha(person_image), wait_label="Uploading person image"
-                ),
-                product_images=await upload_images_to_comfyapi(
-                    cls, products, max_images=BRIA_MAX_PRODUCT_IMAGES, wait_label="Uploading product images"
-                ),
+                person_image=person_url,
+                product_images=product_urls,
                 instruction=instruction or None,
                 aspect_ratio=None if aspect_ratio == "auto" else aspect_ratio,
                 seed=seed,
@@ -2042,16 +2050,18 @@ class BriaVirtualTryOn(IO.ComfyNode):
         moderation: InputModerationSettings,
     ) -> IO.NodeOutput:
         garments = _collect_product_images(garment_images, "garment")
+        person_url, garment_urls = await asyncio.gather(
+            upload_image_to_comfyapi(cls, _drop_alpha(person_image), wait_label="Uploading person image"),
+            upload_images_to_comfyapi(
+                cls, garments, max_images=BRIA_MAX_PRODUCT_IMAGES, wait_label="Uploading garment images"
+            ),
+        )
         return await _run_product_edit(
             cls,
             "/proxy/bria/v2/image/edit/product/virtual-tryon",
             BriaVirtualTryOnRequest(
-                person_image=await upload_image_to_comfyapi(
-                    cls, _drop_alpha(person_image), wait_label="Uploading person image"
-                ),
-                garment_images=await upload_images_to_comfyapi(
-                    cls, garments, max_images=BRIA_MAX_PRODUCT_IMAGES, wait_label="Uploading garment images"
-                ),
+                person_image=person_url,
+                garment_images=garment_urls,
                 instruction=instruction or None,
                 aspect_ratio=None if aspect_ratio == "auto" else aspect_ratio,
                 seed=seed,
@@ -2154,12 +2164,16 @@ class BriaVideoEraser(IO.ComfyNode):
                     f"Bria needs one mask frame per video frame."
                 )
             mask_source = mask_video
+        video_url, mask_url = await asyncio.gather(
+            upload_video_to_comfyapi(cls, video),
+            upload_video_to_comfyapi(cls, mask_source, wait_label="Uploading mask"),
+        )
         submitted = await sync_op(
             cls,
             ApiEndpoint(path="/proxy/bria/v2/video/edit/erase", method="POST"),
             data=BriaVideoEraseRequest(
-                video=await upload_video_to_comfyapi(cls, video),
-                mask=await upload_video_to_comfyapi(cls, mask_source, wait_label="Uploading mask"),
+                video=video_url,
+                mask=mask_url,
                 preserve_audio=preserve_audio,
                 output_container_and_codec="mp4_h264",
             ),

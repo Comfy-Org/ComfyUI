@@ -1,3 +1,4 @@
+import asyncio
 import json
 from pathlib import Path
 from urllib.parse import urlparse
@@ -55,6 +56,7 @@ from comfy_api_nodes.util import (
     sync_op,
     tensor_to_bytesio,
     upload_3d_model_to_comfyapi,
+    upload_image_to_comfyapi,
     upload_images_to_comfyapi,
     validate_output_unlinked,
     validate_string,
@@ -768,13 +770,13 @@ class TripoMultiviewToModelNode(IO.ComfyNode):
     ) -> IO.NodeOutput:
         if image is None:
             raise RuntimeError("front image for multiview is required")
-        images = []
         if image_left is None and image_back is None and image_right is None:
             raise RuntimeError("At least one of left, back, or right image must be provided for multiview")
         check_smart_low_poly_face_limit(smart_low_poly, face_limit, quad)
-        for view, image_ in zip(("front", "left", "back", "right"), (image, image_left, image_back, image_right)):
-            if image_ is not None:
-                images.append({view: (await upload_images_to_comfyapi(cls, image_, max_images=1))[0]})
+        views = zip(("front", "left", "back", "right"), (image, image_left, image_back, image_right))
+        connected = {view: image_ for view, image_ in views if image_ is not None}
+        urls = await asyncio.gather(*(upload_image_to_comfyapi(cls, image_) for image_ in connected.values()))
+        images = [{view: url} for view, url in zip(connected, urls)]
         response = await sync_op(
             cls,
             ApiEndpoint(path="/proxy/tripo/v3/generation/multiview-to-model", method="POST"),
@@ -2347,10 +2349,9 @@ class TripoP1MultiviewToModelNode(IO.ComfyNode):
         if sum(1 for v in views if v is not None) < 2:
             raise RuntimeError("Tripo P1 multiview requires at least 2 images (front plus one of left/back/right).")
 
-        inputs: list[dict[str, str]] = []
-        for name, view in zip(("front", "left", "back", "right"), views):
-            if view is not None:
-                inputs.append({name: (await upload_images_to_comfyapi(cls, view, max_images=1))[0]})
+        connected = {name: view for name, view in zip(("front", "left", "back", "right"), views) if view is not None}
+        urls = await asyncio.gather(*(upload_image_to_comfyapi(cls, view) for view in connected.values()))
+        inputs = [{name: url} for name, url in zip(connected, urls)]
 
         common = _build_p1_request_kwargs(
             output_mode=output_mode,
@@ -2661,11 +2662,9 @@ class TripoPSeriesMultiviewToModelNode(IO.ComfyNode):
         if sum(image is not None for image in views.values()) < 2:
             raise ValueError("Connect the front view and at least one of the left, back or right views.")
         fields = p_series_request_fields(model)
-        inputs = [
-            {view: (await upload_images_to_comfyapi(cls, image, max_images=1))[0]}
-            for view, image in views.items()
-            if image is not None
-        ]
+        connected = {view: image for view, image in views.items() if image is not None}
+        urls = await asyncio.gather(*(upload_image_to_comfyapi(cls, image) for image in connected.values()))
+        inputs = [{view: url} for view, url in zip(connected, urls)]
         return await p_series_generate(
             cls,
             "/proxy/tripo/v3/generation/multiview-to-model",

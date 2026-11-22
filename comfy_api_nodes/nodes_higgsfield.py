@@ -1,3 +1,5 @@
+import asyncio
+
 from typing_extensions import override
 
 from comfy_api.latest import IO, ComfyExtension
@@ -95,14 +97,18 @@ class HiggsfieldMotionTransferNode(IO.ComfyNode):
         if sum(get_number_of_images(i) for i in images) > 8:
             raise ValueError("At most 8 reference images are supported.")
         validate_string(model["prompt"], strip_whitespace=False, max_length=10000)
+        video_url, image_urls = await asyncio.gather(
+            upload_video_to_comfyapi(cls, video),
+            upload_images_to_comfyapi(cls, images, max_images=8),
+        )
         result = await router_op(
             cls,
             "higgsfield/higgsfield-genjutsu-motion-transfer-v1.0",
             response_model=HiggsfieldRequestStatus,
             data=MotionTransferRequest(
                 prompt=model["prompt"],
-                video_url=await upload_video_to_comfyapi(cls, video),
-                image_urls=await upload_images_to_comfyapi(cls, images, max_images=8),
+                video_url=video_url,
+                image_urls=image_urls,
                 resolution=model["resolution"],
             ),
         )

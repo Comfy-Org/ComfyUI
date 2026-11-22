@@ -1,3 +1,5 @@
+import asyncio
+
 from typing_extensions import override
 
 from comfy_api.latest import IO, ComfyExtension, Input
@@ -160,8 +162,10 @@ class SyncLipSyncNode(IO.ComfyNode):
         else:
             speaker_detection = None
 
-        video_url = await upload_video_to_comfyapi(cls, video, max_duration=600)
-        audio_url = await upload_audio_to_comfyapi(cls, audio)
+        video_url, audio_url = await asyncio.gather(
+            upload_video_to_comfyapi(cls, video, max_duration=600),
+            upload_audio_to_comfyapi(cls, audio),
+        )
 
         generation = await router_op(
             cls,
@@ -318,8 +322,10 @@ class SyncTalkingImageNode(IO.ComfyNode):
         else:
             speaker_detection = None
 
-        image_url = await upload_image_to_comfyapi(cls, image, mime_type="image/png", total_pixels=None)
-        audio_url = await upload_audio_to_comfyapi(cls, audio)
+        image_url, audio_url = await asyncio.gather(
+            upload_image_to_comfyapi(cls, image, mime_type="image/png", total_pixels=None),
+            upload_audio_to_comfyapi(cls, audio),
+        )
 
         generation = await router_op(
             cls,

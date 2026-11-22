@@ -1,3 +1,4 @@
+import asyncio
 import re
 import uuid
 from io import BytesIO
@@ -359,18 +360,33 @@ class PikaH3FlexReferenceVideoNode(IO.ComfyNode):
             },
         )
         validate_string(prompt, min_length=1, max_length=8000)
-        references = []
-        for i, image in enumerate(reference_images.values(), 1):
-            url = await upload_image_to_comfyapi(cls, image, wait_label=f"Uploading image {i}")
-            references.append(PikaH3FlexReference(type="image", url=url))
-        for audio in reference_audios.values():
-            url = await upload_audio_to_comfyapi(
-                cls, audio, container_format="wav", codec_name="pcm_s16le", mime_type="audio/wav"
-            )
-            references.append(PikaH3FlexReference(type="audio", url=url))
-        for i, video in enumerate(reference_videos.values(), 1):
-            url = await _upload_reference_video(cls, video, reference_video_audio, f"Uploading video {i}")
-            references.append(PikaH3FlexReference(type="video", url=url))
+        image_urls, audio_urls, video_urls = await asyncio.gather(
+            asyncio.gather(
+                *(
+                    upload_image_to_comfyapi(cls, image, wait_label=f"Uploading image {i}")
+                    for i, image in enumerate(reference_images.values(), 1)
+                )
+            ),
+            asyncio.gather(
+                *(
+                    upload_audio_to_comfyapi(
+                        cls, audio, container_format="wav", codec_name="pcm_s16le", mime_type="audio/wav"
+                    )
+                    for audio in reference_audios.values()
+                )
+            ),
+            asyncio.gather(
+                *(
+                    _upload_reference_video(cls, video, reference_video_audio, f"Uploading video {i}")
+                    for i, video in enumerate(reference_videos.values(), 1)
+                )
+            ),
+        )
+        references = [
+            *(PikaH3FlexReference(type="image", url=url) for url in image_urls),
+            *(PikaH3FlexReference(type="audio", url=url) for url in audio_urls),
+            *(PikaH3FlexReference(type="video", url=url) for url in video_urls),
+        ]
         return await _pika_video(
             cls,
             "pika-h3-flex/reference-to-video",

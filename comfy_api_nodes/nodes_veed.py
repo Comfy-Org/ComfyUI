@@ -1,3 +1,5 @@
+import asyncio
+
 import av
 from pydantic import BaseModel
 from typing_extensions import override
@@ -139,12 +141,16 @@ class VeedFabricNode(IO.ComfyNode):
     @classmethod
     async def execute(cls, model: dict) -> IO.NodeOutput:
         validate_audio_duration(model["audio"], max_duration=MAX_FABRIC_AUDIO_SECONDS)
+        image_url, audio_url = await asyncio.gather(
+            upload_image_to_comfyapi(cls, model["image"], mime_type="image/png"),
+            _upload_audio(cls, model["audio"]),
+        )
         job = await _run_job(
             cls,
             model["model"],
             VeedFabricRequest(
-                image_url=await upload_image_to_comfyapi(cls, model["image"], mime_type="image/png"),
-                audio_url=await _upload_audio(cls, model["audio"]),
+                image_url=image_url,
+                audio_url=audio_url,
                 resolution=model["resolution"],
             ),
         )
@@ -205,12 +211,16 @@ class VeedLipsyncNode(IO.ComfyNode):
     @classmethod
     async def execute(cls, model: dict) -> IO.NodeOutput:
         validate_audio_duration(model["audio"], max_duration=MAX_LIPSYNC_AUDIO_SECONDS)
+        video_url, audio_url = await asyncio.gather(
+            upload_video_to_comfyapi(cls, model["video"]),
+            _upload_audio(cls, model["audio"]),
+        )
         job = await _run_job(
             cls,
             model["model"],
             VeedLipsyncRequest(
-                video_url=await upload_video_to_comfyapi(cls, model["video"]),
-                audio_url=await _upload_audio(cls, model["audio"]),
+                video_url=video_url,
+                audio_url=audio_url,
             ),
         )
         return IO.NodeOutput(await download_url_to_video_output(job.result.video.url))

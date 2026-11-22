@@ -1,3 +1,4 @@
+import asyncio
 import math
 import re
 
@@ -302,20 +303,28 @@ class CreatifyBorealH3ReferenceVideoNode(IO.ComfyNode):
         if resolution == "1088p" and aspect_ratio == "auto" and not reference_images:
             width, height = next(iter(reference_videos.values())).get_dimensions()
             aspect_ratio = min(BOREAL_ASPECT_RATIOS, key=lambda r: abs(math.log(width / height / BOREAL_ASPECT_RATIOS[r])))
-        image_urls = [
-            await upload_image_to_comfyapi(cls, image, wait_label=f"Uploading image {i}")
-            for i, image in enumerate(reference_images.values(), 1)
-        ]
-        video_urls = [
-            await upload_video_to_comfyapi(cls, video, wait_label=f"Uploading video {i}")
-            for i, video in enumerate(reference_videos.values(), 1)
-        ]
-        audio_urls = [
-            await upload_audio_to_comfyapi(
-                cls, audio, container_format="wav", codec_name="pcm_s16le", mime_type="audio/wav"
-            )
-            for audio in reference_audios.values()
-        ]
+        image_urls, video_urls, audio_urls = await asyncio.gather(
+            asyncio.gather(
+                *(
+                    upload_image_to_comfyapi(cls, image, wait_label=f"Uploading image {i}")
+                    for i, image in enumerate(reference_images.values(), 1)
+                )
+            ),
+            asyncio.gather(
+                *(
+                    upload_video_to_comfyapi(cls, video, wait_label=f"Uploading video {i}")
+                    for i, video in enumerate(reference_videos.values(), 1)
+                )
+            ),
+            asyncio.gather(
+                *(
+                    upload_audio_to_comfyapi(
+                        cls, audio, container_format="wav", codec_name="pcm_s16le", mime_type="audio/wav"
+                    )
+                    for audio in reference_audios.values()
+                )
+            ),
+        )
         return await _creatify_video(
             cls,
             "boreal",
@@ -394,14 +403,16 @@ class CreatifyAurora2AvatarNode(IO.ComfyNode):
         seconds = audio["waveform"].shape[-1] / audio["sample_rate"]
         if seconds > limit:
             raise ValueError(f"The audio is {seconds:.1f} seconds; Aurora 2.0 takes up to {limit} seconds at {resolution}.")
+        image_url, audio_url = await asyncio.gather(
+            upload_image_to_comfyapi(cls, image, wait_label="Uploading photo"),
+            upload_audio_to_comfyapi(cls, audio, container_format="wav", codec_name="pcm_s16le", mime_type="audio/wav"),
+        )
         return await _creatify_video(
             cls,
             "aurora",
             CreatifyAuroraRequest(
-                image=await upload_image_to_comfyapi(cls, image, wait_label="Uploading photo"),
-                audio=await upload_audio_to_comfyapi(
-                    cls, audio, container_format="wav", codec_name="pcm_s16le", mime_type="audio/wav"
-                ),
+                image=image_url,
+                audio=audio_url,
                 model_version="aurora_v2",
                 resolution=resolution,
                 text_prompt=text_prompt.strip() or None,

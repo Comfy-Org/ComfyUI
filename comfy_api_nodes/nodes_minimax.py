@@ -1,3 +1,4 @@
+import asyncio
 import math
 import re
 from typing import Optional
@@ -49,6 +50,7 @@ from comfy_api_nodes.util import (
     poll_op,
     sync_op,
     upload_audio_to_comfyapi,
+    upload_image_to_comfyapi,
     upload_images_to_comfyapi,
     upload_video_to_comfyapi,
     validate_audio_duration,
@@ -1159,34 +1161,39 @@ class MinimaxHailuo03ReferenceNode(IO.ComfyNode):
             if len(reference_images) + len(reference_videos) + len(reference_audios) > 12:
                 raise ValueError("MiniMax H3 Max accepts at most 12 reference files in total.")
             max_long_side, max_short_side = HAILUO_03_MAX_REFERENCE_IMAGE_MAX_SIDES[model["reference_detail"]]
-            reference_image_urls = [
-                (
-                    await upload_images_to_comfyapi(
-                        cls,
-                        downscale_image_tensor_by_max_sides(
-                            image, max_long_side=max_long_side, max_short_side=max_short_side
-                        ),
-                        max_images=1,
-                        total_pixels=None,
-                        wait_label=f"Uploading image {i}",
+            reference_image_urls, reference_video_urls, reference_audio_urls = await asyncio.gather(
+                asyncio.gather(
+                    *(
+                        upload_image_to_comfyapi(
+                            cls,
+                            downscale_image_tensor_by_max_sides(
+                                image, max_long_side=max_long_side, max_short_side=max_short_side
+                            ),
+                            total_pixels=None,
+                            wait_label=f"Uploading image {i}",
+                        )
+                        for i, image in enumerate(reference_images.values(), 1)
                     )
-                )[0]
-                for i, image in enumerate(reference_images.values(), 1)
-            ]
-            reference_video_urls = [
-                await upload_video_to_comfyapi(cls, video, wait_label=f"Uploading video {i}")
-                for i, video in enumerate(reference_videos.values(), 1)
-            ]
-            reference_audio_urls = [
-                await upload_audio_to_comfyapi(
-                    cls,
-                    audio,
-                    container_format="mp3",
-                    codec_name="libmp3lame",
-                    mime_type="audio/mpeg",
-                )
-                for audio in reference_audios.values()
-            ]
+                ),
+                asyncio.gather(
+                    *(
+                        upload_video_to_comfyapi(cls, video, wait_label=f"Uploading video {i}")
+                        for i, video in enumerate(reference_videos.values(), 1)
+                    )
+                ),
+                asyncio.gather(
+                    *(
+                        upload_audio_to_comfyapi(
+                            cls,
+                            audio,
+                            container_format="mp3",
+                            codec_name="libmp3lame",
+                            mime_type="audio/mpeg",
+                        )
+                        for audio in reference_audios.values()
+                    )
+                ),
+            )
             return await _hailuo03_max_run_task(
                 cls,
                 model=HAILUO_03_MAX_MODEL,
@@ -1204,39 +1211,55 @@ class MinimaxHailuo03ReferenceNode(IO.ComfyNode):
                 ),
             )
 
+        reference_image_urls, reference_video_urls, reference_audio_urls = await asyncio.gather(
+            asyncio.gather(
+                *(
+                    upload_image_to_comfyapi(cls, image, wait_label=f"Uploading image {i}")
+                    for i, image in enumerate(reference_images.values(), 1)
+                )
+            ),
+            asyncio.gather(
+                *(
+                    upload_video_to_comfyapi(cls, video, wait_label=f"Uploading video {i}")
+                    for i, video in enumerate(reference_videos.values(), 1)
+                )
+            ),
+            asyncio.gather(
+                *(
+                    upload_audio_to_comfyapi(
+                        cls,
+                        audio,
+                        container_format="mp3",
+                        codec_name="libmp3lame",
+                        mime_type="audio/mpeg",
+                    )
+                    for audio in reference_audios.values()
+                )
+            ),
+        )
         content: list = [Hailuo03TextContent(text=prompt)]
-        for i, image in enumerate(reference_images.values(), 1):
+        for url in reference_image_urls:
             content.append(
                 Hailuo03ImageContent(
                     image_url=Hailuo03ImageContentUrl(
-                        url=(
-                            await upload_images_to_comfyapi(
-                                cls, image, max_images=1, wait_label=f"Uploading image {i}"
-                            )
-                        )[0],
+                        url=url,
                     ),
                     role="reference_image",
                 )
             )
-        for i, video in enumerate(reference_videos.values(), 1):
+        for url in reference_video_urls:
             content.append(
                 Hailuo03VideoContent(
                     video_url=Hailuo03VideoContentUrl(
-                        url=await upload_video_to_comfyapi(cls, video, wait_label=f"Uploading video {i}"),
+                        url=url,
                     ),
                 )
             )
-        for audio in reference_audios.values():
+        for url in reference_audio_urls:
             content.append(
                 Hailuo03AudioContent(
                     audio_url=Hailuo03AudioContentUrl(
-                        url=await upload_audio_to_comfyapi(
-                            cls,
-                            audio,
-                            container_format="mp3",
-                            codec_name="libmp3lame",
-                            mime_type="audio/mpeg",
-                        ),
+                        url=url,
                     ),
                 )
             )
@@ -1478,38 +1501,54 @@ class MinimaxHailuo03ContextIRNode(IO.ComfyNode):
                     role="last_frame",
                 )
             )
-        for i, image in enumerate(reference_images.values(), 1):
+        reference_image_urls, reference_video_urls, reference_audio_urls = await asyncio.gather(
+            asyncio.gather(
+                *(
+                    upload_image_to_comfyapi(cls, image, wait_label=f"Uploading image {i}")
+                    for i, image in enumerate(reference_images.values(), 1)
+                )
+            ),
+            asyncio.gather(
+                *(
+                    upload_video_to_comfyapi(cls, video, wait_label=f"Uploading video {i}")
+                    for i, video in enumerate(reference_videos.values(), 1)
+                )
+            ),
+            asyncio.gather(
+                *(
+                    upload_audio_to_comfyapi(
+                        cls,
+                        audio,
+                        container_format="mp3",
+                        codec_name="libmp3lame",
+                        mime_type="audio/mpeg",
+                    )
+                    for audio in reference_audios.values()
+                )
+            ),
+        )
+        for url in reference_image_urls:
             content.append(
                 Hailuo03ImageContent(
                     image_url=Hailuo03ImageContentUrl(
-                        url=(
-                            await upload_images_to_comfyapi(
-                                cls, image, max_images=1, wait_label=f"Uploading image {i}"
-                            )
-                        )[0],
+                        url=url,
                     ),
                     role="reference_image",
                 )
             )
-        for i, video in enumerate(reference_videos.values(), 1):
+        for url in reference_video_urls:
             content.append(
                 Hailuo03VideoContent(
                     video_url=Hailuo03VideoContentUrl(
-                        url=await upload_video_to_comfyapi(cls, video, wait_label=f"Uploading video {i}"),
+                        url=url,
                     ),
                 )
             )
-        for audio in reference_audios.values():
+        for url in reference_audio_urls:
             content.append(
                 Hailuo03AudioContent(
                     audio_url=Hailuo03AudioContentUrl(
-                        url=await upload_audio_to_comfyapi(
-                            cls,
-                            audio,
-                            container_format="mp3",
-                            codec_name="libmp3lame",
-                            mime_type="audio/mpeg",
-                        ),
+                        url=url,
                     ),
                 )
             )
@@ -1742,10 +1781,37 @@ class MinimaxHailuo03RegenerateNode(IO.ComfyNode):
                 f"Total reference audio duration is {total_audio_duration:.1f}s. Maximum is 15 seconds."
             )
 
+        source_video_url, reference_image_urls, reference_video_urls, reference_audio_urls = await asyncio.gather(
+            upload_video_to_comfyapi(cls, video, wait_label="Uploading source video"),
+            asyncio.gather(
+                *(
+                    upload_image_to_comfyapi(cls, image, wait_label=f"Uploading image {i}")
+                    for i, image in enumerate(reference_images.values(), 1)
+                )
+            ),
+            asyncio.gather(
+                *(
+                    upload_video_to_comfyapi(cls, ref_video, wait_label=f"Uploading video {i}")
+                    for i, ref_video in enumerate(reference_videos.values(), 1)
+                )
+            ),
+            asyncio.gather(
+                *(
+                    upload_audio_to_comfyapi(
+                        cls,
+                        audio,
+                        container_format="mp3",
+                        codec_name="libmp3lame",
+                        mime_type="audio/mpeg",
+                    )
+                    for audio in reference_audios.values()
+                )
+            ),
+        )
         content: list = [
             Hailuo03VideoContent(
                 video_url=Hailuo03VideoContentUrl(
-                    url=await upload_video_to_comfyapi(cls, video, wait_label="Uploading source video"),
+                    url=source_video_url,
                 ),
                 role="base_video",
             ),
@@ -1777,38 +1843,28 @@ class MinimaxHailuo03RegenerateNode(IO.ComfyNode):
                     role="last_frame",
                 )
             )
-        for i, image in enumerate(reference_images.values(), 1):
+        for url in reference_image_urls:
             content.append(
                 Hailuo03ImageContent(
                     image_url=Hailuo03ImageContentUrl(
-                        url=(
-                            await upload_images_to_comfyapi(
-                                cls, image, max_images=1, wait_label=f"Uploading image {i}"
-                            )
-                        )[0],
+                        url=url,
                     ),
                     role="reference_image",
                 )
             )
-        for i, ref_video in enumerate(reference_videos.values(), 1):
+        for url in reference_video_urls:
             content.append(
                 Hailuo03VideoContent(
                     video_url=Hailuo03VideoContentUrl(
-                        url=await upload_video_to_comfyapi(cls, ref_video, wait_label=f"Uploading video {i}"),
+                        url=url,
                     ),
                 )
             )
-        for audio in reference_audios.values():
+        for url in reference_audio_urls:
             content.append(
                 Hailuo03AudioContent(
                     audio_url=Hailuo03AudioContentUrl(
-                        url=await upload_audio_to_comfyapi(
-                            cls,
-                            audio,
-                            container_format="mp3",
-                            codec_name="libmp3lame",
-                            mime_type="audio/mpeg",
-                        ),
+                        url=url,
                     ),
                 )
             )
@@ -1940,11 +1996,15 @@ class MinimaxHailuo03MaxRecastNode(IO.ComfyNode):
             validate_image_dimensions(image, min_width=256, min_height=256)
         validate_string(model["prompt"], strip_whitespace=False, max_length=2000)
         prompt = _hailuo03_resolve_ref_tags(model["prompt"].strip(), {"image": len(reference_images)})
-        video_url = await upload_video_to_comfyapi(cls, video, wait_label="Uploading video")
-        reference_image_urls = [
-            (await upload_images_to_comfyapi(cls, image, max_images=1, wait_label=f"Uploading image {i}"))[0]
-            for i, image in enumerate(reference_images.values(), 1)
-        ]
+        video_url, reference_image_urls = await asyncio.gather(
+            upload_video_to_comfyapi(cls, video, wait_label="Uploading video"),
+            asyncio.gather(
+                *(
+                    upload_image_to_comfyapi(cls, image, wait_label=f"Uploading image {i}")
+                    for i, image in enumerate(reference_images.values(), 1)
+                )
+            ),
+        )
         return await _hailuo03_max_run_task(
             cls,
             model=HAILUO_03_MAX_MODEL,
@@ -2087,8 +2147,10 @@ class MinimaxHailuo03MaxExtendVideoNode(IO.ComfyNode):
                 f"Total reference audio duration is {total_audio_duration:.2f}s. Maximum is 14.5 seconds."
             )
         prompt = _hailuo03_resolve_ref_tags(model["prompt"], {"audio": len(reference_audios)})
-        video_url = await upload_video_to_comfyapi(cls, video, wait_label="Uploading video")
-        reference_audio_urls = [await upload_audio_to_comfyapi(cls, audio) for audio in reference_audios.values()]
+        video_url, reference_audio_urls = await asyncio.gather(
+            upload_video_to_comfyapi(cls, video, wait_label="Uploading video"),
+            asyncio.gather(*(upload_audio_to_comfyapi(cls, audio) for audio in reference_audios.values())),
+        )
         return await _hailuo03_max_run_task(
             cls,
             model=model["model"],
@@ -2359,15 +2421,21 @@ class MinimaxHailuo03MaxInsertVideoNode(IO.ComfyNode):
         prompt = _hailuo03_resolve_ref_tags(
             model["prompt"].strip(), {"image": len(reference_images), "video": len(reference_videos)}
         )
-        video_url = await upload_video_to_comfyapi(cls, video, wait_label="Uploading video")
-        reference_image_urls = [
-            (await upload_images_to_comfyapi(cls, image, max_images=1, wait_label=f"Uploading image {i}"))[0]
-            for i, image in enumerate(reference_images.values(), 1)
-        ]
-        reference_video_urls = [
-            await upload_video_to_comfyapi(cls, reference_video, wait_label=f"Uploading reference video {i}")
-            for i, reference_video in enumerate(reference_videos.values(), 1)
-        ]
+        video_url, reference_image_urls, reference_video_urls = await asyncio.gather(
+            upload_video_to_comfyapi(cls, video, wait_label="Uploading video"),
+            asyncio.gather(
+                *(
+                    upload_image_to_comfyapi(cls, image, wait_label=f"Uploading image {i}")
+                    for i, image in enumerate(reference_images.values(), 1)
+                )
+            ),
+            asyncio.gather(
+                *(
+                    upload_video_to_comfyapi(cls, reference_video, wait_label=f"Uploading reference video {i}")
+                    for i, reference_video in enumerate(reference_videos.values(), 1)
+                )
+            ),
+        )
         return await _hailuo03_max_run_task(
             cls,
             model=HAILUO_03_MAX_MODEL,
@@ -2462,8 +2530,10 @@ class MinimaxHailuo03MaxLipSyncNode(IO.ComfyNode):
         validate_image_aspect_ratio(image, (2, 5), (5, 2), strict=False)
         validate_image_dimensions(image, min_width=256, min_height=256)
         validate_audio_duration(model["audio"], min_duration=5, max_duration=899)
-        image_url = (await upload_images_to_comfyapi(cls, image, max_images=1, wait_label="Uploading image"))[0]
-        audio_url = await upload_audio_to_comfyapi(cls, model["audio"])
+        image_url, audio_url = await asyncio.gather(
+            upload_image_to_comfyapi(cls, image, wait_label="Uploading image"),
+            upload_audio_to_comfyapi(cls, model["audio"]),
+        )
         return await _hailuo03_max_run_task(
             cls,
             model=HAILUO_03_MAX_MODEL,

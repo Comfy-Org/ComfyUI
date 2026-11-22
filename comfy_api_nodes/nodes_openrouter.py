@@ -1,5 +1,6 @@
 """API Nodes for OpenRouter chat completions: LLM text generation and image generation."""
 
+import asyncio
 import base64
 from dataclasses import dataclass
 from io import BytesIO
@@ -224,15 +225,10 @@ async def _build_image_blocks(
 
 
 async def _build_video_blocks(cls: type[IO.ComfyNode], videos: list[Input.Video]) -> list[OpenRouterVideoContent]:
-    blocks: list[OpenRouterVideoContent] = []
-    total = len(videos)
-    for idx, video in enumerate(videos):
-        label = "Uploading reference video"
-        if total > 1:
-            label = f"{label} ({idx + 1}/{total})"
-        url = await upload_video_to_comfyapi(cls, video, wait_label=label)
-        blocks.append(OpenRouterVideoContent(video_url=OpenRouterVideoUrl(url=url)))
-    return blocks
+    urls = await asyncio.gather(
+        *(upload_video_to_comfyapi(cls, video, wait_label="Uploading reference video") for video in videos)
+    )
+    return [OpenRouterVideoContent(video_url=OpenRouterVideoUrl(url=url)) for url in urls]
 
 
 def _user_message(prompt: str, media_blocks: list[OpenRouterContentBlock]) -> OpenRouterMessage:
@@ -402,11 +398,11 @@ class OpenRouterLLMNode(IO.ComfyNode):
         if video_inputs and len(video_inputs) > spec.max_videos:
             raise ValueError(f"Up to {spec.max_videos} videos are supported for {slug}.")
 
-        media_blocks: list[OpenRouterContentBlock] = []
-        if image_tensors:
-            media_blocks.extend(await _build_image_blocks(cls, spec, image_tensors))
-        if video_inputs:
-            media_blocks.extend(await _build_video_blocks(cls, video_inputs))
+        image_blocks, video_blocks = await asyncio.gather(
+            _build_image_blocks(cls, spec, image_tensors),
+            _build_video_blocks(cls, video_inputs),
+        )
+        media_blocks: list[OpenRouterContentBlock] = [*image_blocks, *video_blocks]
 
         request = _build_request(
             slug,
