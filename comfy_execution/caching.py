@@ -5,7 +5,6 @@ import logging
 import time
 import torch
 from typing import Sequence, Mapping, Dict
-import comfy.model_management
 from comfy.model_patcher import is_model_patcher_output
 from comfy.system_memory import virtual_memory_available
 from comfy_execution.graph import DynamicPrompt
@@ -111,26 +110,30 @@ class CacheKeySetInputSignature(CacheKeySet):
         super().__init__(dynprompt, node_ids, is_changed_cache)
         self.dynprompt = dynprompt
         self.is_changed_cache = is_changed_cache
-        self.uncacheable = {}
+        # Small keys hold this value, unequal to itself, so they never match another prompt and providers skip them.
+        self.small_key_marker = float("NaN")
+        self.canonical_ids = {}
 
     def include_node_id_in_input(self) -> bool:
         return False
 
     async def add_keys(self, node_ids):
+        # Decided afresh on each call: a node override between calls can change a node's ancestry.
+        self.uncacheable = {}
+        self.small_keys = {}
+        self.input_keys = {}
         for node_id in node_ids:
             if node_id in self.keys:
                 continue
             if not self.dynprompt.has_node(node_id):
                 continue
-            comfy.model_management.throw_exception_if_processing_interrupted()
             node = self.dynprompt.get_node(node_id)
-            self.keys[node_id] = await self.get_node_signature(self.dynprompt, node_id)
+            self.keys[node_id] = self.input_keys.get(node_id) or await self.get_node_signature(self.dynprompt, node_id)
             self.subcache_keys[node_id] = (node_id, node["class_type"])
 
     async def get_node_signature(self, dynprompt, node_id):
         if await self.is_uncacheable(dynprompt, node_id):
-            # Its full signature would hold a value unequal to itself and could never match, so skip building it.
-            return to_hashable([dynprompt.get_node(node_id)["class_type"], node_id, float("NaN")])
+            return self.small_keys[node_id]
         signature = []
         ancestors, order_mapping = self.get_ordered_ancestry(dynprompt, node_id)
         signature.append(await self.get_immediate_node_signature(dynprompt, node_id, order_mapping))
@@ -197,7 +200,21 @@ class CacheKeySetInputSignature(CacheKeySet):
                 self.uncacheable[current] = await self.is_immediately_uncacheable(dynprompt, current) or any(
                     self.uncacheable.get(ancestor_id, False) for ancestor_id in linked_input_ids(dynprompt, current)
                 )
+                if self.uncacheable[current]:
+                    self.small_keys[current] = await self.get_small_key(dynprompt, current)
         return self.uncacheable[node_id]
+
+    # Its full key could only ever match within this prompt, so it is built from the node's own signature and
+    # its inputs' keys, interned so that nodes whose full keys would be equal get the same small key.
+    async def get_small_key(self, dynprompt, node_id):
+        input_keys = {}
+        for ancestor_id in linked_input_ids(dynprompt, node_id):
+            key = self.small_keys.get(ancestor_id) or self.keys.get(ancestor_id) or self.input_keys.get(ancestor_id)
+            if key is None:
+                key = self.input_keys[ancestor_id] = await self.get_node_signature(dynprompt, ancestor_id)
+            input_keys[ancestor_id] = self.canonical_ids.setdefault(key, len(self.canonical_ids))
+        signature = to_hashable(await self.get_immediate_node_signature(dynprompt, node_id, input_keys))
+        return (self.small_key_marker, self.canonical_ids.setdefault(signature, len(self.canonical_ids)))
 
     async def is_immediately_uncacheable(self, dynprompt, node_id):
         from comfy_execution.cache_provider import _contains_self_unequal

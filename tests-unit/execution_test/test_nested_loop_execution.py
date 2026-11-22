@@ -493,7 +493,7 @@ def test_loop_executes_final_carried_value_without_output():
 
 
 def test_loop_runs_more_passes_than_the_recursion_limit_allows():
-    # Each pass chains onto the one before, so 200 passes recurse about 400 frames deeper than this.
+    # Each cached pass chains onto the one before, so its full key walks about 400 frames deeper than this.
     limit = sys.getrecursionlimit()
     depth = len(inspect.stack(0))
     Increment.calls = []
@@ -502,7 +502,12 @@ def test_loop_runs_more_passes_than_the_recursion_limit_allows():
         "initial": {"class_type": "TestConstant", "inputs": {"value": 0}},
         "loop": {
             "class_type": "StartLoop",
-            "inputs": {"mode": "simple", "mode.num_iterations": 200, "initial_iteration_value": ["initial", 0]},
+            "inputs": {
+                "mode": "simple",
+                "mode.num_iterations": 200,
+                "initial_iteration_value": ["initial", 0],
+                "cache_iterations": True,
+            },
         },
         "increment": {"class_type": "TestIncrement", "inputs": {"value": ["loop", 4]}},
         "close": {
@@ -557,14 +562,14 @@ def count_calls(monkeypatch, name):
     return calls
 
 
-def test_uncached_loop_keys_its_passes_without_building_their_signatures(monkeypatch):
+def test_uncached_loop_keys_in_work_linear_in_its_length(monkeypatch):
     Capture.values = []
     signature_parts = count_calls(monkeypatch, "get_immediate_node_signature")
 
     execute_prompt(carried_loop(500), "long-uncached-loop", ["capture"])
 
     assert Capture.values == [500]
-    assert sum(signature_parts.values()) < 50, "only the submitted nodes get full keys; every pass is uncacheable"
+    assert sum(signature_parts.values()) < 2 * len(signature_parts), "every pass is uncacheable, so no key lists its ancestors"
 
 
 def test_ram_pressure_cache_keys_each_unrolled_node_once(monkeypatch):
@@ -588,6 +593,35 @@ def test_cached_loop_over_the_key_budget_fails_before_running(monkeypatch):
     errors = [data["exception_message"] for event, data in executor.status_messages if event == "execution_error"]
     assert len(errors) == 1 and "Turn off cache iterations" in errors[0]
     assert Increment.calls == []
+
+
+class ObjectList:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {"required": {}}
+
+    RETURN_TYPES = ("*",)
+    OUTPUT_IS_LIST = (True,)
+    FUNCTION = "execute"
+
+    def execute(self):
+        return ([object() for _ in range(50)],)
+
+
+def test_cached_loop_over_unhashable_items_is_not_size_limited(monkeypatch):
+    CapturePassthrough.values = []
+    monkeypatch.setitem(nodes.NODE_CLASS_MAPPINGS, "TestObjectList", ObjectList)
+    monkeypatch.setattr(nodes_loop, "CACHED_LOOP_KEY_BUDGET", 1)
+    prompt = {
+        "items": {"class_type": "TestObjectList", "inputs": {}},
+        "loop": {"class_type": "StartLoop", "inputs": {"mode": "List", "mode.list": ["items", 0], "cache_iterations": True}},
+        "capture": {"class_type": "TestCapturePassthrough", "inputs": {"value": ["loop", 0]}},
+        "close": {"class_type": "EndLoop", "inputs": {"output_value": ["capture", 0], "accumulate": True}},
+    }
+
+    execute_prompt(prompt, "unhashable-items", ["close"])
+
+    assert len(CapturePassthrough.values) == 50
 
 
 def test_loop_carries_every_item_of_a_heterogeneous_list():

@@ -1,5 +1,6 @@
 from comfy_api.latest import io
-from comfy_execution.caching import count_ancestors
+from comfy_execution.cache_provider import _contains_self_unequal
+from comfy_execution.caching import count_ancestors, to_hashable
 from comfy_execution.graph_utils import GraphBuilder, is_link
 from server import PromptServer
 
@@ -11,9 +12,20 @@ def _cache_enabled(value):
     return value[0] if isinstance(value, list) else value
 
 
-def _check_cached_loop_size(dynprompt, opener_id, body, expanded, passes):
-    nodes = len(expanded)
-    entries = nodes * (count_ancestors(dynprompt, [opener_id, *body]) + nodes // 2)
+def _check_cached_loop_size(dynprompt, opener_id, body, list_items, passes):
+    if _contains_self_unequal(to_hashable(list_items)):
+        return  # Items such as images can't be hashed, so no pass gets a full key.
+    inherited = {
+        value[0]
+        for node_id in body
+        for value in dynprompt.get_node(node_id)["inputs"].values()
+        if is_link(value) and value[0] not in body and value[0] != opener_id
+    }
+    initial = dynprompt.get_node(opener_id)["inputs"].get("initial_iteration_value")
+    if is_link(initial):
+        inherited.add(initial[0])
+    full_keys = passes * (len(body) + 1)
+    entries = full_keys * (len(inherited) + count_ancestors(dynprompt, inherited) + full_keys // 2)
     if entries > CACHED_LOOP_KEY_BUDGET:
         raise ValueError(
             f"Start Loop has {passes} passes with cache iterations on, which would need about {entries:,} cache key "
@@ -236,7 +248,7 @@ class StartLoop(io.ComfyNode):
             _cache_enabled(cache_iterations),
         )
         if _cache_enabled(cache_iterations):
-            _check_cached_loop_size(dynprompt, unique_id, body, graph, len(values))
+            _check_cached_loop_size(dynprompt, unique_id, body, list_items, len(values))
         close = dynprompt.get_node(close_id)
         close_inputs = close["inputs"].copy()
         for name in tuple(close_inputs):

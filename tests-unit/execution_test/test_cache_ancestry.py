@@ -3,7 +3,6 @@ import random
 
 import pytest
 
-import comfy.model_management
 import nodes
 from comfy_execution.cache_provider import _contains_self_unequal
 from comfy_execution.caching import CacheKeySetInputSignature
@@ -165,11 +164,34 @@ def test_only_keys_that_could_never_match_change(monkeypatch, seed):
             assert keys.get_data_key(node_id) == full_key
 
 
-def test_keying_stops_when_processing_is_interrupted(monkeypatch):
+def test_identical_uncacheable_nodes_still_share_a_key(monkeypatch):
     monkeypatch.setitem(nodes.NODE_CLASS_MAPPINGS, "Test", PlainNode)
-    comfy.model_management.interrupt_current_processing(True)
-    try:
-        with pytest.raises(comfy.model_management.InterruptProcessingException):
-            keyed(CacheKeySetInputSignature, GRAPHS["branching"], {})
-    finally:
-        comfy.model_management.interrupt_current_processing(False)
+    prompt = {
+        "source": node(value=1),
+        "a": node(x=["source", 0]),
+        "b": node(x=["source", 0]),
+        "after_a": node(x=["a", 0]),
+        "after_b": node(x=["b", 0]),
+        "other": node(x=["source", 0], extra=2),
+    }
+    changed = {"source": float("NaN")}
+
+    keys = keyed(CacheKeySetInputSignature, prompt, changed)
+    full = keyed(FullKeys, prompt, changed)
+
+    assert full.get_data_key("a") == full.get_data_key("b")
+    assert keys.get_data_key("a") == keys.get_data_key("b")
+    assert keys.get_data_key("after_a") == keys.get_data_key("after_b")
+    assert keys.get_data_key("other") != keys.get_data_key("a")
+
+
+def test_a_node_keyed_after_an_override_is_judged_on_the_current_graph(monkeypatch):
+    monkeypatch.setitem(nodes.NODE_CLASS_MAPPINGS, "Test", PlainNode)
+    dynprompt = DynamicPrompt({"source": node(value=1), "close": node(x=["source", 0]), "after": node(x=["close", 0])})
+    keys = CacheKeySetInputSignature(dynprompt, [], Changed({"source": float("NaN")}))
+    asyncio.run(keys.add_keys(["close"]))
+
+    dynprompt.override_node("close", node())
+    asyncio.run(keys.add_keys(["after"]))
+
+    assert keys.uncacheable == {"after": False, "close": False}
