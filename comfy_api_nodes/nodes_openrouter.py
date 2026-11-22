@@ -27,19 +27,16 @@ from comfy_api_nodes.apis.openrouter import (
     OpenRouterWebSearchOptions,
 )
 from comfy_api_nodes.util import (
-    ApiEndpoint,
     bytesio_to_image_tensor,
     download_url_to_image_tensor,
     get_number_of_images,
     pad_images_to_common_channels,
-    sync_op,
+    router_op,
     upload_images_to_comfyapi,
     upload_video_to_comfyapi,
     validate_string,
 )
 
-OPENROUTER_CHAT_ENDPOINT = "/proxy/openrouter/api/v1/chat/completions"
-OPENROUTER_IMAGES_ENDPOINT = "/proxy/openrouter/api/v1/images"
 
 
 Profile = Literal["standard", "reasoning", "frontier_reasoning", "always_reasoning", "perplexity", "perplexity_reasoning"]
@@ -418,9 +415,9 @@ class OpenRouterLLMNode(IO.ComfyNode):
             search_context_size=search_context_size,
         )
 
-        response = await sync_op(
+        response = await router_op(
             cls,
-            ApiEndpoint(path=OPENROUTER_CHAT_ENDPOINT, method="POST"),
+            "openrouter/chat-completions",
             response_model=OpenRouterChatResponse,
             data=request,
         )
@@ -641,11 +638,10 @@ class OpenRouterImageNode(IO.ComfyNode):
             )
             input_references = [OpenRouterImageContent(image_url=OpenRouterImageUrl(url=url)) for url in urls]
 
-        response = await sync_op(
+        response = await router_op(
             cls,
-            ApiEndpoint(path=OPENROUTER_IMAGES_ENDPOINT, method="POST"),
+            "openrouter/images",
             response_model=OpenRouterImageResponse,
-            asset_urls=True,
             data=OpenRouterImageRequest(
                 model=slug,
                 prompt=prompt,
