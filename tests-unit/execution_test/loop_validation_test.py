@@ -472,7 +472,6 @@ def valid_loop_with_inner_output(tag):
 
 
 def orphan_end():
-    # An End Loop with no Start Loop has no expansion result, so its output can't run either.
     return {
         "z_source": node("Source"),
         "z_end": node("EndLoop", output_value=["z_source", 0], accumulate=False),
@@ -481,7 +480,6 @@ def orphan_end():
 
 
 def test_prompt_validation_drops_every_loop_output_when_a_loop_fails(monkeypatch):
-    # Start Loops are annotated only when every loop validates, so outputs of the valid loop "a" can't run either.
     register_loop_test_nodes(monkeypatch)
     prompt = {
         **valid_loop_with_inner_output("a"),
