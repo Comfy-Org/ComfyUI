@@ -1014,6 +1014,12 @@ def load_models_gpu(models, memory_required=0, force_patch_weights=False, minimu
         else:
             vram_set_state = vram_state
         lowvram_model_memory = 0
+        if vram_set_state == VRAMState.SHARED and (args.lowvram or args.novram):
+            # An explicit --lowvram/--novram asks for streaming loads even on
+            # MPS, where vram_state is forced to SHARED at import time and
+            # would otherwise load the full model into the shared pool,
+            # OOMing on small-memory machines.
+            vram_set_state = VRAMState.NO_VRAM if args.novram else VRAMState.LOW_VRAM
         if (vram_set_state == VRAMState.LOW_VRAM or vram_set_state == VRAMState.NORMAL_VRAM) and not force_full_load:
             loaded_memory = loaded_model.model_loaded_memory()
             current_free_mem = get_free_memory(torch_dev) + loaded_memory
