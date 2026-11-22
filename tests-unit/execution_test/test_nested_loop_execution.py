@@ -835,10 +835,10 @@ def test_iteration_cache_still_expands_when_only_termination_is_requested():
     assert CapturePassthrough.values == [1, 2]
 
 
-def cached_loop(initial, passes=2):
+def cached_loop(initial, passes=2, cache_iterations=True):
     return {
         "class_type": "StartLoop",
-        "inputs": {"mode": "simple", "mode.num_iterations": passes, "initial_iteration_value": initial, "cache_iterations": True},
+        "inputs": {"mode": "simple", "mode.num_iterations": passes, "initial_iteration_value": initial, "cache_iterations": cache_iterations},
     }
 
 
@@ -849,12 +849,12 @@ def carried_close(source, accumulate=False):
     }
 
 
-def chained_loops(tag, start, step=1):
+def chained_loops(tag, start, step=1, cache_first=True):
     """Loop 1 adds an outside step each pass; loop 2 carries loop 1's result and increments it."""
     return {
         f"{tag}_start": {"class_type": "TestConstant", "inputs": {"value": start}},
         f"{tag}_step": {"class_type": "TestConstant", "inputs": {"value": step}},
-        f"{tag}_first": cached_loop([f"{tag}_start", 0]),
+        f"{tag}_first": cached_loop([f"{tag}_start", 0], cache_iterations=cache_first),
         f"{tag}_add": {"class_type": "TestAdd", "inputs": {"value": [f"{tag}_first", 4], "amount": [f"{tag}_step", 0]}},
         f"{tag}_first_close": carried_close(f"{tag}_add"),
         f"{tag}_second": cached_loop([f"{tag}_first_close", 0]),
@@ -910,11 +910,24 @@ def test_loop_after_an_accumulating_loop_reruns_when_it_returns_more_values(cach
         }
 
     executor = PromptExecutor(Server(), cache_type=cache_type, cache_args={"ram": 0, "ram_inactive": 0})
-    executor.execute(prompt(2), "two-passes", execute_outputs=["second_close"])
-    executor.execute(prompt(3), "three-passes", execute_outputs=["second_close"])
+    for passes in (2, 3):
+        executor.execute(prompt(passes), f"{passes}-passes", execute_outputs=["second_close"])
+        assert executor.success
 
-    assert executor.success
     assert RecordCarried.values == [[1, 2], [1, 2, 3]]
+
+
+@pytest.mark.parametrize("cache_type", [False, CacheType.RAM_PRESSURE])
+def test_loop_after_an_uncached_loop_reruns_its_passes(cache_type):
+    # The first loop's passes always change, so nothing downstream of them can be reused.
+    Increment.calls = []
+    executor = PromptExecutor(Server(), cache_type=cache_type, cache_args={"ram": 0, "ram_inactive": 0})
+
+    for name in ("first", "same"):
+        executor.execute(chained_loops("a", 0, cache_first=False), name, execute_outputs=["a_capture"])
+        assert executor.success
+
+    assert Increment.calls == [3, 4, 3, 4]
 
 
 def nested_cached_loops(start):

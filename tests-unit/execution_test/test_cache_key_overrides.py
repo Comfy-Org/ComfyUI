@@ -38,3 +38,7 @@ def test_cache_keys_follow_an_overrides_cache_key_inputs(monkeypatch):
     )
 
     assert node_key(dynprompt, "after") == before
+
+    dynprompt.override_node("close", {"class_type": "TestNode", "inputs": {"flag": True}}, cache_key_inputs={"flag": True})
+
+    assert node_key(dynprompt, "after") != before
