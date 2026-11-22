@@ -8,7 +8,6 @@ from typing import Tuple
 import numpy as np
 import torch
 from torch import Tensor
-from torch.nn.functional import max_pool1d
 
 import comfy.model_management
 
@@ -511,66 +510,138 @@ def _raster_all_torch(uvs_tex, uv_offsets, faces_cat, face_offsets, bw_t, bh_t, 
     return buf, cbase
 
 
-def _build_candidates_gpu(sky_t, ar, cur_w, cur_h, bw0, bw1, step, rand01, device):
-    """Candidate (x, y) positions as a (2, M, 2) tensor (dim 0 = orientation). The first
-    n_sky rows per orientation are skyline-flush and collision-free by construction.
-    rand01 is (2, rand_n, 2) pre-drawn uniforms; ar a preallocated arange."""
+def _build_candidates_gpu(sky_t, arf, cur_w, cur_h, bw0, bw1, step, rand01):
+    """Candidate positions as a (2, 2, M) long tensor [coord (x, y), orientation, candidate].
+    Per orientation: the n_sky skyline-flush candidates (collision-free by construction), the
+    shared edge sweep, then rand01's (2, rand_n, 2) uniforms scaled to the atlas. Assembled in
+    float32, which is exact for these integer coordinates, so the whole set is one conversion;
+    arf is a preallocated float arange."""
     hi_x = max(cur_w, 1) + 1
     hi_y = max(cur_h, 1) + 1
-    xs = ar[0:hi_x:step]
-    ys = ar[0:hi_y:step]
-    n_sky = (hi_x + step - 1) // step
-    zx = torch.zeros_like(xs)
-    zy = torch.zeros_like(ys)
-    common = torch.cat([
-        torch.stack([xs, zx], 1), torch.stack([xs, zx + cur_h], 1),
-        torch.stack([zy, ys], 1), torch.stack([zy + cur_w, ys], 1)])
-    wm = []
-    for cw in (bw0, bw1):
-        span = (n_sky - 1) * step + cw
-        wm.append(max_pool1d(sky_t[:span].view(1, 1, -1).float(), kernel_size=cw,
-                             stride=step).view(-1))
-    sky = torch.stack([torch.stack([xs, wm[0].long()], 1),
-                       torch.stack([xs, wm[1].long()], 1)])
-    lim = torch.tensor([hi_x, hi_y], dtype=rand01.dtype, device=device)
-    rnd = (rand01 * lim).long()
-    return torch.cat([sky, common.expand(2, -1, -1), rnd], 1), n_sky
+    xs = arf[0:hi_x:step].expand(2, -1)
+    ys = arf[0:hi_y:step].expand(2, -1)
+    n_sky, ny = xs.shape[1], ys.shape[1]
+    span = (n_sky - 1) * step
+    skyf = sky_t[:span + max(bw0, bw1)].float()
+    w = torch.stack([skyf[:span + bw].unfold(0, bw, step).amax(1) for bw in (bw0, bw1)])
+    # constant columns are broadcast views into arf (whose entries are their own indices)
+    zero, at_w, at_h = arf[0:1], arf[cur_w:cur_w + 1], arf[cur_h:cur_h + 1]
+    cx = torch.cat([xs, xs, xs, zero.expand(2, ny), at_w.expand(2, ny), rand01[..., 0] * hi_x], 1)
+    cy = torch.cat([w, zero.expand(2, n_sky), at_h.expand(2, n_sky), ys, ys, rand01[..., 1] * hi_y], 1)
+    return torch.stack([cx, cy]).long(), n_sky
 
 
-def _best_placement_torch(atlas, pix0, dim0, dim1, cands, n_sky, cur_w, cur_h, device):
-    """Lowest-score non-colliding placement as a (3,) int tensor [x, y, swap]. The best
-    skyline candidate bounds the score; only strictly better candidates are pixel-tested."""
+def _placement_scores(cands, dim0, dim1, n_sky, cur_w, cur_h):
+    """Flat (2*M,) candidate scores, the best skyline candidate's score and that candidate as
+    a (3,) [x, y, swap] tensor."""
     m = cands.shape[1]
-    chw = torch.tensor([[dim0[0], dim0[1]], [dim1[0], dim1[1]]], device=device)
-    nw = torch.clamp(cands[..., 0] + chw[:, 1:], min=cur_w)             # (2,M)
-    nh = torch.clamp(cands[..., 1] + chw[:, :1], min=cur_h)
+    nw = torch.stack([cands[0, :, 0] + dim0[1], cands[1, :, 0] + dim1[1]]).clamp_(min=cur_w)  # (2,M)
+    nh = torch.stack([cands[0, :, 1] + dim0[0], cands[1, :, 1] + dim1[0]]).clamp_(min=cur_h)
     ext = torch.maximum(nw, nh)
     sc = ext * ext + nw * nh
-    js = sc[:, :n_sky].reshape(-1).argmin()                             # best skyline candidate
+    sky_sc = sc[:, :n_sky].reshape(-1)
+    js = sky_sc.argmin()                                                # best skyline candidate
     sky_o = js // n_sky
-    s_star = sc[:, :n_sky].reshape(-1)[js]
     sky = torch.cat([cands[sky_o, js % n_sky], sky_o.reshape(1)])
+    return sc.reshape(-1), sky_sc[js], sky, m
+
+
+def _collision_lin(atlas, pix0, dim0):
+    """Flattened atlas offsets of a chart's True pixels for both orientations, (2, k)."""
+    aw = atlas.shape[1]
+    idt = torch.int32 if atlas.numel() < (1 << 31) else torch.long
+    lin0 = (pix0[:, 0] * aw + pix0[:, 1]).to(idt)                       # (y, x)
+    lin1 = (pix0[:, 1] * aw + (dim0[0] - 1 - pix0[:, 0])).to(idt)       # rotated: (x, h-1-y)
+    return torch.stack([lin0, lin1]), idt
+
+
+_FAST_EXACT = 256       # prescreen passers exact-tested without another host sync
+_EXACT_BUDGET = 1 << 22  # pixel-tests per exact chunk
+
+
+def _best_placement_torch(atlas, lin, dims, cxy, n_sky, cur_w, cur_h, ar_p, exact_args):
+    """Lowest-score non-colliding placement as host ints (x, y, swap). The best skyline
+    candidate bounds the score; only strictly better candidates are pixel-tested.
+
+    lin is the chart's (2, k) flattened pixel offsets per orientation, dims its (2, 2, 1)
+    [[w, h], [h, w]] (coord, orientation) on device, cxy the (2, 2, M) candidates from
+    _build_candidates_gpu.
+    The loop is bound by per-op dispatch, so the common case is resolved with fixed-size
+    tensors and one host read: prescreen every candidate, exact-test the first _FAST_EXACT
+    (by score) that pass. Only when those hold no free spot but more passers remain does it
+    fall back to _best_placement_exact (with exact_args = (pix0, dim0, dim1)), so the result
+    matches it exactly."""
+    cx, cy = cxy[0], cxy[1]                                             # (2, M) each
+    m = cx.shape[1]
+    nwh = cxy + dims                                                    # candidate extents
+    nw, nh = nwh[0].clamp_(min=cur_w), nwh[1].clamp_(min=cur_h)
+    sc = torch.maximum(nw, nh).square_().addcmul_(nw, nh)
+    s_star, js = sc[:, :n_sky].reshape(-1).min(0)                       # best skyline candidate
+    fj = js + js.div(n_sky, rounding_mode="floor") * (m - n_sky)        # ... as a flat index
+    vals, top = torch.sort(sc.view(-1), stable=True)                    # ties by flat index
+    valid = vals < s_star
+    p = top.shape[0]
+    retry = None
+
+    k = lin.shape[1]
+    if k == 0:                                                          # empty chart: anywhere free
+        pick, free = top, valid
+    else:
+        aflat = atlas.view(-1)
+        base = torch.add(cx, cy, alpha=atlas.shape[1]).view(-1)[top].to(lin.dtype)
+        og = (top >= m)[:, None]                                        # rotated orientation
+        stride = (k + 127) // 128
+        if stride == 1:                                                 # 128 pixels or fewer: exact
+            pick = top
+            free = valid > aflat[base[:, None] + torch.where(og, lin[1], lin[0])].any(1)  # valid & ~hit
+        else:
+            # a sampled hit proves collision, so only subsample-clean candidates need the exact test
+            ls = lin[:, ::stride]
+            maybe = valid > aflat[base[:, None] + torch.where(og, ls[1], ls[0])].any(1)
+            t = max(1, min(_FAST_EXACT, _EXACT_BUDGET // k))
+            rank = maybe.cumsum(0)                                      # 1-based passer rank
+            slot = torch.where(maybe, rank, t + 1).clamp_(max=t + 1)
+            sel = torch.full((t + 2,), p, dtype=torch.long, device=top.device)
+            sel.scatter_(0, slot, ar_p[:p])                             # sync-free compaction
+            sel = sel[1:t + 1]
+            ok = sel < p
+            sel.clamp_(max=p - 1)
+            pick = top[sel]
+            free = ok > aflat[base[sel][:, None] + torch.where(og[sel], lin[1], lin[0])].any(1)
+            retry = rank[-1] > t                                        # untested passers remain
+    has, first = free.max(0)                                            # first free, if any
+    jj = torch.where(has, pick[first], fj)                              # flat candidate index
+    again = retry > has if retry is not None else has < has             # retry & ~has
+    x, y, swap, again = torch.cat([cxy.view(2, -1)[:, jj], (jj // m).view(1),
+                                   again.view(1)]).tolist()
+    if again:
+        pix0, dim0, dim1 = exact_args
+        return tuple(_best_placement_exact(atlas, pix0, dim0, dim1, cxy.permute(1, 2, 0), n_sky,
+                                           cur_w, cur_h, top.device).tolist())
+    return x, y, swap
+
+
+def _best_placement_exact(atlas, pix0, dim0, dim1, cands, n_sky, cur_w, cur_h, device):
+    """Lowest-score non-colliding placement as a (3,) int tensor [x, y, swap], searching
+    every candidate that beats the best skyline candidate."""
+    sc, s_star, sky, m = _placement_scores(cands, dim0, dim1, n_sky, cur_w, cur_h)
     cflat = cands.reshape(-1, 2)
-    surv = (sc.reshape(-1) < s_star).nonzero(as_tuple=True)[0]          # compact once
+    surv = (sc < s_star).nonzero(as_tuple=True)[0]                      # compact once
     total = surv.shape[0]
     if total == 0:
         return sky
 
     k = pix0.shape[0]
     if k == 0:                                                          # empty chart: anywhere free
-        j = surv[sc.reshape(-1)[surv].argmin()]
+        j = surv[sc[surv].argmin()]
         return torch.cat([cflat[j], (j // m).reshape(1)])
-    ordr = surv[torch.argsort(sc.reshape(-1)[surv], stable=True)]
+    ordr = surv[torch.argsort(sc[surv], stable=True)]
 
     # flattened-index collision test: one int32 gather index instead of two int64 rows/cols
-    aw = atlas.shape[1]
-    idt = torch.int32 if atlas.numel() < (1 << 31) else torch.long
-    lin0 = (pix0[:, 0] * aw + pix0[:, 1]).to(idt)                       # (y, x)
-    lin1 = (pix0[:, 1] * aw + (dim0[0] - 1 - pix0[:, 0])).to(idt)       # rotated: (x, h-1-y)
-    linp = torch.stack([lin0, lin1])
+    linp, idt = _collision_lin(atlas, pix0, dim0)
     aflat = atlas.view(-1)
     og = (ordr >= m).long()
-    base = (cflat[ordr, 1] * aw + cflat[ordr, 0]).to(idt)
+    base = (cflat[ordr, 1] * atlas.shape[1] + cflat[ordr, 0]).to(idt)
 
     # prescreen survivors on ~128 strided pixels: a sampled hit proves collision, so only
     # subsample-clean candidates need the exact test
@@ -585,7 +656,7 @@ def _best_placement_torch(atlas, pix0, dim0, dim1, cands, n_sky, cur_w, cur_h, d
         j = ordr[passers[0]]
         return torch.cat([cflat[j], (j // m).reshape(1)])
 
-    budget = 1 << 22                                                    # pixel-tests per chunk
+    budget = _EXACT_BUDGET
     start = 0
     while start < npass:
         take = max(1, budget // k)
@@ -635,10 +706,12 @@ def _pack_bitmap_torch(uvs_cat, uv_offsets, chart_3d_areas, chart_uv_areas, face
         m = end - start
         uvs_pad = torch.zeros(m, vmax, 2, device=device)
         vmask = torch.zeros(m, vmax, dtype=torch.bool, device=device)
-        for j, i in enumerate(range(start, end)):
-            count = int(vcount[i])
-            uvs_pad[j, :count] = uvs_src[int(uv_offsets[i]):int(uv_offsets[i + 1])]
-            vmask[j, :count] = True
+        cnt = vcount[start:end]
+        rows = np.repeat(np.arange(m), cnt)                     # chart-major scatter, one copy
+        cols = np.arange(rows.size) - np.repeat(np.cumsum(cnt) - cnt, cnt)
+        pad_idx = torch.from_numpy(rows * vmax + cols).to(device)
+        uvs_pad.view(-1, 2)[pad_idx] = uvs_src[int(uv_offsets[start]):int(uv_offsets[end])]
+        vmask.view(-1)[pad_idx] = True
         u0, u1 = uvs_pad[..., 0], uvs_pad[..., 1]
         xsp = torch.empty(m, 36, device=device)
         ysp = torch.empty(m, 36, device=device)
@@ -730,13 +803,25 @@ def _pack_bitmap_torch(uvs_cat, uv_offsets, chart_3d_areas, chart_uv_areas, face
     cap = side_guess + margin
     atlas = torch.zeros((cap, cap), dtype=torch.bool, device=device)
     sky_t = torch.zeros(cap, dtype=torch.long, device=device)
-    ar = torch.arange(cap + 1, device=device)
     cur_w = cur_h = 0
     placements = [None] * n
     gen = torch.Generator(device=device).manual_seed(rng_seed)
     rand_n = min(512, attempts)                     # random samples per orientation
     # no _SWEEP_CAP here: the skyline-bound pruning depends on the dense sweep
     rand01 = torch.rand(n, 2, rand_n, 2, generator=gen, device=device)   # all draws upfront
+    # per chart, the size each candidate adds as (coord, orientation): x by width, y by height
+    dims_t = torch.stack([torch.stack([wt, ht], 1), torch.stack([ht, wt], 1)], 1)[..., None]
+    pix_both = torch.stack([pix_all, pixr_all])     # (2, P, 2) per orientation
+
+    def sized_for(side):
+        # per-atlas-width state: float sweep coords, candidate arange, flattened pixel offsets
+        idt = torch.int32 if side * side < (1 << 31) else torch.long
+        lin = (pix_both[..., 0] * side + pix_both[..., 1]).to(idt)
+        return (torch.arange(side + 1, device=device, dtype=torch.float32),
+                torch.arange(10 * (side + 1) + 2 * rand_n, device=device), lin)
+
+    arf, ar_p, lin_all = sized_for(cap)
+    neg = -(1 << 40)
 
     for t_i, ci in enumerate(order):
         if progress_callback is not None and (t_i & 255) == 0:
@@ -749,25 +834,25 @@ def _pack_bitmap_torch(uvs_cat, uv_offsets, chart_3d_areas, chart_uv_areas, face
             nsk = torch.zeros(ns, dtype=torch.long, device=device)
             nsk[:sky_t.shape[0]] = sky_t
             sky_t = nsk
-            ar = torch.arange(ns + 1, device=device)
+            arf, ar_p, lin_all = sized_for(ns)
         dim, dimr = dim_l[ci], dimr_l[ci]
         step = max(1, min(dim[0], dim[1]) // 8)
-        cands, n_sky = _build_candidates_gpu(
-            sky_t, ar, cur_w, cur_h, dim[1], dimr[1], step, rand01[t_i], device)
-        res = _best_placement_torch(atlas, pix_l[ci], dim, dimr,
-                                    cands, n_sky, cur_w, cur_h, device)
-        bx, by, swap = (int(v) for v in res.tolist())
+        cxy, n_sky = _build_candidates_gpu(
+            sky_t, arf, cur_w, cur_h, dim[1], dimr[1], step, rand01[t_i])
+        lin = lin_all[:, offs[ci]:offs[ci + 1]]
+        bx, by, swap = _best_placement_torch(atlas, lin, dims_t[ci], cxy, n_sky, cur_w, cur_h,
+                                             ar_p, (pix_l[ci], dim, dimr))
         if bx < 0:
             bx, by, swap = cur_w, 0, 0
         pix = pixr_l[ci] if swap else pix_l[ci]
         bh_, bw_ = (dimr if swap else dim)
-        atlas[by + pix[:, 0], bx + pix[:, 1]] = True                    # sparse blit
+        atlas.view(-1)[lin[swap] + (by * atlas.shape[1] + bx)] = True   # sparse blit
         cur_w = max(cur_w, bx + bw_)
         cur_h = max(cur_h, by + bh_)
-        ct = torch.full((bw_,), -1, dtype=torch.long, device=device)
+        ct = torch.full((bw_,), neg, dtype=torch.long, device=device)  # columns w/o pixels stay below
         ct.scatter_reduce_(0, pix[:, 1], pix[:, 0], reduce="amax")
-        ix = ar[bx:bx + bw_]
-        sky_t[ix] = torch.where(ct >= 0, torch.maximum(sky_t[ix], by + ct + 1), sky_t[ix])
+        seg = sky_t[bx:bx + bw_]
+        torch.maximum(seg, ct.add_(by + 1), out=seg)                    # skyline: top of each column
         placements[ci] = ChartPlacement(chart_id=ci, offset=(float(bx), float(by)),
                                         scale=scales[ci], rotation=thetas[ci], swap_xy=bool(swap),
                                         chart_h=float(dim_l[ci][0]))
