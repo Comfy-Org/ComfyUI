@@ -11,6 +11,7 @@ import comfy_extras.nodes_loop as nodes_loop
 from comfy_api.latest import io
 from comfy_execution.graph_utils import GraphBuilder
 from comfy_execution.validation import validate_loops
+import comfy_execution.caching as caching
 from comfy_execution.caching import CacheKeySetInputSignature
 from execution import CacheType, PromptExecutor
 
@@ -584,14 +585,14 @@ def test_ram_pressure_cache_keys_each_unrolled_node_once(monkeypatch):
 
 def test_cached_loop_over_the_key_budget_fails_before_running(monkeypatch):
     Increment.calls = []
-    monkeypatch.setattr(nodes_loop, "CACHED_LOOP_KEY_BUDGET", 1000)
+    monkeypatch.setattr(caching, "FULL_KEY_BUDGET", 1000)
     executor = PromptExecutor(Server(), cache_type=False, cache_args={"ram": 0, "ram_inactive": 0})
 
     executor.execute(carried_loop(50, cache_iterations=True), "over-budget", execute_outputs=["capture"])
 
     assert not executor.success
     errors = [data["exception_message"] for event, data in executor.status_messages if event == "execution_error"]
-    assert len(errors) == 1 and "Turn off cache iterations" in errors[0]
+    assert len(errors) == 1 and "turn off cache iterations" in errors[0]
     assert Increment.calls == []
 
 
@@ -611,7 +612,7 @@ class ObjectList:
 def test_cached_loop_over_unhashable_items_is_not_size_limited(monkeypatch):
     CapturePassthrough.values = []
     monkeypatch.setitem(nodes.NODE_CLASS_MAPPINGS, "TestObjectList", ObjectList)
-    monkeypatch.setattr(nodes_loop, "CACHED_LOOP_KEY_BUDGET", 1)
+    monkeypatch.setattr(caching, "FULL_KEY_BUDGET", 1)
     prompt = {
         "items": {"class_type": "TestObjectList", "inputs": {}},
         "loop": {"class_type": "StartLoop", "inputs": {"mode": "List", "mode.list": ["items", 0], "cache_iterations": True}},

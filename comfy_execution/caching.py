@@ -26,7 +26,7 @@ def include_unique_id_in_input(class_type: str) -> bool:
 
 
 def cache_key_inputs(dynprompt, node_id):
-    """The inputs a node's cache key is built from; every key and key-size estimate reads them here."""
+    """The inputs a node's cache key is built from; keys and the key budget read them only through here."""
     return dynprompt.get_node(node_id)["inputs"]
 
 
@@ -184,8 +184,8 @@ class CacheKeySetInputSignature(CacheKeySet):
                 stack.pop()
 
     # A node is uncacheable when it or any ancestor has a value unequal to itself (an always-changed
-    # fingerprint, an unhashable input, a missing node). Decided once per node, without recursion.
-    async def is_uncacheable(self, dynprompt, node_id):
+    # fingerprint, an unhashable input, a missing node). One pass per add_keys call, without recursion.
+    async def is_uncacheable(self, dynprompt, node_id, build_small_keys=True):
         stack = [node_id]
         entered = set()
         while stack:
@@ -200,7 +200,7 @@ class CacheKeySetInputSignature(CacheKeySet):
                 self.uncacheable[current] = await self.is_immediately_uncacheable(dynprompt, current) or any(
                     self.uncacheable.get(ancestor_id, False) for ancestor_id in linked_input_ids(dynprompt, current)
                 )
-                if self.uncacheable[current]:
+                if self.uncacheable[current] and build_small_keys:
                     self.small_keys[current] = await self.get_small_key(dynprompt, current)
         return self.uncacheable[node_id]
 
@@ -223,6 +223,26 @@ class CacheKeySetInputSignature(CacheKeySet):
         inputs = cache_key_inputs(dynprompt, node_id)
         values = [value[1] if is_link(value) else value for value in inputs.values()]
         return _contains_self_unequal(to_hashable([await self.is_changed_cache.get(node_id), values]))
+
+# Full cache keys list every ancestor, so their total size grows with the square of an unrolled loop's length.
+# The estimate below counts each full key's ancestors as the union of all of them, up to about 3x the real size.
+FULL_KEY_BUDGET = 3_000_000
+
+
+async def check_full_key_budget(cache, node_ids):
+    if not isinstance(cache, BasicCache) or cache.key_class is not CacheKeySetInputSignature:
+        return
+    keys = CacheKeySetInputSignature(cache.dynprompt, [], cache.is_changed_cache)
+    keys.uncacheable = {}
+    full = [node_id for node_id in node_ids if not await keys.is_uncacheable(cache.dynprompt, node_id, False)]
+    entries = len(full) * (len(full) + count_ancestors(cache.dynprompt, full))
+    if entries > FULL_KEY_BUDGET:
+        raise ValueError(
+            f"This node created {len(full):,} cacheable nodes whose cache keys would be too large (about {entries:,} "
+            f"ancestor entries, limit {FULL_KEY_BUDGET:,}). For a Start Loop, turn off cache iterations or run "
+            "fewer passes at a time."
+        )
+
 
 class BasicCache:
     def __init__(self, key_class, enable_providers=False):
