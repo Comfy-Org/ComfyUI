@@ -44,6 +44,18 @@ class Increment:
         return (value,)
 
 
+class Add:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {"required": {"value": ("INT",), "amount": ("INT",)}}
+
+    RETURN_TYPES = ("INT",)
+    FUNCTION = "execute"
+
+    def execute(self, value, amount):
+        return (value + amount,)
+
+
 class ExpandIncrement:
     @classmethod
     def INPUT_TYPES(cls):
@@ -301,6 +313,7 @@ def register_internal_loop_nodes(monkeypatch):
         "LoopResult": nodes_loop.LoopResult,
         "TestConstant": Constant,
         "TestIncrement": Increment,
+        "TestAdd": Add,
         "TestExpandIncrement": ExpandIncrement,
         "TestFalseBranch": FalseBranch,
         "TestTrueBranch": TrueBranch,
@@ -820,6 +833,123 @@ def test_iteration_cache_still_expands_when_only_termination_is_requested():
     assert executor.success
     assert Increment.calls == [1, 2]
     assert CapturePassthrough.values == [1, 2]
+
+
+def cached_loop(initial, passes=2):
+    return {
+        "class_type": "StartLoop",
+        "inputs": {"mode": "simple", "mode.num_iterations": passes, "initial_iteration_value": initial, "cache_iterations": True},
+    }
+
+
+def carried_close(source, accumulate=False):
+    return {
+        "class_type": "EndLoop",
+        "inputs": {"output_value": [source, 0], "next_iteration_value": [source, 0], "accumulate": accumulate},
+    }
+
+
+def chained_loops(tag, start, step=1):
+    """Loop 1 adds an outside step each pass; loop 2 carries loop 1's result and increments it."""
+    return {
+        f"{tag}_start": {"class_type": "TestConstant", "inputs": {"value": start}},
+        f"{tag}_step": {"class_type": "TestConstant", "inputs": {"value": step}},
+        f"{tag}_first": cached_loop([f"{tag}_start", 0]),
+        f"{tag}_add": {"class_type": "TestAdd", "inputs": {"value": [f"{tag}_first", 4], "amount": [f"{tag}_step", 0]}},
+        f"{tag}_first_close": carried_close(f"{tag}_add"),
+        f"{tag}_second": cached_loop([f"{tag}_first_close", 0]),
+        f"{tag}_increment": {"class_type": "TestIncrement", "inputs": {"value": [f"{tag}_second", 4]}},
+        f"{tag}_second_close": carried_close(f"{tag}_increment"),
+        f"{tag}_capture": {"class_type": "TestCapture", "inputs": {"value": [f"{tag}_second_close", 0]}},
+    }
+
+
+def test_loop_after_a_loop_does_not_share_another_branchs_cached_passes():
+    # The RAM pressure cache keeps every expansion in one key set, so equal keys share results.
+    Capture.values = []
+    executor = PromptExecutor(Server(), cache_type=CacheType.RAM_PRESSURE, cache_args={"ram": 0, "ram_inactive": 0})
+
+    executor.execute({**chained_loops("a", 0), **chained_loops("b", 100)}, "branches", execute_outputs=["a_capture", "b_capture"])
+
+    assert executor.success
+    assert sorted(Capture.values) == [4, 104]
+
+
+@pytest.mark.parametrize("cache_type", [False, CacheType.RAM_PRESSURE])
+def test_loop_after_a_loop_reuses_its_passes_until_the_first_loops_result_changes(cache_type):
+    Increment.calls = []
+    Capture.values = []
+    executor = PromptExecutor(Server(), cache_type=cache_type, cache_args={"ram": 0, "ram_inactive": 0})
+
+    for name, prompt in [
+        ("first", chained_loops("a", 0)),
+        ("same", chained_loops("a", 0)),
+        ("start-changed", chained_loops("a", 50)),
+        ("step-changed", chained_loops("a", 50, step=10)),
+    ]:
+        executor.execute(prompt, name, execute_outputs=["a_capture"])
+        assert executor.success
+
+    assert Capture.values == [4, 4, 54, 72]
+    assert Increment.calls == [3, 4, 53, 54, 71, 72]
+
+
+@pytest.mark.parametrize("cache_type", [False, CacheType.RAM_PRESSURE])
+def test_loop_after_an_accumulating_loop_reruns_when_it_returns_more_values(cache_type):
+    RecordCarried.values = []
+
+    def prompt(passes):
+        return {
+            "start": {"class_type": "TestConstant", "inputs": {"value": 0}},
+            "first": cached_loop(["start", 0], passes),
+            "increment": {"class_type": "TestIncrement", "inputs": {"value": ["first", 4]}},
+            "first_close": carried_close("increment", accumulate=True),
+            "second": cached_loop(["first_close", 0], passes=1),
+            "record": {"class_type": "TestRecordCarried", "inputs": {"value": ["second", 4]}},
+            "second_close": carried_close("record"),
+        }
+
+    executor = PromptExecutor(Server(), cache_type=cache_type, cache_args={"ram": 0, "ram_inactive": 0})
+    executor.execute(prompt(2), "two-passes", execute_outputs=["second_close"])
+    executor.execute(prompt(3), "three-passes", execute_outputs=["second_close"])
+
+    assert executor.success
+    assert RecordCarried.values == [[1, 2], [1, 2, 3]]
+
+
+def nested_cached_loops(start):
+    return {
+        "start": {"class_type": "TestConstant", "inputs": {"value": start}},
+        "outer": cached_loop(["start", 0]),
+        "inner": {
+            "class_type": "StartLoop",
+            "inputs": {
+                "mode": "simple",
+                "mode.num_iterations": 2,
+                "parent_iteration": ["outer", 0],
+                "initial_iteration_value": ["outer", 4],
+                "cache_iterations": True,
+            },
+        },
+        "increment": {"class_type": "TestIncrement", "inputs": {"value": ["inner", 4]}},
+        "inner_close": carried_close("increment"),
+        "outer_close": carried_close("inner_close"),
+        "capture": {"class_type": "TestCapture", "inputs": {"value": ["outer_close", 0]}},
+    }
+
+
+@pytest.mark.parametrize("cache_type", [False, CacheType.RAM_PRESSURE])
+def test_nested_cached_loops_reuse_their_passes_until_the_start_changes(cache_type):
+    Increment.calls = []
+    Capture.values = []
+    executor = PromptExecutor(Server(), cache_type=cache_type, cache_args={"ram": 0, "ram_inactive": 0})
+
+    for name, start in [("first", 0), ("same", 0), ("changed", 50)]:
+        executor.execute(nested_cached_loops(start), name, execute_outputs=["capture"])
+        assert executor.success
+
+    assert Capture.values == [4, 4, 54]
+    assert Increment.calls == [1, 2, 3, 4, 51, 52, 53, 54]
 
 
 def test_single_loop_concatenates_list_outputs():

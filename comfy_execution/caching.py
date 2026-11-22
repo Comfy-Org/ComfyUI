@@ -26,7 +26,7 @@ def include_unique_id_in_input(class_type: str) -> bool:
 
 
 def cache_key_inputs(dynprompt, node_id):
-    return dynprompt.get_node(node_id)["inputs"]
+    return dynprompt.get_cache_key_inputs(node_id)
 
 
 def linked_input_ids(dynprompt, node_id):

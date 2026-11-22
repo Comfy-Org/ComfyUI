@@ -99,7 +99,8 @@ def _expand_loop(dynprompt, opener_id, body, close_id, values, list_items, initi
     expanded = graph.finalize()
     for node_id, metadata in loop_metadata.items():
         expanded[node_id].update(metadata)
-    return expanded
+    result_outputs = {name: value for name, value in result_inputs.items() if name.startswith("output")}
+    return expanded, result_outputs
 
 
 class StartLoop(io.ComfyNode):
@@ -210,7 +211,7 @@ class StartLoop(io.ComfyNode):
         loop = dynprompt.get_node(unique_id)
         body = set(loop["_loop_body"])
         close_id = loop["_loop_end"]
-        graph = _expand_loop(
+        graph, result_outputs = _expand_loop(
             dynprompt,
             unique_id,
             body,
@@ -228,7 +229,12 @@ class StartLoop(io.ComfyNode):
         execution_list.add_node(close_id)
         execution_list.add_external_block(close_id)
         execution_list.inhibit_nodes(body)
-        dynprompt.override_node(close_id, {"class_type": close["class_type"], "inputs": close_inputs})
+        # Cache keys downstream follow the values End Loop returns, not the stripped links to the body.
+        dynprompt.override_node(
+            close_id,
+            {"class_type": close["class_type"], "inputs": close_inputs},
+            cache_key_inputs={**close_inputs, **result_outputs},
+        )
         PromptServer.instance.send_progress_text(f"Iteration 0 / {len(values)}", unique_id)
         return io.NodeOutput(None, False, not values, None, None, expand=graph)
 

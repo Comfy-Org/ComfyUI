@@ -26,6 +26,8 @@ class DynamicPrompt:
         self.original_prompt = original_prompt
         # Runtime replacements for original nodes, without mutating the submitted prompt.
         self.node_overrides = {}
+        # Inputs that cache keys follow instead, for overridden nodes (Start Loop's End Loop)
+        self.cache_key_inputs = {}
         # Any extra pieces of the graph created during execution
         self.ephemeral_prompt = {}
         self.ephemeral_parents = {}
@@ -40,10 +42,17 @@ class DynamicPrompt:
             return self.original_prompt[node_id]
         raise NodeNotFoundError(f"Node {node_id} not found")
 
-    def override_node(self, node_id, node_info):
+    def override_node(self, node_id, node_info, cache_key_inputs=None):
         if not self.has_node(node_id):
             raise NodeNotFoundError(f"Node {node_id} not found")
         self.node_overrides[node_id] = node_info
+        if cache_key_inputs is not None:
+            self.cache_key_inputs[node_id] = cache_key_inputs
+
+    def get_cache_key_inputs(self, node_id):
+        if node_id in self.cache_key_inputs:
+            return self.cache_key_inputs[node_id]
+        return self.get_node(node_id)["inputs"]
 
     def has_node(self, node_id):
         return node_id in self.original_prompt or node_id in self.ephemeral_prompt
