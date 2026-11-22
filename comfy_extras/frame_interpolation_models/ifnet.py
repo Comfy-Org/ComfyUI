@@ -32,7 +32,7 @@ class Head(nn.Module):
 
 
 class HeadLite(nn.Module):
-    """RIFE 4.7 / 4.9 2-layer head (`encode.0` Conv2d + `encode.1` ConvTranspose2d)."""
+    """RIFE 4.7 / 4.9 2-layer head (`encode.0` Conv2d + `encode.1` ConvTranspose2d without intermediate activation)."""
 
     def __init__(self, out_ch=4, device=None, dtype=None, operations=ops):
         super().__init__()
@@ -40,11 +40,9 @@ class HeadLite(nn.Module):
             operations.Conv2d(3, 16, 3, 2, 1, device=device, dtype=dtype),
             operations.ConvTranspose2d(16, out_ch, 4, 2, 1, device=device, dtype=dtype),
         )
-        self.relu = nn.LeakyReLU(0.2, True)
 
     def forward(self, x):
-        x = self.relu(self.encode[0](x))
-        return self.encode[1](x)
+        return self.encode(x)
 
 
 class ResConv(nn.Module):
@@ -96,7 +94,7 @@ class IFNet(nn.Module):
             self.encode = Head(out_ch=head_ch, device=device, dtype=dtype, operations=operations)
         feat_ch = out_ch - 5
         num_blocks = len(channels)
-        sub_in = (7 + 4 + feat_ch + 2 * head_ch) if lite_head else (8 + 4 + feat_ch + 2 * head_ch)
+        sub_in = (8 + 4 + 2 * head_ch) if lite_head else (8 + 4 + feat_ch + 2 * head_ch)
         block_in = [7 + 2 * head_ch] + [sub_in] * (num_blocks - 1)
         self.blocks = nn.ModuleList(
             [IFBlock(block_in[i], channels[i], out_ch=out_ch, device=device, dtype=dtype, operations=operations) for i in range(num_blocks)]
@@ -128,14 +126,9 @@ class IFNet(nn.Module):
     def warp(self, img, flow):
         return _warp(img, flow, self._warp_grids)
 
-    def _run_encode(self, img):
-        if self.lite_head:
-            return self.encode[1](F.leaky_relu(self.encode[0](img), 0.2, True))
-        return self.encode(img)
-
     def extract_features(self, img):
         """Extract head features for a single frame. Can be cached across pairs."""
-        return self._run_encode(img)
+        return self.encode(img)
 
     def forward(self, img0, img1, timestep=0.5, cache=None):
         if not isinstance(timestep, torch.Tensor):
@@ -144,8 +137,8 @@ class IFNet(nn.Module):
         self._build_warp_grids(img0.shape[2], img0.shape[3], img0.device)
 
         B = img0.shape[0]
-        f0 = cache["img0"].expand(B, -1, -1, -1) if cache and "img0" in cache else self._run_encode(img0)
-        f1 = cache["img1"].expand(B, -1, -1, -1) if cache and "img1" in cache else self._run_encode(img1)
+        f0 = cache["img0"].expand(B, -1, -1, -1) if cache and "img0" in cache else self.encode(img0)
+        f1 = cache["img1"].expand(B, -1, -1, -1) if cache and "img1" in cache else self.encode(img1)
         flow = mask = feat = None
         warped_img0, warped_img1 = img0, img1
         for i, block in enumerate(self.blocks):
@@ -153,7 +146,7 @@ class IFNet(nn.Module):
                 flow, mask, feat = block(torch.cat((img0, img1, f0, f1, timestep), 1), None, scale=self.scale_list[i])
             else:
                 cat_tensors = (
-                    (warped_img0, warped_img1, self.warp(f0, flow[:, :2]), self.warp(f1, flow[:, 2:4]), mask, feat)
+                    (warped_img0, warped_img1, self.warp(f0, flow[:, :2]), self.warp(f1, flow[:, 2:4]), timestep, mask)
                     if self.lite_head
                     else (warped_img0, warped_img1, self.warp(f0, flow[:, :2]), self.warp(f1, flow[:, 2:4]), timestep, mask, feat)
                 )
