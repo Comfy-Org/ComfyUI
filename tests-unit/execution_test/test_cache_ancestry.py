@@ -5,7 +5,8 @@ import pytest
 
 import nodes
 from comfy_execution.cache_provider import _contains_self_unequal
-from comfy_execution.caching import CacheKeySetInputSignature
+import comfy_execution.caching as caching
+from comfy_execution.caching import CacheKeySetInputSignature, to_hashable
 from comfy_execution.graph import DynamicPrompt
 from comfy_execution.graph_utils import is_link
 
@@ -195,3 +196,32 @@ def test_a_node_keyed_after_an_override_is_judged_on_the_current_graph(monkeypat
     asyncio.run(keys.add_keys(["after"]))
 
     assert keys.uncacheable == {"after": False, "close": False}
+
+
+def test_full_keys_keep_their_format(monkeypatch):
+    monkeypatch.setitem(nodes.NODE_CLASS_MAPPINGS, "Test", PlainNode)
+    keys = keyed(CacheKeySetInputSignature, {"a": node(value=1), "b": node(x=["a", 0])}, {})
+
+    assert keys.get_data_key("b") == to_hashable([["Test", False, ("x", ("ANCESTOR", 0, 0))], ["Test", False, ("value", 1)]])
+
+
+def test_key_budget_counts_ancestors_outside_the_new_nodes(monkeypatch):
+    monkeypatch.setitem(nodes.NODE_CLASS_MAPPINGS, "Test", PlainNode)
+    monkeypatch.setattr(caching, "FULL_KEY_BUDGET", 100)
+    prompt = {"0": node()}
+    for index in range(1, 50):
+        prompt[str(index)] = node(value=[str(index - 1), 0])
+    prompt.update({"new_a": node(x=["49", 0]), "new_b": node(x=["49", 0])})
+    cache = caching.HierarchicalCache(CacheKeySetInputSignature)
+    asyncio.run(cache.set_prompt(DynamicPrompt(prompt), [], Changed({})))
+
+    with pytest.raises(ValueError, match="turn off cache iterations"):
+        asyncio.run(caching.check_full_key_budget(cache, ["new_a", "new_b"]))
+
+
+def test_small_and_full_keys_can_be_ordered_against_each_other(monkeypatch):
+    monkeypatch.setitem(nodes.NODE_CLASS_MAPPINGS, "Test", PlainNode)
+    keys = keyed(CacheKeySetInputSignature, {"cached": node(value=1), "changed": node(value=2)}, {"changed": float("NaN")})
+
+    # The RAM pressure cache sorts eviction candidates on (score, time, key, size), so tied entries compare keys.
+    sorted([(0, 0, keys.get_data_key("cached"), 0), (0, 0, keys.get_data_key("changed"), 0)])

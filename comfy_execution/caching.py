@@ -214,7 +214,7 @@ class CacheKeySetInputSignature(CacheKeySet):
                 key = self.input_keys[ancestor_id] = await self.get_node_signature(dynprompt, ancestor_id)
             input_keys[ancestor_id] = self.canonical_ids.setdefault(key, len(self.canonical_ids))
         signature = to_hashable(await self.get_immediate_node_signature(dynprompt, node_id, input_keys))
-        return (self.small_key_marker, self.canonical_ids.setdefault(signature, len(self.canonical_ids)))
+        return to_hashable([self.small_key_marker, self.canonical_ids.setdefault(signature, len(self.canonical_ids))])
 
     async def is_immediately_uncacheable(self, dynprompt, node_id):
         from comfy_execution.cache_provider import _contains_self_unequal

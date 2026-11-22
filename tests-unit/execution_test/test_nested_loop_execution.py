@@ -566,6 +566,7 @@ def count_calls(monkeypatch, name):
 def test_uncached_loop_keys_in_work_linear_in_its_length(monkeypatch):
     Capture.values = []
     signature_parts = count_calls(monkeypatch, "get_immediate_node_signature")
+    monkeypatch.setattr(caching, "FULL_KEY_BUDGET", 1)
 
     execute_prompt(carried_loop(500), "long-uncached-loop", ["capture"])
 
@@ -574,12 +575,14 @@ def test_uncached_loop_keys_in_work_linear_in_its_length(monkeypatch):
 
 
 def test_ram_pressure_cache_keys_each_unrolled_node_once(monkeypatch):
+    Capture.values = []
     keyed = count_calls(monkeypatch, "get_node_signature")
     executor = PromptExecutor(Server(), cache_type=CacheType.RAM_PRESSURE, cache_args={"ram": 0, "ram_inactive": 0})
 
     executor.execute(carried_loop(20, cache_iterations=True), "keyed-once", execute_outputs=["capture"])
 
     assert executor.success
+    assert Capture.values == [20]
     assert max(keyed.values()) == 1
 
 
