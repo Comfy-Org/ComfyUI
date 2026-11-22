@@ -40,7 +40,7 @@ from comfy_execution.graph import (
     get_input_info,
 )
 from comfy_execution.graph_utils import GraphBuilder, is_link
-from comfy_execution.validation import LoopValidationError, validate_loops, validate_node_input
+from comfy_execution.validation import LoopValidationError, outputs_reaching, validate_loops, validate_node_input
 from comfy_execution.progress import get_progress_state, reset_progress_state, add_progress_handler, WebUIProgressHandler
 from comfy_execution.utils import CurrentNodeContext
 from comfy_execution.asset_enrichment import register_executed_outputs, emit_cached_output, take_asset_previews
@@ -1291,11 +1291,16 @@ async def validate_prompt(prompt_id, prompt, partial_execution_list: Union[list[
         for valid, reasons, _ in validated.values()
         for reason in reasons
     )
-    if not has_dependency_cycle:
+    if has_dependency_cycle:
+        # Loop validation is skipped, so no Start Loop is annotated and no output that runs a loop can run.
+        good_outputs.difference_update(outputs_reaching(prompt, outputs, start_nodes | end_nodes))
+    else:
         try:
             validate_loops(prompt, outputs, validated, start_nodes, end_nodes)
         except LoopValidationError as ex:
-            dependent_outputs = ex.error["extra_info"]["output_ids"]
+            # Start Loops are only annotated once every loop validates, so no output that runs a loop can run.
+            dependent_outputs = sorted(outputs_reaching(prompt, outputs, start_nodes | end_nodes))
+            ex.error["extra_info"]["output_ids"] = dependent_outputs
             for node_id in ex.error["extra_info"]["node_ids"]:
                 if node_id not in node_errors:
                     node_errors[node_id] = {

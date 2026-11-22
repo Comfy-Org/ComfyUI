@@ -452,3 +452,64 @@ def test_loop_error_does_not_reject_independent_output(monkeypatch):
     assert good_outputs == ["independent_output"]
     assert set(node_errors) == {"left", "right", "end"}
     assert all(value["dependent_outputs"] == ["loop_output"] for value in node_errors.values())
+
+
+def register_loop_test_nodes(monkeypatch):
+    for name, node_class in {"StartLoop": StartLoop, "EndLoop": EndLoop, "Body": Body, "Output": Output, "Source": Source}.items():
+        monkeypatch.setitem(nodes.NODE_CLASS_MAPPINGS, name, node_class)
+
+
+def valid_loop_with_inner_output(tag):
+    return {
+        f"{tag}_start": node("StartLoop", cache_iterations=False),
+        f"{tag}_body": node("Body", left=[f"{tag}_start", 0], right=[f"{tag}_start", 0]),
+        f"{tag}_inner_output": node("Output", value=[f"{tag}_body", 0]),
+        f"{tag}_end": node(
+            "EndLoop", output_value=[f"{tag}_body", 0], termination0=[f"{tag}_inner_output", 0], accumulate=False
+        ),
+        f"{tag}_output": node("Output", value=[f"{tag}_end", 0]),
+    }
+
+
+def test_prompt_validation_drops_every_loop_output_when_a_loop_fails(monkeypatch):
+    # Start Loops are annotated only when every loop validates, so outputs of the valid loop "a" can't run either.
+    register_loop_test_nodes(monkeypatch)
+    prompt = {
+        **valid_loop_with_inner_output("a"),
+        "b_start": node("StartLoop", cache_iterations=False),
+        "b_body": node("Body", left=["b_start", 0], right=["b_start", 0]),
+        "b_unwired_output": node("Output", value=["b_body", 0]),
+        "b_end": node("EndLoop", output_value=["b_body", 0], accumulate=False),
+        "b_output": node("Output", value=["b_end", 0]),
+        "source": node("Source"),
+        "plain_output": node("Output", value=["source", 0]),
+    }
+
+    valid, error, good_outputs, node_errors = asyncio.run(validate_prompt("prompt", prompt, None))
+
+    loop_outputs = ["a_inner_output", "a_output", "b_output", "b_unwired_output"]
+    assert valid
+    assert error is None
+    assert good_outputs == ["plain_output"]
+    assert set(node_errors) == {"b_start", "b_end", "b_unwired_output"}
+    for value in node_errors.values():
+        assert value["errors"][0]["message"] == "Loop body is not closed"
+        assert value["errors"][0]["extra_info"]["output_ids"] == loop_outputs
+        assert value["dependent_outputs"] == loop_outputs
+
+
+def test_prompt_validation_drops_loop_outputs_when_a_cycle_skips_loop_validation(monkeypatch):
+    register_loop_test_nodes(monkeypatch)
+    prompt = {
+        **valid_loop_with_inner_output("a"),
+        "x": node("Body", left=["y", 0], right=["y", 0]),
+        "y": node("Body", left=["x", 0], right=["x", 0]),
+        "cycle_output": node("Output", value=["x", 0]),
+        "source": node("Source"),
+        "plain_output": node("Output", value=["source", 0]),
+    }
+
+    valid, error, good_outputs, node_errors = asyncio.run(validate_prompt("prompt", prompt, None))
+
+    assert valid
+    assert good_outputs == ["plain_output"]
