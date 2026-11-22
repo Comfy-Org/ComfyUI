@@ -930,6 +930,25 @@ def test_loop_after_an_uncached_loop_reruns_its_passes(cache_type):
     assert Increment.calls == [3, 4, 3, 4]
 
 
+@pytest.mark.parametrize("cache_type", [False, CacheType.RAM_PRESSURE, CacheType.LRU])
+def test_three_chained_cached_loops_each_add_their_passes(cache_type):
+    Capture.values = []
+    prompt = {"start": {"class_type": "TestConstant", "inputs": {"value": 0}}}
+    previous = ["start", 0]
+    for index in range(3):
+        prompt[f"loop{index}"] = cached_loop(previous, passes=5)
+        prompt[f"increment{index}"] = {"class_type": "TestIncrement", "inputs": {"value": [f"loop{index}", 4]}}
+        prompt[f"close{index}"] = carried_close(f"increment{index}")
+        previous = [f"close{index}", 0]
+    prompt["capture"] = {"class_type": "TestCapture", "inputs": {"value": previous}}
+    executor = PromptExecutor(Server(), cache_type=cache_type, cache_args={"ram": 0, "ram_inactive": 0, "lru": 100})
+
+    executor.execute(prompt, "three-chained-loops", execute_outputs=["capture"])
+
+    assert executor.success
+    assert Capture.values == [15]
+
+
 def nested_cached_loops(start):
     return {
         "start": {"class_type": "TestConstant", "inputs": {"value": start}},
