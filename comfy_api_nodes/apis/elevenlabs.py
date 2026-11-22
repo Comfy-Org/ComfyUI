@@ -49,6 +49,7 @@ class TextToSpeechRequest(BaseModel):
 
 class TextToSoundEffectsRequest(BaseModel):
     text: str = Field(..., description="Text prompt to convert into a sound effect")
+    model_id: str = Field(..., description="Model ID for sound effect generation")
     duration_seconds: float = Field(..., description="Duration of generated sound in seconds")
     prompt_influence: float = Field(..., description="How closely generation follows the prompt")
     loop: bool | None = Field(None, description="Whether to create a smoothly looping sound effect")
