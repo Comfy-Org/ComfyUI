@@ -1,3 +1,6 @@
+import logging
+import os
+
 import nodes
 import node_helpers
 import torch
@@ -224,7 +227,16 @@ class LatentUpscaleModelLoader(io.ComfyNode):
             config = json.loads(metadata["config"])
             model = LatentUpsampler.from_config(config, operations=comfy.ops.disable_weight_init).to(dtype=comfy.model_management.vae_dtype(allowed_dtypes=[torch.bfloat16, torch.float32]))
             comfy.model_management.archive_model_dtypes(model)
-            model_patcher = comfy.model_patcher.CoreModelPatcher(model, load_device=comfy.model_management.get_torch_device(), offload_device=comfy.model_management.unet_offload_device(), fast_disk=fast_disk)
+            device = comfy.model_management.get_torch_device()
+            offload_device = comfy.model_management.unet_offload_device()
+            if device.type == "xpu" and os.environ.get("LTX25_IRIS_CPU_UPSCALER") == "1":
+                device = offload_device = torch.device("cpu")
+                logging.info("LTX latent spatial upscaler on CPU (LTX25_IRIS_CPU_UPSCALER=1)")
+            model_patcher = comfy.model_patcher.CoreModelPatcher(
+                model,
+                load_device=device, offload_device=offload_device,
+                fast_disk=fast_disk,
+            )
             model.load_state_dict(sd, assign=model_patcher.is_dynamic())
             model = model_patcher
         elif "in_blocks.0.emb_layers.1.weight" in sd and "conv_in.weight" in sd and "in_blocks.1.dwconv.weight" in sd:

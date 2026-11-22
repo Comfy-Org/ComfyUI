@@ -41,6 +41,8 @@ For the 9-frame 640×384 text-to-video benchmark on the i5-1340P, omit `--cpu-va
 
 For longer videos, add `--use-quad-cross-attention` to the Iris Xe launch command. On hp8, the default PyTorch SDPA path raised an unsupported free-memory query during the first sampling step at 960×544 and 81 frames. Sub-quadratic attention sizes its blocks using both the XPU allocator estimate and the available system RAM (including the cgroup limit). This accounts for memory shared with CPU models. `--cache-lru 5` controls reuse of node results between prompts in the same process.
 
+For long LTX HD renders on Iris Xe, set `LTX25_IRIS_CPU_UPSCALER=1` before starting ComfyUI to run the LTX latent upscaler on CPU. Use `--fp32-vae` for the tested FP32 path. At 105 frames and 960×544 input, the XPU worker stalled waiting for a Level Zero copy event during output normalization. With the CPU upscaler on the XPU server, the node finished in 30.79 seconds and matched the CPU reference latent exactly. The denoiser and VideoVAE use their existing device settings.
+
 ## Mixed-quantization LTX GGUF files
 
 For `ltx-2.5-22b-distilled-UD-Q5_K_XL.gguf`, apply the following additional diff to the custom node after the Iris Xe and native unpack patches. The checkpoint also uses BF16, Q2_K, Q3_K and Q8_0. On the tested Iris Xe, GPU unpacking of these four formats and Q5_K fails with Level Zero error 45. This fallback uses the plugin's existing CPU decoder for those formats and transfers the result back to the XPU. Q4_K and Q6_K retain the previously selected path.
