@@ -900,6 +900,8 @@ class LTXVGeneratedKeyframesToGuides(io.ComfyNode):
                 batch * num_keyframes, channels, 1, height, width
             )
 
+        # Check the VAE before the resize path decodes with it, so an image VAE gets the clear error.
+        time_scale_factor = video_vae_downscale_factors(vae)[0]
         resize_needed = kf_samples.shape[3:] != samples.shape[3:]
         guides = cls.decode_single_frames(vae, kf_samples) if resize_needed else kf_samples
         if guides.shape[0] != len(indices):
@@ -908,7 +910,6 @@ class LTXVGeneratedKeyframesToGuides(io.ComfyNode):
             )
 
         _, num_guide_frames = get_keyframe_idxs(positive, samples.shape)
-        time_scale_factor = video_vae_downscale_factors(vae)[0]
         num_pixel_frames = (samples.shape[2] - num_guide_frames - 1) * time_scale_factor + 1
         if override_frame_indices and str(override_frame_indices).strip():
             indices = _parse_frame_index_list(
