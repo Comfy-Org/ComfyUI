@@ -216,9 +216,9 @@ async def check_full_key_budget(cache, node_ids):
             entries += 1 + len(keys.get_ordered_ancestry(cache.dynprompt, node_id)[0])
             if entries > FULL_KEY_BUDGET:
                 raise ValueError(
-                    "This prompt's loops with cache iterations on have unrolled too far to cache: their cache keys "
-                    f"would need more than {FULL_KEY_BUDGET:,} entries (about 350 passes of a one-node loop body in "
-                    "total). Turn off cache iterations, or run fewer passes at a time."
+                    "This prompt's expanded nodes (such as loops with cache iterations on) would need more than "
+                    f"{FULL_KEY_BUDGET:,} cache key entries, about 350 passes of a one-node loop body in total. "
+                    "Turn off cache iterations, or run fewer passes at a time."
                 )
     cache.cache_key_set.full_key_entries = entries
 
