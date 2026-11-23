@@ -22,6 +22,7 @@ def prefix_case_paths(root: str) -> list[tuple[str, bool]]:
         (os.path.join(parent, upper, "case.png"), False),
         (root + "-other" + os.sep + "lexical.png", False),
         (root + "extra", False),
+        (root + chr(ord(os.sep) + 1), False),
         (os.path.join(parent, "unrelated.png"), False),
         (os.path.join(root, os.pardir, "escaped.png"), False),
         (os.path.join(root, "sub", os.pardir, "in.png"), True),

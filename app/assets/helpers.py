@@ -28,9 +28,12 @@ def sql_path_under_prefix(
     and let the enrichment scan mutate rows outside the requested root.
     ``GLOB`` is case-sensitive but carries its own metacharacters (``*``, ``?``,
     ``[``) with no ESCAPE clause, so every caller would need bracket-quoting.
-    ``substr(column, 1, n) = <prefix>`` compares under the column's BINARY
-    collation and has no metacharacters at all, so a path containing ``%``,
-    ``_``, ``*``, ``?`` or ``[`` needs no escaping and cannot inject.
+    A range on the column compares under its BINARY collation and has no
+    metacharacters at all, so a path containing ``%``, ``_``, ``*``, ``?`` or
+    ``[`` needs no escaping and cannot inject. The stem ends with the separator,
+    so the paths under it are exactly those from the stem up to, not including,
+    the stem with that separator raised by one; unlike ``substr``, an index on
+    the column can serve the range.
 
     Only the PREFIX is normalized here. That is sound because the column holds
     normalized absolute paths — ``records.create_content`` is the sole writer
@@ -40,7 +43,7 @@ def sql_path_under_prefix(
     base, stem = _base_and_stem(prefix)
     return sa.or_(
         column == base,
-        sa.func.substr(column, 1, len(stem)) == stem,
+        sa.and_(column >= stem, column < stem[:-1] + chr(ord(stem[-1]) + 1)),
     )
 
 
