@@ -41,6 +41,7 @@ def make_clip(patcher):
     clip.cond_stage_model = patcher.model
     clip.patcher = patcher
     clip.tokenizer = None
+    clip.tokenizer_metadata = {}
     clip.layer_idx = None
     clip.tokenizer_options = {}
     clip.use_clip_schedule = False
