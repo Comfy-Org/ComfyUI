@@ -69,3 +69,17 @@ git -C "$node" apply "$PWD/extra/iris-xe/gguf-native-unpack.patch"
 Set `LTX25_IRIS_NATIVE_UNPACK=1` in the server environment and launch with the same Iris Xe settings as above. Set it to `0` for the standard CPU unpacker. Restart the server between modes. The first eligible tensor logs `Iris Xe: native GGUF CPU unpack active`. This path applies to FP32 output with default or FP16 intermediate precision.
 
 For an end-to-end comparison, render the same fixed-seed 9-frame, 640×384 graph with eight sampling steps in each fresh process. Record both the eight-step sampler time and the complete prompt time. HD refinement can be measured separately by running the matching HD graph immediately after the preview in each process. Verify that the HD log shows just the three refinement steps.
+
+### Native Q2_K, Q3_K, Q5_K and Q8_0
+
+With both the native unpacker and the mixed-qtypes fallback installed, rebuild the library from this revision and apply the additional plugin patch. Run these commands from the ComfyUI root while the server is stopped.
+
+```bash
+node=custom_nodes/ComfyUI-GGUF
+git -C "$node" apply --check "$PWD/extra/iris-xe/gguf-native-mixed.patch"
+g++ -O3 -fPIC -shared -fopenmp -ffp-contract=off extra/iris-xe/unpack.cpp -o "$node/libiris_unpack.so"
+git -C "$node" apply "$PWD/extra/iris-xe/gguf-native-mixed.patch"
+export LTX25_IRIS_NATIVE_UNPACK=1 LTX25_IRIS_NATIVE_MIXED=1
+```
+
+Launch with the Iris Xe settings above. Each additional format logs its name on first use. Set `LTX25_IRIS_NATIVE_MIXED=0` to use the previous Q4_K/Q6_K-only native path. On an i5-1340P, the fixed-seed nine-frame Q5_K_XL preview sampled in 9:57 between two controls of 10:51 and 10:30. The latent and decoded frames matched exactly. End-to-end request times were 23:03, 20:37 and 17:01 in run order.

@@ -1,0 +1,54 @@
+--- a/dequant.py
++++ b/dequant.py
+@@ -18,16 +18,28 @@
+     return not is_torch_compatible(tensor)
+ 
+ @lru_cache(maxsize=1)
+-def iris_native_decoder():
++def iris_native_library():
+     library = ctypes.CDLL(os.path.join(os.path.dirname(__file__), "libiris_unpack.so"))
+     library.iris_unpack_supported.argtypes = []
+     library.iris_unpack_supported.restype = ctypes.c_bool
+     if not library.iris_unpack_supported():
+         raise RuntimeError("Iris Xe native GGUF unpack requires AVX2 and F16C on the CPU")
+-    decode = library.decode_fp32
++    return library
++
++@lru_cache(maxsize=1)
++def iris_native_decoder():
++    decode = iris_native_library().decode_fp32
+     decode.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_int64, ctypes.c_bool, ctypes.c_int]
+     decode.restype = None
+     logging.info("Iris Xe: native GGUF CPU unpack active (Q4_K/Q6_K to FP32)")
++    return decode
++
++@lru_cache(maxsize=None)
++def iris_mixed_decoder(qtype):
++    decode = iris_native_library().decode_mixed_fp32
++    decode.argtypes = [ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_int64, ctypes.c_int]
++    decode.restype = ctypes.c_int
++    logging.info("Iris mixed CPU unpack active: %s", qtype.name)
+     return decode
+ 
+ def dequantize_tensor(tensor, dtype=None, dequant_dtype=None):
+@@ -44,6 +56,20 @@
+                               gguf.GGMLQuantizationType.Q3_K, gguf.GGMLQuantizationType.Q5_K,
+                               gguf.GGMLQuantizationType.Q8_0)):
+             packed = tensor.data.as_subclass(torch.Tensor).cpu()
++            if (qtype != gguf.GGMLQuantizationType.BF16
++                    and os.environ.get("LTX25_IRIS_NATIVE_UNPACK") == "1"
++                    and os.environ.get("LTX25_IRIS_NATIVE_MIXED") == "1"
++                    and dtype == torch.float32 and dequant_dtype in (None, torch.float16)
++                    and packed.dtype == torch.uint8 and packed.is_contiguous()):
++                block_size, type_size = gguf.GGML_QUANT_SIZES[qtype]
++                blocks, remainder = divmod(packed.numel(), type_size)
++                if remainder:
++                    raise ValueError(f"Incomplete GGUF block for {qtype.name}")
++                weight = torch.empty(blocks * block_size, dtype=dtype, device="cpu").view(oshape)
++                if iris_mixed_decoder(qtype)(qtype.value, packed.data_ptr(), weight.data_ptr(),
++                                             blocks, torch.get_num_threads()) != 0:
++                    raise ValueError(f"Unsupported native GGUF format {qtype.name}")
++                return weight.to(tensor.device)
+             return dequantize(packed, qtype, oshape, dtype=dequant_dtype).to(dtype).to(tensor.device)
+         if (tensor.device.type == "xpu"
+                 and qtype in (gguf.GGMLQuantizationType.Q4_K, gguf.GGMLQuantizationType.Q6_K)

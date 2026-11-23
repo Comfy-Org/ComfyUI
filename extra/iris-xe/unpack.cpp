@@ -71,4 +71,88 @@ extern "C" void decode_fp32(const uint8_t* packed, float* out, int64_t blocks, b
     }
 }
 
+static __m256 factor(float d, int scale) {
+    return _mm256_set1_ps(_cvtsh_ss(_cvtss_sh(d * scale, 0)));
+}
+
+static __m256i field(const uint8_t* p, int shift, int mask) {
+    return _mm256_and_si256(_mm256_srli_epi32(load_eight(p), shift), _mm256_set1_epi32(mask));
+}
+
+static void affine(float* dst, __m256 scale, __m256i q, __m256 minimum) {
+    auto product = round_half(_mm256_mul_ps(scale, _mm256_cvtepi32_ps(q)));
+    _mm256_storeu_ps(dst, round_half(_mm256_sub_ps(product, minimum)));
+}
+
+static void decode_q5(const uint8_t* p, float* dst) {
+    for (int g = 0; g < 8; ++g) {
+        int j = g % 4;
+        int s = p[4+j], m = p[8+j], sm = p[12+j];
+        auto scale = factor(read_half(p), g < 4 ? s & 63 : (sm & 15) | ((s >> 6) << 4));
+        auto minimum = factor(read_half(p+2), g < 4 ? m & 63 : (sm >> 4) | ((m >> 6) << 4));
+        for (int i = 0; i < 32; i += 8) {
+            auto low = field(p+48+(g/2)*32+i, (g%2)*4, 15);
+            auto high = field(p+16+i, g, 1);
+            affine(dst+g*32+i, scale, _mm256_or_si256(low, _mm256_slli_epi32(high,4)), minimum);
+        }
+    }
+}
+
+static void decode_q8(const uint8_t* p, float* dst) {
+    auto d = _mm256_set1_ps(read_half(p));
+    for (int i = 0; i < 32; i += 8) {
+        auto q = _mm256_cvtepi8_epi32(_mm_loadl_epi64(reinterpret_cast<const __m128i*>(p+2+i)));
+        _mm256_storeu_ps(dst+i, round_half(_mm256_mul_ps(d, _mm256_cvtepi32_ps(q))));
+    }
+}
+
+static void decode_q2(const uint8_t* p, float* dst) {
+    for (int g = 0; g < 16; ++g) {
+        auto scale = factor(read_half(p+80), p[g] & 15);
+        auto minimum = factor(read_half(p+82), p[g] >> 4);
+        for (int i = 0; i < 16; i += 8) {
+            auto q = field(p+16+(g/8)*32+(g%2)*16+i, (g/2%4)*2, 3);
+            affine(dst+g*16+i, scale, q, minimum);
+        }
+    }
+}
+
+static void decode_q3(const uint8_t* p, float* dst) {
+    for (int g = 0; g < 16; ++g) {
+        int low = (p[96+g%8] >> (g/8*4)) & 15;
+        int high = (p[104+g%4] >> (g/4*2)) & 3;
+        auto scale = factor(read_half(p+108), (low | (high << 4)) - 32);
+        for (int i = 0; i < 16; i += 8) {
+            int lane = g%2*16+i;
+            auto lo = field(p+32+(g/8)*32+lane, (g/2%4)*2, 3);
+            auto high_bit = field(p+lane, g/2, 1);
+            auto sign = _mm256_slli_epi32(_mm256_xor_si256(high_bit, _mm256_set1_epi32(1)), 2);
+            auto q = _mm256_sub_epi32(lo, sign);
+            _mm256_storeu_ps(dst+g*16+i, round_half(_mm256_mul_ps(scale, _mm256_cvtepi32_ps(q))));
+        }
+    }
+}
+
+template<int packed_size, int elements, void (*decode)(const uint8_t*, float*)>
+static void blocks(const uint8_t* p, float* dst, int64_t count, int threads) {
+    #pragma omp parallel for schedule(static) num_threads(threads) if(count >= 256)
+    for (int64_t i = 0; i < count; ++i)
+        decode(p+i*packed_size, dst+i*elements);
+}
+
+extern "C" int decode_mixed_fp32(int ggml_type, const uint8_t* p, float* dst, int64_t count, int threads) {
+    switch (ggml_type) {
+    case 10: // GGML_TYPE_Q2_K
+        blocks<84,256,decode_q2>(p,dst,count,threads); break;
+    case 11: // GGML_TYPE_Q3_K
+        blocks<110,256,decode_q3>(p,dst,count,threads); break;
+    case 13: // GGML_TYPE_Q5_K
+        blocks<176,256,decode_q5>(p,dst,count,threads); break;
+    case 8: // GGML_TYPE_Q8_0
+        blocks<34,32,decode_q8>(p,dst,count,threads); break;
+    default: return -1;
+    }
+    return 0;
+}
+
 #pragma GCC pop_options
