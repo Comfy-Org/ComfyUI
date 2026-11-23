@@ -6,8 +6,10 @@ import nodes
 
 import comfy_extras.nodes_loop as nodes_loop
 from comfy_api.latest import io
+from comfy_execution.graph import ExecutionList
 from comfy_execution.graph_utils import GraphBuilder
 from comfy_execution.validation import validate_loops
+import execution
 from execution import CacheType, PromptExecutor
 
 
@@ -874,3 +876,24 @@ def test_chained_loops_run_each_body_once(cache_type):
 
     assert Capture.values == [4]
     assert Increment.calls == [1, 2, 3, 4]
+
+
+@pytest.mark.parametrize("cache_type", [False, CacheType.LRU, CacheType.RAM_PRESSURE, CacheType.NONE])
+def test_only_a_run_without_an_output_cache_keeps_loop_results(monkeypatch, cache_type):
+    execution_lists = []
+
+    class RecordingExecutionList(ExecutionList):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            execution_lists.append(self)
+
+    monkeypatch.setattr(execution, "ExecutionList", RecordingExecutionList)
+    prompt = {
+        "start": {"class_type": "TestConstant", "inputs": {"value": 0}},
+        **incrementing_loop("first", ["start", 0]),
+        "capture": {"class_type": "TestCapture", "inputs": {"value": ["first_close", 0]}},
+    }
+
+    execute_prompt(prompt, "loop-result-lifetime", ["capture"], cache_type)
+
+    assert [bool(graph.externalBlockResults) for graph in execution_lists] == [cache_type == CacheType.NONE]
