@@ -332,14 +332,15 @@ def register_internal_loop_nodes(monkeypatch):
     monkeypatch.setattr(PromptExecutor, "execute", execute_validated)
 
 
-def execute_prompt(prompt, prompt_id, outputs):
-    executor = PromptExecutor(Server(), cache_type=False, cache_args={"ram": 0, "ram_inactive": 0})
+def execute_prompt(prompt, prompt_id, outputs, cache_type=False):
+    executor = PromptExecutor(Server(), cache_type=cache_type, cache_args={"ram": 0, "ram_inactive": 0})
     executor.execute(prompt, prompt_id, execute_outputs=outputs)
     assert executor.success
     return executor
 
 
-def test_nested_loops_execute_each_body_once_without_final_requeue():
+@pytest.mark.parametrize("cache_type", [False, CacheType.NONE])
+def test_nested_loops_execute_each_body_once_without_final_requeue(cache_type):
     Increment.calls = []
     Capture.values = []
 
@@ -390,7 +391,7 @@ def test_nested_loops_execute_each_body_once_without_final_requeue():
             "inputs": {"value": ["outer_close", 0]},
         },
     }
-    execute_prompt(prompt, "nested-loop-test", ["capture"])
+    execute_prompt(prompt, "nested-loop-test", ["capture"], cache_type)
     assert Increment.calls == [1, 2, 3, 4]
     assert Capture.values == [4]
 
@@ -780,7 +781,7 @@ def test_loop_repeats_runtime_expanded_descendants():
     assert Increment.calls == [1, 2, 3]
 
 
-def run_nested_accumulation(producer_name):
+def run_nested_accumulation(producer_name, cache_type):
     Capture.values = []
 
     prompt = {
@@ -819,12 +820,13 @@ def run_nested_accumulation(producer_name):
             "inputs": {"value": ["outer_close", 0]},
         },
     }
-    execute_prompt(prompt, "nested-loop-accumulation-test", ["capture"])
+    execute_prompt(prompt, "nested-loop-accumulation-test", ["capture"], cache_type)
     return Capture.values
 
 
-def test_nested_loop_concatenates_lists():
-    assert run_nested_accumulation("TestPair") == [
+@pytest.mark.parametrize("cache_type", [False, CacheType.NONE])
+def test_nested_loop_concatenates_lists(cache_type):
+    assert run_nested_accumulation("TestPair", cache_type) == [
         0,
         "0",
         1,
@@ -836,8 +838,9 @@ def test_nested_loop_concatenates_lists():
     ]
 
 
-def test_nested_loop_does_not_flatten_list_backed_scalars():
-    assert run_nested_accumulation("TestListBackedScalar") == [
+@pytest.mark.parametrize("cache_type", [False, CacheType.NONE])
+def test_nested_loop_does_not_flatten_list_backed_scalars(cache_type):
+    assert run_nested_accumulation("TestListBackedScalar", cache_type) == [
         [[0]],
         [[1]],
         [[0]],
@@ -845,12 +848,9 @@ def test_nested_loop_does_not_flatten_list_backed_scalars():
     ]
 
 
-def incrementing_loop(tag, initial, cache_iterations):
+def incrementing_loop(tag, initial):
     return {
-        tag: {
-            "class_type": "StartLoop",
-            "inputs": {"mode": "simple", "mode.num_iterations": 2, "initial_iteration_value": initial, "cache_iterations": cache_iterations},
-        },
+        tag: {"class_type": "StartLoop", "inputs": {"mode": "simple", "mode.num_iterations": 2, "initial_iteration_value": initial}},
         f"{tag}_increment": {"class_type": "TestIncrement", "inputs": {"value": [tag, 4]}},
         f"{tag}_close": {
             "class_type": "EndLoop",
@@ -859,18 +859,18 @@ def incrementing_loop(tag, initial, cache_iterations):
     }
 
 
-@pytest.mark.parametrize("cache_iterations", [False, True])
-def test_chained_loops_run_without_a_cache(cache_iterations):
+@pytest.mark.parametrize("cache_type", [False, CacheType.NONE])
+def test_chained_loops_run_each_body_once(cache_type):
+    Increment.calls = []
     Capture.values = []
     prompt = {
         "start": {"class_type": "TestConstant", "inputs": {"value": 0}},
-        **incrementing_loop("first", ["start", 0], cache_iterations),
-        **incrementing_loop("second", ["first_close", 0], cache_iterations),
+        **incrementing_loop("first", ["start", 0]),
+        **incrementing_loop("second", ["first_close", 0]),
         "capture": {"class_type": "TestCapture", "inputs": {"value": ["second_close", 0]}},
     }
-    executor = PromptExecutor(Server(), cache_type=CacheType.NONE, cache_args={"ram": 0, "ram_inactive": 0})
 
-    executor.execute(prompt, "chained-loops-without-a-cache", execute_outputs=["capture"])
+    execute_prompt(prompt, "chained-loops", ["capture"], cache_type)
 
-    assert executor.success
     assert Capture.values == [4]
+    assert Increment.calls == [1, 2, 3, 4]
