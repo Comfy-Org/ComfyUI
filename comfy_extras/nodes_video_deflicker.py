@@ -19,7 +19,12 @@ LAPLACIAN = ((0.0, -1.0, 0.0), (-1.0, 4.0, -1.0), (0.0, -1.0, 0.0))
 
 def warp(x, flow, grid, norm):
     # backward warp: sample x at each pixel's position + flow, norm maps flow pixels to grid units
-    return F.grid_sample(x, torch.addcmul(grid, flow.movedim(1, -1), norm), mode="bilinear", padding_mode="border", align_corners=True)
+    coords = torch.addcmul(grid, flow.movedim(1, -1), norm)
+    if x.device.type == "mps":
+        # PyTorch MPS does not support padding_mode="border" in grid_sample;
+        # clamping normalized coordinates to [-1, 1] with padding_mode="zeros" is equivalent for align_corners=True.
+        return F.grid_sample(x, coords.clamp(-1.0, 1.0), mode="bilinear", padding_mode="zeros", align_corners=True)
+    return F.grid_sample(x, coords, mode="bilinear", padding_mode="border", align_corners=True)
 
 
 def gaussian_blur(x, kernel):
