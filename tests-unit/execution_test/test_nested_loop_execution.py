@@ -881,11 +881,17 @@ def test_chained_loops_run_each_body_once(cache_type):
 @pytest.mark.parametrize("cache_type", [False, CacheType.LRU, CacheType.RAM_PRESSURE, CacheType.NONE])
 def test_only_a_run_without_an_output_cache_keeps_loop_results(monkeypatch, cache_type):
     execution_lists = []
+    kept_after_a_node = []
 
     class RecordingExecutionList(ExecutionList):
         def __init__(self, *args, **kwargs):
             super().__init__(*args, **kwargs)
             execution_lists.append(self)
+
+        def complete_node_execution(self):
+            node_id = self.staged_node_id
+            super().complete_node_execution()
+            kept_after_a_node.append(node_id in self.externalBlockResults)
 
     monkeypatch.setattr(execution, "ExecutionList", RecordingExecutionList)
     prompt = {
@@ -896,4 +902,5 @@ def test_only_a_run_without_an_output_cache_keeps_loop_results(monkeypatch, cach
 
     execute_prompt(prompt, "loop-result-lifetime", ["capture"], cache_type)
 
-    assert [bool(graph.externalBlockResults) for graph in execution_lists] == [cache_type == CacheType.NONE]
+    assert any(kept_after_a_node) == (cache_type == CacheType.NONE)
+    assert len(execution_lists) == 1 and not execution_lists[0].externalBlockResults, "loop results outlived the prompt"

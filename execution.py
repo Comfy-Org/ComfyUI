@@ -856,6 +856,8 @@ class PromptExecutor:
                             emit_cached_output(self.server, node_id, _node_meta(dynamic_prompt, node_id), cached, prompt_id, ui_node_outputs, self.asset_manager)
                     self.add_message("execution_success", { "prompt_id": prompt_id }, broadcast=False)
 
+                # The finished list can outlive the prompt until garbage collection, so drop its kept loop results now.
+                execution_list.externalBlockResults.clear()
                 ui_outputs = {}
                 meta_outputs = {}
                 for node_id, ui_info in ui_node_outputs.items():
