@@ -66,20 +66,22 @@ def register(monkeypatch):
 
 
 @pytest.mark.parametrize("value,targets,bad_inputs", [
-    pytest.param("euler", {"V1Target": "sampler_name", "V3Target": "choice"}, [], id="valid-v1-and-v3"),
-    pytest.param("heun", {"V1Target": "sampler_name", "V3Target": "choice"}, ["choice"], id="missing-from-v3-only"),
-    pytest.param("bogus", {"V1Target": "sampler_name"}, ["sampler_name"], id="missing-from-v1"),
-    pytest.param("bogus", {"OptOutTarget": "choice"}, [], id="target-opts-out"),
-    pytest.param({"__value__": ["euler", "bogus"]}, {"MultiTarget": "choice"}, ["choice"], id="multiselect"),
+    pytest.param("euler", {"V1Target": "sampler_name", "V3Target": "choice"}, {}, id="valid-v1-and-v3"),
+    pytest.param("heun", {"V1Target": "sampler_name", "V3Target": "choice"}, {"V3Target": "choice"}, id="missing-from-v3-only"),
+    pytest.param("bogus", {"V1Target": "sampler_name", "V3Target": "choice"}, {"V1Target": "sampler_name", "V3Target": "choice"}, id="missing-from-both"),
+    pytest.param("bogus", {"OptOutTarget": "choice"}, {}, id="target-opts-out"),
+    pytest.param({"__value__": ["euler", "bogus"]}, {"MultiTarget": "choice"}, {"MultiTarget": "choice"}, id="multiselect"),
 ])
 async def test_linked_primitive_combo_checked_against_each_target(value, targets, bad_inputs):
     prompt = {"src": {"class_type": "PrimitiveCombo", "inputs": {"value": value}}}
     for class_type, input_name in targets.items():
         prompt[class_type] = {"class_type": class_type, "inputs": {input_name: ["src", 0]}}
 
-    valid, _, _, errors = await execution.validate_prompt("combo", prompt, None)
+    valid, _, good_outputs, errors = await execution.validate_prompt("combo", prompt, None)
 
-    assert valid is not bad_inputs
+    good = sorted(set(targets) - set(bad_inputs))
+    assert valid is bool(good)
+    assert sorted(good_outputs) == good
     if not bad_inputs:
         assert errors == {}
         return
@@ -87,4 +89,4 @@ async def test_linked_primitive_combo_checked_against_each_target(value, targets
     src_errors = errors["src"]["errors"]
     assert [e["type"] for e in src_errors] == ["value_not_in_list"] * len(bad_inputs)
     assert [e["extra_info"]["input_name"] for e in src_errors] == ["value"] * len(bad_inputs)
-    assert all(f"input '{name}'" in e["details"] for e, name in zip(src_errors, bad_inputs))
+    assert sorted(e["details"].split(" of ")[-1] for e in src_errors) == sorted(f"{t} {t} input '{name}'" for t, name in bad_inputs.items())

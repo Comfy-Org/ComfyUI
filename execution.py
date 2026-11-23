@@ -1056,10 +1056,13 @@ async def validate_inputs(prompt_id, prompt, item, validated, visiting=None):
 
             # A PrimitiveCombo holds a constant chosen from its targets' options; check it against this
             # input's options and report it on the PrimitiveCombo, where the user can change it.
+            # Only this node fails; the PrimitiveCombo stays valid for targets that accept the value.
             if o_class_type == "PrimitiveCombo" and x not in validate_function_inputs and not validate_has_kwargs and (isinstance(input_type, list) or input_type == io.Combo.io_type):
                 error = combo_value_error("value", prompt[o_id]['inputs']['value'], input_type, extra_info, f" of {class_type} {unique_id} input '{x}'")
                 if error is not None:
-                    validated[o_id] = (False, validated[o_id][1] + [error], o_id)
+                    o_valid, o_errors, _ = validated[o_id]
+                    if error not in o_errors:
+                        validated[o_id] = (o_valid, o_errors + [error], o_id)
                     valid = False
                     continue
         else:
@@ -1280,12 +1283,13 @@ async def validate_prompt(prompt_id, prompt, partial_execution_list: Union[list[
                     logging.error(f"  - {reason['message']}: {reason['details']}")
             errors += [(o, reasons)]
             for node_id, result in validated.items():
-                valid = result[0]
                 reasons = result[1]
                 # If a node upstream has errors, the nodes downstream will also
                 # be reported as invalid, but there will be no errors attached.
                 # So don't return those nodes as having errors in the response.
-                if valid is not True and len(reasons) > 0:
+                # A valid PrimitiveCombo can still carry errors for the targets that rejected its value,
+                # and gains more as later outputs validate.
+                if len(reasons) > 0:
                     if node_id not in node_errors:
                         class_type = prompt[node_id]['class_type']
                         node_errors[node_id] = {
@@ -1296,6 +1300,7 @@ async def validate_prompt(prompt_id, prompt, partial_execution_list: Union[list[
                         logging.error(f"* {class_type} {node_id}:")
                         for reason in reasons:
                             logging.error(f"  - {reason['message']}: {reason['details']}")
+                    node_errors[node_id]["errors"] = reasons
                     node_errors[node_id]["dependent_outputs"].append(o)
             logging.error("Output will be ignored")
 
