@@ -39,28 +39,16 @@ CLAUDE_MODELS: dict[str, str] = {
     "Opus 4.7": "claude-opus-4-7",
     "Opus 4.6": "claude-opus-4-6",
     "Sonnet 4.6": "claude-sonnet-4-6",
-    "Sonnet 4.5": "claude-sonnet-4-5-20250929",
     "Haiku 4.5": "claude-haiku-4-5-20251001",
 }
 
 _THINKING_UNSUPPORTED = {"Haiku 4.5"}
-# Models that use the newer "adaptive" thinking mode (Opus 4.7+ require it; older models keep the explicit budget API).
-# Anthropic decides the actual budget when adaptive is used, based on the `output_config.effort` hint.
-_ADAPTIVE_THINKING_MODELS = {"Opus 4.8", "Sonnet 5.5", "Sonnet 5", "Opus 4.7", "Opus 4.6", "Sonnet 4.6"}
 _ALWAYS_THINKING_MODELS = {"Opus 5.5", "Opus 5", "Fable 5.2", "Fable 5.1", "Fable 5"}
 _XHIGH_EFFORT_MODELS = {"Opus 5.5", "Opus 5", "Opus 4.8", "Fable 5.2", "Fable 5.1", "Fable 5", "Sonnet 5.5", "Sonnet 5", "Opus 4.7"}
 _MAX_EFFORT_MODELS = _XHIGH_EFFORT_MODELS | {"Opus 4.6", "Sonnet 4.6"}
 _EXPLICIT_THINKING_OFF_MODELS = {"Sonnet 5.5": "between_tools", "Sonnet 5": "disabled"}
 _NO_TEMPERATURE_MODELS = {"Opus 5.5", "Opus 5", "Opus 4.8", "Fable 5.2", "Fable 5.1", "Fable 5", "Sonnet 5.5", "Sonnet 5"}
 _MAX_TOKENS_MIN = {"Opus 5.5": 1024, "Sonnet 5.5": 1024, "Fable 5.2": 8192}
-
-# Budget mode (Sonnet 4.5): effort -> reasoning budget in tokens. Must be < max_tokens.
-# Sized so even the "high" budget fits comfortably under the default max_tokens=32768.
-_REASONING_BUDGET: dict[str, int] = {
-    "low": 2048,
-    "medium": 8192,
-    "high": 16384,
-}
 _REASONING_EFFORTS = ["off", "low", "medium", "high"]
 
 
@@ -295,15 +283,8 @@ class ClaudeNode(IO.ComfyNode):
         if always_thinking:
             output_cfg = AnthropicOutputConfig(effort=reasoning_effort)
         elif thinking_enabled:
-            if model_label in _ADAPTIVE_THINKING_MODELS:
-                # Adaptive mode - Anthropic chooses the budget based on effort hint
-                thinking_cfg = AnthropicThinkingConfig(type="adaptive")
-                output_cfg = AnthropicOutputConfig(effort=reasoning_effort)
-            else:
-                # Budget mode (Sonnet 4.5). Leave at least 1024 tokens for the actual response
-                budget = _REASONING_BUDGET[reasoning_effort]
-                budget = min(budget, max(1024, max_tokens - 1024))
-                thinking_cfg = AnthropicThinkingConfig(type="enabled", budget_tokens=budget)
+            thinking_cfg = AnthropicThinkingConfig(type="adaptive")
+            output_cfg = AnthropicOutputConfig(effort=reasoning_effort)
         elif model_label in _EXPLICIT_THINKING_OFF_MODELS:
             thinking_cfg = AnthropicThinkingConfig(type=_EXPLICIT_THINKING_OFF_MODELS[model_label])
 

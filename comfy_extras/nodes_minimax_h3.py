@@ -28,6 +28,7 @@ import node_helpers
 from comfy.ldm.minimax.model import FRAME_PER_TOKEN, FRAME_RESCALE
 from comfy.ldm.minimax.vae import IMAGENET_MEAN
 from comfy_api.latest import ComfyExtension, io
+from comfy_extras.nodes_model_merging import ModelMergeBlocks
 
 CANVAS_MULTIPLE = 32
 BASE_SHORT_EDGE = 768
@@ -379,6 +380,34 @@ class MiniMaxH3ReferenceToVideo(io.ComfyNode):
         if ref_blocks:
             cond = node_helpers.conditioning_set_values(cond, {"minimax_refs": ref_blocks})
         return io.NodeOutput(cond, latent)
+
+
+class ModelMergeMiniMaxH3(io.ComfyNode):
+    @classmethod
+    def define_schema(cls):
+        prefixes = [
+            "video_patch_proj.", "audio_patch_proj.", "condition_proj.", "time_embedder.",
+            *(f"token_refiner.blocks.{i}." for i in range(2)),
+            "token_refiner.final_norm.",
+            *(f"blocks.{i}." for i in range(50)),
+            "final_layer.norm.", "final_layer.adaln_proj.", "final_layer.video_out.", "final_layer.audio_out.",
+        ]
+        return io.Schema(
+            node_id="ModelMergeMiniMaxH3",
+            display_name="Model Merge MiniMax H3",
+            category="model/merging/model specific",
+            description="Merge two compatible MiniMax H3 models by component. Each ratio is the share of model1. Buffers are kept from model1.",
+            inputs=[
+                io.Model.Input("model1"),
+                io.Model.Input("model2"),
+                *[io.Float.Input(prefix, default=1.0, min=0.0, max=1.0, step=0.01) for prefix in prefixes],
+            ],
+            outputs=[io.Model.Output()],
+        )
+
+    @classmethod
+    def execute(cls, model1, model2, **ratios) -> io.NodeOutput:
+        return io.NodeOutput(*ModelMergeBlocks().merge(model1, model2, **ratios))
 
 
 class MiniMaxH3SigmaShift(io.ComfyNode):
@@ -827,6 +856,7 @@ class MiniMaxH3Extension(ComfyExtension):
             MiniMaxH3ImageToVideo,
             MiniMaxH3AddGuide,
             MiniMaxH3ReferenceToVideo,
+            ModelMergeMiniMaxH3,
             MiniMaxH3SigmaShift,
             MiniMaxH3FunControlNetApply,
             MiniMaxH3LatentUpscaleWithModel,
