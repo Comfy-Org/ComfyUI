@@ -277,7 +277,6 @@ class PrefixCache:
         with contextlib.ExitStack() as stack:
             unprefetched = [slot[i] for slot in self.slots if slot[i].comfy_cast_weights and not hasattr(slot[i], "_prefetch")]
             if unprefetched:
-                # Registered first: pin_modules can fail after making records for some of the slots.
                 stack.callback(comfy.model_prefetch.cleanup_prefetched_modules, self, unprefetched)
                 comfy.model_prefetch.pin_modules(unprefetched, device)
             self.values = []
