@@ -949,15 +949,15 @@ def test_three_chained_cached_loops_each_add_their_passes(cache_type):
     assert Capture.values == [15]
 
 
-def nested_cached_loops(start):
+def nested_cached_loops(start, outer=2, inner=2):
     return {
         "start": {"class_type": "TestConstant", "inputs": {"value": start}},
-        "outer": cached_loop(["start", 0]),
+        "outer": cached_loop(["start", 0], passes=outer),
         "inner": {
             "class_type": "StartLoop",
             "inputs": {
                 "mode": "simple",
-                "mode.num_iterations": 2,
+                "mode.num_iterations": inner,
                 "parent_iteration": ["outer", 0],
                 "initial_iteration_value": ["outer", 4],
                 "cache_iterations": True,
@@ -968,6 +968,18 @@ def nested_cached_loops(start):
         "outer_close": carried_close("inner_close"),
         "capture": {"class_type": "TestCapture", "inputs": {"value": ["outer_close", 0]}},
     }
+
+
+@pytest.mark.parametrize("cache_type", [False, CacheType.RAM_PRESSURE, CacheType.LRU])
+def test_nested_cached_loops_of_a_new_size_count_every_pass(cache_type):
+    Capture.values = []
+    executor = PromptExecutor(Server(), cache_type=cache_type, cache_args={"ram": 0, "ram_inactive": 0, "lru": 100})
+
+    for outer, inner in [(2, 2), (2, 3)]:
+        executor.execute(nested_cached_loops(0, outer, inner), f"nested-{outer}x{inner}", execute_outputs=["capture"])
+        assert executor.success
+
+    assert Capture.values == [4, 6]
 
 
 @pytest.mark.parametrize("cache_type", [False, CacheType.RAM_PRESSURE])
