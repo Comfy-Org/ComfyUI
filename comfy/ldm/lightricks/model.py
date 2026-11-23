@@ -735,6 +735,7 @@ class LTXBaseModel(torch.nn.Module, ABC):
     ):
         super().__init__()
         self.generator = None
+        self.diffusion_graphs = False
         self.vae_scale_factors = vae_scale_factors
         self.use_middle_indices_grid = use_middle_indices_grid
         self.dtype = dtype
@@ -944,6 +945,8 @@ class LTXBaseModel(torch.nn.Module, ABC):
             attention_mask = (attention_mask - 1).to(x_dtype).reshape(
                 (attention_mask.shape[0], 1, -1, attention_mask.shape[-1])
             ) * torch.finfo(x_dtype).max
+        elif attention_mask is not None and self.diffusion_graphs:
+            attention_mask = attention_mask.clone()
         return attention_mask
 
     def forward(

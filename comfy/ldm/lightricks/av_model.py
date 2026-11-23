@@ -20,6 +20,7 @@ import comfy.ldm.common_dit
 import comfy.model_management
 import comfy.model_prefetch
 import comfy.quant_ops
+from comfy.cli_args import args, PerformanceFeature
 
 class CompressedTimestep:
     """Store video timestep embeddings in compressed form using per-frame indexing."""
@@ -465,6 +466,7 @@ class LTXAVModel(LTXVModel):
             operations=operations,
             **kwargs,
         )
+        self.diffusion_graphs = PerformanceFeature.DiffusionGraphs in args.fast
 
     def _init_model_components(self, device, dtype, **kwargs):
         """Initialize LTXAV-specific components."""
@@ -856,6 +858,8 @@ class LTXAVModel(LTXVModel):
         v_context_dim = self.caption_channels if self.caption_proj_before_connector is False else video_dim
         a_context_dim = self.caption_channels if self.caption_proj_before_connector is False else audio_dim
 
+        if self.caption_proj_before_connector and self.diffusion_graphs:
+            context = context.clone()
         v_context, a_context = torch.split(
             context, [v_context_dim, a_context_dim], len(context.shape) - 1
         )
@@ -937,12 +941,10 @@ class LTXAVModel(LTXVModel):
 
         # Blocks whose self-attention should be perturbed to a value-passthrough (STG).
         stg_self_attn_blocks = transformer_options.get("stg_self_attn_blocks", ())
+        enable_graph = self.diffusion_graphs and not blocks_replace and not transformer_options.get("patches") and "optimized_attention_override" not in transformer_options
 
         # Process transformer blocks
         for i, block in enumerate(self.transformer_blocks):
-            comfy.model_prefetch.prefetch_queue_pop(
-                prefetch_queue, vx.device, block, malloc_scope="block"
-            )
             block_transformer_options = transformer_options
             if i in stg_self_attn_blocks:
                 block_transformer_options = {**transformer_options, "stg_skip_self_attn": True}
@@ -1020,7 +1022,10 @@ class LTXAVModel(LTXVModel):
                         a_prompt_timestep=a_prompt_timestep,
                     )
 
-            core()
+            comfy.model_prefetch.prefetch_queue_pop(
+                prefetch_queue, vx.device, block, vx.dtype, core=core, enable_graph=enable_graph,
+                malloc_scope="block",
+            )
 
         comfy.model_prefetch.prefetch_queue_pop(
             prefetch_queue, vx.device, None, malloc_scope="block"

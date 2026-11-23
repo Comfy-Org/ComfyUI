@@ -1241,6 +1241,9 @@ class LTXAV(BaseModel):
     def __init__(self, model_config, model_type=ModelType.FLUX, device=None):
         super().__init__(model_config, model_type, device=device, unet_model=comfy.ldm.lightricks.av_model.LTXAVModel) #TODO
 
+    def get_dynamic_vram__units(self):
+        return (list(self.diffusion_model.transformer_blocks), []) if self.diffusion_model.diffusion_graphs else ([], [])
+
     def extra_conds(self, **kwargs):
         out = super().extra_conds(**kwargs)
         attention_mask = kwargs.get("attention_mask", None)
