@@ -11,6 +11,7 @@ import comfy.ops
 import comfy.patcher_extension
 import comfy.quant_ops
 import comfy.rmsnorm
+from comfy.cli_args import args, PerformanceFeature
 from comfy.ldm.flux.layers import EmbedND, timestep_embedding
 from comfy.ldm.flux.math import apply_rope1
 from comfy.ldm.lightricks.model import TimestepEmbedding
@@ -322,6 +323,7 @@ class QwenImage21Transformer2DModel(nn.Module):
     ):
         super().__init__()
         self.dtype = dtype
+        self.diffusion_graphs = PerformanceFeature.DiffusionGraphs in args.fast
         self.out_channels = out_channels
         self.inner_dim = num_attention_heads * attention_head_dim
 
@@ -471,6 +473,7 @@ class QwenImage21Transformer2DModel(nn.Module):
         transformer_options["total_blocks"] = len(self.transformer_blocks)
         transformer_options["block_type"] = "single"
         prefetch_queue = comfy.model_prefetch.make_prefetch_queue(list(self.transformer_blocks), x.device, transformer_options)
+        enable_graph = self.diffusion_graphs and (cache is None or isinstance(cache, PrefixCache) and cached) and not blocks_replace and not patches and "optimized_attention_override" not in transformer_options
         for i, block in enumerate(self.transformer_blocks):
             transformer_options["block_index"] = i
             def core():
@@ -498,7 +501,7 @@ class QwenImage21Transformer2DModel(nn.Module):
 
             # Cache pages must stay pinned even when the block's graph skips its Python body.
             with cache.layer(i, x.device, write=not cached) if isinstance(cache, PrefixCache) else contextlib.nullcontext():
-                comfy.model_prefetch.prefetch_queue_pop(prefetch_queue, x.device, block, dtype, core=core, malloc_scope="block")
+                comfy.model_prefetch.prefetch_queue_pop(prefetch_queue, x.device, block, dtype, core=core, enable_graph=enable_graph, malloc_scope="block")
 
         comfy.model_prefetch.prefetch_queue_pop(prefetch_queue, x.device, None, malloc_scope="block")
         if isinstance(cache, PrefixCache) and not cached:
