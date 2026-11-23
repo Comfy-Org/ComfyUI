@@ -26,7 +26,6 @@ def include_unique_id_in_input(class_type: str) -> bool:
 
 
 def cache_key_inputs(dynprompt, node_id):
-    """The inputs a node's cache key and its ancestry are built from."""
     return dynprompt.get_node(node_id)["inputs"]
 
 
@@ -100,10 +99,9 @@ class CacheKeySetInputSignature(CacheKeySet):
         super().__init__(dynprompt, node_ids, is_changed_cache)
         self.dynprompt = dynprompt
         self.is_changed_cache = is_changed_cache
-        # Small keys hold this value, unequal to itself, so they never match another prompt and providers skip them.
+        # Unequal to itself, so a small key never matches another prompt and cache providers skip it.
         self.small_key_marker = float("NaN")
         self.uncacheable = {}
-        # Full-key entries built for this prompt's expansions, all of which stay held until the next prompt.
         self.full_key_entries = 0
 
     def include_node_id_in_input(self) -> bool:
@@ -123,7 +121,6 @@ class CacheKeySetInputSignature(CacheKeySet):
 
     async def get_node_signature(self, dynprompt, node_id):
         if await self.is_uncacheable(dynprompt, node_id):
-            # Its full key would hold a value unequal to itself and match no other key, so skip building it.
             return to_hashable([self.small_key_marker, node_id])
         signature = []
         ancestors, order_mapping = self.get_ordered_ancestry(dynprompt, node_id)
@@ -160,8 +157,7 @@ class CacheKeySetInputSignature(CacheKeySet):
         self.get_ordered_ancestry_internal(dynprompt, node_id, ancestors, order_mapping)
         return ancestors, order_mapping
 
-    # Walks with an explicit stack rather than recursion: an unrolled loop chains more ancestors
-    # than Python's recursion limit allows. The order matches a recursive pre-order walk.
+    # An explicit stack, not recursion: an unrolled loop chains more ancestors than the recursion limit allows.
     def get_ordered_ancestry_internal(self, dynprompt, node_id, ancestors, order_mapping):
         stack = [linked_input_ids(dynprompt, node_id)]
         while stack:
@@ -174,8 +170,6 @@ class CacheKeySetInputSignature(CacheKeySet):
             else:
                 stack.pop()
 
-    # A node is uncacheable when it or any ancestor has a value unequal to itself (an always-changed
-    # fingerprint, an unhashable input, a missing node). One pass per add_keys call, without recursion.
     async def is_uncacheable(self, dynprompt, node_id):
         stack = [node_id]
         entered = set()
@@ -201,8 +195,7 @@ class CacheKeySetInputSignature(CacheKeySet):
         values = [value[1] if is_link(value) else value for value in inputs.values()]
         return _contains_self_unequal(to_hashable([await self.is_changed_cache.get(node_id), values]))
 
-# Full cache keys list every ancestor, so their total size grows with the square of an unrolled loop's length.
-# An entry costs about 3.5 KB and 45 us to build, so this keeps keying an expansion near 1 GB and 10 s.
+# Full keys list every ancestor, so their total size grows with the square of an unrolled loop's length.
 FULL_KEY_BUDGET = 250_000
 
 

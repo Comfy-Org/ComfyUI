@@ -18,7 +18,6 @@ class PlainNode:
 
 
 def recursive_ordered_ancestry(dynprompt, node_id):
-    """The recursive walk the cache used before, kept to check that cache keys don't change."""
     ancestors = []
     order_mapping = {}
 
@@ -112,7 +111,6 @@ def test_ordered_ancestry_walks_chain_longer_than_recursion_limit():
 
 
 class Changed:
-    """An is-changed cache with fixed per-node values."""
 
     def __init__(self, values):
         self.values = values
@@ -122,7 +120,6 @@ class Changed:
 
 
 class FullKeys(CacheKeySetInputSignature):
-    """Builds every key in full, as the cache did before small keys for uncacheable nodes."""
 
     async def is_uncacheable(self, dynprompt, node_id):
         return False
@@ -241,5 +238,4 @@ def test_small_and_full_keys_can_be_ordered_against_each_other(monkeypatch):
     monkeypatch.setitem(nodes.NODE_CLASS_MAPPINGS, "Test", PlainNode)
     keys = keyed(CacheKeySetInputSignature, {"cached": node(value=1), "changed": node(value=2)}, {"changed": float("NaN")})
 
-    # The RAM pressure cache sorts eviction candidates on (score, time, key, size), so tied entries compare keys.
     sorted([(0, 0, keys.get_data_key("cached"), 0), (0, 0, keys.get_data_key("changed"), 0)])

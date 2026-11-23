@@ -494,7 +494,6 @@ def test_loop_executes_final_carried_value_without_output():
 
 
 def test_loop_runs_more_passes_than_the_recursion_limit_allows():
-    # Each cached pass chains onto the one before, so its full key walks about 400 frames deeper than this.
     limit = sys.getrecursionlimit()
     depth = len(inspect.stack(0))
     Increment.calls = []
