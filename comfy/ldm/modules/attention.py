@@ -355,24 +355,23 @@ def attention_sub_quad(query, key, value, heads, mask=None, attn_precision=None,
     _, _, k_tokens = key.shape
 
     mem_free_total, _ = model_management.get_free_memory(query.device, True)
-    if query.device.type == "xpu" and os.environ.get("LTX25_IRIS_CPU_UNPACK") == "1":
-        # Iris Xe allocations share host RAM with the text encoder and the OS.
-        from comfy.system_memory import virtual_memory_available
-        mem_free_total = min(mem_free_total, virtual_memory_available())
-
-    kv_chunk_size_min = None
     kv_chunk_size = None
-    query_chunk_size = None
-
-    for x in [4096, 2048, 1024, 512, 256]:
-        count = mem_free_total / (batch_x_heads * bytes_per_token * x * 4.0)
-        if count >= k_tokens:
-            kv_chunk_size = k_tokens
-            query_chunk_size = x
-            break
-
-    if query_chunk_size is None:
-        query_chunk_size = 512
+    query_chunk_size = 512
+    if query.device.type == "xpu" and os.environ.get("LTX25_IRIS_CPU_UNPACK") == "1":
+        from comfy.system_memory import virtual_memory_available
+        # Shared RAM can exceed the size of a single usable XPU score buffer.
+        # Keep full keys when possible; split queries before splitting softmax over keys.
+        score_bytes = min(mem_free_total // 4, virtual_memory_available() // 4, 256 * 1024**2)
+        tile_elements = max(1, int(score_bytes) // (batch_x_heads * bytes_per_token))
+        kv_chunk_size = min(max(1, k_tokens), tile_elements)
+        query_chunk_size = min(4096, tile_elements // kv_chunk_size)
+    else:
+        for x in [4096, 2048, 1024, 512, 256]:
+            count = mem_free_total / (batch_x_heads * bytes_per_token * x * 4.0)
+            if count >= k_tokens:
+                kv_chunk_size = k_tokens
+                query_chunk_size = x
+                break
 
     if mask is not None:
         if len(mask.shape) == 2:
@@ -387,7 +386,6 @@ def attention_sub_quad(query, key, value, heads, mask=None, attn_precision=None,
         value,
         query_chunk_size=query_chunk_size,
         kv_chunk_size=kv_chunk_size,
-        kv_chunk_size_min=kv_chunk_size_min,
         use_checkpoint=False,
         upcast_attention=upcast_attention,
         mask=mask,
