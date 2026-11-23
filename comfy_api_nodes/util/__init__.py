@@ -5,6 +5,7 @@ from .client import (
     poll_op_raw,
     router_op,
     router_op_raw,
+    router_sync_op,
     sync_op,
     sync_op_raw,
 )
@@ -71,6 +72,7 @@ __all__ = [
     "poll_op_raw",
     "router_op",
     "router_op_raw",
+    "router_sync_op",
     "sync_op",
     "sync_op_raw",
     # Upload helpers
