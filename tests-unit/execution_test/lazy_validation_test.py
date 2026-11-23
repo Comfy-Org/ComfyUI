@@ -29,6 +29,15 @@ class Source:
     FUNCTION = "run"
 
 
+class BoolSource:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {"required": {"value": ("BOOLEAN",)}}
+
+    RETURN_TYPES = ("BOOLEAN",)
+    FUNCTION = "run"
+
+
 class Sink:
     @classmethod
     def INPUT_TYPES(cls):
@@ -62,6 +71,7 @@ def test_nodes(monkeypatch):
     for class_type, cls in {
         "Source": Source,
         "Sink": Sink,
+        "BoolSource": BoolSource,
         "ComfySwitchNode": SwitchNode,
         "BranchNode": BranchNode,
         "UnmarkedSwitch": UnmarkedSwitch,
@@ -147,7 +157,7 @@ def test_branch_reports_unconnected_selection_as_validation_error():
 
 def test_switch_with_linked_selector_validates_both_inputs():
     prompt = switch_prompt(["selector", 0])
-    prompt["selector"] = node("PrimitiveBoolean", value=True)
+    prompt["selector"] = node("BoolSource", value=True)
 
     valid, _, _, node_errors = validate(prompt)
 
@@ -158,6 +168,39 @@ def test_switch_with_linked_selector_validates_both_inputs():
 @pytest.mark.parametrize("switch_class", ["UnmarkedSwitch", "HiddenPromptSwitch", "AcceptAllSwitch"])
 def test_lazy_node_without_static_selection_validates_both_inputs(switch_class):
     valid, _, _, node_errors = validate(switch_prompt(True, switch_class=switch_class))
+
+    assert not valid
+    assert error_types(node_errors, "broken") == ["value_not_in_list"]
+
+
+@pytest.mark.parametrize("selector,expected_valid", [(True, True), (False, False)])
+def test_switch_folds_primitive_selector(selector, expected_valid):
+    prompt = switch_prompt(["selector", 0])
+    prompt["selector"] = node("PrimitiveBoolean", value=selector)
+
+    valid, _, _, node_errors = validate(prompt)
+
+    assert valid is expected_valid
+    if not expected_valid:
+        assert error_types(node_errors, "broken") == ["value_not_in_list"]
+
+
+def test_switch_folds_chained_primitive_selector():
+    prompt = switch_prompt(["selector", 0])
+    prompt["selector"] = node("PrimitiveBoolean", value=["root", 0])
+    prompt["root"] = node("PrimitiveBoolean", value=True)
+
+    valid, _, _, node_errors = validate(prompt)
+
+    assert valid, node_errors
+
+
+def test_switch_does_not_fold_primitive_fed_by_other_node():
+    prompt = switch_prompt(["selector", 0])
+    prompt["selector"] = node("PrimitiveBoolean", value=["root", 0])
+    prompt["root"] = node("BoolSource", value=True)
+
+    valid, _, _, node_errors = validate(prompt)
 
     assert not valid
     assert error_types(node_errors, "broken") == ["value_not_in_list"]
