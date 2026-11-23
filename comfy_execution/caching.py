@@ -217,7 +217,8 @@ async def check_full_key_budget(cache, node_ids):
             if entries > FULL_KEY_BUDGET:
                 raise ValueError(
                     "This prompt's expanded nodes (such as loops with cache iterations on) would need more than "
-                    f"{FULL_KEY_BUDGET:,} cache key entries, about 350 passes of a one-node loop body in total. "
+                    f"{FULL_KEY_BUDGET:,} cache key entries. One cached loop with a one-node body reaches that at "
+                    "about 350 passes; chained or nested cached loops reach it sooner, independent ones later. "
                     "Turn off cache iterations, or run fewer passes at a time."
                 )
     cache.cache_key_set.full_key_entries = entries
