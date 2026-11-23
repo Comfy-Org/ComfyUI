@@ -1094,6 +1094,11 @@ def _try_quantized_linear_input_act(x, weight, bias, input_act, act_weight, act_
                                    residual, residual_scale):
     if comfy.model_management.in_training or not isinstance(weight, QuantizedTensor):
         return NotImplemented
+    params = getattr(weight, "_params", None)
+    if params is not None and getattr(params, "orig_dtype", x.dtype) != x.dtype and dataclasses.is_dataclass(params):
+        weight = QuantizedTensor(weight._qdata, weight._layout_cls, dataclasses.replace(params, orig_dtype=x.dtype))
+    if bias is not None and bias.dtype != x.dtype:
+        bias = bias.to(dtype=x.dtype)
     with _input_act_weight(x, input_act, act_weight, act_eps) as (act_weight, act_eps):
         return weight.linear_input_act(
             x, bias, input_act=input_act, input_act_weight=act_weight, input_act_eps=act_eps,
