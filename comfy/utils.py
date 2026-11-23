@@ -225,7 +225,7 @@ def load_torch_file(ckpt, safe_load=False, device=None, return_metadata=False):
     metadata = None
     if ckpt.lower().endswith(".safetensors") or ckpt.lower().endswith(".sft"):
         try:
-            if comfy.memory_management.aimdo_enabled or (MMAP_TORCH_FILES and sys.platform == "darwin" and device.type == "cpu"):
+            if comfy.memory_management.aimdo_enabled or (MMAP_TORCH_FILES and not DISABLE_MMAP and sys.platform == "darwin" and device.type == "cpu"):
                 sd, metadata = load_safetensors(ckpt)
                 if not return_metadata:
                     metadata = None
