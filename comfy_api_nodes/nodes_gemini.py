@@ -647,6 +647,11 @@ GEMINI_TEXT_PRICE_BADGE = IO.PriceBadge(
         "usd": [0.00025, 0.0015],
         "format": { "approximate": true, "separator": "-", "suffix": " per 1K tokens" }
       }
+      : $contains($m, "neon") ? {
+        "type": "list_usd",
+        "usd": [0.00429, 0.02145],
+        "format": { "approximate": true, "separator": "-", "suffix": " per 1K tokens" }
+      }
       : ($contains($m, "argon") or $contains($m, "carbon")) ? {
         "type": "list_usd",
         "usd": [0.00572, 0.0286],
@@ -673,6 +678,7 @@ GEMINI_TEXT_PRICE_BADGE = IO.PriceBadge(
 
 
 GEMINI_TEXT_MODELS: dict[str, str] = {
+    "Gemini 4 Neon": "gemini-4-neon",
     "Gemini 4 Hydrogen": "gemini-4-hydrogen",
     "Gemini 4 Argon": "gemini-4-argon",
     "Gemini 4 Carbon": "gemini-4-carbon",
@@ -1008,6 +1014,16 @@ class GeminiNodeV3(IO.ComfyNode):
                 IO.DynamicCombo.Input(
                     "model",
                     options=[
+                        IO.DynamicCombo.Option(
+                            "Gemini 4 Neon",
+                            _gemini_v3_model_inputs(
+                                "HIGH",
+                                ["LOW", "MEDIUM", "HIGH", "XHIGH"],
+                                max_output_tokens=65536,
+                                sampling=False,
+                                agentic_video=True,
+                            ),
+                        ),
                         IO.DynamicCombo.Option(
                             "Gemini 4 Hydrogen",
                             _gemini_v3_model_inputs(
@@ -2427,8 +2443,8 @@ def _parse_decision_options(options: str) -> list[str]:
             raise ValueError(f"The option on line {number} is longer than 128 characters.")
         if not name.isprintable():
             raise ValueError(f"The option on line {number} contains an invisible or control character.")
-        if name in names:
-            raise ValueError(f"The option '{name}' is listed twice.")
+        if list(map(str.casefold, name)) in (list(map(str.casefold, n)) for n in names):
+            raise ValueError(f"The option '{name}' is listed twice. Options must differ by more than letter case.")
         names.append(name)
     if not 2 <= len(names) <= 255:
         raise ValueError(f"Give 2 to 255 options, one per line. Got {len(names)}.")
