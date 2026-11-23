@@ -443,12 +443,22 @@ def _apply_video_scale(video: Input.Video, scale_dims: tuple[int, int]) -> Input
                     continue
                 if end_pts is not None and frame.pts >= end_pts:
                     break
+            if encoded == 0:
+                rotation = int(round(frame.rotation // 90)) % 4 if frame.rotation else 0
+                if crop_rect is None and rotation % 2:
+                    out_w, out_h = out_h, out_w
+                    video_stream.width, video_stream.height = out_w, out_h
             if crop_rect is not None:
                 x, y, w, h = crop_rect
                 planes = frame.to_ndarray(format="yuv444p")
-                if frame.rotation:
-                    planes = np.rot90(planes, k=int(round(frame.rotation // 90)) % 4, axes=(1, 2))
+                if rotation:
+                    planes = np.rot90(planes, k=rotation, axes=(1, 2))
                 frame = av.VideoFrame.from_ndarray(np.ascontiguousarray(planes[:, y:y + h, x:x + w]), format="yuv444p")
+            elif rotation:
+                w, h = (out_h, out_w) if rotation % 2 else (out_w, out_h)
+                yuv = frame.to_ndarray(width=w, height=h, format="yuv420p").reshape(-1)
+                planes = (yuv[:w * h].reshape(h, w), yuv[w * h:w * h * 5 // 4].reshape(h // 2, w // 2), yuv[w * h * 5 // 4:].reshape(h // 2, w // 2))
+                frame = av.VideoFrame.from_ndarray(np.concatenate([np.rot90(p, k=rotation).ravel() for p in planes]).reshape(-1, out_w), format="yuv420p")
             frame = frame.reformat(width=out_w, height=out_h, format="yuv420p")
             # Re-wrap as a fresh frame: dropping irregular source timestamps (VFR/AVI/GIF/...)
             # lets the encoder assign clean ones and avoids mp4 muxer errors.
