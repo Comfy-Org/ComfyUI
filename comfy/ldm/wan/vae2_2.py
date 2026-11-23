@@ -133,6 +133,8 @@ def strip_apply(fn, x, scale=1, halo=1, out=None):
         b = min(size, a + step)
         lo = max(0, a - halo)
         y = fn(x.narrow(-2, lo, min(size, b + halo) - lo)).narrow(-2, (a - lo) * scale, (b - a) * scale)
+        if x.device.type == "mps":  # torch 2.12.1: without this a Metal command buffer fails and every later kernel is dropped
+            torch.mps.synchronize()
         if out is None:
             out = y.new_empty(*y.shape[:-2], size * scale, y.shape[-1])
         dst = out.narrow(-2, a * scale, (b - a) * scale)
