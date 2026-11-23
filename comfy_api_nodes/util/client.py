@@ -44,6 +44,10 @@ from .download_helpers import download_url_to_bytesio
 M = TypeVar("M", bound=BaseModel)
 
 
+class PollingTimeoutError(Exception):
+    """The polling budget ended before the provider task reached a terminal state."""
+
+
 class ApiEndpoint:
     def __init__(
         self,
@@ -577,11 +581,11 @@ async def poll_op_raw(
                 consumed_attempts += 1
 
         await _cancel()
-        raise Exception(
-            f"Polling timed out after {max_poll_attempts} non-queued attempts "
+        raise PollingTimeoutError(
+            f"Polling aborted due to error: Polling timed out after {max_poll_attempts} non-queued attempts "
             f"(~{int(max_poll_attempts * (max_poll_interval or poll_interval))}s of active polling)."
         )
-    except ProcessingInterrupted:
+    except (ProcessingInterrupted, PollingTimeoutError):
         raise
     except asyncio.CancelledError:
         await _cancel()
@@ -642,6 +646,19 @@ async def router_op(
     data: dict[str, Any] | BaseModel,
 ) -> M:
     return _validate_or_raise(response_model, await router_op_raw(cls, model, data=data))
+
+
+async def router_sync_op(
+    cls: type[IO.ComfyNode],
+    model: str,
+    *,
+    response_model: type[M],
+    data: dict[str, Any] | BaseModel,
+) -> M:
+    return _validate_or_raise(
+        response_model,
+        await sync_op_raw(cls, ApiEndpoint(path=f"/v2/models/{model}", method="POST"), data=data),
+    )
 
 
 def _display_text(
@@ -794,6 +811,9 @@ def _response_detail(body: Any) -> str:
     if isinstance(body, dict):
         for key in ("detail", "message"):
             if isinstance(body.get(key), str) and body[key]:
+                upstream = body.get("upstream_detail")
+                if isinstance(upstream, str) and upstream:
+                    return f"{body[key].rstrip('.')}: {upstream}"
                 return body[key]
         if isinstance(body.get("detail"), list):
             return "; ".join(

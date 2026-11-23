@@ -318,3 +318,27 @@ class Hailuo03MaxCameraControlsRequest(BaseModel):
     resolution: str = Field(...)
     prompt_expansion_mode: str = Field(...)
     seed: int = Field(...)
+
+
+class MinimaxH3ImageInput(BaseModel):
+    image_url: str = Field(...)
+
+
+class MinimaxH3ImageRequest(BaseModel):
+    model: str = Field(...)
+    prompt: str = Field(...)
+    images: list[MinimaxH3ImageInput] | None = Field(None)
+    size: str | None = Field(None)
+    area: str | None = Field(None)
+    aspect_ratio: str | None = Field(None)
+    disable_prompt_enhanced: bool | None = Field(None)
+    output_format: str = Field(...)
+
+
+class MinimaxH3ImageData(BaseModel):
+    url: str = Field(...)
+    revised_prompt: str = Field(...)
+
+
+class MinimaxH3ImageResponse(BaseModel):
+    data: list[MinimaxH3ImageData] = Field(...)

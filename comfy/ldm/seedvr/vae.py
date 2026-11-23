@@ -21,6 +21,14 @@ from comfy.ldm.seedvr.constants import (
     SEEDVR2_DECODE_BYTES_PER_FRAME_PIXEL,
     SEEDVR2_DECODE_FIXED_BYTES,
     SEEDVR2_CACHE_BYTES_PER_FRAME_PIXEL,
+    SEEDVR2_DECODE_SLICE_BYTES_PER_FRAME_PIXEL,
+    SEEDVR2_DECODE_TAIL_BYTES_PER_FRAME_PIXEL,
+    SEEDVR2_DECODE_TAIL_FIXED_BYTES,
+    SEEDVR2_ENCODE_SLICE_BYTES_PER_PIXEL,
+    SEEDVR2_ENCODE_TAIL_BYTES_PER_PIXEL,
+    SEEDVR2_ENCODE_TAIL_FIXED_BYTES,
+    SEEDVR2_MAX_SLICE_LATENTS,
+    SEEDVR2_SLICE_MEM_HEADROOM,
     SEEDVR2_DECODE_LAB_BYTES_PER_OUTPUT_PIXEL,
     SEEDVR2_ENCODE_BYTES_PER_PIXEL,
     SEEDVR2_ENCODE_FIXED_BYTES,
@@ -33,11 +41,13 @@ from comfy.ldm.seedvr.constants import (
 from comfy.ldm.modules.diffusionmodules.model import vae_attention
 
 import collections
+import contextlib
 import dataclasses
 import math
 from enum import Enum
 
 import comfy.model_management
+import comfy.model_prefetch
 import comfy.ops
 import comfy.quant_ops
 import comfy_kitchen
@@ -72,7 +82,8 @@ def _match_layout(t, ref):
 def _ndhwc_filter(conv):
     """Store a resident filter NDHWC once, so cast_bias_weight hands it back without a per-call copy."""
     if conv.weight.is_cuda and not conv.weight.is_contiguous(memory_format=_CL):
-        conv.weight.data = conv.weight.data.contiguous(memory_format=_CL)
+        with comfy.model_prefetch.pause_malloc_graph():
+            conv.weight.data = conv.weight.data.contiguous(memory_format=_CL)
 ops = comfy.ops.manual_cast
 
 
@@ -107,7 +118,10 @@ def tiled_vae(x, vae_model, tile_size=(512, 512), tile_overlap=(64, 64), encode=
 
     def run(tile):
         tile = tile.contiguous()
-        out = vae_model.encode(tile) if encode else vae_model.slicing_decode(tile)
+        if encode:
+            out = vae_model.encode(tile)
+        else:
+            out = vae_model.slicing_decode(tile, torch.empty(vae_model.decode_output_shape(tile.shape), device=storage_device, dtype=tile.dtype))
         if out.ndim == 4:   # encode drops the time axis of a single-frame latent
             out = out.unsqueeze(2)
         return out.to(storage_device).float()
@@ -194,12 +208,15 @@ class CausalMemoryCache:
     Large channels_last CUDA tails are int8-packed (ConvRot, per-token scales); with ``offload`` the
     packed tails live in host memory and the next reader's tail is prefetched while this one runs.
     A tail can be a ring of per-frame entries, so extending it packs one frame. free() ends the pass.
+    A ``compiled`` pass runs its slices under the memory compiler: an activation dies with its slice, and
+    the tails, which outlive it, stay on the device outside the compiler's memory, so neither fragments the other.
     """
 
     CONVROT_GROUPSIZE = 256
 
-    def __init__(self, offload=False):
+    def __init__(self, offload=False, compiled=False):
         self.offload = offload
+        self.compiled = compiled
         self.plain = {}
         self.packed = {}       # key -> (qdata, params, shape), on the host when offloaded
         self._order = []       # keys in packing order, which is the order the next slice reads them
@@ -216,7 +233,7 @@ class CausalMemoryCache:
         """The one stream this cache copies on, so copies reusing a host buffer stay ordered;
         it starts after the compute queued so far. None copies on the compute stream."""
         if self._stream is None:
-            self._stream = comfy.model_management.get_offload_stream(device)
+            self._stream = comfy.model_management.get_data_stream(device)
         if self._stream is not None:
             self._stream.wait_stream(comfy.model_management.current_stream(device))
         return self._stream
@@ -319,6 +336,13 @@ class CausalMemoryCache:
         )
 
     def __setitem__(self, key, value):
+        if self.compiled:
+            with comfy.model_prefetch.pause_malloc_graph():
+                self._store(key, value if self._packable(value) else value.clone())
+        else:
+            self._store(key, value)
+
+    def _store(self, key, value):
         self.discard(key)   # a whole tail replaces a ring too
         if self._packable(value):
             c = value.shape[1]
@@ -393,6 +417,26 @@ class CausalMemoryCache:
             for t in (entry[0],) if entry[1] is None else (entry[0], entry[1].scale):
                 self._spare.setdefault((t.shape, t.dtype), []).append(t)
 
+    @contextlib.contextmanager
+    def scope(self, device):
+        """The compiler scope of a pass; a graph of its own is released at the end so the next plan sees
+        the memory, another model's parked graph is left as found."""
+        if not self.compiled:
+            yield
+            return
+        parked = comfy.model_prefetch.malloc_graph_recording()
+        with comfy.model_prefetch.malloc_graph_scope(device):
+            yield
+        if not parked:
+            comfy.model_prefetch.cleanup_malloc_graph()
+
+    def next_slice(self, device, stage=None, frames=None):
+        """Close the open slice scope and open one for ``frames`` latents through ``stage``; none to only close."""
+        if self.compiled:
+            comfy.model_prefetch.prefetch_queue_pop(None, device, None, malloc_scope="slice")
+            if stage is not None:
+                comfy.model_prefetch.prefetch_queue_pop(None, device, stage, malloc_scope=f"slice{frames}")
+
     def free(self):
         """Unpin the host buffers at the end of the pass; the cache is empty afterwards."""
         if self._pinned:
@@ -415,6 +459,26 @@ def _offload_caches_for(frame_pixels):
     """Whether a pass over this frame area keeps its packed caches in host memory: when there is
     room for them, reclaiming RAM from inactive models if needed."""
     return comfy.model_management.ensure_pin_budget(frame_pixels * SEEDVR2_CACHE_BYTES_PER_FRAME_PIXEL, evict_active=False)
+
+
+def _plan_pass(device, free_memory, frame_pixels, latents, working_bytes, slice_bytes, tail_bytes, dtype):
+    """Latent frames per slice (0: a frame at a time) and the cache for a pass. A clip that fits runs
+    whole. Otherwise fp16 keeps the caches on the device under the compiler and the rest of the free
+    memory sets the slice length; without room for them, they go to host memory, or the pass stays at
+    its floor."""
+    mm = comfy.model_management
+    slice_latents, compiled = 0, False
+    if mm.vram_state not in (mm.VRAMState.LOW_VRAM, mm.VRAMState.NO_VRAM) and mm.is_device_cuda(device):
+        spare = (free_memory - mm.extra_reserved_memory()) * SEEDVR2_SLICE_MEM_HEADROOM - working_bytes
+        if latents <= SEEDVR2_MAX_SLICE_LATENTS and spare >= latents * slice_bytes:
+            return latents, CausalMemoryCache()
+        # the other dtypes' tails are not stored this way
+        compiled = dtype == torch.float16 and spare >= tail_bytes and comfy.model_prefetch.malloc_graph_enabled(device)
+        if compiled:
+            spare -= tail_bytes
+        slice_latents = max(0, min(SEEDVR2_MAX_SLICE_LATENTS, int(spare / slice_bytes)))
+    offload = not compiled and _offload_caches_for(frame_pixels)
+    return slice_latents if compiled or offload else 0, CausalMemoryCache(offload=offload, compiled=compiled)
 
 
 class MemoryState(Enum):
@@ -1165,20 +1229,18 @@ class Encoder3D(nn.Module):
         self.conv_norm_out = ops.GroupNorm(num_channels=block_out_channels[-1], num_groups=norm_num_groups, eps=1e-6)
         self.conv_out = InflatedCausalConv3d(block_out_channels[-1], 2 * out_channels, 3, padding=1)
 
-    # Frames per pass through the full-resolution, spatial-only head; None runs a slice's frames at once.
-    head_frames = 1
-
     def _head(self, source, memory_state, memory_cache):
         box = [self.conv_in(source.pop(), memory_state=memory_state, memory_cache=memory_cache)]
         for down_block in self.down_blocks[:self.head_blocks]:
             box = [down_block.run(box, memory_state, memory_cache)]
         return box.pop()
 
-    def forward(self, sample, memory_state, memory_cache):
+    def forward(self, sample, memory_state, memory_cache, head_frames):
+        """``head_frames`` per run through the spatial-only head; None runs the slice at once."""
         frame_pixels = sample.size(-2) * sample.size(-1)
         source = [sample]
         del sample
-        box = [_frame_chunked(self, self._head, source, self.head_frames, memory_state, memory_cache, frame_pixels)]
+        box = [_frame_chunked(self, self._head, source, head_frames, memory_state, memory_cache, frame_pixels)]
         for down_block in self.down_blocks[self.head_blocks:]:
             box = [down_block.run(box, memory_state, memory_cache)]
         sample = self.mid_block(box.pop(), memory_state, memory_cache)
@@ -1210,9 +1272,6 @@ class Decoder3D(nn.Module):
         self.conv_norm_out = ops.GroupNorm(num_channels=block_out_channels[0], num_groups=norm_num_groups, eps=1e-6)
         self.conv_out = InflatedCausalConv3d(block_out_channels[0], out_channels, 3, padding=1)
 
-    # Frames per pass through the spatial-only tail; None runs a slice's frames at once.
-    tail_frames = 1
-
     def _tail(self, source, memory_state, memory_cache):
         for up_block in self.up_blocks[self.temporal_up_num:]:
             source = [up_block.run(source, memory_state, memory_cache)]
@@ -1222,7 +1281,8 @@ class Decoder3D(nn.Module):
             out = self.conv_out(sample, memory_state=memory_state, memory_cache=memory_cache)
         return out
 
-    def forward(self, sample, memory_state, memory_cache):
+    def forward(self, sample, memory_state, memory_cache, tail_frames):
+        """``tail_frames`` per run through the spatial-only tail; None runs the slice at once."""
         sample = self.conv_in(sample, memory_state=memory_state, memory_cache=memory_cache)
         sample = self.mid_block(sample, memory_state, memory_cache)
 
@@ -1247,11 +1307,10 @@ class Decoder3D(nn.Module):
                         for n, box in enumerate(up.frames(source, state, cache))]
                 return torch.cat(outs, dim=2)
             box = [up.run(source, state, cache)]
-            return _frame_chunked(self, self._tail, box, self.tail_frames, state, cache, frame_pixels)
+            return _frame_chunked(self, self._tail, box, tail_frames, state, cache, frame_pixels)
         source = [sample]
         del sample
-        return _frame_chunked(last, upsample_and_tail, source, self.tail_frames and max(1, self.tail_frames // up.temporal_ratio),
-                              memory_state, memory_cache, frame_pixels)
+        return _frame_chunked(last, upsample_and_tail, source, tail_frames, memory_state, memory_cache, frame_pixels)
 
 
 class VideoAutoencoderKLWrapper(nn.Module):
@@ -1266,6 +1325,7 @@ class VideoAutoencoderKLWrapper(nn.Module):
         super().__init__()
         self.encoder = Encoder3D(3, SEEDVR2_LATENT_CHANNELS, BYTEDANCE_BLOCK_OUT_CHANNELS, layers_per_block=2,
                                  norm_num_groups=32, temporal_down_num=2)
+        self.current_patcher = None   # set by the VAE wrapper
         self.decoder = Decoder3D(SEEDVR2_LATENT_CHANNELS, 3, BYTEDANCE_BLOCK_OUT_CHANNELS, layers_per_block=2,
                                  norm_num_groups=32, temporal_up_num=2)
         set_norm_limit(BYTEDANCE_VAE_NORM_MEM_GIB)
@@ -1273,30 +1333,51 @@ class VideoAutoencoderKLWrapper(nn.Module):
             if isinstance(m, InflatedCausalConv3d):
                 m.memory_limit = BYTEDANCE_VAE_CONV_MEM_GIB
 
-    def _encode(self, x, memory_state=MemoryState.DISABLED, memory_cache=None):
-        h = self.encoder(x.to(self.device), memory_state=memory_state, memory_cache=memory_cache)
+    def _encode(self, x, head_frames, memory_state=MemoryState.DISABLED, memory_cache=None):
+        h = self.encoder(x.to(self.device), memory_state=memory_state, memory_cache=memory_cache, head_frames=head_frames)
         return h.to(x.device)
 
-    def _decode(self, z, memory_state=MemoryState.DISABLED, memory_cache=None):
-        output = self.decoder(z.to(self.device), memory_state=memory_state, memory_cache=memory_cache)
+    def _decode(self, z, tail_frames, memory_state=MemoryState.DISABLED, memory_cache=None):
+        output = self.decoder(z.to(self.device), memory_state=memory_state, memory_cache=memory_cache, tail_frames=tail_frames)
         return output.to(z.device)
 
     def slicing_encode(self, x: torch.Tensor) -> torch.Tensor:
         if x.size(0) > 1:   # a video at a time: the buffered path and the memory estimate are per video
             return torch.cat([self.slicing_encode(x[i:i + 1]) for i in range(x.size(0))])
-        if (x.shape[2] - 1) <= self.slicing_sample_min_size:
-            return self._encode(x.to(self.device))
-        memory_cache = CausalMemoryCache(offload=_offload_caches_for(x.shape[-2] * x.shape[-1]))
-        split_size = max(self.slicing_sample_min_size, self.temporal_downsample_factor)
+        area = x.shape[-2] * x.shape[-1]
+        factor = _eager_factor(x.dtype, SEEDVR2_EAGER_ENCODE_FACTOR)
+        latents = -(-(x.shape[2] - 1) // self.temporal_downsample_factor)
+        slice_bytes = area * SEEDVR2_ENCODE_SLICE_BYTES_PER_PIXEL * factor
+        short_tail = (x.shape[2] - 1) % self.temporal_downsample_factor / self.temporal_downsample_factor   # joins the slice before it
+        slice_latents, memory_cache = _plan_pass(self.device, self.current_patcher.get_free_memory(self.device), area, latents, self.comfy_memory_used_encode(x.shape, x.dtype) + short_tail * slice_bytes,
+                                                 slice_bytes, area * SEEDVR2_ENCODE_TAIL_BYTES_PER_PIXEL + SEEDVR2_ENCODE_TAIL_FIXED_BYTES, x.dtype)
+        head_frames = None if slice_latents else 1
+        split_size = max(self.slicing_sample_min_size, self.temporal_downsample_factor, slice_latents * self.temporal_downsample_factor)
+        if (x.shape[2] - 1) <= split_size:
+            memory_cache.free()
+            return self._encode(x.to(self.device), head_frames=head_frames)
         x_slices = list(x[:, :, 1:].split(split_size=split_size, dim=2))   # _encode moves each to the device
         if len(x_slices) > 1 and x_slices[-1].shape[2] < self.temporal_downsample_factor:
             x_slices[-2] = torch.cat((x_slices[-2], x_slices[-1]), dim=2)
             x_slices.pop()
+        encoded_slices = []
+
+        def keep(encoded):
+            if memory_cache.compiled and encoded.is_cuda:
+                with comfy.model_prefetch.pause_malloc_graph():
+                    encoded_slices.append(encoded.clone())
+            else:
+                encoded_slices.append(encoded)
+
         try:
-            encoded_slices = [self._encode(torch.cat((x[:, :, :1], x_slices[0]), dim=2),
-                                           memory_state=MemoryState.INITIALIZING, memory_cache=memory_cache)]
-            for x_slice in x_slices[1:]:
-                encoded_slices.append(self._encode(x_slice, memory_state=MemoryState.ACTIVE, memory_cache=memory_cache))
+            with memory_cache.scope(self.device):
+                memory_cache.next_slice(self.device, self.encoder, x_slices[0].size(2) + 1)
+                keep(self._encode(torch.cat((x[:, :, :1], x_slices[0]), dim=2),
+                                  memory_state=MemoryState.INITIALIZING, memory_cache=memory_cache, head_frames=head_frames))
+                for x_slice in x_slices[1:]:
+                    memory_cache.next_slice(self.device, self.encoder, x_slice.size(2))
+                    keep(self._encode(x_slice, memory_state=MemoryState.ACTIVE, memory_cache=memory_cache, head_frames=head_frames))
+                memory_cache.next_slice(self.device)
         finally:
             memory_cache.free()
         return torch.cat(encoded_slices, dim=2)
@@ -1307,11 +1388,20 @@ class VideoAutoencoderKLWrapper(nn.Module):
             outs = [self.slicing_decode(z[i:i + 1], None if output_buffer is None else output_buffer[i:i + 1])
                     for i in range(z.size(0))]
             return output_buffer if output_buffer is not None else torch.cat(outs)
-        if (z.shape[2] - 1) <= self.slicing_latent_min_size:
-            decoded = self._decode(z)
+        area = z.shape[-2] * z.shape[-1] * self.spatial_downsample_factor ** 2
+        factor = _eager_factor(z.dtype, SEEDVR2_EAGER_DECODE_FACTOR)
+        slice_latents, memory_cache = _plan_pass(self.device, self.current_patcher.get_free_memory(self.device), area, z.shape[2] - 1, (area * SEEDVR2_DECODE_BYTES_PER_FRAME_PIXEL + SEEDVR2_DECODE_FIXED_BYTES) * factor,
+                                                 area * SEEDVR2_DECODE_SLICE_BYTES_PER_FRAME_PIXEL * factor,
+                                                 area * SEEDVR2_DECODE_TAIL_BYTES_PER_FRAME_PIXEL + SEEDVR2_DECODE_TAIL_FIXED_BYTES, z.dtype)
+        tail_frames = None if slice_latents else 1
+        split_size = max(self.slicing_latent_min_size, slice_latents)
+        if (z.shape[2] - 1) <= split_size:
+            memory_cache.free()
+            decoded = self._decode(z, tail_frames=tail_frames)
             return decoded if output_buffer is None else output_buffer.copy_(decoded)
-        memory_cache = CausalMemoryCache(offload=_offload_caches_for(z.shape[-2] * z.shape[-1] * self.spatial_downsample_factor ** 2))
-        z_slices = z[:, :, 1:].split(split_size=self.slicing_latent_min_size, dim=2)
+        z_slices = z[:, :, 1:].split(split_size=split_size, dim=2)
+        if memory_cache.compiled and output_buffer is None:   # the frames outlive their slice
+            output_buffer = torch.empty(self.decode_output_shape(z.shape), device=z.device, dtype=z.dtype)
         decoded_slices = []
         write_pos = 0
 
@@ -1324,10 +1414,14 @@ class VideoAutoencoderKLWrapper(nn.Module):
             write_pos += decoded.size(2)
 
         try:
-            emit(self._decode(torch.cat((z[:, :, :1], z_slices[0]), dim=2),
-                              memory_state=MemoryState.INITIALIZING, memory_cache=memory_cache))
-            for z_slice in z_slices[1:]:
-                emit(self._decode(z_slice, memory_state=MemoryState.ACTIVE, memory_cache=memory_cache))
+            with memory_cache.scope(self.device):
+                memory_cache.next_slice(self.device, self.decoder, z_slices[0].size(2) + 1)
+                emit(self._decode(torch.cat((z[:, :, :1], z_slices[0]), dim=2),
+                                  memory_state=MemoryState.INITIALIZING, memory_cache=memory_cache, tail_frames=tail_frames))
+                for z_slice in z_slices[1:]:
+                    memory_cache.next_slice(self.device, self.decoder, z_slice.size(2))
+                    emit(self._decode(z_slice, memory_state=MemoryState.ACTIVE, memory_cache=memory_cache, tail_frames=tail_frames))
+                memory_cache.next_slice(self.device)
         finally:
             memory_cache.free()
         return output_buffer if output_buffer is not None else torch.cat(decoded_slices, dim=2)

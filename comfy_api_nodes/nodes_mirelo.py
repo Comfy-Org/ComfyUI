@@ -17,6 +17,7 @@ from comfy_api_nodes.util import (
     ApiEndpoint,
     audio_bytes_to_audio_input,
     download_url_as_bytesio,
+    downscale_video_to_max_pixels,
     poll_op,
     sync_op,
     upload_audio_to_comfyapi,
@@ -26,6 +27,7 @@ from comfy_api_nodes.util import (
 )
 
 MIRELO_MODELS = ["sfx-2.0"]
+MIRELO_MAX_SHORT_SIDE = 2160
 
 
 async def _mirelo_job(cls: type[IO.ComfyNode], family: str, request: BaseModel) -> MireloJob:
@@ -113,6 +115,13 @@ class MireloVideoToSFX(IO.ComfyNode):
                                     max=4294967295,
                                     control_after_generate=True,
                                 ),
+                                IO.Boolean.Input(
+                                    "auto_downscale",
+                                    default=True,
+                                    optional=True,
+                                    tooltip="Automatically downscale videos whose shorter side is above 2160 pixels. "
+                                    "Aspect ratio is preserved; smaller videos are untouched.",
+                                ),
                             ],
                         )
                         for model_id in MIRELO_MODELS
@@ -141,9 +150,18 @@ class MireloVideoToSFX(IO.ComfyNode):
 
     @classmethod
     async def execute(cls, model: dict):
-        validate_video_duration(model["video"], min_duration=1, max_duration=600)
+        video = model["video"]
+        validate_video_duration(video, min_duration=1, max_duration=600)
         validate_string(model["prompt"], max_length=2000)
         validate_string(model["negative_prompt"], field_name="negative_prompt", max_length=1000)
+        width, height = video.get_dimensions()
+        if min(width, height) > MIRELO_MAX_SHORT_SIDE:
+            if model["auto_downscale"] is False:
+                raise ValueError(
+                    f"Video must be at most {MIRELO_MAX_SHORT_SIDE} pixels on its shorter side, got {width}x{height}. "
+                    "Enable auto_downscale or use a smaller video."
+                )
+            video = downscale_video_to_max_pixels(video, int(width * height * (MIRELO_MAX_SHORT_SIDE / min(width, height)) ** 2))
         audio_url = None
         if model.get("audio") is not None:
             audio_url = MireloMediaURL(url=await upload_audio_to_comfyapi(cls, model["audio"]))
@@ -154,7 +172,7 @@ class MireloVideoToSFX(IO.ComfyNode):
                 model=model["model"],
                 seed=model["seed"],
                 input=MireloVideoInput(
-                    video=MireloMediaURL(url=await upload_video_to_comfyapi(cls, model["video"])),
+                    video=MireloMediaURL(url=await upload_video_to_comfyapi(cls, video)),
                     audio=audio_url,
                     prompt=model["prompt"] or None,
                     negative_prompt=model["negative_prompt"] or None,
