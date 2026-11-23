@@ -167,23 +167,47 @@ def _mmap_file_slice_tensors(module, seen):
     return found
 
 
+_STAGING_ALIGN = 256
+_staging_arena = None
+
+
+def _get_staging_arena(size):
+    """One pinned buffer, kept for later loads: pinning it is the slow part on some hosts."""
+    global _staging_arena
+    if _staging_arena is None or _staging_arena.numel() < size:
+        _staging_arena = None
+        _staging_arena = torch.empty(size, dtype=torch.uint8, pin_memory=True)
+    return _staging_arena
+
+
 def move_modules_reading_files(modules, device, max_staged_bytes, workers=4):
     """module.to(device) for each module, reading its mmap'd weights from their file first.
 
     ROCm copies pageable host memory to the GPU by locking the source pages, which
     runs at about 2.3 GB/s from an mmap'd checkpoint. Reading the file into pinned
-    memory and copying from there is several times faster. Modules are read ahead on
-    ``workers`` threads while earlier ones are copied, with at most
-    ``max_staged_bytes`` of pinned staging in flight; a module larger than that, and
-    tensors without a file slice or whose read fails, move as before.
+    memory and copying from there is several times faster. The weights are read into
+    one pinned buffer of ``max_staged_bytes``, used as a ring: modules are read ahead
+    on ``workers`` threads while earlier ones are copied, and a module's region is
+    reused once its synchronous .to() has returned. A module larger than the buffer,
+    and tensors without a file slice or whose read fails, move as before.
     """
-    def read(found):
+    try:
+        arena = _get_staging_arena(max_staged_bytes)
+    except RuntimeError:
+        for module in modules:
+            module.to(device)
+        return
+    capacity = max_staged_bytes
+
+    def read(found, start):
         staged = []
+        offset = start
         for holder, src, info in found:
+            pinned = arena[offset:offset + info.size].view(src.dtype).view(src.shape)
+            offset += -(-info.size // _STAGING_ALIGN) * _STAGING_ALIGN
             try:
-                pinned = torch.empty(src.shape, dtype=src.dtype, pin_memory=True)
                 _read_file_slice(info, pinned.data_ptr())
-            except (OSError, RuntimeError):
+            except OSError:
                 continue
             staged.append((holder, src, pinned))
         return staged
@@ -194,42 +218,51 @@ def move_modules_reading_files(modules, device, max_staged_bytes, workers=4):
                 holder._qdata = pinned
             else:
                 holder.data = pinned
-        module.to(device)
-        # A holder that .to() replaced rather than moved (quantized modules register new
-        # Parameters) may still be referenced, e.g. as a patch backup. Point it back at
-        # the mmap so the pinned copy is released.
-        for holder, src, pinned in staged:
-            if isinstance(holder, QuantizedTensor):
-                if holder._qdata is pinned:
-                    holder._qdata = src
-            elif holder.device.type == "cpu":
-                holder.data = src
+        try:
+            module.to(device)
+        finally:
+            # Any holder still on the staging buffer goes back to the mmap, as the buffer
+            # is about to be reused: one that .to() replaced rather than moved (quantized
+            # modules register new Parameters) may still be referenced, e.g. as a patch
+            # backup, and if .to() raised, the module itself keeps its CPU holders.
+            for holder, src, pinned in staged:
+                if isinstance(holder, QuantizedTensor):
+                    if holder._qdata is pinned:
+                        holder._qdata = src
+                elif holder.data_ptr() == pinned.data_ptr():
+                    holder.data = src
 
-    pending = collections.deque()
-    in_flight = 0
+    pending = collections.deque()  # (module, start, end, future), oldest first
+    head = 0
     seen = set()
 
-    def finish_oldest():
-        nonlocal in_flight
-        module, size, staged = pending.popleft()
-        move(module, staged.result())
-        in_flight -= size
+    def place(size):
+        """Start of a free ring region of ``size`` bytes, or None while it is still in use."""
+        for start in (head, 0):
+            if start + size <= capacity and all(start + size <= s or e <= start for _, s, e, _ in pending):
+                return start
+        return None
 
     with ThreadPoolExecutor(workers) as pool:
         for module in modules:
             found = _mmap_file_slice_tensors(module, seen)
-            size = sum(info.size for _, _, info in found)
-            if size > max_staged_bytes:
+            size = sum(-(-info.size // _STAGING_ALIGN) * _STAGING_ALIGN for _, _, info in found)
+            if size > capacity:
                 while pending:
-                    finish_oldest()
+                    old, _, _, staged = pending.popleft()
+                    move(old, staged.result())
                 module.to(device)
                 continue
-            while pending and in_flight + size > max_staged_bytes:
-                finish_oldest()
-            pending.append((module, size, pool.submit(read, found)))
-            in_flight += size
+            start = place(size)
+            while start is None:
+                old, _, _, staged = pending.popleft()
+                move(old, staged.result())
+                start = place(size)
+            pending.append((module, start, start + size, pool.submit(read, found, start)))
+            head = start + size
         while pending:
-            finish_oldest()
+            old, _, _, staged = pending.popleft()
+            move(old, staged.result())
 
 
 class TensorGeometry(NamedTuple):

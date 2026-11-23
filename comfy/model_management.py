@@ -1664,12 +1664,18 @@ def weight_staging_bytes(device):
     """Pinned bytes the legacy loader may stage file reads through for ``device``, or 0.
 
     Only ROCm needs it (see memory_management.move_modules_reading_files). It follows the
-    pinned-memory policy (--disable-pinned-memory, integrated GPUs) and stays within the
-    unused part of the pinning budget, capped at 512 MiB.
+    pinned-memory policy (--disable-pinned-memory, integrated GPUs), stays within the unused
+    part of the pinning budget and within the RAM that ensure_pin_budget keeps free, and is
+    capped at 512 MiB. Staging is transient, so it never evicts pins to make room; the
+    legacy loader pins offloaded weights only after it has moved the full-load modules.
     """
     if not is_amd() or not is_device_cuda(device) or MAX_PINNED_MEMORY <= 0:
         return 0
-    return int(max(0, min(512 * 1024 * 1024, MAX_PINNED_MEMORY - TOTAL_PINNED_MEMORY)))
+    budget = min(512 * 1024 * 1024, MAX_PINNED_MEMORY - TOTAL_PINNED_MEMORY)
+    if not args.high_ram:
+        headroom = max(comfy.memory_management.RAM_CACHE_HEADROOM / 2, 2048 * 1024 ** 2)
+        budget = min(budget, comfy.system_memory.virtual_memory_available() - headroom)
+    return int(max(0, budget))
 
 def pin_memory(tensor, evict_active=True):
     global TOTAL_PINNED_MEMORY
