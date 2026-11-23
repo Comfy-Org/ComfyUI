@@ -88,7 +88,7 @@ class V3NodeCallingTheApi(io.ComfyNode):
         return io.Schema(
             node_id="TestV3NodeCallingTheApi",
             inputs=[io.Int.Input("value")],
-            hidden=[io.Hidden.unique_id, io.Hidden.auth_token_comfy_org, io.Hidden.api_key_comfy_org],
+            hidden=[io.Hidden.unique_id, io.Hidden.api_key_comfy_org],
         )
 
     @classmethod

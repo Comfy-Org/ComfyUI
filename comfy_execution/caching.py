@@ -27,7 +27,7 @@ def include_unique_id_in_input(class_type: str) -> bool:
     unique_id = ("UNIQUE_ID",) if v3 else "UNIQUE_ID"
     hidden = class_def.INPUT_TYPES().get("hidden", {}).values()
     # V3 nodes that call Comfy's API read their id only for progress and price text, so identical ones keep sharing one paid call.
-    calls_api = v3 and ("AUTH_TOKEN_COMFY_ORG",) in hidden
+    calls_api = v3 and any(key in hidden for key in (("AUTH_TOKEN_COMFY_ORG",), ("API_KEY_COMFY_ORG",)))
     NODE_CLASS_CONTAINS_UNIQUE_ID[class_type] = unique_id in hidden and not calls_api
     return NODE_CLASS_CONTAINS_UNIQUE_ID[class_type]
 
