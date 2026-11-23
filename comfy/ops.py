@@ -188,9 +188,6 @@ def cast_modules_with_vbar(comfy_modules, dtype, device, bias_dtype, non_blockin
             group._v_weight = None
             for m in group.linears:
                 m._v_signature = None
-        # The prefetch record is made as soon as the fault pins the module, so the caller's
-        # cleanup (cleanup_prefetched_modules) can see and unpin it if the cast fails part way.
-        # The cast fields are added to the record once the transfer is set up.
         if group is None or group._v_weight is None:
             signature = comfy_aimdo.model_vbar.vbar_fault(s._v)
             s._prefetch = {
@@ -343,7 +340,6 @@ def resolve_cast_module_with_vbar(s, dtype, device, bias_dtype, compute_dtype, w
             s._v_weight = weight
             s._v_bias = bias
             s._v_relayout = False
-        # Set at the end: if a cast below fails, a retry must not match this signature as resident.
         s._v_signature = None
 
     def post_cast(s, param_key, x, dtype, resident, update_weight):
@@ -428,7 +424,6 @@ def cast_bias_weight(s, input=None, dtype=None, device=None, bias_dtype=None, of
     elif hasattr(s, "_v") and s.weight.device != device:
         prefetched = hasattr(s, "_prefetch")
         offload_stream = None
-        offload_device = None
         try:
             if not prefetched:
                 offload_stream = cast_modules_with_vbar([s], dtype, device, bias_dtype, non_blocking)
@@ -436,20 +431,21 @@ def cast_bias_weight(s, input=None, dtype=None, device=None, bias_dtype=None, of
             weight, bias = resolve_cast_module_with_vbar(s, dtype, device, bias_dtype, compute_dtype, want_requant)
         except BaseException:
             if not prefetched:
-                # FIXME: Make uncast_bias_weight robust enough to handle our partial aborted cast rather than use the prefetcher
-                import comfy.model_prefetch as model_prefetch  # model_prefetch imports this module
-                model_prefetch.cleanup_prefetched_modules(None, [s])
+                comfy.model_management.cleanup_cast_module(s)
             raise
 
+        offload_state = (offload_stream, None, None)
         if not prefetched:
-            if getattr(s, "_prefetch")["signature"] is not None:
-                offload_device = device
+            prefetch = s._prefetch
             for param_key in ("weight", "bias"):
                 lowvram_fn = getattr(s, param_key + "_lowvram_function", None)
                 if lowvram_fn is not None:
                     lowvram_fn.clear_prepared()
             delattr(s, "_prefetch")
-        return format_return((weight, bias, (offload_stream, offload_device, None)), offloadable)
+            if prefetch["signature"] is not None:
+                offload_state = (offload_stream, device, object())
+                comfy.model_management.PENDING_VBAR_CASTS[offload_state[2]] = (s._v, offload_state)
+        return format_return((weight, bias, offload_state), offloadable)
 
 
     if offloadable and (device != s.weight.device or
@@ -501,24 +497,7 @@ def cast_bias_weight(s, input=None, dtype=None, device=None, bias_dtype=None, of
 
 
 def uncast_bias_weight(s, weight, bias, offload_stream):
-    if offload_stream is None:
-        return
-    os, weight_a, bias_a = offload_stream
-    device=None
-    #FIXME: This is really bad RTTI
-    if weight_a is not None and not isinstance(weight_a, torch.Tensor):
-        comfy_aimdo.model_vbar.vbar_unpin(s._v)
-        device = weight_a
-    if os is None:
-        return
-    if device is None:
-        if weight_a is not None:
-            device = weight_a.device
-        else:
-            if bias_a is None:
-                return
-            device = bias_a.device
-    os.wait_stream(comfy.model_management.current_stream(device))
+    comfy.model_management.uncast_weights(offload_stream)
 
 class CastBiasWeightContext:
     # When initialized with no arguments or the first is None, the context
