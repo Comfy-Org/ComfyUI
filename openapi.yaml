@@ -2929,6 +2929,23 @@ paths:
                             schema:
                                 additionalProperties: true
                                 properties:
+                                    agent:
+                                        description: 'Local ComfyUI only: lifecycle of the optional local agent host. Present only when the agent is enabled.'
+                                        properties:
+                                            reason:
+                                                description: Why the host failed or crashed. Present whenever set, in any state (including starting after a crash).
+                                                type: string
+                                            state:
+                                                enum:
+                                                    - starting
+                                                    - ready
+                                                    - failed
+                                                type: string
+                                        required:
+                                            - state
+                                        type: object
+                                        x-runtime:
+                                            - local
                                     deploy_to_cloud:
                                         description: 'Local ComfyUI only: whether the UI should offer Deploy to Cloud. True when the server is not --offline and this installation has ever had a prompt queued by a non-browser client (a persistent marker in the user directory). A discovery hint only: it grants nothing, and the /api/deploy/* routes do not check it. Not settable with --feature-flag.'
                                         type: boolean
@@ -2954,6 +2971,11 @@ paths:
                                     max_upload_size:
                                         description: Maximum upload size in bytes
                                         type: integer
+                                    server_boot_id:
+                                        description: 'Local ComfyUI only: a random id that is new on every server start. A client that reconnects and gets a different value knows the server restarted, so node definitions it loaded earlier may be stale. Not settable with --feature-flag.'
+                                        type: string
+                                        x-runtime:
+                                            - local
                                     supports_preview_metadata:
                                         description: Whether the server supports preview metadata
                                         type: boolean
