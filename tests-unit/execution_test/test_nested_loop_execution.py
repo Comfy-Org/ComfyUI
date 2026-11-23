@@ -1,4 +1,5 @@
 import copy
+from collections import Counter
 
 import pytest
 
@@ -932,12 +933,7 @@ def lazy_pick(on_true, on_false):
 
 
 def earlier_loop(tag="earlier"):
-    return {
-        "zero": {"class_type": "TestConstant", "inputs": {"value": 0}},
-        tag: start_loop(["zero", 0], 2),
-        f"{tag}_increment": {"class_type": "TestIncrement", "inputs": {"value": [tag, 4]}},
-        f"{tag}_close": end_loop(f"{tag}_increment"),
-    }
+    return {"zero": {"class_type": "TestConstant", "inputs": {"value": 0}}, **incrementing_loop(tag, ["zero", 0])}
 
 
 def outer_loop(passes, body, close_source):
@@ -1021,10 +1017,18 @@ BODIES_READING_AN_EARLIER_LOOP = {
 
 @pytest.mark.parametrize("cache_type", [False, CacheType.LRU, CacheType.RAM_PRESSURE, CacheType.NONE])
 @pytest.mark.parametrize("body", sorted(BODIES_READING_AN_EARLIER_LOOP))
-def test_loop_body_reads_an_earlier_loop_after_its_output_is_evicted(monkeypatch, body, cache_type):
+def test_loop_body_reads_an_earlier_loop_in_every_cache_mode(monkeypatch, body, cache_type):
     monkeypatch.setattr(comfy.system_memory, "virtual_memory_available", lambda: 0)
     monkeypatch.setattr(comfy_execution.caching, "virtual_memory_available", lambda: 0)
     build_prompt, expected, increments = BODIES_READING_AN_EARLIER_LOOP[body]
+    kept_result_reads = []
+    get_external_block_result = ExecutionList.get_external_block_result
+
+    def record(self, node_id):
+        kept_result_reads.append(node_id)
+        return get_external_block_result(self, node_id)
+
+    monkeypatch.setattr(ExecutionList, "get_external_block_result", record)
     Increment.calls = []
     Capture.values = []
     executor = PromptExecutor(Server(), cache_type=cache_type, cache_args={"ram": 1.0, "ram_inactive": 1.0, "lru": 100})
@@ -1037,3 +1041,4 @@ def test_loop_body_reads_an_earlier_loop_after_its_output_is_evicted(monkeypatch
         assert sorted(Increment.calls) == increments, "a finished node ran again"
     if cache_type == CacheType.RAM_PRESSURE:
         assert executor.caches.outputs.full_evictions
+        assert max(Counter(kept_result_reads).values()) > 1, "no evicted End Loop ran again from its kept result"

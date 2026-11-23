@@ -95,7 +95,7 @@ def test_external_block_carries_a_result_to_its_node():
 
 
 @pytest.mark.parametrize("keep_block_results", [False, True])
-def test_completed_node_keeps_its_block_result_only_without_an_output_cache(keep_block_results):
+def test_completed_node_keeps_its_block_result_only_when_asked(keep_block_results):
     graph = execution_list()
     graph.keep_block_results = keep_block_results
     graph.externalBlockResults["start"] = [1, 2]

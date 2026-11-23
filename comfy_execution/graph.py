@@ -221,7 +221,7 @@ class ExecutionList(TopologicalSort):
     def __init__(self, dynprompt, output_cache, output_link_callback=None, force_rerun=None, keep_block_results=False):
         super().__init__(dynprompt)
         self.output_cache = output_cache
-        # When the output cache lacks or evicts a finished End Loop's output, a later expansion runs it again from its kept result.
+        # When the output cache lacks or evicts a finished End Loop's output, a later consumer runs it again from its kept result.
         self.keep_block_results = keep_block_results
         self.output_link_callback = output_link_callback
         # Optional predicate: node ids that must run again even with a cached result.
