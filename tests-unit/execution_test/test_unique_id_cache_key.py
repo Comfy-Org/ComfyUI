@@ -6,6 +6,8 @@ from comfy.cli_args import args
 if not torch.cuda.is_available():
     args.cpu = True
 
+import comfy_api_nodes.nodes_bytedance as nodes_bytedance
+import comfy_api_nodes.nodes_krea as nodes_krea
 import comfy_extras.nodes_images as nodes_images
 import comfy_execution.caching as caching
 import nodes
@@ -80,11 +82,29 @@ class V3ApiNode(io.ComfyNode):
         return io.NodeOutput()
 
 
+class V3NodeCallingTheApi(io.ComfyNode):
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="TestV3NodeCallingTheApi",
+            inputs=[io.Int.Input("value")],
+            hidden=[io.Hidden.unique_id, io.Hidden.auth_token_comfy_org, io.Hidden.api_key_comfy_org],
+        )
+
+    @classmethod
+    def execute(cls, value):
+        return io.NodeOutput()
+
+
 @pytest.mark.parametrize(("node_class", "expected"), [
     (nodes_images.GetImageSize, True),
     (V3ApiNode, False),
+    (V3NodeCallingTheApi, False),
+    (nodes_bytedance.ByteDanceCreateImageAsset, False),
+    (nodes_bytedance.ByteDanceCreateVideoAsset, False),
+    (nodes_krea.Krea2StyleReferenceNode, False),
     (v1_node({"unique_id": "UNIQUE_ID"}), True),
-    (type("V1ApiNode", (v1_node({"unique_id": "UNIQUE_ID"}),), {"API_NODE": True}), True),
+    (type("V1ApiNode", (v1_node({"unique_id": "UNIQUE_ID", "auth_token_comfy_org": "AUTH_TOKEN_COMFY_ORG"}),), {"API_NODE": True}), True),
     (v1_node({"unique_id": ("UNIQUE_ID",)}), False),
     (v1_node({"prompt": "PROMPT"}), False),
     (V3Output, False),

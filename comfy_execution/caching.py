@@ -25,9 +25,10 @@ def include_unique_id_in_input(class_type: str) -> bool:
     v3 = issubclass(class_def, _ComfyNodeInternal)
     # V3 schemas list a hidden input as a one-item tuple and V1 nodes as a plain string, as execution reads them.
     unique_id = ("UNIQUE_ID",) if v3 else "UNIQUE_ID"
-    keyed = unique_id in class_def.INPUT_TYPES().get("hidden", {}).values()
-    # V3 API nodes read their id only for progress and price text, so identical ones keep sharing one paid call.
-    NODE_CLASS_CONTAINS_UNIQUE_ID[class_type] = keyed and not (v3 and class_def.API_NODE)
+    hidden = class_def.INPUT_TYPES().get("hidden", {}).values()
+    # V3 nodes that call Comfy's API read their id only for progress and price text, so identical ones keep sharing one paid call.
+    calls_api = v3 and ("AUTH_TOKEN_COMFY_ORG",) in hidden
+    NODE_CLASS_CONTAINS_UNIQUE_ID[class_type] = unique_id in hidden and not calls_api
     return NODE_CLASS_CONTAINS_UNIQUE_ID[class_type]
 
 class CacheKeySet(ABC):
