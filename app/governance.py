@@ -14,6 +14,8 @@ import unicodedata
 
 import yaml
 
+from utils.ed25519 import Ed25519PublicKey
+
 
 GOVERNANCE_REQUIRED = False
 GOVERNANCE_BUILD_IDENTITY = ""
@@ -254,8 +256,6 @@ def apply_disabled_nodes(disabled: set[str]) -> None:
 
 
 def verify_and_load(envelope_bytes: bytes) -> dict:
-    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
-
     if len(envelope_bytes) > _MAX_ENVELOPE_BYTES:
         raise ValueError("governance envelope exceeds maximum size")
 

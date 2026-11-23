@@ -260,6 +260,17 @@ def detect_unet_config(state_dict, key_prefix, metadata=None):
             dit_config["meanflow_sum"] = False
         return dit_config
 
+    if '{}content_mode_blocks.image.0.attn_out.weight'.format(key_prefix) in state_dict_keys and '{}single_stream_modulations.txt.lin.weight'.format(key_prefix) in state_dict_keys:  # FLUX.3
+        dit_config = {}
+        dit_config["image_model"] = "flux3"
+        dit_config["hidden_size"] = state_dict['{}content_mode_blocks.image.0.attn_out.weight'.format(key_prefix)].shape[0]
+        dit_config["num_heads"] = dit_config["hidden_size"] // 128
+        dit_config["fused_qkv"] = '{}single_blocks.0.qkv.weight'.format(key_prefix) in state_dict_keys
+        dit_config["flow_map"] = '{}ref_time_in.in_layer.weight'.format(key_prefix) in state_dict_keys
+        dit_config["depth"] = count_blocks(state_dict_keys, '{}txt_mode_blocks.'.format(key_prefix) + '{}.')
+        dit_config["depth_single_blocks"] = count_blocks(state_dict_keys, '{}single_blocks.'.format(key_prefix) + '{}.')
+        return dit_config
+
     if any_suffix_in(state_dict_keys, key_prefix, 'double_blocks.0.img_attn.norm.key_norm.', ["weight", "scale"]) and ('{}img_in.weight'.format(key_prefix) in state_dict_keys or any_suffix_in(state_dict_keys, key_prefix, 'distilled_guidance_layer.norms.0.', ["weight", "scale"])): #Flux, Chroma or Chroma Radiance (has no img_in.weight)
         dit_config = {}
         if '{}double_stream_modulation_img.lin.weight'.format(key_prefix) in state_dict_keys:
@@ -387,14 +398,20 @@ def detect_unet_config(state_dict, key_prefix, metadata=None):
         # PixArt diffusers
         return None
 
-    if '{}video_patch_proj.weight'.format(key_prefix) in state_dict_keys and '{}audio_patch_proj.weight'.format(key_prefix) in state_dict_keys: # MiniMax H3
+    if '{}video_patch_proj.weight'.format(key_prefix) in state_dict_keys and '{}condition_proj.weight'.format(key_prefix) in state_dict_keys: # MiniMax H3
         dit_config = {}
-        dit_config["image_model"] = "minimax_h3"
+        audio = '{}audio_patch_proj.weight'.format(key_prefix) in state_dict_keys  # the image checkpoints have no audio stream
+        dit_config["image_model"] = "minimax_h3" if audio else "minimax_h3_image"
         dit_config["num_layers"] = count_blocks(state_dict_keys, '{}blocks.'.format(key_prefix) + '{}.')
         dit_config["token_refiner_num_layers"] = count_blocks(state_dict_keys, '{}token_refiner.blocks.'.format(key_prefix) + '{}.')
         dit_config["hidden_size"] = state_dict['{}video_patch_proj.weight'.format(key_prefix)].shape[0]
-        dit_config["latents_dim"] = state_dict['{}final_layer.video_out.weight'.format(key_prefix)].shape[0] // 4  # patch 1x2x2
-        dit_config["audio_latents_dim"] = state_dict['{}final_layer.audio_out.weight'.format(key_prefix)].shape[0]
+        # a PDD checkpoint stacks pdd_steps output heads per stream (declared in its config metadata)
+        pdd_steps = 1
+        if metadata is not None and "config" in metadata:
+            pdd_steps = json.loads(metadata["config"]).get("transformer", {}).get("pdd_steps", 1)
+        dit_config["latents_dim"] = state_dict['{}final_layer.video_out.weight'.format(key_prefix)].shape[0] // (4 * pdd_steps)  # patch 1x2x2
+        if audio:
+            dit_config["audio_latents_dim"] = state_dict['{}final_layer.audio_out.weight'.format(key_prefix)].shape[0] // pdd_steps
         dit_config["attention_head_dim"] = state_dict['{}blocks.0.attn.q_norm.weight'.format(key_prefix)].shape[0]
         qkv = state_dict['{}blocks.0.attn.qkv_proj.weight'.format(key_prefix)]
         dit_config["num_attention_heads"] = qkv.shape[0] // (3 * dit_config["attention_head_dim"])
@@ -772,6 +789,10 @@ def detect_unet_config(state_dict, key_prefix, metadata=None):
             dit_config["model_type"] = "scail"
         elif '{}patch_embedding_global.weight'.format(key_prefix) in state_dict_keys:
             dit_config["model_type"] = "wandancer"
+        elif '{}lq_proj_in.conv1.weight'.format(key_prefix) in state_dict_keys:
+            dit_config["model_type"] = "relayvsr"
+            # the LQ frames go in pixel-unshuffled by 4 * upscale_factor
+            dit_config["upscale_factor"] = math.isqrt(state_dict['{}lq_proj_in.conv1.weight'.format(key_prefix)].shape[1] // 3) // 4
         else:
             if '{}img_emb.proj.0.bias'.format(key_prefix) in state_dict_keys:
                 dit_config["model_type"] = "i2v"
@@ -824,11 +845,13 @@ def detect_unet_config(state_dict, key_prefix, metadata=None):
     if '{}t_embedder1.mlp.0.weight'.format(key_prefix) in state_dict_keys and '{}x_embedder.proj1.weight'.format(key_prefix) in state_dict_keys:  # HiDream-O1
         return {"image_model": "hidream_o1"}
 
-    vision_key = f"{key_prefix}fm_modules.vision_model_mot_gen.embeddings.patch_embedding.weight"
-    query_key = f"{key_prefix}language_model.model.layers.0.self_attn.q_proj_mot_gen.weight"
+    vision_key = f"{key_prefix}patch_embed.patch_embedding.weight"
+    query_key = f"{key_prefix}layers.0.self_attn.q_proj.weight"
+    pixel_head_key = f"{key_prefix}head.conv1.weight"
     if (
         vision_key in state_dict
         and query_key in state_dict
+        and pixel_head_key in state_dict
         and state_dict[vision_key].shape[0] == 1024
         and state_dict[query_key].shape[0] == 4096
     ):  # SenseNova U1.5
@@ -1005,6 +1028,50 @@ def detect_unet_config(state_dict, key_prefix, metadata=None):
         dit_config["image_model"] = "ideogram4"
         dit_config["in_channels"] = state_dict['{}input_proj.weight'.format(key_prefix)].shape[1]
         dit_config["num_layers"] = count_blocks(state_dict_keys, '{}layers.'.format(key_prefix) + '{}.')
+        return dit_config
+
+    if ('{}perceiver.latent_queries'.format(key_prefix) in state_dict_keys and '{}layers.0.attention.qkv.weight'.format(key_prefix) in state_dict_keys and '{}final_layer.linear.weight'.format(key_prefix) in state_dict_keys
+            and ('{}layers.0.feed_forward.w13.weight'.format(key_prefix) in state_dict_keys or '{}layers.0.feed_forward.w1.weight'.format(key_prefix) in state_dict_keys)):  # Fibo 2.0 (repacked)
+        dit_config = {}
+        dit_config["image_model"] = "fibo2"
+        dit_config["max_gist_tokens"], dit_config["dim"] = state_dict['{}perceiver.latent_queries'.format(key_prefix)].shape
+        dit_config["n_heads"] = dit_config["dim"] // 128
+        dit_config["in_channels"] = state_dict['{}final_layer.linear.weight'.format(key_prefix)].shape[0]
+        dit_config["n_layers"] = count_blocks(state_dict_keys, '{}layers.'.format(key_prefix) + '{}.')
+        dit_config["n_refiner_layers"] = count_blocks(state_dict_keys, '{}noise_refiner.'.format(key_prefix) + '{}.')
+        dit_config["perceiver_layers"] = count_blocks(state_dict_keys, '{}perceiver.layers.'.format(key_prefix) + '{}.')
+        dit_config["injection_layers"] = [i for i in range(dit_config["n_layers"]) if '{}layers.{}.cross_attn_gate'.format(key_prefix, i) in state_dict_keys]
+        w13 = '{}layers.0.feed_forward.w13.weight'.format(key_prefix)
+        if w13 in state_dict_keys:  # w1 and w3 fused, hidden width padded for the fused int8 swiglu
+            dit_config["ffn_dim"] = state_dict[w13].shape[0] // 2
+        else:
+            dit_config["ffn_dim"] = state_dict['{}layers.0.feed_forward.w1.weight'.format(key_prefix)].shape[0]
+            dit_config["fused_ffn"] = False
+        return dit_config
+
+    if '{}shared_block_modulation.weight'.format(key_prefix) in state_dict_keys and '{}layers.0.proj.ffn_up_gate.weight'.format(key_prefix) in state_dict_keys:  # MOSS-Image
+        dit_config = {}
+        dit_config["image_model"] = "moss_image"
+        dit_config["dim"] = state_dict['{}shared_block_modulation.weight'.format(key_prefix)].shape[0] // 6
+        dit_config["ffn_dim"] = state_dict['{}layers.0.proj.ffn_up_gate.weight'.format(key_prefix)].shape[0] // 2
+        dit_config["num_heads"] = dit_config["dim"] // 128
+        dit_config["num_layers"] = count_blocks(state_dict_keys, '{}layers.'.format(key_prefix) + '{}.')
+        dit_config["fused_qkv"] = '{}layers.0.proj.qkv.weight'.format(key_prefix) in state_dict_keys
+        return dit_config
+
+    if '{}transformer_blocks.0.scale_shift_table_context'.format(key_prefix) in state_dict_keys and '{}transformer_blocks.0.ff.net.0.proj.weight'.format(key_prefix) in state_dict_keys and '{}transformer_blocks.0.ff_context.net.0.proj.weight'.format(key_prefix) in state_dict_keys and '{}x_embedder.weight'.format(key_prefix) in state_dict_keys:  # PAN 2
+        dit_config = {}
+        dit_config["image_model"] = "pan2"
+        dit_config["in_channels"] = state_dict['{}x_embedder.weight'.format(key_prefix)].shape[1]
+        dim = state_dict['{}x_embedder.weight'.format(key_prefix)].shape[0]
+        dit_config["dim"] = dim
+        dit_config["num_heads"] = dim // 128
+        dit_config["mlp_ratio"] = state_dict['{}transformer_blocks.0.ff.net.0.proj.weight'.format(key_prefix)].shape[0] / dim
+        dit_config["context_mlp_ratio"] = state_dict['{}transformer_blocks.0.ff_context.net.0.proj.weight'.format(key_prefix)].shape[0] / dim
+        dit_config["num_layers"] = count_blocks(state_dict_keys, '{}transformer_blocks.'.format(key_prefix) + '{}.')
+        table_key = '{}adaln_t_table'.format(key_prefix)
+        if table_key in state_dict_keys:  # adaln over a precomputed basis of the time-embedding curve, no time embedder
+            dit_config["adaln_curve_grid"], dit_config["adaln_curve_dim"] = state_dict[table_key].shape
         return dit_config
 
     if '{}txtfusion.projector.weight'.format(key_prefix) in state_dict_keys:  # Krea 2 (K2)
@@ -1345,13 +1412,6 @@ def model_config_from_unet(state_dict, unet_key_prefix, use_base_if_no_match=Fal
 def unet_prefix_from_state_dict(state_dict):
     # SAM3: detector.* and tracker.* at top level, no common prefix
     if any(k.startswith("detector.") for k in state_dict) and any(k.startswith("tracker.") for k in state_dict):
-        return ""
-
-    # SenseNova checkpoints store the diffusion and language backbones at top level.
-    if (
-        "fm_modules.vision_model_mot_gen.embeddings.patch_embedding.weight" in state_dict
-        and "language_model.model.layers.0.self_attn.q_proj_mot_gen.weight" in state_dict
-    ):
         return ""
 
     candidates = ["model.diffusion_model.", #ldm/sgm models

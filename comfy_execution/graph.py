@@ -219,15 +219,19 @@ class ExecutionList(TopologicalSort):
     ExecutionList implements a topological dissolve of the graph. After a node is staged for execution,
     it can still be returned to the graph after having further dependencies added.
     """
-    def __init__(self, dynprompt, output_cache, output_link_callback=None):
+    def __init__(self, dynprompt, output_cache, output_link_callback=None, force_rerun=None):
         super().__init__(dynprompt)
         self.output_cache = output_cache
         self.output_link_callback = output_link_callback
+        # Optional predicate: node ids that must run again even with a cached result.
+        self.force_rerun = force_rerun
         self.staged_node_id = None
         self.execution_cache = {}
         self.execution_cache_listeners = {}
 
     def is_cached(self, node_id):
+        if self.force_rerun is not None and self.force_rerun(node_id):
+            return False
         return self.output_cache.get_local(node_id) is not None
 
     def cache_link(self, from_node_id, to_node_id, from_socket=None):

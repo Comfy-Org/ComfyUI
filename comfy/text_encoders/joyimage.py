@@ -45,10 +45,9 @@ class JoyImageTokenizer(Qwen3VLTokenizer):
         self.llama_template_images = JOYIMAGE_TEMPLATE_IMAGE
 
     def tokenize_with_weights(self, text, return_word_ids=False, llama_template=None, images=None, **kwargs):
-        kwargs.pop("thinking", None)
         return super().tokenize_with_weights(
             text, return_word_ids=return_word_ids, llama_template=llama_template,
-            images=images or [], thinking=True, **kwargs,
+            images=images or [], **kwargs,
         )
 
 

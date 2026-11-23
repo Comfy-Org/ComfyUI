@@ -6,6 +6,7 @@ allowing graceful protocol evolution while maintaining backward compatibility.
 """
 
 import logging
+import uuid
 from typing import Any, TypedDict
 
 from comfy.cli_args import args
@@ -34,6 +35,16 @@ CLI_FEATURE_FLAG_REGISTRY: dict[str, FeatureFlagInfo] = {
         "type": "bool",
         "default": True,
         "description": "Gate the local Run button behind sign-in when the graph contains partner nodes",
+    },
+    "partner_node_token": {
+        "type": "bool",
+        "default": True,
+        "description": "Queue Local API-node prompts with a renewable partner-node token instead of the workspace token",
+    },
+    "local_web_sso": {
+        "type": "bool",
+        "default": True,
+        "description": "Offer Sign in with browser (Cloud OAuth + PKCE) on Local ComfyUI opened at localhost or 127.0.0.1",
     },
 }
 
@@ -111,12 +122,25 @@ _CORE_FEATURE_FLAGS: dict[str, Any] = {
     "node_replacements": True,
     # main.py replaces this at startup with the selected AssetManager's state.
     "assets": not args.disable_assets,
+    # New on every server start. A client that reconnects and sees a different
+    # value knows the server restarted, so its node definitions may be stale.
+    "server_boot_id": uuid.uuid4().hex,
 }
 
-# CLI-provided flags cannot overwrite core flags. Startup code may: main.py sets "assets".
-_cli_flags = {k: v for k, v in _parse_cli_feature_flags().items() if k not in _CORE_FEATURE_FLAGS}
+# Owned by app.deploy_to_cloud, which sets it via set_server_feature.
+_SERVER_SET_FEATURE_FLAGS = ("deploy_to_cloud",)
 
-SERVER_FEATURE_FLAGS: dict[str, Any] = {**_CORE_FEATURE_FLAGS, **_cli_flags}
+def _server_feature_flags() -> dict[str, Any]:
+    """Registry defaults, then core flags, then CLI flags. CLI flags cannot overwrite core or server-set flags; main.py may still set "assets"."""
+    registry_defaults = {k: info["default"] for k, info in CLI_FEATURE_FLAG_REGISTRY.items()}
+    cli_flags = {
+        k: v for k, v in _parse_cli_feature_flags().items()
+        if k not in _CORE_FEATURE_FLAGS and k not in _SERVER_SET_FEATURE_FLAGS
+    }
+    return {**registry_defaults, **_CORE_FEATURE_FLAGS, **cli_flags}
+
+
+SERVER_FEATURE_FLAGS: dict[str, Any] = _server_feature_flags()
 
 
 def get_connection_feature(
@@ -170,3 +194,8 @@ def get_server_features() -> dict[str, Any]:
         Dictionary of server feature flags
     """
     return SERVER_FEATURE_FLAGS.copy()
+
+
+def set_server_feature(name: str, value: Any) -> None:
+    """Set a server feature flag reported to clients and returned by get_server_features."""
+    SERVER_FEATURE_FLAGS[name] = value

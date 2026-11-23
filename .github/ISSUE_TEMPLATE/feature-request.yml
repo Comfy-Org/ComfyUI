@@ -11,7 +11,7 @@ body:
                 **2:** You have looked to make sure there is not already a feature that does what you need, and there is not already a Feature Request listed for the same idea.
                 **3:** This is something that makes sense to add to ComfyUI Core, and wouldn't make more sense as a custom node.
 
-                If unsure, ask on the [ComfyUI Matrix Space](https://app.element.io/#/room/%23comfyui_space%3Amatrix.org) or the [Comfy Org Discord](https://discord.gg/comfyorg) first.
+                If unsure, ask on the [Comfy Org Discord](https://discord.gg/comfyorg) first.
     - type: textarea
       attributes:
             label: Feature Idea

@@ -41,12 +41,13 @@ def run_quick_startup(tmp_path: Path, *flags: str) -> subprocess.CompletedProces
     )
 
 
-def test_starts_without_asset_dependencies_when_assets_disabled(tmp_path: Path) -> None:
+@pytest.mark.parametrize("flags", [(), ("--disable-assets",), ("--enable-assets", "--disable-assets")])
+def test_starts_without_asset_dependencies_when_assets_off(tmp_path: Path, flags: tuple[str, ...]) -> None:
     stale_temp_file = tmp_path / "temp" / "stale.png"
     stale_temp_file.parent.mkdir()
     stale_temp_file.write_bytes(b"")
 
-    result = run_quick_startup(tmp_path, "--disable-assets")
+    result = run_quick_startup(tmp_path, *flags)
 
     assert result.returncode == 0, result.stdout + result.stderr
     assert "Traceback" not in result.stderr
@@ -54,9 +55,8 @@ def test_starts_without_asset_dependencies_when_assets_disabled(tmp_path: Path) 
     assert not stale_temp_file.exists()
 
 
-@pytest.mark.parametrize("flags", [(), ("--enable-assets",)])
-def test_missing_dependencies_stop_startup_and_name_the_fix(tmp_path: Path, flags: tuple[str, ...]) -> None:
-    result = run_quick_startup(tmp_path, *flags)
+def test_missing_dependencies_stop_startup_and_name_the_fix(tmp_path: Path) -> None:
+    result = run_quick_startup(tmp_path, "--enable-assets")
     output = result.stdout + result.stderr
 
     assert result.returncode == 1, output
