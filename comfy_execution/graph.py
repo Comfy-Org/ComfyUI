@@ -209,7 +209,6 @@ class TopologicalSort:
         for blocked_node_id in self.blocking[unique_id]:
             self.blockCount[blocked_node_id] -= 1
         del self.blocking[unique_id]
-        self.externalBlockResults.pop(unique_id, None)
 
     def is_empty(self):
         return len(self.pendingNodes) == 0

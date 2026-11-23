@@ -8,7 +8,7 @@ import comfy_extras.nodes_loop as nodes_loop
 from comfy_api.latest import io
 from comfy_execution.graph_utils import GraphBuilder
 from comfy_execution.validation import validate_loops
-from execution import PromptExecutor
+from execution import CacheType, PromptExecutor
 
 
 class Constant:
@@ -843,3 +843,34 @@ def test_nested_loop_does_not_flatten_list_backed_scalars():
         [[0]],
         [[1]],
     ]
+
+
+def incrementing_loop(tag, initial, cache_iterations):
+    return {
+        tag: {
+            "class_type": "StartLoop",
+            "inputs": {"mode": "simple", "mode.num_iterations": 2, "initial_iteration_value": initial, "cache_iterations": cache_iterations},
+        },
+        f"{tag}_increment": {"class_type": "TestIncrement", "inputs": {"value": [tag, 4]}},
+        f"{tag}_close": {
+            "class_type": "EndLoop",
+            "inputs": {"output_value": [f"{tag}_increment", 0], "next_iteration_value": [f"{tag}_increment", 0], "accumulate": False},
+        },
+    }
+
+
+@pytest.mark.parametrize("cache_iterations", [False, True])
+def test_chained_loops_run_without_a_cache(cache_iterations):
+    Capture.values = []
+    prompt = {
+        "start": {"class_type": "TestConstant", "inputs": {"value": 0}},
+        **incrementing_loop("first", ["start", 0], cache_iterations),
+        **incrementing_loop("second", ["first_close", 0], cache_iterations),
+        "capture": {"class_type": "TestCapture", "inputs": {"value": ["second_close", 0]}},
+    }
+    executor = PromptExecutor(Server(), cache_type=CacheType.NONE, cache_args={"ram": 0, "ram_inactive": 0})
+
+    executor.execute(prompt, "chained-loops-without-a-cache", execute_outputs=["capture"])
+
+    assert executor.success
+    assert Capture.values == [4]
