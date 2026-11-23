@@ -112,6 +112,12 @@ def test_ne_custom_override():
         ("STRING,INT", "STRING", True, False),
         ("BOOLEAN", "STRING,INT", False, False),
         ("STRING,BOOLEAN", "STRING,INT", False, True),
+        ("COMBO", ["a", "b"], False, True),
+        (["a"], ["b", "a"], False, True),
+        (["a"], "COMBO", False, True),
+        (["a"], "COMBO,STRING", True, True),
+        ("COMBO", "STRING", False, False),
+        (["a"], "STRING", False, False),
     ],
 )
 def test_parametrized_cases(received, input_type, strict, expected):

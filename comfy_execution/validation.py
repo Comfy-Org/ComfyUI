@@ -213,6 +213,13 @@ def validate_node_input(
     if not received_type != input_type:
         return True
 
+    # V1 combos (and some custom node outputs) use the options list as the type;
+    # any combo can link to any combo, linked values are checked against options separately.
+    if isinstance(received_type, list):
+        received_type = IO.Combo.io_type
+    if isinstance(input_type, list):
+        input_type = IO.Combo.io_type
+
     # If one of the types is '*', we can return True immediately; this is the 'Any' type.
     if received_type == IO.AnyType.io_type or input_type == IO.AnyType.io_type:
         return True
@@ -220,11 +227,6 @@ def validate_node_input(
     # If the received type or input_type is a MatchType, we can return True immediately;
     # validation for this is handled by the frontend
     if received_type == IO.MatchType.io_type or input_type == IO.MatchType.io_type:
-        return True
-
-    # This accounts for some custom nodes that output lists of options as the type;
-    # if we ever want to break them on purpose, this can be removed
-    if isinstance(received_type, list) and input_type == IO.Combo.io_type:
         return True
 
     # Not equal, and not strings

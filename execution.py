@@ -875,6 +875,39 @@ class PromptExecutor:
             self._notify_prompt_lifecycle("end", prompt_id)
 
 
+def combo_value_error(input_name, val, input_type, extra_info, target=""):
+    if input_type == io.Combo.io_type:
+        combo_options = extra_info.get("options", [])
+    else:
+        combo_options = input_type
+    is_multiselect = extra_info.get("multiselect", False)
+    if is_multiselect and isinstance(val, list):
+        invalid_vals = [v for v in val if v not in combo_options]
+    else:
+        invalid_vals = [val] if val not in combo_options else []
+    if not invalid_vals:
+        return None
+
+    input_config = (input_type, extra_info)
+    # Don't send back gigantic lists like if they're lots of
+    # scanned model filepaths
+    if len(combo_options) > 20:
+        list_info = f"(list of length {len(combo_options)})"
+        input_config = None
+    else:
+        list_info = str(combo_options)
+
+    return {
+        "type": "value_not_in_list",
+        "message": "Value not in list",
+        "details": f"{input_name}: {', '.join(repr(v) for v in invalid_vals)} not in {list_info}{target}",
+        "extra_info": {
+            "input_name": input_name,
+            "input_config": input_config,
+            "received_value": val,
+        }
+    }
+
 async def validate_inputs(prompt_id, prompt, item, validated, visiting=None):
     if visiting is None:
         visiting = []
@@ -1020,6 +1053,15 @@ async def validate_inputs(prompt_id, prompt, item, validated, visiting=None):
                 }]
                 validated[o_id] = (False, reasons, o_id)
                 continue
+
+            # A PrimitiveCombo holds a constant chosen from its targets' options; check it against this
+            # input's options and report it on the PrimitiveCombo, where the user can change it.
+            if o_class_type == "PrimitiveCombo" and x not in validate_function_inputs and not validate_has_kwargs and (isinstance(input_type, list) or input_type == io.Combo.io_type):
+                error = combo_value_error("value", prompt[o_id]['inputs']['value'], input_type, extra_info, f" of {class_type} {unique_id} input '{x}'")
+                if error is not None:
+                    validated[o_id] = (False, validated[o_id][1] + [error], o_id)
+                    valid = False
+                    continue
         else:
             try:
                 # Unwraps values wrapped in __value__ key or typed wrapper.
@@ -1087,37 +1129,8 @@ async def validate_inputs(prompt_id, prompt, item, validated, visiting=None):
                     continue
 
                 if isinstance(input_type, list) or input_type == io.Combo.io_type:
-                    if input_type == io.Combo.io_type:
-                        combo_options = extra_info.get("options", [])
-                    else:
-                        combo_options = input_type
-                    is_multiselect = extra_info.get("multiselect", False)
-                    if is_multiselect and isinstance(val, list):
-                        invalid_vals = [v for v in val if v not in combo_options]
-                    else:
-                        invalid_vals = [val] if val not in combo_options else []
-                    if invalid_vals:
-                        input_config = info
-                        list_info = ""
-
-                        # Don't send back gigantic lists like if they're lots of
-                        # scanned model filepaths
-                        if len(combo_options) > 20:
-                            list_info = f"(list of length {len(combo_options)})"
-                            input_config = None
-                        else:
-                            list_info = str(combo_options)
-
-                        error = {
-                            "type": "value_not_in_list",
-                            "message": "Value not in list",
-                            "details": f"{x}: {', '.join(repr(v) for v in invalid_vals)} not in {list_info}",
-                            "extra_info": {
-                                "input_name": x,
-                                "input_config": input_config,
-                                "received_value": val,
-                            }
-                        }
+                    error = combo_value_error(x, val, input_type, extra_info)
+                    if error is not None:
                         errors.append(error)
                         continue
 
