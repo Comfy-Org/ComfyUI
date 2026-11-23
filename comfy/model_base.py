@@ -22,6 +22,7 @@ import torch
 import logging
 import comfy.ldm.lightricks.av_model
 import comfy.ldm.minimax.model
+import comfy.ldm.minimax.sampling
 import comfy.ldm.minimax_music.dit
 import comfy.ldm.yue2.model
 import comfy.nested_tensor
@@ -86,8 +87,10 @@ from comfy.ldm.sensenova.sampling import SenseNovaModelSampling, time_snr_shift
 import comfy.ldm.depth_anything_3.model
 import comfy.ldm.moss_image.model
 import comfy.ldm.fibo2.model
+import comfy.ldm.pan2.model
 
 import comfy.model_management
+import comfy.utils
 import comfy.patcher_extension
 import comfy.conds
 import comfy.ops
@@ -1068,6 +1071,22 @@ class Flux(BaseModel):
             ref_latents_method = kwargs.get("reference_latents_method", None)
             if ref_latents_method is not None:
                 out['ref_latents_method'] = comfy.conds.CONDConstant(ref_latents_method)
+
+        # Multi-view (UltraTex): batch items as tiles of one image, and background token dropping.
+        view_grid = kwargs.get("view_grid", None)
+        if view_grid is not None:
+            out['view_grid'] = comfy.conds.CONDConstant(view_grid)
+        token_masks = kwargs.get("token_masks", None)
+        if token_masks is not None:
+            # the kept token indices depend on the conditioning alone: compute them once, not every step
+            device = kwargs["device"]
+            masks = {"target": token_masks["target"].to(device), "refs": [None if m is None else m.to(device) for m in token_masks["refs"]]}
+            background = self.process_latent_in(kwargs["background_latent"]).to(device=device, dtype=self.get_dtype_inference())
+            out['token_keep'] = comfy.conds.CONDConstant(self.diffusion_model.preprocess_token_masks(
+                masks, view_grid, kwargs["noise"].shape, [lat.shape for lat in ref_latents], background))
+        reference_views = kwargs.get("reference_views", None)
+        if reference_views is not None:
+            out['reference_views'] = comfy.conds.CONDConstant(reference_views)
         return out
 
     def extra_conds_shapes(self, **kwargs):
@@ -2207,8 +2226,8 @@ class Hunyuan3Dv2_1(BaseModel):
         return out
 
 class MiniMaxH3(BaseModel):
-    def __init__(self, model_config, model_type=ModelType.FLOW_AV, device=None):
-        super().__init__(model_config, model_type, device=device, unet_model=comfy.ldm.minimax.model.MiniMaxH3Model)
+    def __init__(self, model_config, model_type=ModelType.FLOW_AV, device=None, unet_model=comfy.ldm.minimax.model.MiniMaxH3Model):
+        super().__init__(model_config, model_type, device=device, unet_model=unet_model)
 
     def audio_scale(self):
         """Scale the sampler carries the audio stream at, 1.0 when not sampling the packed latent."""
@@ -2244,7 +2263,7 @@ class MiniMaxH3(BaseModel):
             out['c_crossattn'] = comfy.conds.CONDRegular(cross_attn)
 
         latent_shapes = kwargs.get("latent_shapes", None)
-        if latent_shapes is not None:
+        if latent_shapes is not None and len(latent_shapes) > 1:  # the image model samples one stream
             out['latent_shapes'] = comfy.conds.CONDConstant(latent_shapes)
 
         # Everything H3-specific rides in one dict so _apply_model's dtype cast
@@ -2409,6 +2428,21 @@ class MiniMaxH3(BaseModel):
         x_blend_weight = torch.where(denoise_mask < 1.0, x_blend_weight.clamp(0.0, 1.0), torch.zeros_like(x_blend_weight))
         return injected + x_blend_weight.to(injected.dtype) * (x - injected)
 
+class MiniMaxH3Image(MiniMaxH3):
+    def __init__(self, model_config, model_type=ModelType.FLOW, device=None):
+        super().__init__(model_config, model_type, device=device, unet_model=comfy.ldm.minimax.model.MiniMaxH3ImageModel)
+        self.model_sampling = comfy.ldm.minimax.sampling.MiniMaxH3ImageModelSampling(model_config)
+
+    def extra_conds(self, **kwargs):
+        out = super().extra_conds(**kwargs)
+        if 'c_crossattn' in out:
+            # the image is one latent stream without audio
+            payload = out['minimax_payload'].cond
+            shape = kwargs["noise"].shape
+            payload["layout"] = comfy.ldm.minimax.model.PackedLayout(
+                out['c_crossattn'].cond.shape[1], shape[2], (shape[3] + 1) // 2 * 2, (shape[4] + 1) // 2 * 2, 0, refs=payload.get("refs"))
+        return out
+
 class TripoSplat(BaseModel):
     def __init__(self, model_config, model_type=ModelType.FLOW, device=None):
         super().__init__(model_config, model_type, device=device, unet_model=comfy.ldm.triposplat.model.LatentSeqMMFlowModel)
@@ -2491,12 +2525,12 @@ class SenseNovaSharedList(comfy.conds.CONDList):
         return self._copy_with(self.cond)
 
 class SenseNovaU15(BaseModel):
-    PATCH_SIZE = 32
-
     def __init__(self, model_config, model_type=ModelType.FLOW, device=None):
         super().__init__(model_config, model_type, device=device, unet_model=comfy.ldm.sensenova.model.SenseNovaU15)
         self.model_sampling = SenseNovaModelSampling(model_config)
-        self.memory_usage_factor_conds = ("reference_images",)
+
+    def get_dynamic_vram__units(self):
+        return list(self.diffusion_model.layers), []
 
     def process_timestep(self, timestep, **kwargs):
         base_timestep = timestep / self.model_sampling.multiplier
@@ -2504,109 +2538,25 @@ class SenseNovaU15(BaseModel):
 
     def extra_conds(self, **kwargs):
         out = super().extra_conds(**kwargs)
-        text_input_ids = kwargs.get("text_input_ids")
-        if text_input_ids is not None:
+        references = comfy.ldm.sensenova.conditioning.split_reference_batches(kwargs.get("reference_latents") or [])
+        if len(references) != kwargs.get("sensenova_reference_count", 0):
+            raise ValueError("Encode reference images with SenseNova Conditioning before sampling.")
+        if "prefix_keys" in kwargs:
             device = kwargs["device"]
-            reference_images = kwargs.get("reference_latents")
-            if reference_images is not None:
-                reference_images = comfy.ldm.sensenova.conditioning.preprocess_references(reference_images)
-            image_only = kwargs.get("prompt_type") == "negative"
-            indexes = None
-            prefix_mask = None
-            if reference_images:
-                reference_grids = [
-                    (
-                        max(1, math.ceil(image.shape[-2] / self.PATCH_SIZE)),
-                        max(1, math.ceil(image.shape[-1] / self.PATCH_SIZE)),
-                    )
-                    for image in reference_images
-                ]
-                text_input_ids = comfy.ldm.sensenova.conditioning.condition_input_ids(
-                    text_input_ids,
-                    reference_grids,
-                    image_only=image_only,
-                )
-                indexes = comfy.ldm.sensenova.conditioning.thw_indexes(text_input_ids, reference_grids)
-                prefix_mask = comfy.ldm.sensenova.conditioning.block_causal_mask(
-                    indexes, dtype=self.get_dtype_inference()
-                )
-
-            if kwargs.get("hooks") is None:
-                dtype = self.get_dtype_inference()
-                prefix_keys, prefix_values, prefix_time = (
-                    self.diffusion_model.preprocess_prefix(
-                        text_input_ids.to(device=device),
-                        [
-                            image.to(device=device, dtype=dtype)
-                            for image in reference_images
-                        ]
-                        if reference_images
-                        else None,
-                        indexes.to(device=device) if indexes is not None else None,
-                        prefix_mask.to(device=device)
-                        if prefix_mask is not None
-                        else None,
-                    )
-                )
-                out["prefix_keys"] = SenseNovaSharedList(prefix_keys)
-                out["prefix_values"] = SenseNovaSharedList(prefix_values)
-                out["prefix_time"] = SenseNovaSharedRegular(prefix_time)
-            else:
-                if reference_images:
-                    out["prefix_indexes"] = SenseNovaSharedRegular(indexes)
-                    out["prefix_mask"] = SenseNovaSharedRegular(prefix_mask)
-                    out["reference_images"] = SenseNovaSharedList(reference_images)
-                out["text_input_ids"] = SenseNovaSharedRegular(text_input_ids)
+            dtype = self.get_dtype_inference()
+            for key in ("prefix_keys", "prefix_values"):
+                out[key] = SenseNovaSharedList([value.to(device=device, dtype=dtype) for value in kwargs[key]])
+            out["prefix_time"] = SenseNovaSharedRegular(kwargs["prefix_time"].to(device=device))
         return out
 
     def extra_conds_shapes(self, **kwargs):
-        images = kwargs.get("reference_latents")
-        images = comfy.ldm.sensenova.conditioning.split_reference_batches(images) if images is not None else []
-        reference_grids = [
-            (
-                max(1, math.ceil(image.shape[-3] / self.PATCH_SIZE)),
-                max(1, math.ceil(image.shape[-2] / self.PATCH_SIZE)),
-            )
-            for image in images
-        ]
-        reference_pixels = sum(
-            height * width * self.PATCH_SIZE**2
-            for height, width in reference_grids
-        )
-        out = {}
-        if reference_pixels:
-            out["reference_images"] = [1, 3, reference_pixels]
-        text_input_ids = kwargs.get("text_input_ids")
-        if text_input_ids is not None:
-            if reference_grids:
-                length = comfy.ldm.sensenova.conditioning.conditioned_input_length(
-                    text_input_ids.shape[1],
-                    reference_grids,
-                    image_only=kwargs.get("prompt_type") == "negative",
-                )
-            else:
-                length = text_input_ids.shape[1]
-            out["prefix_mask"] = [1, 1, length, length]
-            if kwargs.get("hooks") is None:
-                prefix_shape = [
-                    1,
-                    comfy.ldm.sensenova.model.NUM_KV_HEADS,
-                    comfy.ldm.sensenova.model.NUM_LAYERS
-                    * length
-                    * comfy.ldm.sensenova.model.HEAD_DIM,
-                ]
-                out["prefix_keys"] = prefix_shape
-                out["prefix_values"] = prefix_shape
-        return out
+        return {key: [sum(value.numel() for value in kwargs[key])] for key in ("prefix_keys", "prefix_values") if key in kwargs}
 
     def memory_required(self, input_shape, cond_shapes={}):
         memory = super().memory_required(input_shape, cond_shapes)
         dtype_size = comfy.model_management.dtype_size(self.get_dtype_inference())
-        return memory + sum(
-            math.prod(shape) * dtype_size
-            for key in ("prefix_mask", "prefix_keys", "prefix_values")
-            for shape in cond_shapes.get(key, ())
-        )
+        return memory + sum(math.prod(shape) * dtype_size for key in ("prefix_keys", "prefix_values") for shape in cond_shapes.get(key, ()))
+
 
 class Chroma(Flux):
     def __init__(self, model_config, model_type=ModelType.FLUX, device=None, unet_model=comfy.ldm.chroma.model.Chroma):
@@ -2960,6 +2910,27 @@ class MOSSImage(BaseModel):
             return noise.new_zeros((noise.shape[0], channels) + noise.shape[2:])
         image = utils.common_upscale(image.to(kwargs["device"]), noise.shape[-1], noise.shape[-2], "bilinear", "center")
         return utils.resize_to_batch_size(self.process_latent_in(image), noise.shape[0])
+
+class PAN2(BaseModel):
+    def __init__(self, model_config, model_type=ModelType.FLOW, device=None):
+        super().__init__(model_config, model_type, device=device, unet_model=comfy.ldm.pan2.model.PAN2)
+
+    def extra_conds(self, **kwargs):
+        out = super().extra_conds(**kwargs)
+        cross_attn = kwargs.get("cross_attn", None)
+        # no repeat padding, the joint attention would weight repeated caption tokens: cond and uncond of different lengths run separately
+        if cross_attn is not None:
+            out['c_crossattn'] = comfy.conds.CONDRegular(cross_attn)
+        return out
+
+    def concat_cond(self, **kwargs):
+        # [clean latent of the known frames, their mask], zeros for text to video
+        noise = kwargs["noise"]
+        denoise_mask = kwargs.get("denoise_mask", None)
+        if denoise_mask is None:
+            return noise.new_zeros((noise.shape[0], noise.shape[1] + 1) + noise.shape[2:])
+        known = 1.0 - denoise_mask[:, :1]
+        return torch.cat((kwargs["latent_image"] * known, known), dim=1)
 
 class Fibo2(BaseModel):
     def __init__(self, model_config, model_type=ModelType.FLUX, device=None):

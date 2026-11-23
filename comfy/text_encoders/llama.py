@@ -445,6 +445,7 @@ class Ovis25_2BConfig:
     rope_scale = None
     final_norm: bool = True
     lm_head: bool = False
+    stop_tokens = [151643, 151645]
 
 @dataclass
 class Qwen25_7BVLI_Config:
@@ -1275,7 +1276,7 @@ class BaseGenerate:
                     extra["visual_pos_masks"] = visual_pos_masks
                 x, _, past_key_values = self.model.forward(None, embeds=embeds, attention_mask=None, past_key_values=past_key_values, input_ids=current_input_ids, position_ids=position_ids, **extra, embeds_info=(embeds_info if step == 0 else None))
                 logits = self.logits(x)[:, -1]
-                if penalty_mask is None and do_sample and penalize:
+                if penalty_mask is None and penalize:
                     # allocated on the (unbracketed) first step; later steps only index_fill_ it
                     penalty_mask = torch.zeros((logits.shape[-1],), dtype=torch.bool, device=device)
                     if len(initial_tokens) > 0:
@@ -1309,15 +1310,8 @@ class BaseGenerate:
 
         return generated_token_ids
 
-    def processed_probs(self, logits, temperature, top_k, top_p, min_p, repetition_penalty, token_history, presence_penalty=0.0, penalty_mask=None):
-        # returns (probs, indices); penalty_mask [vocab] bool stands in for token_history
-        if penalty_active(repetition_penalty, presence_penalty):
-            if penalty_mask is not None:
-                logits = torch.where(penalty_mask.unsqueeze(0), apply_penalty(logits, repetition_penalty, presence_penalty), logits)
-            elif len(token_history) > 0:
-                token_ids = torch.tensor(list(set(token_history)), device=logits.device)
-                logits[:, token_ids] = apply_penalty(logits[:, token_ids], repetition_penalty, presence_penalty)
-
+    def processed_probs(self, logits, temperature, top_k, top_p, min_p):
+        # returns (probs, indices)
         if temperature != 1.0:
             logits = logits / temperature
 
@@ -1346,11 +1340,18 @@ class BaseGenerate:
         return torch.nn.functional.softmax(logits, dim=-1), top_indices
 
     def sample_token(self, logits, temperature, top_k, top_p, min_p, repetition_penalty, token_history, generator, do_sample=True, presence_penalty=0.0, penalty_mask=None):
+        # penalty_mask [vocab] bool stands in for token_history
+        if penalty_active(repetition_penalty, presence_penalty):
+            if penalty_mask is not None:
+                logits = torch.where(penalty_mask.unsqueeze(0), apply_penalty(logits, repetition_penalty, presence_penalty), logits)
+            elif len(token_history) > 0:
+                token_ids = torch.tensor(list(set(token_history)), device=logits.device)
+                logits[:, token_ids] = apply_penalty(logits[:, token_ids], repetition_penalty, presence_penalty)
 
         if not do_sample or temperature == 0.0:
             return torch.argmax(logits, dim=-1, keepdim=True)
 
-        probs, top_indices = self.processed_probs(logits, temperature, top_k, top_p, min_p, repetition_penalty, token_history, presence_penalty=presence_penalty, penalty_mask=penalty_mask)
+        probs, top_indices = self.processed_probs(logits, temperature, top_k, top_p, min_p)
         next_token = torch.multinomial(probs, num_samples=1, generator=generator)
         if top_indices is not None:
             return top_indices.gather(1, next_token)
@@ -1465,7 +1466,7 @@ class Qwen3_8B(BaseLlama, BaseQwen3, BaseGenerate, torch.nn.Module):
         self.model = Llama2_(config, device=device, dtype=dtype, ops=operations)
         self.dtype = dtype
 
-class Ovis25_2B(BaseLlama, torch.nn.Module):
+class Ovis25_2B(BaseLlama, BaseGenerate, torch.nn.Module):
     def __init__(self, config_dict, dtype, device, operations):
         super().__init__()
         config = Ovis25_2BConfig(**config_dict)

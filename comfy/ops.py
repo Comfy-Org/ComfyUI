@@ -184,6 +184,10 @@ def cast_modules_with_vbar(comfy_modules, dtype, device, bias_dtype, non_blockin
     dropped_groups = []
     for s in comfy_modules:
         group = s._combined_linear
+        if group is not None and group._v_weight is not None and len(comfy_modules) == 1:
+            group._v_weight = None
+            for m in group.linears:
+                m._v_signature = None
         if group is None or group._v_weight is None:
             signature = comfy_aimdo.model_vbar.vbar_fault(s._v)
             resident = comfy_aimdo.model_vbar.vbar_signature_compare(signature, s._v_signature)
@@ -384,10 +388,7 @@ def cast_bias_weight(s, input=None, dtype=None, device=None, bias_dtype=None, of
     # will add async-offload support to your cast and improve performance.
     if input is not None:
         if dtype is None:
-            if isinstance(input, QuantizedTensor):
-                dtype = input.params.orig_dtype
-            else:
-                dtype = input.dtype
+            dtype = input.dtype
         if bias_dtype is None:
             bias_dtype = dtype
         if device is None:
@@ -1151,7 +1152,7 @@ class CombinedLinear:
     def linear_input_act(self, x, input_act, act_weight=None, act_eps=0.0,
                          residual=None, residual_scale=None):
         run_every_op()
-        if self._v_weight is None:
+        if self._v_weight is None or (self._v is not None and not hasattr(self.linears[0], "_prefetch")):
             return NotImplemented
         if self._full_precision_mm:
             x = _eager_input_act(x, input_act, act_weight, act_eps)
@@ -1215,7 +1216,7 @@ def linear_input_act_(x, weight, bias, input_act=None, act_weight=None, act_eps=
 
 # Grouped-scale integer weights that run through the shared INT8 GEMM (comfy_kitchen
 # AsymW4A8Int8Layout): format -> code width, which also fixes the packed weight width K*bits/8.
-_GROUPED_INT8_FORMATS = {"asym_w4a8_int8": 4, "w6a8_int8": 6}
+_GROUPED_INT8_FORMATS = {"w3a8_int8": 3, "asym_w4a8_int8": 4, "w5a8_int8": 5, "w6a8_int8": 6}
 
 
 class QuantLinearFunc(torch.autograd.Function):

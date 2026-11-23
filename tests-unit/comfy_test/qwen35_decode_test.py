@@ -525,6 +525,7 @@ def test_adaptive_switch_preserves_sequential_output(monkeypatch, sampled):
     expected = model.generate(embeds.clone(), mtp=False, **settings)
     assert model.generate(embeds.clone(), mtp=True, **settings) == expected
     assert len(set(switches)) == 4, switches
+    assert model.generate(embeds.clone(), mtp=False, **{**settings, "repetition_penalty": 1.0, "presence_penalty": 0.0}) != expected
 
 
 class _FakePacked:

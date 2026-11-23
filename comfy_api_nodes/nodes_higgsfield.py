@@ -3,18 +3,14 @@ from typing_extensions import override
 from comfy_api.latest import IO, ComfyExtension
 from comfy_api_nodes.apis.higgsfield import HiggsfieldRequestStatus, MotionTransferRequest
 from comfy_api_nodes.util import (
-    ApiEndpoint,
     download_url_to_video_output,
     get_number_of_images,
-    poll_op,
-    sync_op,
+    router_op,
     upload_images_to_comfyapi,
     upload_video_to_comfyapi,
     validate_string,
     validate_video_duration,
 )
-
-MOTION_TRANSFER_ENDPOINT = "/proxy/higgsfield/higgsfield/genjutsu/motion-transfer/v1.0"
 
 
 class HiggsfieldMotionTransferNode(IO.ComfyNode):
@@ -99,9 +95,9 @@ class HiggsfieldMotionTransferNode(IO.ComfyNode):
         if sum(get_number_of_images(i) for i in images) > 8:
             raise ValueError("At most 8 reference images are supported.")
         validate_string(model["prompt"], strip_whitespace=False, max_length=10000)
-        submit = await sync_op(
+        result = await router_op(
             cls,
-            ApiEndpoint(path=MOTION_TRANSFER_ENDPOINT, method="POST"),
+            "higgsfield/higgsfield-genjutsu-motion-transfer-v1.0",
             response_model=HiggsfieldRequestStatus,
             data=MotionTransferRequest(
                 prompt=model["prompt"],
@@ -110,19 +106,6 @@ class HiggsfieldMotionTransferNode(IO.ComfyNode):
                 resolution=model["resolution"],
             ),
         )
-        result = await poll_op(
-            cls,
-            ApiEndpoint(path=f"/proxy/higgsfield/requests/{submit.request_id}/status"),
-            response_model=HiggsfieldRequestStatus,
-            status_extractor=lambda r: r.status,
-            completed_statuses=["completed", "failed", "nsfw", "canceled"],
-            queued_statuses=["queued"],
-            poll_interval=10,
-        )
-        if result.status == "nsfw":
-            raise ValueError("Higgsfield's content moderation rejected the input or the result.")
-        if result.status != "completed":
-            raise ValueError(f"Higgsfield could not generate the video: {result.error or result.status}")
         return IO.NodeOutput(await download_url_to_video_output(result.video.url))
 
 

@@ -11,6 +11,7 @@ from comfy_extras.nodes_lt import (
     conditioning_get_any_value,
     get_keyframe_idxs,
     get_noise_mask,
+    video_vae_downscale_factors,
 )
 from typing_extensions import override
 
@@ -465,7 +466,7 @@ class LTXVAddGeneratedKeyframes(io.ComfyNode):
                     "not be contiguous with the existing block. Add all the keyframes before any guides."
                 )
 
-        scale_factors = vae.downscale_index_formula
+        scale_factors = video_vae_downscale_factors(vae)
         time_scale_factor = scale_factors[0]
         keyframe_idxs, num_guide_frames = get_keyframe_idxs(positive, samples.shape)
         num_target_frames = samples.shape[2] - num_guide_frames
@@ -899,6 +900,8 @@ class LTXVGeneratedKeyframesToGuides(io.ComfyNode):
                 batch * num_keyframes, channels, 1, height, width
             )
 
+        # Check the VAE before the resize path decodes with it, so an image VAE gets the clear error.
+        time_scale_factor = video_vae_downscale_factors(vae)[0]
         resize_needed = kf_samples.shape[3:] != samples.shape[3:]
         guides = cls.decode_single_frames(vae, kf_samples) if resize_needed else kf_samples
         if guides.shape[0] != len(indices):
@@ -907,7 +910,6 @@ class LTXVGeneratedKeyframesToGuides(io.ComfyNode):
             )
 
         _, num_guide_frames = get_keyframe_idxs(positive, samples.shape)
-        time_scale_factor = vae.downscale_index_formula[0]
         num_pixel_frames = (samples.shape[2] - num_guide_frames - 1) * time_scale_factor + 1
         if override_frame_indices and str(override_frame_indices).strip():
             indices = _parse_frame_index_list(
@@ -966,7 +968,7 @@ class LTXVGeneratedKeyframesToGuides(io.ComfyNode):
             noise_mask,
             guiding_latent,
             strength,
-            vae.downscale_index_formula,
+            video_vae_downscale_factors(vae),
         )
         positive, negative = _append_guide_attention_entry(
             positive,

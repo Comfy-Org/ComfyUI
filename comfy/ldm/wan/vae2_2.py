@@ -8,6 +8,7 @@ import torch.nn.functional as F
 from einops import rearrange
 from .vae import AttentionBlock, CausalConv3d, RMS_norm
 
+import comfy.model_management
 import comfy.ops
 ops = comfy.ops.disable_weight_init
 
@@ -133,6 +134,9 @@ def strip_apply(fn, x, scale=1, halo=1, out=None):
         b = min(size, a + step)
         lo = max(0, a - halo)
         y = fn(x.narrow(-2, lo, min(size, b + halo) - lo)).narrow(-2, (a - lo) * scale, (b - a) * scale)
+        if comfy.model_management.is_device_mps(x.device):
+            # PyTorch 2.12.1 can fail the Metal command buffer without a wait between strips.
+            comfy.model_management.synchronize()
         if out is None:
             out = y.new_empty(*y.shape[:-2], size * scale, y.shape[-1])
         dst = out.narrow(-2, a * scale, (b - a) * scale)
