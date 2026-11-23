@@ -81,6 +81,7 @@ _TYPES = {
     "F8_E5M2": torch.float8_e5m2,
     "F8_E8M0": torch.float8_e8m0fnu,
     "C64": torch.complex64,
+    "C128": torch.complex128,
 
     "U64": torch.uint64,
     "U32": torch.uint32,
