@@ -648,6 +648,19 @@ async def router_op(
     return _validate_or_raise(response_model, await router_op_raw(cls, model, data=data))
 
 
+async def router_sync_op(
+    cls: type[IO.ComfyNode],
+    model: str,
+    *,
+    response_model: type[M],
+    data: dict[str, Any] | BaseModel,
+) -> M:
+    return _validate_or_raise(
+        response_model,
+        await sync_op_raw(cls, ApiEndpoint(path=f"/v2/models/{model}", method="POST"), data=data),
+    )
+
+
 def _display_text(
     node_cls: type[IO.ComfyNode],
     text: str | None,

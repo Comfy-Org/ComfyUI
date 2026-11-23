@@ -2779,10 +2779,17 @@ class KlingTryOnNode(IO.ComfyNode):
 
 
 KLING4_VIDEO_SECONDS_LIMIT = {"kling-4.0": 30, "kling-4.0-flash": 20.4}
+KLING4_RESOLUTIONS = ["720p", "1080p", "4k", "1080p HDR", "4k HDR"]
 
 
 def _kling4_resolution(options: list[str]) -> IO.Combo.Input:
     return IO.Combo.Input("resolution", options=options)
+
+
+def _kling4_resolution_settings(resolution: str) -> dict[str, str]:
+    if resolution.endswith(" HDR"):
+        return {"resolution": resolution.removesuffix(" HDR"), "dynamic_range": "hdr"}
+    return {"resolution": resolution}
 
 
 def _kling4_duration(max_duration: int) -> IO.Int.Input:
@@ -2835,9 +2842,13 @@ def _kling4_price_badge() -> IO.PriceBadge:
         depends_on=IO.PriceBadgeDepends(widgets=["model", "model.resolution", "model.duration"]),
         expr="""
         (
-          $rate := $contains(widgets.model, "flash")
-            ? 0.13442
-            : ($lookup(widgets, "model.resolution") = "1080p" ? 0.33605 : 0.22451);
+          $res := $lookup(widgets, "model.resolution");
+          $rate := $contains(widgets.model, "flash") ? 0.13442
+            : $res = "4k hdr" ? 0.89661
+            : $res = "4k" ? 0.78507
+            : $res = "1080p hdr" ? 0.40326
+            : $res = "1080p" ? 0.33605
+            : 0.22451;
           {"type":"usd","usd": $rate * $lookup(widgets, "model.duration")}
         )
         """,
@@ -2883,6 +2894,8 @@ def _validate_kling4_images(images: list[torch.Tensor]) -> None:
 
 def _validate_kling4_videos(videos: list[Input.Video], max_seconds: float) -> None:
     for video in videos:
+        if video.get_color_space() in ("HDR", "HDR PQ"):
+            raise ValueError("Kling 4.0 does not accept HDR videos as input. Connect an SDR video.")
         validate_video_duration(video, min_duration=3, max_duration=max_seconds)
         validate_video_dimensions(video, min_width=700, min_height=700, max_width=4553, max_height=4553)
         width, height = video.get_dimensions()
@@ -2989,7 +3002,7 @@ class Kling4TextToVideoNode(IO.ComfyNode):
                 IO.DynamicCombo.Input(
                     "model",
                     options=[
-                        IO.DynamicCombo.Option("kling-4.0", _kling4_text_to_video_inputs(["720p", "1080p"], 30)),
+                        IO.DynamicCombo.Option("kling-4.0", _kling4_text_to_video_inputs(KLING4_RESOLUTIONS, 30)),
                         IO.DynamicCombo.Option("kling-4.0-flash", _kling4_text_to_video_inputs(["720p"], 20)),
                     ],
                 ),
@@ -3015,7 +3028,9 @@ class Kling4TextToVideoNode(IO.ComfyNode):
             Kling4Text2VideoRequest(
                 prompt=model["prompt"],
                 settings=Kling4Settings(
-                    resolution=model["resolution"], aspect_ratio=model["aspect_ratio"], duration=model["duration"]
+                    **_kling4_resolution_settings(model["resolution"]),
+                    aspect_ratio=model["aspect_ratio"],
+                    duration=model["duration"],
                 ),
             ),
         )
@@ -3058,7 +3073,7 @@ class Kling4ImageToVideoNode(IO.ComfyNode):
                                     tooltip="Optional. Refer to the frames as @Image1, @Image2, ... "
                                     "in order: first frame, middle frames, last frame.",
                                 ),
-                                _kling4_resolution(["720p", "1080p"]),
+                                _kling4_resolution(KLING4_RESOLUTIONS),
                                 _kling4_duration(30),
                                 _kling4_seed(),
                             ],
@@ -3124,7 +3139,7 @@ class Kling4ImageToVideoNode(IO.ComfyNode):
             f"/proxy/kling/image-to-video/{model['model']}",
             Kling4ContentsRequest(
                 contents=contents,
-                settings=Kling4Settings(resolution=model["resolution"], duration=model["duration"]),
+                settings=Kling4Settings(**_kling4_resolution_settings(model["resolution"]), duration=model["duration"]),
             ),
         )
 
@@ -3146,7 +3161,7 @@ class Kling4ReferenceToVideoNode(IO.ComfyNode):
                     options=[
                         IO.DynamicCombo.Option(
                             "kling-4.0",
-                            _kling4_reference_to_video_inputs(["720p", "1080p"], 30, ["first_frame", "last_frame"]),
+                            _kling4_reference_to_video_inputs(KLING4_RESOLUTIONS, 30, ["first_frame", "last_frame"]),
                         ),
                         IO.DynamicCombo.Option(
                             "kling-4.0-flash",
@@ -3172,15 +3187,31 @@ class Kling4ReferenceToVideoNode(IO.ComfyNode):
                 expr="""
                 (
                   $flash := $contains(widgets.model, "flash");
-                  $hd := $lookup(widgets, "model.resolution") = "1080p";
+                  $res := $lookup(widgets, "model.resolution");
                   $duration := $lookup(widgets, "model.duration");
                   $exists(inputGroups) and $lookup(inputGroups, "model.reference_videos") > 0
                     ? (
-                        $rate := $flash ? 0.09009 : ($hd ? 0.20163 : 0.13442);
+                        $rate := $flash ? 0.09009
+                          : $res = "4k" or $res = "4k hdr" ? 0.47047
+                          : $res = "1080p" or $res = "1080p hdr" ? 0.20163
+                          : 0.13442;
+                        $hdr := $res = "4k hdr" ? 0.11154 : ($res = "1080p hdr" ? 0.06721 : 0);
                         $max_input := $flash ? 20 : 30;
-                        {"type":"range_usd","min_usd": $rate * 2 * $duration,"max_usd": $rate * ($max_input + $duration)}
+                        {
+                          "type":"range_usd",
+                          "min_usd": ($rate * 2 + $hdr) * $duration,
+                          "max_usd": $rate * ($max_input + $duration) + $hdr * $duration
+                        }
                       )
-                    : {"type":"usd","usd": ($flash ? 0.13442 : ($hd ? 0.33605 : 0.22451)) * $duration}
+                    : (
+                        $rate := $flash ? 0.13442
+                          : $res = "4k hdr" ? 0.89661
+                          : $res = "4k" ? 0.78507
+                          : $res = "1080p hdr" ? 0.40326
+                          : $res = "1080p" ? 0.33605
+                          : 0.22451;
+                        {"type":"usd","usd": $rate * $duration}
+                      )
                 )
                 """,
             ),
@@ -3210,7 +3241,9 @@ class Kling4ReferenceToVideoNode(IO.ComfyNode):
             Kling4ContentsRequest(
                 contents=contents,
                 settings=Kling4Settings(
-                    resolution=model["resolution"], aspect_ratio=model["aspect_ratio"], duration=model["duration"]
+                    **_kling4_resolution_settings(model["resolution"]),
+                    aspect_ratio=model["aspect_ratio"],
+                    duration=model["duration"],
                 ),
             ),
         )
@@ -3231,7 +3264,7 @@ class Kling4EditVideoNode(IO.ComfyNode):
                 IO.DynamicCombo.Input(
                     "model",
                     options=[
-                        IO.DynamicCombo.Option("kling-4.0", _kling4_edit_inputs(["720p", "1080p"], 30)),
+                        IO.DynamicCombo.Option("kling-4.0", _kling4_edit_inputs(KLING4_RESOLUTIONS, 30)),
                         IO.DynamicCombo.Option("kling-4.0-flash", _kling4_edit_inputs(["720p"], 20)),
                     ],
                 ),
@@ -3252,12 +3285,20 @@ class Kling4EditVideoNode(IO.ComfyNode):
                 ),
                 expr="""
                 (
-                  $rate := $contains(widgets.model, "flash")
-                    ? 0.09009
-                    : ($lookup(widgets, "model.resolution") = "1080p" ? 0.20163 : 0.13442);
+                  $res := $lookup(widgets, "model.resolution");
+                  $rate := $contains(widgets.model, "flash") ? 0.09009
+                    : $res = "4k" or $res = "4k hdr" ? 0.47047
+                    : $res = "1080p" or $res = "1080p hdr" ? 0.20163
+                    : 0.13442;
+                  $hdr := $res = "4k hdr" ? 0.11154 : ($res = "1080p hdr" ? 0.06721 : 0);
                   $exists(inputGroups) and $lookup(inputGroups, "model.reference_videos") > 0
-                    ? {"type":"range_usd","min_usd": $rate,"max_usd": $rate * 2,"format":{"suffix":"/second of input video"}}
-                    : {"type":"usd","usd": $rate * 2,"format":{"suffix":"/second of input video"}}
+                    ? {
+                        "type":"range_usd",
+                        "min_usd": $rate,
+                        "max_usd": $rate * 2 + $hdr,
+                        "format":{"suffix":"/second of input video"}
+                      }
+                    : {"type":"usd","usd": $rate * 2 + $hdr,"format":{"suffix":"/second of input video"}}
                 )
                 """,
             ),
@@ -3282,7 +3323,7 @@ class Kling4EditVideoNode(IO.ComfyNode):
             Kling4ContentsRequest(
                 contents=[Kling4Content(type="prompt", text=prompt), *await _kling4_media_contents(cls, images, videos)],
                 settings=Kling4Settings(
-                    resolution=model["resolution"],
+                    **_kling4_resolution_settings(model["resolution"]),
                     aspect_ratio=model["aspect_ratio"],
                     audio="original" if model.get("audio") == "original" else None,
                 ),
