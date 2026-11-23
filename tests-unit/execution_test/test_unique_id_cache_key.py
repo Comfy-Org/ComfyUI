@@ -70,9 +70,21 @@ class V3Output(io.ComfyNode):
         return io.NodeOutput()
 
 
+class V3ApiNode(io.ComfyNode):
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(node_id="TestV3ApiNode", inputs=[io.Int.Input("value")], hidden=[io.Hidden.unique_id], is_api_node=True)
+
+    @classmethod
+    def execute(cls, value):
+        return io.NodeOutput()
+
+
 @pytest.mark.parametrize(("node_class", "expected"), [
     (nodes_images.GetImageSize, True),
+    (V3ApiNode, False),
     (v1_node({"unique_id": "UNIQUE_ID"}), True),
+    (type("V1ApiNode", (v1_node({"unique_id": "UNIQUE_ID"}),), {"API_NODE": True}), True),
     (v1_node({"unique_id": ("UNIQUE_ID",)}), False),
     (v1_node({"prompt": "PROMPT"}), False),
     (V3Output, False),
