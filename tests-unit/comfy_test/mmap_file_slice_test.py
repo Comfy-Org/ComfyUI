@@ -192,4 +192,5 @@ def test_staging_buffer_is_only_allocated_when_used_and_released(checkpoint):
     mapped = torch.nn.Module()
     mapped.weight = torch.nn.Parameter(sd["outer.weight"], requires_grad=False)
     move_modules_reading_files([mapped], torch.device("cpu"), max_staged_bytes=1 << 20)
-    assert len(arenas) == 1 and arenas[0].buffer is None
+    # sized to what the load needs (one 512-byte tensor), not the 1 MiB budget, and released
+    assert len(arenas) == 1 and arenas[0].size == 512 and arenas[0].buffer is None

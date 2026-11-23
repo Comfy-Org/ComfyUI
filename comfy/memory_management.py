@@ -214,6 +214,14 @@ def move_modules_reading_files(modules, device, max_staged_bytes, workers=4):
 
 
 def _move_through_ring(modules, device, staging, workers):
+    seen = set()
+    plan = []
+    for module in modules:
+        found = _mmap_file_slice_tensors(module, seen)
+        plan.append((module, found, sum(-(-info.size // _STAGING_ALIGN) * _STAGING_ALIGN for _, _, info in found)))
+    # Pin no more than this load can use: pinning costs about 0.3 ms per MiB, which a
+    # small model would not win back.
+    staging.size = min(staging.size, sum(size for _, _, size in plan if size <= staging.size))
     capacity = staging.size
 
     def read(found, start, arena):
@@ -251,7 +259,6 @@ def _move_through_ring(modules, device, staging, workers):
 
     pending = collections.deque()  # (module, start, end, future), oldest first
     head = 0
-    seen = set()
 
     def place(size):
         """Start of a free ring region of ``size`` bytes, or None while it is still in use."""
@@ -261,9 +268,7 @@ def _move_through_ring(modules, device, staging, workers):
         return None
 
     with ThreadPoolExecutor(workers) as pool:
-        for module in modules:
-            found = _mmap_file_slice_tensors(module, seen)
-            size = sum(-(-info.size // _STAGING_ALIGN) * _STAGING_ALIGN for _, _, info in found)
+        for module, found, size in plan:
             if size > capacity:
                 while pending:
                     old, _, _, staged = pending.popleft()
