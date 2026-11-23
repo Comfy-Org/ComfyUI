@@ -1913,7 +1913,7 @@ class HeyGenDecisionYesNo(IO.ComfyNode):
 
 def _parse_decision_options(options: str) -> list[str]:
     names: list[str] = []
-    folded: dict[str, str] = {}
+    folded: dict[tuple[str, ...], str] = {}
     for number, line in enumerate(options.splitlines(), 1):
         name = line.strip()
         if not name:
@@ -1924,9 +1924,10 @@ def _parse_decision_options(options: str) -> list[str]:
             raise ValueError(f"The option on line {number} contains an invisible or control character.")
         if name in names:
             raise ValueError(f"The option '{name}' is listed twice.")
-        if name.casefold() in folded:
-            raise ValueError(f"The options '{folded[name.casefold()]}' and '{name}' differ only in letter case.")
-        folded[name.casefold()] = name
+        key = tuple(map(str.casefold, name))
+        if key in folded:
+            raise ValueError(f"The options '{folded[key]}' and '{name}' differ only in letter case.")
+        folded[key] = name
         names.append(name)
     if not 2 <= len(names) <= 255:
         raise ValueError(f"Give 2 to 255 options, one per line. Got {len(names)}.")
