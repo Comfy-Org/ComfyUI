@@ -185,6 +185,8 @@ class _StagingArena:
             if torch.cuda.cudart().cudaHostRegister(buffer.data_ptr(), self.size, 1) == 0:
                 self.buffer = buffer
             else:
+                import comfy.model_management  # model_management imports this module
+                comfy.model_management.discard_cuda_async_error()
                 self.failed = True
         return self.buffer
 

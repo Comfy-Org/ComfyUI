@@ -194,3 +194,39 @@ def test_staging_buffer_is_only_allocated_when_used_and_released(checkpoint):
     move_modules_reading_files([mapped], torch.device("cpu"), max_staged_bytes=1 << 20)
     # sized to what the load needs (one 512-byte tensor), not the 1 MiB budget, and released
     assert len(arenas) == 1 and arenas[0].size == 512 and arenas[0].buffer is None
+
+
+def test_staging_reservation_is_gone_before_offloaded_weights_are_pinned(checkpoint, monkeypatch):
+    """ModelPatcher.load pins offloaded weights after staging returns; by then the staging
+    buffer is unpinned and its reservation released, even if staging raised."""
+    monkeypatch.setattr(mm, "TOTAL_PINNED_MEMORY", 7 << 20)
+    seen = []
+    with mm.reserve_pinned_bytes(32 << 20):
+        seen.append(mm.TOTAL_PINNED_MEMORY)
+    assert seen == [39 << 20] and mm.TOTAL_PINNED_MEMORY == 7 << 20
+    with pytest.raises(RuntimeError):
+        with mm.reserve_pinned_bytes(32 << 20):
+            raise RuntimeError("load failed")
+    assert mm.TOTAL_PINNED_MEMORY == 7 << 20
+
+    path, _ = checkpoint
+    sd = comfy.utils.load_torch_file(str(path))
+    module = torch.nn.Module()
+    module.weight = torch.nn.Parameter(sd["outer.weight"], requires_grad=False)
+    with mm.reserve_pinned_bytes(1 << 20):
+        move_modules_reading_files([module], torch.device("cpu"), max_staged_bytes=1 << 20)
+    assert arenas and all(a.buffer is None for a in arenas)
+    assert mm.TOTAL_PINNED_MEMORY == 7 << 20
+
+
+def test_failed_pinning_moves_without_staging(checkpoint, monkeypatch):
+    path, tensors = checkpoint
+    monkeypatch.setattr(comfy.memory_management._StagingArena, "get", lambda self: None)
+    reads = []
+    monkeypatch.setattr(comfy.memory_management, "_read_file_slice", lambda info, address: reads.append(info))
+    sd = comfy.utils.load_torch_file(str(path))
+    module = torch.nn.Module()
+    module.weight = torch.nn.Parameter(sd["outer.weight"], requires_grad=False)
+    move_modules_reading_files([module], torch.device("cpu"), max_staged_bytes=1 << 20)
+    assert not reads
+    assert torch.equal(module.weight, tensors["outer.weight"])
