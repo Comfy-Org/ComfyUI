@@ -17,6 +17,7 @@ import comfy.model_prefetch
 import comfy.patcher_extension
 import comfy.ldm.common_dit
 import comfy.utils
+from comfy.cli_args import args, PerformanceFeature
 from comfy.ldm.flux.layers import EmbedND, timestep_embedding
 from comfy.ldm.flux.math import apply_rope
 from comfy.ldm.modules.attention import AttentionTensorContainer, ComfyAttention, optimized_attention_masked
@@ -239,6 +240,7 @@ class SingleStreamDiT(nn.Module):
                  device=None, dtype=None, operations=None, **kwargs):
         super().__init__()
         self.dtype = dtype
+        self.diffusion_graphs = PerformanceFeature.DiffusionGraphs in args.fast
         self.patch = patch
         self.channels = channels
         self.tdim = tdim
@@ -370,6 +372,7 @@ class SingleStreamDiT(nn.Module):
         transformer_options["block_type"] = "single"
         transformer_options["img_slice"] = [txtlen, combined.shape[1]]
         prefetch_queue = comfy.model_prefetch.make_prefetch_queue(list(self.blocks), x.device, transformer_options)
+        enable_graph = self.diffusion_graphs and not patches and "optimized_attention_override" not in transformer_options
         for i, block in enumerate(self.blocks):
             transformer_options["block_index"] = i
             def core():
@@ -377,7 +380,7 @@ class SingleStreamDiT(nn.Module):
                 combined.copy_(output)
 
             comfy.model_prefetch.prefetch_queue_pop(
-                prefetch_queue, x.device, block, combined.dtype, core=core,
+                prefetch_queue, x.device, block, combined.dtype, core=core, enable_graph=enable_graph,
                 malloc_scope="block",
             )
 
