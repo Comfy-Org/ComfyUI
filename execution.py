@@ -793,7 +793,7 @@ class PromptExecutor:
                 # that consumes its result waits for it to run again.
                 execution_list = ExecutionList(dynamic_prompt, self.caches.outputs, self.prompt_model_tracker.add,
                                                force_rerun=force_rerun if args.force_output_rerun else None,
-                                               keep_block_results=self.cache_type == CacheType.NONE)
+                                               keep_block_results=self.cache_type in (CacheType.NONE, CacheType.RAM_PRESSURE))
                 current_outputs = self.caches.outputs.all_node_ids()
                 for node_id in list(execute_outputs):
                     execution_list.add_node(node_id)

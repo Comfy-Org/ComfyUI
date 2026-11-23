@@ -4,6 +4,9 @@ import pytest
 
 import nodes
 
+import comfy.system_memory
+import comfy_execution.caching
+
 import comfy_extras.nodes_loop as nodes_loop
 from comfy_api.latest import io
 from comfy_execution.graph import ExecutionList
@@ -39,6 +42,18 @@ class Increment:
         value += 1
         self.calls.append(value)
         return (value,)
+
+
+class Add:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {"required": {"value": ("INT",), "amount": ("INT",)}}
+
+    RETURN_TYPES = ("INT",)
+    FUNCTION = "execute"
+
+    def execute(self, value, amount):
+        return (value + amount,)
 
 
 class ExpandIncrement:
@@ -298,6 +313,7 @@ def register_internal_loop_nodes(monkeypatch):
         "LoopResult": nodes_loop.LoopResult,
         "TestConstant": Constant,
         "TestIncrement": Increment,
+        "TestAdd": Add,
         "TestExpandIncrement": ExpandIncrement,
         "TestFalseBranch": FalseBranch,
         "TestTrueBranch": TrueBranch,
@@ -879,7 +895,7 @@ def test_chained_loops_run_each_body_once(cache_type):
 
 
 @pytest.mark.parametrize("cache_type", [False, CacheType.LRU, CacheType.RAM_PRESSURE, CacheType.NONE])
-def test_only_a_run_without_an_output_cache_keeps_loop_results(monkeypatch, cache_type):
+def test_loop_results_are_kept_only_where_the_cache_can_lose_them(monkeypatch, cache_type):
     execution_lists = []
 
     class RecordingExecutionList(ExecutionList):
@@ -896,4 +912,128 @@ def test_only_a_run_without_an_output_cache_keeps_loop_results(monkeypatch, cach
 
     execute_prompt(prompt, "loop-result-lifetime", ["capture"], cache_type)
 
-    assert [bool(graph.externalBlockResults) for graph in execution_lists] == [cache_type == CacheType.NONE]
+    assert [bool(graph.externalBlockResults) for graph in execution_lists] == [cache_type in (CacheType.NONE, CacheType.RAM_PRESSURE)]
+
+
+def start_loop(initial, passes):
+    return {"class_type": "StartLoop", "inputs": {"mode": "simple", "mode.num_iterations": passes, "initial_iteration_value": initial}}
+
+
+def end_loop(source):
+    return {"class_type": "EndLoop", "inputs": {"output_value": [source, 0], "next_iteration_value": [source, 0], "accumulate": False}}
+
+
+def add(value, amount):
+    return {"class_type": "TestAdd", "inputs": {"value": value, "amount": amount}}
+
+
+def lazy_pick(on_true, on_false):
+    return {"class_type": "TestLazySwitch", "inputs": {"switch": True, "on_true": on_true, "on_false": on_false}}
+
+
+def earlier_loop(tag="earlier"):
+    return {
+        "zero": {"class_type": "TestConstant", "inputs": {"value": 0}},
+        tag: start_loop(["zero", 0], 2),
+        f"{tag}_increment": {"class_type": "TestIncrement", "inputs": {"value": [tag, 4]}},
+        f"{tag}_close": end_loop(f"{tag}_increment"),
+    }
+
+
+def outer_loop(passes, body, close_source):
+    return {
+        **earlier_loop(),
+        "outer_init": {"class_type": "TestIncrement", "inputs": {"value": ["earlier_close", 0]}},
+        "outer": start_loop(["outer_init", 0], passes),
+        **body,
+        "outer_close": end_loop(close_source),
+        "capture": {"class_type": "TestCapture", "inputs": {"value": ["outer_close", 0]}},
+    }
+
+
+def outer_body():
+    return outer_loop(2, {"outer_add": add(["outer", 4], ["earlier_close", 0])}, "outer_add")
+
+
+def inner_body(read_earlier):
+    prompt = outer_loop(3, {
+        "inner": start_loop(["outer", 4], 2),
+        **read_earlier("inner"),
+        "inner_close": end_loop("inner_add"),
+    }, "inner_close")
+    return prompt
+
+
+def both_inside_a_loop():
+    prompt = outer_body()
+    prompt["top"] = start_loop(["zero", 0], 2)
+    prompt["earlier"] = start_loop(["top", 4], 2)
+    prompt["top_close"] = end_loop("outer_close")
+    prompt["capture"] = {"class_type": "TestCapture", "inputs": {"value": ["top_close", 0]}}
+    return prompt
+
+
+def three_earlier_loops():
+    prompt = outer_loop(2, {
+        "outer_first": add(["outer", 4], ["earlier_close", 0]),
+        "outer_second": add(["outer_first", 0], ["second_close", 0]),
+        "outer_add": add(["outer_second", 0], ["third_close", 0]),
+    }, "outer_add")
+    prompt.update({**earlier_loop("second"), **earlier_loop("third")})
+    prompt["first_two"] = add(["earlier_close", 0], ["second_close", 0])
+    prompt["all_three"] = add(["first_two", 0], ["third_close", 0])
+    prompt["outer_init"] = {"class_type": "TestIncrement", "inputs": {"value": ["all_three", 0]}}
+    return prompt
+
+
+BODIES_READING_AN_EARLIER_LOOP = {
+    "outer_body": (outer_body, 7, [1, 2, 3]),
+    "inner_body": (lambda: inner_body(lambda tag: {f"{tag}_add": add([tag, 4], ["earlier_close", 0])}), 15, [1, 2, 3]),
+    "both_inside_a_loop": (both_inside_a_loop, 28, [1, 2, 3, 8, 9, 10]),
+    "three_earlier_loops": (three_earlier_loops, 19, [1, 1, 1, 2, 2, 2, 7]),
+    "lazy_switch": (
+        lambda: outer_loop(2, {
+            "pick": lazy_pick(["earlier_close", 0], ["outer", 4]),
+            "outer_add": add(["outer", 4], ["pick", 0]),
+        }, "outer_add"),
+        7,
+        [1, 2, 3],
+    ),
+    "strong_and_lazy": (
+        lambda: outer_loop(2, {
+            "pick": lazy_pick(["earlier_close", 0], ["outer", 4]),
+            "outer_strong": add(["outer", 4], ["earlier_close", 0]),
+            "outer_add": add(["outer_strong", 0], ["pick", 0]),
+        }, "outer_add"),
+        11,
+        [1, 2, 3],
+    ),
+    "lazy_switch_in_inner_body": (
+        lambda: inner_body(lambda tag: {
+            f"{tag}_pick": lazy_pick(["earlier_close", 0], [tag, 4]),
+            f"{tag}_add": add([tag, 4], [f"{tag}_pick", 0]),
+        }),
+        15,
+        [1, 2, 3],
+    ),
+}
+
+
+@pytest.mark.parametrize("cache_type", [False, CacheType.LRU, CacheType.RAM_PRESSURE, CacheType.NONE])
+@pytest.mark.parametrize("body", sorted(BODIES_READING_AN_EARLIER_LOOP))
+def test_loop_body_reads_an_earlier_loop_after_its_output_is_evicted(monkeypatch, body, cache_type):
+    monkeypatch.setattr(comfy.system_memory, "virtual_memory_available", lambda: 0)
+    monkeypatch.setattr(comfy_execution.caching, "virtual_memory_available", lambda: 0)
+    build_prompt, expected, increments = BODIES_READING_AN_EARLIER_LOOP[body]
+    Increment.calls = []
+    Capture.values = []
+    executor = PromptExecutor(Server(), cache_type=cache_type, cache_args={"ram": 1.0, "ram_inactive": 1.0, "lru": 100})
+
+    executor.execute(build_prompt(), f"evicted-earlier-loop-{body}", execute_outputs=["capture"])
+
+    assert executor.success
+    assert Capture.values == [expected]
+    if cache_type != CacheType.NONE:
+        assert sorted(Increment.calls) == increments, "a finished node ran again"
+    if cache_type == CacheType.RAM_PRESSURE:
+        assert executor.caches.outputs.full_evictions
