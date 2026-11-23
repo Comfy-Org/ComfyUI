@@ -17,6 +17,7 @@ if not has_gpu():
     args.cpu = True
 
 from comfy import ops
+from comfy.model_patcher import ModelPatcher
 from comfy.quant_ops import QUANT_ALGOS, QuantizedTensor
 import comfy.utils
 
@@ -159,6 +160,12 @@ class TestMixedPrecisionOps(unittest.TestCase):
         self.assertEqual(state_dict2["layer1.weight_scale"].item(), 3.0)
         self.assertEqual(model.layer1.weight._layout_cls, "TensorCoreFP8E4M3Layout")
 
+        cpu = torch.device("cpu")
+        with self.assertLogs(level="WARNING") as logs:
+            patches = ModelPatcher(model, cpu, cpu).get_key_patches("layer1.")
+        self.assertTrue(any("layer1.weight_scale" in message for message in logs.output))
+        self.assertEqual(set(patches), {"layer1.weight", "layer1.bias"})
+
         # Verify non-quantized layers are standard tensors
         self.assertNotIsInstance(state_dict2["layer2.weight"], QuantizedTensor)
         self.assertNotIsInstance(state_dict2["layer3.weight"], QuantizedTensor)
@@ -195,7 +202,7 @@ class TestMixedPrecisionOps(unittest.TestCase):
             lora_delta = torch.randn_like(weight) * 0.01
             return weight + lora_delta
 
-        model.layer1.weight_function.append(apply_lora)
+        model.layer1.weight_function = [apply_lora]
 
         # Forward pass should work with LoRA (triggers weight_function path)
         input_tensor = torch.randn(5, 10, dtype=torch.bfloat16)

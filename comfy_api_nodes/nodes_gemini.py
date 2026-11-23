@@ -17,6 +17,12 @@ import folder_paths
 from comfy_api.latest import IO, ComfyExtension, Input, InputImpl, Types
 from comfy_api_nodes.apis.gemini import (
     GeminiContent,
+    GeminiDecisionAnswer,
+    GeminiDecisionChoiceQuestion,
+    GeminiDecisionNoulQuestion,
+    GeminiDecisionRequest,
+    GeminiDecisionResponse,
+    GeminiDecisionScoreQuestion,
     GeminiFile,
     GeminiFileData,
     GeminiGenerateContentRequest,
@@ -60,9 +66,11 @@ from comfy_api_nodes.util import (
     validate_video_duration,
     video_to_base64_string,
 )
+from server import PromptServer
 
 GEMINI_BASE_ENDPOINT = "/proxy/vertexai/gemini"
 GEMINI_INTERACTIONS_ENDPOINT = "/proxy/gemini-interactions"
+GEMINI_DECISIONS_ENDPOINT = "/proxy/gemini-decisions"
 GEMINI_MAX_INPUT_FILE_SIZE = 20 * 1024 * 1024  # 20 MB
 GEMINI_URL_INPUT_BUDGET = 10
 GEMINI_MAX_INLINE_BYTES = 18 * 1024 * 1024
@@ -288,11 +296,12 @@ async def download_interaction_video(uri: str, cls: type[IO.ComfyNode] | None = 
     name = uri.split("?", 1)[0].rsplit("/files/", 1)[-1].split(":", 1)[0]
     await poll_op(
         cls,
-        ApiEndpoint(path=f"{GEMINI_INTERACTIONS_ENDPOINT}/files/{name}"),
+        ApiEndpoint(path=f"{GEMINI_INTERACTIONS_ENDPOINT}/files/{name}", query_params={"fields": "state"}),
         response_model=GeminiFile,
         status_extractor=lambda file: file.state,
-        completed_statuses=["ACTIVE"],
-        failed_statuses=["FAILED"],
+        # Google may mark a finished output FAILED; its video still downloads
+        completed_statuses=["ACTIVE", "FAILED"],
+        failed_statuses=[],
         queued_statuses=["PROCESSING"],
         poll_interval=3.0,
         max_poll_attempts=200,
@@ -638,7 +647,12 @@ GEMINI_TEXT_PRICE_BADGE = IO.PriceBadge(
         "usd": [0.00025, 0.0015],
         "format": { "approximate": true, "separator": "-", "suffix": " per 1K tokens" }
       }
-      : ($contains($m, "3.7 flash") or $contains($m, "3.8 flash")) ? {
+      : ($contains($m, "argon") or $contains($m, "carbon")) ? {
+        "type": "list_usd",
+        "usd": [0.00572, 0.0286],
+        "format": { "approximate": true, "separator": "-", "suffix": " per 1K tokens" }
+      }
+      : ($contains($m, "hydrogen") or $contains($m, "3.7 flash") or $contains($m, "3.8 flash")) ? {
         "type": "list_usd",
         "usd": [0.002145, 0.010725],
         "format": { "approximate": true, "separator": "-", "suffix": " per 1K tokens" }
@@ -659,6 +673,9 @@ GEMINI_TEXT_PRICE_BADGE = IO.PriceBadge(
 
 
 GEMINI_TEXT_MODELS: dict[str, str] = {
+    "Gemini 4 Hydrogen": "gemini-4-hydrogen",
+    "Gemini 4 Argon": "gemini-4-argon",
+    "Gemini 4 Carbon": "gemini-4-carbon",
     "Gemini 3.8 Flash": "gemini-3.8-flash",
     "Gemini 3.7 Flash": "gemini-3.7-flash",
     "Gemini 3.1 Pro": "gemini-3.1-pro-preview",
@@ -744,12 +761,12 @@ def _gemini_sampling_inputs(sampling: bool) -> list[Input]:
     ]
 
 
-def _gemini_max_output_tokens_input() -> Input:
+def _gemini_max_output_tokens_input(max_output_tokens: int) -> Input:
     return IO.Int.Input(
         "max_output_tokens",
         default=32768,
         min=16,
-        max=65536,
+        max=max_output_tokens,
         tooltip="Maximum tokens to generate, including the model's internal thinking. "
         "With thinking_level HIGH, a low value can leave no room for the answer; raise this if "
         "responses come back empty or truncated. The model stops early when finished, so a higher "
@@ -769,7 +786,7 @@ def _gemini_text_model_inputs(
         _gemini_files_input(),
         _gemini_thinking_input(thinking_default, thinking_options),
         *_gemini_sampling_inputs(sampling),
-        _gemini_max_output_tokens_input(),
+        _gemini_max_output_tokens_input(65536),
     ]
 
 
@@ -777,6 +794,7 @@ def _gemini_v3_model_inputs(
     thinking_default: str,
     thinking_options: list[str] | None = None,
     *,
+    max_output_tokens: int,
     sampling: bool = True,
     agentic_video: bool = False,
 ) -> list[Input]:
@@ -807,7 +825,7 @@ def _gemini_v3_model_inputs(
         _gemini_files_input(),
         _gemini_thinking_input(thinking_default, thinking_options),
         *_gemini_sampling_inputs(sampling),
-        _gemini_max_output_tokens_input(),
+        _gemini_max_output_tokens_input(max_output_tokens),
         IO.Int.Input(
             "seed",
             default=42,
@@ -991,21 +1009,61 @@ class GeminiNodeV3(IO.ComfyNode):
                     "model",
                     options=[
                         IO.DynamicCombo.Option(
+                            "Gemini 4 Hydrogen",
+                            _gemini_v3_model_inputs(
+                                "HIGH",
+                                ["LOW", "MEDIUM", "HIGH", "XHIGH"],
+                                max_output_tokens=65536,
+                                sampling=False,
+                                agentic_video=True,
+                            ),
+                        ),
+                        IO.DynamicCombo.Option(
+                            "Gemini 4 Argon",
+                            _gemini_v3_model_inputs(
+                                "MEDIUM",
+                                ["LOW", "MEDIUM", "HIGH"],
+                                max_output_tokens=32768,
+                                sampling=False,
+                                agentic_video=True,
+                            ),
+                        ),
+                        IO.DynamicCombo.Option(
+                            "Gemini 4 Carbon",
+                            _gemini_v3_model_inputs(
+                                "MEDIUM",
+                                ["LOW", "MEDIUM", "HIGH"],
+                                max_output_tokens=32768,
+                                sampling=False,
+                                agentic_video=True,
+                            ),
+                        ),
+                        IO.DynamicCombo.Option(
                             "Gemini 3.8 Flash",
                             _gemini_v3_model_inputs(
-                                "MEDIUM", ["LOW", "MEDIUM", "HIGH"], sampling=False, agentic_video=True
+                                "MEDIUM",
+                                ["LOW", "MEDIUM", "HIGH"],
+                                max_output_tokens=65536,
+                                sampling=False,
+                                agentic_video=True,
                             ),
                         ),
                         IO.DynamicCombo.Option(
                             "Gemini 3.7 Flash",
-                            _gemini_v3_model_inputs("MEDIUM", ["LOW", "MEDIUM", "HIGH"]),
+                            _gemini_v3_model_inputs("MEDIUM", ["LOW", "MEDIUM", "HIGH"], max_output_tokens=65536),
                         ),
                         IO.DynamicCombo.Option(
                             "Gemini 3.5 Flash",
-                            _gemini_v3_model_inputs("MEDIUM", ["MINIMAL", "LOW", "MEDIUM", "HIGH"]),
+                            _gemini_v3_model_inputs(
+                                "MEDIUM", ["MINIMAL", "LOW", "MEDIUM", "HIGH"], max_output_tokens=65536
+                            ),
                         ),
-                        IO.DynamicCombo.Option("Gemini 3.1 Pro", _gemini_v3_model_inputs("HIGH")),
-                        IO.DynamicCombo.Option("Gemini 3.1 Flash-Lite", _gemini_v3_model_inputs("LOW")),
+                        IO.DynamicCombo.Option(
+                            "Gemini 3.1 Pro", _gemini_v3_model_inputs("HIGH", max_output_tokens=65536)
+                        ),
+                        IO.DynamicCombo.Option(
+                            "Gemini 3.1 Flash-Lite", _gemini_v3_model_inputs("LOW", max_output_tokens=65536)
+                        ),
                     ],
                     tooltip="The Gemini model used to generate the response.",
                 ),
@@ -1556,7 +1614,7 @@ class GeminiNanoBanana2(IO.ComfyNode):
         )
 
 
-def _nano_banana_2_v2_model_inputs(resolutions: list[str]):
+def _nano_banana_2_v2_model_inputs(resolutions: list[str], thinking_levels: list[str], thinking_default: str):
     return [
         IO.Combo.Input(
             "aspect_ratio",
@@ -1588,7 +1646,8 @@ def _nano_banana_2_v2_model_inputs(resolutions: list[str]):
         ),
         IO.Combo.Input(
             "thinking_level",
-            options=["MINIMAL", "HIGH"],
+            options=thinking_levels,
+            default=thinking_default,
         ),
         IO.Autogrow.Input(
             "images",
@@ -1614,7 +1673,7 @@ class GeminiNanoBanana2V2(IO.ComfyNode):
     def define_schema(cls):
         return IO.Schema(
             node_id="GeminiNanoBanana2V2",
-            display_name="Nano Banana 2",
+            display_name="Nano Banana 2.1",
             category="partner/image/Gemini",
             description="Generate or edit images synchronously via Google Vertex API.",
             inputs=[
@@ -1629,12 +1688,28 @@ class GeminiNanoBanana2V2(IO.ComfyNode):
                     "model",
                     options=[
                         IO.DynamicCombo.Option(
+                            "Gemini Nano Banana 2.1",
+                            _nano_banana_2_v2_model_inputs(
+                                resolutions=["1K", "2K", "4K"],
+                                thinking_levels=["MINIMAL", "MEDIUM", "HIGH"],
+                                thinking_default="MEDIUM",
+                            ),
+                        ),
+                        IO.DynamicCombo.Option(
                             "Nano Banana 2 (Gemini 3.1 Flash Image)",
-                            _nano_banana_2_v2_model_inputs(resolutions=["1K", "2K", "4K"]),
+                            _nano_banana_2_v2_model_inputs(
+                                resolutions=["1K", "2K", "4K"],
+                                thinking_levels=["MINIMAL", "HIGH"],
+                                thinking_default="MINIMAL",
+                            ),
                         ),
                         IO.DynamicCombo.Option(
                             "Nano Banana 2 Lite",
-                            _nano_banana_2_v2_model_inputs(resolutions=["1K"]),
+                            _nano_banana_2_v2_model_inputs(
+                                resolutions=["1K"],
+                                thinking_levels=["MINIMAL", "HIGH"],
+                                thinking_default="MINIMAL",
+                            ),
                         ),
                     ],
                 ),
@@ -1690,7 +1765,7 @@ class GeminiNanoBanana2V2(IO.ComfyNode):
                 IO.Image.Output(
                     display_name="thought_image",
                     tooltip="First image from the model's thinking process. "
-                    "Only available with thinking_level HIGH and IMAGE+TEXT modality.",
+                    "Only available with IMAGE+TEXT modality.",
                 ),
             ],
             hidden=[
@@ -1700,16 +1775,28 @@ class GeminiNanoBanana2V2(IO.ComfyNode):
             ],
             is_api_node=True,
             price_badge=IO.PriceBadge(
-                depends_on=IO.PriceBadgeDepends(widgets=["model", "model.resolution"]),
+                depends_on=IO.PriceBadgeDepends(widgets=["model", "model.resolution", "model.thinking_level"]),
                 expr="""
                 (
                   $contains(widgets.model, "lite")
                     ? {"type":"usd","usd": 0.0408, "format":{"suffix":"/Image","approximate":true}}
-                    : (
-                        $r := $lookup(widgets, "model.resolution");
-                        $prices := {"1k": 0.0835, "2k": 0.1217, "4k": 0.1848};
-                        {"type":"usd","usd": $lookup($prices, $r), "format":{"suffix":"/Image","approximate":true}}
-                      )
+                    : $contains(widgets.model, "banana 2.1")
+                      ? (
+                          $r := $lookup(widgets, "model.resolution");
+                          $t := $lookup(widgets, "model.thinking_level");
+                          $image := {"1k": 0.048048, "2k": 0.072072, "4k": 0.162162};
+                          $thinking := {"minimal": 0, "medium": 0.010725, "high": 0.01769625};
+                          {
+                            "type":"usd",
+                            "usd": $lookup($image, $r) + $lookup($thinking, $t),
+                            "format":{"suffix":"/Image","approximate":true}
+                          }
+                        )
+                      : (
+                          $r := $lookup(widgets, "model.resolution");
+                          $prices := {"1k": 0.0835, "2k": 0.1217, "4k": 0.1848};
+                          {"type":"usd","usd": $lookup($prices, $r), "format":{"suffix":"/Image","approximate":true}}
+                        )
                 )
                 """,
             ),
@@ -1728,7 +1815,10 @@ class GeminiNanoBanana2V2(IO.ComfyNode):
     ) -> IO.NodeOutput:
         validate_string(prompt, strip_whitespace=True, min_length=1)
         model_choice = model["model"]
-        if model_choice == "Nano Banana 2 (Gemini 3.1 Flash Image)":
+        if model_choice == "Gemini Nano Banana 2.1":
+            model_id = "gemini-nano-banana-2.1"
+            temperature = top_p = None
+        elif model_choice == "Nano Banana 2 (Gemini 3.1 Flash Image)":
             model_id = "gemini-3.1-flash-image"
         elif model_choice == "Nano Banana 2 Lite":
             model_id = "gemini-3.1-flash-lite-image"
@@ -1787,6 +1877,7 @@ OMNI_URI_DELIVERY_RESOLUTIONS = ("1080p", "4k")
 OMNI_MODELS: dict[str, str] = {
     "Omni Flash": "gemini-omni-flash-preview",
     "Omni Flash 1.1": "gemini-omni-1.1-flash",
+    "Omni Flash 1.2": "gemini-omni-1.2-flash",
 }
 
 
@@ -2074,6 +2165,56 @@ def _omni_v2_flash_1_1_inputs() -> list[Input]:
     ]
 
 
+def _omni_v2_flash_1_2_inputs() -> list[Input]:
+    return [
+        IO.String.Input(
+            "prompt",
+            multiline=True,
+            default="",
+            tooltip="Describe the video to generate, or the edit to apply to an attached video. Specify the "
+            'length directly in the prompt, e.g. "a 6-second clip" or, for the \'extend\' task, "extend by 5 seconds"; '
+            "the generated length may be 3-15 seconds, and 'extend' adds at most 10 seconds.",
+        ),
+        IO.Combo.Input(
+            "resolution",
+            options=["360p", "720p", "1080p", "4k"],
+            default="720p",
+            tooltip="Output resolution.",
+        ),
+        IO.Combo.Input(
+            "aspect_ratio",
+            options=["16:9", "9:16"],
+            default="16:9",
+            tooltip="Output aspect ratio: 16:9 (landscape) or 9:16 (portrait). "
+            "The 'edit' and 'extend' tasks keep the aspect ratio of the input video instead.",
+        ),
+        _omni_task_input(with_extend=True),
+        IO.Autogrow.Input(
+            "images",
+            template=IO.Autogrow.TemplateNames(
+                IO.Image.Input("image"),
+                names=[f"image_{i}" for i in range(1, OMNI_MAX_IMAGES + 1)],
+                min=0,
+            ),
+            tooltip=f"Optional reference image(s) to guide or animate the video. Up to {OMNI_MAX_IMAGES} images; "
+            "with the 'image_to_video' task the first one is the starting frame and an optional second one "
+            "is the ending frame.",
+        ),
+        IO.Autogrow.Input(
+            "videos",
+            template=IO.Autogrow.TemplateNames(
+                IO.Video.Input("video"),
+                names=[f"video_{i}" for i in range(1, OMNI_MAX_VIDEOS + 1)],
+                min=0,
+            ),
+            tooltip=f"Optional reference video(s) to guide or edit. Up to {OMNI_MAX_VIDEOS} videos, "
+            "each up to 15 seconds long. The 'extend' task accepts up to 25 seconds, "
+            "and its result can be at most 30 seconds.",
+        ),
+        _omni_seed_input(),
+    ]
+
+
 
 class GeminiVideoOmniV2(IO.ComfyNode):
 
@@ -2086,11 +2227,12 @@ class GeminiVideoOmniV2(IO.ComfyNode):
             essentials_category="Video Generation",
             description="Generate a video with audio from a text prompt using Google's Gemini Omni Flash models. "
             "Optionally provide reference images and/or videos to guide or edit the result. Describe the desired "
-            "length (3-10s) directly in the prompt.",
+            "length directly in the prompt (3-15s for Omni Flash 1.2, 3-10s for older models).",
             inputs=[
                 IO.DynamicCombo.Input(
                     "model",
                     options=[
+                        IO.DynamicCombo.Option("Omni Flash 1.2", _omni_v2_flash_1_2_inputs()),
                         IO.DynamicCombo.Option("Omni Flash 1.1", _omni_v2_flash_1_1_inputs()),
                         IO.DynamicCombo.Option("Omni Flash", _omni_v2_flash_inputs()),
                     ],
@@ -2111,9 +2253,11 @@ class GeminiVideoOmniV2(IO.ComfyNode):
                 depends_on=IO.PriceBadgeDepends(widgets=["model", "model.resolution"]),
                 expr="""
                 (
-                  $prices := {"360p": 0.0483, "720p": 0.1449, "1080p": 0.2174, "4k": 0.4349};
+                  $prices := widgets.model = "omni flash 1.2"
+                    ? {"360p": 0.0331, "720p": 0.0994, "1080p": 0.1491, "4k": 0.2982}
+                    : {"360p": 0.0483, "720p": 0.1449, "1080p": 0.2174, "4k": 0.4349};
                   $r := $lookup(widgets, "model.resolution");
-                  {"type":"usd","usd": $r ? $lookup($prices, $r) : 0.1449,
+                  {"type":"usd","usd": $lookup($prices, $r ? $r : "720p"),
                    "format":{"suffix":"/second","approximate":true}}
                 )
                 """,
@@ -2134,8 +2278,11 @@ class GeminiVideoOmniV2(IO.ComfyNode):
             raise ValueError(f"The current maximum number of supported images is {OMNI_MAX_IMAGES}.")
         if len(videos) > OMNI_MAX_VIDEOS:
             raise ValueError(f"The current maximum number of supported videos is {OMNI_MAX_VIDEOS}.")
+        max_video_duration = 10.1
+        if model["model"] == "Omni Flash 1.2":
+            max_video_duration = 25.1 if task == "extend" else 15.1
         for video in videos:
-            validate_video_duration(video, max_duration=10.1)
+            validate_video_duration(video, max_duration=max_video_duration)
         if task == "text_to_video" and (images or videos):
             raise ValueError("The 'text_to_video' task generates from the prompt alone; detach the reference media.")
         if task == "image_to_video" and videos:
@@ -2201,6 +2348,371 @@ class GeminiVideoOmniV2(IO.ComfyNode):
         )
 
 
+GEMINI_DECISION_PRICE_BADGE = IO.PriceBadge(
+    expr="""{"type":"usd","usd":0.143,"format":{"approximate":true,"suffix":" per 1M tokens"}}""",
+)
+
+
+def _decision_inputs() -> list[Input]:
+    return [
+        *_gemini_media_inputs(),
+        IO.String.Input(
+            "text",
+            multiline=True,
+            force_input=True,
+            optional=True,
+            tooltip="The text the question is about, such as a prompt or an LLM response.",
+        ),
+    ]
+
+
+def _decision_labels(items: dict[str, Any], count: int, unit: str) -> list[str]:
+    labels = []
+    for name, item in items.items():
+        n = count(item)
+        labels.extend([name] if n == 1 else [f"{name}, {unit} {i}" for i in range(1, n + 1)])
+    return labels
+
+
+async def _decision_input(
+    cls: type[IO.ComfyNode],
+    text: str,
+    images: dict[str, Input.Image],
+    audio: dict[str, Input.Audio],
+    video: dict[str, Input.Video],
+) -> list[GeminiInteractionTextPart | GeminiInteractionMediaPart]:
+    images = {name: image for name, image in images.items() if image is not None}
+    audio = {name: clip for name, clip in audio.items() if clip is not None}
+    video = {name: clip for name, clip in video.items() if clip is not None}
+    blocks: list[GeminiInteractionTextPart | GeminiInteractionMediaPart] = []
+    if text.strip():
+        blocks.append(GeminiInteractionTextPart(text=f"text:\n{text}\n"))
+    labels = (
+        list(video)
+        + _decision_labels(audio, lambda clip: clip["waveform"].shape[0], "clip")
+        + _decision_labels(images, get_number_of_images, "frame")
+    )
+    if labels:
+        parts = await build_gemini_media_parts(cls, list(images.values()), list(audio.values()), list(video.values()))
+        for label, part in zip(labels, parts):
+            blocks.append(GeminiInteractionTextPart(text=f"{label}:\n"))
+            blocks.append(to_interaction_media_part(part))
+    if not blocks:
+        raise ValueError("Connect text, an image, audio or video for the question to be about.")
+    return blocks
+
+
+async def _run_gemini_decision(
+    cls: type[IO.ComfyNode],
+    model: str,
+    question: GeminiDecisionNoulQuestion | GeminiDecisionChoiceQuestion | GeminiDecisionScoreQuestion,
+    blocks: list[GeminiInteractionTextPart | GeminiInteractionMediaPart],
+) -> GeminiDecisionAnswer:
+    response = await sync_op(
+        cls,
+        ApiEndpoint(path=GEMINI_DECISIONS_ENDPOINT, method="POST"),
+        response_model=GeminiDecisionResponse,
+        data=GeminiDecisionRequest(model=model, input=blocks, questions={"answer": question}),
+    )
+    return response.answers["answer"]
+
+
+def _parse_decision_options(options: str) -> list[str]:
+    names: list[str] = []
+    for number, line in enumerate(options.splitlines(), 1):
+        name = line.strip()
+        if not name:
+            continue
+        if len(name) > 128:
+            raise ValueError(f"The option on line {number} is longer than 128 characters.")
+        if not name.isprintable():
+            raise ValueError(f"The option on line {number} contains an invisible or control character.")
+        if list(map(str.casefold, name)) in (list(map(str.casefold, n)) for n in names):
+            raise ValueError(f"The option '{name}' is listed twice. Options must differ by more than letter case.")
+        names.append(name)
+    if not 2 <= len(names) <= 255:
+        raise ValueError(f"Give 2 to 255 options, one per line. Got {len(names)}.")
+    return names
+
+
+class GeminiDecisionYesNo(IO.ComfyNode):
+
+    @classmethod
+    def define_schema(cls):
+        return IO.Schema(
+            node_id="GeminiDecisionYesNo",
+            display_name="Google Gemini Decision (Yes/No)",
+            category="partner/text/Gemini",
+            description="Ask a yes/no question about text, images, audio or video. "
+            "Connect `result` to an If/Else Switch node to choose between two paths.",
+            search_aliases=["if", "condition", "check", "filter", "classify", "verify", "yes no", "boolean"],
+            inputs=[
+                IO.Combo.Input("model", options=["gemini-decision-1"]),
+                IO.String.Input(
+                    "question",
+                    multiline=True,
+                    default="Is there a person in the image?",
+                    tooltip="A question with a yes or no answer about what is connected. "
+                    "Ask it so that yes is the case you act on. With several inputs, use the socket names, "
+                    "for example 'Does image_2 show the same person as image_1?'",
+                ),
+                IO.Float.Input(
+                    "threshold",
+                    default=0.5,
+                    min=0.01,
+                    max=0.99,
+                    step=0.01,
+                    tooltip="The answer is yes when the probability of yes is at least this value. "
+                    "Clear yes answers score about 0.85 to 0.92, so 0.9 or more rejects many of them.",
+                ),
+                *_decision_inputs(),
+            ],
+            outputs=[
+                IO.Boolean.Output(display_name="result"),
+                IO.String.Output(display_name="answer"),
+                IO.Float.Output(display_name="probability"),
+            ],
+            hidden=[
+                IO.Hidden.auth_token_comfy_org,
+                IO.Hidden.api_key_comfy_org,
+                IO.Hidden.unique_id,
+            ],
+            is_api_node=True,
+            price_badge=GEMINI_DECISION_PRICE_BADGE,
+        )
+
+    @classmethod
+    async def execute(
+        cls,
+        model: str,
+        question: str,
+        threshold: float,
+        images: IO.Autogrow.Type,
+        audio: IO.Autogrow.Type,
+        video: IO.Autogrow.Type,
+        text: str = "",
+    ) -> IO.NodeOutput:
+        validate_string(question, field_name="question", min_length=1, max_length=5000)
+        validate_string(text, field_name="text", max_length=20000)
+        blocks = await _decision_input(cls, text, images, audio, video)
+        answer = await _run_gemini_decision(cls, model, GeminiDecisionNoulQuestion(instructions=question), blocks)
+        result = answer.noul >= threshold
+        verdict = "yes" if result else "no"
+        PromptServer.instance.send_progress_text(f"{verdict} · {answer.noul:.2f}", cls.hidden.unique_id)
+        return IO.NodeOutput(result, verdict, answer.noul)
+
+
+class GeminiDecisionChoice(IO.ComfyNode):
+
+    @classmethod
+    def define_schema(cls):
+        return IO.Schema(
+            node_id="GeminiDecisionChoice",
+            display_name="Google Gemini Decision (Choice)",
+            category="partner/text/Gemini",
+            description="Pick one of your options for text, images, audio or video. "
+            "Connect `choice` to a Branch node whose inputs carry the option names, or use `option_index`.",
+            search_aliases=["classify", "category", "route", "select", "label", "choose"],
+            inputs=[
+                IO.Combo.Input("model", options=["gemini-decision-1"]),
+                IO.String.Input(
+                    "question",
+                    multiline=True,
+                    default="What style is the image?",
+                    tooltip="The question the options answer. With several inputs, use the socket names, "
+                    "for example 'Which season is shown in image_1?'",
+                ),
+                IO.String.Input(
+                    "options",
+                    multiline=True,
+                    default="photo\nillustration\n3d render\nanime\nsketch\nother",
+                    tooltip="One option per line, used exactly as typed. "
+                    "Add an option such as `other` for inputs that fit none of them.",
+                ),
+                *_decision_inputs(),
+            ],
+            outputs=[
+                IO.String.Output(display_name="choice"),
+                IO.Int.Output(
+                    display_name="option_index",
+                    tooltip="Position of the chosen option in the options list, starting at 0.",
+                ),
+                IO.Float.Output(display_name="confidence"),
+            ],
+            hidden=[
+                IO.Hidden.auth_token_comfy_org,
+                IO.Hidden.api_key_comfy_org,
+                IO.Hidden.unique_id,
+            ],
+            is_api_node=True,
+            price_badge=GEMINI_DECISION_PRICE_BADGE,
+        )
+
+    @classmethod
+    async def execute(
+        cls,
+        model: str,
+        question: str,
+        options: str,
+        images: IO.Autogrow.Type,
+        audio: IO.Autogrow.Type,
+        video: IO.Autogrow.Type,
+        text: str = "",
+    ) -> IO.NodeOutput:
+        validate_string(question, field_name="question", min_length=1, max_length=5000)
+        validate_string(text, field_name="text", max_length=20000)
+        names = _parse_decision_options(options)
+        blocks = await _decision_input(cls, text, images, audio, video)
+        answer = await _run_gemini_decision(
+            cls,
+            model,
+            GeminiDecisionChoiceQuestion(instructions=question, criteria={name: "" for name in names}),
+            blocks,
+        )
+        PromptServer.instance.send_progress_text(f"{answer.choice} · {answer.confidence:.2f}", cls.hidden.unique_id)
+        return IO.NodeOutput(answer.choice, names.index(answer.choice), answer.confidence)
+
+
+class GeminiDecisionPickImage(IO.ComfyNode):
+
+    @classmethod
+    def define_schema(cls):
+        return IO.Schema(
+            node_id="GeminiDecisionPickImage",
+            display_name="Google Gemini Decision (Pick Image)",
+            category="partner/text/Gemini",
+            description="Pick one image from a batch. Connect `index` to Get Image from Batch to keep the picked image.",
+            search_aliases=["pick best", "best image", "select image", "best of", "rank images"],
+            inputs=[
+                IO.Combo.Input("model", options=["gemini-decision-1"]),
+                IO.String.Input(
+                    "question",
+                    multiline=True,
+                    default="Which image best matches the prompt in text? "
+                    "If there is no text, which image has the best quality?",
+                    tooltip="Which image to pick. Connect the prompt to `text` to pick the image that matches it best.",
+                ),
+                IO.Image.Input("images", tooltip="The images to choose from, 2 to 64."),
+                IO.String.Input(
+                    "text",
+                    multiline=True,
+                    force_input=True,
+                    optional=True,
+                    tooltip="The text the question is about, such as the prompt the images were made from.",
+                ),
+            ],
+            outputs=[
+                IO.Int.Output(display_name="index"),
+                IO.Float.Output(display_name="confidence"),
+            ],
+            hidden=[
+                IO.Hidden.auth_token_comfy_org,
+                IO.Hidden.api_key_comfy_org,
+                IO.Hidden.unique_id,
+            ],
+            is_api_node=True,
+            price_badge=GEMINI_DECISION_PRICE_BADGE,
+        )
+
+    @classmethod
+    async def execute(
+        cls,
+        model: str,
+        question: str,
+        images: Input.Image,
+        text: str = "",
+    ) -> IO.NodeOutput:
+        validate_string(question, field_name="question", min_length=1, max_length=5000)
+        validate_string(text, field_name="text", max_length=20000)
+        count = get_number_of_images(images)
+        if not 2 <= count <= 64:
+            raise ValueError(f"Pick Image takes 2 to 64 images, got {count}.")
+        names = [f"images, frame {i}" for i in range(1, count + 1)]
+        blocks = await _decision_input(cls, text, {"images": images}, {}, {})
+        answer = await _run_gemini_decision(
+            cls,
+            model,
+            GeminiDecisionChoiceQuestion(instructions=question, criteria={name: "" for name in names}),
+            blocks,
+        )
+        index = names.index(answer.choice)
+        PromptServer.instance.send_progress_text(
+            f"image {index + 1} of {count} · {answer.confidence:.2f}", cls.hidden.unique_id
+        )
+        return IO.NodeOutput(index, answer.confidence)
+
+
+class GeminiDecisionScore(IO.ComfyNode):
+
+    @classmethod
+    def define_schema(cls):
+        return IO.Schema(
+            node_id="GeminiDecisionScore",
+            display_name="Google Gemini Decision (Score)",
+            category="partner/text/Gemini",
+            description="Rate text, images, audio or video from 1 to 10. "
+            "Connect `result` to an If/Else Switch node to act on the score.",
+            search_aliases=["rate", "rating", "quality", "grade", "judge", "evaluate"],
+            inputs=[
+                IO.Combo.Input("model", options=["gemini-decision-1"]),
+                IO.String.Input(
+                    "question",
+                    multiline=True,
+                    default="Rate the technical quality of the image from 1 (worst) to 10 (best).",
+                    tooltip="What to rate, on a scale from 1 to 10. Say what 1 and 10 mean, as in the example.",
+                ),
+                IO.Float.Input(
+                    "threshold",
+                    default=6.0,
+                    min=1.0,
+                    max=10.0,
+                    step=0.1,
+                    tooltip="`result` is true when the score is at least this value. "
+                    "Clean, sharp images score about 7 to 8, badly damaged ones about 3 to 5.",
+                ),
+                *_decision_inputs(),
+            ],
+            outputs=[
+                IO.Boolean.Output(display_name="result"),
+                IO.Float.Output(display_name="score"),
+            ],
+            hidden=[
+                IO.Hidden.auth_token_comfy_org,
+                IO.Hidden.api_key_comfy_org,
+                IO.Hidden.unique_id,
+            ],
+            is_api_node=True,
+            price_badge=GEMINI_DECISION_PRICE_BADGE,
+        )
+
+    @classmethod
+    async def execute(
+        cls,
+        model: str,
+        question: str,
+        threshold: float,
+        images: IO.Autogrow.Type,
+        audio: IO.Autogrow.Type,
+        video: IO.Autogrow.Type,
+        text: str = "",
+    ) -> IO.NodeOutput:
+        validate_string(question, field_name="question", min_length=1, max_length=5000)
+        validate_string(text, field_name="text", max_length=20000)
+        blocks = await _decision_input(cls, text, images, audio, video)
+        answer = await _run_gemini_decision(
+            cls,
+            model,
+            GeminiDecisionScoreQuestion(instructions=question, criteria=[str(i) for i in range(1, 11)]),
+            blocks,
+        )
+        score = answer.score + 1
+        result = score >= threshold
+        PromptServer.instance.send_progress_text(
+            f"{score:.1f} / 10 · {'pass' if result else 'fail'}", cls.hidden.unique_id
+        )
+        return IO.NodeOutput(result, score)
+
+
 class GeminiExtension(ComfyExtension):
     @override
     async def get_node_list(self) -> list[type[IO.ComfyNode]]:
@@ -2215,6 +2727,10 @@ class GeminiExtension(ComfyExtension):
             GeminiVideoOmni,
             GeminiVideoOmniV2,
             GeminiInputFiles,
+            GeminiDecisionYesNo,
+            GeminiDecisionChoice,
+            GeminiDecisionPickImage,
+            GeminiDecisionScore,
         ]
 
 

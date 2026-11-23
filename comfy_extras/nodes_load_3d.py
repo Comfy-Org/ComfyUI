@@ -185,7 +185,7 @@ class Preview3DAdvanced(IO.ComfyNode):
             camera_info,
             width,
             height,
-            ui=UI.PreviewUI3DAdvanced(filename, camera_info, model_3d_info, folder_type=IO.FolderType.temp),
+            ui=UI.Saved3DModels([UI.SavedResult(filename, "", IO.FolderType.temp)], camera_info, model_3d_info),
         )
 
 
@@ -256,7 +256,7 @@ class PreviewGaussianSplat(IO.ComfyNode):
             camera_info,
             width,
             height,
-            ui=UI.PreviewUI3DAdvanced(filename, camera_info, model_3d_info, folder_type=IO.FolderType.temp),
+            ui=UI.Saved3DModels([UI.SavedResult(filename, "", IO.FolderType.temp)], camera_info, model_3d_info),
         )
 
 
@@ -318,7 +318,7 @@ class PreviewPointCloud(IO.ComfyNode):
             camera_info,
             width,
             height,
-            ui=UI.PreviewUI3DAdvanced(filename, camera_info, model_3d_info, folder_type=IO.FolderType.temp),
+            ui=UI.Saved3DModels([UI.SavedResult(filename, "", IO.FolderType.temp)], camera_info, model_3d_info),
         )
 
 

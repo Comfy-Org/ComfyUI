@@ -9,6 +9,7 @@ from types import SimpleNamespace
 import time
 
 import folder_paths
+from app import governance
 
 
 def _load_execute_prestartup_script():
@@ -19,6 +20,7 @@ def _load_execute_prestartup_script():
     namespace = {
         "args": SimpleNamespace(disable_all_custom_nodes=False, whitelist_custom_nodes=[], enable_manager=False),
         "folder_paths": folder_paths,
+        "governance": governance,
         "importlib": importlib,
         "logging": logging,
         "os": os,

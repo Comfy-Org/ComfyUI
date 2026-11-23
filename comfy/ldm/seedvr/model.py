@@ -3,6 +3,7 @@ from typing import Optional, Tuple, Union, List, Dict, Any, Callable
 import torch.nn.functional as F
 from math import ceil, pi
 import torch
+from comfy.ldm.modules.attention import AttentionTensorContainer, ComfyAttention
 from itertools import accumulate, chain
 from comfy.ldm.modules.diffusionmodules.model import get_timestep_embedding
 from comfy.ldm.seedvr.attention import optimized_var_attention
@@ -488,6 +489,7 @@ class NaMMAttention(nn.Module):
         device, dtype, operations,
     ):
         super().__init__()
+        self.comfy_attention = ComfyAttention()
         dim = MMArg(vid_dim, txt_dim)
         self.heads = heads
         inner_dim = heads * head_dim
@@ -597,6 +599,7 @@ class NaSwinAttention(NaMMAttention):
 
         vid_q, vid_k, vid_v = vid_qkv_win.unbind(1)
         txt_q, txt_k, txt_v = txt_qkv.unbind(1)
+        del txt_qkv, vid_qkv_win
 
         vid_q, txt_q = self.norm_q(vid_q, txt_q)
         vid_k, txt_k = self.norm_k(vid_k, txt_k)
@@ -624,14 +627,14 @@ class NaSwinAttention(NaMMAttention):
         concat_win, unconcat_win, cu_seqlens_win = cache_win(
             "mm_pnp", lambda: repeat_concat_idx(vid_len_win, txt_len, window_count)
         )
-        q = concat_win(vid_q, txt_q)
+        q = AttentionTensorContainer(concat_win(vid_q, txt_q))
         del vid_q, txt_q
-        k = concat_win(vid_k, txt_k)
+        k = AttentionTensorContainer(concat_win(vid_k, txt_k))
         del vid_k, txt_k
-        v = concat_win(vid_v, txt_v)
-        del vid_v, txt_v, vid_qkv_win, txt_qkv
+        v = AttentionTensorContainer(concat_win(vid_v, txt_v))
+        del vid_v, txt_v
         out = optimized_var_attention(
-            q=q, k=k, v=v,
+            q=q, k=k, v=v, preferred_attention=self.comfy_attention,
             heads=self.heads, skip_reshape=True, skip_output_reshape=True,
             cu_seqlens_q=cu_seqlens_win,
             cu_seqlens_k=cu_seqlens_win,

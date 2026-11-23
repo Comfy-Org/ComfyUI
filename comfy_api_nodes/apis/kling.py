@@ -1,4 +1,4 @@
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 class MultiPromptEntry(BaseModel):
@@ -173,35 +173,138 @@ class Kling3TurboImage2VideoRequest(BaseModel):
     settings: Kling3TurboSettings | None = Field(None)
 
 
-class Kling3TurboCreateData(BaseModel):
+class Kling4Settings(BaseModel):
+    resolution: str = Field(..., description="'720p', '1080p' or '4k'; Flash is 720p only")
+    aspect_ratio: str | None = Field(None, description="'16:9', '9:16', '1:1', '21:9', '4:3', '3:4'; omni also 'adaptive'")
+    duration: int | None = Field(None, description="3-30 seconds, 3-20 on Flash; omitted for edits to keep the input length")
+    audio: str | None = Field(None, description="'original' keeps the input video's audio; omitted generates new audio")
+    dynamic_range: str | None = Field(None, description="'sdr' or 'hdr'; hdr is 1080p and 4k only")
+
+
+class Kling4Content(BaseModel):
+    type: str = Field(
+        ...,
+        description="prompt, first_frame, middle_frame, last_frame, refer_image, feature_video, base_video, "
+        "style_refer_image, subject_refer_image",
+    )
+    text: str | None = Field(None)
+    url: str | None = Field(None)
+    id: str | None = Field(None, description="Name the prompt refers to as @id")
+
+
+class Kling4Text2VideoRequest(BaseModel):
+    prompt: str = Field(...)
+    settings: Kling4Settings = Field(...)
+
+
+class Kling4ContentsRequest(BaseModel):
+    contents: list[Kling4Content] = Field(...)
+    settings: Kling4Settings = Field(...)
+
+
+class Kling4ImageSettings(BaseModel):
+    result_type: str = Field(..., description="'single' or 'series'")
+    n: int | None = Field(None)
+    series_amount: int | str | None = Field(None, description="2-10 or 'auto'")
+    resolution: str = Field(..., description="'2k', '4k' or '8k'")
+    aspect_ratio: str = Field(...)
+
+
+class Kling4ImageRequest(BaseModel):
+    contents: list[Kling4Content] = Field(...)
+    settings: Kling4ImageSettings = Field(...)
+
+
+class Kling4LongImageSettings(BaseModel):
+    skill: str = Field(..., description="'webpage' or 'ecommerce'")
+    resolution: str = Field(..., description="'1k' or '2k'")
+    length: str | None = Field(None, description="'short', 'medium' or 'long'; ecommerce only")
+
+
+class Kling4LongImageRequest(BaseModel):
+    contents: list[Kling4Content] = Field(...)
+    settings: Kling4LongImageSettings = Field(...)
+
+
+class KlingTaskCreateData(BaseModel):
     id: str | None = Field(None, description="Task ID")
     status: str | None = Field(None)
     message: str | None = Field(None)
 
 
-class Kling3TurboCreateResponse(BaseModel):
+class KlingTaskCreateResponse(BaseModel):
     code: int | None = Field(None)
     message: str | None = Field(None)
     request_id: str | None = Field(None)
-    data: Kling3TurboCreateData | None = Field(None)
+    data: KlingTaskCreateData | None = Field(None)
 
 
-class Kling3TurboOutput(BaseModel):
+class KlingTaskOutput(BaseModel):
     type: str | None = Field(None, description="'video', 'image', 'audio', ...")
     id: str | None = Field(None)
     url: str | None = Field(None)
     duration: str | None = Field(None)
 
 
-class Kling3TurboTaskData(BaseModel):
+class KlingTaskData(BaseModel):
     id: str | None = Field(None)
     status: str | None = Field(None, description="submitted | processing | succeeded | failed")
     message: str | None = Field(None)
-    outputs: list[Kling3TurboOutput] | None = Field(None)
+    outputs: list[KlingTaskOutput] | None = Field(None)
 
 
-class Kling3TurboQueryResponse(BaseModel):
+class KlingTaskQueryResponse(BaseModel):
     code: int | None = Field(None)
     message: str | None = Field(None)
     request_id: str | None = Field(None)
-    data: list[Kling3TurboTaskData] | None = Field(None)
+    data: list[KlingTaskData] | None = Field(None)
+
+
+class KlingSolutionContent(BaseModel):
+    type: str = Field(..., description="'product_image' or 'person_image'")
+    url: str = Field(...)
+
+
+class KlingTryOnSettings(BaseModel):
+    keep_pose: bool = Field(...)
+
+
+class KlingTryOnRequest(BaseModel):
+    contents: list[KlingSolutionContent] = Field(...)
+    settings: KlingTryOnSettings = Field(...)
+
+
+class KlingSolutionCreateData(BaseModel):
+    task_id: str | None = Field(None)
+    status: str | None = Field(None)
+
+
+class KlingSolutionCreateResponse(BaseModel):
+    code: int | None = Field(None)
+    message: str | None = Field(None)
+    request_id: str | None = Field(None)
+    data: KlingSolutionCreateData | None = Field(None)
+
+
+class KlingSolutionOutput(BaseModel):
+    type: str | None = Field(None)
+    url: str | None = Field(None)
+
+
+class KlingSolutionTask(BaseModel):
+    id: str | None = Field(None)
+    status: str | None = Field(None, description="submitted | processing | succeed | failed")
+    message: str | None = Field(None)
+    outputs: list[KlingSolutionOutput] | None = Field(None)
+
+
+class KlingSolutionQueryResponse(BaseModel):
+    code: int | None = Field(None)
+    message: str | None = Field(None)
+    request_id: str | None = Field(None)
+    data: list[KlingSolutionTask] | None = Field(None)
+
+    @field_validator("data", mode="before")
+    @classmethod
+    def single_task_as_list(cls, v):
+        return [v] if isinstance(v, dict) else v

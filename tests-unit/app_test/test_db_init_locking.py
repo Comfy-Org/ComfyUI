@@ -3,18 +3,11 @@ import os
 import sqlite3
 
 import pytest
-import torch
 from alembic import command
 from alembic.config import Config
 from filelock import FileLock, Timeout
 
 from app.database import db as db_module
-from comfy.cli_args import args as cli_args
-
-if not torch.cuda.is_available():
-    cli_args.cpu = True
-
-import main  # noqa: E402
 
 _PRE_HEAD = "0006_add_loader_path"
 
@@ -132,64 +125,6 @@ def test_legacy_database_copy_runs_under_file_lock(tmp_path, monkeypatch):
             db_module._db_lock.release(force=True)
 
     assert copied == [(str(legacy_db) + ".bak", str(target_db))]
-
-
-class _AssetsOn:
-    enabled = True
-
-    def startup(self):
-        pass
-
-
-def test_setup_database_exits_for_file_lock_when_assets_are_enabled(monkeypatch, caplog):
-    monkeypatch.setattr(main, "dependencies_available", lambda: True)
-
-    def _raise_file_lock():
-        raise RuntimeError(
-            "Could not acquire lock on database 'x.db'. "
-            "Another ComfyUI process may already be using it. "
-            "Use --database-url to specify a separate database file."
-        )
-
-    monkeypatch.setattr(main, "init_db", _raise_file_lock)
-
-    with caplog.at_level(logging.ERROR), pytest.raises(SystemExit) as error:
-        main.setup_database(_AssetsOn())
-
-    assert error.value.code == 1
-    assert "Database is locked. Another ComfyUI process is already using this database." in caplog.text
-    assert "The --enable-assets flag requires a working database connection." not in caplog.text
-
-
-def test_setup_database_exits_for_driver_lock_when_assets_are_enabled(monkeypatch, caplog):
-    monkeypatch.setattr(main, "dependencies_available", lambda: True)
-
-    def _raise_driver_lock():
-        raise Exception("sqlite3.OperationalError: database is locked")
-
-    monkeypatch.setattr(main, "init_db", _raise_driver_lock)
-
-    with caplog.at_level(logging.ERROR), pytest.raises(SystemExit) as error:
-        main.setup_database(_AssetsOn())
-
-    assert error.value.code == 1
-    assert "Database is locked. Another ComfyUI process is already using this database." in caplog.text
-
-
-def test_setup_database_exits_for_other_failures_when_assets_are_enabled(monkeypatch, caplog):
-    monkeypatch.setattr(main, "dependencies_available", lambda: True)
-
-    def _raise_other():
-        raise RuntimeError("alembic config exploded")
-
-    monkeypatch.setattr(main, "init_db", _raise_other)
-
-    with caplog.at_level(logging.ERROR), pytest.raises(SystemExit) as error:
-        main.setup_database(_AssetsOn())
-
-    assert error.value.code == 1
-    assert "The --enable-assets flag requires a working database connection." in caplog.text
-    assert "Database is locked." not in caplog.text
 
 
 def test_failed_restore_does_not_mask_the_upgrade_error(stale_db, monkeypatch, caplog):

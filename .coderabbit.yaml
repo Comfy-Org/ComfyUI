@@ -29,6 +29,18 @@ reviews:
   in_progress_fortune: false
   enable_prompt_for_ai_agents: true
 
+  pre_merge_checks:
+    title:
+      mode: "error"
+      requirements: |
+        Pull requests that add or modify Partner Node implementations or
+        provider metadata under comfy_api_nodes/ must start their title with
+        "[Partner Nodes] ". Prefer the existing form
+        "[Partner Nodes] type(Provider): concise description" when a
+        conventional-commit type and provider apply. Do not require this
+        prefix for unrelated changes, even when they touch shared API-node
+        infrastructure or tests.
+
   path_filters:
     - "!comfy_api_nodes/apis/**"
     - "!**/generated/*.pyi"
@@ -140,5 +152,32 @@ knowledge_base:
     filePatterns:
       - files: "AGENTS.md"
         applyTo: "**"
+  linked_repositories:
+    - repository: "Comfy-Org/ComfyUI_frontend"
+      instructions: |
+        Frontend consumer of Core APIs, routes, feature flags, asset behavior,
+        node metadata, and package-version rollouts. Check for compatibility
+        issues and changes that require coordinated rollout or merge ordering.
+        Surface linked-repository findings only when they change a review
+        conclusion or provide decision-relevant compatibility, ownership,
+        rollout, or merge-order evidence. Continue using the repository as
+        review context, but omit routine search inventories and no-match results
+        that do not provide decision-relevant evidence.
+        Treat changes to frontend-consumed HTTP or WebSocket routes,
+        request/response schemas, error semantics, asset paths, node metadata,
+        feature flags, and package versions as material by default. When the
+        frontend contains a consumer or test for a changed contract, surface
+        that evidence and state whether coordinated changes or rollout are
+        required; do not suppress it as a routine no-match result.
+    - repository: "Comfy-Org/comfy-kitchen"
+      instructions: |
+        Owns optimized inference operations and kernels used by ComfyUI. Check
+        whether new model math or backend-specific operations duplicate an
+        existing implementation or belong in comfy-kitchen instead of Core.
+        Surface linked-repository findings only when they change a review
+        conclusion or provide decision-relevant ownership, performance,
+        compatibility, or rollout evidence. Continue using the repository as
+        review context, but omit routine search inventories and no-match results
+        that do not provide decision-relevant evidence.
   learnings:
     scope: "auto"

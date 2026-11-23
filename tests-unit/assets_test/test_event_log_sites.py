@@ -63,6 +63,6 @@ def test_enabled_assets_emits_once_with_the_hashing_flag(
 
 
 def test_noassets_emits_no_enabled_event(tmp_path: Path) -> None:
-    output = run_quick_startup(tmp_path)
+    output = run_quick_startup(tmp_path, "--disable-assets")
 
     assert f"{TAG} assets.enabled " not in output

@@ -12,7 +12,7 @@ Reference: https://github.com/thu-ml/Causal-Forcing
 import torch
 import torch.nn as nn
 
-from comfy.ldm.modules.attention import optimized_attention
+from comfy.ldm.modules.attention import AttentionTensorContainer, ComfyAttention, optimized_attention
 from comfy.ldm.flux.math import apply_rope1
 from comfy.ldm.wan.model import (
     sinusoidal_embedding_1d,
@@ -31,6 +31,7 @@ class CausalWanSelfAttention(nn.Module):
                  eps=1e-6, operation_settings={}):
         assert dim % num_heads == 0
         super().__init__()
+        self.comfy_attention = ComfyAttention()
         self.dim = dim
         self.num_heads = num_heads
         self.head_dim = dim // num_heads
@@ -55,15 +56,7 @@ class CausalWanSelfAttention(nn.Module):
         k = apply_rope1(self.norm_k(self.k(x)).view(b, s, n, d), freqs)
         v = self.v(x).view(b, s, n, d)
 
-        if kv_cache is None:
-            x = optimized_attention(
-                q.view(b, s, n * d),
-                k.view(b, s, n * d),
-                v.view(b, s, n * d),
-                heads=self.num_heads,
-                transformer_options=transformer_options,
-            )
-        else:
+        if kv_cache is not None:
             end = kv_cache["end"]
             new_end = end + s
 
@@ -72,13 +65,17 @@ class CausalWanSelfAttention(nn.Module):
             kv_cache["v"][:, end:new_end] = v
             kv_cache["end"] = new_end
 
-            x = optimized_attention(
-                q.view(b, s, n * d),
-                kv_cache["k"][:, :new_end].view(b, new_end, n * d),
-                kv_cache["v"][:, :new_end].view(b, new_end, n * d),
-                heads=self.num_heads,
-                transformer_options=transformer_options,
-            )
+            k = kv_cache["k"][:, :new_end]
+            v = kv_cache["v"][:, :new_end]
+
+        q = AttentionTensorContainer(q.view(b, s, n * d))
+        k = AttentionTensorContainer(k.reshape(b, -1, n * d))
+        v = AttentionTensorContainer(v.reshape(b, -1, n * d))
+        x = optimized_attention(
+            q, k, v, heads=self.num_heads,
+            preferred_attention=self.comfy_attention,
+            transformer_options=transformer_options,
+        )
 
         x = self.o(x)
         return x
@@ -114,10 +111,10 @@ class CausalWanAttentionBlock(WanAttentionBlock):
 
         # Cross-attention with optional caching
         if crossattn_cache is not None and crossattn_cache.get("is_init"):
-            q = self.cross_attn.norm_q(self.cross_attn.q(self.norm3(x)))
+            q = AttentionTensorContainer(self.cross_attn.norm_q(self.cross_attn.q(self.norm3(x))))
             x_ca = optimized_attention(
-                q, crossattn_cache["k"], crossattn_cache["v"],
-                heads=self.num_heads, transformer_options=transformer_options)
+                q, AttentionTensorContainer(crossattn_cache["k"]), AttentionTensorContainer(crossattn_cache["v"]),
+                heads=self.num_heads, preferred_attention=self.cross_attn.comfy_attention, transformer_options=transformer_options)
             x = x + self.cross_attn.o(x_ca)
         else:
             x = x + self.cross_attn(self.norm3(x), context, context_img_len=context_img_len, transformer_options=transformer_options)

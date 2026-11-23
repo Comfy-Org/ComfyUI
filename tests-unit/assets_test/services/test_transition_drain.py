@@ -305,7 +305,7 @@ def test_transition_drain_skips_out_of_root_path(session, temp_dir, monkeypatch,
         except ValueError as error:
             pytest.fail(
                 f"an out-of-root path escaped the drain as {error!r}; setup_database turns that "
-                f"into sys.exit(1) when --enable-assets is set"
+                f"into sys.exit(1) when assets are on"
             )
     session.commit()
 

@@ -1,5 +1,5 @@
 import os
-from typing import NamedTuple, Protocol
+from typing import Callable, NamedTuple, Protocol
 
 from app.assets.services.gil import yield_gil
 
@@ -53,11 +53,15 @@ def is_visible(name: str) -> bool:
 
 
 def list_files_recursively(
-    base_dir: str, counter: _DirListingCounter | None = None
+    base_dir: str,
+    counter: _DirListingCounter | None = None,
+    should_stop: Callable[[], bool] | None = None,
 ) -> list[str]:
     """Recursively list all files in a directory, following symlinks.
 
-    ``counter.dirs_listed`` gains one per directory os.walk listed.
+    ``counter.dirs_listed`` gains one per directory os.walk listed. ``should_stop`` is
+    called before each directory; it may block, and True ends the walk early with a
+    partial list.
     """
     out: list[str] = []
     base_abs = os.path.abspath(base_dir)
@@ -68,6 +72,8 @@ def list_files_recursively(
     for dirpath, subdirs, filenames in os.walk(
         base_abs, topdown=True, followlinks=True
     ):
+        if should_stop is not None and should_stop():
+            break
         if counter is not None:
             counter.dirs_listed += 1
         try:

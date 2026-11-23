@@ -94,7 +94,7 @@ def test_enrichment_retains_dimensions_when_image_extraction_degrades(
             "app.assets.scanner.extract_file_metadata",
             return_value=_ExtractedMetadata("image/png", {"filename": "image.png"}),
         ),
-        patch("app.assets.scanner.extract_image_dimensions", return_value=None),
+        patch("app.assets.scanner.extract_media_metadata", return_value=None),
     ):
         enrich_asset(session, str(path), content.id, record.id)
 

@@ -2,6 +2,7 @@ import logging
 import re
 import threading
 import time
+from datetime import datetime
 from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from unittest.mock import Mock
@@ -98,7 +99,7 @@ def _configure_fast_phase(
     monkeypatch.setattr(
         seeder_module,
         "collect_paths_for_roots",
-        lambda _roots, _progress=None: [str(path) for path in paths],
+        lambda _roots, _progress=None, _should_stop=None: [str(path) for path in paths],
     )
     monkeypatch.setattr(
         seeder_module,
@@ -143,6 +144,7 @@ def _run_faulting_fast_phase(
         job_id: str | None,
         loader_path: str | None,
         tags: list[str],
+        created_at: datetime,
     ) -> Asset:
         if name == "broken.bin":
             raise original_fault
@@ -154,6 +156,7 @@ def _run_faulting_fast_phase(
             job_id=job_id,
             loader_path=loader_path,
             tags=tags,
+            created_at=created_at,
         )
 
     monkeypatch.setattr(scanner_module, "create_session", database_session)
@@ -609,12 +612,12 @@ def test_batch_insert_failure_emits_only_the_exception_type(
     monkeypatch.setattr(
         seeder_module,
         "collect_paths_for_roots",
-        lambda roots, progress=None: ["asset.safetensors"],
+        lambda roots, progress=None, should_stop=None: ["asset.safetensors"],
     )
     monkeypatch.setattr(
         seeder_module,
         "build_asset_specs",
-        lambda paths, existing_paths, enable_metadata_extraction, progress=None: (
+        lambda paths, existing_paths, enable_metadata_extraction, progress=None, should_stop=None: (
             [{"tags": []}],
             {},
             0,

@@ -305,6 +305,37 @@ class TestDynamicDependencyCycle:
             "expand": g.finalize(),
         }
 
+class TestDisabledNode:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {"required": {}}
+
+    RETURN_TYPES = ()
+    FUNCTION = "execute"
+    CATEGORY = "Testing/Nodes"
+    OUTPUT_NODE = True
+
+    def execute(self):
+        return ()
+
+class TestExpandsToDisabledNode:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {"required": {}}
+
+    RETURN_TYPES = ()
+    FUNCTION = "expand"
+    CATEGORY = "Testing/Nodes"
+    OUTPUT_NODE = True
+
+    def expand(self):
+        g = GraphBuilder()
+        g.node("TestDisabledNode")
+        return {
+            "result": (),
+            "expand": g.finalize(),
+        }
+
 class TestMixedExpansionReturns:
     @classmethod
     def INPUT_TYPES(cls):
@@ -543,8 +574,40 @@ class TestExecutedNodeIdsBlocking:
         await self.release_event.wait()
         return {"ui": {"completed": [True]}}
 
+class TestPaidOutputNode:
+    """An output node marked as an API node: a stand-in for a paid partner node."""
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {"required": {"seed": ("INT", {"default": 0})}}
+
+    RETURN_TYPES = ()
+    FUNCTION = "execute"
+    CATEGORY = "Testing/Nodes"
+    OUTPUT_NODE = True
+    API_NODE = True
+
+    def execute(self, seed):
+        return {"ui": {"text": [str(time.time_ns())]}}
+
+class TestOutputPassthrough:
+    """An output node that also returns a value, different on every execution."""
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {"required": {"seed": ("INT", {"default": 0})}}
+
+    RETURN_TYPES = ("STRING",)
+    FUNCTION = "execute"
+    CATEGORY = "Testing/Nodes"
+    OUTPUT_NODE = True
+
+    def execute(self, seed):
+        value = str(time.time_ns())
+        return {"ui": {"text": [value]}, "result": (value,)}
+
 TEST_NODE_CLASS_MAPPINGS = {
     "TestLazyMixImages": TestLazyMixImages,
+    "TestPaidOutputNode": TestPaidOutputNode,
+    "TestOutputPassthrough": TestOutputPassthrough,
     "TestVariadicAverage": TestVariadicAverage,
     "TestCustomIsChanged": TestCustomIsChanged,
     "TestIsChangedWithConstants": TestIsChangedWithConstants,
@@ -554,6 +617,8 @@ TEST_NODE_CLASS_MAPPINGS = {
     "TestCustomValidation4": TestCustomValidation4,
     "TestCustomValidation5": TestCustomValidation5,
     "TestDynamicDependencyCycle": TestDynamicDependencyCycle,
+    "TestDisabledNode": TestDisabledNode,
+    "TestExpandsToDisabledNode": TestExpandsToDisabledNode,
     "TestMixedExpansionReturns": TestMixedExpansionReturns,
     "TestSamplingInExpansion": TestSamplingInExpansion,
     "TestSleep": TestSleep,
@@ -566,6 +631,8 @@ TEST_NODE_CLASS_MAPPINGS = {
 
 TEST_NODE_DISPLAY_NAME_MAPPINGS = {
     "TestLazyMixImages": "Lazy Mix Images",
+    "TestPaidOutputNode": "Paid Output Node",
+    "TestOutputPassthrough": "Output Passthrough",
     "TestVariadicAverage": "Variadic Average",
     "TestCustomIsChanged": "Custom IsChanged",
     "TestIsChangedWithConstants": "IsChanged With Constants",
@@ -575,6 +642,8 @@ TEST_NODE_DISPLAY_NAME_MAPPINGS = {
     "TestCustomValidation4": "Custom Validation 4",
     "TestCustomValidation5": "Custom Validation 5",
     "TestDynamicDependencyCycle": "Dynamic Dependency Cycle",
+    "TestDisabledNode": "Disabled Node",
+    "TestExpandsToDisabledNode": "Expands To Disabled Node",
     "TestMixedExpansionReturns": "Mixed Expansion Returns",
     "TestSamplingInExpansion": "Sampling In Expansion",
     "TestSleep": "Test Sleep",
