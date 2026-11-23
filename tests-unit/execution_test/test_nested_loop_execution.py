@@ -850,7 +850,6 @@ def carried_close(source, accumulate=False):
 
 
 def chained_loops(tag, start, step=1, cache_first=True):
-    """Loop 1 adds an outside step each pass; loop 2 carries loop 1's result and increments it."""
     return {
         f"{tag}_start": {"class_type": "TestConstant", "inputs": {"value": start}},
         f"{tag}_step": {"class_type": "TestConstant", "inputs": {"value": step}},
@@ -865,7 +864,6 @@ def chained_loops(tag, start, step=1, cache_first=True):
 
 
 def test_loop_after_a_loop_does_not_share_another_branchs_cached_passes():
-    # The RAM pressure cache keeps every expansion in one key set, so equal keys share results.
     Capture.values = []
     executor = PromptExecutor(Server(), cache_type=CacheType.RAM_PRESSURE, cache_args={"ram": 0, "ram_inactive": 0})
 
@@ -919,7 +917,6 @@ def test_loop_after_an_accumulating_loop_reruns_when_it_returns_more_values(cach
 
 @pytest.mark.parametrize("cache_type", [False, CacheType.RAM_PRESSURE])
 def test_loop_after_an_uncached_loop_reruns_its_passes(cache_type):
-    # The first loop's passes always change, so nothing downstream of them can be reused.
     Increment.calls = []
     executor = PromptExecutor(Server(), cache_type=cache_type, cache_args={"ram": 0, "ram_inactive": 0})
 
