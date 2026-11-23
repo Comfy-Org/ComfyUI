@@ -10,14 +10,24 @@ import comfy.utils
 from comfy.memory_management import _read_file_slice, move_modules_reading_files
 
 
+arenas = []
+
+
 @pytest.fixture
 def checkpoint(tmp_path, monkeypatch):
     monkeypatch.setattr(comfy.memory_management, "aimdo_enabled", False)
     monkeypatch.setattr(comfy.utils, "DISABLE_MMAP", False)
-    # Pinned memory needs a GPU; the CPU runner stages through pageable memory instead.
-    monkeypatch.setattr(comfy.memory_management, "_staging_arena", None)
-    real_empty = torch.empty
-    monkeypatch.setattr(torch, "empty", lambda *a, pin_memory=False, **kw: real_empty(*a, **kw))
+    # Pinning needs a GPU; the CPU runner stages through pageable memory instead.
+    arenas.clear()
+
+    def get(self):
+        if self.buffer is None:
+            self.buffer = torch.empty(self.size, dtype=torch.uint8)
+            arenas.append(self)
+        return self.buffer
+
+    monkeypatch.setattr(comfy.memory_management._StagingArena, "get", get)
+    monkeypatch.setattr(comfy.memory_management._StagingArena, "close", lambda self: setattr(self, "buffer", None))
     torch.manual_seed(0)
     tensors = {
         "outer.weight": torch.randn(16, 8),
@@ -113,9 +123,13 @@ def test_staging_follows_the_pinned_memory_policy(monkeypatch):
     monkeypatch.setattr(mm.comfy.system_memory, "virtual_memory_available", lambda: 64 << 30)
     monkeypatch.setattr(mm, "TOTAL_PINNED_MEMORY", 0)
     monkeypatch.setattr(mm, "MAX_PINNED_MEMORY", 64 << 30)
-    assert mm.weight_staging_bytes(gpu) == 512 << 20
+    assert mm.weight_staging_bytes(gpu) == 128 << 20
     assert mm.weight_staging_bytes(torch.device("cpu")) == 0
     monkeypatch.setattr(mm, "TOTAL_PINNED_MEMORY", (64 << 30) - (100 << 20))
+    assert mm.weight_staging_bytes(gpu) == 100 << 20
+    # While staging runs, its buffer counts against the budget, e.g. for pins taken later in the load.
+    with mm.reserve_pinned_bytes(60 << 20):
+        assert mm.weight_staging_bytes(gpu) == 40 << 20
     assert mm.weight_staging_bytes(gpu) == 100 << 20
     monkeypatch.setattr(mm, "MAX_PINNED_MEMORY", -1)  # --disable-pinned-memory, integrated GPU
     assert mm.weight_staging_bytes(gpu) == 0
@@ -164,3 +178,18 @@ def test_ring_reuses_the_staging_buffer(checkpoint, monkeypatch):
     assert len(reads) == len(set(reads)) == 3
     for name, m in modules:
         assert torch.equal(m.t, tensors[name])
+
+
+def test_staging_buffer_is_only_allocated_when_used_and_released(checkpoint):
+    """Without file slices nothing is pinned; with them, the buffer does not outlive the load."""
+    path, tensors = checkpoint
+    plain = torch.nn.Module()
+    plain.weight = torch.nn.Parameter(tensors["outer.weight"].clone(), requires_grad=False)
+    move_modules_reading_files([plain], torch.device("cpu"), max_staged_bytes=1 << 20)
+    assert arenas == []
+
+    sd = comfy.utils.load_torch_file(str(path))
+    mapped = torch.nn.Module()
+    mapped.weight = torch.nn.Parameter(sd["outer.weight"], requires_grad=False)
+    move_modules_reading_files([mapped], torch.device("cpu"), max_staged_bytes=1 << 20)
+    assert len(arenas) == 1 and arenas[0].buffer is None

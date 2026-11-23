@@ -1109,7 +1109,8 @@ class ModelPatcher:
 
             staging = comfy.model_management.weight_staging_bytes(device_to)
             if staging > 0:
-                comfy.memory_management.move_modules_reading_files([x[2] for x in load_completely], device_to, staging)
+                with comfy.model_management.reserve_pinned_bytes(staging):
+                    comfy.memory_management.move_modules_reading_files([x[2] for x in load_completely], device_to, staging)
             else:
                 for x in load_completely:
                     x[2].to(device_to)

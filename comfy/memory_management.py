@@ -168,16 +168,30 @@ def _mmap_file_slice_tensors(module, seen):
 
 
 _STAGING_ALIGN = 256
-_staging_arena = None
 
 
-def _get_staging_arena(size):
-    """One pinned buffer, kept for later loads: pinning it is the slow part on some hosts."""
-    global _staging_arena
-    if _staging_arena is None or _staging_arena.numel() < size:
-        _staging_arena = None
-        _staging_arena = torch.empty(size, dtype=torch.uint8, pin_memory=True)
-    return _staging_arena
+class _StagingArena:
+    """A pinned host buffer for one load, allocated on first use and unpinned and freed on close."""
+
+    def __init__(self, size):
+        self.size = size
+        self.buffer = None
+        self.failed = False
+
+    def get(self):
+        """The pinned buffer, or None if it cannot be pinned."""
+        if self.buffer is None and not self.failed:
+            buffer = torch.empty(self.size, dtype=torch.uint8)
+            if torch.cuda.cudart().cudaHostRegister(buffer.data_ptr(), self.size, 1) == 0:
+                self.buffer = buffer
+            else:
+                self.failed = True
+        return self.buffer
+
+    def close(self):
+        if self.buffer is not None:
+            torch.cuda.cudart().cudaHostUnregister(self.buffer.data_ptr())
+            self.buffer = None
 
 
 def move_modules_reading_files(modules, device, max_staged_bytes, workers=4):
@@ -188,18 +202,21 @@ def move_modules_reading_files(modules, device, max_staged_bytes, workers=4):
     memory and copying from there is several times faster. The weights are read into
     one pinned buffer of ``max_staged_bytes``, used as a ring: modules are read ahead
     on ``workers`` threads while earlier ones are copied, and a module's region is
-    reused once its synchronous .to() has returned. A module larger than the buffer,
+    reused once its synchronous .to() has returned. The buffer is pinned only once a
+    module needs it and is released before returning. A module larger than the buffer,
     and tensors without a file slice or whose read fails, move as before.
     """
+    staging = _StagingArena(max_staged_bytes)
     try:
-        arena = _get_staging_arena(max_staged_bytes)
-    except RuntimeError:
-        for module in modules:
-            module.to(device)
-        return
-    capacity = max_staged_bytes
+        _move_through_ring(modules, device, staging, workers)
+    finally:
+        staging.close()
 
-    def read(found, start):
+
+def _move_through_ring(modules, device, staging, workers):
+    capacity = staging.size
+
+    def read(found, start, arena):
         staged = []
         offset = start
         for holder, src, info in found:
@@ -253,12 +270,19 @@ def move_modules_reading_files(modules, device, max_staged_bytes, workers=4):
                     move(old, staged.result())
                 module.to(device)
                 continue
+            arena = staging.get() if found else None
+            if found and arena is None:
+                while pending:
+                    old, _, _, staged = pending.popleft()
+                    move(old, staged.result())
+                module.to(device)
+                continue
             start = place(size)
             while start is None:
                 old, _, _, staged = pending.popleft()
                 move(old, staged.result())
                 start = place(size)
-            pending.append((module, start, start + size, pool.submit(read, found, start)))
+            pending.append((module, start, start + size, pool.submit(read, found, start, arena)))
             head = start + size
         while pending:
             old, _, _, staged = pending.popleft()
