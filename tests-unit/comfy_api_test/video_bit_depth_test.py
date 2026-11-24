@@ -113,7 +113,7 @@ def test_save_video_auto_format(gradient_components, tmp_path, monkeypatch, code
         {"format": "auto", "codec": {"codec": codec}},
     )
 
-    path = tmp_path / f"auto_00001_.{expected_suffix}"
+    path = tmp_path / f"auto_00001.{expected_suffix}"
     with av.open(path) as container:
         assert container.streams.video[0].codec.canonical_name == expected_codec
 
@@ -269,7 +269,7 @@ def test_save_video_prores_defaults(gradient_components, tmp_path, monkeypatch, 
         lambda *args: (str(tmp_path), "prores", 1, "", "prores"),
     )
     SaveVideo.execute(VideoFromComponents(gradient_components), "prores", "mov")
-    with av.open(str(tmp_path / "prores_00001_.mov")) as container:
+    with av.open(str(tmp_path / "prores_00001.mov")) as container:
         assert container.streams.video[0].profile == "4444"
         assert container.streams.video[0].format.name.startswith("yuv444p")
     assert "does not support" not in caplog.text
@@ -357,7 +357,7 @@ def test_create_video_chroma_control(gradient_components, tmp_path, monkeypatch,
     ).args[0]
     assert video.get_chroma_subsampling() == (actual if eager else requested)
     SaveVideo.execute(video, "chroma", {"format": extension, "codec": {"codec": codec}})
-    with av.open(str(tmp_path / f"chroma_00001_.{extension}")) as container:
+    with av.open(str(tmp_path / f"chroma_00001.{extension}")) as container:
         assert container.streams.video[0].format.name.startswith(f"yuv{actual}p")
         assert len(list(container.decode(video=0))) == 3
     if requested != actual:
