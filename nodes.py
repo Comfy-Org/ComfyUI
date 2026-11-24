@@ -1917,6 +1917,9 @@ class ImageScale:
             elif height == 0:
                 height = max(1, round(samples.shape[2] * width / samples.shape[3]))
 
+            if samples.shape[-2:] == (height, width):
+                return (image,)
+
             s = comfy.utils.common_upscale(samples, width, height, upscale_method, crop)
             s = s.movedim(1,-1)
         return (s,)
@@ -1938,6 +1941,8 @@ class ImageScaleBy:
         samples = image.movedim(-1,1)
         width = round(samples.shape[3] * scale_by)
         height = round(samples.shape[2] * scale_by)
+        if samples.shape[-2:] == (height, width):
+            return (image,)
         s = comfy.utils.common_upscale(samples, width, height, upscale_method, "disabled")
         s = s.movedim(1,-1)
         return (s,)
