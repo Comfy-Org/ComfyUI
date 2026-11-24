@@ -1,0 +1,927 @@
+{
+  "id": "555a0e08-2685-427b-89c7-97c76e612c15",
+  "revision": 0,
+  "last_node_id": 16,
+  "last_link_id": 17,
+  "nodes": [
+    {
+      "id": 1,
+      "type": "UnetLoaderGGUF",
+      "pos": [
+        11738.409318453889,
+        4103.015259661325
+      ],
+      "size": [
+        380,
+        80
+      ],
+      "flags": {},
+      "order": 0,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "MODEL",
+          "type": "MODEL",
+          "slot_index": 0,
+          "links": [
+            1
+          ]
+        }
+      ],
+      "title": "Stock LTX-2.5 Distilled — UD-Q5_K_XL",
+      "properties": {
+        "Node name for S&R": "UnetLoaderGGUF"
+      },
+      "widgets_values": [
+        "ltx-2.5-22b-distilled-UD-Q5_K_XL.gguf"
+      ],
+      "widgets_values_named": {
+        "unet_name": "ltx-2.5-22b-distilled-UD-Q5_K_XL.gguf"
+      }
+    },
+    {
+      "id": 2,
+      "type": "CLIPLoader",
+      "pos": [
+        11738.409318453889,
+        4283.015259661325
+      ],
+      "size": [
+        430,
+        106
+      ],
+      "flags": {},
+      "order": 1,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "CLIP",
+          "type": "CLIP",
+          "slot_index": 0,
+          "links": [
+            2,
+            14
+          ]
+        }
+      ],
+      "title": "Uncensored Gemma 4 12B (INT8, CPU)",
+      "properties": {
+        "Node name for S&R": "CLIPLoader"
+      },
+      "widgets_values": [
+        "gemma4_12b_ltx25_uncensored-int8.safetensors",
+        "ltxv",
+        "cpu"
+      ],
+      "widgets_values_named": {
+        "clip_name": "gemma4_12b_ltx25_uncensored-int8.safetensors",
+        "type": "ltxv",
+        "device": "cpu"
+      }
+    },
+    {
+      "id": 3,
+      "type": "CLIPTextEncode",
+      "pos": [
+        12218.409318453889,
+        4263.015259661325
+      ],
+      "size": [
+        430,
+        210
+      ],
+      "flags": {},
+      "order": 7,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "clip",
+          "type": "CLIP",
+          "link": 2
+        }
+      ],
+      "outputs": [
+        {
+          "name": "CONDITIONING",
+          "type": "CONDITIONING",
+          "slot_index": 0,
+          "links": [
+            3
+          ]
+        }
+      ],
+      "title": "Positive prompt",
+      "properties": {
+        "Node name for S&R": "CLIPTextEncode",
+        "cnr_id": "comfy-core",
+        "ver": "0.45.0"
+      },
+      "widgets_values": [
+        "Portrait of an adult woman with short brown hair in a blue jacket. Soft daylight. She looks at the camera as it slowly pulls back."
+      ],
+      "widgets_values_named": {
+        "text": "Portrait of an adult woman with short brown hair in a blue jacket. Soft daylight. She looks at the camera as it slowly pulls back."
+      }
+    },
+    {
+      "id": 4,
+      "type": "CLIPTextEncode",
+      "pos": [
+        12218.409318453889,
+        4493.015259661325
+      ],
+      "size": [
+        430,
+        210
+      ],
+      "flags": {},
+      "order": 8,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "clip",
+          "type": "CLIP",
+          "link": 14
+        }
+      ],
+      "outputs": [
+        {
+          "name": "CONDITIONING",
+          "type": "CONDITIONING",
+          "slot_index": 0,
+          "links": [
+            4
+          ]
+        }
+      ],
+      "title": "Negative prompt (Active via CFG++)",
+      "properties": {
+        "Node name for S&R": "CLIPTextEncode",
+        "cnr_id": "comfy-core",
+        "ver": "0.45.0"
+      },
+      "widgets_values": [
+        "Blur, flicker, abrupt camera movement, text, watermark."
+      ],
+      "widgets_values_named": {
+        "text": "Blur, flicker, abrupt camera movement, text, watermark."
+      }
+    },
+    {
+      "id": 5,
+      "type": "LTXVConditioning",
+      "pos": [
+        12698.409318453889,
+        4303.015259661325
+      ],
+      "size": [
+        250,
+        110
+      ],
+      "flags": {},
+      "order": 9,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "positive",
+          "type": "CONDITIONING",
+          "link": 3
+        },
+        {
+          "name": "negative",
+          "type": "CONDITIONING",
+          "link": 4
+        }
+      ],
+      "outputs": [
+        {
+          "name": "positive",
+          "type": "CONDITIONING",
+          "slot_index": 0,
+          "links": [
+            5
+          ]
+        },
+        {
+          "name": "negative",
+          "type": "CONDITIONING",
+          "slot_index": 1,
+          "links": [
+            15
+          ]
+        }
+      ],
+      "title": "Set LTX frame rate",
+      "properties": {
+        "Node name for S&R": "LTXVConditioning",
+        "cnr_id": "comfy-core",
+        "ver": "0.45.0"
+      },
+      "widgets_values": [
+        24
+      ],
+      "widgets_values_named": {
+        "frame_rate": 24
+      }
+    },
+    {
+      "id": 6,
+      "type": "VAELoader",
+      "pos": [
+        11738.409318453889,
+        4563.015259661325
+      ],
+      "size": [
+        380,
+        70
+      ],
+      "flags": {},
+      "order": 2,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "VAE",
+          "type": "VAE",
+          "slot_index": 0,
+          "links": [
+            11
+          ]
+        }
+      ],
+      "title": "Conv Video VAE (CPU-safe)",
+      "properties": {
+        "Node name for S&R": "VAELoader",
+        "cnr_id": "comfy-core",
+        "ver": "0.45.0"
+      },
+      "widgets_values": [
+        "ltx-2.5-video-vae-conv-bf16.safetensors"
+      ],
+      "widgets_values_named": {
+        "vae_name": "ltx-2.5-video-vae-conv-bf16.safetensors"
+      }
+    },
+    {
+      "id": 7,
+      "type": "EmptyLTXVLatentVideo",
+      "pos": [
+        12284.388699897188,
+        4753.015259661325
+      ],
+      "size": [
+        320,
+        170
+      ],
+      "flags": {},
+      "order": 3,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "LATENT",
+          "type": "LATENT",
+          "slot_index": 0,
+          "links": [
+            10
+          ]
+        }
+      ],
+      "title": "Video size and length",
+      "properties": {
+        "Node name for S&R": "EmptyLTXVLatentVideo",
+        "cnr_id": "comfy-core",
+        "ver": "0.45.0"
+      },
+      "widgets_values": [
+        480,
+        288,
+        9,
+        1
+      ],
+      "widgets_values_named": {
+        "width": 480,
+        "height": 288,
+        "length": 9,
+        "batch_size": 1
+      }
+    },
+    {
+      "id": 8,
+      "type": "LTXDurationNoise",
+      "pos": [
+        13018.409318453889,
+        4103.015259661325
+      ],
+      "size": [
+        270,
+        95
+      ],
+      "flags": {},
+      "order": 4,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "NOISE",
+          "type": "NOISE",
+          "slot_index": 0,
+          "links": [
+            6
+          ]
+        }
+      ],
+      "title": "Seed · same initial noise across lengths",
+      "properties": {
+        "Node name for S&R": "LTXDurationNoise"
+      },
+      "widgets_values": [
+        10000001,
+        "fixed"
+      ],
+      "widgets_values_named": {
+        "noise_seed": 10000001,
+        "control_after_generate": "fixed"
+      }
+    },
+    {
+      "id": 9,
+      "type": "CFGGuider",
+      "pos": [
+        13018.409318453889,
+        4243.015259661325
+      ],
+      "size": [
+        300,
+        130
+      ],
+      "flags": {},
+      "order": 10,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "model",
+          "type": "MODEL",
+          "link": 1
+        },
+        {
+          "name": "positive",
+          "type": "CONDITIONING",
+          "link": 5
+        },
+        {
+          "name": "negative",
+          "type": "CONDITIONING",
+          "link": 15
+        }
+      ],
+      "outputs": [
+        {
+          "name": "GUIDER",
+          "type": "GUIDER",
+          "slot_index": 0,
+          "links": [
+            7
+          ]
+        }
+      ],
+      "title": "CFG 1.0 (CFG++ active negative)",
+      "properties": {
+        "Node name for S&R": "CFGGuider",
+        "cnr_id": "comfy-core",
+        "ver": "0.45.0"
+      },
+      "widgets_values": [
+        1
+      ],
+      "widgets_values_named": {
+        "cfg": 1
+      }
+    },
+    {
+      "id": 10,
+      "type": "KSamplerSelect",
+      "pos": [
+        13018.409318453889,
+        4423.015259661325
+      ],
+      "size": [
+        340,
+        90
+      ],
+      "flags": {},
+      "order": 5,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "SAMPLER",
+          "type": "SAMPLER",
+          "slot_index": 0,
+          "links": [
+            8
+          ]
+        }
+      ],
+      "title": "Sampler · Euler CFG++",
+      "properties": {
+        "Node name for S&R": "KSamplerSelect",
+        "cnr_id": "comfy-core",
+        "ver": "0.45.0"
+      },
+      "widgets_values": [
+        "euler_cfg_pp"
+      ],
+      "widgets_values_named": {
+        "sampler_name": "euler_cfg_pp"
+      }
+    },
+    {
+      "id": 11,
+      "type": "LTXVScheduler",
+      "pos": [
+        13018.409318453889,
+        4563.015259661325
+      ],
+      "size": [
+        320,
+        180
+      ],
+      "flags": {},
+      "order": 6,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "latent",
+          "shape": 7,
+          "type": "LATENT",
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "name": "SIGMAS",
+          "type": "SIGMAS",
+          "slot_index": 0,
+          "links": [
+            9
+          ]
+        }
+      ],
+      "title": "Stage 1 · Sampling steps",
+      "properties": {
+        "Node name for S&R": "LTXVScheduler",
+        "cnr_id": "comfy-core",
+        "ver": "0.45.0"
+      },
+      "widgets_values": [
+        8,
+        2.05,
+        0.95,
+        true,
+        0.1
+      ],
+      "widgets_values_named": {
+        "steps": 8,
+        "max_shift": 2.05,
+        "base_shift": 0.95,
+        "stretch": true,
+        "terminal": 0.1
+      }
+    },
+    {
+      "id": 12,
+      "type": "SamplerCustomAdvanced",
+      "pos": [
+        13418.409318453889,
+        4283.015259661325
+      ],
+      "size": [
+        330,
+        160
+      ],
+      "flags": {},
+      "order": 11,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "noise",
+          "type": "NOISE",
+          "link": 6
+        },
+        {
+          "name": "guider",
+          "type": "GUIDER",
+          "link": 7
+        },
+        {
+          "name": "sampler",
+          "type": "SAMPLER",
+          "link": 8
+        },
+        {
+          "name": "sigmas",
+          "type": "SIGMAS",
+          "link": 9
+        },
+        {
+          "name": "latent_image",
+          "type": "LATENT",
+          "link": 10
+        }
+      ],
+      "outputs": [
+        {
+          "name": "output",
+          "type": "LATENT",
+          "slot_index": 0,
+          "links": [
+            16
+          ]
+        },
+        {
+          "name": "denoised_output",
+          "type": "LATENT",
+          "slot_index": 1,
+          "links": []
+        }
+      ],
+      "title": "Stage 1 diffusion",
+      "properties": {
+        "Node name for S&R": "SamplerCustomAdvanced",
+        "cnr_id": "comfy-core",
+        "ver": "0.45.0"
+      }
+    },
+    {
+      "id": 13,
+      "type": "SaveLatent",
+      "pos": [
+        13818.409318453889,
+        4283.015259661325
+      ],
+      "size": [
+        310,
+        110
+      ],
+      "flags": {},
+      "order": 12,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "samples",
+          "type": "LATENT",
+          "link": 16
+        }
+      ],
+      "outputs": [
+        {
+          "name": "samples",
+          "type": "LATENT",
+          "slot_index": 0,
+          "links": [
+            17
+          ]
+        }
+      ],
+      "title": "Save sampled latent",
+      "properties": {
+        "Node name for S&R": "SaveLatent",
+        "cnr_id": "comfy-core",
+        "ver": "0.45.0"
+      },
+      "widgets_values": [
+        "latents/LTX25_Q5_T2V_DurationNoise"
+      ],
+      "widgets_values_named": {
+        "filename_prefix": "latents/LTX25_Q5_T2V_DurationNoise"
+      }
+    },
+    {
+      "id": 14,
+      "type": "VAEDecodeTiled",
+      "pos": [
+        14238.409318453889,
+        4283.015259661325
+      ],
+      "size": [
+        305,
+        175
+      ],
+      "flags": {},
+      "order": 13,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "samples",
+          "type": "LATENT",
+          "link": 17
+        },
+        {
+          "name": "vae",
+          "type": "VAE",
+          "link": 11
+        }
+      ],
+      "outputs": [
+        {
+          "name": "IMAGE",
+          "type": "IMAGE",
+          "slot_index": 0,
+          "links": [
+            12
+          ]
+        }
+      ],
+      "title": "Decode preview in tiles",
+      "properties": {
+        "Node name for S&R": "VAEDecodeTiled",
+        "cnr_id": "comfy-core",
+        "ver": "0.45.0"
+      },
+      "widgets_values": [
+        512,
+        64,
+        64,
+        8
+      ],
+      "widgets_values_named": {
+        "tile_size": 512,
+        "overlap": 64,
+        "temporal_size": 64,
+        "temporal_overlap": 8
+      }
+    },
+    {
+      "id": 15,
+      "type": "CreateVideo",
+      "pos": [
+        14598.409318453889,
+        4283.015259661325
+      ],
+      "size": [
+        290,
+        166
+      ],
+      "flags": {},
+      "order": 14,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "link": 12
+        },
+        {
+          "name": "audio",
+          "shape": 7,
+          "type": "AUDIO",
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "name": "VIDEO",
+          "type": "VIDEO",
+          "slot_index": 0,
+          "links": [
+            13
+          ]
+        }
+      ],
+      "title": "Create preview video (24 fps)",
+      "properties": {
+        "Node name for S&R": "CreateVideo",
+        "cnr_id": "comfy-core",
+        "ver": "0.45.0"
+      },
+      "widgets_values": [
+        24,
+        "auto",
+        "sRGB",
+        "auto",
+        "none"
+      ],
+      "widgets_values_named": {
+        "fps": 24,
+        "bit_depth": "auto",
+        "color_space": "sRGB",
+        "chroma_subsampling": "auto",
+        "codec": "none"
+      }
+    },
+    {
+      "id": 16,
+      "type": "SaveVideo",
+      "pos": [
+        14948.409318453889,
+        4283.015259661325
+      ],
+      "size": [
+        430,
+        250
+      ],
+      "flags": {},
+      "order": 15,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "video",
+          "type": "VIDEO",
+          "link": 13
+        }
+      ],
+      "outputs": [
+        {
+          "name": "video",
+          "type": "VIDEO",
+          "links": []
+        }
+      ],
+      "title": "Save preview MP4",
+      "properties": {
+        "Node name for S&R": "SaveVideo",
+        "cnr_id": "comfy-core",
+        "ver": "0.45.0"
+      },
+      "widgets_values": [
+        "LTX25_Q5_T2V_DurationNoise",
+        "auto",
+        "auto",
+        "auto"
+      ],
+      "widgets_values_named": {
+        "filename_prefix": "LTX25_Q5_T2V_DurationNoise",
+        "format": "auto",
+        "format.codec": "auto",
+        "codec": "auto"
+      }
+    }
+  ],
+  "links": [
+    [
+      1,
+      1,
+      0,
+      9,
+      0,
+      "MODEL"
+    ],
+    [
+      2,
+      2,
+      0,
+      3,
+      0,
+      "CLIP"
+    ],
+    [
+      3,
+      3,
+      0,
+      5,
+      0,
+      "CONDITIONING"
+    ],
+    [
+      4,
+      4,
+      0,
+      5,
+      1,
+      "CONDITIONING"
+    ],
+    [
+      5,
+      5,
+      0,
+      9,
+      1,
+      "CONDITIONING"
+    ],
+    [
+      6,
+      8,
+      0,
+      12,
+      0,
+      "NOISE"
+    ],
+    [
+      7,
+      9,
+      0,
+      12,
+      1,
+      "GUIDER"
+    ],
+    [
+      8,
+      10,
+      0,
+      12,
+      2,
+      "SAMPLER"
+    ],
+    [
+      9,
+      11,
+      0,
+      12,
+      3,
+      "SIGMAS"
+    ],
+    [
+      10,
+      7,
+      0,
+      12,
+      4,
+      "LATENT"
+    ],
+    [
+      11,
+      6,
+      0,
+      14,
+      1,
+      "VAE"
+    ],
+    [
+      12,
+      14,
+      0,
+      15,
+      0,
+      "IMAGE"
+    ],
+    [
+      13,
+      15,
+      0,
+      16,
+      0,
+      "VIDEO"
+    ],
+    [
+      14,
+      2,
+      0,
+      4,
+      0,
+      "CLIP"
+    ],
+    [
+      15,
+      5,
+      1,
+      9,
+      2,
+      "CONDITIONING"
+    ],
+    [
+      16,
+      12,
+      0,
+      13,
+      0,
+      "LATENT"
+    ],
+    [
+      17,
+      13,
+      0,
+      14,
+      0,
+      "LATENT"
+    ]
+  ],
+  "groups": [
+    {
+      "id": 1,
+      "title": "Q5 T2V · Duration-stable noise · Preview",
+      "bounding": [
+        11698.409318453889,
+        4053.015259661325,
+        3720,
+        920
+      ],
+      "color": "#3f789e",
+      "flags": {}
+    }
+  ],
+  "config": {},
+  "extra": {
+    "ds": {
+      "scale": 0.9700000000000035,
+      "offset": [
+        -11838.445150806272,
+        -4434.172320879701
+      ]
+    },
+    "frontendVersion": "1.59.4"
+  },
+  "version": 0.4
+}
