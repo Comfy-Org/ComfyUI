@@ -29,6 +29,13 @@ from pathlib import Path
 
 import torch
 
+from comfy.cli_args import args
+
+# The comfy modules reach for the CUDA device at import time, so a CPU-only
+# machine has to opt into the CPU path before they are imported.
+if not torch.cuda.is_available():
+    args.cpu = True
+
 import comfy.sd1_clip as sd1_clip
 
 
