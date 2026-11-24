@@ -508,7 +508,13 @@ class PromptServer():
 
                 if not image_is_duplicate:
                     if image_save_function is not None:
-                        image_save_function(image, post, filepath)
+                        save_response = image_save_function(image, post, filepath)
+                        if save_response is not None:
+                            # The callback rejected the upload — e.g. a mask
+                            # whose original image lives on another drive
+                            # (#1488). Report that instead of registering an
+                            # asset for a file that was never written.
+                            return save_response, None, None
                     else:
                         with open(filepath, "wb") as f:
                             f.write(image.file.read())
