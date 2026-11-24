@@ -1,6 +1,6 @@
 {
   "id": "555a0e08-2685-427b-89c7-97c76e612c15",
-  "revision": 0,
+  "revision": 1,
   "last_node_id": 16,
   "last_link_id": 17,
   "nodes": [
@@ -29,15 +29,15 @@
           ]
         }
       ],
-      "title": "Stock LTX-2.5 Distilled — UD-Q5_K_XL",
+      "title": "LTX-2.5 · Q4_K_M",
       "properties": {
         "Node name for S&R": "UnetLoaderGGUF"
       },
       "widgets_values": [
-        "ltx-2.5-22b-distilled-UD-Q5_K_XL.gguf"
+        "ltx25_uncensored_v1.1-Q4_K_M.gguf"
       ],
       "widgets_values_named": {
-        "unet_name": "ltx-2.5-22b-distilled-UD-Q5_K_XL.gguf"
+        "unet_name": "ltx25_uncensored_v1.1-Q4_K_M.gguf"
       }
     },
     {
@@ -265,55 +265,11 @@
       }
     },
     {
-      "id": 7,
-      "type": "EmptyLTXVLatentVideo",
-      "pos": [
-        12284.388699897188,
-        4753.015259661325
-      ],
-      "size": [
-        320,
-        170
-      ],
-      "flags": {},
-      "order": 3,
-      "mode": 0,
-      "inputs": [],
-      "outputs": [
-        {
-          "name": "LATENT",
-          "type": "LATENT",
-          "slot_index": 0,
-          "links": [
-            10
-          ]
-        }
-      ],
-      "title": "Video size and length",
-      "properties": {
-        "Node name for S&R": "EmptyLTXVLatentVideo",
-        "cnr_id": "comfy-core",
-        "ver": "0.45.0"
-      },
-      "widgets_values": [
-        480,
-        288,
-        9,
-        1
-      ],
-      "widgets_values_named": {
-        "width": 480,
-        "height": 288,
-        "length": 9,
-        "batch_size": 1
-      }
-    },
-    {
       "id": 8,
       "type": "LTXDurationNoise",
       "pos": [
-        13018.409318453889,
-        4103.015259661325
+        12218,
+        4100
       ],
       "size": [
         270,
@@ -333,16 +289,16 @@
           ]
         }
       ],
-      "title": "Seed · same initial noise across lengths",
+      "title": "Seed · noise_seed",
       "properties": {
         "Node name for S&R": "LTXDurationNoise"
       },
       "widgets_values": [
-        10000001,
+        20000001,
         "fixed"
       ],
       "widgets_values_named": {
-        "noise_seed": 10000001,
+        "noise_seed": 20000001,
         "control_after_generate": "fixed"
       }
     },
@@ -493,14 +449,14 @@
     },
     {
       "id": 12,
-      "type": "SamplerCustomAdvanced",
+      "type": "LTXTextContinuation",
       "pos": [
-        13418.409318453889,
-        4283.015259661325
+        12685,
+        3995
       ],
       "size": [
-        330,
-        160
+        390,
+        285
       ],
       "flags": {},
       "order": 11,
@@ -527,99 +483,6 @@
           "link": 9
         },
         {
-          "name": "latent_image",
-          "type": "LATENT",
-          "link": 10
-        }
-      ],
-      "outputs": [
-        {
-          "name": "output",
-          "type": "LATENT",
-          "slot_index": 0,
-          "links": [
-            16
-          ]
-        },
-        {
-          "name": "denoised_output",
-          "type": "LATENT",
-          "slot_index": 1,
-          "links": []
-        }
-      ],
-      "title": "Stage 1 diffusion",
-      "properties": {
-        "Node name for S&R": "SamplerCustomAdvanced",
-        "cnr_id": "comfy-core",
-        "ver": "0.45.0"
-      }
-    },
-    {
-      "id": 13,
-      "type": "SaveLatent",
-      "pos": [
-        13818.409318453889,
-        4283.015259661325
-      ],
-      "size": [
-        310,
-        110
-      ],
-      "flags": {},
-      "order": 12,
-      "mode": 0,
-      "inputs": [
-        {
-          "name": "samples",
-          "type": "LATENT",
-          "link": 16
-        }
-      ],
-      "outputs": [
-        {
-          "name": "samples",
-          "type": "LATENT",
-          "slot_index": 0,
-          "links": [
-            17
-          ]
-        }
-      ],
-      "title": "Save sampled latent",
-      "properties": {
-        "Node name for S&R": "SaveLatent",
-        "cnr_id": "comfy-core",
-        "ver": "0.45.0"
-      },
-      "widgets_values": [
-        "latents/LTX25_Q5_T2V_DurationNoise"
-      ],
-      "widgets_values_named": {
-        "filename_prefix": "latents/LTX25_Q5_T2V_DurationNoise"
-      }
-    },
-    {
-      "id": 14,
-      "type": "VAEDecodeTiled",
-      "pos": [
-        14238.409318453889,
-        4283.015259661325
-      ],
-      "size": [
-        305,
-        175
-      ],
-      "flags": {},
-      "order": 13,
-      "mode": 0,
-      "inputs": [
-        {
-          "name": "samples",
-          "type": "LATENT",
-          "link": 17
-        },
-        {
           "name": "vae",
           "type": "VAE",
           "link": 11
@@ -627,97 +490,39 @@
       ],
       "outputs": [
         {
-          "name": "IMAGE",
-          "type": "IMAGE",
-          "slot_index": 0,
-          "links": [
-            12
-          ]
-        }
-      ],
-      "title": "Decode preview in tiles",
-      "properties": {
-        "Node name for S&R": "VAEDecodeTiled",
-        "cnr_id": "comfy-core",
-        "ver": "0.45.0"
-      },
-      "widgets_values": [
-        512,
-        64,
-        64,
-        8
-      ],
-      "widgets_values_named": {
-        "tile_size": 512,
-        "overlap": 64,
-        "temporal_size": 64,
-        "temporal_overlap": 8
-      }
-    },
-    {
-      "id": 15,
-      "type": "CreateVideo",
-      "pos": [
-        14598.409318453889,
-        4283.015259661325
-      ],
-      "size": [
-        290,
-        166
-      ],
-      "flags": {},
-      "order": 14,
-      "mode": 0,
-      "inputs": [
-        {
-          "name": "images",
-          "type": "IMAGE",
-          "link": 12
-        },
-        {
-          "name": "audio",
-          "shape": 7,
-          "type": "AUDIO",
-          "link": null
-        }
-      ],
-      "outputs": [
-        {
           "name": "VIDEO",
           "type": "VIDEO",
-          "slot_index": 0,
           "links": [
             13
-          ]
+          ],
+          "slot_index": 0
         }
       ],
-      "title": "Create preview video (24 fps)",
+      "title": "T2V · Total length / Продолжительность",
       "properties": {
-        "Node name for S&R": "CreateVideo",
-        "cnr_id": "comfy-core",
-        "ver": "0.45.0"
+        "Node name for S&R": "LTXTextContinuation"
       },
       "widgets_values": [
-        24,
-        "auto",
-        "sRGB",
-        "auto",
-        "none"
+        480,
+        288,
+        9,
+        "frames",
+        24
       ],
       "widgets_values_named": {
-        "fps": 24,
-        "bit_depth": "auto",
-        "color_space": "sRGB",
-        "chroma_subsampling": "auto",
-        "codec": "none"
+        "width": 480,
+        "height": 288,
+        "total_length": 9,
+        "unit": "frames",
+        "fps": 24
       }
     },
     {
       "id": 16,
       "type": "SaveVideo",
       "pos": [
-        14948.409318453889,
-        4283.015259661325
+        13200,
+        3980
       ],
       "size": [
         430,
@@ -740,20 +545,20 @@
           "links": []
         }
       ],
-      "title": "Save preview MP4",
+      "title": "Save extended MP4",
       "properties": {
         "Node name for S&R": "SaveVideo",
         "cnr_id": "comfy-core",
         "ver": "0.45.0"
       },
       "widgets_values": [
-        "LTX25_Q5_T2V_DurationNoise",
+        "LTX25_T2V_SameShot",
         "auto",
         "auto",
         "auto"
       ],
       "widgets_values_named": {
-        "filename_prefix": "LTX25_Q5_T2V_DurationNoise",
+        "filename_prefix": "LTX25_T2V_SameShot",
         "format": "auto",
         "format.codec": "auto",
         "codec": "auto"
@@ -834,32 +639,16 @@
       "SIGMAS"
     ],
     [
-      10,
-      7,
-      0,
-      12,
-      4,
-      "LATENT"
-    ],
-    [
       11,
       6,
       0,
-      14,
-      1,
+      12,
+      4,
       "VAE"
     ],
     [
-      12,
-      14,
-      0,
-      15,
-      0,
-      "IMAGE"
-    ],
-    [
       13,
-      15,
+      12,
       0,
       16,
       0,
@@ -880,33 +669,17 @@
       9,
       2,
       "CONDITIONING"
-    ],
-    [
-      16,
-      12,
-      0,
-      13,
-      0,
-      "LATENT"
-    ],
-    [
-      17,
-      13,
-      0,
-      14,
-      0,
-      "LATENT"
     ]
   ],
   "groups": [
     {
       "id": 1,
-      "title": "Q5 T2V · Duration-stable noise · Preview",
+      "title": "Text to video · Keep and extend the same shot",
       "bounding": [
-        11698.409318453889,
-        4053.015259661325,
-        3720,
-        920
+        11695,
+        3925,
+        1990,
+        880
       ],
       "color": "#3f789e",
       "flags": {}
@@ -915,10 +688,10 @@
   "config": {},
   "extra": {
     "ds": {
-      "scale": 0.9700000000000035,
+      "scale": 0.68,
       "offset": [
-        -11838.445150806272,
-        -4434.172320879701
+        -11850,
+        -3870
       ]
     },
     "frontendVersion": "1.59.4"

@@ -351,8 +351,8 @@
       "id": 8,
       "type": "LTXDurationNoise",
       "pos": [
-        13018.409318453889,
-        4103.015259661325
+        12218,
+        4100
       ],
       "size": [
         270,
@@ -372,7 +372,7 @@
           ]
         }
       ],
-      "title": "Seed · same initial noise across lengths",
+      "title": "Seed · noise_seed",
       "properties": {
         "Node name for S&R": "LTXDurationNoise"
       },
@@ -1026,10 +1026,10 @@
   "config": {},
   "extra": {
     "ds": {
-      "scale": 0.9700000000000035,
+      "scale": 0.75,
       "offset": [
-        -11838.445150806272,
-        -4434.172320879701
+        -11690,
+        -4010
       ]
     },
     "frontendVersion": "1.59.4"
