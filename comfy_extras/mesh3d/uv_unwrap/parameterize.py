@@ -10,7 +10,6 @@ import scipy.sparse.linalg as spla
 import torch
 from torch import Tensor
 
-import comfy.model_management
 from . import mesh as _mesh
 
 LSCM_BATCH_MAX_VERTS = 256      # charts above this solve per-chart sparse (lscm_chart)
@@ -22,7 +21,7 @@ def _lscm_solve_on_gpu(device: "torch.device | None") -> bool:
     call) raises HIPBLAS_STATUS_ALLOC_FAILED on these chart batches even with plenty
     of free VRAM, and PyTorch reports a ROCm device's .type as "cuda", so the type
     check alone can't tell AMD and NVIDIA apart."""
-    return device is not None and device.type == "cuda" and not comfy.model_management.is_amd()
+    return device is not None and device.type == "cuda" and not torch.version.hip
 
 
 def solve_least_squares(A: sp.csr_matrix, b: np.ndarray) -> np.ndarray:
