@@ -112,6 +112,18 @@ import comfy.latent_formats
 
 import comfy.ldm.flux.redux
 
+def _set_lora_metadata(patcher, metadata, applied):
+    if not metadata:
+        return
+    history = patcher.get_attachment("lora_metadata_history")
+    if history is None:
+        previous = patcher.get_attachment("lora_metadata")
+        history = (previous,) if previous else ()
+    patcher.set_attachments("lora_metadata_history", (metadata, *history) if applied else history)
+    # Keep the latest loaded metadata available through the original attachment.
+    patcher.set_attachments("lora_metadata", metadata)
+
+
 def load_lora_for_models(model, clip, lora, strength_model, strength_clip, lora_metadata=None):
     key_map = {}
     if model is not None:
@@ -124,8 +136,7 @@ def load_lora_for_models(model, clip, lora, strength_model, strength_clip, lora_
     if model is not None:
         new_modelpatcher = model.clone()
         k = new_modelpatcher.add_patches(loaded, strength_model)
-        if lora_metadata:
-            new_modelpatcher.set_attachments("lora_metadata", lora_metadata)
+        _set_lora_metadata(new_modelpatcher, lora_metadata, bool(k) and strength_model != 0)
     else:
         k = ()
         new_modelpatcher = None
@@ -133,8 +144,7 @@ def load_lora_for_models(model, clip, lora, strength_model, strength_clip, lora_
     if clip is not None:
         new_clip = clip.clone()
         k1 = new_clip.add_patches(loaded, strength_clip)
-        if lora_metadata:
-            new_clip.patcher.set_attachments("lora_metadata", lora_metadata)
+        _set_lora_metadata(new_clip.patcher, lora_metadata, bool(k1) and strength_clip != 0)
     else:
         k1 = ()
         new_clip = None

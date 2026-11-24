@@ -33,8 +33,8 @@ class GetICLoRAParameters(io.ComfyNode):
             inputs=[
                 io.Model.Input(
                     "iclora_model",
-                    tooltip="Direct output from a LoRA Loader for the specific IC-LoRA "
-                            "from which to extract the metadata.",
+                    tooltip="Connect the output of the loader for the IC-LoRA you want to read. "
+                            "For a stack, uses the most recently applied LoRA with a valid reference downscale factor.",
                 ),
             ],
             outputs=[
@@ -49,13 +49,18 @@ class GetICLoRAParameters(io.ComfyNode):
 
     @classmethod
     def execute(cls, iclora_model) -> io.NodeOutput:
-        metadata = iclora_model.get_attachment("lora_metadata")
+        metadata_history = iclora_model.get_attachment("lora_metadata_history")
+        if metadata_history is None:
+            metadata = iclora_model.get_attachment("lora_metadata")
+            metadata_history = (metadata,) if metadata else ()
         factor = 1
-        if metadata:
+        for metadata in metadata_history:
             try:
-                factor = max(1, round(float(next(v for k, v in metadata.items() if k.endswith("reference_downscale_factor")))))
-            except (StopIteration, TypeError, ValueError):
-                factor = 1
+                value = next(v for k, v in metadata.items() if k.endswith("reference_downscale_factor"))
+                factor = max(1, round(float(value)))
+            except (StopIteration, TypeError, ValueError, OverflowError):
+                continue
+            break
         parameters = {"reference_downscale_factor": factor}
         return io.NodeOutput(parameters)
 
