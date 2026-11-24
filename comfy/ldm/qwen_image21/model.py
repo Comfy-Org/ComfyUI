@@ -473,8 +473,8 @@ class QwenImage21Transformer2DModel(nn.Module):
         prefetch_queue = comfy.model_prefetch.make_prefetch_queue(list(self.transformer_blocks), x.device, transformer_options)
         for i, block in enumerate(self.transformer_blocks):
             transformer_options["block_index"] = i
-            with cache.layer(i, x.device, write=not cached) if isinstance(cache, PrefixCache) else contextlib.nullcontext():
-                comfy.model_prefetch.prefetch_queue_pop(prefetch_queue, x.device, block, dtype, malloc_scope="block")
+            def core():
+                nonlocal hidden_states, prefix_states
                 if cache is not None:
                     if not cached:
                         with comfy.model_prefetch.pause_malloc_graph():
@@ -482,22 +482,23 @@ class QwenImage21Transformer2DModel(nn.Module):
                             prefix_states = block(prefix_states, mod, prefix_pe, prefix_attn, prefix_states.shape[1], transformer_options)
                     prefix_k, prefix_v = cache.take(i, x.device, dtype, B).unbind(1)
                     if cached and not isinstance(cache, PrefixCache):
-                        cache.prefetch(i + 1, x.device, dtype)  # queue the next block before the compute it should overlap
+                        cache.prefetch(i + 1, x.device, dtype)
                     attn_fn = prefix_cached_attention(prefix_k, prefix_v, transformer_options)
                 else:
                     attn_fn = block_causal_attention(segments, transformer_options, cache, i, prefix_len)
                 if ("single_block", i) in blocks_replace:
                     def block_wrap(args):
                         return {"img": block(args["img"], mod, args["pe"], attn_fn, prefix_len, args["transformer_options"])}
-                    args = {"img": hidden_states, "vec": temb, "pe": pe, "mod": mod, "attn_fn": attn_fn, "prefix_len": prefix_len, "transformer_options": transformer_options}
-                    hidden_states = blocks_replace[("single_block", i)](args, {"original_block": block_wrap})["img"]
+                    block_args = {"img": hidden_states, "vec": temb, "pe": pe, "mod": mod, "attn_fn": attn_fn, "prefix_len": prefix_len, "transformer_options": transformer_options}
+                    hidden_states = blocks_replace[("single_block", i)](block_args, {"original_block": block_wrap})["img"]
                 else:
                     hidden_states = block(hidden_states, mod, pe, attn_fn, prefix_len, transformer_options)
                 for p in patches.get("single_block", []):
                     hidden_states = p({"img": hidden_states, "x": x, "block_index": i, "transformer_options": transformer_options})["img"]
-                if cache is not None:
-                    # Release dequantized K/V before leaving the block's allocation scope.
-                    del attn_fn, prefix_k, prefix_v
+
+            # Cache pages must stay pinned even when the block's graph skips its Python body.
+            with cache.layer(i, x.device, write=not cached) if isinstance(cache, PrefixCache) else contextlib.nullcontext():
+                comfy.model_prefetch.prefetch_queue_pop(prefetch_queue, x.device, block, dtype, core=core, malloc_scope="block")
 
         comfy.model_prefetch.prefetch_queue_pop(prefetch_queue, x.device, None, malloc_scope="block")
         if isinstance(cache, PrefixCache) and not cached:
