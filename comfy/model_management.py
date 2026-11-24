@@ -505,7 +505,15 @@ try:
             It answers True on a supported arch whose kernel image was never shipped,
             and that only fails at launch, without raising. So run one attention
             through the flash backend and force the pending error check.
+
+            COMFY_AOTRITON_SUPPORTED=1/0 skips the probe with a known answer. On some
+            kernel/ROCm combinations the first kernel launch leaves a runtime thread
+            busy-polling a CPU core for the life of the process, so a probe at import
+            means even a server that never ran a prompt never idles.
             """
+            override = os.environ.get("COMFY_AOTRITON_SUPPORTED")
+            if override in ("0", "1"):
+                return override == "1"
             try:
                 device = get_torch_device()
                 if not torch.backends.cuda.is_flash_attention_available():  # not built with flash attention
