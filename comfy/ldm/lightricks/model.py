@@ -14,6 +14,7 @@ import comfy.ldm.modules.attention
 from comfy.ldm.modules.attention import AttentionTensorContainer, ComfyAttention
 import comfy.ldm.common_dit
 import comfy.model_management
+import comfy.model_prefetch
 import comfy.ops
 import comfy.quant_ops
 
@@ -1024,9 +1025,10 @@ class LTXBaseModel(torch.nn.Module, ABC):
             **merged_args,
         )
 
-        # Process output
-        x = self._process_output(x, embedded_timestep, keyframe_idxs, **merged_args)
-        return x
+        # Returned tensors must outlive the allocation scope.
+        with comfy.model_prefetch.pause_malloc_graph():
+            output = self._process_output(x, embedded_timestep, keyframe_idxs, **merged_args)
+        return output
 
 
 class LTXVModel(LTXBaseModel):

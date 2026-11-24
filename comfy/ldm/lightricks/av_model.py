@@ -1,4 +1,5 @@
 from typing import Tuple
+from contextlib import nullcontext
 import torch
 import torch.nn as nn
 from comfy.ldm.lightricks.model import (
@@ -938,7 +939,6 @@ class LTXAVModel(LTXVModel):
         stg_self_attn_blocks = transformer_options.get("stg_self_attn_blocks", ())
 
         # Process transformer blocks
-        comfy.model_prefetch.malloc_graph_begin(vx.device)
         for i, block in enumerate(self.transformer_blocks):
             comfy.model_prefetch.prefetch_queue_pop(
                 prefetch_queue, vx.device, block, malloc_scope="block"
@@ -1021,7 +1021,6 @@ class LTXAVModel(LTXVModel):
         comfy.model_prefetch.prefetch_queue_pop(
             prefetch_queue, vx.device, None, malloc_scope="block"
         )
-        comfy.model_prefetch.malloc_graph_end()
 
         return [vx, ax]
 
@@ -1100,13 +1099,17 @@ class LTXAVModel(LTXVModel):
             kwargs["a_timestep"] = timestep
 
         # Call parent forward method
-        return super().forward(
-            x,
-            timestep,
-            context,
-            attention_mask,
-            frame_rate,
-            transformer_options,
-            keyframe_idxs,
-            **kwargs,
-        )
+        device = x[0].device if isinstance(x, list) else x.device
+        # The extra STG pass changes both the batch size and the block trace.
+        scope = comfy.model_prefetch.malloc_graph_scope(device) if not transformer_options.get("stg_self_attn_blocks") else nullcontext()
+        with scope:
+            return super().forward(
+                x,
+                timestep,
+                context,
+                attention_mask,
+                frame_rate,
+                transformer_options,
+                keyframe_idxs,
+                **kwargs,
+            )
