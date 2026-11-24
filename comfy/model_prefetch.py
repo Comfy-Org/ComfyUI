@@ -67,6 +67,12 @@ def malloc_graph_scope(device):
 def malloc_graph_recording():
     return threading.get_ident() in MALLOC_GRAPHS
 
+def _warmup_blas(device):
+    with torch.cuda.device(device):
+        torch.cuda.current_blas_handle()
+        one = torch.empty((2, 2), device=device)
+        torch.addmm(one[0], one, one)
+
 def malloc_graph_begin(device):
     global MALLOC_GRAPH_USED
     if not malloc_graph_enabled(device):
@@ -74,6 +80,8 @@ def malloc_graph_begin(device):
     thread_id = threading.get_ident()
     graph = MALLOC_GRAPHS.get(thread_id)
     if graph is None:
+        # Keep PyTorch's persistent BLAS workspaces outside the allocation graph.
+        _warmup_blas(device)
         graph = comfy_aimdo.malloc_graph.record(
             comfy.model_management.current_stream(device), args.assert_graph_breaks
         )
@@ -249,9 +257,7 @@ def prefetch_queue_pop(queue, device, module, dtype=None, core=None, enable_grap
             # Keep PyTorch's persistent BLAS workspaces outside the allocation graph.
             malloc_graph.pause()
             with torch.cuda.stream(capture_stream):
-                torch.cuda.current_blas_handle()
-                one = torch.empty((2, 2), device=device)
-                torch.addmm(one[0], one, one)
+                _warmup_blas(device)
             malloc_graph.resume()
             GRAPH_CAPTURE_STREAMS[device] = capture_stream
 
