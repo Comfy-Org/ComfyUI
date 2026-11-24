@@ -417,11 +417,15 @@ class QwenImage21Transformer2DModel(nn.Module):
         return torch.cat(parts, dim=1), pe, segments
 
     def forward(self, x, timestep, context, ref_latents=None, image_slots=None, transformer_options={}, **kwargs):
-        return comfy.patcher_extension.WrapperExecutor.new_class_executor(
-            self._forward,
-            self,
-            comfy.patcher_extension.get_all_wrappers(comfy.patcher_extension.WrappersMP.DIFFUSION_MODEL, transformer_options)
-        ).execute(x, timestep, context, ref_latents, image_slots, transformer_options, **kwargs)
+        # Separate CFG prompts can have different prefix lengths.
+        cache_slots = kwargs.get("prefix_cache", {}).get(x.device, ())
+        compile_allocations = transformer_options.get("cond_or_uncond") != [1] and all(slot.key is not None for slot in cache_slots)
+        with comfy.model_prefetch.malloc_graph_scope(x.device) if compile_allocations else contextlib.nullcontext():
+            return comfy.patcher_extension.WrapperExecutor.new_class_executor(
+                self._forward,
+                self,
+                comfy.patcher_extension.get_all_wrappers(comfy.patcher_extension.WrappersMP.DIFFUSION_MODEL, transformer_options)
+            ).execute(x, timestep, context, ref_latents, image_slots, transformer_options, **kwargs)
 
     def _forward(self, x, timesteps, context, ref_latents=None, image_slots=None, transformer_options={}, prefix_cache=None, **kwargs):
         B, C, H, W = x.shape
@@ -445,17 +449,18 @@ class QwenImage21Transformer2DModel(nn.Module):
         blocks_replace = transformer_options.get("patches_replace", {}).get("dit", {})
         cache, cached = None, False
         if prefix_len > 0 and self.can_cache_prefix(transformer_options):
-            key = prefix_cache_key(x, context, ref_latents, image_slots)
-            options = transformer_options.get("qwen_image21_cache", {})
-            if prefix_cache is not None and x.device in prefix_cache:
-                cache = PrefixCache(prefix_cache[x.device])
-                cached = cache.filled(key)
-                for slot in cache.slots:
-                    for layer in slot:
-                        layer.read_before_write = cached
-            elif options.get("device", "auto") in ("cpu", "gpu") or not self.current_patcher.is_dynamic():
-                cache_bytes = 2 * len(self.transformer_blocks) * B * prefix_len * self.inner_dim * hidden_states.element_size()
-                cache, cached = self.select_prefix_cache(key, cache_bytes, x.device, options)
+            with comfy.model_prefetch.pause_malloc_graph():
+                key = prefix_cache_key(x, context, ref_latents, image_slots)
+                options = transformer_options.get("qwen_image21_cache", {})
+                if prefix_cache is not None and x.device in prefix_cache:
+                    cache = PrefixCache(prefix_cache[x.device])
+                    cached = cache.filled(key)
+                    for slot in cache.slots:
+                        for layer in slot:
+                            layer.read_before_write = cached
+                elif options.get("device", "auto") in ("cpu", "gpu") or not self.current_patcher.is_dynamic():
+                    cache_bytes = 2 * len(self.transformer_blocks) * B * prefix_len * self.inner_dim * hidden_states.element_size()
+                    cache, cached = self.select_prefix_cache(key, cache_bytes, x.device, options)
         if cached:
             hidden_states, pe, prefix_len = hidden_states[:, prefix_len:], pe[:, prefix_len:], 0
         elif cache is not None:
@@ -465,13 +470,11 @@ class QwenImage21Transformer2DModel(nn.Module):
 
         transformer_options["total_blocks"] = len(self.transformer_blocks)
         transformer_options["block_type"] = "single"
-        units = [(block, *(slot[i] for slot in cache.slots)) for i, block in enumerate(self.transformer_blocks)] if isinstance(cache, PrefixCache) else list(self.transformer_blocks)
-        prefetch_queue = comfy.model_prefetch.make_prefetch_queue(units, x.device, transformer_options)
-        comfy.model_prefetch.malloc_graph_begin(x.device)
+        prefetch_queue = comfy.model_prefetch.make_prefetch_queue(list(self.transformer_blocks), x.device, transformer_options)
         for i, block in enumerate(self.transformer_blocks):
-            comfy.model_prefetch.prefetch_queue_pop(prefetch_queue, x.device, block, dtype, malloc_scope="block")
             transformer_options["block_index"] = i
             with cache.layer(i, x.device, write=not cached) if isinstance(cache, PrefixCache) else contextlib.nullcontext():
+                comfy.model_prefetch.prefetch_queue_pop(prefetch_queue, x.device, block, dtype, malloc_scope="block")
                 if cache is not None:
                     if not cached:
                         with comfy.model_prefetch.pause_malloc_graph():
@@ -497,9 +500,11 @@ class QwenImage21Transformer2DModel(nn.Module):
                     del attn_fn, prefix_k, prefix_v
 
         comfy.model_prefetch.prefetch_queue_pop(prefetch_queue, x.device, None, malloc_scope="block")
-        comfy.model_prefetch.malloc_graph_end()
         if isinstance(cache, PrefixCache) and not cached:
-            cache.finish(key)
-        hidden_states = self.norm_out(hidden_states[:, prefix_len:], temb[:-1])
-        hidden_states = self.proj_out(hidden_states)
-        return hidden_states.transpose(1, 2).reshape(B, self.out_channels, H, W)
+            with comfy.model_prefetch.pause_malloc_graph():
+                cache.finish(key)
+        with comfy.model_prefetch.pause_malloc_graph():
+            output = self.norm_out(hidden_states[:, prefix_len:], temb[:-1])
+            output = self.proj_out(output)
+            output = output.transpose(1, 2).reshape(B, self.out_channels, H, W)
+        return output
