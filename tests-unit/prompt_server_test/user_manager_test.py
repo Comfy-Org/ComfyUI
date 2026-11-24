@@ -179,10 +179,19 @@ async def test_post_userdata_full_info(aiohttp_client, app, tmp_path):
     assert "modified" in result
 
 
-async def test_post_userdata_normalized_separator(aiohttp_client, app, tmp_path, monkeypatch):
-    # Force backslash as os separator
+@pytest.fixture
+def windows_relpath(monkeypatch):
+    """Make relative paths come out with backslashes, as they do on Windows.
+
+    Patching os.sep alone does not change what os.path.relpath returns on POSIX.
+    """
+    relpath = os.path.relpath
     monkeypatch.setattr(os, 'sep', '\\')
     monkeypatch.setattr(os.path, 'sep', '\\')
+    monkeypatch.setattr(os.path, 'relpath', lambda path, start=None: relpath(path, start).replace('/', '\\'))
+
+
+async def test_post_userdata_normalized_separator(aiohttp_client, app, tmp_path, windows_relpath):
     os.makedirs(tmp_path / "subdir")
 
     client = await aiohttp_client(app)
@@ -209,10 +218,7 @@ async def test_move_userdata(aiohttp_client, app, tmp_path):
         assert f.read() == "test content"
 
 
-async def test_move_userdata_normalized_separator(aiohttp_client, app, tmp_path, monkeypatch):
-    # Force backslash as os separator
-    monkeypatch.setattr(os, 'sep', '\\')
-    monkeypatch.setattr(os.path, 'sep', '\\')
+async def test_move_userdata_normalized_separator(aiohttp_client, app, tmp_path, windows_relpath):
     os.makedirs(tmp_path / "subdir")
     with open(tmp_path / "source.txt", "w") as f:
         f.write("test content")
