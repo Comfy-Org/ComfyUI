@@ -13,6 +13,7 @@ import torch.nn.functional as F
 from einops import rearrange
 
 import comfy.model_management
+import comfy.model_prefetch
 import comfy.patcher_extension
 import comfy.ldm.common_dit
 import comfy.utils
@@ -276,11 +277,12 @@ class SingleStreamDiT(nn.Module):
         )
 
     def forward(self, x, timesteps, context, attention_mask=None, ref_latents=None, transformer_options={}, **kwargs):
-        return comfy.patcher_extension.WrapperExecutor.new_class_executor(
-            self._forward,
-            self,
-            comfy.patcher_extension.get_all_wrappers(comfy.patcher_extension.WrappersMP.DIFFUSION_MODEL, transformer_options),
-        ).execute(x, timesteps, context, attention_mask, ref_latents, transformer_options, **kwargs)
+        with comfy.model_prefetch.malloc_graph_scope(x.device):
+            return comfy.patcher_extension.WrapperExecutor.new_class_executor(
+                self._forward,
+                self,
+                comfy.patcher_extension.get_all_wrappers(comfy.patcher_extension.WrappersMP.DIFFUSION_MODEL, transformer_options),
+            ).execute(x, timesteps, context, attention_mask, ref_latents, transformer_options, **kwargs)
 
     def process_img(self, x, index=0):
         patch = self.patch
@@ -367,18 +369,28 @@ class SingleStreamDiT(nn.Module):
         transformer_options["total_blocks"] = len(self.blocks)
         transformer_options["block_type"] = "single"
         transformer_options["img_slice"] = [txtlen, combined.shape[1]]
+        prefetch_queue = comfy.model_prefetch.make_prefetch_queue(list(self.blocks), x.device, transformer_options)
         for i, block in enumerate(self.blocks):
             transformer_options["block_index"] = i
-            combined = block(combined, tvec, freqs, None, timestep_zero_index=timestep_zero_index, transformer_options=transformer_options)
+            def core():
+                output = block(combined, tvec, freqs, None, timestep_zero_index=timestep_zero_index, transformer_options=transformer_options)
+                combined.copy_(output)
 
-        final = self.last(combined, t)
-        del combined
-        out = final[:, txtlen:txtlen + img_tokens, :]
-        out = rearrange(out, "b (h w) (c ph pw) -> b c (h ph) (w pw)",
-                        h=h_, w=w_, ph=patch, pw=patch, c=self.channels)
-        out = out[:, :, :h_orig, :w_orig]  # crop padding back off
-        if temporal:
-            out = out.reshape(b5, t5, self.channels, h_orig, w_orig).movedim(1, 2)
+            comfy.model_prefetch.prefetch_queue_pop(
+                prefetch_queue, x.device, block, combined.dtype, core=core,
+                malloc_scope="block",
+            )
+
+        comfy.model_prefetch.prefetch_queue_pop(prefetch_queue, x.device, None, malloc_scope="block")
+
+        with comfy.model_prefetch.pause_malloc_graph():
+            final = self.last(combined, t)
+            out = final[:, txtlen:txtlen + img_tokens, :]
+            out = rearrange(out, "b (h w) (c ph pw) -> b c (h ph) (w pw)",
+                            h=h_, w=w_, ph=patch, pw=patch, c=self.channels)
+            out = out[:, :, :h_orig, :w_orig]
+            if temporal:
+                out = out.reshape(b5, t5, self.channels, h_orig, w_orig).movedim(1, 2)
         return out
 
     def _unpack_context(self, context):

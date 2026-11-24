@@ -2841,6 +2841,9 @@ class Krea2(BaseModel):
         super().__init__(model_config, model_type, device=device, unet_model=comfy.ldm.krea2.model.SingleStreamDiT)
         self.memory_usage_factor_conds = ("ref_latents",)
 
+    def get_dynamic_vram__units(self):
+        return list(self.diffusion_model.blocks), []
+
     def extra_conds(self, **kwargs):
         out = super().extra_conds(**kwargs)
         cross_attn = kwargs.get("cross_attn", None)
