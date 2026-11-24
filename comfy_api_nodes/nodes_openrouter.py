@@ -29,11 +29,15 @@ from comfy_api_nodes.apis.openrouter import (
 from comfy_api_nodes.util import (
     bytesio_to_image_tensor,
     download_url_to_image_tensor,
+    get_fs_object_size,
+    get_image_dimensions,
     get_number_of_images,
     pad_images_to_common_channels,
     router_op,
     upload_images_to_comfyapi,
     upload_video_to_comfyapi,
+    validate_image_aspect_ratio,
+    validate_image_dimensions,
     validate_string,
     validate_video_duration,
 )
@@ -52,6 +56,10 @@ class _ModelSpec:
     max_images: int = 0  # 0 = no image input; otherwise max URL-passed images supported
     max_videos: int = 0  # 0 = no video input; otherwise max URL-passed videos supported
     min_video_duration: int = 0
+    max_video_bytes: int = 0
+    min_image_side: int = 0
+    min_image_pixels: int = 0
+    max_image_aspect: int = 0
 
 
 MODELS: list[_ModelSpec] = [
@@ -70,17 +78,17 @@ MODELS: list[_ModelSpec] = [
     _ModelSpec("openai/gpt-5.5-pro", "frontier_reasoning", 0.0000429, 0.0002574, max_images=20),
     _ModelSpec("openai/gpt-5.5", "frontier_reasoning", 0.00000715, 0.0000429, max_images=20),
     _ModelSpec("google/gemini-3.5-flash", "reasoning", 0.000002145, 0.00001287, max_images=20, max_videos=4),
-    _ModelSpec("x-ai/grok-4.5", "reasoning", 0.00000286, 0.00000858, max_images=20),
-    _ModelSpec("x-ai/grok-4.20", "reasoning", 0.0000017875, 0.000003575, max_images=20),
-    _ModelSpec("x-ai/grok-4.3", "reasoning", 0.0000017875, 0.000003575, max_images=20),
-    _ModelSpec("meta/muse-wonder", "always_reasoning", 0.00000572, 0.0000286, max_images=50, max_videos=5),
-    _ModelSpec("meta/muse-spark-1.3", "always_reasoning", 0.0000017875, 0.0000060775, max_images=50, max_videos=5),
-    _ModelSpec("meta/muse-ember", "always_reasoning", 0.000000143, 0.000000715, max_images=50, max_videos=5),
+    _ModelSpec("x-ai/grok-4.5", "reasoning", 0.00000286, 0.00000858, max_images=20, min_image_side=8, min_image_pixels=512),
+    _ModelSpec("x-ai/grok-4.20", "reasoning", 0.0000017875, 0.000003575, max_images=20, min_image_side=8, min_image_pixels=512),
+    _ModelSpec("x-ai/grok-4.3", "reasoning", 0.0000017875, 0.000003575, max_images=20, min_image_side=8, min_image_pixels=512),
+    _ModelSpec("meta/muse-wonder", "always_reasoning", 0.00000572, 0.0000286, max_images=50, max_videos=5, max_video_bytes=50 * 1024 * 1024),
+    _ModelSpec("meta/muse-spark-1.3", "always_reasoning", 0.0000017875, 0.0000060775, max_images=50, max_videos=5, max_video_bytes=50 * 1024 * 1024),
+    _ModelSpec("meta/muse-ember", "always_reasoning", 0.000000143, 0.000000715, max_images=50, max_videos=5, max_video_bytes=50 * 1024 * 1024),
     _ModelSpec("deepseek/deepseek-v4-pro", "reasoning", 0.00000062205, 0.0000012441),
     _ModelSpec("deepseek/deepseek-v4-flash", "reasoning", 0.00000016016, 0.00000032032),
     _ModelSpec("deepseek/deepseek-v3.2", "reasoning", 0.00000036036, 0.00000054054),
-    _ModelSpec("qwen/qwen3.6-plus", "reasoning", 0.00000046475, 0.0000027885, max_images=10, max_videos=4, min_video_duration=2),
-    _ModelSpec("qwen/qwen3.6-flash", "reasoning", 0.000000268125, 0.00000160875, max_images=10, max_videos=4, min_video_duration=2),
+    _ModelSpec("qwen/qwen3.6-plus", "reasoning", 0.00000046475, 0.0000027885, max_images=10, max_videos=4, min_video_duration=2, min_image_side=10, max_image_aspect=200),
+    _ModelSpec("qwen/qwen3.6-flash", "reasoning", 0.000000268125, 0.00000160875, max_images=10, max_videos=4, min_video_duration=2, min_image_side=10, max_image_aspect=200),
     _ModelSpec("mistralai/mistral-large-2512", "standard", 0.000000715, 0.000002145, max_images=8),
     _ModelSpec("mistralai/mistral-medium-3-5", "reasoning", 0.000002145, 0.000010725, max_images=8),
     _ModelSpec("z-ai/glm-4.6", "reasoning", 0.0000006149, 0.0000024882),
@@ -399,9 +407,25 @@ class OpenRouterLLMNode(IO.ComfyNode):
         video_inputs: list[Input.Video] = [v for v in (model.get("videos") or {}).values() if v is not None]
         if video_inputs and len(video_inputs) > spec.max_videos:
             raise ValueError(f"Up to {spec.max_videos} videos are supported for {slug}.")
-        if spec.min_video_duration:
-            for video in video_inputs:
+        for image in image_tensors:
+            validate_image_dimensions(image, min_width=spec.min_image_side, min_height=spec.min_image_side)
+            height, width = get_image_dimensions(image)
+            if width * height < spec.min_image_pixels:
+                raise ValueError(f"Image must have at least {spec.min_image_pixels} pixels, got {width}x{height}")
+            if spec.max_image_aspect:
+                validate_image_aspect_ratio(
+                    image, min_ratio=(1, spec.max_image_aspect), max_ratio=(spec.max_image_aspect, 1), strict=False
+                )
+        for video in video_inputs:
+            if spec.min_video_duration:
                 validate_video_duration(video, min_duration=spec.min_video_duration)
+            if spec.max_video_bytes:
+                video_size = get_fs_object_size(video.get_stream_source())
+                if video_size > spec.max_video_bytes:
+                    raise ValueError(
+                        f"Video size ({video_size / 1024 / 1024:.1f}MB) exceeds the "
+                        f"{spec.max_video_bytes // (1024 * 1024)}MB limit for {slug}."
+                    )
 
         media_blocks: list[OpenRouterContentBlock] = []
         if image_tensors:
@@ -615,7 +639,12 @@ class OpenRouterImageNode(IO.ComfyNode):
             raise ValueError(f"Unknown OpenRouter model: {slug}")
         prompt: str = model["prompt"]
         validate_string(prompt, strip_whitespace=True, min_length=1)
-        validate_string(prompt, strip_whitespace=False, max_length=_IMAGE_PROMPT_MAX_CHARS)
+        prompt_length = len(prompt.encode("utf-16-le")) // 2
+        if prompt_length > _IMAGE_PROMPT_MAX_CHARS:
+            raise ValueError(
+                f"Prompt cannot be longer than {_IMAGE_PROMPT_MAX_CHARS} characters; was {prompt_length} characters "
+                "long (emoji and some symbols count as two)."
+            )
         aspect_ratio: str = model["aspect_ratio"]
         size: str | None = None
         if aspect_ratio != _IMAGE_AUTO_ASPECT_RATIO:
