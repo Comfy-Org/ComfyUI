@@ -179,6 +179,19 @@ async def test_post_userdata_full_info(aiohttp_client, app, tmp_path):
     assert "modified" in result
 
 
+async def test_post_userdata_normalized_separator(aiohttp_client, app, tmp_path, monkeypatch):
+    # Force backslash as os separator
+    monkeypatch.setattr(os, 'sep', '\\')
+    monkeypatch.setattr(os.path, 'sep', '\\')
+    os.makedirs(tmp_path / "subdir")
+
+    client = await aiohttp_client(app)
+    resp = await client.post("/userdata/subdir%2Ftest.txt", data=b"test content")
+
+    assert resp.status == 200
+    assert await resp.json() == "subdir/test.txt"
+
+
 async def test_move_userdata(aiohttp_client, app, tmp_path):
     # Create initial file
     with open(tmp_path / "source.txt", "w") as f:
@@ -194,6 +207,21 @@ async def test_move_userdata(aiohttp_client, app, tmp_path):
     assert not os.path.exists(tmp_path / "source.txt")
     with open(tmp_path / "dest.txt", "r") as f:
         assert f.read() == "test content"
+
+
+async def test_move_userdata_normalized_separator(aiohttp_client, app, tmp_path, monkeypatch):
+    # Force backslash as os separator
+    monkeypatch.setattr(os, 'sep', '\\')
+    monkeypatch.setattr(os.path, 'sep', '\\')
+    os.makedirs(tmp_path / "subdir")
+    with open(tmp_path / "source.txt", "w") as f:
+        f.write("test content")
+
+    client = await aiohttp_client(app)
+    resp = await client.post("/userdata/source.txt/move/subdir%2Fdest.txt")
+
+    assert resp.status == 200
+    assert await resp.json() == "subdir/dest.txt"
 
 
 async def test_move_userdata_no_overwrite(aiohttp_client, app, tmp_path):

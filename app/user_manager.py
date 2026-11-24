@@ -450,7 +450,7 @@ class UserManager():
             if full_info:
                 resp = get_file_info(path, user_path)
             else:
-                resp = os.path.relpath(path, user_path)
+                resp = os.path.relpath(path, user_path).replace(os.sep, '/')
 
             return web.json_response(resp)
 
@@ -511,6 +511,6 @@ class UserManager():
             if full_info:
                 resp = get_file_info(dest, user_path)
             else:
-                resp = os.path.relpath(dest, user_path)
+                resp = os.path.relpath(dest, user_path).replace(os.sep, '/')
 
             return web.json_response(resp)
