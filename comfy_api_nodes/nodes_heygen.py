@@ -1,4 +1,3 @@
-import asyncio
 import re
 
 import torch
@@ -22,6 +21,7 @@ from comfy_api_nodes.util import (
     download_url_to_image_tensor,
     download_url_to_video_output,
     downscale_image_tensor_by_max_side,
+    downscale_video_to_max_pixels,
     get_number_of_images,
     poll_op_raw,
     sync_op_raw,
@@ -44,11 +44,39 @@ _AVATARS_PATH = "/proxy/heygen/v3/avatars"
 _LOOKS_PATH = "/proxy/heygen/v3/avatars/looks"
 _MODEL_VOICES_PATH = "/proxy/heygen/v3/models/audio/voices"
 _MODEL_TTS_PATH = "/proxy/heygen/v3/models/audio/tts"
+_MODEL_CLONE_TTS_PATH = "/proxy/heygen/v3/models/audio/clone-tts"
 _MODEL_AVATARS_PATH = "/proxy/heygen/v3/models/avatars"
+_MODEL_DECISIONS_PATH = "/proxy/heygen/v3/models/decisions"
+
+_DECISION_MODELS = ["heygen-decision-1", "heygen-decision-1-turbo"]
+_DECISION_MAX_IMAGES = 4
+_DECISION_PRICE_BADGE = IO.PriceBadge(
+    depends_on=IO.PriceBadgeDepends(widgets=["model"]),
+    expr="""
+    (
+      $promo := $now() < "2026-12-01T08:00:00.000Z";
+      $rate := widgets.model = "heygen-decision-1-turbo"
+        ? ($promo ? 0.06006 : 0.1287)
+        : ($promo ? 0.1001 : 0.2002);
+      {"type":"usd","usd":$rate,"format":{"approximate":true,"suffix":" per 1M tokens"}}
+    )
+    """,
+)
 
 _DEFAULT_VOICE_OPTION = "(avatar's default voice)"
 _VOICE_LANGUAGE_OPTIONS = ["auto", *HEYGEN_VOICE_LANGUAGES]
-_NEW_VOICE_RETRIES = 5
+_VOICE_TTS_PRICE_BADGE = IO.PriceBadge(
+    depends_on=IO.PriceBadgeDepends(widgets=["model", "model.text"]),
+    expr="""
+    (
+      $t := $lookup(widgets, "model.text");
+      $rate := widgets.model = "heygen-voice-1-turbo" ? 0.010725 : 0.0429;
+      $type($t) = "string" and $length($t) > 0
+        ? {"type":"usd","usd": $length($t) * $rate / 1000}
+        : {"type":"usd","usd": $rate, "format":{"approximate":true,"suffix":"/1K chars"}}
+    )
+    """,
+)
 
 _AVATARS_BY_ENGINE = {
     e: [label for label, (_aid, _atype, engines) in HEYGEN_AVATAR_MAP.items() if e in engines]
@@ -109,18 +137,11 @@ async def _create_and_poll_video(
     cls: type[IO.ComfyNode], create_path: str, payload: dict, max_poll_attempts: int
 ) -> dict:
     """POST a video payload, poll /v3/videos until terminal, and return the final video data."""
-    for attempt in range(_NEW_VOICE_RETRIES + 1):
-        try:
-            created = await sync_op_raw(
-                cls,
-                ApiEndpoint(path=create_path, method="POST"),
-                data=payload,
-            )
-            break
-        except Exception as e:
-            if attempt == _NEW_VOICE_RETRIES or "Invalid voice_id" not in str(e):
-                raise
-            await asyncio.sleep(3)
+    created = await sync_op_raw(
+        cls,
+        ApiEndpoint(path=create_path, method="POST"),
+        data=payload,
+    )
     video_id = (created.get("data") or {}).get("video_id")
     if not video_id:
         raise ValueError(f"HeyGen did not return a video_id: {created}")
@@ -1162,6 +1183,30 @@ class HeyGenImageToVideoNode(IO.ComfyNode):
         return IO.NodeOutput(await download_url_to_video_output(video["video_url"]))
 
 
+async def _upload_voice_recording(cls: type[IO.ComfyNode], audio: Input.Audio) -> str:
+    sample_rate = audio["sample_rate"]
+    return await upload_audio_to_comfyapi(
+        cls,
+        {"waveform": audio["waveform"][..., : 180 * sample_rate], "sample_rate": sample_rate},
+        container_format="mp3",
+        codec_name="libmp3lame",
+        mime_type="audio/mpeg",
+    )
+
+
+async def _synthesize_speech(cls: type[IO.ComfyNode], path: str, payload: dict) -> IO.NodeOutput:
+    response = await sync_op_raw(
+        cls,
+        ApiEndpoint(path=path, method="POST"),
+        data=payload,
+    )
+    audio_url = (response.get("data") or {}).get("audio_url")
+    if not audio_url:
+        raise ValueError(f"HeyGen did not return an audio_url: {response}")
+    audio_bytes = await download_url_as_bytesio(audio_url)
+    return IO.NodeOutput(audio_bytes_to_audio_input(audio_bytes.getvalue()))
+
+
 class HeyGenVoiceCloneNode(IO.ComfyNode):
 
     @classmethod
@@ -1207,6 +1252,7 @@ class HeyGenVoiceCloneNode(IO.ComfyNode):
             ],
             is_api_node=True,
             price_badge=IO.PriceBadge(expr="""{"type":"usd","usd":0}"""),
+            is_deprecated=True,
         )
 
     @classmethod
@@ -1218,18 +1264,10 @@ class HeyGenVoiceCloneNode(IO.ComfyNode):
         remove_background_noise: bool,
         seed: int,
     ) -> IO.NodeOutput:
-        sample_rate = audio["sample_rate"]
-        audio_url = await upload_audio_to_comfyapi(
-            cls,
-            {"waveform": audio["waveform"][..., : 180 * sample_rate], "sample_rate": sample_rate},
-            container_format="mp3",
-            codec_name="libmp3lame",
-            mime_type="audio/mpeg",
-        )
         payload = {
             "mode": "instant",
             "name": "ComfyUI Voice",
-            "audio": [{"type": "url", "url": audio_url}],
+            "audio": [{"type": "url", "url": await _upload_voice_recording(cls, audio)}],
             "similarity": similarity,
             "remove_background_noise": remove_background_noise,
         }
@@ -1254,20 +1292,11 @@ class HeyGenVoiceCloneNode(IO.ComfyNode):
             raise ValueError(
                 f"HeyGen could not create a voice from this recording ({final['data'].get('failure_reason')})."
             )
-        PromptServer.instance.send_progress_text(
-            f"Please save the voice_id for reuse.\n\nvoice_id: {voice_id}",
-            cls.hidden.unique_id,
-        )
         return IO.NodeOutput(voice_id)
 
 
-def _voice_tts_inputs() -> list:
+def _speech_text_inputs() -> list:
     return [
-        IO.String.Input(
-            "voice_id",
-            default="",
-            tooltip="Voice from HeyGen Voice 1.0 Instant Clone.",
-        ),
         IO.String.Input(
             "text",
             multiline=True,
@@ -1292,6 +1321,17 @@ def _voice_tts_inputs() -> list:
     ]
 
 
+def _voice_tts_inputs() -> list:
+    return [
+        IO.String.Input(
+            "voice_id",
+            default="",
+            tooltip="ID of a HeyGen voice, for example from HeyGen's voice library.",
+        ),
+        *_speech_text_inputs(),
+    ]
+
+
 class HeyGenVoiceTextToSpeechNode(IO.ComfyNode):
 
     @classmethod
@@ -1300,7 +1340,8 @@ class HeyGenVoiceTextToSpeechNode(IO.ComfyNode):
             node_id="HeyGenVoiceTextToSpeechNode",
             display_name="HeyGen Voice 1.0 Text to Speech",
             category="partner/audio/HeyGen",
-            description="Speak text in a voice cloned with HeyGen Voice 1.0 Instant Clone.",
+            description="Speak text in a HeyGen voice with HeyGen Voice 1.0. "
+            "To speak in a voice cloned from a recording, use HeyGen Voice 1.0 Instant Clone Text to Speech.",
             inputs=[
                 IO.DynamicCombo.Input(
                     "model",
@@ -1317,28 +1358,14 @@ class HeyGenVoiceTextToSpeechNode(IO.ComfyNode):
                 IO.Hidden.unique_id,
             ],
             is_api_node=True,
-            price_badge=IO.PriceBadge(
-                depends_on=IO.PriceBadgeDepends(widgets=["model", "model.text"]),
-                expr="""
-                (
-                  $t := $lookup(widgets, "model.text");
-                  $promo := $now() < "2026-11-01T00:00:00.000Z";
-                  $rate := widgets.model = "heygen-voice-1-turbo"
-                    ? ($promo ? 0.00572 : 0.010725)
-                    : ($promo ? 0.02145 : 0.0429);
-                  $type($t) = "string" and $length($t) > 0
-                    ? {"type":"usd","usd": $length($t) * $rate / 1000}
-                    : {"type":"usd","usd": $rate, "format":{"approximate":true,"suffix":"/1K chars"}}
-                )
-                """,
-            ),
+            price_badge=_VOICE_TTS_PRICE_BADGE,
         )
 
     @classmethod
     async def execute(cls, model: dict) -> IO.NodeOutput:
         voice_id = model["voice_id"].strip()
         if not voice_id:
-            raise ValueError("Connect a voice_id from HeyGen Voice 1.0 Instant Clone.")
+            raise ValueError("Enter a HeyGen voice_id.")
         text = model["text"].strip()
         validate_string(text, field_name="text", min_length=1, max_length=5000)
         payload = {
@@ -1349,16 +1376,85 @@ class HeyGenVoiceTextToSpeechNode(IO.ComfyNode):
         }
         if model["language"] != "auto":
             payload["language"] = HEYGEN_VOICE_LANGUAGES[model["language"]]
-        response = await sync_op_raw(
-            cls,
-            ApiEndpoint(path=_MODEL_TTS_PATH, method="POST"),
-            data=payload,
+        return await _synthesize_speech(cls, _MODEL_TTS_PATH, payload)
+
+
+def _clone_tts_inputs() -> list:
+    return [
+        IO.Audio.Input(
+            "audio",
+            tooltip="Recording of one speaker. Use at least 10 seconds of clear speech; "
+            "only the first 3 minutes are used.",
+        ),
+        *_speech_text_inputs(),
+        IO.Combo.Input(
+            "recording_language",
+            options=_VOICE_LANGUAGE_OPTIONS,
+            tooltip="Language spoken in the recording.",
+        ),
+        IO.Combo.Input(
+            "similarity",
+            options=["medium", "high", "extra_high", "max"],
+            default="max",
+            tooltip="How closely the voice follows the recording.",
+        ),
+        IO.Boolean.Input("remove_background_noise", default=True),
+        IO.Int.Input(
+            "seed",
+            default=42,
+            min=0,
+            max=2147483647,
+            control_after_generate=IO.ControlAfterGenerate.fixed,
+            tooltip="Seed controls whether the node should re-run; results are non-deterministic regardless of seed.",
+        ),
+    ]
+
+
+class HeyGenVoiceCloneTextToSpeechNode(IO.ComfyNode):
+
+    @classmethod
+    def define_schema(cls) -> IO.Schema:
+        return IO.Schema(
+            node_id="HeyGenVoiceCloneTextToSpeechNode",
+            display_name="HeyGen Voice 1.0 Instant Clone Text to Speech",
+            category="partner/audio/HeyGen",
+            description="Clone a voice from a recording of one speaker and speak text in it with HeyGen Voice 1.0.",
+            inputs=[
+                IO.DynamicCombo.Input(
+                    "model",
+                    options=[
+                        IO.DynamicCombo.Option("heygen-voice-1", _clone_tts_inputs()),
+                        IO.DynamicCombo.Option("heygen-voice-1-turbo", _clone_tts_inputs()),
+                    ],
+                ),
+            ],
+            outputs=[IO.Audio.Output()],
+            hidden=[
+                IO.Hidden.auth_token_comfy_org,
+                IO.Hidden.api_key_comfy_org,
+                IO.Hidden.unique_id,
+            ],
+            is_api_node=True,
+            price_badge=_VOICE_TTS_PRICE_BADGE,
         )
-        audio_url = (response.get("data") or {}).get("audio_url")
-        if not audio_url:
-            raise ValueError(f"HeyGen did not return an audio_url: {response}")
-        audio_bytes = await download_url_as_bytesio(audio_url)
-        return IO.NodeOutput(audio_bytes_to_audio_input(audio_bytes.getvalue()))
+
+    @classmethod
+    async def execute(cls, model: dict) -> IO.NodeOutput:
+        text = model["text"].strip()
+        validate_string(text, field_name="text", min_length=1, max_length=5000)
+        payload = {
+            "model": model["model"],
+            "reference_audio": {"type": "url", "url": await _upload_voice_recording(cls, model["audio"])},
+            "similarity": model["similarity"],
+            "remove_background_noise": model["remove_background_noise"],
+            "text": text,
+            "expressiveness_boost": model["expressiveness_boost"],
+        }
+        if model["recording_language"] != "auto":
+            payload["reference_language"] = HEYGEN_VOICE_LANGUAGES[model["recording_language"]]
+        if model["language"] != "auto":
+            payload["language"] = HEYGEN_VOICE_LANGUAGES[model["language"]]
+        return await _synthesize_speech(cls, _MODEL_CLONE_TTS_PATH, payload)
 
 
 def _avatar6_reference_inputs() -> list:
@@ -1666,6 +1762,322 @@ class HeyGenAvatar6IdentityToVideoNode(IO.ComfyNode):
         return IO.NodeOutput(await download_url_to_video_output(video["video_url"]))
 
 
+def _decision_inputs() -> list:
+    return [
+        IO.Autogrow.Input(
+            "images",
+            template=IO.Autogrow.TemplateNames(
+                IO.Image.Input("image"),
+                names=[f"image_{i}" for i in range(1, _DECISION_MAX_IMAGES + 1)],
+                min=0,
+            ),
+            optional=True,
+            tooltip="Up to 4 images in total, counting every frame of a batch. They are numbered "
+            "image_1 to image_4 in order across the sockets, so a batch of 2 on the first socket is image_1 and image_2.",
+        ),
+        IO.Audio.Input("audio_1", optional=True, tooltip="Audio up to 30 minutes."),
+        IO.Video.Input("video_1", optional=True, tooltip="Video up to 60 seconds."),
+        IO.String.Input(
+            "text",
+            multiline=True,
+            force_input=True,
+            optional=True,
+            tooltip="The text the question is about, such as a prompt or an LLM response.",
+        ),
+    ]
+
+
+async def _run_decision(
+    cls: type[IO.ComfyNode],
+    model: str,
+    question: dict,
+    text: str,
+    images: IO.Autogrow.Type,
+    audio: Input.Audio | None,
+    video: Input.Video | None,
+) -> dict:
+    validate_string(question["instructions"], field_name="question", min_length=1, max_length=5000)
+    validate_string(text, field_name="text", max_length=20000)
+    image_tensors = [image for image in images.values() if image is not None]
+    n_images = sum(get_number_of_images(image) for image in image_tensors)
+    if n_images > _DECISION_MAX_IMAGES:
+        raise ValueError(f"HeyGen Decision takes up to {_DECISION_MAX_IMAGES} images; got {n_images}.")
+    if not text.strip() and not n_images and audio is None and video is None:
+        raise ValueError("Connect text, an image, audio or video for the question to be about.")
+    if video is not None:
+        validate_video_duration(video, max_duration=60)
+    if audio is not None:
+        validate_audio_duration(audio, max_duration=1800)
+    assets = {}
+    legend = []
+    if n_images:
+        urls = await upload_images_to_comfyapi(
+            cls, image_tensors, max_images=_DECISION_MAX_IMAGES, mime_type="image/png"
+        )
+        assets["images"] = {f"image_{i}": {"type": "url", "url": url} for i, url in enumerate(urls, 1)}
+        legend.append(
+            f"{n_images} images are attached, numbered image_1 to image_{n_images} in the order they are given."
+            if n_images > 1
+            else "1 image is attached: image_1."
+        )
+    if video is not None:
+        video = downscale_video_to_max_pixels(video, 1280 * 720)
+        assets["videos"] = {"video_1": {"type": "url", "url": await upload_video_to_comfyapi(cls, video)}}
+        legend.append("1 video is attached: video_1.")
+    if audio is not None:
+        assets["audios"] = {"audio_1": {"type": "url", "url": await upload_audio_to_comfyapi(cls, audio)}}
+        legend.append("1 audio clip is attached: audio_1.")
+    state = [text] if text.strip() else []
+    if legend:
+        state.append(" ".join(legend))
+    payload = {"model": model, "state": "\n\n".join(state), "questions": {"decision": question}}
+    if assets:
+        payload["assets"] = assets
+    response = await sync_op_raw(
+        cls,
+        ApiEndpoint(path=_MODEL_DECISIONS_PATH, method="POST"),
+        data=payload,
+    )
+    answer = ((response.get("data") or {}).get("answers") or {}).get("decision")
+    if not answer:
+        raise ValueError(f"HeyGen did not return an answer: {response}")
+    return answer
+
+
+class HeyGenDecisionYesNo(IO.ComfyNode):
+
+    @classmethod
+    def define_schema(cls) -> IO.Schema:
+        return IO.Schema(
+            node_id="HeyGenDecisionYesNo",
+            display_name="HeyGen Decision (Yes/No)",
+            category="partner/text/HeyGen",
+            description="Ask a yes/no question about text, images, audio or video. "
+            "Connect `result` to an If/Else Switch node to choose between two paths.",
+            search_aliases=["if", "condition", "check", "filter", "classify", "verify", "yes no", "boolean"],
+            inputs=[
+                IO.Combo.Input("model", options=_DECISION_MODELS),
+                IO.String.Input(
+                    "question",
+                    multiline=True,
+                    default="Is there a person in the image?",
+                    tooltip="A question with a yes or no answer about what is connected. "
+                    "Ask it so that yes is the case you act on. With several inputs, refer to them as "
+                    "image_1, image_2, audio_1 or video_1, for example 'Does image_2 show the same person as image_1?'",
+                ),
+                IO.Float.Input(
+                    "threshold",
+                    default=0.5,
+                    min=0.01,
+                    max=0.99,
+                    step=0.01,
+                    tooltip="The answer is yes when the probability of yes is at least this value. "
+                    "Clear answers are close to 0 or 1.",
+                ),
+                *_decision_inputs(),
+            ],
+            outputs=[
+                IO.Boolean.Output(display_name="result"),
+                IO.String.Output(display_name="answer"),
+                IO.Float.Output(display_name="probability"),
+            ],
+            hidden=[
+                IO.Hidden.auth_token_comfy_org,
+                IO.Hidden.api_key_comfy_org,
+                IO.Hidden.unique_id,
+            ],
+            is_api_node=True,
+            price_badge=_DECISION_PRICE_BADGE,
+        )
+
+    @classmethod
+    async def execute(
+        cls,
+        model: str,
+        question: str,
+        threshold: float,
+        images: IO.Autogrow.Type,
+        text: str = "",
+        audio_1: Input.Audio | None = None,
+        video_1: Input.Video | None = None,
+    ) -> IO.NodeOutput:
+        answer = await _run_decision(
+            cls, model, {"type": "noul", "instructions": question}, text, images, audio_1, video_1
+        )
+        probability = answer["noul"]
+        result = probability >= threshold
+        verdict = "yes" if result else "no"
+        PromptServer.instance.send_progress_text(f"{verdict} · {probability:.2f}", cls.hidden.unique_id)
+        return IO.NodeOutput(result, verdict, probability)
+
+
+def _parse_decision_options(options: str) -> list[str]:
+    names: list[str] = []
+    folded: dict[tuple[str, ...], str] = {}
+    for number, line in enumerate(options.splitlines(), 1):
+        name = line.strip()
+        if not name:
+            continue
+        if len(name) > 128:
+            raise ValueError(f"The option on line {number} is longer than 128 characters.")
+        if not name.isprintable():
+            raise ValueError(f"The option on line {number} contains an invisible or control character.")
+        if name in names:
+            raise ValueError(f"The option '{name}' is listed twice.")
+        key = tuple(map(str.casefold, name))
+        if key in folded:
+            raise ValueError(f"The options '{folded[key]}' and '{name}' differ only in letter case.")
+        folded[key] = name
+        names.append(name)
+    if not 2 <= len(names) <= 255:
+        raise ValueError(f"Give 2 to 255 options, one per line. Got {len(names)}.")
+    return names
+
+
+class HeyGenDecisionChoice(IO.ComfyNode):
+
+    @classmethod
+    def define_schema(cls) -> IO.Schema:
+        return IO.Schema(
+            node_id="HeyGenDecisionChoice",
+            display_name="HeyGen Decision (Choice)",
+            category="partner/text/HeyGen",
+            description="Pick one of your options for text, images, audio or video. "
+            "Connect `choice` to a Branch node whose inputs carry the option names, or use `option_index`.",
+            search_aliases=["classify", "category", "route", "select", "label", "choose"],
+            inputs=[
+                IO.Combo.Input("model", options=_DECISION_MODELS),
+                IO.String.Input(
+                    "question",
+                    multiline=True,
+                    default="What style is the image?",
+                    tooltip="The question the options answer. With several inputs, refer to them as "
+                    "image_1, image_2, audio_1 or video_1, for example 'Which season is shown in image_1?'",
+                ),
+                IO.String.Input(
+                    "options",
+                    multiline=True,
+                    default="photo\nillustration\n3d render\nanime\nsketch\nother",
+                    tooltip="One option per line, used exactly as typed. "
+                    "Add an option such as `other` for inputs that fit none of them.",
+                ),
+                *_decision_inputs(),
+            ],
+            outputs=[
+                IO.String.Output(display_name="choice"),
+                IO.Int.Output(
+                    display_name="option_index",
+                    tooltip="Position of the chosen option in the options list, starting at 0.",
+                ),
+                IO.Float.Output(display_name="confidence"),
+            ],
+            hidden=[
+                IO.Hidden.auth_token_comfy_org,
+                IO.Hidden.api_key_comfy_org,
+                IO.Hidden.unique_id,
+            ],
+            is_api_node=True,
+            price_badge=_DECISION_PRICE_BADGE,
+        )
+
+    @classmethod
+    async def execute(
+        cls,
+        model: str,
+        question: str,
+        options: str,
+        images: IO.Autogrow.Type,
+        text: str = "",
+        audio_1: Input.Audio | None = None,
+        video_1: Input.Video | None = None,
+    ) -> IO.NodeOutput:
+        names = _parse_decision_options(options)
+        answer = await _run_decision(
+            cls,
+            model,
+            {"type": "choice", "instructions": question, "criteria": {name: "" for name in names}},
+            text,
+            images,
+            audio_1,
+            video_1,
+        )
+        choice = answer["choice"]
+        confidence = answer["probabilities"][choice]
+        PromptServer.instance.send_progress_text(f"{choice} · {confidence:.2f}", cls.hidden.unique_id)
+        return IO.NodeOutput(choice, names.index(choice), confidence)
+
+
+class HeyGenDecisionScore(IO.ComfyNode):
+
+    @classmethod
+    def define_schema(cls) -> IO.Schema:
+        return IO.Schema(
+            node_id="HeyGenDecisionScore",
+            display_name="HeyGen Decision (Score)",
+            category="partner/text/HeyGen",
+            description="Rate text, images, audio or video from 1 to 10. "
+            "Connect `result` to an If/Else Switch node to act on the score.",
+            search_aliases=["rate", "rating", "quality", "grade", "judge", "evaluate"],
+            inputs=[
+                IO.Combo.Input("model", options=_DECISION_MODELS),
+                IO.String.Input(
+                    "question",
+                    multiline=True,
+                    default="Rate the technical quality of the image from 1 (worst) to 10 (best).",
+                    tooltip="What to rate, on a scale from 1 to 10. Say what 1 and 10 mean, as in the example.",
+                ),
+                IO.Float.Input(
+                    "threshold",
+                    default=6.0,
+                    min=1.0,
+                    max=10.0,
+                    step=0.1,
+                    tooltip="`result` is true when the score is at least this value. "
+                    "Clean, sharp images score about 7, badly damaged ones about 3 to 5.",
+                ),
+                *_decision_inputs(),
+            ],
+            outputs=[
+                IO.Boolean.Output(display_name="result"),
+                IO.Float.Output(display_name="score"),
+            ],
+            hidden=[
+                IO.Hidden.auth_token_comfy_org,
+                IO.Hidden.api_key_comfy_org,
+                IO.Hidden.unique_id,
+            ],
+            is_api_node=True,
+            price_badge=_DECISION_PRICE_BADGE,
+        )
+
+    @classmethod
+    async def execute(
+        cls,
+        model: str,
+        question: str,
+        threshold: float,
+        images: IO.Autogrow.Type,
+        text: str = "",
+        audio_1: Input.Audio | None = None,
+        video_1: Input.Video | None = None,
+    ) -> IO.NodeOutput:
+        answer = await _run_decision(
+            cls,
+            model,
+            {"type": "score", "instructions": question, "criteria": [str(i) for i in range(1, 11)]},
+            text,
+            images,
+            audio_1,
+            video_1,
+        )
+        score = answer["score"] + 1
+        result = score >= threshold
+        PromptServer.instance.send_progress_text(
+            f"{score:.1f} / 10 · {'pass' if result else 'fail'}", cls.hidden.unique_id
+        )
+        return IO.NodeOutput(result, score)
+
+
 class HeyGenExtension(ComfyExtension):
     @override
     async def get_node_list(self) -> list[type[IO.ComfyNode]]:
@@ -1679,8 +2091,12 @@ class HeyGenExtension(ComfyExtension):
             HeyGenImageToVideoNode,
             HeyGenVoiceCloneNode,
             HeyGenVoiceTextToSpeechNode,
+            HeyGenVoiceCloneTextToSpeechNode,
             HeyGenAvatar6ReferenceToVideoNode,
             HeyGenAvatar6IdentityToVideoNode,
+            HeyGenDecisionYesNo,
+            HeyGenDecisionChoice,
+            HeyGenDecisionScore,
         ]
 
 

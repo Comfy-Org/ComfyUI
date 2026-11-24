@@ -143,11 +143,31 @@ class MeshyTextureRequest(BaseModel):
     multiview_image_urls: list[str] | None = Field(None)
 
 
+class MeshyReliefRequest(BaseModel):
+    image_url: str = Field(...)
+    variant: str = Field(...)
+    should_generate_model: bool = Field(...)
+    size_mm: float = Field(...)
+    carving_mode: str = Field(...)
+    carving_depth_mm: float = Field(...)
+    remove_base: bool = Field(...)
+    removal_threshold: float | None = Field(None)
+    base_thickness_mm: float | None = Field(None)
+    bend_mode: str = Field(...)
+    bend_axis: str | None = Field(None)
+    bend_angle: float | None = Field(None)
+    mesh_resolution: int = Field(...)
+    target_formats: list[str] = Field(...)
+    color_mapping: bool = Field(...)
+
+
 class MeshyModelsUrls(BaseModel):
     glb: str = Field("")
     fbx: str = Field("")
     usdz: str = Field("")
     obj: str = Field("")
+    stl: str = Field("")
+    three_mf: str = Field("", alias="3mf")
 
 
 class MeshyRiggedModelsUrls(BaseModel):
@@ -198,4 +218,14 @@ class MeshyAnimationResult(BaseModel):
     status: str = Field(...)
     progress: int = Field(0)
     result: MeshyAnimatedModelsUrls = Field(MeshyAnimatedModelsUrls())
+    task_error: MeshyTaskError | None = Field(None)
+
+
+class MeshyReliefResult(BaseModel):
+    id: str = Field(...)
+    status: str = Field(...)
+    progress: int = Field(0)
+    model_urls: MeshyModelsUrls = Field(MeshyModelsUrls())
+    depth_map_url: str = Field("")
+    thumbnail_url: str = Field("")
     task_error: MeshyTaskError | None = Field(None)
