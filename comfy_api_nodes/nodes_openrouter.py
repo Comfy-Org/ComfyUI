@@ -35,6 +35,7 @@ from comfy_api_nodes.util import (
     upload_images_to_comfyapi,
     upload_video_to_comfyapi,
     validate_string,
+    validate_video_duration,
 )
 
 
@@ -50,6 +51,7 @@ class _ModelSpec:
     price_out: float  # USD per token (completion)
     max_images: int = 0  # 0 = no image input; otherwise max URL-passed images supported
     max_videos: int = 0  # 0 = no video input; otherwise max URL-passed videos supported
+    min_video_duration: int = 0
 
 
 MODELS: list[_ModelSpec] = [
@@ -77,8 +79,8 @@ MODELS: list[_ModelSpec] = [
     _ModelSpec("deepseek/deepseek-v4-pro", "reasoning", 0.00000062205, 0.0000012441),
     _ModelSpec("deepseek/deepseek-v4-flash", "reasoning", 0.00000016016, 0.00000032032),
     _ModelSpec("deepseek/deepseek-v3.2", "reasoning", 0.00000036036, 0.00000054054),
-    _ModelSpec("qwen/qwen3.6-plus", "reasoning", 0.00000046475, 0.0000027885, max_images=10, max_videos=4),
-    _ModelSpec("qwen/qwen3.6-flash", "reasoning", 0.000000268125, 0.00000160875, max_images=10, max_videos=4),
+    _ModelSpec("qwen/qwen3.6-plus", "reasoning", 0.00000046475, 0.0000027885, max_images=10, max_videos=4, min_video_duration=2),
+    _ModelSpec("qwen/qwen3.6-flash", "reasoning", 0.000000268125, 0.00000160875, max_images=10, max_videos=4, min_video_duration=2),
     _ModelSpec("mistralai/mistral-large-2512", "standard", 0.000000715, 0.000002145, max_images=8),
     _ModelSpec("mistralai/mistral-medium-3-5", "reasoning", 0.000002145, 0.000010725, max_images=8),
     _ModelSpec("z-ai/glm-4.6", "reasoning", 0.0000006149, 0.0000024882),
@@ -397,6 +399,9 @@ class OpenRouterLLMNode(IO.ComfyNode):
         video_inputs: list[Input.Video] = [v for v in (model.get("videos") or {}).values() if v is not None]
         if video_inputs and len(video_inputs) > spec.max_videos:
             raise ValueError(f"Up to {spec.max_videos} videos are supported for {slug}.")
+        if spec.min_video_duration:
+            for video in video_inputs:
+                validate_video_duration(video, min_duration=spec.min_video_duration)
 
         media_blocks: list[OpenRouterContentBlock] = []
         if image_tensors:
