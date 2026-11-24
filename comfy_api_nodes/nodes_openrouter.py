@@ -85,7 +85,6 @@ MODELS: list[_ModelSpec] = [
     _ModelSpec("z-ai/glm-5", "reasoning", 0.000000858, 0.0000027456),
     _ModelSpec("moonshotai/kimi-k3", "reasoning", 0.00000429, 0.00002145, max_images=10),
     _ModelSpec("moonshotai/kimi-k2.6", "reasoning", 0.0000010439, 0.0000049907, max_images=10),
-    _ModelSpec("moonshotai/kimi-k2-thinking", "reasoning", 0.000000858, 0.000003575),
     _ModelSpec("perplexity/sonar-pro", "perplexity", 0.00000429, 0.00002145),
     _ModelSpec("perplexity/sonar-reasoning-pro", "perplexity_reasoning", 0.00000286, 0.00001144),
     _ModelSpec("perplexity/sonar-deep-research", "perplexity_reasoning", 0.00000286, 0.00001144),
