@@ -328,6 +328,24 @@ class FeedForward(nn.Module):
         # Dropout, so leave it to the stock path whenever it could be active.
         if comfy.model_management.in_training:
             return self.net(x)
+        if (x.device.type == "xpu" and os.environ.get("LTX25_IRIS_CPU_UNPACK") == "1"
+                and x.ndim == 3 and x.dtype == torch.float32 and not torch.is_grad_enabled()):
+            # Xe-LP / torch 2.15 XPU: the full 105-frame HD FFN stalled at its
+            # output projection with a 3.49 GiB FP32 hidden activation. Each
+            # token is independent in this MLP; cap live hidden rows per call.
+            batch, tokens, _ = x.shape
+            row_bytes = batch * self.net[0].proj.out_features * x.element_size()
+            if row_bytes * tokens >= 2 * 1024**3:
+                chunk_tokens = max(1, (256 * 1024**2) // row_bytes)
+                out = x.new_empty((batch, tokens, self.net[2].out_features))
+                for start in range(0, tokens, chunk_tokens):
+                    end = min(start + chunk_tokens, tokens)
+                    hidden = self.net[0].proj(x[:, start:end].contiguous())
+                    out[:, start:end].copy_(comfy.ops.linear_input_act(self.net[2], hidden, "gelu_tanh"))
+                    # A tight async loop can accumulate pending work and stall i915.
+                    torch.xpu.current_stream(x.device).synchronize()
+                    del hidden
+                return out
         return comfy.ops.linear_input_act(self.net[2], self.net[0].proj(x), "gelu_tanh")
 
 def apply_rotary_emb(input_tensor, freqs_cis):

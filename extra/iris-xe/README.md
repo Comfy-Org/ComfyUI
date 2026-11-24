@@ -83,3 +83,10 @@ export LTX25_IRIS_NATIVE_UNPACK=1 LTX25_IRIS_NATIVE_MIXED=1
 ```
 
 Launch with the Iris Xe settings above. Each additional format logs its name on first use. Set `LTX25_IRIS_NATIVE_MIXED=0` to use the previous Q4_K/Q6_K-only native path. On an i5-1340P, the fixed-seed nine-frame Q5_K_XL preview sampled in 9:57 between two controls of 10:51 and 10:30. The latent and decoded frames matched exactly. End-to-end request times were 23:03, 20:37 and 17:01 in run order.
+
+
+## Large LTX feed-forward activations
+
+On an i5-1340P, a 105-frame, 1920×1088 LTX-2.5 HD refinement with CFG++ and FP32 stalled in the first transformer block's feed-forward output projection. The positive and negative conditions ran together, creating a hidden activation of shape `[2, 28560, 16384]` (3.49 GiB). The i915 driver reported a fence timeout.
+
+The Iris Xe launch option enables token-wise execution of the LTX feed-forward network when its estimated FP32 hidden activation reaches 2 GiB during inference. Each chunk covers at most 256 MiB of hidden activations for this model. The current XPU stream synchronizes before processing the next chunk. Both prompt conditions and the full attention context are preserved. Existing workflows and launch commands can use this path as-is.
