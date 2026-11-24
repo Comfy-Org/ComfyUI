@@ -299,5 +299,14 @@ def test_bare_embedding_reference_is_reported_as_missing(monkeypatch, tmp_path, 
     assert any("embedding:" in record.message for record in caplog.records), (
         f"the empty reference was not reported: {[r.message for r in caplog.records]}"
     )
-    # ... and the rest of the prompt still tokenised.
-    assert batched[tokenizer.clip_name], "the prompt produced no tokens at all"
+    # ... and the rest of the prompt still tokenised, with the remaining
+    # text intact: the batch must match the one of the prompt without the
+    # empty reference. Comparing the token ids this way avoids pinning
+    # them to a specific vocabulary.
+    reference = tokenizer.tokenize_with_weights("portrait,")[tokenizer.clip_name]
+    got_ids = [token for token, _weight in batched[tokenizer.clip_name][0]]
+    expected_ids = [token for token, _weight in reference[0]]
+    assert got_ids == expected_ids, (
+        "the remaining prompt text did not survive the empty embedding "
+        f"reference: got {got_ids[:8]}..., expected {expected_ids[:8]}..."
+    )
