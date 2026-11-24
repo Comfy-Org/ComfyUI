@@ -238,7 +238,7 @@
         },
         "inputs": [
           {
-            "id": "image1",
+            "id": "b39f0843-1f0c-4dd6-9afe-6ab0d80e17d6",
             "name": "image1",
             "type": "IMAGE",
             "linkIds": [
@@ -253,7 +253,7 @@
             ]
           },
           {
-            "id": "prompt",
+            "id": "a4c16ce2-a00c-4035-9253-3800be8066ca",
             "name": "prompt",
             "type": "STRING",
             "linkIds": [
@@ -266,7 +266,7 @@
             ]
           },
           {
-            "id": "negative",
+            "id": "eace7055-221f-4277-ab98-56eef9322448",
             "name": "negative_prompt",
             "type": "STRING",
             "linkIds": [
@@ -279,7 +279,7 @@
             ]
           },
           {
-            "id": "unet",
+            "id": "17f86f21-29ac-4410-ad4a-68d4d5a42147",
             "name": "unet_name",
             "type": "COMBO",
             "linkIds": [
@@ -292,7 +292,7 @@
             ]
           },
           {
-            "id": "clip",
+            "id": "64708e0d-6dfb-4682-b421-fccb318a3106",
             "name": "clip_name",
             "type": "COMBO",
             "linkIds": [
@@ -305,7 +305,7 @@
             ]
           },
           {
-            "id": "vae",
+            "id": "edfa2554-68fb-4310-ae25-4d1da34965df",
             "name": "vae_name",
             "type": "COMBO",
             "linkIds": [
@@ -318,7 +318,7 @@
             ]
           },
           {
-            "id": "width",
+            "id": "59966403-4c13-4efb-871e-6bfc515bff4a",
             "name": "width",
             "type": "INT",
             "linkIds": [
@@ -330,7 +330,7 @@
             ]
           },
           {
-            "id": "height",
+            "id": "e5a0391b-2401-4b37-bba5-212178a4f2ef",
             "name": "height",
             "type": "INT",
             "linkIds": [
