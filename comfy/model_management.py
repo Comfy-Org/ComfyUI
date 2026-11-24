@@ -2176,6 +2176,8 @@ def synchronize():
         torch.xpu.synchronize()
     elif is_ascend_npu():
         torch.npu.synchronize()
+    elif mps_mode():
+        torch.mps.synchronize()
     elif torch.cuda.is_available():
         torch.cuda.synchronize()
 

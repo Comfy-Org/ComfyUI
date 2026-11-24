@@ -469,6 +469,34 @@ class ElevenLabsAudioIsolation(IO.ComfyNode):
         return IO.NodeOutput(audio_bytes_to_audio_input(response))
 
 
+ELEVENLABS_SFX_SETTINGS = [
+    IO.Float.Input(
+        "duration",
+        default=5.0,
+        min=0.5,
+        max=30.0,
+        step=0.1,
+        display_mode=IO.NumberDisplay.slider,
+        tooltip="Duration of generated sound in seconds.",
+    ),
+    IO.Boolean.Input(
+        "loop",
+        default=False,
+        tooltip="Create a smoothly looping sound effect.",
+    ),
+    IO.Float.Input(
+        "prompt_influence",
+        default=0.3,
+        min=0.0,
+        max=1.0,
+        step=0.01,
+        display_mode=IO.NumberDisplay.slider,
+        tooltip="How closely generation follows the prompt. "
+        "Higher values make the sound follow the text more closely.",
+    ),
+]
+
+
 class ElevenLabsTextToSoundEffects(IO.ComfyNode):
     @classmethod
     def define_schema(cls) -> IO.Schema:
@@ -482,40 +510,14 @@ class ElevenLabsTextToSoundEffects(IO.ComfyNode):
                     "text",
                     multiline=True,
                     default="",
-                    tooltip="Text description of the sound effect to generate.",
+                    tooltip="Describe the sound in English, up to 450 characters. "
+                    "Prompts in other languages are often spoken aloud instead of turned into a sound.",
                 ),
                 IO.DynamicCombo.Input(
                     "model",
                     options=[
-                        IO.DynamicCombo.Option(
-                            "eleven_sfx_v2",
-                            [
-                                IO.Float.Input(
-                                    "duration",
-                                    default=5.0,
-                                    min=0.5,
-                                    max=30.0,
-                                    step=0.1,
-                                    display_mode=IO.NumberDisplay.slider,
-                                    tooltip="Duration of generated sound in seconds.",
-                                ),
-                                IO.Boolean.Input(
-                                    "loop",
-                                    default=False,
-                                    tooltip="Create a smoothly looping sound effect.",
-                                ),
-                                IO.Float.Input(
-                                    "prompt_influence",
-                                    default=0.3,
-                                    min=0.0,
-                                    max=1.0,
-                                    step=0.01,
-                                    display_mode=IO.NumberDisplay.slider,
-                                    tooltip="How closely generation follows the prompt. "
-                                    "Higher values make the sound follow the text more closely.",
-                                ),
-                            ],
-                        ),
+                        IO.DynamicCombo.Option("eleven_sfx_v3", ELEVENLABS_SFX_SETTINGS),
+                        IO.DynamicCombo.Option("eleven_sfx_v2", ELEVENLABS_SFX_SETTINGS),
                     ],
                     tooltip="Model to use for sound effect generation.",
                 ),
@@ -535,7 +537,15 @@ class ElevenLabsTextToSoundEffects(IO.ComfyNode):
             ],
             is_api_node=True,
             price_badge=IO.PriceBadge(
-                expr="""{"type":"usd","usd":0.14,"format":{"approximate":true,"suffix":"/minute"}}""",
+                depends_on=IO.PriceBadgeDepends(widgets=["model.duration"]),
+                expr="""
+                (
+                  $d := $lookup(widgets, "model.duration");
+                  $type($d) = "number"
+                    ? {"type":"usd","usd": 0.1716 / 60 * $d}
+                    : {"type":"usd","usd": 0.1716,"format":{"suffix":"/minute"}}
+                )
+                """,
             ),
         )
 
@@ -546,7 +556,7 @@ class ElevenLabsTextToSoundEffects(IO.ComfyNode):
         model: dict,
         output_format: str,
     ) -> IO.NodeOutput:
-        validate_string(text, min_length=1)
+        validate_string(text, field_name="text", min_length=1, max_length=450)
         response = await sync_op_raw(
             cls,
             ApiEndpoint(
@@ -556,6 +566,7 @@ class ElevenLabsTextToSoundEffects(IO.ComfyNode):
             ),
             data=TextToSoundEffectsRequest(
                 text=text,
+                model_id=model["model"],
                 duration_seconds=model["duration"],
                 prompt_influence=model["prompt_influence"],
                 loop=model.get("loop", None),
