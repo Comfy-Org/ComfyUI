@@ -1,6 +1,7 @@
 from unittest import mock
 
 import comfy.storage
+import comfy.system_memory
 
 
 def test_fast_nvme_link_thresholds():
@@ -22,5 +23,19 @@ def test_non_nvme_is_not_fast():
 def test_every_model_file_must_be_on_fast_storage():
     with mock.patch.object(comfy.storage, "fast_storage", side_effect=[True, False]):
         assert comfy.storage.model_fast_disk(["first", "second"]) is False
-    with mock.patch.object(comfy.storage, "fast_storage", side_effect=[True, True]):
-        assert comfy.storage.model_fast_disk(["first", "second"]) is True
+    with mock.patch.object(comfy.storage, "fast_storage", side_effect=[True, True]), mock.patch.object(comfy.storage.os.path, "getsize", return_value=10):
+        with mock.patch.object(comfy.system_memory, "virtual_memory_available", return_value=20):
+            assert comfy.storage.model_fast_disk(["first", "second"]) is True
+
+
+def test_fast_disk_auto_detection_prefers_ram_when_model_fits():
+    with mock.patch.object(comfy.storage.args, "fast_disk", False), mock.patch.object(comfy.storage.args, "disable_fast_disk", False):
+        with mock.patch.object(comfy.storage, "fast_storage", return_value=True), mock.patch.object(comfy.storage.os.path, "getsize", return_value=17):
+            with mock.patch.object(comfy.system_memory, "virtual_memory_available", return_value=45):
+                assert comfy.storage.model_fast_disk(["model"]) is False
+            with mock.patch.object(comfy.system_memory, "virtual_memory_available", return_value=20):
+                assert comfy.storage.model_fast_disk(["model"]) is True
+            with mock.patch.object(comfy.storage.args, "fast_disk", True):
+                assert comfy.storage.model_fast_disk(["model"]) is True
+                with mock.patch.object(comfy.storage.args, "disable_fast_disk", True):
+                    assert comfy.storage.model_fast_disk(["model"]) is False

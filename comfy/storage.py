@@ -5,6 +5,7 @@ import platform
 import re
 
 import comfy_aimdo.storage
+import comfy.system_memory
 from comfy.cli_args import args
 
 
@@ -107,5 +108,7 @@ def model_fast_disk(paths):
     else:
         results = [fast_storage(path) for path in paths]
         fast = bool(results) and all(result is True for result in results)
+        if fast:
+            fast = comfy.system_memory.virtual_memory_available() < 2 * sum(os.path.getsize(path) for path in paths)
     logging.info("Model storage policy: fast_disk=%s paths=%s", fast, [os.path.realpath(path) for path in paths])
     return fast
