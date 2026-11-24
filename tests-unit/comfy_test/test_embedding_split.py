@@ -24,6 +24,7 @@ even when the regex still contains the comma.
 from __future__ import annotations
 
 import ast
+import logging
 import re
 from pathlib import Path
 
@@ -271,3 +272,32 @@ def test_sd1_tokenizer_dispatches_both_comma_separated_embeddings(monkeypatch, t
         assert any(t is loaded[name] for t in tensors), (
             f"the embedding {name!r} is missing from the token output"
         )
+
+
+def test_bare_embedding_reference_is_reported_as_missing(monkeypatch, tmp_path, caplog) -> None:
+    """A bare ``embedding:`` must not stop the prompt with an IndexError.
+
+    ``embedding:`` carries no name to look up. ``"".split()`` returns an
+    empty list, so indexing the first element raised IndexError and
+    aborted the whole tokenisation. It is now reported as a missing
+    embedding — the same way an unknown name is handled — so the caller
+    warns and keeps going.
+    """
+    requested, loaded = _fake_embedding_loader(monkeypatch)
+
+    tokenizer = sd1_clip.SD1Tokenizer(embedding_directory=str(tmp_path))
+    with caplog.at_level(logging.WARNING):
+        batched = tokenizer.tokenize_with_weights("portrait,embedding:")
+
+    # The empty reference is rejected before any embedding is looked up:
+    # there is no name to load.
+    assert requested == [], (
+        f"an empty embedding reference triggered a lookup: requested {requested}"
+    )
+    assert loaded == {}, f"an empty embedding reference resolved to {sorted(loaded)}"
+    # It is reported like any other missing embedding ...
+    assert any("embedding:" in record.message for record in caplog.records), (
+        f"the empty reference was not reported: {[r.message for r in caplog.records]}"
+    )
+    # ... and the rest of the prompt still tokenised.
+    assert batched[tokenizer.clip_name], "the prompt produced no tokens at all"

@@ -551,6 +551,13 @@ class SDTokenizer:
         Returns a Tuple consisting of the embedding, the cleaned embedding name, and any leftover string, embedding can be None.
         '''
         split_embed = embedding_name.split()
+        if not split_embed:
+            # A bare ``embedding:`` reference carries no name to look up.
+            # ``"".split()`` returns an empty list, so indexing it raised
+            # IndexError and stopped the whole prompt. Report it as a
+            # missing embedding instead — the same way an unknown name is
+            # handled — so the caller warns and moves on.
+            return None, embedding_name, ''
         embedding_name = split_embed[0]
         leftover = ' '.join(split_embed[1:])
 
