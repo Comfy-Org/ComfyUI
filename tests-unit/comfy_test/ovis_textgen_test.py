@@ -7,6 +7,7 @@ if not torch.cuda.is_available():
     args.cpu = True
 
 import comfy.ops  # noqa: E402
+import comfy.text_encoders.token_stream as token_stream  # noqa: E402
 from comfy.text_encoders.flux import KleinTokenizer8B  # noqa: E402
 from comfy.text_encoders.llama import Ovis25_2B  # noqa: E402
 from comfy.text_encoders.ovis import OvisTokenizer  # noqa: E402
@@ -120,3 +121,11 @@ def test_generate_stops_at_end_of_turn(stop):
     weight[[free[new_token_step], stop]] = weight[[stop, free[new_token_step]]]
     assert model.generate(embeds.clone(), do_sample=False, max_length=8, execution_dtype=torch.float32) == free[:new_token_step] + [stop], \
         "the stop token, swapped into that step's row, ends generation there"
+
+
+def test_generate_reports_the_tokens_so_far():
+    model = tiny_model(97)
+    reports = []
+    with token_stream.listen(lambda ids: reports.append(list(ids))):
+        generated = model.generate(torch.randn(1, 5, 64), do_sample=False, max_length=12, stop_tokens=[], execution_dtype=torch.float32)
+    assert reports == [generated[:n] for n in range(1, 13)]

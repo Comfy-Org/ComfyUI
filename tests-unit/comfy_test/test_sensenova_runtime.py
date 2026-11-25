@@ -25,6 +25,7 @@ import comfy.model_prefetch
 import comfy.ops
 import comfy.utils
 import comfy.text_encoders.sensenova
+import comfy.text_encoders.token_stream as token_stream
 from comfy.ldm.sensenova import model as sensenova_model
 from comfy_extras.nodes_textgen import TextGenerateV2
 from comfy_extras.nodes_hidream_o1 import HiDreamO1ReferenceImages
@@ -407,6 +408,14 @@ def test_sensenova_native_sampling_and_generation_node():
     assert clip.decode([pair[0] for pair in raw["sensenova_u15"][0]], skip_special_tokens=False) == "literal <img>"
     custom = clip.tokenize("hello", skip_template=False, system_prompt="Be concise.")
     assert "system\nBe concise.<|im_end|>" in clip.decode([pair[0] for pair in custom["sensenova_u15"][0]], skip_special_tokens=False)
+
+
+def test_sensenova_generate_reports_the_tokens_so_far():
+    clip = _text_clip([42, 43, 44, 151645])
+    reports = []
+    with token_stream.listen(lambda ids: reports.append(list(ids))):
+        assert clip.generate({"text_input_ids": torch.tensor([[1]])}, do_sample=False, max_length=8) == [42, 43, 44, 151645]
+    assert reports == [[42], [42, 43], [42, 43, 44]]
 
 
 @pytest.mark.parametrize(("generated", "limit", "expected"), [

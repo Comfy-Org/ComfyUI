@@ -11,6 +11,7 @@ from comfy.ldm.flux.math import apply_rope1
 from comfy.ldm.modules.attention import AttentionTensorContainer, ComfyAttention, optimized_attention
 from comfy.ldm.modules.diffusionmodules.mmdit import TimestepEmbedder
 from comfy.text_encoders.llama import BaseGenerate, FixedKV
+import comfy.text_encoders.token_stream as token_stream
 
 from .conditioning import IM_END_ID, MERGED_PATCH_SIZE, image_token_mask
 from .sampling import resolution_noise_scale
@@ -631,6 +632,7 @@ class SenseNovaTextModel(nn.Module, BaseGenerate):
                 return token_ids, token_id
             token_ids.append(token_id)
             history.append(token_id)
+            token_stream.report(token_ids)
             if token_id in stop_token_ids:
                 return token_ids, token_id
             if step + 1 == max_tokens:

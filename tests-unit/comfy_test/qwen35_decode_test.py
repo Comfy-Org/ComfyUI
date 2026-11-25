@@ -478,6 +478,18 @@ def test_greedy_mtp_matches_plain_greedy(monkeypatch, image_prompt):
         assert discards and min(discards) < max(discards)  # partial acceptance happened
 
 
+@pytest.mark.parametrize("mtp", [False, True])
+def test_generate_reports_the_tokens_so_far(monkeypatch, mtp):
+    import comfy.text_encoders.token_stream as token_stream
+    model = _tiny_model(monkeypatch)
+    reports = []
+    with token_stream.listen(lambda ids: reports.append(list(ids))):
+        generated = model.generate(torch.randn(1, 5, 64), do_sample=False, max_length=40, mtp=mtp)
+    assert len(reports) > 1 and reports[-1] == generated
+    assert all(r == generated[:len(r)] for r in reports)
+    assert all(len(a) < len(b) for a, b in zip(reports, reports[1:]))
+
+
 @pytest.mark.parametrize("quantile", [0.42, 0.8, 0.92])
 @pytest.mark.parametrize("top_k", [0, 7])
 def test_sampled_tree_matches_sequential_with_same_draws(monkeypatch, quantile, top_k):

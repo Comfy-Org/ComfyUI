@@ -10,23 +10,28 @@ from server import PromptServer
 VIDEO_TOOLTIP = "Video frames as image batch. Assumed to be 24 FPS; subsampled to the model's frame rate internally."
 
 class ProgressText:
-    """Shows the text generated so far on the node, for the client that queued the prompt only, at most every
+    """Shows the text generated so far on the node, to the client that queued the prompt only, at most every
     INTERVAL seconds (a token_stream listener)."""
 
     INTERVAL = 0.15
 
-    def __init__(self, clip, node_id):
-        self.clip, self.node_id, self.sent_at = clip, node_id, float("-inf")
+    def __init__(self, clip, node_id, client_id):
+        self.clip, self.node_id, self.client_id, self.sent_at = clip, node_id, client_id, float("-inf")
 
-    def __call__(self, token_ids, final=False):
-        now = time.monotonic()
-        if now - self.sent_at < self.INTERVAL and not final:
-            return
-        server = PromptServer.instance
-        if server is None or server.client_id is None:  # never broadcast another client's text
-            return
-        self.sent_at = now
-        server.send_progress_text(self.clip.decode(list(token_ids)), self.node_id, sid=server.client_id)
+    @classmethod
+    def for_node(cls, clip, hidden):
+        """None when there is no node to show it on or no client to send it to (never broadcast it)."""
+        if hidden is None or not hidden.unique_id or PromptServer.instance.client_id is None:
+            return None
+        return cls(clip, hidden.unique_id, PromptServer.instance.client_id)
+
+    def __call__(self, token_ids):
+        if time.monotonic() - self.sent_at >= self.INTERVAL:
+            self.send(self.clip.decode(list(token_ids)))
+
+    def send(self, text):
+        PromptServer.instance.send_progress_text(text, self.node_id, sid=self.client_id)
+        self.sent_at = time.monotonic()  # after decoding and sending, so a slow decode can't run back to back
 
 
 class TextGenerateV2(io.ComfyNode):
@@ -98,7 +103,7 @@ class TextGenerateV2(io.ComfyNode):
         repetition_penalty = sampling_mode.get("repetition_penalty", 1.0)
         presence_penalty = sampling_mode.get("presence_penalty", 0.0)
 
-        progress = ProgressText(clip, cls.hidden.unique_id) if cls.hidden is not None and cls.hidden.unique_id else None
+        progress = ProgressText.for_node(clip, cls.hidden)
         with token_stream.listen(progress) if progress is not None else contextlib.nullcontext():
             generated_ids = clip.generate(
                 tokens,
@@ -113,10 +118,9 @@ class TextGenerateV2(io.ComfyNode):
                 seed=seed,
                 mtp=mtp
             )
-        if progress is not None:
-            progress(generated_ids, final=True)  # the throttle may have held back the last tokens
-
         generated_text = clip.decode(generated_ids)
+        if progress is not None:
+            progress.send(generated_text)  # the throttle may have held back the last tokens
 
         # </think> ends reasoning; without one, reasoning opened by the output or prompt was cut off by max_length
         reasoning, sep, text = generated_text.partition("</think>")
