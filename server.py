@@ -556,6 +556,8 @@ class PromptServer():
             original_ref_json = post.get("original_ref")
             if not original_ref_json:
                 return web.Response(status=400, text="original_ref is required")
+            if not isinstance(original_ref_json, str):
+                return web.Response(status=400, text="original_ref must be text")
             try:
                 original_ref = json.loads(original_ref_json)
             except json.JSONDecodeError:

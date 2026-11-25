@@ -57,3 +57,11 @@ async def test_mask_upload_requires_original_ref(client, tmp_path, monkeypatch):
     assert response.status == 400
     assert "original_ref" in await response.text()
     assert not list(tmp_path.iterdir())
+
+
+@pytest.mark.asyncio
+async def test_mask_upload_rejects_file_original_ref(client):
+    form = FormData()
+    form.add_field("original_ref", b"{}", filename="original_ref.json")
+    response = await client.post("/upload/mask", data=form)
+    assert response.status == 400
