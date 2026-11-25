@@ -73,6 +73,15 @@ def test_control_node_cannot_inhibit_itself():
         graph.inhibit_nodes({"start"})
 
 
+def test_pop_node_updates_ready_nodes_without_rescanning_pending_nodes():
+    graph = execution_list()
+    graph.readyNodes = {"start"}
+
+    graph.pop_node("start")
+
+    assert graph.readyNodes == {"first"}
+
+
 def test_staged_node_reports_dependencies_added_during_lazy_status():
     graph = execution_list()
 
