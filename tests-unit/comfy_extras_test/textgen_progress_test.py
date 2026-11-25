@@ -76,13 +76,19 @@ def test_progress_text_goes_to_the_queuing_client_only(server):
 
 
 def test_progress_text_is_throttled(server, monkeypatch):
-    monkeypatch.setattr(ProgressText, "INTERVAL", 3600.0)
+    clock = [0.5]  # monotonic time can be below INTERVAL, e.g. on a freshly booted machine
+    monkeypatch.setattr(nodes_textgen, "time", SimpleNamespace(monotonic=lambda: clock[0]))
+    monkeypatch.setattr(ProgressText, "INTERVAL", 1.0)
     p = ProgressText(FakeClip(""), "7")
     p([ord("a")])
+    clock[0] += 0.5
     p([ord("a"), ord("b")])
     assert [t for t, _, _ in server.sent] == ["a"]
     p([ord("a"), ord("b"), ord("c")], final=True)
     assert [t for t, _, _ in server.sent] == ["a", "abc"]
+    clock[0] += 1.0
+    p([ord("a"), ord("b"), ord("c"), ord("d")])
+    assert [t for t, _, _ in server.sent] == ["a", "abc", "abcd"]
 
 
 @pytest.mark.parametrize("node", [TextGenerateV2, TextGenerate])

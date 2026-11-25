@@ -16,7 +16,7 @@ class ProgressText:
     INTERVAL = 0.15
 
     def __init__(self, clip, node_id):
-        self.clip, self.node_id, self.sent_at = clip, node_id, 0.0
+        self.clip, self.node_id, self.sent_at = clip, node_id, float("-inf")
 
     def __call__(self, token_ids, final=False):
         now = time.monotonic()
