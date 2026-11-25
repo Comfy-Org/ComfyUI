@@ -122,6 +122,26 @@ async def test_status_queue_remaining_leaves_hidden_jobs_out(client):
 
 
 @pytest.mark.asyncio
+async def test_status_is_broadcast_only_when_the_visible_queue_changes(client):
+    prompt_server = client.prompt_server
+    del prompt_server.queue_updated  # the fixture's no-op
+    counts = []
+    prompt_server.send_sync = lambda event, data, sid=None: counts.append(data["status"]["exec_info"]["queue_remaining"])
+    prompt_server.prompt_queue = queue = execution.PromptQueue(prompt_server)
+    status = execution.PromptQueue.ExecutionStatus(status_str="success", completed=True, messages=[])
+
+    queue.put(item(1, "user"))
+    queue.put(item(2, "agent", hidden=True))
+    _, user_id = queue.get(timeout=0)
+    _, agent_id = queue.get(timeout=0)
+    queue.task_done(user_id, {}, status, process_item=lambda p: p[:5])
+    queue.task_done(agent_id, {}, status, process_item=lambda p: p[:5])
+    queue.put(item(3, "agent-2", hidden=True))
+    # queued, started (the frontend refreshes its queue panel), drained: once each, as for a queue with no hidden jobs
+    assert counts == [1, 1, 0]
+
+
+@pytest.mark.asyncio
 async def test_a_prompt_posted_as_hidden_is_queued_hidden(client, monkeypatch):
     async def valid(prompt_id, prompt, partial_execution_targets):
         return True, None, ["1"], {}

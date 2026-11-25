@@ -339,6 +339,7 @@ class PromptServer():
         self.routes = routes
         self.last_node_id = None
         self.client_id = None
+        self.last_visible_queue = None
         self.workflow_metadata = {}
 
         self.on_prompt_handlers = []
@@ -1534,6 +1535,11 @@ class PromptServer():
             self.messages.put_nowait, (event, data, sid))
 
     def queue_updated(self):
+        running, queued = self.prompt_queue.get_current_queue_volatile()
+        visible = tuple(frozenset(item[1] for item in items if not is_hidden_job(item)) for items in (running, queued))
+        if visible == self.last_visible_queue:  # a hidden job was queued, started or finished
+            return  # an unchanged status reads to the frontend as another queue drain, and auto-queue runs again
+        self.last_visible_queue = visible
         self.send_sync("status", { "status": self.get_queue_info() })
 
     async def publish_loop(self):
