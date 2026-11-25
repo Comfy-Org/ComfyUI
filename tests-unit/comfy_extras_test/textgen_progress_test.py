@@ -48,18 +48,19 @@ class FakeClip:
 
 @pytest.fixture
 def server(monkeypatch):
+    """Sends every report: the clock stands still (decodes take no time) and INTERVAL is 0."""
     s = FakeServer()
+    s.now = [0.5]  # monotonic time can be below INTERVAL, e.g. on a freshly booted machine
     monkeypatch.setattr(nodes_textgen, "PromptServer", SimpleNamespace(instance=s))
+    monkeypatch.setattr(nodes_textgen, "time", SimpleNamespace(monotonic=lambda: s.now[0]))
     monkeypatch.setattr(ProgressText, "INTERVAL", 0.0)
     return s
 
 
 @pytest.fixture
 def clock(server, monkeypatch):
-    now = [0.5]  # monotonic time can be below INTERVAL, e.g. on a freshly booted machine
-    monkeypatch.setattr(nodes_textgen, "time", SimpleNamespace(monotonic=lambda: now[0]))
     monkeypatch.setattr(ProgressText, "INTERVAL", 1.0)
-    return now
+    return server.now
 
 
 def texts(server):

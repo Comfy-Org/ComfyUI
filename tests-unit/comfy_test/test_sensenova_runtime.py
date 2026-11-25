@@ -425,6 +425,7 @@ def test_sensenova_generate_text_node_streams_with_the_real_tokenizer(monkeypatc
     server = SimpleNamespace(client_id="tab", send_progress_text=lambda text, node_id, sid=None: sent.append((text, node_id, sid)))
     monkeypatch.setattr(nodes_textgen, "PromptServer", SimpleNamespace(instance=server))
     monkeypatch.setattr(nodes_textgen.ProgressText, "INTERVAL", 0.0)
+    monkeypatch.setattr(nodes_textgen, "time", SimpleNamespace(monotonic=lambda: 0.0))  # every report sends
     clip = _text_clip([42, 43, 151645])
     embed = clip.cond_stage_model.language_model.model.embed_tokens.weight.detach()
     embed[271].copy_(embed[1])
