@@ -395,7 +395,7 @@ def get_output_from_returns(return_values, obj):
                 if r.block_execution is not None:
                     result = tuple([ExecutionBlocker(r.block_execution)] * len(obj.RETURN_TYPES))
                 subgraph_results.append((new_graph, result))
-            elif r.result is not None:
+            elif r.result is not None or r.block_execution is not None:
                 result = r.result
                 if r.block_execution is not None:
                     result = tuple([ExecutionBlocker(r.block_execution)] * len(obj.RETURN_TYPES))
