@@ -1,6 +1,6 @@
 """Block-sparse attention on comfy_kitchen's sparse attention kernels (Sol-Attn adaptive
-threshold, SLA-style top-k, or FastVideo's VSA). Generic models go through the
-attention override, blocks that build their qkv projection in chunks through the
+threshold, SLA-style top-k, Spark-Attn's top-k over key-grouped blocks, or FastVideo's VSA). Generic
+models go through the attention override, blocks that build their qkv projection in chunks through the
 chunked one; MiniMax-H3 gets the chunked qkv producer through block patches."""
 from __future__ import annotations
 
@@ -40,12 +40,13 @@ class SparseAttnPatch:
     """Options plus runtime state for one patched model; an ON_CLEANUP callback
     resets the state when the sampling run ends."""
 
-    def __init__(self, tau, topk_ratio, vsa, sigma_start, sigma_end, min_tokens,
+    def __init__(self, tau, topk_ratio, vsa, spark_attn, sigma_start, sigma_end, min_tokens,
                  dense_blocks, sink_conditioning, extra_tokens, verbose):
         self.tau = tau
         self.topk_ratio = topk_ratio
         self.extra_tokens = extra_tokens
         self.vsa = vsa
+        self.spark_attn = spark_attn
         self.sigma_start = sigma_start
         self.sigma_end = sigma_end
         self.min_tokens = min_tokens
@@ -95,6 +96,8 @@ class SparseAttnPatch:
                 return f"sigma {sigma:.3g} outside the start/end window"
         if tokens < self.min_tokens:
             return f"{tokens} tokens < min_tokens {self.min_tokens}"
+        if self.spark_attn and comfy.model_management.is_amd():
+            return "spark-attn row orders need the CUDA kernels"
         if self.dense_blocks:
             if block_index is None:
                 self.log_once("no_block_index", "this model does not report block indices; dense_blocks ignored")
@@ -105,7 +108,7 @@ class SparseAttnPatch:
     def sinks(self, transformer_options, tokens):
         """MiniMax-H3 conditioning rows as (exact-KV blocks, dense-query blocks):
         the packed prefix stays exact for every query, and optionally the
-        target-audio query rows run dense."""
+        target-audio query rows (spark-attn: every conditioning row) run dense."""
         layout = transformer_options.get("minimax_h3_layout")
         if self.sink_conditioning == "off" or layout is None or layout.seq_len != tokens:
             return (0, 0), (0, 0)
@@ -116,7 +119,7 @@ class SparseAttnPatch:
         if self.sink_conditioning != "exact_kv_and_rows":
             return blocks, (0, 0)
         audio = next(((a, b) for a, b, kind in layout.segments if kind == "audio"), None)
-        if audio is None:
+        if audio is None or self.spark_attn:
             return blocks, blocks
         return blocks, (audio[0] // BLOCK_SIZE, blocks[1])
 
@@ -191,8 +194,8 @@ def _ineligible(q, k, v, dim_head):
 
 def make_attention_override(patch: SparseAttnPatch, previous):
     """Attention override; declined calls run ``previous`` (the override that was
-    on the hook before this one) or ``func``. Dense-only in VSA mode: a
-    VSA-trained model must never see plain block-sparse attention."""
+    on the hook before this one) or ``func``. Dense-only in VSA mode (a
+    VSA-trained model must never see plain block-sparse attention)."""
     def override(func, q, k, v, heads, mask=None, attn_precision=None,
                  skip_reshape=False, skip_output_reshape=False, **kwargs):
         transformer_options = kwargs.get("transformer_options") or {}
@@ -222,12 +225,14 @@ def make_attention_override(patch: SparseAttnPatch, previous):
             patch.log_once(("ineligible", tuple(qs.shape), reason), f"dense {tuple(qs.shape)}: {reason}")
             return dense()
         sink, sink_q = patch.sinks(transformer_options, tokens)
+        extra = {"key_order_from": sink[1] * BLOCK_SIZE} if patch.spark_attn else {}   # as on the H3 path
         if q.dtype == torch.float32:   # the kernel quantizes to int8 anyway; bf16 keeps the fp32 range
             qs, ks, vs = (t.to(torch.bfloat16) for t in (qs, ks, vs))
         out = ck.sol_attn(qs, ks, vs, tau=patch.tau, scale=kwargs.get("scale"),
                           sink_blocks=list(sink), sink_q=list(sink_q), topk_ratio=patch.topk_ratio,
-                          token_aug=patch.extra_tokens).to(q.dtype)
-        patch.log_once(("sparse", tuple(qs.shape)), f"sparse {tuple(qs.shape)}, sinks {sink}/{sink_q}")
+                          token_aug=patch.extra_tokens, **extra).to(q.dtype)
+        mode = f", key-grouped from row {extra['key_order_from']}" if extra else ""
+        patch.log_once(("sparse", tuple(qs.shape)), f"sparse {tuple(qs.shape)}, sinks {sink}/{sink_q}{mode}")
         if skip_output_reshape:
             return out.transpose(1, 2)
         return out.reshape(b, -1, heads * dim_head)
@@ -290,6 +295,8 @@ def h3_sparse_attention(attn, x, rope_freqs, transformer_options, patch: SparseA
             extra["coarse_gate"] = x.new_empty(n, heads * head_dim).view(1, n, heads, head_dim)
     else:
         sink, sink_q = patch.sinks(transformer_options, n_tokens)
+        if patch.spark_attn:   # rows from the end of the exact prefix on are regrouped by key similarity
+            extra = {"key_order_from": sink[1] * BLOCK_SIZE}
 
     def chunks():
         for i in range(0, n, PRODUCER_CHUNK):
@@ -305,6 +312,8 @@ def h3_sparse_attention(attn, x, rope_freqs, transformer_options, patch: SparseA
     out = patch.sol_attn_chunked(key, chunks, n, heads, freqs, (qw, kw), sink_blocks=list(sink), sink_q=list(sink_q),
                                  rope_eps=attn.q_norm.eps, **extra)
     mode = f"VSA tiles ({n} padded rows, {sink[1]} prefix tiles)" if plan is not None else f"sinks {sink}/{sink_q}"
+    if patch.spark_attn:
+        mode += f", key-grouped from row {extra['key_order_from']}"
     patch.log_once(("producer", n), f"sparse producer path: {n_tokens} tokens, {mode}")
     out = out.view(n, heads * head_dim)
     if plan is not None:
@@ -337,21 +346,25 @@ def make_chunked_override(patch: SparseAttnPatch):
                 or not ck.sol_attn_is_available(pe.device)):
             return None
         key = (transformer_options.get("block_type"), transformer_options.get("block_index"), n, tuple(transformer_options.get("uuids", ())))
-        out = patch.sol_attn_chunked(key, lambda: qkv_chunks(PRODUCER_CHUNK), n, heads, pe, (q_scale, k_scale), rope_eps=eps, rope_split_half=False)
-        patch.log_once(("producer", n), f"sparse producer path: {n} tokens")
+        extra = {"key_order_from": 0} if patch.spark_attn else {}   # no conditioning prefix to keep in place
+        out = patch.sol_attn_chunked(key, lambda: qkv_chunks(PRODUCER_CHUNK), n, heads, pe, (q_scale, k_scale), rope_eps=eps,
+                                     rope_split_half=False, **extra)
+        patch.log_once(("producer", n), f"sparse producer path: {n} tokens" + (", key-grouped" if extra else ""))
         return out.view(1, n, heads * HEAD_DIM)
 
     return override
 
 
-def apply_block_sparse_attention(model, *, tau, topk_ratio, vsa, start_percent, end_percent, min_tokens,
+def apply_block_sparse_attention(model, *, tau, topk_ratio, vsa, spark_attn, start_percent, end_percent, min_tokens,
                                  dense_blocks, sink_conditioning, extra_tokens, verbose):
     model_sampling = model.get_model_object("model_sampling")
     if vsa and extra_tokens:
         # VSA weights were trained against their sparse pattern, don't pull the attention toward dense
         logging.info("VSA: extra_tokens ignored (the trained sparse pattern is the target)")
         extra_tokens = 0
-    patch = SparseAttnPatch(tau=tau, topk_ratio=topk_ratio, vsa=vsa,
+    if spark_attn:   # the per-row summary of the unselected blocks takes their place
+        extra_tokens = 0
+    patch = SparseAttnPatch(tau=tau, topk_ratio=topk_ratio, vsa=vsa, spark_attn=spark_attn,
                             sigma_start=float(model_sampling.percent_to_sigma(start_percent)),
                             sigma_end=float(model_sampling.percent_to_sigma(end_percent)),
                             min_tokens=min_tokens, dense_blocks=dense_blocks,
@@ -403,6 +416,12 @@ class BlockSparseAttention(io.ComfyNode):
                                                "the diagonal ride on top). The selection SLA-style LoRAs are "
                                                "distilled against; without such a LoRA higher is closer to dense."),
                     ]),
+                    io.DynamicCombo.Option("spark-attn", [
+                        io.Float.Input("keep_percent", default=10.0, min=0.5, max=95.0, step=0.5,
+                                       tooltip="Percent of key blocks each query block keeps exactly; every other "
+                                               "block reaches each query row as one weighted summary key. "
+                                               "Higher is closer to dense."),
+                    ]),
                     io.DynamicCombo.Option("vsa", [
                         io.Float.Input("keep_percent", default=10.0, min=0.5, max=95.0, step=0.5,
                                        tooltip="Percent of video cubes each query cube keeps; FastH3-VSA "
@@ -412,6 +431,7 @@ class BlockSparseAttention(io.ComfyNode):
                 ], tooltip="Method used to choose key blocks for full token-level attention. "
                            "sol-attn: Sparsifying Online Attention uses a training-free adaptive threshold for each attention head and query block. "
                            "sla: Sparse-Linear Attention keeps a fixed percentage of the highest-scoring key blocks; use only with model weights trained for this pattern. "
+                           "spark-attn: Spark-Attn (arXiv:2611.24256) is training-free; it regroups each head's tokens so every block holds similar keys, keeps a fixed percentage of key blocks exactly and summarizes the rest per query row; NVIDIA GPUs only. "
                            "vsa: Video Sparse Attention (FastVideo) uses 3D video-cube tiling and a learned coarse attention branch; requires FastH3 model weights."),
                 io.Float.Input("start_percent", default=0.2, min=0.0, max=1.0, step=0.01,
                                tooltip="Percentage point when sparse attention begins. Before this point, attention stays dense."),
@@ -424,12 +444,13 @@ class BlockSparseAttention(io.ComfyNode):
                 io.Int.Input("extra_tokens", default=256, min=0, max=256, step=64, advanced=True,
                              tooltip="Extra top-scoring tokens each query block attends beyond its selected "
                                      "blocks. Closer to dense for more attention time; 256 recommended, 0 disables. "
-                                     "Ignored for VSA."),
+                                     "Used by sol-attn and sla; ignored by spark-attn and vsa."),
                 io.Combo.Input("sink_conditioning", options=["exact_kv", "exact_kv_and_rows", "off"],
                                default="exact_kv_and_rows", advanced=True,
                                tooltip="MiniMax-H3 only. exact_kv: every query attends the packed text/audio/"
                                        "reference rows exactly (~3% cost). exact_kv_and_rows: additionally runs "
-                                       "the target-audio query rows dense (keeps generated audio intact)."),
+                                       "the target-audio query rows dense (keeps generated audio intact); with "
+                                       "spark-attn, every conditioning row."),
                 io.Boolean.Input("verbose", default=False, advanced=True,
                                  tooltip="Logs whether each attention shape used sparse attention or why it stayed dense."),
             ],
@@ -445,6 +466,7 @@ class BlockSparseAttention(io.ComfyNode):
             tau=selection.get("tau", 1.3),
             topk_ratio=0.0 if mode == "sol-attn" else selection["keep_percent"] / 100.0,
             vsa=mode == "vsa",
+            spark_attn=mode == "spark-attn",
             start_percent=start_percent,
             end_percent=end_percent,
             min_tokens=min_tokens,
