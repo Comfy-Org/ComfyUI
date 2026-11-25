@@ -73,6 +73,15 @@ def test_listen_is_scoped():
     assert seen == [[1]]
 
 
+def test_listen_ends_when_generation_fails():
+    seen = []
+    with pytest.raises(RuntimeError):
+        with token_stream.listen(lambda ids: seen.append(list(ids))):
+            raise RuntimeError("interrupted")
+    token_stream.report([1])
+    assert seen == []
+
+
 def test_progress_text_goes_to_the_queuing_client(server):
     ProgressText(FakeClip(""), "7", "tab")([ord("h"), ord("i")])
     assert server.sent == [("hi", "7", "tab")]
