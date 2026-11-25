@@ -138,7 +138,7 @@ class MeshyTextToModelNode(IO.ComfyNode):
             ],
             outputs=[
                 IO.String.Output(display_name="model_file"),  # for backward compatibility only
-                IO.Custom("MESHY_TASK_ID").Output(display_name="meshy_task_id"),
+                IO.Custom("MESHY_TASK_ID,STRING").Output(display_name="meshy_task_id"),
                 IO.File3DGLB.Output(display_name="GLB"),
                 IO.File3DFBX.Output(display_name="FBX"),
             ],
@@ -221,7 +221,7 @@ class MeshyRefineNode(IO.ComfyNode):
             description="Refine a previously created draft model.",
             inputs=[
                 IO.Combo.Input("model", options=["meshy-7.1", "meshy-7", "meshy-6", "latest"]),
-                IO.Custom("MESHY_TASK_ID").Input("meshy_task_id"),
+                IO.Custom("MESHY_TASK_ID,STRING").Input("meshy_task_id"),
                 IO.Boolean.Input(
                     "enable_pbr",
                     default=False,
@@ -248,7 +248,7 @@ class MeshyRefineNode(IO.ComfyNode):
             ],
             outputs=[
                 IO.String.Output(display_name="model_file"),  # for backward compatibility only
-                IO.Custom("MESHY_TASK_ID").Output(display_name="meshy_task_id"),
+                IO.Custom("MESHY_TASK_ID,STRING").Output(display_name="meshy_task_id"),
                 IO.File3DGLB.Output(display_name="GLB"),
                 IO.File3DFBX.Output(display_name="FBX"),
             ],
@@ -417,7 +417,7 @@ class MeshyImageToModelNode(IO.ComfyNode):
             ],
             outputs=[
                 IO.String.Output(display_name="model_file"),  # for backward compatibility only
-                IO.Custom("MESHY_TASK_ID").Output(display_name="meshy_task_id"),
+                IO.Custom("MESHY_TASK_ID,STRING").Output(display_name="meshy_task_id"),
                 IO.File3DGLB.Output(display_name="GLB"),
                 IO.File3DFBX.Output(display_name="FBX"),
             ],
@@ -610,7 +610,7 @@ class MeshyMultiImageToModelNode(IO.ComfyNode):
             ],
             outputs=[
                 IO.String.Output(display_name="model_file"),  # for backward compatibility only
-                IO.Custom("MESHY_TASK_ID").Output(display_name="meshy_task_id"),
+                IO.Custom("MESHY_TASK_ID,STRING").Output(display_name="meshy_task_id"),
                 IO.File3DGLB.Output(display_name="GLB"),
                 IO.File3DFBX.Output(display_name="FBX"),
             ],
@@ -739,7 +739,7 @@ class MeshyTextToModelSmartTopologyNode(IO.ComfyNode):
                 ),
             ],
             outputs=[
-                IO.Custom("MESHY_TASK_ID").Output(display_name="meshy_task_id"),
+                IO.Custom("MESHY_TASK_ID,STRING").Output(display_name="meshy_task_id"),
                 IO.File3DGLB.Output(display_name="GLB"),
                 IO.File3DFBX.Output(display_name="FBX"),
             ],
@@ -854,7 +854,7 @@ class MeshyImageToModelSmartTopologyNode(IO.ComfyNode):
                 ),
             ],
             outputs=[
-                IO.Custom("MESHY_TASK_ID").Output(display_name="meshy_task_id"),
+                IO.Custom("MESHY_TASK_ID,STRING").Output(display_name="meshy_task_id"),
                 IO.File3DGLB.Output(display_name="GLB"),
                 IO.File3DFBX.Output(display_name="FBX"),
             ],
@@ -943,7 +943,7 @@ class MeshyRigModelNode(IO.ComfyNode):
             "Auto-rigging is currently not suitable for untextured meshes, non-humanoid assets, "
             "or humanoid assets with unclear limb and body structure.",
             inputs=[
-                IO.Custom("MESHY_TASK_ID").Input("meshy_task_id"),
+                IO.Custom("MESHY_TASK_ID,STRING").Input("meshy_task_id"),
                 IO.Float.Input(
                     "height_meters",
                     min=0.1,
@@ -960,7 +960,7 @@ class MeshyRigModelNode(IO.ComfyNode):
             ],
             outputs=[
                 IO.String.Output(display_name="model_file"),  # for backward compatibility only
-                IO.Custom("MESHY_RIGGED_TASK_ID").Output(display_name="rig_task_id"),
+                IO.Custom("MESHY_RIGGED_TASK_ID,STRING").Output(display_name="rig_task_id"),
                 IO.File3DGLB.Output(display_name="GLB"),
                 IO.File3DFBX.Output(display_name="FBX"),
             ],
@@ -1022,7 +1022,7 @@ class MeshyAnimateModelNode(IO.ComfyNode):
             category="partner/3d/Meshy",
             description="Apply a specific animation action to a previously rigged character.",
             inputs=[
-                IO.Custom("MESHY_RIGGED_TASK_ID").Input("rig_task_id"),
+                IO.Custom("MESHY_RIGGED_TASK_ID,STRING").Input("rig_task_id"),
                 IO.Int.Input(
                     "action_id",
                     default=0,
@@ -1088,7 +1088,7 @@ class MeshyTextureNode(IO.ComfyNode):
             category="partner/3d/Meshy",
             inputs=[
                 IO.Combo.Input("model", options=["meshy-7", "meshy-6", "latest"]),
-                IO.Custom("MESHY_TASK_ID").Input("meshy_task_id"),
+                IO.Custom("MESHY_TASK_ID,STRING").Input("meshy_task_id"),
                 IO.Boolean.Input(
                     "enable_original_uv",
                     default=True,
@@ -1119,7 +1119,7 @@ class MeshyTextureNode(IO.ComfyNode):
             ],
             outputs=[
                 IO.String.Output(display_name="model_file"),  # for backward compatibility only
-                IO.Custom("MESHY_TASK_ID").Output(display_name="meshy_task_id"),
+                IO.Custom("MESHY_TASK_ID,STRING").Output(display_name="meshy_task_id"),
                 IO.File3DGLB.Output(display_name="GLB"),
                 IO.File3DFBX.Output(display_name="FBX"),
             ],
@@ -1200,7 +1200,7 @@ class MeshyTextureMultiViewNode(IO.ComfyNode):
             description="Texture a previously created model using 1 to 4 reference views of the same object.",
             inputs=[
                 IO.Combo.Input("model", options=["meshy-7"]),
-                IO.Custom("MESHY_TASK_ID").Input("meshy_task_id"),
+                IO.Custom("MESHY_TASK_ID,STRING").Input("meshy_task_id"),
                 IO.Autogrow.Input(
                     "multiview_images",
                     template=IO.Autogrow.TemplatePrefix(IO.Image.Input("image"), prefix="image", min=1, max=4),
@@ -1224,7 +1224,7 @@ class MeshyTextureMultiViewNode(IO.ComfyNode):
             ],
             outputs=[
                 IO.String.Output(display_name="model_file"),  # for backward compatibility only
-                IO.Custom("MESHY_TASK_ID").Output(display_name="meshy_task_id"),
+                IO.Custom("MESHY_TASK_ID,STRING").Output(display_name="meshy_task_id"),
                 IO.File3DGLB.Output(display_name="GLB"),
                 IO.File3DFBX.Output(display_name="FBX"),
             ],
@@ -1303,7 +1303,7 @@ class MeshyTextureN1Node(IO.ComfyNode):
             search_aliases=["meshy n1"],
             inputs=[
                 IO.Combo.Input("model", options=["meshy-n1"]),
-                IO.Custom("MESHY_TASK_ID").Input("meshy_task_id"),
+                IO.Custom("MESHY_TASK_ID,STRING").Input("meshy_task_id"),
                 IO.Image.Input(
                     "front_view",
                     tooltip="The view Meshy treats as the front. One image textures the front and leaves the back "
@@ -1325,7 +1325,7 @@ class MeshyTextureN1Node(IO.ComfyNode):
                 ),
             ],
             outputs=[
-                IO.Custom("MESHY_TASK_ID").Output(display_name="meshy_task_id"),
+                IO.Custom("MESHY_TASK_ID,STRING").Output(display_name="meshy_task_id"),
                 IO.File3DGLB.Output(display_name="GLB"),
                 IO.File3DFBX.Output(display_name="FBX"),
             ],
