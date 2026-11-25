@@ -123,6 +123,12 @@ def test_a_slow_decode_does_not_run_back_to_back(server, clock):
     p([ord("a")])
     p([ord("a"), ord("b")])
     assert texts(server) == ["a"]
+    clock[0] += 19.0  # the next send waits ten decodes, not INTERVAL
+    p([ord("a"), ord("b"), ord("c")])
+    assert texts(server) == ["a"]
+    clock[0] += 1.0
+    p([ord("a"), ord("b"), ord("c"), ord("d")])
+    assert texts(server) == ["a", "abcd"]
 
 
 def test_progress_text_in_a_loop_body_shows_on_the_node_it_copies(server):

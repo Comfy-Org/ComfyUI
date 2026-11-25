@@ -17,6 +17,7 @@ class ProgressText:
 
     def __init__(self, clip, node_id, client_id):
         self.clip, self.node_id, self.client_id, self.sent_at = clip, node_id, client_id, float("-inf")
+        self.decode_seconds = 0.0
 
     @classmethod
     def for_node(cls, clip, hidden):
@@ -29,8 +30,12 @@ class ProgressText:
         return cls(clip, node_id, PromptServer.instance.client_id)
 
     def __call__(self, token_ids):
-        if time.monotonic() - self.sent_at >= self.INTERVAL:
-            self.send(self.clip.decode(list(token_ids)))
+        # each send decodes the whole text so far: with a slow tokenizer, wait longer so decoding stays under ~10%
+        if time.monotonic() - self.sent_at >= max(self.INTERVAL, 10 * self.decode_seconds):
+            started = time.monotonic()
+            text = self.clip.decode(list(token_ids))
+            self.decode_seconds = time.monotonic() - started
+            self.send(text)
 
     def send(self, text):
         PromptServer.instance.send_progress_text(text, self.node_id, sid=self.client_id)
