@@ -1404,13 +1404,15 @@ class PromptServer():
             web.static('/', self.web_root),
         ])
 
-    def get_queue_info(self):
-        prompt_info = {}
-        exec_info = {}
+    def queue_counts(self):
+        """(running, pending) counts of the jobs not marked hidden, and of the hidden ones."""
         running, queued = self.prompt_queue.get_current_queue_volatile()
-        exec_info['queue_remaining'] = sum(1 for item in running + queued if not is_hidden_job(item))
-        prompt_info['exec_info'] = exec_info
-        return prompt_info
+        visible = tuple(sum(1 for item in items if not is_hidden_job(item)) for items in (running, queued))
+        return visible, (len(running) - visible[0], len(queued) - visible[1])
+
+    def get_queue_info(self, counts=None):
+        visible, _ = counts or self.queue_counts()
+        return {'exec_info': {'queue_remaining': sum(visible)}}
 
     async def send(self, event, data, sid=None):
         if event == BinaryEventTypes.UNENCODED_PREVIEW_IMAGE:
@@ -1535,13 +1537,11 @@ class PromptServer():
             self.messages.put_nowait, (event, data, sid))
 
     def queue_updated(self):
-        running, queued = self.prompt_queue.get_current_queue_volatile()
-        visible = tuple(sum(1 for item in items if not is_hidden_job(item)) for items in (running, queued))
-        hidden = (len(running) - visible[0], len(queued) - visible[1])
-        (last_visible, last_hidden), self.last_queue_counts = self.last_queue_counts, (visible, hidden)
-        if visible == last_visible and hidden != last_hidden:  # only a hidden job was queued, started or finished
+        counts = self.queue_counts()
+        (last_visible, last_hidden), self.last_queue_counts = self.last_queue_counts, counts
+        if counts[0] == last_visible and counts[1] != last_hidden:  # only a hidden job was queued, started or finished
             return  # an unchanged status reads to the frontend as another queue drain, and auto-queue runs again
-        self.send_sync("status", {"status": {"exec_info": {"queue_remaining": sum(visible)}}})
+        self.send_sync("status", {"status": self.get_queue_info(counts)})
 
     async def publish_loop(self):
         while True:
