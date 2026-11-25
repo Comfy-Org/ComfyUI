@@ -139,15 +139,18 @@ def test_generate_text_nodes_get_their_node_id_to_stream_to(node):
     assert {io.Hidden.unique_id, io.Hidden.dynprompt} <= set(node.GET_SCHEMA().hidden)
 
 
-def test_generate_text_in_a_loop_body_streams_to_the_node_it_copies(tokenizer, monkeypatch):
+@pytest.mark.parametrize("unique_id", ["42", "7.0.0.0_42", "9.0.0.0_7.0.0.0_42"], ids=["top level", "loop body", "nested loop"])
+def test_generate_text_streams_to_the_node_on_the_canvas(tokenizer, monkeypatch, unique_id):
     previews = []
     server = SimpleNamespace(client_id="client", send_progress_text=lambda *args: previews.append(args))
     monkeypatch.setattr(PromptServer, "instance", server, raising=False)
-    dynprompt = DynamicPrompt({"42": {"class_type": "TextGenerate", "inputs": {}}})
-    dynprompt.add_ephemeral_node("7.0.0.0_42", {"class_type": "TextGenerate", "inputs": {}}, "7", "42")
-    hidden = {io.Hidden.unique_id: "7.0.0.0_42", io.Hidden.dynprompt: dynprompt}
+    node = {"class_type": "TextGenerate", "inputs": {}}
+    dynprompt = DynamicPrompt({"42": node})
+    dynprompt.add_ephemeral_node("7.0.0.0_42", node, "7", "42")  # how a loop copies its body
+    dynprompt.add_ephemeral_node("9.0.0.0_7.0.0.0_42", node, "9", "7.0.0.0_42")
+    hidden = {io.Hidden.unique_id: unique_id, io.Hidden.dynprompt: dynprompt}
     nodes_textgen.TextGenerateV2.PREPARE_CLASS_CLONE({"hidden_inputs": hidden}).execute(RecordingClip(tokenizer), PROMPT, 8, {"sampling_mode": "off"})
-    assert previews and {node_id for _, node_id, _ in previews} == {"42"}
+    assert previews and {(node_id, client_id) for _, node_id, client_id in previews} == {("42", "client")}
 
 
 def tiny_model(vocab_size):
