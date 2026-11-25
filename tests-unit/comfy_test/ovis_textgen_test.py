@@ -17,6 +17,7 @@ from comfy.text_encoders.ovis import OvisTokenizer  # noqa: E402
 from comfy.text_encoders.token_stream import report_generated_tokens  # noqa: E402
 from comfy.text_encoders.z_image import ZImageTokenizer  # noqa: E402
 from comfy_api.latest import io  # noqa: E402
+from comfy_execution.graph import DynamicPrompt  # noqa: E402
 from comfy_extras import nodes_textgen  # noqa: E402
 from server import PromptServer  # noqa: E402
 
@@ -131,6 +132,22 @@ def test_generate_text_streams_decoded_prefix_and_flushes_final_text(tokenizer, 
     result = node.execute(clip, PROMPT, 8, {"sampling_mode": "off"})
     assert previews == [("A", "42", "client"), ("A🪼</think> Answer", "42", "client")]
     assert result.args == ("Answer", "A🪼")
+
+
+@pytest.mark.parametrize("node", [nodes_textgen.TextGenerateV2, nodes_textgen.TextGenerate, nodes_textgen.TextGenerateLTX2Prompt])
+def test_generate_text_nodes_get_their_node_id_to_stream_to(node):
+    assert {io.Hidden.unique_id, io.Hidden.dynprompt} <= set(node.GET_SCHEMA().hidden)
+
+
+def test_generate_text_in_a_loop_body_streams_to_the_node_it_copies(tokenizer, monkeypatch):
+    previews = []
+    server = SimpleNamespace(client_id="client", send_progress_text=lambda *args: previews.append(args))
+    monkeypatch.setattr(PromptServer, "instance", server, raising=False)
+    dynprompt = DynamicPrompt({"42": {"class_type": "TextGenerate", "inputs": {}}})
+    dynprompt.add_ephemeral_node("7.0.0.0_42", {"class_type": "TextGenerate", "inputs": {}}, "7", "42")
+    hidden = {io.Hidden.unique_id: "7.0.0.0_42", io.Hidden.dynprompt: dynprompt}
+    nodes_textgen.TextGenerateV2.PREPARE_CLASS_CLONE({"hidden_inputs": hidden}).execute(RecordingClip(tokenizer), PROMPT, 8, {"sampling_mode": "off"})
+    assert previews and {node_id for _, node_id, _ in previews} == {"42"}
 
 
 def tiny_model(vocab_size):
