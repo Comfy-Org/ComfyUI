@@ -130,6 +130,8 @@ async def test_status_is_broadcast_only_when_the_visible_queue_changes(client):
     prompt_server.prompt_queue = queue = execution.PromptQueue(prompt_server)
     status = execution.PromptQueue.ExecutionStatus(status_str="success", completed=True, messages=[])
 
+    queue.put(item(0, "agent-0", hidden=True))  # the first change after startup
+    queue.get(timeout=0)
     queue.put(item(1, "user"))
     queue.put(item(2, "agent", hidden=True))
     _, user_id = queue.get(timeout=0)
@@ -139,6 +141,9 @@ async def test_status_is_broadcast_only_when_the_visible_queue_changes(client):
     queue.put(item(3, "agent-2", hidden=True))
     # queued, started (the frontend refreshes its queue panel), drained: once each, as for a queue with no hidden jobs
     assert counts == [1, 1, 0]
+    queue.put(item(4, "retry"))
+    queue.put(item(5, "retry"))  # a client may resubmit with the same prompt_id
+    assert counts == [1, 1, 0, 1, 2]
 
 
 @pytest.mark.asyncio
