@@ -23,7 +23,10 @@ class ProgressText:
         """None when there is no node to show it on or no client to send it to (never broadcast it)."""
         if hidden is None or not hidden.unique_id or PromptServer.instance.client_id is None:
             return None
-        return cls(clip, hidden.unique_id, PromptServer.instance.client_id)
+        node_id = hidden.unique_id
+        if hidden.dynprompt is not None:  # a loop body's copy runs under its own id; show it on the node it copies
+            node_id = hidden.dynprompt.get_display_node_id(node_id)
+        return cls(clip, node_id, PromptServer.instance.client_id)
 
     def __call__(self, token_ids):
         if time.monotonic() - self.sent_at >= self.INTERVAL:
@@ -79,7 +82,7 @@ class TextGenerateV2(io.ComfyNode):
                 io.String.Output(display_name="generated_text"),
                 io.String.Output(display_name="thinking"),
             ],
-            hidden=[io.Hidden.unique_id],
+            hidden=[io.Hidden.unique_id, io.Hidden.dynprompt],
         )
 
     @classmethod

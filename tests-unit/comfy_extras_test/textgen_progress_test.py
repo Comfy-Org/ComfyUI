@@ -88,9 +88,9 @@ def test_progress_text_goes_to_the_queuing_client(server):
 
 
 def test_no_progress_text_without_a_client_or_a_node(server):
-    clip, node = FakeClip(""), SimpleNamespace(unique_id="7")
+    clip, node = FakeClip(""), SimpleNamespace(unique_id="7", dynprompt=None)
     assert ProgressText.for_node(clip, node).client_id == "tab"
-    assert ProgressText.for_node(clip, SimpleNamespace(unique_id=None)) is None
+    assert ProgressText.for_node(clip, SimpleNamespace(unique_id=None, dynprompt=None)) is None
     assert ProgressText.for_node(clip, None) is None  # execute called on the bare class
     server.client_id = None
     assert ProgressText.for_node(clip, node) is None  # never broadcast another client's text
@@ -124,9 +124,15 @@ def test_a_slow_decode_does_not_run_back_to_back(server, clock):
     assert texts(server) == ["a"]
 
 
+def test_progress_text_in_a_loop_body_shows_on_the_node_it_copies(server):
+    copies = {"4.0.0.0_2": "2"}
+    hidden = SimpleNamespace(unique_id="4.0.0.0_2", dynprompt=SimpleNamespace(get_display_node_id=lambda i: copies.get(i, i)))
+    assert ProgressText.for_node(FakeClip(""), hidden).node_id == "2"
+
+
 @pytest.mark.parametrize("node", [TextGenerateV2, TextGenerate, TextGenerateLTX2Prompt])
 def test_generate_text_nodes_ask_the_executor_for_their_node_id(node):
-    assert io.Hidden.unique_id in node.GET_SCHEMA().hidden
+    assert {io.Hidden.unique_id, io.Hidden.dynprompt} <= set(node.GET_SCHEMA().hidden)
 
 
 def test_generate_text_shows_its_text_while_it_is_written(server):
