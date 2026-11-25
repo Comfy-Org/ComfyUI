@@ -91,6 +91,10 @@ class MultiSelectOptions(TypedDict):
     """The placeholder text to display in the multi-select widget when no items are selected."""
     chip: NotRequired[bool]
     """Specifies whether to use chips instead of comma separated values for the multi-select widget."""
+    min: NotRequired[int]
+    """The fewest items that must be selected. `0` lets the user choose nothing, e.g. an optional file picker."""
+    max: NotRequired[int]
+    """The most items that may be selected."""
 
 
 class InputTypeOptions(TypedDict):

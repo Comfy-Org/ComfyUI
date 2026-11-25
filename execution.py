@@ -875,6 +875,31 @@ class PromptExecutor:
             self._notify_prompt_lifecycle("end", prompt_id)
 
 
+def multiselect_count_error(input_name, val, input_config, extra_info):
+    multi_select = extra_info.get("multi_select")
+    if not extra_info.get("multiselect", False) or not isinstance(multi_select, dict):
+        return None
+    count = len(val) if isinstance(val, list) else 1
+    minimum = multi_select.get("min")
+    maximum = multi_select.get("max")
+    if minimum is not None and count < minimum:
+        error_type, message = "value_smaller_than_min", f"Selected {count} items, fewer than min of {minimum}"
+    elif maximum is not None and count > maximum:
+        error_type, message = "value_bigger_than_max", f"Selected {count} items, more than max of {maximum}"
+    else:
+        return None
+    return {
+        "type": error_type,
+        "message": message,
+        "details": f"{input_name}",
+        "extra_info": {
+            "input_name": input_name,
+            "input_config": input_config,
+            "received_value": val,
+        }
+    }
+
+
 async def validate_inputs(prompt_id, prompt, item, validated, visiting=None):
     if visiting is None:
         visiting = []
@@ -1119,6 +1144,11 @@ async def validate_inputs(prompt_id, prompt, item, validated, visiting=None):
                             }
                         }
                         errors.append(error)
+                        continue
+
+                    count_error = multiselect_count_error(x, val, info, extra_info)
+                    if count_error is not None:
+                        errors.append(count_error)
                         continue
 
     if len(validate_function_inputs) > 0 or validate_has_kwargs:

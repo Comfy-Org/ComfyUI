@@ -1,4 +1,6 @@
-from comfy_api.latest._io import Combo, MultiCombo
+import pytest
+
+from comfy_api.latest._io import Combo, FolderType, MultiCombo, UploadType
 
 
 def test_multicombo_serializes_multi_select_as_object():
@@ -76,3 +78,26 @@ def test_combo_validation_rejects_list_even_with_valid_items():
     options = ["a", "b", "c"]
     invalid = _validate_combo_values(["a", "b"], options, False)
     assert len(invalid) > 0
+
+
+def test_multicombo_serializes_upload_and_selection_counts():
+    multi_combo = MultiCombo.Input(
+        id="image",
+        options=["a.png", "b.png"],
+        default=[],
+        upload=UploadType.image,
+        image_folder=FolderType.input,
+        min=0,
+        max=1,
+    )
+
+    serialized = multi_combo.as_dict()
+
+    assert serialized["image_upload"] is True
+    assert serialized["image_folder"] == "input"
+    assert serialized["multi_select"] == {"min": 0, "max": 1}
+
+
+def test_multicombo_rejects_min_greater_than_max():
+    with pytest.raises(ValueError):
+        MultiCombo.Input(id="image", options=["a.png"], min=2, max=1)
