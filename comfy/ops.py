@@ -388,10 +388,7 @@ def cast_bias_weight(s, input=None, dtype=None, device=None, bias_dtype=None, of
     # will add async-offload support to your cast and improve performance.
     if input is not None:
         if dtype is None:
-            if isinstance(input, QuantizedTensor):
-                dtype = input.params.orig_dtype
-            else:
-                dtype = input.dtype
+            dtype = input.dtype
         if bias_dtype is None:
             bias_dtype = dtype
         if device is None:
@@ -1219,7 +1216,8 @@ def linear_input_act_(x, weight, bias, input_act=None, act_weight=None, act_eps=
 
 # Grouped-scale integer weights that run through the shared INT8 GEMM (comfy_kitchen
 # AsymW4A8Int8Layout): format -> code width, which also fixes the packed weight width K*bits/8.
-_GROUPED_INT8_FORMATS = {"asym_w4a8_int8": 4, "w6a8_int8": 6}
+_GROUPED_INT8_FORMATS = {"w3a8_int8": 3, "asym_w4a8_int8": 4, "w5a8_int8": 5, "w6a8_int8": 6}
+_INT8_COMPUTE_FORMATS = ("int8_tensorwise", "convrot_w4a4", *_GROUPED_INT8_FORMATS)
 
 
 class QuantLinearFunc(torch.autograd.Function):
@@ -1967,9 +1965,7 @@ def get_disabled_quant_formats(device=None):
         disabled.add("float8_e4m3fn")
         disabled.add("float8_e5m2")
     if not comfy.model_management.supports_int8_compute(device):
-        disabled.add("int8_tensorwise")
-        disabled.add("convrot_w4a4")
-        disabled.update(_GROUPED_INT8_FORMATS)
+        disabled.update(_INT8_COMPUTE_FORMATS)
     return disabled
 
 

@@ -6,6 +6,7 @@ allowing graceful protocol evolution while maintaining backward compatibility.
 """
 
 import logging
+import uuid
 from typing import Any, TypedDict
 
 from comfy.cli_args import args
@@ -44,6 +45,11 @@ CLI_FEATURE_FLAG_REGISTRY: dict[str, FeatureFlagInfo] = {
         "type": "bool",
         "default": True,
         "description": "Offer Sign in with browser (Cloud OAuth + PKCE) on Local ComfyUI opened at localhost or 127.0.0.1",
+    },
+    "local_mcp_connect": {
+        "type": "bool",
+        "default": False,
+        "description": "Show the Comfy MCP connect sidebar tab in the frontend",
     },
 }
 
@@ -121,6 +127,9 @@ _CORE_FEATURE_FLAGS: dict[str, Any] = {
     "node_replacements": True,
     # main.py replaces this at startup with the selected AssetManager's state.
     "assets": not args.disable_assets,
+    # New on every server start. A client that reconnects and sees a different
+    # value knows the server restarted, so its node definitions may be stale.
+    "server_boot_id": uuid.uuid4().hex,
 }
 
 # Owned by app.deploy_to_cloud, which sets it via set_server_feature.

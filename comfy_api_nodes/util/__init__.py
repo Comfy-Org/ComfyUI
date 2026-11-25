@@ -5,6 +5,7 @@ from .client import (
     poll_op_raw,
     router_op,
     router_op_raw,
+    router_sync_op,
     sync_op,
     sync_op_raw,
 )
@@ -29,7 +30,6 @@ from .conversions import (
     tensor_to_pil,
     text_filepath_to_base64_string,
     text_filepath_to_data_uri,
-    trim_video,
     upscale_image_tensor_to_min_pixels,
     upscale_video_to_min_pixels,
     video_to_base64_string,
@@ -72,6 +72,7 @@ __all__ = [
     "poll_op_raw",
     "router_op",
     "router_op_raw",
+    "router_sync_op",
     "sync_op",
     "sync_op_raw",
     # Upload helpers
@@ -108,7 +109,6 @@ __all__ = [
     "tensor_to_pil",
     "text_filepath_to_base64_string",
     "text_filepath_to_data_uri",
-    "trim_video",
     "upscale_image_tensor_to_min_pixels",
     "upscale_video_to_min_pixels",
     "video_to_base64_string",
