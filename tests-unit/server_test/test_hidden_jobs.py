@@ -56,7 +56,7 @@ def test_is_hidden_job(extra_data, hidden):
     assert is_hidden_job((0, "p", {}, extra_data, [])) is hidden
 
 
-def test_queue_counts_every_job_and_history_filters_before_paging():
+def test_tasks_remaining_counts_hidden_jobs_and_history_filters_before_paging():
     queue = execution.PromptQueue(MagicMock())
     seed(queue)
     assert queue.get_tasks_remaining() == 4  # the worker's idle check counts hidden jobs too
@@ -119,6 +119,7 @@ async def test_queue_and_history_lists_leave_hidden_jobs_out(client):
 
 @pytest.mark.asyncio
 async def test_status_queue_remaining_leaves_hidden_jobs_out(client):
+    client.prompt_server.prompt_queue.put(item(7, "agent-pending-2", hidden=True))  # 2 visible, 3 hidden
     assert client.prompt_server.get_queue_info() == {"exec_info": {"queue_remaining": 2}}
 
 
