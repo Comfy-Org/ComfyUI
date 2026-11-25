@@ -91,10 +91,6 @@ class MultiSelectOptions(TypedDict):
     """The placeholder text to display in the multi-select widget when no items are selected."""
     chip: NotRequired[bool]
     """Specifies whether to use chips instead of comma separated values for the multi-select widget."""
-    min: NotRequired[int]
-    """The fewest items that must be selected. `0` lets the user choose nothing, e.g. an optional file picker."""
-    max: NotRequired[int]
-    """The most items that may be selected."""
 
 
 class InputTypeOptions(TypedDict):
@@ -133,9 +129,9 @@ class InputTypeOptions(TypedDict):
     # class InputTypeNumber(InputTypeOptions):
     # default: float | int
     min: NotRequired[float]
-    """The minimum value of a number (``FLOAT`` | ``INT``)"""
+    """The minimum value of a number (``FLOAT`` | ``INT``), or the fewest options a ``COMBO`` may select; setting ``min`` or ``max`` on a ``COMBO`` makes its value a list."""
     max: NotRequired[float]
-    """The maximum value of a number (``FLOAT`` | ``INT``)"""
+    """The maximum value of a number (``FLOAT`` | ``INT``), or the most options a ``COMBO`` may select."""
     step: NotRequired[float]
     """The amount to increment or decrement a widget by when stepping up/down (``FLOAT`` | ``INT``)"""
     round: NotRequired[float]

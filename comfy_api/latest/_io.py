@@ -418,11 +418,11 @@ class MultiCombo(ComfyTypeI):
             # Frontend expects `multi_select` to be an object config (not a boolean).
             # Keep top-level `multiselect` from Combo.Input for backwards compatibility.
             return super().as_dict() | prune_dict({
+                "min": self.min,
+                "max": self.max,
                 "multi_select": prune_dict({
                     "placeholder": self.placeholder,
                     "chip": self.chip,
-                    "min": self.min,
-                    "max": self.max,
                 }),
             })
 

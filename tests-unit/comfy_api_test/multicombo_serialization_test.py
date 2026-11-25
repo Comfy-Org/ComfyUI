@@ -95,7 +95,9 @@ def test_multicombo_serializes_upload_and_selection_counts():
 
     assert serialized["image_upload"] is True
     assert serialized["image_folder"] == "input"
-    assert serialized["multi_select"] == {"min": 0, "max": 1}
+    assert serialized["min"] == 0
+    assert serialized["max"] == 1
+    assert serialized["multi_select"] == {}
 
 
 def test_multicombo_rejects_min_greater_than_max():

@@ -875,16 +875,24 @@ class PromptExecutor:
             self._notify_prompt_lifecycle("end", prompt_id)
 
 
-def multiselect_count_error(input_name, val, input_config, extra_info):
-    multi_select = extra_info.get("multi_select")
-    if not extra_info.get("multiselect", False) or not isinstance(multi_select, dict):
+def combo_selection_limits(extra_info):
+    minimum = extra_info.get("min")
+    maximum = extra_info.get("max")
+    if minimum is None and maximum is None:
         return None
+    minimum = 1 if minimum is None else minimum
+    return minimum, max(1, minimum) if maximum is None else maximum
+
+
+def combo_selection_count_error(input_name, val, input_config, extra_info):
+    limits = combo_selection_limits(extra_info)
+    if limits is None:
+        return None
+    minimum, maximum = limits
     count = len(val) if isinstance(val, list) else 1
-    minimum = multi_select.get("min")
-    maximum = multi_select.get("max")
-    if minimum is not None and count < minimum:
+    if count < minimum:
         error_type, message = "value_smaller_than_min", f"Selected {count} items, fewer than min of {minimum}"
-    elif maximum is not None and count > maximum:
+    elif count > maximum:
         error_type, message = "value_bigger_than_max", f"Selected {count} items, more than max of {maximum}"
     else:
         return None
@@ -1084,7 +1092,8 @@ async def validate_inputs(prompt_id, prompt, item, validated, visiting=None):
                 continue
 
             if x not in validate_function_inputs and not validate_has_kwargs:
-                if "min" in extra_info and val < extra_info["min"]:
+                is_combo = isinstance(input_type, list) or input_type == io.Combo.io_type
+                if not is_combo and "min" in extra_info and val < extra_info["min"]:
                     error = {
                         "type": "value_smaller_than_min",
                         "message": "Value {} smaller than min of {}".format(val, extra_info["min"]),
@@ -1097,7 +1106,7 @@ async def validate_inputs(prompt_id, prompt, item, validated, visiting=None):
                     }
                     errors.append(error)
                     continue
-                if "max" in extra_info and val > extra_info["max"]:
+                if not is_combo and "max" in extra_info and val > extra_info["max"]:
                     error = {
                         "type": "value_bigger_than_max",
                         "message": "Value {} bigger than max of {}".format(val, extra_info["max"]),
@@ -1111,13 +1120,13 @@ async def validate_inputs(prompt_id, prompt, item, validated, visiting=None):
                     errors.append(error)
                     continue
 
-                if isinstance(input_type, list) or input_type == io.Combo.io_type:
+                if is_combo:
                     if input_type == io.Combo.io_type:
                         combo_options = extra_info.get("options", [])
                     else:
                         combo_options = input_type
-                    is_multiselect = extra_info.get("multiselect", False)
-                    if is_multiselect and isinstance(val, list):
+                    accepts_list = extra_info.get("multiselect", False) or combo_selection_limits(extra_info) is not None
+                    if accepts_list and isinstance(val, list):
                         invalid_vals = [v for v in val if v not in combo_options]
                     else:
                         invalid_vals = [val] if val not in combo_options else []
@@ -1146,7 +1155,7 @@ async def validate_inputs(prompt_id, prompt, item, validated, visiting=None):
                         errors.append(error)
                         continue
 
-                    count_error = multiselect_count_error(x, val, info, extra_info)
+                    count_error = combo_selection_count_error(x, val, info, extra_info)
                     if count_error is not None:
                         errors.append(count_error)
                         continue
