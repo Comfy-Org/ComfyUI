@@ -405,6 +405,12 @@ class BlockSparseAttention(io.ComfyNode):
             inputs=[
                 io.Model.Input("model", tooltip="The model to patch."),
                 io.DynamicCombo.Input("selection", display_name="method", options=[
+                    io.DynamicCombo.Option("spark-attn", [
+                        io.Float.Input("keep_percent", default=10.0, min=0.5, max=95.0, step=0.5,
+                                       tooltip="Percent of key blocks each query block keeps exactly; every other "
+                                               "block reaches each query row as one weighted summary key. "
+                                               "Higher is closer to dense."),
+                    ]),
                     io.DynamicCombo.Option("sol-attn", [
                         io.Float.Input("tau", default=1.3, min=0.0, max=4.0, step=0.05,
                                        tooltip="Threshold in score-distribution sigmas. Higher is sparser: "
@@ -416,12 +422,6 @@ class BlockSparseAttention(io.ComfyNode):
                                                "the diagonal ride on top). The selection SLA-style LoRAs are "
                                                "distilled against; without such a LoRA higher is closer to dense."),
                     ]),
-                    io.DynamicCombo.Option("spark-attn", [
-                        io.Float.Input("keep_percent", default=10.0, min=0.5, max=95.0, step=0.5,
-                                       tooltip="Percent of key blocks each query block keeps exactly; every other "
-                                               "block reaches each query row as one weighted summary key. "
-                                               "Higher is closer to dense."),
-                    ]),
                     io.DynamicCombo.Option("vsa", [
                         io.Float.Input("keep_percent", default=10.0, min=0.5, max=95.0, step=0.5,
                                        tooltip="Percent of video cubes each query cube keeps; FastH3-VSA "
@@ -429,11 +429,11 @@ class BlockSparseAttention(io.ComfyNode):
                                                "layers for the coarse branch when present."),
                     ]),
                 ], tooltip="Method used to choose key blocks for full token-level attention. "
+                           "spark-attn: Spark-Attn (arXiv:2611.24256) is training-free; it regroups each head's tokens so every block holds similar keys, keeps a fixed percentage of key blocks exactly and summarizes the rest per query row; NVIDIA GPUs only. "
                            "sol-attn: Sparsifying Online Attention uses a training-free adaptive threshold for each attention head and query block. "
                            "sla: Sparse-Linear Attention keeps a fixed percentage of the highest-scoring key blocks; use only with model weights trained for this pattern. "
-                           "spark-attn: Spark-Attn (arXiv:2611.24256) is training-free; it regroups each head's tokens so every block holds similar keys, keeps a fixed percentage of key blocks exactly and summarizes the rest per query row; NVIDIA GPUs only. "
                            "vsa: Video Sparse Attention (FastVideo) uses 3D video-cube tiling and a learned coarse attention branch; requires FastH3 model weights."),
-                io.Float.Input("start_percent", default=0.2, min=0.0, max=1.0, step=0.01,
+                io.Float.Input("start_percent", default=0.0, min=0.0, max=1.0, step=0.01,
                                tooltip="Percentage point when sparse attention begins. Before this point, attention stays dense."),
                 io.Float.Input("end_percent", default=1.0, min=0.0, max=1.0, step=0.01,
                                tooltip="Percentage point when sparse attention ends. After this point, attention returns to dense."),
