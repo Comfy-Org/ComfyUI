@@ -43,7 +43,6 @@ from comfy_execution.graph_utils import GraphBuilder, is_link
 from comfy_execution.validation import LoopValidationError, validate_loops, validate_node_input
 from comfy_execution.progress import get_progress_state, reset_progress_state, add_progress_handler, WebUIProgressHandler
 from comfy_execution.utils import CurrentNodeContext
-from comfy_execution.jobs import is_hidden_job
 from comfy_execution.asset_enrichment import register_executed_outputs, emit_cached_output, take_asset_previews
 from comfy_execution.media_enrichment import enrich_output_with_media_metadata
 from comfy_api.internal import _ComfyNodeInternal, _NodeOutputInternal, first_real_override, is_class, make_locked_method_func
@@ -1423,12 +1422,9 @@ class PromptQueue:
                     return True
         return False
 
-    def get_tasks_remaining(self, include_hidden=True):
+    def get_tasks_remaining(self):
         with self.mutex:
-            if include_hidden:
-                return len(self.queue) + len(self.currently_running)
-            items = [*self.queue, *self.currently_running.values()]
-            return sum(1 for item in items if not is_hidden_job(item))
+            return len(self.queue) + len(self.currently_running)
 
     def wipe_queue(self):
         with self.mutex:
@@ -1448,12 +1444,12 @@ class PromptQueue:
                     return True
         return False
 
-    def get_history(self, prompt_id=None, max_items=None, offset=-1, map_function=None, include_hidden=True):
+    def get_history(self, prompt_id=None, max_items=None, offset=-1, map_function=None, filter_function=None):
         with self.mutex:
             if prompt_id is None:
                 out = {}
                 i = 0
-                keys = [k for k in self.history if include_hidden or not is_hidden_job(self.history[k]["prompt"])]
+                keys = [k for k in self.history if filter_function is None or filter_function(self.history[k])]
                 if offset < 0 and max_items is not None:
                     offset = len(keys) - max_items
                 for k in keys:

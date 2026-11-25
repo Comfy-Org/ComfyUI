@@ -122,6 +122,10 @@ def _visible_queue(queue: list) -> list:
     return _remove_sensitive_from_queue([item for item in queue if not is_hidden_job(item)])
 
 
+def _is_visible_history_entry(entry: dict) -> bool:
+    return not is_hidden_job(entry["prompt"])
+
+
 async def send_socket_catch_exception(function, message):
     try:
         await function(message)
@@ -987,7 +991,7 @@ class PromptServer():
                     )
 
             running, queued = self.prompt_queue.get_current_queue_volatile()
-            history = self.prompt_queue.get_history(include_hidden=False)
+            history = self.prompt_queue.get_history(filter_function=_is_visible_history_entry)
 
             running = _visible_queue(running)
             queued = _visible_queue(queued)
@@ -1152,7 +1156,7 @@ class PromptServer():
             else:
                 offset = -1
 
-            return web.json_response(self.prompt_queue.get_history(max_items=max_items, offset=offset, include_hidden=False))
+            return web.json_response(self.prompt_queue.get_history(max_items=max_items, offset=offset, filter_function=_is_visible_history_entry))
 
         @routes.get("/history/{prompt_id}")
         async def get_history_prompt_id(request):
@@ -1402,7 +1406,8 @@ class PromptServer():
     def get_queue_info(self):
         prompt_info = {}
         exec_info = {}
-        exec_info['queue_remaining'] = self.prompt_queue.get_tasks_remaining(include_hidden=False)
+        running, queued = self.prompt_queue.get_current_queue_volatile()
+        exec_info['queue_remaining'] = sum(1 for item in running + queued if not is_hidden_job(item))
         prompt_info['exec_info'] = exec_info
         return prompt_info
 

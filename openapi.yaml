@@ -1067,7 +1067,7 @@ components:
                 exec_info:
                     properties:
                         queue_remaining:
-                            description: Number of items remaining in the queue
+                            description: Number of items remaining in the queue, not counting jobs submitted with `extra_data.hidden`
                             type: integer
                     type: object
             type: object
@@ -1077,6 +1077,10 @@ components:
                 extra_data:
                     additionalProperties: true
                     description: Extra data to be associated with the prompt
+                    properties:
+                        hidden:
+                            description: 'If true, the job is left out of the job, queue and history lists and the queue count for every client, for a client running its own internal jobs. It can still be fetched by its id.'
+                            type: boolean
                     type: object
                 front:
                     description: If true, adds the prompt to the front of the queue
