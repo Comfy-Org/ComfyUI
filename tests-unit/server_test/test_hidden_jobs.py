@@ -49,6 +49,7 @@ def seed(queue):
     ({"hidden": True}, True),
     ({"hidden": "true"}, False),
     ({"hidden": False}, False),
+    ({"hidden": 1}, False),
     ({}, False),
 ])
 def test_is_hidden_job(extra_data, hidden):
@@ -63,6 +64,17 @@ def test_queue_counts_every_job_and_history_filters_before_paging():
     visible = server._is_visible_history_entry
     assert list(queue.get_history(filter_function=visible)) == ["user-done"]
     assert list(queue.get_history(max_items=1, filter_function=visible)) == ["user-done"]
+
+
+def test_history_offset_counts_visible_entries_only():
+    queue = execution.PromptQueue(MagicMock())
+    queue.put(item(1, "agent-done", hidden=True))
+    queue.put(item(2, "user-a"))
+    queue.put(item(3, "user-b"))
+    assert [finish(queue) for _ in range(3)] == ["agent-done", "user-a", "user-b"]
+    visible = server._is_visible_history_entry
+    assert list(queue.get_history(offset=1, filter_function=visible)) == ["user-b"]
+    assert list(queue.get_history(max_items=2, filter_function=visible)) == ["user-a", "user-b"]
 
 
 @pytest_asyncio.fixture
