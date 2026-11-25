@@ -339,7 +339,7 @@ class PromptServer():
         self.routes = routes
         self.last_node_id = None
         self.client_id = None
-        self.last_queue_ids = (((), ()), ((), ()))  # (running, pending) prompt ids: of the visible jobs, of the hidden
+        self.last_queue_counts = ((0, 0), (0, 0))  # (running, pending): of the visible jobs, of the hidden
         self.workflow_metadata = {}
 
         self.on_prompt_handlers = []
@@ -1536,14 +1536,12 @@ class PromptServer():
 
     def queue_updated(self):
         running, queued = self.prompt_queue.get_current_queue_volatile()
-
-        def ids(hidden):
-            return tuple(tuple(sorted(item[1] for item in items if is_hidden_job(item) == hidden)) for items in (running, queued))
-        visible, hidden = ids(False), ids(True)
-        (last_visible, last_hidden), self.last_queue_ids = self.last_queue_ids, (visible, hidden)
+        visible = tuple(sum(1 for item in items if not is_hidden_job(item)) for items in (running, queued))
+        hidden = (len(running) - visible[0], len(queued) - visible[1])
+        (last_visible, last_hidden), self.last_queue_counts = self.last_queue_counts, (visible, hidden)
         if visible == last_visible and hidden != last_hidden:  # only a hidden job was queued, started or finished
             return  # an unchanged status reads to the frontend as another queue drain, and auto-queue runs again
-        self.send_sync("status", { "status": self.get_queue_info() })
+        self.send_sync("status", {"status": {"exec_info": {"queue_remaining": sum(visible)}}})
 
     async def publish_loop(self):
         while True:

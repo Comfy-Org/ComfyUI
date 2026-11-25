@@ -1436,11 +1436,11 @@ class PromptQueue:
             for x in range(len(self.queue)):
                 if function(self.queue[x]):
                     if len(self.queue) == 1:
-                        self.wipe_queue()
+                        self.wipe_queue()  # notifies the server
                     else:
                         self.queue.pop(x)
                         heapq.heapify(self.queue)
-                    self.server.queue_updated()
+                        self.server.queue_updated()
                     return True
         return False
 

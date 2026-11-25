@@ -149,6 +149,12 @@ async def test_status_is_broadcast_only_when_the_visible_queue_changes(client):
     queue.wipe_queue()  # with no hidden job involved, every change is broadcast as before
     assert counts == [1, 1, 0, 1, 2, 0, 0]
 
+    queue.put(item(6, "agent-3", hidden=True))
+    queue.delete_queue_item(lambda i: i[1] == "agent-3")  # a client cancels its only pending hidden job
+    queue.put(item(7, "user-2"))
+    queue.delete_queue_item(lambda i: i[1] == "user-2")
+    assert counts == [1, 1, 0, 1, 2, 0, 0, 1, 0]  # deleting the last pending job sends one status, not two
+
 
 @pytest.mark.asyncio
 async def test_a_prompt_posted_as_hidden_is_queued_hidden(client, monkeypatch):
