@@ -350,6 +350,10 @@ class BaseModel(torch.nn.Module):
         """Temporal dim of each stream of a packed multimodal latent for context windows."""
         return [dim] * len(latent_shapes)
 
+    def denoise_mask_conds(self, denoise_mask, latent_shapes):
+        """Model conds derived from the sampling denoise mask, rebuilt when a sampler masks a sub-latent."""
+        return {}
+
     def extra_conds(self, **kwargs):
         out = {}
         concat_cond = self.concat_cond(**kwargs)
@@ -2289,7 +2293,7 @@ class MiniMaxH3(BaseModel):
 
         denoise_mask = kwargs.get("denoise_mask", None)
         if denoise_mask is not None:
-            out.update(self._denoise_mask_conds(denoise_mask, latent_shapes))
+            out.update(self.denoise_mask_conds(denoise_mask, latent_shapes))
 
         if cross_attn is not None and latent_shapes is not None and len(latent_shapes) > 1:
             # packed layout built once per sampling run, h/w rounded up to the DiT's 2x2 patch
@@ -2399,7 +2403,7 @@ class MiniMaxH3(BaseModel):
             out['audio_denoise_mask'] = masks[1][:1].amax(dim=1, keepdim=True)
         return out
 
-    def _denoise_mask_conds(self, denoise_mask, latent_shapes):
+    def denoise_mask_conds(self, denoise_mask, latent_shapes):
         return {name: comfy.conds.CONDRegular(value) for name, value in self._denoise_mask_values(denoise_mask, latent_shapes).items()}
 
     def scale_latent_inpaint(self, sigma, noise, latent_image, x=None, denoise_mask=None, **kwargs):
