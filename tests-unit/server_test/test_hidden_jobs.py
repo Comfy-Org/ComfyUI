@@ -22,7 +22,7 @@ def item(number, prompt_id, hidden=False):
     extra_data = {"client_id": "c", "create_time": number}
     if hidden:
         extra_data["hidden"] = True
-    return (number, prompt_id, {}, extra_data, [], {})
+    return (number, prompt_id, {}, extra_data, [], {"api_key_comfy_org": "secret"})
 
 
 def finish(queue):
@@ -112,6 +112,7 @@ async def test_queue_and_history_lists_leave_hidden_jobs_out(client):
     queue = await (await client.get("/queue")).json()
     assert [i[1] for i in queue["queue_running"]] == ["user-running"]
     assert [i[1] for i in queue["queue_pending"]] == ["user-pending"]
+    assert "secret" not in str(queue)
     assert list(await (await client.get("/history")).json()) == ["user-done"]
     assert list(await (await client.get("/history?max_items=1")).json()) == ["user-done"]
 
@@ -144,6 +145,9 @@ async def test_status_is_broadcast_only_when_the_visible_queue_changes(client):
     queue.put(item(4, "retry"))
     queue.put(item(5, "retry"))  # a client may resubmit with the same prompt_id
     assert counts == [1, 1, 0, 1, 2]
+    queue.wipe_queue()
+    queue.wipe_queue()  # with no hidden job involved, every change is broadcast as before
+    assert counts == [1, 1, 0, 1, 2, 0, 0]
 
 
 @pytest.mark.asyncio
