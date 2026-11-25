@@ -154,6 +154,10 @@ async def test_status_is_broadcast_only_when_the_visible_queue_changes(client):
     queue.put(item(7, "user-2"))
     queue.delete_queue_item(lambda i: i[1] == "user-2")
     assert counts == [1, 1, 0, 1, 2, 0, 0, 1, 0]  # deleting the last pending job sends one status, not two
+    queue.put(item(8, "user-3"))
+    queue.put(item(9, "user-4"))
+    queue.delete_queue_item(lambda i: i[1] == "user-3")  # one of several pending jobs
+    assert counts == [1, 1, 0, 1, 2, 0, 0, 1, 0, 1, 2, 1]
 
 
 @pytest.mark.asyncio
