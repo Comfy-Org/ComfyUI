@@ -418,6 +418,23 @@ def test_sensenova_generate_reports_the_tokens_so_far():
     assert reports == [[42], [42, 43], [42, 43, 44]]
 
 
+def test_sensenova_generate_text_node_streams_with_the_real_tokenizer(monkeypatch):
+    import comfy_extras.nodes_textgen as nodes_textgen
+    from comfy_api.latest import io
+    sent = []
+    server = SimpleNamespace(client_id="tab", send_progress_text=lambda text, node_id, sid=None: sent.append((text, node_id, sid)))
+    monkeypatch.setattr(nodes_textgen, "PromptServer", SimpleNamespace(instance=server))
+    monkeypatch.setattr(nodes_textgen.ProgressText, "INTERVAL", 0.0)
+    clip = _text_clip([42, 43, 151645])
+    embed = clip.cond_stage_model.language_model.model.embed_tokens.weight.detach()
+    embed[271].copy_(embed[1])
+    clone = TextGenerateV2.PREPARE_CLASS_CLONE({"hidden_inputs": {io.Hidden.unique_id: "2"}})
+    assert clone.execute(clip=clip, prompt="Say hello", max_length=8, sampling_mode={"sampling_mode": "off"}).args == ("KL", "")
+    texts = [text for text, _, _ in sent]
+    assert len(texts) > 1 and texts[-1] == "KL" and all("KL".startswith(t) for t in texts)
+    assert {(node_id, sid) for _, node_id, sid in sent} == {("2", "tab")}
+
+
 @pytest.mark.parametrize(("generated", "limit", "expected"), [
     ([42, 43, 151645], 8, [42, 43, 151645]),
     ([151645], 8, [151645]),

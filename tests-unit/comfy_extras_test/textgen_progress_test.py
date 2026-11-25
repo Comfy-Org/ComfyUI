@@ -10,6 +10,7 @@ if not torch.cuda.is_available():
 
 import comfy.text_encoders.token_stream as token_stream  # noqa: E402
 from comfy_api.latest import io  # noqa: E402
+from comfy_execution.graph import DynamicPrompt  # noqa: E402
 from comfy_extras import nodes_textgen  # noqa: E402
 from comfy_extras.nodes_textgen import ProgressText, TextGenerate, TextGenerateLTX2Prompt, TextGenerateV2  # noqa: E402
 
@@ -54,7 +55,7 @@ def server(monkeypatch):
 
 
 @pytest.fixture
-def clock(monkeypatch):
+def clock(server, monkeypatch):
     now = [0.5]  # monotonic time can be below INTERVAL, e.g. on a freshly booted machine
     monkeypatch.setattr(nodes_textgen, "time", SimpleNamespace(monotonic=lambda: now[0]))
     monkeypatch.setattr(ProgressText, "INTERVAL", 1.0)
@@ -125,8 +126,9 @@ def test_a_slow_decode_does_not_run_back_to_back(server, clock):
 
 
 def test_progress_text_in_a_loop_body_shows_on_the_node_it_copies(server):
-    copies = {"4.0.0.0_2": "2"}
-    hidden = SimpleNamespace(unique_id="4.0.0.0_2", dynprompt=SimpleNamespace(get_display_node_id=lambda i: copies.get(i, i)))
+    dynprompt = DynamicPrompt({"2": {"class_type": "TextGenerate", "inputs": {}}})
+    dynprompt.add_ephemeral_node("4.0.0.0_2", {"class_type": "TextGenerate", "inputs": {}}, "4", "2")
+    hidden = SimpleNamespace(unique_id="4.0.0.0_2", dynprompt=dynprompt)
     assert ProgressText.for_node(FakeClip(""), hidden).node_id == "2"
 
 
@@ -141,6 +143,12 @@ def test_generate_text_shows_its_text_while_it_is_written(server):
     assert out.args[0] == "Hello"
     assert texts(server) == ["H", "He", "Hel", "Hell", "Hello", "Hello"]  # the last, unthrottled
     assert {(n, sid) for _, n, sid in server.sent} == {("2", "tab")}
+
+
+def test_generate_text_sends_its_whole_text_at_the_end_whatever_the_throttle(server, clock):
+    clone = TextGenerateV2.PREPARE_CLASS_CLONE({"hidden_inputs": {io.Hidden.unique_id: "2"}})
+    assert clone.execute(FakeClip("Hello"), "hi", 16, {"sampling_mode": "off"}).args[0] == "Hello"
+    assert texts(server) == ["H", "Hello"]
 
 
 def test_generate_text_without_a_client_sends_nothing(server):
