@@ -1079,7 +1079,7 @@ components:
                     description: Extra data to be associated with the prompt
                     properties:
                         hidden:
-                            description: 'If true, the job is left out of the job, queue and history lists and the queue count for every client, for a client running its own internal jobs. It can still be fetched by its id.'
+                            description: 'If true, the job is left out of the job, queue and history lists and the queue count for every client, for a client running its own internal jobs. It can still be fetched by its id. Send a client_id of its own so its progress events reach only that client; hidden jobs still count toward the history limit.'
                             type: boolean
                     type: object
                 front:
