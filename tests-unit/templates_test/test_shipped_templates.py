@@ -44,6 +44,11 @@ FRONTEND_ONLY = {"MarkdownNote", "Note", "Reroute", "PrimitiveNode"}
 # Widget names the frontend adds for its own controls, with no input behind them.
 UI_ONLY_WIDGETS = {"upload", "audioUI", "imageUI", "videoUI", "model3DUI", "previewUI"}
 
+# Reroute exists only in the frontend, so it is never in the backend registry.
+# A link drawn through one has to be resolved to the nodes on either side of
+# the chain, or it goes unchecked.
+PASSTHROUGH_TYPES = {"Reroute"}
+
 # Input and return types that match anything: the V3 dynamic kinds, whose
 # concrete type is decided at runtime, and the legacy wildcard. COMBO is
 # deliberately not here: ComfyUI's own validation does not treat a combo as an
@@ -404,11 +409,7 @@ def test_no_template_link_leaves_an_output_a_node_no_longer_has(
             by_id = {node["id"]: node for node in scope.get("nodes") or []}
             for origin_id, origin_slot, _target_id, _target_slot in links_of(scope):
                 origin = by_id.get(origin_id)
-                if (
-                    origin is None
-                    or origin.get("mode") in SKIPPED_MODES
-                    or not isinstance(origin_slot, int)
-                ):
+                if origin is None or not isinstance(origin_slot, int):
                     continue
                 node_class = node_registry.get(origin.get("type"))
                 if node_class is None:
@@ -480,58 +481,72 @@ def accepted_type(
     return (f"{node['type']}.{name}", declared) if declared else None
 
 
+def link_index(scope: dict[str, Any]) -> tuple[dict, dict]:
+    """(incoming, outgoing) maps for one graph, built once per scope.
+
+    Resolving a reroute chain needs to look up a node's neighbours. Scanning
+    every link for each lookup is quadratic in the link count, and the corpus
+    carries about fourteen thousand links.
+    """
+    incoming: dict[tuple[Any, Any], tuple[Any, Any]] = {}
+    outgoing: dict[Any, list[tuple[Any, Any]]] = {}
+    for origin_id, origin_slot, target_id, target_slot in links_of(scope):
+        incoming[(target_id, target_slot)] = (origin_id, origin_slot)
+        outgoing.setdefault(origin_id, []).append((target_id, target_slot))
+    return incoming, outgoing
+
+
+def is_passthrough(by_id: dict[Any, dict[str, Any]], node_id: Any) -> bool:
+    node = by_id.get(node_id)
+    return node is not None and node.get("type") in PASSTHROUGH_TYPES
+
+
 def resolve_reroute_origin(
-    scope: dict[str, Any],
     by_id: dict[Any, dict[str, Any]],
+    incoming: dict[tuple[Any, Any], tuple[Any, Any]],
     node_id: Any,
     slot: Any,
-    seen: set | None = None,
+    seen: frozenset[Any] = frozenset(),
 ) -> tuple[Any, Any]:
-    """Follow a chain of Reroute nodes back to whatever actually produces the value.
+    """Follow a reroute chain back to whatever actually produces the value.
 
-    A Reroute has no node class, so a link starting there is otherwise
-    unresolvable and silently skipped -- which would let a type change
-    upstream of a Reroute pass unnoticed.
+    A Reroute has no node class, so a link starting at one is otherwise
+    unresolvable and silently skipped, which would let a type change upstream
+    of a reroute pass unnoticed.
     """
-    node = by_id.get(node_id)
-    if node is None or node.get("type") != "Reroute":
+    if not is_passthrough(by_id, node_id) or node_id in seen:
         return node_id, slot
-    seen = seen if seen is not None else set()
-    if node_id in seen:
+    upstream = incoming.get((node_id, 0))
+    if upstream is None:
         return node_id, slot
-    seen.add(node_id)
-    for origin_id, origin_slot, target_id, _target_slot in links_of(scope):
-        if target_id == node_id:
-            return resolve_reroute_origin(scope, by_id, origin_id, origin_slot, seen)
-    return node_id, slot
+    return resolve_reroute_origin(
+        by_id, incoming, upstream[0], upstream[1], seen | {node_id}
+    )
 
 
 def resolve_reroute_targets(
-    scope: dict[str, Any],
     by_id: dict[Any, dict[str, Any]],
+    outgoing: dict[Any, list[tuple[Any, Any]]],
     node_id: Any,
     slot: Any,
-    seen: set | None = None,
+    seen: frozenset[Any] = frozenset(),
 ) -> list[tuple[Any, Any]]:
-    """Follow a chain of Reroute nodes forward to every node that actually consumes the value.
+    """Follow a reroute chain forward to every node that consumes the value.
 
-    A Reroute's own output can feed more than one link, so this can fan out
-    to several terminal (node, slot) pairs for one starting point.
+    A reroute's output can feed several links, so one starting point fans out
+    to several terminal pairs. `seen` is carried per path rather than shared,
+    so one branch visiting a node does not cut a sibling branch short.
     """
-    node = by_id.get(node_id)
-    if node is None or node.get("type") != "Reroute":
+    if not is_passthrough(by_id, node_id) or node_id in seen:
         return [(node_id, slot)]
-    seen = seen if seen is not None else set()
-    if node_id in seen:
-        return [(node_id, slot)]
-    seen.add(node_id)
-    targets = [
-        resolved
-        for origin_id, _origin_slot, target_id, target_slot in links_of(scope)
-        if origin_id == node_id
-        for resolved in resolve_reroute_targets(scope, by_id, target_id, target_slot, seen)
+    resolved = [
+        pair
+        for target_id, target_slot in outgoing.get(node_id, ())
+        for pair in resolve_reroute_targets(
+            by_id, outgoing, target_id, target_slot, seen | {node_id}
+        )
     ]
-    return targets or [(node_id, slot)]
+    return resolved or [(node_id, slot)]
 
 
 def test_every_template_link_still_connects_types_that_match(
@@ -551,31 +566,29 @@ def test_every_template_link_still_connects_types_that_match(
         instances = subgraph_ids(graph)
         for scope in iter_nodes(graph):
             by_id = {node["id"]: node for node in scope.get("nodes") or []}
+            incoming, outgoing = link_index(scope)
             for origin_id, origin_slot, target_id, target_slot in links_of(scope):
-                if any(
-                    node is not None and node.get("mode") in SKIPPED_MODES
-                    for node in (by_id.get(origin_id), by_id.get(target_id))
-                ):
-                    continue
-                resolved_origin_id, resolved_origin_slot = resolve_reroute_origin(
-                    scope, by_id, origin_id, origin_slot
+                resolved_origin = resolve_reroute_origin(
+                    by_id, incoming, origin_id, origin_slot
                 )
                 source = produced_type(
-                    scope, by_id, instances, node_registry, resolved_origin_id, resolved_origin_slot
+                    scope, by_id, instances, node_registry, *resolved_origin
                 )
                 if source is None:
                     continue
-                for resolved_target_id, resolved_target_slot in resolve_reroute_targets(
-                    scope, by_id, target_id, target_slot
+                for resolved_target in resolve_reroute_targets(
+                    by_id, outgoing, target_id, target_slot
                 ):
                     sink = accepted_type(
-                        scope, by_id, instances, node_registry, resolved_target_id, resolved_target_slot
+                        scope, by_id, instances, node_registry, *resolved_target
                     )
                     if sink is None:
                         continue
                     label, target_type = sink
                     if not types_connect(source, target_type):
-                        mismatched.add((template_id, f"{source} -> {label}:{target_type}"))
+                        mismatched.add(
+                            (template_id, f"{source} -> {label}:{target_type}")
+                        )
     assert not mismatched, f"templates wire types that no longer connect: {sorted(mismatched)}"
 
 
@@ -656,3 +669,78 @@ def test_a_subgraph_boundary_slot_reports_its_declared_type(side, slot, expected
         "outputs": [{"name": "IMAGE", "type": "IMAGE"}],
     }
     assert boundary_slot_type(scope, side, slot) == expected
+
+
+def test_a_link_through_a_reroute_resolves_to_the_real_producer():
+    """Reroute never reaches the registry, so a LATENT carried through one into
+    an IMAGE input would otherwise resolve to None and never be compared."""
+
+    class Sampler:
+        RETURN_TYPES = ("LATENT",)
+
+    scope = {
+        "nodes": [{"id": 1, "type": "KSampler"}, {"id": 2, "type": "Reroute"}],
+        "links": [[10, 1, 0, 2, 0, "LATENT"]],
+    }
+    by_id = {node["id"]: node for node in scope["nodes"]}
+    incoming, _ = link_index(scope)
+
+    origin = resolve_reroute_origin(by_id, incoming, 2, 0)
+    source = produced_type(scope, by_id, set(), {"KSampler": Sampler}, *origin)
+    assert source == "LATENT"
+    assert not types_connect(source, "IMAGE")
+
+
+def test_a_chain_of_reroutes_resolves_through_all_of_them():
+    scope = {
+        "nodes": [{"id": 1, "type": "LoadImage"}]
+        + [{"id": i, "type": "Reroute"} for i in (2, 3, 4)],
+        "links": [[10, 1, 0, 2, 0, "IMAGE"], [11, 2, 0, 3, 0, "IMAGE"], [12, 3, 0, 4, 0, "IMAGE"]],
+    }
+    by_id = {node["id"]: node for node in scope["nodes"]}
+    incoming, outgoing = link_index(scope)
+
+    assert resolve_reroute_origin(by_id, incoming, 4, 0) == (1, 0)
+    assert resolve_reroute_targets(by_id, outgoing, 2, 0) == [(4, 0)]
+
+
+def test_a_reroute_feeding_two_consumers_reports_both():
+    """One branch walking the chain must not cut the sibling branch short."""
+    scope = {
+        "nodes": [{"id": 1, "type": "Reroute"}, {"id": 2, "type": "Reroute"}],
+        "links": [[10, 1, 0, 2, 0, "IMAGE"], [11, 2, 0, 7, 0, "IMAGE"], [12, 2, 0, 8, 1, "IMAGE"]],
+    }
+    by_id = {node["id"]: node for node in scope["nodes"]}
+    _, outgoing = link_index(scope)
+
+    assert sorted(resolve_reroute_targets(by_id, outgoing, 1, 0)) == [(7, 0), (8, 1)]
+
+
+def test_reroutes_wired_into_a_loop_do_not_recurse_forever():
+    scope = {
+        "nodes": [{"id": 1, "type": "Reroute"}, {"id": 2, "type": "Reroute"}],
+        "links": [[10, 1, 0, 2, 0, "IMAGE"], [11, 2, 0, 1, 0, "IMAGE"]],
+    }
+    by_id = {node["id"]: node for node in scope["nodes"]}
+    incoming, outgoing = link_index(scope)
+
+    assert resolve_reroute_origin(by_id, incoming, 1, 0) in {(1, 0), (2, 0)}
+    assert resolve_reroute_targets(by_id, outgoing, 1, 0)
+
+
+def test_a_muted_nodes_wiring_is_still_checked():
+    """Muting is a UI state. The link is still saved, and it breaks as soon as
+    the user turns the node back on, so the gate does not excuse it."""
+
+    class Sampler:
+        RETURN_TYPES = ("LATENT",)
+
+    scope = {
+        "nodes": [{"id": 1, "type": "KSampler", "mode": 2}, {"id": 2, "type": "Reroute"}],
+        "links": [[10, 1, 0, 2, 0, "LATENT"]],
+    }
+    by_id = {node["id"]: node for node in scope["nodes"]}
+    incoming, _ = link_index(scope)
+
+    origin = resolve_reroute_origin(by_id, incoming, 2, 0)
+    assert produced_type(scope, by_id, set(), {"KSampler": Sampler}, *origin) == "LATENT"
