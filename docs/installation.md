@@ -28,6 +28,7 @@ translations.
   - [Dependencies](#dependencies)
 - [Windows Portable](#windows-portable)
 - [ComfyUI-Manager](#comfyui-manager)
+- [Docker Compose](#docker-compose)
 - [Running](#running)
 - [Sharing models with another UI](#sharing-models-with-another-ui)
 - [High-quality previews](#high-quality-previews)
@@ -300,21 +301,16 @@ python main.py
 The full list of launch options is documented at
 [docs.comfy.org/development/comfyui-server/startup-flags](https://docs.comfy.org/development/comfyui-server/startup-flags).
 
-### Docker Compose (NVIDIA, Linux x86_64)
+## Docker Compose
 
-This deployment builds ComfyUI into a versioned image using a digest-pinned
-PyTorch/CUDA base image. It requires Docker Compose v2 and the NVIDIA Container
-Toolkit on the host. Check out the exact ComfyUI release or commit you want to run,
-then copy `.env.example` to `.env` and set `COMFYUI_VERSION` to that same release
-tag or full commit SHA.
+This NVIDIA deployment for Linux x86_64 builds ComfyUI into a versioned image
+using a digest-pinned PyTorch/CUDA base image. It requires Docker Compose v2 and
+the NVIDIA Container Toolkit on the host. From the checked-out ComfyUI repository,
+run this one-line command to initialize the local configuration, build the image
+for the current checkout, and start the service:
 
-Create a local model-path configuration from the example, then build and start with
-the NVIDIA override:
-
-```
-cp -n .env.example .env
-cp -n extra_model_paths.yaml.example extra_model_paths.yaml
-docker compose -f compose.yaml -f compose.nvidia.yaml up -d --build
+```sh
+cp -n .env.example .env && cp -n extra_model_paths.yaml.example extra_model_paths.yaml && COMFYUI_VERSION="$(git rev-parse HEAD)" COMFYUI_BIND_ADDRESS=0.0.0.0 docker compose -f compose.yaml -f compose.nvidia.yaml up -d --build
 ```
 
 The image includes ComfyUI and its Python dependencies. The Compose service keeps
@@ -322,12 +318,12 @@ models, input files, output files, the user directory (including workflows and
 settings), and `extra_model_paths.yaml` outside the image so they survive rebuilds.
 `docker compose down` stops the service without removing this data.
 
-The service binds to `127.0.0.1:8188` by default. Keep this loopback binding when
-using a host-local reverse proxy that provides TLS and authentication; ComfyUI does
-not provide authentication by default. For a trusted private network, set
-`COMFYUI_BIND_ADDRESS` in `.env` to the server's private address and restrict access
-with the host firewall. Do not expose the unauthenticated service directly to the
-internet.
+The service publishes `0.0.0.0:8188` by default, making it reachable on every
+network interface. ComfyUI does not provide authentication by default, so only use
+this setting on a trusted network with access restricted by the host firewall; do
+not expose the unauthenticated service directly to the internet. To use a
+host-local reverse proxy that provides TLS and authentication, set
+`COMFYUI_BIND_ADDRESS=127.0.0.1` in `.env`.
 
 To check the merged Compose configuration before starting the service, run:
 

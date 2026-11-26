@@ -8,7 +8,7 @@ services:
     init: true
     restart: unless-stopped
     ports:
-      - "${COMFYUI_BIND_ADDRESS:-127.0.0.1}:${COMFYUI_PORT:-8188}:8188"
+      - "${COMFYUI_BIND_ADDRESS:-0.0.0.0}:${COMFYUI_PORT:-8188}:8188"
     volumes:
       - ./models:/comfyui/models
       - ./input:/comfyui/input
