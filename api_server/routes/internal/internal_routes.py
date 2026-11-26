@@ -1,6 +1,6 @@
 from aiohttp import web
 from typing import Optional
-from folder_paths import folder_names_and_paths, get_directory_by_type
+from folder_paths import folder_names_and_paths, get_directory_by_type, filter_files_content_types
 from api_server.services.terminal_service import TerminalService
 import app.logger
 import os
@@ -59,12 +59,11 @@ class InternalRoutes:
 
             directory = get_directory_by_type(directory_type)
 
-            def is_visible_file(entry: os.DirEntry) -> bool:
-                """Filter out hidden files (e.g., .DS_Store on macOS)."""
-                return entry.is_file() and not entry.name.startswith('.')
-
+            # Skip hidden files (e.g. .DS_Store) and anything that isn't an image (Thumbs.db, videos, json...)
+            entries = [entry for entry in os.scandir(directory) if entry.is_file() and not entry.name.startswith('.')]
+            images = set(filter_files_content_types([entry.name for entry in entries], ["image"]))
             sorted_files = sorted(
-                (entry for entry in os.scandir(directory) if is_visible_file(entry)),
+                (entry for entry in entries if entry.name in images),
                 key=lambda entry: -entry.stat().st_mtime
             )
             return web.json_response([f"{entry.name} [{directory_type}]" for entry in sorted_files], status=200)
