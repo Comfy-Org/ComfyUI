@@ -404,7 +404,11 @@ def test_no_template_link_leaves_an_output_a_node_no_longer_has(
             by_id = {node["id"]: node for node in scope.get("nodes") or []}
             for origin_id, origin_slot, _target_id, _target_slot in links_of(scope):
                 origin = by_id.get(origin_id)
-                if origin is None or not isinstance(origin_slot, int):
+                if (
+                    origin is None
+                    or origin.get("mode") in SKIPPED_MODES
+                    or not isinstance(origin_slot, int)
+                ):
                     continue
                 node_class = node_registry.get(origin.get("type"))
                 if node_class is None:
@@ -476,6 +480,60 @@ def accepted_type(
     return (f"{node['type']}.{name}", declared) if declared else None
 
 
+def resolve_reroute_origin(
+    scope: dict[str, Any],
+    by_id: dict[Any, dict[str, Any]],
+    node_id: Any,
+    slot: Any,
+    seen: set | None = None,
+) -> tuple[Any, Any]:
+    """Follow a chain of Reroute nodes back to whatever actually produces the value.
+
+    A Reroute has no node class, so a link starting there is otherwise
+    unresolvable and silently skipped -- which would let a type change
+    upstream of a Reroute pass unnoticed.
+    """
+    node = by_id.get(node_id)
+    if node is None or node.get("type") != "Reroute":
+        return node_id, slot
+    seen = seen if seen is not None else set()
+    if node_id in seen:
+        return node_id, slot
+    seen.add(node_id)
+    for origin_id, origin_slot, target_id, _target_slot in links_of(scope):
+        if target_id == node_id:
+            return resolve_reroute_origin(scope, by_id, origin_id, origin_slot, seen)
+    return node_id, slot
+
+
+def resolve_reroute_targets(
+    scope: dict[str, Any],
+    by_id: dict[Any, dict[str, Any]],
+    node_id: Any,
+    slot: Any,
+    seen: set | None = None,
+) -> list[tuple[Any, Any]]:
+    """Follow a chain of Reroute nodes forward to every node that actually consumes the value.
+
+    A Reroute's own output can feed more than one link, so this can fan out
+    to several terminal (node, slot) pairs for one starting point.
+    """
+    node = by_id.get(node_id)
+    if node is None or node.get("type") != "Reroute":
+        return [(node_id, slot)]
+    seen = seen if seen is not None else set()
+    if node_id in seen:
+        return [(node_id, slot)]
+    seen.add(node_id)
+    targets = [
+        resolved
+        for origin_id, _origin_slot, target_id, target_slot in links_of(scope)
+        if origin_id == node_id
+        for resolved in resolve_reroute_targets(scope, by_id, target_id, target_slot, seen)
+    ]
+    return targets or [(node_id, slot)]
+
+
 def test_every_template_link_still_connects_types_that_match(
     shipped_templates, node_registry
 ):
@@ -483,7 +541,10 @@ def test_every_template_link_still_connects_types_that_match(
 
     Links across a subgraph boundary are included: inside a subgraph the only
     link an inner node's output has is often the one to the output boundary, so
-    skipping those would leave most of a modern template unchecked.
+    skipping those would leave most of a modern template unchecked. A link
+    through one or more Reroute nodes is resolved to the backend nodes on
+    either side of the chain, since a Reroute itself has no declared type to
+    compare.
     """
     mismatched = set()
     for template_id, graph in shipped_templates:
@@ -491,17 +552,30 @@ def test_every_template_link_still_connects_types_that_match(
         for scope in iter_nodes(graph):
             by_id = {node["id"]: node for node in scope.get("nodes") or []}
             for origin_id, origin_slot, target_id, target_slot in links_of(scope):
-                source = produced_type(
-                    scope, by_id, instances, node_registry, origin_id, origin_slot
-                )
-                sink = accepted_type(
-                    scope, by_id, instances, node_registry, target_id, target_slot
-                )
-                if source is None or sink is None:
+                if any(
+                    node is not None and node.get("mode") in SKIPPED_MODES
+                    for node in (by_id.get(origin_id), by_id.get(target_id))
+                ):
                     continue
-                label, target_type = sink
-                if not types_connect(source, target_type):
-                    mismatched.add((template_id, f"{source} -> {label}:{target_type}"))
+                resolved_origin_id, resolved_origin_slot = resolve_reroute_origin(
+                    scope, by_id, origin_id, origin_slot
+                )
+                source = produced_type(
+                    scope, by_id, instances, node_registry, resolved_origin_id, resolved_origin_slot
+                )
+                if source is None:
+                    continue
+                for resolved_target_id, resolved_target_slot in resolve_reroute_targets(
+                    scope, by_id, target_id, target_slot
+                ):
+                    sink = accepted_type(
+                        scope, by_id, instances, node_registry, resolved_target_id, resolved_target_slot
+                    )
+                    if sink is None:
+                        continue
+                    label, target_type = sink
+                    if not types_connect(source, target_type):
+                        mismatched.add((template_id, f"{source} -> {label}:{target_type}"))
     assert not mismatched, f"templates wire types that no longer connect: {sorted(mismatched)}"
 
 
