@@ -28,6 +28,7 @@ from comfy_api_nodes.apis.recraft import (
     RecraftIO,
     RecraftStyle,
     RecraftStyleV3,
+    RecraftVectorizeRequest,
     get_v3_substyles,
 )
 from comfy_api_nodes.util import (
@@ -968,6 +969,22 @@ class RecraftVectorizeImageNode(IO.ComfyNode):
             description="Generates SVG synchronously from an input image.",
             inputs=[
                 IO.Image.Input("image"),
+                IO.Combo.Input(
+                    "version",
+                    options=["v1", "v1_pro"],
+                    default="v1",
+                    optional=True,
+                    tooltip="v1_pro (Vectorizer Pro) gives cleaner SVGs with smooth curves, straight lines and sharp "
+                    "corners, best for lettering and intricate shapes.",
+                ),
+                IO.Combo.Input(
+                    "shape_stacking",
+                    options=["hierarchical", "cut_out"],
+                    default="hierarchical",
+                    optional=True,
+                    tooltip="hierarchical layers shapes on top of each other; "
+                    "cut_out makes shapes that never overlap, for plotters, vinyl cutters and screen printing.",
+                ),
             ],
             outputs=[
                 IO.SVG.Output(),
@@ -979,13 +996,18 @@ class RecraftVectorizeImageNode(IO.ComfyNode):
             ],
             is_api_node=True,
             price_badge=IO.PriceBadge(
-                depends_on=IO.PriceBadgeDepends(),
-                expr="""{"type":"usd","usd": 0.0143}""",
+                depends_on=IO.PriceBadgeDepends(widgets=["version"]),
+                expr="""{"type":"usd","usd": widgets.version = "v1_pro" ? 0.0572 : 0.0143}""",
             ),
         )
 
     @classmethod
-    async def execute(cls, image: torch.Tensor) -> IO.NodeOutput:
+    async def execute(
+        cls,
+        image: torch.Tensor,
+        version: str = "v1",
+        shape_stacking: str = "hierarchical",
+    ) -> IO.NodeOutput:
         svgs = []
         total = image.shape[0]
         pbar = ProgressBar(total)
@@ -994,6 +1016,7 @@ class RecraftVectorizeImageNode(IO.ComfyNode):
                 cls,
                 image=image[i],
                 path="/proxy/recraft/images/vectorize",
+                request=RecraftVectorizeRequest(version=version, shape_stacking=shape_stacking),
             )
             svgs.append(SVG(sub_bytes))
             pbar.update(1)
@@ -1336,7 +1359,8 @@ class RecraftV4TextToImageNode(IO.ComfyNode):
                     ],
                     tooltip="The model to use for generation. The recraftv4_styles models are built for "
                     "style-consistent generation and always require a style_id or style_references; "
-                    "recraftv4_1_flash is the fastest and cheapest model and supports no styles at all.",
+                    "recraftv4_1_flash runs Recraft V4.1 Flash V2, the fastest and cheapest model, "
+                    "and supports no styles at all.",
                 ),
                 IO.Int.Input(
                     "n",
@@ -1440,7 +1464,7 @@ class RecraftV4TextToImageNode(IO.ComfyNode):
             response_model=RecraftImageGenerationResponse,
             data=RecraftImageGenerationRequest(
                 prompt=prompt,
-                model=model["model"],
+                model="recraftv4_1_flash_v2" if model["model"] == "recraftv4_1_flash" else model["model"],
                 size=model["size"],
                 n=n,
                 style_id=style_id,

@@ -2120,6 +2120,12 @@ def supports_fp64(device=None):
 
     return True
 
+def slow_int8_compute(device=None):
+    if is_nvidia() and (device is None or torch.device(device).type == "cuda"):
+        # GB300 supports INT8, but its throughput is poor for matmul and attention.
+        return "GB300" in torch.cuda.get_device_name(device).upper()
+    return False
+
 def supports_int8_compute(device=None):
     if is_device_cpu(device):
         return False
@@ -2136,7 +2142,7 @@ def supports_int8_compute(device=None):
     if is_ixuca():
         return False
 
-    return True
+    return not slow_int8_compute(device)
 
 def extended_fp16_support():
     # TODO: check why some models work with fp16 on newer torch versions but not on older
@@ -2166,6 +2172,8 @@ def synchronize():
         torch.xpu.synchronize()
     elif is_ascend_npu():
         torch.npu.synchronize()
+    elif mps_mode():
+        torch.mps.synchronize()
     elif torch.cuda.is_available():
         torch.cuda.synchronize()
 

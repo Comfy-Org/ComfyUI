@@ -271,17 +271,19 @@ def audio_ndarray_to_bytesio(
     """
     audio_bytes_io = BytesIO()
     with av.open(audio_bytes_io, mode="w", format=container_format) as output_container:
-        audio_stream = output_container.add_stream(codec_name, rate=sample_rate)
-        frame = av.AudioFrame.from_ndarray(
-            audio_data_np,
-            format="fltp",
-            layout="stereo" if audio_data_np.shape[0] > 1 else "mono",
-        )
-        frame.sample_rate = sample_rate
-        frame.pts = 0
-
-        for packet in audio_stream.encode(frame):
-            output_container.mux(packet)
+        rates = av.codec.Codec(codec_name, "w").audio_rates
+        audio_stream = output_container.add_stream(codec_name, rate=min(sample_rate, max(rates)) if rates else sample_rate)
+        layout = "3.0" if audio_data_np.shape[0] == 3 else f"{audio_data_np.shape[0]}c"
+        for start in range(0, max(audio_data_np.shape[1], 1), 1 << 20):
+            frame = av.AudioFrame.from_ndarray(
+                np.ascontiguousarray(audio_data_np[:, start : start + (1 << 20)].T).reshape(1, -1),
+                format="flt",
+                layout=layout,
+            )
+            frame.sample_rate = sample_rate
+            frame.pts = start
+            for packet in audio_stream.encode(frame):
+                output_container.mux(packet)
 
         # Flush stream
         for packet in audio_stream.encode(None):
@@ -322,17 +324,19 @@ def audio_input_to_mp3(audio: Input.Audio) -> BytesIO:
     output_buffer = BytesIO()
     output_container = av.open(output_buffer, mode="w", format="mp3")
 
-    out_stream = output_container.add_stream("libmp3lame", rate=sample_rate)
+    out_stream = output_container.add_stream("libmp3lame", rate=min(sample_rate, 48000))
     out_stream.bit_rate = 320000
 
-    frame = av.AudioFrame.from_ndarray(
-        audio_data_np,
-        format="fltp",
-        layout="stereo" if audio_data_np.shape[0] > 1 else "mono",
-    )
-    frame.sample_rate = sample_rate
-    frame.pts = 0
-    output_container.mux(out_stream.encode(frame))
+    layout = "3.0" if audio_data_np.shape[0] == 3 else f"{audio_data_np.shape[0]}c"
+    for start in range(0, max(audio_data_np.shape[1], 1), 1 << 20):
+        frame = av.AudioFrame.from_ndarray(
+            np.ascontiguousarray(audio_data_np[:, start : start + (1 << 20)].T).reshape(1, -1),
+            format="flt",
+            layout=layout,
+        )
+        frame.sample_rate = sample_rate
+        frame.pts = start
+        output_container.mux(out_stream.encode(frame))
     output_container.mux(out_stream.encode(None))
     output_container.close()
     output_buffer.seek(0)
@@ -439,12 +443,22 @@ def _apply_video_scale(video: Input.Video, scale_dims: tuple[int, int]) -> Input
                     continue
                 if end_pts is not None and frame.pts >= end_pts:
                     break
+            if encoded == 0:
+                rotation = int(round(frame.rotation // 90)) % 4 if frame.rotation else 0
+                if crop_rect is None and rotation % 2:
+                    out_w, out_h = out_h, out_w
+                    video_stream.width, video_stream.height = out_w, out_h
             if crop_rect is not None:
                 x, y, w, h = crop_rect
                 planes = frame.to_ndarray(format="yuv444p")
-                if frame.rotation:
-                    planes = np.rot90(planes, k=int(round(frame.rotation // 90)) % 4, axes=(1, 2))
+                if rotation:
+                    planes = np.rot90(planes, k=rotation, axes=(1, 2))
                 frame = av.VideoFrame.from_ndarray(np.ascontiguousarray(planes[:, y:y + h, x:x + w]), format="yuv444p")
+            elif rotation:
+                w, h = (out_h, out_w) if rotation % 2 else (out_w, out_h)
+                yuv = frame.to_ndarray(width=w, height=h, format="yuv420p").reshape(-1)
+                planes = (yuv[:w * h].reshape(h, w), yuv[w * h:w * h * 5 // 4].reshape(h // 2, w // 2), yuv[w * h * 5 // 4:].reshape(h // 2, w // 2))
+                frame = av.VideoFrame.from_ndarray(np.concatenate([np.rot90(p, k=rotation).ravel() for p in planes]).reshape(-1, out_w), format="yuv420p")
             frame = frame.reformat(width=out_w, height=out_h, format="yuv420p")
             # Re-wrap as a fresh frame: dropping irregular source timestamps (VFR/AVI/GIF/...)
             # lets the encoder assign clean ones and avoids mp4 muxer errors.
