@@ -59,13 +59,12 @@ class InternalRoutes:
 
             directory = get_directory_by_type(directory_type)
 
-            # Skip hidden files (e.g. .DS_Store) and anything that isn't an image (Thumbs.db, videos, json...)
+            # Skip hidden files (e.g. .DS_Store); for outputs, also anything that isn't an image (Thumbs.db, videos, json...)
             entries = [entry for entry in os.scandir(directory) if entry.is_file() and not entry.name.startswith('.')]
-            images = set(filter_files_content_types([entry.name for entry in entries], ["image"]))
-            sorted_files = sorted(
-                (entry for entry in entries if entry.name in images),
-                key=lambda entry: -entry.stat().st_mtime
-            )
+            if directory_type == "output":
+                images = set(filter_files_content_types([entry.name for entry in entries], ["image"]))
+                entries = [entry for entry in entries if entry.name in images]
+            sorted_files = sorted(entries, key=lambda entry: -entry.stat().st_mtime)
             return web.json_response([f"{entry.name} [{directory_type}]" for entry in sorted_files], status=200)
 
 
