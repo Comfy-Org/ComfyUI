@@ -277,8 +277,8 @@ class PrefixCache:
         with contextlib.ExitStack() as stack:
             unprefetched = [slot[i] for slot in self.slots if slot[i].comfy_cast_weights and not hasattr(slot[i], "_prefetch")]
             if unprefetched:
-                comfy.model_prefetch.pin_modules(unprefetched, device)
                 stack.callback(comfy.model_prefetch.cleanup_prefetched_modules, self, unprefetched)
+                comfy.model_prefetch.pin_modules(unprefetched, device)
             self.values = []
             for slot in self.slots:
                 layer = slot[i]
