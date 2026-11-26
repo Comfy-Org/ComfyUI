@@ -154,9 +154,7 @@ class LTXVImgToVideoInplace(io.ComfyNode):
             return (latent,)
 
         samples = latent["samples"].clone()
-        _, height_scale_factor, width_scale_factor = (
-            vae.downscale_index_formula
-        )
+        _, height_scale_factor, width_scale_factor = video_vae_downscale_factors(vae)
 
         _, _, _, latent_height, latent_width = samples.shape
         width = latent_width * width_scale_factor
@@ -214,6 +212,14 @@ def conditioning_get_any_value(conditioning, key, default=None):
         if key in t[1]:
             return t[1][key]
     return default
+
+
+def video_vae_downscale_factors(vae):
+    # Image and audio VAEs leave this unset; without the check the nodes fail with an unpack TypeError.
+    factors = getattr(vae, "downscale_index_formula", None)
+    if factors is None:
+        raise ValueError("This node needs a video VAE, such as the LTXV VAE. The connected VAE does not encode video.")
+    return factors
 
 
 def get_noise_mask(latent):
@@ -468,7 +474,7 @@ class LTXVAddGuide(io.ComfyNode):
 
     @classmethod
     def execute(cls, positive, negative, vae, latent, image, frame_idx, strength, attention_mask=None, iclora_parameters=None) -> io.NodeOutput:
-        scale_factors = vae.downscale_index_formula
+        scale_factors = video_vae_downscale_factors(vae)
         latent_image = latent["samples"]
         noise_mask = get_noise_mask(latent)
 
@@ -583,7 +589,7 @@ class LTXVAddLatentGuide(io.ComfyNode):
 
     @classmethod
     def execute(cls, positive, negative, vae, latent, guiding_latent, latent_idx, strength, attention_mask=None) -> io.NodeOutput:
-        scale_factors = vae.downscale_index_formula
+        scale_factors = video_vae_downscale_factors(vae)
         latent_image = latent["samples"]
         noise_mask = get_noise_mask(latent)
         guide_latent = guiding_latent["samples"]
