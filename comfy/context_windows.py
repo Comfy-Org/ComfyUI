@@ -647,12 +647,35 @@ class IndexListContextHandler(ContextHandlerABC):
         model = guider.inner_model
         self._model = model
         steps = min(self.sequential_steps, len(sigmas) - 1)
-        cond_lists = list(guider.conds.values())
-        window_state = self._build_window_state(noise, cond_lists, model)
-        dims = window_state.modality_dims
+        window_state = self._build_window_state(noise, list(guider.conds.values()), model)
         windows = [window_state.prepare_window(w, model) for w in self.get_context_windows(model, window_state.latents[0], extra_args["model_options"])]
         if len(windows) == 1:
             return executor(guider, sigmas, extra_args, callback, noise, latent_image, denoise_mask, disable_pbar)
+
+        total_steps = len(windows) * steps + len(sigmas) - 1 - steps
+        # a separate call so the window pass's full-length buffers are freed before the joint finish
+        state = self._sample_windows(executor, guider, sigmas[:steps + 1], extra_args, callback, noise, latent_image, denoise_mask, disable_pbar,
+                                     window_state, windows, total_steps)
+        if steps == len(sigmas) - 1:
+            return state
+        # joint finish: the noise that reproduces the assembled state from the original latent, so user masks still inpaint from it
+        sigma = sigmas[steps]
+        model_sampling = model.model_sampling
+        state -= model_sampling.noise_scaling(sigma, torch.zeros_like(state), latent_image)
+        state /= model_sampling.noise_scaling(sigma, torch.ones_like(state), torch.zeros_like(state))
+
+        def joint_callback(i, x0, x, total):
+            if callback is not None:
+                callback(len(windows) * steps + i, x0, x, total_steps)
+
+        return executor(guider, sigmas[steps:], extra_args, joint_callback, state, latent_image, denoise_mask, disable_pbar)
+
+    def _sample_windows(self, executor, guider, sigmas, extra_args, callback, noise, latent_image, denoise_mask, disable_pbar, window_state, windows, total_steps):
+        """Sample each window over sigmas, holding the end of the previous one, and return the assembled state at sigmas[-1]."""
+        model = guider.inner_model
+        steps = len(sigmas) - 1
+        cond_lists = list(guider.conds.values())
+        dims = window_state.modality_dims
 
         def unpack(t, shapes):
             return list(comfy.utils.unpack_latents(t, shapes)) if window_state.is_multimodal else [t]
@@ -666,7 +689,6 @@ class IndexListContextHandler(ContextHandlerABC):
         state = [torch.empty_like(p) for p in noise_parts]
         clean = [p.clone() for p in unpack(latent_image, shapes)]  # latest prediction per row: the carry source and the preview
         owned = [0] * len(dims)  # per stream: first index no earlier window has sampled
-        total_steps = len(windows) * steps + len(sigmas) - 1 - steps
         # the warmup windows fit one window, so they skip the context handler
         warm_args = {**extra_args, "model_options": {k: v for k, v in extra_args["model_options"].items() if k != "context_handler"}}
         conds, latent_shapes = guider.conds, model.latent_shapes
@@ -706,11 +728,11 @@ class IndexListContextHandler(ContextHandlerABC):
             guider.conds = dict(zip(conds.keys(), sub_conds))
             model.latent_shapes = sub_shapes if window_state.is_multimodal else latent_shapes
             try:
-                out = executor(guider, sigmas[:steps + 1], warm_args, window_callback, sub_noise, sub_latent, sub_mask, disable_pbar)
+                out = executor(guider, sigmas, warm_args, window_callback, sub_noise, sub_latent, sub_mask, disable_pbar)
             finally:
                 guider.conds, model.latent_shapes = conds, latent_shapes
-            # the sampler returns the inverse noise scaled state, undo it to get the state at sigmas[steps]
-            out = model.model_sampling.noise_scaling(sigmas[steps], torch.zeros_like(out), out)
+            # the sampler returns the inverse noise scaled state, undo it to get the state at sigmas[-1]
+            out = model.model_sampling.noise_scaling(sigmas[-1], torch.zeros_like(out), out)
 
             # the first window to sample a row owns its state
             for m, (w, x_part) in enumerate(zip(mod_windows, unpack(out, sub_shapes))):
@@ -719,20 +741,7 @@ class IndexListContextHandler(ContextHandlerABC):
                 state[m].narrow(dims[m], w.index_list[0] + local, n).copy_(x_part.narrow(dims[m], local, n))
                 owned[m] = w.index_list[-1] + 1
 
-        state = pack(state)[0]
-        if steps == len(sigmas) - 1:
-            return state
-        # joint finish: the noise that reproduces the assembled state from the original latent, so user masks still inpaint from it
-        sigma = sigmas[steps]
-        model_sampling = model.model_sampling
-        base = model_sampling.noise_scaling(sigma, torch.zeros_like(state), latent_image)
-        scale = model_sampling.noise_scaling(sigma, torch.ones_like(state), torch.zeros_like(state))
-
-        def joint_callback(i, x0, x, total):
-            if callback is not None:
-                callback(len(windows) * steps + i, x0, x, total_steps)
-
-        return executor(guider, sigmas[steps:], extra_args, joint_callback, (state - base) / scale, latent_image, denoise_mask, disable_pbar)
+        return pack(state)[0]
 
     def evaluate_context_windows(self, calc_cond_batch: Callable, model: BaseModel, x_in: torch.Tensor, conds,
                                 timestep: torch.Tensor, enumerated_context_windows: list[tuple[int, IndexListContextWindow]],
