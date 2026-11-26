@@ -68,7 +68,7 @@ MIXAMO_RETARGET_ERROR = "Tripo cannot retarget animation presets onto a v1.0 rig
 
 FACE_LIMIT_TOOLTIP = (
     "Maximum face count. -1 lets Tripo pick adaptively (about 1.4M faces on v3.x standard, 2M on detailed). "
-    "Tripo clamps silently: v2.5 at 500,000, quad meshes at 150,000."
+    "Tripo clamps quad meshes silently at 150,000."
 )
 
 
@@ -315,7 +315,6 @@ def generation_price_badge(untextured: int, textured: int) -> IO.PriceBadge:
     return IO.PriceBadge(
         depends_on=IO.PriceBadgeDepends(
             widgets=[
-                "model_version",
                 "texture",
                 "quad",
                 "smart_low_poly",
@@ -325,10 +324,9 @@ def generation_price_badge(untextured: int, textured: int) -> IO.PriceBadge:
         ),
         expr=f"""
                 (
-                  $isV3OrLater := $contains(widgets.model_version,"v3.");
                   $tq := widgets.texture_quality;
                   $textureAddon := widgets.texture ? ($tq = "extreme" ? 20 : ($tq = "detailed" ? 10 : 0)) : 0;
-                  $geometryAddon := (widgets.geometry_quality = "detailed" and $isV3OrLater) ? 20 : 0;
+                  $geometryAddon := widgets.geometry_quality = "detailed" ? 20 : 0;
                   $credits := (widgets.texture ? {textured} : {untextured})
                     + (widgets.quad ? 5 : 0)
                     + (widgets.smart_low_poly ? 10 : 0)
@@ -941,7 +939,6 @@ def texture_model_inputs(legacy: bool) -> list:
             options=TripoTextureModelVersion,
             default=TripoTextureModelVersion.v3_0_20250812,
             optional=True,
-            tooltip="Texture model: v3.0 for meshes generated with v3.x, v2.5 for meshes generated with v2.5.",
         ),
         IO.Image.Input(
             "style_image",
