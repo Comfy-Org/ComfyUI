@@ -307,10 +307,10 @@ This NVIDIA deployment for Linux x86_64 builds ComfyUI into a versioned image
 using a digest-pinned PyTorch/CUDA base image. It requires Docker Compose v2 and
 the NVIDIA Container Toolkit on the host. From the checked-out ComfyUI repository,
 run this one-line command to initialize the local configuration, build the image
-for the current checkout, and start the service:
+for the current checkout, save its revision in `.env`, and start the service:
 
 ```sh
-cp -n .env.example .env && cp -n extra_model_paths.yaml.example extra_model_paths.yaml && COMFYUI_VERSION="$(git rev-parse HEAD)" COMFYUI_BIND_ADDRESS=0.0.0.0 docker compose -f compose.yaml -f compose.nvidia.yaml up -d --build
+cp -n .env.example .env && cp -n extra_model_paths.yaml.example extra_model_paths.yaml && sed -i.bak "s/^COMFYUI_VERSION=.*/COMFYUI_VERSION=$(git rev-parse HEAD)/" .env && rm -f .env.bak && docker compose -f compose.yaml -f compose.nvidia.yaml up -d --build
 ```
 
 The image includes ComfyUI and its Python dependencies. The Compose service keeps
