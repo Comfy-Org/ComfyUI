@@ -1559,7 +1559,7 @@ class Gemma4_Tokenizer():
                 model_open = "<|channel>thought\n<channel|>" if self.prime_empty_thought and not thinking else ""
                 llama_text = f"{system}<|turn>user\n{text}{media}<turn|>\n<|turn>model\n{model_open}"
 
-        text_tokens = super().tokenize_with_weights(llama_text, return_word_ids)
+        text_tokens = super().tokenize_with_weights(llama_text, return_word_ids, **kwargs)
 
         def _replace_placeholders(token_list, token_id, embeds):
             """Replace first placeholder with embed dict, remove remaining consecutive ones."""

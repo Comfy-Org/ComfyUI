@@ -63,7 +63,7 @@ class Gemma3_Tokenizer():
             if system_prompt:  # replaces the default system turn
                 llama_text = "<start_of_turn>system\n" + system_prompt + "<end_of_turn>\n" + llama_text[llama_text.index("<start_of_turn>user"):]
 
-        text_tokens = super().tokenize_with_weights(llama_text, return_word_ids)
+        text_tokens = super().tokenize_with_weights(llama_text, return_word_ids, **kwargs)
 
         if len(images) > 0:
             embed_count = 0
