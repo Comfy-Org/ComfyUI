@@ -1,3 +1,6 @@
+import struct
+import zlib
+
 import numpy as np
 import pytest
 import torch
@@ -42,6 +45,38 @@ def test_load_image_applies_exif_orientation(tmp_path, monkeypatch, fmt, ext, or
     got = image[0].float().cpu().numpy()
     assert got.shape == expected.shape
     assert np.abs(got - expected).mean() < 0.01
+
+
+def _write_png16(path, pixels, orientation):
+    """16-bit RGB PNG with an eXIf chunk before IDAT (Pillow cannot write 16-bit RGB)."""
+    def chunk(tag, data):
+        return struct.pack(">I", len(data)) + tag + data + struct.pack(">I", zlib.crc32(tag + data) & 0xFFFFFFFF)
+    h, w, _ = pixels.shape
+    exif = Image.Exif()
+    exif[0x0112] = orientation
+    raw = b"".join(b"\x00" + row.astype(">u2").tobytes() for row in pixels)
+    path.write_bytes(b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 16, 2, 0, 0, 0))
+                     + chunk(b"eXIf", exif.tobytes()[6:]) + chunk(b"IDAT", zlib.compress(raw)) + chunk(b"IEND", b""))
+
+
+@pytest.mark.parametrize("orientation", [1, 6])
+def test_load_image_keeps_16bit_precision_when_oriented(tmp_path, monkeypatch, orientation):
+    rng = np.random.default_rng(16)
+    pixels = rng.integers(0, 65536, size=(24, 40, 3), dtype=np.uint16)
+    path = tmp_path / f"deep{orientation}.png"
+    _write_png16(path, pixels, orientation)
+    assert node_helpers.image_exif_orientation(str(path)) == orientation
+
+    monkeypatch.setattr(folder_paths, "get_annotated_filepath", lambda name: str(path))
+    image, mask = nodes.LoadImage().load_image(path.name)
+
+    expected = pixels.astype(np.float32) / 65535.0
+    if orientation == 6:
+        expected = np.rot90(expected, -1, axes=(0, 1))
+    got = image[0].float().cpu().numpy()
+    assert got.shape == expected.shape
+    # 8-bit clipping would leave a mean error of ~1e-3; 16-bit decoding stays well below that
+    assert np.abs(got - expected).mean() < 2e-4
 
 
 def test_load_image_keeps_palette_transparency_when_oriented(tmp_path, monkeypatch):

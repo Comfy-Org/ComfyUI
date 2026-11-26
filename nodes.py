@@ -1744,6 +1744,18 @@ class PreviewImage(SaveImage):
                 "hidden": {"prompt": "PROMPT", "extra_pnginfo": "EXTRA_PNGINFO"},
                 }
 
+def pyav_image_rotation_quadrant(path):
+    """Quarter turns pyav applies to the first decoded frame of an image (from its display matrix), 0 when none."""
+    import av
+    from comfy_api.latest._input_impl.video_types import _rotation_quadrant
+    try:
+        with av.open(path) as container:
+            for frame in container.decode(video=0):
+                return _rotation_quadrant(frame)
+    except Exception:
+        pass
+    return 0
+
 class LoadImage:
     @classmethod
     def INPUT_TYPES(s):
@@ -1767,14 +1779,21 @@ class LoadImage:
         dtype = comfy.model_management.intermediate_dtype()
         device = comfy.model_management.intermediate_device()
 
-        # pyav applies EXIF orientation only when its bundled ffmpeg exports it (av 17.0 does for JPEG but not PNG, WebP
-        # or TIFF) and drops the mirror of orientations 2, 4, 5 and 7, so EXIF-oriented images go through Pillow.
-        if node_helpers.image_exif_orientation(image_path) == 1:
-            components = InputImpl.VideoFromFile(image_path).get_components()
-            if components.images.shape[0] > 0:
-                return (components.images.to(device=device, dtype=dtype), (1.0 - components.alpha[..., -1]).to(device=device, dtype=dtype) if components.alpha is not None else torch.zeros((components.images.shape[0], 64, 64), dtype=dtype, device=device))
+        components = InputImpl.VideoFromFile(image_path).get_components()
+        if components.images.shape[0] > 0:
+            images, alpha = components.images, components.alpha
+            orientation = node_helpers.image_exif_orientation(image_path)
+            if orientation != 1:
+                # pyav keeps the decoded pixels (incl. 16-bit precision) but applies EXIF orientation only partially and
+                # depending on its version (rotation only, and only when its ffmpeg exports it), so undo whatever rotation
+                # it applied and apply the full EXIF orientation from the file header instead.
+                k = pyav_image_rotation_quadrant(image_path)
+                images = node_helpers.apply_exif_orientation(images.rot90(-k, dims=(1, 2)), orientation)
+                if alpha is not None:
+                    alpha = node_helpers.apply_exif_orientation(alpha.rot90(-k, dims=(1, 2)), orientation)
+            return (images.to(device=device, dtype=dtype), (1.0 - alpha[..., -1]).to(device=device, dtype=dtype) if alpha is not None else torch.zeros((images.shape[0], 64, 64), dtype=dtype, device=device))
 
-        # Pillow path: EXIF-oriented images, and animated webp which pyav does not support loading
+        # This code is left here to handle animated webp which pyav does not support loading
         img = node_helpers.pillow(Image.open, image_path)
 
         output_images = []
