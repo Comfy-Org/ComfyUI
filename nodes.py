@@ -1767,11 +1767,14 @@ class LoadImage:
         dtype = comfy.model_management.intermediate_dtype()
         device = comfy.model_management.intermediate_device()
 
-        components = InputImpl.VideoFromFile(image_path).get_components()
-        if components.images.shape[0] > 0:
-            return (components.images.to(device=device, dtype=dtype), (1.0 - components.alpha[..., -1]).to(device=device, dtype=dtype) if components.alpha is not None else torch.zeros((components.images.shape[0], 64, 64), dtype=dtype, device=device))
+        # pyav applies EXIF orientation only when its bundled ffmpeg exports it (av 17.0 does for JPEG but not PNG, WebP
+        # or TIFF) and drops the mirror of orientations 2, 4, 5 and 7, so EXIF-oriented images go through Pillow.
+        if node_helpers.image_exif_orientation(image_path) == 1:
+            components = InputImpl.VideoFromFile(image_path).get_components()
+            if components.images.shape[0] > 0:
+                return (components.images.to(device=device, dtype=dtype), (1.0 - components.alpha[..., -1]).to(device=device, dtype=dtype) if components.alpha is not None else torch.zeros((components.images.shape[0], 64, 64), dtype=dtype, device=device))
 
-        # This code is left here to handle animated webp which pyav does not support loading
+        # Pillow path: EXIF-oriented images, and animated webp which pyav does not support loading
         img = node_helpers.pillow(Image.open, image_path)
 
         output_images = []
