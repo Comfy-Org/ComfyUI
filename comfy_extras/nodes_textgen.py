@@ -114,7 +114,7 @@ class TextGenerateV2(io.ComfyNode):
         presence_penalty = sampling_mode.get("presence_penalty", 0.0)
 
         node_id = cls.hidden.unique_id if cls.hidden else None
-        if node_id is not None and cls.hidden.dynprompt is not None:  # a loop body's copy shows on the node it copies
+        if node_id is not None and cls.hidden.dynprompt is not None:
             node_id = cls.hidden.dynprompt.get_display_node_id(node_id)
         generated_text = _generate_text(
             clip, tokens, node_id,

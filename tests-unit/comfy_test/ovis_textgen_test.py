@@ -146,7 +146,7 @@ def test_generate_text_streams_to_the_node_on_the_canvas(tokenizer, monkeypatch,
     monkeypatch.setattr(PromptServer, "instance", server, raising=False)
     node = {"class_type": "TextGenerate", "inputs": {}}
     dynprompt = DynamicPrompt({"42": node})
-    dynprompt.add_ephemeral_node("7.0.0.0_42", node, "7", "42")  # how a loop copies its body
+    dynprompt.add_ephemeral_node("7.0.0.0_42", node, "7", "42")
     dynprompt.add_ephemeral_node("9.0.0.0_7.0.0.0_42", node, "9", "7.0.0.0_42")
     hidden = {io.Hidden.unique_id: unique_id, io.Hidden.dynprompt: dynprompt}
     nodes_textgen.TextGenerateV2.PREPARE_CLASS_CLONE({"hidden_inputs": hidden}).execute(RecordingClip(tokenizer), PROMPT, 8, {"sampling_mode": "off"})
