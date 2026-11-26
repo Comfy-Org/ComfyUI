@@ -893,7 +893,11 @@ class ModelPatcher:
                     continue
             bk = self.backup.get(k, None)
             hbk = self.hook_backup.get(k, None)
-            weight, set_func, convert_func = get_key_weight(self.model, k)
+            try:
+                weight, set_func, convert_func = get_key_weight(self.model, k)
+            except AttributeError as e:
+                logging.warning("Skipping state dict key %s during patch collection (%s)", k, e)
+                continue
             if not isinstance(weight, torch.Tensor):
                 continue
             if bk is not None:
@@ -1937,7 +1941,8 @@ class ModelPatcherDynamic(ModelPatcher):
             bk = self.backup.pop(key)
             comfy.utils.set_attr_param(self.model, key, bk.weight)
         for key in list(self.backup_buffers.keys()):
-            comfy.utils.set_attr_buffer(self.model, key, self.backup_buffers.pop(key))
+            owner, buf = self.backup_buffers.pop(key)
+            comfy.utils.set_attr_buffer(owner, key.rsplit(".", 1)[-1], buf)
         self.model.model_loaded_weight_memory = 0
         return restored
 
@@ -1986,18 +1991,26 @@ class ModelPatcherDynamic(ModelPatcher):
             dynamic_units = list(dynamic_units)
             last_dynamic_units = list(last_dynamic_units)
             loading_by_module = {entry[-2]: entry for entry in loading}
+
+            def unit_loading(units, loading):
+                for unit in units:
+                    unit_modules = unit if isinstance(unit, (list, tuple)) else (unit,)
+                    # VBAR is a bump allocator, so loading a CombinedLinear's members back to
+                    # back in member order is what makes their weights consecutive.
+                    modules = []
+                    for root in unit_modules:
+                        for module in root.modules():
+                            if module not in loading_by_module or module in modules:
+                                continue
+                            group = getattr(module, "_combined_linear", None)
+                            modules.extend(group.linears if group is not None else (module,))
+                    for index, module in enumerate(modules):
+                        loading.append((*loading_by_module.pop(module), unit if index == len(modules) - 1 else None))
+
             loading = []
-            for unit in dynamic_units:
-                unit_modules = unit if isinstance(unit, (list, tuple)) else (unit,)
-                modules = [module for root in unit_modules for module in root.modules() if module in loading_by_module]
-                for index, module in enumerate(modules):
-                    loading.append((*loading_by_module.pop(module), unit if index == len(modules) - 1 else None))
+            unit_loading(dynamic_units, loading)
             last_loading = []
-            for unit in last_dynamic_units:
-                unit_modules = unit if isinstance(unit, (list, tuple)) else (unit,)
-                modules = [module for root in unit_modules for module in root.modules() if module in loading_by_module]
-                for index, module in enumerate(modules):
-                    last_loading.append((*loading_by_module.pop(module), unit if index == len(modules) - 1 else None))
+            unit_loading(last_dynamic_units, last_loading)
             loading.extend((*entry, None) for entry in loading_by_module.values())
             loading.extend(last_loading)
             v_block = None
@@ -2104,9 +2117,9 @@ class ModelPatcherDynamic(ModelPatcher):
                     v_block = None
 
             for key, buf in self.model.named_buffers(recurse=True):
-                if key not in self.backup_buffers:
-                    self.backup_buffers[key] = buf
                 module, buf_name = comfy.utils.resolve_attr(self.model, key)
+                if key not in self.backup_buffers:
+                    self.backup_buffers[key] = (module, buf)
                 model_dtype = getattr(module, buf_name + "_comfy_model_dtype", None)
                 casted_buf = buf.to(dtype=model_dtype, device=device_to)
                 comfy.utils.set_attr_buffer(self.model, key, casted_buf)

@@ -161,8 +161,9 @@
 
 ## Model Integration
 
-- Reuse native ComfyUI loaders and nodes wherever possible. Extend existing
-  loading paths before introducing model-specific loaders.
+- Reuse native loaders, nodes, model configuration, and state-dict processing
+  interfaces without changing shared loaders or unrelated models; convert
+  incompatible checkpoint layouts locally.
 - Use standard `MODEL`, `CLIP`, and `VAE` interfaces where they fit, preferring
   the regular checkpoint loader for bundled components.
 - Package weights as single `.safetensors` files in the normal model folders;
@@ -367,9 +368,6 @@
 - Mark inputs optional when execution has a valid path that does not read them.
   If one optional input is needed only to process another optional input, do not
   force users on the path that supplies neither to connect it.
-- Conditioning nodes should normally output conditioning only. Do not expose
-  input or intermediate images as convenience outputs for downstream sizing or
-  routing; use the existing image path or a dedicated image operation instead.
 - Nodes should output only values they own. Do not add pass-through outputs for
   workflow convenience unless the node is explicitly an output node. Existing
   models, latents, conditioning, or other inputs should flow directly to the

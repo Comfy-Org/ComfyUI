@@ -7,7 +7,8 @@ import av
 import io
 import numpy as np
 from fractions import Fraction
-from comfy_api.input_impl.video_types import VideoFromFile, VideoFromComponents
+from comfy_api.input_impl.video_types import VideoFromFile, VideoFromComponents, VideoFromList
+from comfy_api.latest._input_impl.video_types import conformed_frame_indices
 from comfy_api.latest._util.video_types import normalize_crop_rect
 from comfy_api.util.video_types import VideoComponents, VideoContainer, VideoCodec
 from comfy_api.input.basic_types import AudioInput
@@ -1315,6 +1316,86 @@ def test_save_to_transcode_trim_survives_missing_leading_pts():
             assert float(video_stream.duration * video_stream.time_base) == pytest.approx(2 / 30, abs=0.01)
     finally:
         os.unlink(file_path)
+
+
+@pytest.mark.parametrize(
+    "first_fps,second_fps,expected_frames",
+    [
+        pytest.param(25, 30, 50, id="higher-rate-clip-is-thinned-to-the-first-clip-rate"),
+        pytest.param(30, 25, 60, id="lower-rate-clip-repeats-frames-to-fill-its-duration"),
+        pytest.param(25, 50, 50, id="clip-at-twice-the-rate-stays-inside-its-duration"),
+    ],
+)
+def test_concatenation_conforms_clips_to_the_first_clip_frame_rate(first_fps, second_fps, expected_frames):
+    first = create_transcode_source(frames=first_fps, fps=first_fps)
+    second = create_transcode_source(frames=second_fps, fps=second_fps)
+    try:
+        video = VideoFromList([VideoFromFile(first), VideoFromFile(second)])
+        assert video.get_frame_count() == expected_frames
+        result = transcode_and_probe(video)
+        assert result["frames"] == expected_frames
+        assert result["video_seconds"] == pytest.approx(2.0, abs=0.05)
+    finally:
+        os.unlink(first)
+        os.unlink(second)
+
+
+@pytest.mark.parametrize(
+    "frame_count,source_rate,target_rate,expected",
+    [
+        pytest.param(5, 25, 30, [0, 1, 2, 2, 3, 4], id="lower-rate-repeats-a-frame"),
+        pytest.param(6, 30, 25, [0, 1, 2, 3, 5], id="higher-rate-drops-a-frame"),
+        pytest.param(4, 50, 25, [0, 2], id="double-rate-keeps-every-other-frame"),
+        pytest.param(3, 24, 24, [0, 1, 2], id="same-rate-keeps-every-frame"),
+        pytest.param(6, 50, 20, [0, 2, 5], id="last-frame-starting-a-partial-slot-is-kept"),
+    ],
+)
+def test_conformed_frame_indices_pick_frames_by_time(frame_count, source_rate, target_rate, expected):
+    assert conformed_frame_indices(frame_count, Fraction(source_rate), Fraction(target_rate)) == expected
+
+
+def test_concatenation_frame_count_matches_the_saved_frames_when_a_clip_ends_in_a_partial_slot():
+    first = create_transcode_source(frames=20, fps=20)
+    second = create_transcode_source(frames=6, fps=50)
+    try:
+        video = VideoFromList([VideoFromFile(first), VideoFromFile(second)])
+        assert video.get_frame_count() == len(video.get_components().images) == transcode_and_probe(video)["frames"] == 23
+    finally:
+        os.unlink(first)
+        os.unlink(second)
+
+
+def test_materializing_conforms_clips_to_the_first_clip():
+    first = VideoComponents(
+        images=torch.zeros((30, 16, 16, 3)),
+        audio={"waveform": torch.zeros(1, 1, 44100), "sample_rate": 44100},
+        frame_rate=Fraction(30),
+    )
+    second = VideoComponents(
+        images=torch.ones((25, 16, 16, 3)),
+        audio={"waveform": torch.zeros(1, 2, 48000), "sample_rate": 48000},
+        frame_rate=Fraction(25),
+    )
+    video = VideoFromList([VideoFromComponents(first), VideoFromComponents(second)])
+
+    components = video.get_components()
+
+    assert components.frame_rate == 30
+    assert len(components.images) == 60
+    assert components.audio["sample_rate"] == 44100
+    assert components.audio["waveform"].shape[1] == 1
+    assert components.audio["waveform"].shape[2] == pytest.approx(88200, abs=2048)
+
+
+def test_concatenation_keeps_audio_when_the_final_frame_is_dropped():
+    first = create_transcode_source(frames=25, fps=25)
+    second = create_transcode_source(frames=29, fps=30)
+    try:
+        result = transcode_and_probe(VideoFromList([VideoFromFile(first), VideoFromFile(second)]))
+        assert result["audio_seconds"] == pytest.approx(result["video_seconds"], abs=0.002)
+    finally:
+        os.unlink(first)
+        os.unlink(second)
 
 
 def test_save_to_transcode_bakes_rotation():

@@ -224,7 +224,7 @@ class BriaRemoveImageBackground(IO.ComfyNode):
             node_id="BriaRemoveImageBackground",
             display_name="Bria Remove Image Background",
             category="partner/image/Bria",
-            description="Remove the background from an image using Bria RMBG 2.0.",
+            description="Remove the background from an image using Bria RMBG 2.0 or RMBG 3.0.",
             inputs=[
                 IO.Image.Input("image"),
                 IO.DynamicCombo.Input(
@@ -249,8 +249,9 @@ class BriaRemoveImageBackground(IO.ComfyNode):
                     display_mode=IO.NumberDisplay.number,
                     control_after_generate=True,
                     tooltip="Seed controls whether the node should re-run; "
-                    "results are non-deterministic regardless of seed.",
+                    "the same image always gives the same result regardless of seed.",
                 ),
+                IO.Combo.Input("model", options=["RMBG2", "RMBG3"], default="RMBG2", optional=True),
             ],
             outputs=[IO.Image.Output()],
             hidden=[
@@ -260,7 +261,7 @@ class BriaRemoveImageBackground(IO.ComfyNode):
             ],
             is_api_node=True,
             price_badge=IO.PriceBadge(
-                expr="""{"type":"usd","usd":0.018}""",
+                expr="""{"type":"usd","usd":0.02574}""",
             ),
         )
 
@@ -270,16 +271,20 @@ class BriaRemoveImageBackground(IO.ComfyNode):
         image: Input.Image,
         moderation: dict,
         seed: int,
+        model: str = "RMBG2",
     ) -> IO.NodeOutput:
         response = await sync_op(
             cls,
             ApiEndpoint(path="/proxy/bria/v2/image/edit/remove_background", method="POST"),
             data=BriaRemoveBackgroundRequest(
-                image=await upload_image_to_comfyapi(cls, image, wait_label="Uploading image"),
+                image=await upload_image_to_comfyapi(
+                    cls, image, total_pixels=178_000_000, wait_label="Uploading image"
+                ),
                 sync=False,
                 visual_input_content_moderation=moderation.get("visual_input_moderation", False),
                 visual_output_content_moderation=moderation.get("visual_output_moderation", False),
                 seed=seed,
+                model=model,
             ),
             response_model=BriaStatusResponse,
         )

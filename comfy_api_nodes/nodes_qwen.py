@@ -14,17 +14,16 @@ from comfy_api_nodes.apis.qwen import (
     QwenImageParametersField,
 )
 from comfy_api_nodes.util import (
-    ApiEndpoint,
     download_url_to_image_tensor,
-    sync_op,
+    router_op,
     tensor_to_base64_string,
     validate_string,
 )
 
-GENERATION_PATH = "/proxy/qwen/api/v1/services/aigc/multimodal-generation/generation"
 QWEN_IMAGE_MODELS = ["qwen-image-3.0-pro", "qwen-image-3.0"]
 MIN_AREA = 262144  # 512*512
 MAX_AREA = 6553600  # 2560*2560
+EDIT_MAX_AREA = 5992704
 MAX_ASPECT = 8  # the API allows aspect ratios from 1:8 to 8:1
 MAX_INPUT_BYTES = 10 * 1024 * 1024  # the API rejects decoded input images over 10MB
 
@@ -58,10 +57,11 @@ def _resolve_image_refs(prompt: str, total_images: int) -> str:
     return "".join(parts)
 
 
-def _validate_size(width: int, height: int) -> None:
-    if not MIN_AREA <= width * height <= MAX_AREA:
+def _validate_size(width: int, height: int, max_area: int) -> None:
+    if not MIN_AREA <= width * height <= max_area:
+        side = math.isqrt(max_area)
         raise ValueError(
-            f"Image area must be between {MIN_AREA} (512x512) and {MAX_AREA} (2560x2560) pixels; "
+            f"Image area must be between {MIN_AREA} (512x512) and {max_area} ({side}x{side}) pixels; "
             f"got {width}x{height} = {width * height}."
         )
     if width > MAX_ASPECT * height or height > MAX_ASPECT * width:
@@ -79,9 +79,9 @@ def _fit_to_size(width: int, height: int) -> tuple[int, int]:
     if area < MIN_AREA:
         scale = math.sqrt(MIN_AREA / area)
         width, height = math.ceil(width * scale), math.ceil(height * scale)
-    elif area > MAX_AREA:
-        scale = math.sqrt(MAX_AREA / area)
-        width, height = math.floor(width * scale), math.floor(height * scale)
+    elif math.ceil(width / 16) * math.ceil(height / 16) * 256 > EDIT_MAX_AREA:
+        scale = math.sqrt(EDIT_MAX_AREA / area)
+        width, height = math.floor(width * scale / 16) * 16, math.floor(height * scale / 16) * 16
     # rounding can push the ratio a hair past the limit; trimming only ever shrinks the area
     return min(width, MAX_ASPECT * height), min(height, MAX_ASPECT * width)
 
@@ -113,7 +113,8 @@ async def _download_result_images(response: QwenImageGenerationResponse) -> torc
     return torch.cat([await download_url_to_image_tensor(url) for url in urls])
 
 
-def _size_inputs() -> list[IO.Int.Input]:
+def _size_inputs(max_area: int) -> list[IO.Int.Input]:
+    side = math.isqrt(max_area)
     return [
         IO.Int.Input(
             "width",
@@ -121,7 +122,7 @@ def _size_inputs() -> list[IO.Int.Input]:
             min=256,
             max=2560,
             step=16,
-            tooltip="The total pixel area must be between 512x512 and 2560x2560; "
+            tooltip=f"The total pixel area must be between 512x512 and {side}x{side}; "
             "any aspect ratio within that area works.",
         ),
         IO.Int.Input(
@@ -130,7 +131,7 @@ def _size_inputs() -> list[IO.Int.Input]:
             min=256,
             max=2560,
             step=16,
-            tooltip="The total pixel area must be between 512x512 and 2560x2560; "
+            tooltip=f"The total pixel area must be between 512x512 and {side}x{side}; "
             "any aspect ratio within that area works.",
         ),
     ]
@@ -152,7 +153,7 @@ def _t2i_model_option(model_id: str) -> IO.DynamicCombo.Option:
                 default="",
                 tooltip="Negative prompt describing what to avoid.",
             ),
-            *_size_inputs(),
+            *_size_inputs(MAX_AREA),
         ],
     )
 
@@ -266,10 +267,10 @@ class QwenImageTextToImageApi(IO.ComfyNode):
     ):
         validate_string(model["prompt"], strip_whitespace=False, min_length=1)
         width, height = model["width"], model["height"]
-        _validate_size(width, height)
-        response = await sync_op(
+        _validate_size(width, height, MAX_AREA)
+        response = await router_op(
             cls,
-            ApiEndpoint(path=GENERATION_PATH, method="POST"),
+            f"qwen/{model['model']}",
             response_model=QwenImageGenerationResponse,
             data=QwenImageGenerationRequest(
                 model=model["model"],
@@ -309,7 +310,7 @@ class QwenImageEditApi(IO.ComfyNode):
                     options=[
                         IO.DynamicCombo.Option("match input", []),
                         IO.DynamicCombo.Option("auto", []),
-                        IO.DynamicCombo.Option("custom", _size_inputs()),
+                        IO.DynamicCombo.Option("custom", _size_inputs(EDIT_MAX_AREA)),
                     ],
                     tooltip="Output resolution. 'match input' reuses the first reference image's size, "
                     "'auto' lets the model pick a size with the same aspect ratio, "
@@ -399,7 +400,7 @@ class QwenImageEditApi(IO.ComfyNode):
             )
         prompt = _resolve_image_refs(model["prompt"], len(reference_images))
         if size["size"] == "custom":
-            _validate_size(size["width"], size["height"])
+            _validate_size(size["width"], size["height"], EDIT_MAX_AREA)
             size_str = f"{size['width']}*{size['height']}"
         elif size["size"] == "match input":
             height, width = reference_images[0].shape[0], reference_images[0].shape[1]
@@ -409,9 +410,9 @@ class QwenImageEditApi(IO.ComfyNode):
             size_str = None
         content = [QwenImageContentItem(image=_image_data_uri(image)) for image in reference_images]
         content.append(QwenImageContentItem(text=prompt))
-        response = await sync_op(
+        response = await router_op(
             cls,
-            ApiEndpoint(path=GENERATION_PATH, method="POST"),
+            f"qwen/{model['model']}",
             response_model=QwenImageGenerationResponse,
             data=QwenImageGenerationRequest(
                 model=model["model"],

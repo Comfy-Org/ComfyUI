@@ -8,10 +8,12 @@ import torch
 
 import comfy_aimdo.malloc_graph
 import comfy_aimdo.model_vbar
+import comfy_aimdo.torch
 from comfy.cli_args import args
 import comfy.memory_management
 import comfy.model_management
 import comfy.ops
+from comfy.quant_ops import QuantizedTensor
 
 PREFETCH_QUEUES = []
 GRAPH_WARMED_MODULES = weakref.WeakSet()
@@ -61,6 +63,9 @@ class _MallocGraphScope:
 
 def malloc_graph_scope(device):
     return _MallocGraphScope(device)
+
+def malloc_graph_recording():
+    return threading.get_ident() in MALLOC_GRAPHS
 
 def malloc_graph_begin(device):
     global MALLOC_GRAPH_USED
@@ -120,23 +125,60 @@ def pin_modules(comfy_modules, device, dtype=None):
     if fully_faulted and dtype is not None:
         for comfy_module in comfy_modules:
             comfy.ops.resolve_cast_module_with_vbar(comfy_module, dtype, device, dtype, None, False, return_weights=False)
+    # A miss whose modules all have VBAR slots and no runtime weight functions is resolved
+    # here rather than in the forward, so the block is combined and relaid out on its first
+    # residency and the eager warm pass runs the kernels the graph captures on the next hit.
+    elif dtype is not None and all(s._prefetch["signature"] is not None and not getattr(s, param_key + "_function", []) for s in comfy_modules for param_key in ("weight", "bias")):
+        for comfy_module in comfy_modules:
+            comfy.ops.resolve_cast_module_with_vbar(comfy_module, dtype, device, dtype, None, False, return_weights=False)
+    else:
+        return offload_stream, fully_faulted
+    relayout = []
+    for s in comfy_modules:
+        if s._v_relayout:
+            continue
+        s._v_relayout = True
+        group = s._combined_linear
+        if group is not None and s is group.linears[0]:
+            group.prepare(device)
+            relayout.append(group)
+        relayout.append(s)
+    for s in relayout:
+        # FIXME: Make this non_gemv_specific.
+        if isinstance(s, (comfy.ops.MixedPrecisionOp, comfy.ops.CombinedLinear)) and s.comfy_gemv_optimized and isinstance(s._v_weight, QuantizedTensor) and not s._full_precision_mm:
+            s._v_weight = s._v_weight.optimize_for_gemv(comfy_aimdo.torch.aimdo_to_tensor(s._v, device))
     return offload_stream, fully_faulted
 
 def cleanup_prefetched_modules(module, comfy_modules):
+    # Always drop the _prefetch marker, even if unpinning fails: a stale marker makes cast_bias_weight
+    # skip the fresh cast and read the old transfer state. Clean up every module, then raise the first error.
+    first_error = None
     for s in comfy_modules:
         prefetch = getattr(s, "_prefetch", None)
         if prefetch is None:
             continue
-        for param_key in ("weight", "bias"):
-            lowvram_fn = getattr(s, param_key + "_lowvram_function", None)
-            if lowvram_fn is not None:
-                lowvram_fn.clear_prepared()
-        if prefetch["signature"] is not None:
-            comfy_aimdo.model_vbar.vbar_unpin(s._v)
-        delattr(s, "_prefetch")
+        try:
+            for param_key in ("weight", "bias"):
+                lowvram_fn = getattr(s, param_key + "_lowvram_function", None)
+                if lowvram_fn is not None:
+                    lowvram_fn.clear_prepared()
+            if prefetch["signature"] is not None:
+                comfy_aimdo.model_vbar.vbar_unpin(s._v)
+        except Exception as e:
+            if first_error is None:
+                first_error = e
+        finally:
+            delattr(s, "_prefetch")
     if getattr(module, "_v_block_faulted", False):
-        comfy_aimdo.model_vbar.vbar_unpin(module._v_block)
-        del module._v_block_faulted
+        try:
+            comfy_aimdo.model_vbar.vbar_unpin(module._v_block)
+        except Exception as e:
+            if first_error is None:
+                first_error = e
+        finally:
+            del module._v_block_faulted
+    if first_error is not None:
+        raise first_error
 
 def _drop_graph(module):
     graph = getattr(module, "_comfy_graph", None)
@@ -156,19 +198,35 @@ def cleanup_prefetch_queues():
     global MALLOC_GRAPH_ROGUES
     global MALLOC_GRAPH_USED
 
-    cleanup_malloc_graph()
-    for queue in PREFETCH_QUEUES:
-        # Only the head has been prefetched; later entries are raw module groups.
-        if queue[0] is not None:
-            _, (prefetched_module, comfy_modules) = queue[0]
-            cleanup_prefetched_modules(prefetched_module, comfy_modules)
+    queues = PREFETCH_QUEUES
+    # Reset before walking so a failing entry can't leave stale queues behind for every later node.
     PREFETCH_QUEUES = []
+    first_error = None
+    try:
+        cleanup_malloc_graph()
+    except Exception as e:
+        first_error = e
+    for queue in queues:
+        # Only the head can have been pinned, as (offload_stream, (module, comfy_modules)). Later
+        # entries, and a head that was not reached yet, still hold the raw module or module group.
+        head = queue[0] if queue else None
+        if not isinstance(head, tuple) or len(head) != 2 or not isinstance(head[1], tuple):
+            continue
+        prefetched_module, comfy_modules = head[1]
+        try:
+            cleanup_prefetched_modules(prefetched_module, comfy_modules)
+        except Exception as e:
+            # Keep unpinning the other queues; report the first failure once they are done.
+            if first_error is None:
+                first_error = e
     GRAPH_WARMED_MODULES.clear()
     if MALLOC_GRAPH_USED:
         logging.info("Comfy model compiler graph breaks: %d, rogues: %d", MALLOC_GRAPH_BREAKS, MALLOC_GRAPH_ROGUES)
     MALLOC_GRAPH_BREAKS = 0
     MALLOC_GRAPH_ROGUES = 0
     MALLOC_GRAPH_USED = False
+    if first_error is not None:
+        raise first_error
 
 def prefetch_queue_pop(queue, device, module, dtype=None, core=None, enable_graph=False, generator=None, malloc_scope=None):
     malloc_graph = MALLOC_GRAPHS.get(threading.get_ident())

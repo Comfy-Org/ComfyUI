@@ -26,6 +26,7 @@ class OpenAIImageGenerationResponse(BaseModel):
 
 class OpenAIImageEditRequest(BaseModel):
     background: str | None = Field(None, description="Background transparency")
+    complexity: str | None = Field(None)
     model: str = Field(...)
     moderation: str | None = Field(None)
     n: int | None = Field(None, description="The number of images to generate")
@@ -36,8 +37,15 @@ class OpenAIImageEditRequest(BaseModel):
     size: str | None = Field(None, description="Size of the output image")
 
 
+class OpenAIImageSVGOptions(BaseModel):
+    model: str = Field(...)
+
+
 class OpenAIImageGenerationRequest(BaseModel):
     background: str | None = Field(None, description="Background transparency")
+    complexity: str | None = Field(None)
+    frame_count: int | None = Field(None)
+    frame_duration_ms: int | None = Field(None)
     model: str | None = Field(None)
     moderation: str | None = Field(None)
     n: int | None = Field(
@@ -49,6 +57,7 @@ class OpenAIImageGenerationRequest(BaseModel):
     prompt: str = Field(...)
     quality: str | None = Field(None, description="The quality of the generated image")
     size: str | None = Field(None, description="Size of the image (e.g., 1024x1024, 1536x1024, auto)")
+    svg: OpenAIImageSVGOptions | None = Field(None)
 
 
 class Reasoning(BaseModel):
@@ -81,6 +90,10 @@ class ResponseProperties(BaseModel):
 class ResponseError(BaseModel):
     code: str = Field(...)
     message: str = Field(...)
+
+
+class IncompleteDetails(BaseModel):
+    reason: str | None = Field(None, description="Why the response is incomplete: `max_output_tokens` or `content_filter`.")
 
 
 class OutputTokensDetails(BaseModel):
@@ -118,6 +131,7 @@ class OutputMessage(BaseModel):
     type: str = Field(..., description="The type of output item")
     content: list[OutputContent] | None = Field(None, description="The content of the message")
     role: str | None = Field(None, description="The role of the message")
+    phase: str | None = Field(None, description="`commentary` for progress updates, `final_answer` for the answer")
 
 
 class OpenAIResponse(ModelResponseProperties, ResponseProperties):
@@ -127,6 +141,7 @@ class OpenAIResponse(ModelResponseProperties, ResponseProperties):
     )
     error: ResponseError | None = Field(None)
     id: str | None = Field(None, description="Unique identifier for this Response.")
+    incomplete_details: IncompleteDetails | None = Field(None)
     object: str | None = Field(None, description="The object type of this resource - always set to `response`.")
     output: list[OutputMessage] | None = Field(None)
     parallel_tool_calls: bool | None = Field(True)

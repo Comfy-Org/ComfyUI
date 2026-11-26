@@ -14,7 +14,6 @@ from comfy_api_nodes.apis.wan import (
     Reference2VideoInputField,
     Reference2VideoParametersField,
     Reference2VideoTaskCreationRequest,
-    TaskCreationResponse,
     Text2ImageInputField,
     Text2ImageTaskCreationRequest,
     Text2VideoInputField,
@@ -40,13 +39,11 @@ from comfy_api_nodes.apis.wan import (
     Wan3TaskCreationRequest,
 )
 from comfy_api_nodes.util import (
-    ApiEndpoint,
     audio_to_base64_string,
     download_url_to_image_tensor,
     download_url_to_video_output,
     get_number_of_images,
-    poll_op,
-    sync_op,
+    router_op,
     tensor_to_base64_string,
     upload_audio_to_comfyapi,
     upload_image_to_comfyapi,
@@ -57,13 +54,10 @@ from comfy_api_nodes.util import (
     validate_string,
     validate_video_duration,
 )
-from comfy_api_nodes.util.client import FAILED_STATUSES, QUEUED_STATUSES
 
 
 RES_IN_PARENS = re.compile(r"\((\d+)\s*[x×]\s*(\d+)\)")
 
-WAN3_QUEUED_STATUSES = [*QUEUED_STATUSES, "pending"]
-WAN3_FAILED_STATUSES = [*FAILED_STATUSES, "unknown"]
 
 _WAN3_REF_TAG_RE = re.compile(r"@(image|video|audio)(?P<idx>\d*)(?!\w)", re.IGNORECASE | re.ASCII)
 
@@ -188,10 +182,10 @@ class WanTextToImageApi(IO.ComfyNode):
         prompt_extend: bool = True,
         watermark: bool = False,
     ):
-        initial_response = await sync_op(
+        response = await router_op(
             cls,
-            ApiEndpoint(path="/proxy/wan/api/v1/services/aigc/text2image/image-synthesis", method="POST"),
-            response_model=TaskCreationResponse,
+            f"wan/{model}",
+            response_model=ImageTaskStatusResponse,
             data=Text2ImageTaskCreationRequest(
                 model=model,
                 input=Text2ImageInputField(prompt=prompt, negative_prompt=negative_prompt),
@@ -202,16 +196,6 @@ class WanTextToImageApi(IO.ComfyNode):
                     watermark=watermark,
                 ),
             ),
-        )
-        if not initial_response.output:
-            raise Exception(f"An unknown error occurred: {initial_response.code} - {initial_response.message}")
-        response = await poll_op(
-            cls,
-            ApiEndpoint(path=f"/proxy/wan/api/v1/tasks/{initial_response.output.task_id}"),
-            response_model=ImageTaskStatusResponse,
-            status_extractor=lambda x: x.output.task_status,
-            estimated_duration=9,
-            poll_interval=3,
         )
         return IO.NodeOutput(await download_url_to_image_tensor(str(response.output.results[0].url)))
 
@@ -317,10 +301,10 @@ class WanImageToImageApi(IO.ComfyNode):
         images = []
         for i in image:
             images.append("data:image/png;base64," + tensor_to_base64_string(i, total_pixels=4096 * 4096))
-        initial_response = await sync_op(
+        response = await router_op(
             cls,
-            ApiEndpoint(path="/proxy/wan/api/v1/services/aigc/image2image/image-synthesis", method="POST"),
-            response_model=TaskCreationResponse,
+            f"wan/{model}",
+            response_model=ImageTaskStatusResponse,
             data=Image2ImageTaskCreationRequest(
                 model=model,
                 input=Image2ImageInputField(prompt=prompt, negative_prompt=negative_prompt, images=images),
@@ -330,16 +314,6 @@ class WanImageToImageApi(IO.ComfyNode):
                     watermark=watermark,
                 ),
             ),
-        )
-        if not initial_response.output:
-            raise Exception(f"An unknown error occurred: {initial_response.code} - {initial_response.message}")
-        response = await poll_op(
-            cls,
-            ApiEndpoint(path=f"/proxy/wan/api/v1/tasks/{initial_response.output.task_id}"),
-            response_model=ImageTaskStatusResponse,
-            status_extractor=lambda x: x.output.task_status,
-            estimated_duration=42,
-            poll_interval=4,
         )
         return IO.NodeOutput(await download_url_to_image_tensor(str(response.output.results[0].url)))
 
@@ -496,10 +470,10 @@ class WanTextToVideoApi(IO.ComfyNode):
             validate_audio_duration(audio, 3.0, 29.0)
             audio_url = "data:audio/mp3;base64," + audio_to_base64_string(audio, "mp3", "libmp3lame")
 
-        initial_response = await sync_op(
+        response = await router_op(
             cls,
-            ApiEndpoint(path="/proxy/wan/api/v1/services/aigc/video-generation/video-synthesis", method="POST"),
-            response_model=TaskCreationResponse,
+            f"wan/{model}",
+            response_model=VideoTaskStatusResponse,
             data=Text2VideoTaskCreationRequest(
                 model=model,
                 input=Text2VideoInputField(prompt=prompt, negative_prompt=negative_prompt, audio_url=audio_url),
@@ -513,16 +487,6 @@ class WanTextToVideoApi(IO.ComfyNode):
                     shot_type=shot_type,
                 ),
             ),
-        )
-        if not initial_response.output:
-            raise Exception(f"An unknown error occurred: {initial_response.code} - {initial_response.message}")
-        response = await poll_op(
-            cls,
-            ApiEndpoint(path=f"/proxy/wan/api/v1/tasks/{initial_response.output.task_id}"),
-            response_model=VideoTaskStatusResponse,
-            status_extractor=lambda x: x.output.task_status,
-            estimated_duration=120 * int(duration / 5),
-            poll_interval=6,
         )
         return IO.NodeOutput(await download_url_to_video_output(response.output.video_url))
 
@@ -673,10 +637,10 @@ class WanImageToVideoApi(IO.ComfyNode):
         if audio is not None:
             validate_audio_duration(audio, 3.0, 29.0)
             audio_url = "data:audio/mp3;base64," + audio_to_base64_string(audio, "mp3", "libmp3lame")
-        initial_response = await sync_op(
+        response = await router_op(
             cls,
-            ApiEndpoint(path="/proxy/wan/api/v1/services/aigc/video-generation/video-synthesis", method="POST"),
-            response_model=TaskCreationResponse,
+            f"wan/{model}",
+            response_model=VideoTaskStatusResponse,
             data=Image2VideoTaskCreationRequest(
                 model=model,
                 input=Image2VideoInputField(
@@ -692,16 +656,6 @@ class WanImageToVideoApi(IO.ComfyNode):
                     shot_type=shot_type,
                 ),
             ),
-        )
-        if not initial_response.output:
-            raise Exception(f"An unknown error occurred: {initial_response.code} - {initial_response.message}")
-        response = await poll_op(
-            cls,
-            ApiEndpoint(path=f"/proxy/wan/api/v1/tasks/{initial_response.output.task_id}"),
-            response_model=VideoTaskStatusResponse,
-            status_extractor=lambda x: x.output.task_status,
-            estimated_duration=120 * int(duration / 5),
-            poll_interval=6,
         )
         return IO.NodeOutput(await download_url_to_video_output(response.output.video_url))
 
@@ -830,10 +784,10 @@ class WanReferenceVideoApi(IO.ComfyNode):
         for i in reference_videos:
             reference_video_urls.append(await upload_video_to_comfyapi(cls, reference_videos[i]))
         width, height = RES_IN_PARENS.search(size).groups()
-        initial_response = await sync_op(
+        response = await router_op(
             cls,
-            ApiEndpoint(path="/proxy/wan/api/v1/services/aigc/video-generation/video-synthesis", method="POST"),
-            response_model=TaskCreationResponse,
+            f"wan/{model}",
+            response_model=VideoTaskStatusResponse,
             data=Reference2VideoTaskCreationRequest(
                 model=model,
                 input=Reference2VideoInputField(
@@ -847,15 +801,6 @@ class WanReferenceVideoApi(IO.ComfyNode):
                     seed=seed,
                 ),
             ),
-        )
-        if not initial_response.output:
-            raise Exception(f"An unknown error occurred: {initial_response.code} - {initial_response.message}")
-        response = await poll_op(
-            cls,
-            ApiEndpoint(path=f"/proxy/wan/api/v1/tasks/{initial_response.output.task_id}"),
-            response_model=VideoTaskStatusResponse,
-            status_extractor=lambda x: x.output.task_status,
-            poll_interval=6,
         )
         return IO.NodeOutput(await download_url_to_video_output(response.output.video_url))
 
@@ -977,13 +922,10 @@ class Wan2TextToVideoApi(IO.ComfyNode):
             audio_url = await upload_audio_to_comfyapi(
                 cls, audio, container_format="mp3", codec_name="libmp3lame", mime_type="audio/mpeg"
             )
-        initial_response = await sync_op(
+        response = await router_op(
             cls,
-            ApiEndpoint(
-                path="/proxy/wan/api/v1/services/aigc/video-generation/video-synthesis",
-                method="POST",
-            ),
-            response_model=TaskCreationResponse,
+            f"wan/{model['model']}",
+            response_model=VideoTaskStatusResponse,
             data=Wan27Text2VideoTaskCreationRequest(
                 model=model["model"],
                 input=Text2VideoInputField(
@@ -1000,15 +942,6 @@ class Wan2TextToVideoApi(IO.ComfyNode):
                     watermark=watermark,
                 ),
             ),
-        )
-        if not initial_response.output:
-            raise Exception(f"An unknown error occurred: {initial_response.code} - {initial_response.message}")
-        response = await poll_op(
-            cls,
-            ApiEndpoint(path=f"/proxy/wan/api/v1/tasks/{initial_response.output.task_id}"),
-            response_model=VideoTaskStatusResponse,
-            status_extractor=lambda x: x.output.task_status,
-            poll_interval=7,
         )
         return IO.NodeOutput(await download_url_to_video_output(response.output.video_url))
 
@@ -1149,13 +1082,10 @@ class Wan2ImageToVideoApi(IO.ComfyNode):
                 cls, audio, container_format="mp3", codec_name="libmp3lame", mime_type="audio/mpeg"
             )
             media.append(Wan27MediaItem(type="driving_audio", url=audio_url))
-        initial_response = await sync_op(
+        response = await router_op(
             cls,
-            ApiEndpoint(
-                path="/proxy/wan/api/v1/services/aigc/video-generation/video-synthesis",
-                method="POST",
-            ),
-            response_model=TaskCreationResponse,
+            f"wan/{model['model']}",
+            response_model=VideoTaskStatusResponse,
             data=Wan27ImageToVideoTaskCreationRequest(
                 model=model["model"],
                 input=Wan27ImageToVideoInputField(
@@ -1171,15 +1101,6 @@ class Wan2ImageToVideoApi(IO.ComfyNode):
                     watermark=watermark,
                 ),
             ),
-        )
-        if not initial_response.output:
-            raise Exception(f"An unknown error occurred: {initial_response.code} - {initial_response.message}")
-        response = await poll_op(
-            cls,
-            ApiEndpoint(path=f"/proxy/wan/api/v1/tasks/{initial_response.output.task_id}"),
-            response_model=VideoTaskStatusResponse,
-            status_extractor=lambda x: x.output.task_status,
-            poll_interval=7,
         )
         return IO.NodeOutput(await download_url_to_video_output(response.output.video_url))
 
@@ -1316,13 +1237,10 @@ class Wan2VideoContinuationApi(IO.ComfyNode):
                     url=await upload_image_to_comfyapi(cls, image=last_frame),
                 )
             )
-        initial_response = await sync_op(
+        response = await router_op(
             cls,
-            ApiEndpoint(
-                path="/proxy/wan/api/v1/services/aigc/video-generation/video-synthesis",
-                method="POST",
-            ),
-            response_model=TaskCreationResponse,
+            f"wan/{model['model']}",
+            response_model=VideoTaskStatusResponse,
             data=Wan27ImageToVideoTaskCreationRequest(
                 model=model["model"],
                 input=Wan27ImageToVideoInputField(
@@ -1338,15 +1256,6 @@ class Wan2VideoContinuationApi(IO.ComfyNode):
                     watermark=watermark,
                 ),
             ),
-        )
-        if not initial_response.output:
-            raise Exception(f"An unknown error occurred: {initial_response.code} - {initial_response.message}")
-        response = await poll_op(
-            cls,
-            ApiEndpoint(path=f"/proxy/wan/api/v1/tasks/{initial_response.output.task_id}"),
-            response_model=VideoTaskStatusResponse,
-            status_extractor=lambda x: x.output.task_status,
-            poll_interval=7,
         )
         return IO.NodeOutput(await download_url_to_video_output(response.output.video_url))
 
@@ -1477,13 +1386,10 @@ class Wan2VideoEditApi(IO.ComfyNode):
                     type="reference_image", url=await upload_image_to_comfyapi(cls, image=reference_images[key])
                 )
             )
-        initial_response = await sync_op(
+        response = await router_op(
             cls,
-            ApiEndpoint(
-                path="/proxy/wan/api/v1/services/aigc/video-generation/video-synthesis",
-                method="POST",
-            ),
-            response_model=TaskCreationResponse,
+            f"wan/{model['model']}",
+            response_model=VideoTaskStatusResponse,
             data=Wan27VideoEditTaskCreationRequest(
                 model=model["model"],
                 input=Wan27VideoEditInputField(prompt=model["prompt"], media=media),
@@ -1496,15 +1402,6 @@ class Wan2VideoEditApi(IO.ComfyNode):
                     seed=seed,
                 ),
             ),
-        )
-        if not initial_response.output:
-            raise Exception(f"An unknown error occurred: {initial_response.code} - {initial_response.message}")
-        response = await poll_op(
-            cls,
-            ApiEndpoint(path=f"/proxy/wan/api/v1/tasks/{initial_response.output.task_id}"),
-            response_model=VideoTaskStatusResponse,
-            status_extractor=lambda x: x.output.task_status,
-            poll_interval=7,
         )
         return IO.NodeOutput(await download_url_to_video_output(response.output.video_url))
 
@@ -1648,13 +1545,10 @@ class Wan2ReferenceVideoApi(IO.ComfyNode):
                 f"Too many references ({len(media)}). The maximum total of reference videos and images is 5."
             )
 
-        initial_response = await sync_op(
+        response = await router_op(
             cls,
-            ApiEndpoint(
-                path="/proxy/wan/api/v1/services/aigc/video-generation/video-synthesis",
-                method="POST",
-            ),
-            response_model=TaskCreationResponse,
+            f"wan/{model['model']}",
+            response_model=VideoTaskStatusResponse,
             data=Wan27ReferenceVideoTaskCreationRequest(
                 model=model["model"],
                 input=Wan27ReferenceVideoInputField(
@@ -1670,15 +1564,6 @@ class Wan2ReferenceVideoApi(IO.ComfyNode):
                     seed=seed,
                 ),
             ),
-        )
-        if not initial_response.output:
-            raise Exception(f"An unknown error occurred: {initial_response.code} - {initial_response.message}")
-        response = await poll_op(
-            cls,
-            ApiEndpoint(path=f"/proxy/wan/api/v1/tasks/{initial_response.output.task_id}"),
-            response_model=VideoTaskStatusResponse,
-            status_extractor=lambda x: x.output.task_status,
-            poll_interval=7,
         )
         return IO.NodeOutput(await download_url_to_video_output(response.output.video_url))
 
@@ -1947,10 +1832,10 @@ class Wan3ReferenceToVideoApi(IO.ComfyNode):
                     ),
                 )
             )
-        initial_response = await sync_op(
+        response = await router_op(
             cls,
-            ApiEndpoint(path="/proxy/wan/api/v1/services/aigc/video-generation/video-synthesis", method="POST"),
-            response_model=TaskCreationResponse,
+            f"wan/{model['model']}",
+            response_model=VideoTaskStatusResponse,
             data=Wan3TaskCreationRequest(
                 model=model["model"],
                 input=Wan3InputField(prompt=prompt or None, media=media or None),
@@ -1964,17 +1849,6 @@ class Wan3ReferenceToVideoApi(IO.ComfyNode):
                     watermark=watermark,
                 ),
             ),
-        )
-        if not initial_response.output:
-            raise Exception(f"An unknown error occurred: {initial_response.code} - {initial_response.message}")
-        response = await poll_op(
-            cls,
-            ApiEndpoint(path=f"/proxy/wan/api/v1/tasks/{initial_response.output.task_id}"),
-            response_model=VideoTaskStatusResponse,
-            status_extractor=lambda x: x.output.task_status,
-            queued_statuses=WAN3_QUEUED_STATUSES,
-            failed_statuses=WAN3_FAILED_STATUSES,
-            poll_interval=10,
         )
         return IO.NodeOutput(await download_url_to_video_output(response.output.video_url))
 
@@ -2141,10 +2015,10 @@ class Wan3ImageToVideoApi(IO.ComfyNode):
         media = [Wan3MediaItem(type="first_frame", url=await upload_image_to_comfyapi(cls, first_frame))]
         if last_frame is not None:
             media.append(Wan3MediaItem(type="last_frame", url=await upload_image_to_comfyapi(cls, last_frame)))
-        initial_response = await sync_op(
+        response = await router_op(
             cls,
-            ApiEndpoint(path="/proxy/wan/api/v1/services/aigc/video-generation/video-synthesis", method="POST"),
-            response_model=TaskCreationResponse,
+            f"wan/{model['model']}",
+            response_model=VideoTaskStatusResponse,
             data=Wan3TaskCreationRequest(
                 model=model["model"],
                 input=Wan3InputField(prompt=model["prompt"] or None, media=media),
@@ -2158,17 +2032,6 @@ class Wan3ImageToVideoApi(IO.ComfyNode):
                     watermark=watermark,
                 ),
             ),
-        )
-        if not initial_response.output:
-            raise Exception(f"An unknown error occurred: {initial_response.code} - {initial_response.message}")
-        response = await poll_op(
-            cls,
-            ApiEndpoint(path=f"/proxy/wan/api/v1/tasks/{initial_response.output.task_id}"),
-            response_model=VideoTaskStatusResponse,
-            status_extractor=lambda x: x.output.task_status,
-            queued_statuses=WAN3_QUEUED_STATUSES,
-            failed_statuses=WAN3_FAILED_STATUSES,
-            poll_interval=10,
         )
         return IO.NodeOutput(await download_url_to_video_output(response.output.video_url))
 
@@ -2303,13 +2166,10 @@ class HappyHorseTextToVideoApi(IO.ComfyNode):
         watermark: bool,
     ):
         validate_string(model["prompt"], strip_whitespace=False, min_length=1)
-        initial_response = await sync_op(
+        response = await router_op(
             cls,
-            ApiEndpoint(
-                path="/proxy/wan/api/v1/services/aigc/video-generation/video-synthesis",
-                method="POST",
-            ),
-            response_model=TaskCreationResponse,
+            f"wan/{model['model']}",
+            response_model=VideoTaskStatusResponse,
             data=Wan27Text2VideoTaskCreationRequest(
                 model=model["model"],
                 input=Text2VideoInputField(
@@ -2324,15 +2184,6 @@ class HappyHorseTextToVideoApi(IO.ComfyNode):
                     watermark=watermark,
                 ),
             ),
-        )
-        if not initial_response.output:
-            raise Exception(f"An unknown error occurred: {initial_response.code} - {initial_response.message}")
-        response = await poll_op(
-            cls,
-            ApiEndpoint(path=f"/proxy/wan/api/v1/tasks/{initial_response.output.task_id}"),
-            response_model=VideoTaskStatusResponse,
-            status_extractor=lambda x: x.output.task_status,
-            poll_interval=7,
         )
         return IO.NodeOutput(await download_url_to_video_output(response.output.video_url))
 
@@ -2461,13 +2312,10 @@ class HappyHorseImageToVideoApi(IO.ComfyNode):
                 url=await upload_image_to_comfyapi(cls, image=first_frame),
             )
         ]
-        initial_response = await sync_op(
+        response = await router_op(
             cls,
-            ApiEndpoint(
-                path="/proxy/wan/api/v1/services/aigc/video-generation/video-synthesis",
-                method="POST",
-            ),
-            response_model=TaskCreationResponse,
+            f"wan/{model['model']}",
+            response_model=VideoTaskStatusResponse,
             data=Wan27ImageToVideoTaskCreationRequest(
                 model=model["model"],
                 input=Wan27ImageToVideoInputField(
@@ -2482,15 +2330,6 @@ class HappyHorseImageToVideoApi(IO.ComfyNode):
                     watermark=watermark,
                 ),
             ),
-        )
-        if not initial_response.output:
-            raise Exception(f"An unknown error occurred: {initial_response.code} - {initial_response.message}")
-        response = await poll_op(
-            cls,
-            ApiEndpoint(path=f"/proxy/wan/api/v1/tasks/{initial_response.output.task_id}"),
-            response_model=VideoTaskStatusResponse,
-            status_extractor=lambda x: x.output.task_status,
-            poll_interval=7,
         )
         return IO.NodeOutput(await download_url_to_video_output(response.output.video_url))
 
@@ -2605,13 +2444,10 @@ class HappyHorseVideoEditApi(IO.ComfyNode):
                     type="reference_image", url=await upload_image_to_comfyapi(cls, image=reference_images[key])
                 )
             )
-        initial_response = await sync_op(
+        response = await router_op(
             cls,
-            ApiEndpoint(
-                path="/proxy/wan/api/v1/services/aigc/video-generation/video-synthesis",
-                method="POST",
-            ),
-            response_model=TaskCreationResponse,
+            f"wan/{model['model']}",
+            response_model=VideoTaskStatusResponse,
             data=Wan27VideoEditTaskCreationRequest(
                 model=model["model"],
                 input=Wan27VideoEditInputField(prompt=model["prompt"], media=media),
@@ -2623,15 +2459,6 @@ class HappyHorseVideoEditApi(IO.ComfyNode):
                     seed=seed,
                 ),
             ),
-        )
-        if not initial_response.output:
-            raise Exception(f"An unknown error occurred: {initial_response.code} - {initial_response.message}")
-        response = await poll_op(
-            cls,
-            ApiEndpoint(path=f"/proxy/wan/api/v1/tasks/{initial_response.output.task_id}"),
-            response_model=VideoTaskStatusResponse,
-            status_extractor=lambda x: x.output.task_status,
-            poll_interval=7,
         )
         return IO.NodeOutput(await download_url_to_video_output(response.output.video_url))
 
@@ -2818,13 +2645,10 @@ class HappyHorseReferenceVideoApi(IO.ComfyNode):
         if not media:
             raise ValueError("At least one reference image must be provided.")
 
-        initial_response = await sync_op(
+        response = await router_op(
             cls,
-            ApiEndpoint(
-                path="/proxy/wan/api/v1/services/aigc/video-generation/video-synthesis",
-                method="POST",
-            ),
-            response_model=TaskCreationResponse,
+            f"wan/{model['model']}",
+            response_model=VideoTaskStatusResponse,
             data=Wan27ReferenceVideoTaskCreationRequest(
                 model=model["model"],
                 input=Wan27ReferenceVideoInputField(
@@ -2840,15 +2664,6 @@ class HappyHorseReferenceVideoApi(IO.ComfyNode):
                     seed=seed,
                 ),
             ),
-        )
-        if not initial_response.output:
-            raise Exception(f"An unknown error occurred: {initial_response.code} - {initial_response.message}")
-        response = await poll_op(
-            cls,
-            ApiEndpoint(path=f"/proxy/wan/api/v1/tasks/{initial_response.output.task_id}"),
-            response_model=VideoTaskStatusResponse,
-            status_extractor=lambda x: x.output.task_status,
-            poll_interval=7,
         )
         return IO.NodeOutput(await download_url_to_video_output(response.output.video_url))
 

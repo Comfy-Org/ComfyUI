@@ -1470,21 +1470,32 @@ class Gemma4_Tokenizer():
         up_slopes = slopes[:, 2:] / filter_diff[1:]
         return np.maximum(np.zeros(1), np.minimum(down_slopes, up_slopes))
 
-    def tokenize_with_weights(self, text, return_word_ids=False, image=None, audio=None, video=None, llama_template=None, skip_template=True, thinking=False, system_prompt="", **kwargs):
+    def tokenize_with_weights(self, text, return_word_ids=False, image=None, audio=None, video=None, llama_template=None, skip_template=True, thinking=False, system_prompt="", images=[], audios=[], videos=[], **kwargs):
 
         # Process audio
+        if audio is not None and len(audios) == 0:
+            audios = [audio]
         audio_features = []
-        if audio is not None:
+        audio_token_counts = []
+        for audio in audios:
             waveform = audio["waveform"].squeeze(0) if hasattr(audio, "__getitem__") else audio
             sample_rate = audio.get("sample_rate", 16000) if hasattr(audio, "get") else 16000
             feat, feat_mask = self._extract_audio_features(waveform, sample_rate)
-            audio_features = [(feat.unsqueeze(0), feat_mask.unsqueeze(0))]  # ([1, T, D], [1, T])
+            audio_features.append((feat.unsqueeze(0), feat_mask.unsqueeze(0)))  # ([1, T, D], [1, T])
+            # Compute audio token count (always at 16kHz)
+            num_samples = int(waveform.shape[-1] * 16000 / sample_rate) if sample_rate != 16000 else waveform.shape[-1]
+            audio_token_counts.append(self._audio_token_count(num_samples))
 
         # Process image/video frames
-        is_video = video is not None
-        source = video if is_video else image
-        images = []
-        if source is not None:
+        if video is not None and len(videos) == 0:
+            videos = [video]
+        if image is not None and len(images) == 0:
+            images = [image]
+        sources = [(source, False) for source in images] + [(source, True) for source in videos]
+        image_frames = []
+        video_frames = []
+        video_frame_counts = []
+        for source, is_video in sources:
             samples = source.movedim(-1, 1)  # [B, C, H, W]
             num_frames = samples.shape[0]
 
@@ -1497,6 +1508,7 @@ class Gemma4_Tokenizer():
                     indices = [0]
                 samples = samples[indices]
                 num_frames = len(indices)
+                video_frame_counts.append(num_frames)
 
             h, w = samples.shape[2], samples.shape[3]
             patch_size = 16
@@ -1505,13 +1517,14 @@ class Gemma4_Tokenizer():
             max_patches = max_soft_tokens * pooling_k * pooling_k
             target_h, target_w = _get_aspect_ratio_preserving_size(h, w, patch_size, max_patches, pooling_k)
 
+            frames = video_frames if is_video else image_frames
             for i in range(num_frames):
                 # rescaling to match reference code
                 s = (samples[i].clamp(0, 1) * 255).to(torch.uint8)  # [C, H, W] uint8
                 if target_h != h or target_w != w:
                     s = TVF.resize(s, [target_h, target_w], interpolation=TVF.InterpolationMode.BICUBIC, antialias=True)
                 s = s.float() * (1.0 / 255.0)
-                images.append({"pixels": s.unsqueeze(0).movedim(1, -1)[:, :, :, :3], "max_soft_tokens": max_soft_tokens})
+                frames.append({"pixels": s.unsqueeze(0).movedim(1, -1)[:, :, :, :3], "max_soft_tokens": max_soft_tokens})
 
         if text.startswith('<|turn>'):
             skip_template = True
@@ -1526,25 +1539,21 @@ class Gemma4_Tokenizer():
                 think = "<|think|>\n" if thinking else ""
                 system = f"<|turn>system\n{think}{system_prompt}<turn|>\n" if thinking or system_prompt else ""
                 media = ""
-                if len(images) > 0:
-                    if is_video:
-                        media += "\n\n"
-                        for i in range(len(images)):
-                            ts = f"{int(i // 60):02d}:{int(i % 60):02d}"
-                            sep = "" if i == 0 else " "
-                            media += f"{sep}{ts} <|image><|video|><image|>"
-                        media += "\n\n"
-                    else:
-                        media += "\n\n"
-                        for i in range(len(images)):
-                            if i > 0:
-                                media += "\n\n\n\n"
-                            media += "<|image><|image|><image|>"
-                        media += "\n\n"
-                if len(audio_features) > 0:
-                    # Compute audio token count (always at 16kHz)
-                    num_samples = int(waveform.shape[-1] * 16000 / sample_rate) if sample_rate != 16000 else waveform.shape[-1]
-                    n_audio_tokens = self._audio_token_count(num_samples)
+                if len(image_frames) > 0:
+                    media += "\n\n"
+                    for i in range(len(image_frames)):
+                        if i > 0:
+                            media += "\n\n\n\n"
+                        media += "<|image><|image|><image|>"
+                    media += "\n\n"
+                for num_frames in video_frame_counts:
+                    media += "\n\n"
+                    for i in range(num_frames):
+                        ts = f"{int(i // 60):02d}:{int(i % 60):02d}"
+                        sep = "" if i == 0 else " "
+                        media += f"{sep}{ts} <|image><|video|><image|>"
+                    media += "\n\n"
+                for n_audio_tokens in audio_token_counts:
                     media += "<|audio>" + "<|audio|>" * n_audio_tokens + "<audio|>"
                 # 12B/31B prime a closed thought block for non-thinking mode, E2B/E4B must not: it cues them into reasoning inline.
                 model_open = "<|channel>thought\n<channel|>" if self.prime_empty_thought and not thinking else ""
@@ -1566,9 +1575,8 @@ class Gemma4_Tokenizer():
                 else:
                     i += 1
 
-        if len(images) > 0:
-            img_token_id = 258884 if is_video else 258880
-            img_embeds = [{"type": "image", "data": img["pixels"], "max_soft_tokens": img["max_soft_tokens"]} for img in images]
+        for img_token_id, frames in ((258880, image_frames), (258884, video_frames)):
+            img_embeds = [{"type": "image", "data": img["pixels"], "max_soft_tokens": img["max_soft_tokens"]} for img in frames]
             for r in text_tokens:
                 _replace_placeholders(r, img_token_id, img_embeds)
 

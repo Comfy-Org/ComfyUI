@@ -200,7 +200,10 @@ def execute_prestartup_script():
     node_paths = folder_paths.get_folder_paths("custom_nodes")
     node_prestartup_times = []
     for custom_node_path in node_paths:
-        possible_modules = os.listdir(custom_node_path)
+        try:
+            possible_modules = os.listdir(custom_node_path)
+        except FileNotFoundError:
+            continue
 
         for possible_module in possible_modules:
             module_path = os.path.join(custom_node_path, possible_module)
@@ -689,6 +692,7 @@ if __name__ == "__main__":
         x = start_all_func()
         if product_tips.tips_enabled(args, os.environ):
             logging.info(product_tips.COMFY_API_STARTUP_TIP)
+        comfy.model_management.cuda_version_warning()
         app.logger.print_startup_warnings()
         event_loop.run_until_complete(x)
     except KeyboardInterrupt:

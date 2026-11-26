@@ -10,6 +10,7 @@ from comfy_api.feature_flags import (
     SERVER_FEATURE_FLAGS,
     _coerce_flag_value,
     _parse_cli_feature_flags,
+    _server_feature_flags,
 )
 from app.comfy_api_env import (
     environment_overrides_for_base,
@@ -160,7 +161,7 @@ class TestParseCliFeatureFlags:
         result = _parse_cli_feature_flags()
         assert result == {"show_signin_button": True}
 
-    @pytest.mark.parametrize("key", ["partner_node_token", "local_web_sso"])
+    @pytest.mark.parametrize("key", ["partner_node_token", "local_web_sso", "local_mcp_connect"])
     def test_frontend_strict_bool_flags_parse_to_bool(self, monkeypatch, key):
         monkeypatch.setattr("comfy_api.feature_flags.args", type("Args", (), {"feature_flag": [f"{key}=true"]})())
         assert _parse_cli_feature_flags()[key] is True
@@ -192,6 +193,41 @@ class TestParseCliFeatureFlags:
 
 class TestCliFeatureFlagRegistry:
     """Test suite for the CLI feature flag registry."""
+
+    @pytest.mark.parametrize("key", ["partner_node_token", "local_web_sso"])
+    def test_local_sso_flags_are_on_by_default(self, key):
+        assert CLI_FEATURE_FLAG_REGISTRY[key]["default"] is True
+
+    def test_local_mcp_connect_is_off_by_default(self):
+        assert CLI_FEATURE_FLAG_REGISTRY["local_mcp_connect"]["default"] is False
+
+    def test_server_features_report_registry_defaults(self, monkeypatch):
+        monkeypatch.setattr("comfy_api.feature_flags.args", type("Args", (), {"feature_flag": []})())
+        features = _server_feature_flags()
+        for key, info in CLI_FEATURE_FLAG_REGISTRY.items():
+            assert features[key] == info["default"], key
+
+    @pytest.mark.parametrize("key", ["partner_node_token", "local_web_sso"])
+    def test_cli_flag_turns_a_default_on_flag_off(self, monkeypatch, key):
+        monkeypatch.setattr("comfy_api.feature_flags.args", type("Args", (), {"feature_flag": [f"{key}=false"]})())
+        assert _server_feature_flags()[key] is False
+
+    def test_cli_flags_cannot_override_core_flags(self, monkeypatch):
+        monkeypatch.setattr("comfy_api.feature_flags.args", type("Args", (), {"feature_flag": ["node_replacements=false"]})())
+        assert _server_feature_flags()["node_replacements"] is True
+
+    def test_server_features_report_a_boot_id(self):
+        boot_id = get_server_features()["server_boot_id"]
+        assert isinstance(boot_id, str)
+        assert len(boot_id) == 32
+
+    def test_boot_id_is_stable_within_a_process(self, monkeypatch):
+        monkeypatch.setattr("comfy_api.feature_flags.args", type("Args", (), {"feature_flag": []})())
+        assert _server_feature_flags()["server_boot_id"] == get_server_features()["server_boot_id"]
+
+    def test_cli_flags_cannot_override_the_boot_id(self, monkeypatch):
+        monkeypatch.setattr("comfy_api.feature_flags.args", type("Args", (), {"feature_flag": ["server_boot_id=fixed"]})())
+        assert _server_feature_flags()["server_boot_id"] != "fixed"
 
     def test_registry_entries_have_required_fields(self):
         for key, info in CLI_FEATURE_FLAG_REGISTRY.items():

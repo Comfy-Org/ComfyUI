@@ -19,6 +19,8 @@ class FishAudioTTSRequest(BaseModel):
 class FishAudioASRRequest(BaseModel):
     language: str | None = Field(None, description="Optional ISO 639-1 language hint")
     ignore_timestamps: bool = Field(True, description="Skip precise timestamp computation")
+    diarize: bool = Field(..., description="Add speaker markers to the text")
+    tag_audio_events: bool = Field(..., description="Add audio event cues such as [laughter] to the text")
 
 
 class FishAudioASRSegment(BaseModel):
