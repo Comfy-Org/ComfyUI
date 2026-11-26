@@ -1,3 +1,6 @@
+from contextlib import nullcontext
+import threading
+
 import pytest
 import torch
 
@@ -16,8 +19,10 @@ class MTPHead(torch.nn.Module):
 @pytest.fixture(autouse=True)
 def _reset_queues():
     model_prefetch.PREFETCH_QUEUES = []
+    model_prefetch.GRAPH_WARMED_MODULES.clear()
     yield
     model_prefetch.PREFETCH_QUEUES = []
+    model_prefetch.GRAPH_WARMED_MODULES.clear()
 
 
 def _prefetched(module):
@@ -141,3 +146,133 @@ def test_cleanup_releases_block_pin_without_module_records(monkeypatch):
     assert calls == ["block"]
     assert not hasattr(module, "_v_block_faulted")
     assert model_prefetch.PREFETCH_QUEUES == []
+
+
+class _DummyGraph:
+    def __init__(self):
+        self.replays = 0
+
+    def replay(self):
+        self.replays += 1
+
+
+class _DummyStream:
+    def wait_stream(self, _other):
+        pass
+
+
+class _DummyMallocGraph:
+    def __init__(self, fail_iterate=False):
+        self._comfy_active = True
+        self._comfy_cuda_graph_modules = set()
+        self.rogue_count = 0
+        self.fail_iterate = fail_iterate
+
+    def iterate(self, scope):
+        if self.fail_iterate:
+            raise RuntimeError("graph break")
+        return False
+
+    def use_stream(self, _stream):
+        return nullcontext()
+
+    def abort(self):
+        pass
+
+
+def _setup_graph_env(monkeypatch, device, *, signature_match=True, fail_iterate=False):
+    pins = {"count": 0, "max": 0}
+
+    def vbar_fault(v):
+        pins["count"] += 1
+        pins["max"] = max(pins["max"], pins["count"])
+        return "sig"
+
+    def vbar_unpin(v):
+        pins["count"] -= 1
+
+    stream = _DummyStream()
+    monkeypatch.setattr(model_prefetch.args, "disable_cuda_graphs", False)
+    monkeypatch.setattr(model_prefetch.comfy.model_management, "is_device_cuda", lambda _d: True)
+    monkeypatch.setattr(model_prefetch.comfy.model_management, "current_stream", lambda _d: stream)
+    monkeypatch.setattr(model_prefetch.torch.cuda, "stream", lambda _s: nullcontext())
+    monkeypatch.setattr(model_prefetch.comfy_aimdo.model_vbar, "vbar_fault", vbar_fault)
+    monkeypatch.setattr(model_prefetch.comfy_aimdo.model_vbar, "vbar_unpin", vbar_unpin)
+    monkeypatch.setattr(model_prefetch.comfy_aimdo.model_vbar, "vbar_signature_compare", lambda _a, _b: signature_match)
+    monkeypatch.setitem(model_prefetch.MALLOC_GRAPHS, threading.get_ident(), _DummyMallocGraph(fail_iterate=fail_iterate))
+    monkeypatch.setitem(model_prefetch.GRAPH_CAPTURE_STREAMS, device, stream)
+    return pins
+
+
+def test_repeated_module_graph_hit_unpins_vbar_block(monkeypatch):
+    # A module repeated consecutively in one prefetch queue (e.g. RAFT's update_block)
+    # must unpin the prior iteration's _v_block before faulting it for the next one.
+    device = torch.device("cpu")
+    pins = _setup_graph_env(monkeypatch, device, signature_match=True)
+    graph = _DummyGraph()
+    module = torch.nn.Linear(4, 4)
+    module._v_block = "block"
+    module._comfy_graph = {"graph": graph, "signature": "sig"}
+
+    for _ in range(2):
+        queue = [None, module, module, module, None]
+        model_prefetch.PREFETCH_QUEUES.append(queue)
+        for _ in range(3):
+            model_prefetch.prefetch_queue_pop(queue, device, module, enable_graph=True, malloc_scope="block")
+        model_prefetch.prefetch_queue_pop(queue, device, None, malloc_scope="block")
+        assert pins["count"] == 0
+        assert not hasattr(module, "_v_block_faulted")
+
+    assert graph.replays == 6
+    assert pins["max"] == 1
+
+
+def test_graph_miss_after_vbar_fault_still_prefetches_and_unpins(monkeypatch):
+    device = torch.device("cpu")
+    pins = _setup_graph_env(monkeypatch, device, signature_match=False)
+    graph = _DummyGraph()
+    module = torch.nn.Linear(4, 4)
+    module._v = "weight"
+    module._v_block = "block"
+    module._comfy_graph = {"graph": graph, "signature": "old"}
+
+    pinned_submodules = []
+
+    def fake_pin_modules(comfy_modules, _device, _dtype):
+        pinned_submodules.extend(comfy_modules)
+        for s in comfy_modules:
+            s._prefetch = {"signature": "sig"}
+            pins["count"] += 1
+        return None, False
+
+    monkeypatch.setattr(model_prefetch, "pin_modules", fake_pin_modules)
+
+    ran_core = []
+    queue = [None, module, None]
+    model_prefetch.PREFETCH_QUEUES.append(queue)
+    model_prefetch.prefetch_queue_pop(queue, device, module, core=lambda: ran_core.append(True), enable_graph=True, malloc_scope="block")
+    model_prefetch.prefetch_queue_pop(queue, device, None, malloc_scope="block")
+
+    assert graph.replays == 0
+    assert ran_core == [True]
+    assert pinned_submodules == [module]
+    assert pins["count"] == 0
+    assert not hasattr(module, "_v_block_faulted")
+    assert not hasattr(module, "_prefetch")
+
+
+def test_vbar_block_unpinned_when_malloc_graph_iterate_raises(monkeypatch):
+    device = torch.device("cpu")
+    pins = _setup_graph_env(monkeypatch, device, signature_match=True, fail_iterate=True)
+    module = torch.nn.Linear(4, 4)
+    module._v_block = "block"
+    module._comfy_graph = {"graph": _DummyGraph(), "signature": "sig"}
+
+    queue = [None, module, None]
+    model_prefetch.PREFETCH_QUEUES.append(queue)
+    with pytest.raises(RuntimeError, match="graph break"):
+        model_prefetch.prefetch_queue_pop(queue, device, module, enable_graph=True, malloc_scope="block")
+
+    model_prefetch.cleanup_prefetch_queues()
+    assert pins["count"] == 0
+    assert not hasattr(module, "_v_block_faulted")
