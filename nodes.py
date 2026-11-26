@@ -17,6 +17,7 @@ import logging
 from PIL import Image, ImageOps, ImageSequence
 from PIL.PngImagePlugin import PngInfo
 
+import av
 import numpy as np
 import safetensors.torch
 
@@ -31,6 +32,7 @@ from comfy.comfy_types import IO, ComfyNodeABC, InputTypeDict, FileLocator
 from comfy_api.internal import register_versions, ComfyAPIWithVersion
 from comfy_api.version_list import supported_versions
 from comfy_api.latest import io, ComfyExtension, InputImpl
+from comfy_api.latest._input_impl.video_types import _rotation_quadrant
 
 import comfy.clip_vision
 
@@ -1746,14 +1748,9 @@ class PreviewImage(SaveImage):
 
 def pyav_image_rotation_quadrant(path):
     """Quarter turns pyav applies to the first decoded frame of an image (from its display matrix), 0 when none."""
-    import av
-    from comfy_api.latest._input_impl.video_types import _rotation_quadrant
-    try:
-        with av.open(path) as container:
-            for frame in container.decode(video=0):
-                return _rotation_quadrant(frame)
-    except Exception:
-        pass
+    with av.open(path) as container:
+        for frame in container.decode(video=0):
+            return _rotation_quadrant(frame)
     return 0
 
 class LoadImage:
