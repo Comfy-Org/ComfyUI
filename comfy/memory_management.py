@@ -214,9 +214,12 @@ def cat_gathered(tensors, gathered):
     fields = {}
     for attr in inner_tensors[1:]:
         values = [getattr(t, attr) for t in tensors]
-        if all(v.ndim > 0 and v.shape[0] == n and v.shape[1:] == values[0].shape[1:] and v.dtype == values[0].dtype for v, n in zip(values, rows)):
+        if attr == "_param_correction":
+            return None
+        if (attr not in ("_param_codebook", "_param_decode_lut")
+                and all(v.ndim > 0 and v.shape[0] == n and v.shape[1:] == values[0].shape[1:] and v.dtype == values[0].dtype for v, n in zip(values, rows))):
             fields[attr] = torch.cat(values)
-        elif all(torch.equal(v, values[0]) for v in values[1:]):
+        elif all(v.dtype == values[0].dtype and torch.equal(v, values[0]) for v in values[1:]):
             fields[attr] = values[0].clone()
         else:
             return None

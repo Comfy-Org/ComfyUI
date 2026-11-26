@@ -109,6 +109,61 @@ def test_combined_linear_combines_grouped_int8_formats(monkeypatch, quant_format
     torch.testing.assert_close(out_norm, expected_norm, rtol=0, atol=0)
 
 
+@pytest.mark.parametrize("quant_format, bits", [("w3a8_int8", 3), ("asym_w4a8_int8", 4)])
+def test_combined_linear_keeps_codebook_shared_when_rows_match_codebook_len(monkeypatch, quant_format, bits):
+    torch.manual_seed(7)
+    levels = 1 << bits
+    ops = comfy.ops.mixed_precision_ops(compute_dtype=torch.float32)
+    layout = QUANT_ALGOS[quant_format]["comfy_tensor_layout"]
+    cb_a = torch.linspace(-1.0, 1.0, levels)
+    cb_b = torch.linspace(-0.8, 0.8, levels)
+    monkeypatch.setattr(comfy.model_management, "is_device_cpu", lambda device: False)
+
+    # Identical codebooks: codebook must be shared with shape (levels,), not concatenated as rows.
+    linears = (ops.Linear(256, levels, bias=False), ops.Linear(256, levels, bias=False))
+    weights = [QuantizedTensor.from_float(torch.randn(levels, 256), layout, bits=bits, codebook_tensor=cb_a) for _ in range(2)]
+    views, gathered = _pack_gathered(weights)
+    for s, weight, view in zip(linears, weights, views):
+        s.weight = torch.nn.Parameter(weight.to("meta"), requires_grad=False)
+        s.quant_format = quant_format
+        s.layout_type = layout
+        s._v = (None, view._qdata.data_ptr(), comfy.memory_management.vram_aligned_size(view))
+        s._v_weight = view
+        s._v_bias = None
+        s._prefetch = {"resident": True, "signature": None}
+    monkeypatch.setattr(comfy.ops.comfy_aimdo.torch, "aimdo_to_tensor", lambda v, device: gathered)
+    combined = comfy.ops.CombinedLinear(linears)
+    x = torch.randn(3, 256)
+    expected = torch.cat([s(x) for s in linears], dim=-1)
+    combined.prepare(x.device)
+    assert combined._v_weight is not None
+    assert tuple(combined._v_weight._params.codebook.shape) == (levels,)
+    assert torch.equal(combined._v_weight._params.codebook, cb_a)
+    torch.testing.assert_close(combined.forward(x), expected, rtol=0, atol=0)
+
+    # Differing codebooks: prepare() must decline without mutating member weights.
+    linears = (ops.Linear(256, levels, bias=False), ops.Linear(256, levels, bias=False))
+    weights = [
+        QuantizedTensor.from_float(torch.randn(levels, 256), layout, bits=bits, codebook_tensor=cb_a),
+        QuantizedTensor.from_float(torch.randn(levels, 256), layout, bits=bits, codebook_tensor=cb_b),
+    ]
+    views, gathered = _pack_gathered(weights)
+    for s, weight, view in zip(linears, weights, views):
+        s.weight = torch.nn.Parameter(weight.to("meta"), requires_grad=False)
+        s.quant_format = quant_format
+        s.layout_type = layout
+        s._v = (None, view._qdata.data_ptr(), comfy.memory_management.vram_aligned_size(view))
+        s._v_weight = view
+        s._v_bias = None
+        s._prefetch = {"resident": True, "signature": None}
+    monkeypatch.setattr(comfy.ops.comfy_aimdo.torch, "aimdo_to_tensor", lambda v, device: gathered)
+    combined = comfy.ops.CombinedLinear(linears)
+    combined.prepare(x.device)
+    assert combined._v_weight is None
+    assert all(s._v_weight is view for s, view in zip(linears, views))
+    assert all(torch.equal(v.dequantize(), w.dequantize()) for v, w in zip(views, weights))
+
+
 @pytest.mark.parametrize("layout, kwargs", [
     ("TensorWiseINT8Layout", {"per_channel": True, "convrot": True}),
     ("AsymW4A8Int8Layout", {"bits": 3}),
@@ -233,6 +288,11 @@ def test_cat_gathered_declines_incompatible_weights():
     views, gathered = _pack_gathered(mixed_cb)
     assert comfy.memory_management.cat_gathered(views, gathered) is None
     assert all(torch.equal(v.dequantize(), w.dequantize()) for v, w in zip(views, mixed_cb))
+    # Asymmetric correction tensor is (groups, N), not per-row along dim 0 even when groups == N.
+    asym = [QuantizedTensor.from_float(torch.randn(16, 256), "AsymW4A8Int8Layout", bits=4, symmetric=False) for _ in range(2)]
+    views, gathered = _pack_gathered(asym)
+    assert comfy.memory_management.cat_gathered(views, gathered) is None
+    assert all(torch.equal(v.dequantize(), w.dequantize()) for v, w in zip(views, asym))
     # Out of order.
     _, views, gathered = _gathered("TensorWiseINT8Layout", (128, 128), 512, per_channel=True)
     with pytest.raises(RuntimeError):
