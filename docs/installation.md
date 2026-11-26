@@ -307,17 +307,21 @@ This NVIDIA deployment for Linux x86_64 builds ComfyUI into a versioned image
 using a digest-pinned PyTorch/CUDA base image. It requires Docker Compose v2 and
 the NVIDIA Container Toolkit on the host. From the checked-out ComfyUI repository,
 run this one-line command to initialize the local configuration, build the image
-for the current checkout, save its revision in `.env`, and start the service. It
-updates or adds `COMFYUI_VERSION` without changing the other `.env` settings:
+for the current checkout, and start the service. The command supplies the checked-out
+revision to Compose without changing `.env`:
 
 ```sh
-( [ -e .env ] || cp .env.example .env ) && ( [ -e extra_model_paths.yaml ] || cp extra_model_paths.yaml.example extra_model_paths.yaml ) && tmp_env="$(mktemp)" && awk -v revision="$(git rev-parse HEAD)" 'BEGIN { found = 0 } /^[[:space:]]*COMFYUI_VERSION[[:space:]]*=/ { if (!found) print "COMFYUI_VERSION=" revision; found = 1; next } { print } END { if (!found) print "COMFYUI_VERSION=" revision }' .env > "$tmp_env" && mv "$tmp_env" .env && unset COMFYUI_VERSION && docker compose -f compose.yaml -f compose.nvidia.yaml up -d --build
+revision="$(git rev-parse HEAD)" && [ -n "$revision" ] && ( [ -e .env ] || cp .env.example .env ) && ( [ -e extra_model_paths.yaml ] || cp extra_model_paths.yaml.example extra_model_paths.yaml ) && COMFYUI_VERSION="$revision" docker compose --env-file .env -f compose.yaml -f compose.nvidia.yaml up -d --build
 ```
 
 The image includes ComfyUI and its Python dependencies. The Compose service keeps
 models, input files, output files, the user directory (including workflows and
 settings), and `extra_model_paths.yaml` outside the image so they survive rebuilds.
-`docker compose down` stops the service without removing this data.
+To stop the service without removing this data, run:
+
+```sh
+revision="$(git rev-parse HEAD)" && [ -n "$revision" ] && COMFYUI_VERSION="$revision" docker compose --env-file .env -f compose.yaml -f compose.nvidia.yaml down
+```
 
 The service publishes `0.0.0.0:8188` by default, making it reachable on every
 network interface. ComfyUI does not provide authentication by default, so only use
@@ -328,15 +332,14 @@ host-local reverse proxy that provides TLS and authentication, set
 
 To check the merged Compose configuration before starting the service, run:
 
-```
-docker compose -f compose.yaml -f compose.nvidia.yaml config --quiet
+```sh
+revision="$(git rev-parse HEAD)" && [ -n "$revision" ] && COMFYUI_VERSION="$revision" docker compose --env-file .env -f compose.yaml -f compose.nvidia.yaml config --quiet
 ```
 
-For updates, check out a new release or commit, update `COMFYUI_VERSION`, and rebuild
-with `docker compose -f compose.yaml -f compose.nvidia.yaml up -d --build`. Custom
-nodes and their dependencies should be added to a derived image so the deployment
-remains reproducible. Use a new version tag for each revision; do not rebuild or
-retag an image that is already in use.
+For updates, check out a new release or commit and run the same setup command to
+build that revision. Custom nodes and their dependencies should be added to a
+derived image so the deployment remains reproducible. Use a new version tag for
+each revision; do not rebuild or retag an image that is already in use.
 
 ### For AMD cards not officially supported by ROCm
 
