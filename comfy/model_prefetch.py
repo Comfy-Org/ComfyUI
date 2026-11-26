@@ -154,21 +154,11 @@ def cleanup_prefetched_modules(module, comfy_modules):
     # skip the fresh cast and read the old transfer state. Clean up every module, then raise the first error.
     first_error = None
     for s in comfy_modules:
-        prefetch = getattr(s, "_prefetch", None)
-        if prefetch is None:
-            continue
         try:
-            for param_key in ("weight", "bias"):
-                lowvram_fn = getattr(s, param_key + "_lowvram_function", None)
-                if lowvram_fn is not None:
-                    lowvram_fn.clear_prepared()
-            if prefetch["signature"] is not None:
-                comfy_aimdo.model_vbar.vbar_unpin(s._v)
+            comfy.model_management.cleanup_cast_module(s)
         except Exception as e:
             if first_error is None:
                 first_error = e
-        finally:
-            delattr(s, "_prefetch")
     if getattr(module, "_v_block_faulted", False):
         try:
             comfy_aimdo.model_vbar.vbar_unpin(module._v_block)
@@ -219,6 +209,11 @@ def cleanup_prefetch_queues():
             # Keep unpinning the other queues; report the first failure once they are done.
             if first_error is None:
                 first_error = e
+    try:
+        comfy.model_management.cleanup_vbar_casts()
+    except Exception as e:
+        if first_error is None:
+            first_error = e
     GRAPH_WARMED_MODULES.clear()
     if MALLOC_GRAPH_USED:
         logging.info("Comfy model compiler graph breaks: %d, rogues: %d", MALLOC_GRAPH_BREAKS, MALLOC_GRAPH_ROGUES)
