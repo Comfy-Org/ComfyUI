@@ -3,6 +3,27 @@ import sys
 
 import psutil
 
+if sys.platform == "win32":
+    import ctypes
+    from ctypes import wintypes
+
+    class _MEMORYSTATUSEX(ctypes.Structure):
+        _fields_ = [
+            ("dwLength", wintypes.DWORD),
+            ("dwMemoryLoad", wintypes.DWORD),
+            ("ullTotalPhys", ctypes.c_uint64),
+            ("ullAvailPhys", ctypes.c_uint64),
+            ("ullTotalPageFile", ctypes.c_uint64),
+            ("ullAvailPageFile", ctypes.c_uint64),
+            ("ullTotalVirtual", ctypes.c_uint64),
+            ("ullAvailVirtual", ctypes.c_uint64),
+            ("ullAvailExtendedVirtual", ctypes.c_uint64),
+        ]
+
+    _get_memory_status = ctypes.WinDLL("kernel32").GlobalMemoryStatusEx
+    _get_memory_status.argtypes = [ctypes.POINTER(_MEMORYSTATUSEX)]
+    _get_memory_status.restype = wintypes.BOOL
+
 CGROUP_V2_ROOT = "/sys/fs/cgroup"
 CGROUP_V1_MEMORY_ROOT = "/sys/fs/cgroup/memory"
 PROC_SELF_CGROUP = "/proc/self/cgroup"
@@ -120,6 +141,13 @@ def virtual_memory_total():
 
 
 def virtual_memory_available():
+    if sys.platform == "win32":
+        # Pinning checks only need available physical bytes, not the full performance counters.
+        status = _MEMORYSTATUSEX()
+        status.dwLength = ctypes.sizeof(status)
+        if _get_memory_status(ctypes.byref(status)):
+            return status.ullAvailPhys
+
     host = psutil.virtual_memory()
     available = host.available
     for limit, directory in _limited(host.total):
