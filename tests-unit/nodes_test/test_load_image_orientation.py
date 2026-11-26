@@ -44,6 +44,24 @@ def test_load_image_applies_exif_orientation(tmp_path, monkeypatch, fmt, ext, or
     assert np.abs(got - expected).mean() < 0.01
 
 
+def test_load_image_keeps_palette_transparency_when_oriented(tmp_path, monkeypatch):
+    path = tmp_path / "palette.png"
+    img = Image.new("P", (6, 4), 1)
+    img.putpalette([0, 0, 0, 255, 0, 0] + [0] * 762)
+    img.putpixel((0, 0), 0)  # index 0 is transparent
+    exif = Image.Exif()
+    exif[0x0112] = 6
+    img.save(path, "PNG", transparency=0, exif=exif)
+
+    monkeypatch.setattr(folder_paths, "get_annotated_filepath", lambda name: str(path))
+    image, mask = nodes.LoadImage().load_image(path.name)
+
+    with Image.open(path) as src:
+        alpha = np.asarray(ImageOps.exif_transpose(src).convert("RGBA").getchannel("A"), dtype=np.float32) / 255.0
+    assert tuple(image.shape[1:3]) == (6, 4)
+    assert np.allclose(mask[0].float().cpu().numpy(), 1.0 - alpha)
+
+
 def test_image_exif_orientation_defaults(tmp_path):
     plain = tmp_path / "plain.png"
     Image.new("RGB", (4, 2)).save(plain)

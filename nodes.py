@@ -1783,6 +1783,8 @@ class LoadImage:
 
         for i in ImageSequence.Iterator(img):
             i = node_helpers.pillow(ImageOps.exif_transpose, i)
+            if "transparency" in i.info:  # palette/tRNS transparency has no A band until converted
+                i = i.convert("RGBA")
 
             image = i.convert("RGB")
 
