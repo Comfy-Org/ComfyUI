@@ -24,7 +24,7 @@ def test_combined_linear_declines_without_running_split_or_activation():
 
 
 def _pack_gathered(weights):
-    gathered = torch.empty(comfy.memory_management.vram_aligned_size(weights), dtype=torch.uint8)
+    gathered = torch.full((comfy.memory_management.vram_aligned_size(weights),), 0xA5, dtype=torch.uint8)
     views = comfy.memory_management.interpret_gathered_like(weights, gathered)
     for weight, view in zip(weights, views):
         inner_tensors, _ = weight.__tensor_flatten__()
@@ -158,9 +158,11 @@ def test_combined_linear_keeps_codebook_shared_when_rows_match_codebook_len(monk
         s._prefetch = {"resident": True, "signature": None}
     monkeypatch.setattr(comfy.ops.comfy_aimdo.torch, "aimdo_to_tensor", lambda v, device: gathered)
     combined = comfy.ops.CombinedLinear(linears)
+    before = gathered.clone()
     combined.prepare(x.device)
     assert combined._v_weight is None
     assert all(s._v_weight is view for s, view in zip(linears, views))
+    assert torch.equal(gathered, before)
     assert all(torch.equal(v.dequantize(), w.dequantize()) for v, w in zip(views, weights))
 
 
@@ -256,13 +258,17 @@ def test_cat_gathered_declines_incompatible_weights():
     torch.manual_seed(7)
     # A tensor-wise scale cannot be shared across rows.
     weights, views, gathered = _gathered("TensorWiseINT8Layout", (128, 128), 512)
+    before = gathered.clone()
     assert comfy.memory_management.cat_gathered(views, gathered) is None
+    assert torch.equal(gathered, before)
     assert all(torch.equal(v.dequantize(), w.dequantize()) for v, w in zip(views, weights))
     # Different K.
     a = _gathered("TensorWiseINT8Layout", (128,), 512, per_channel=True)[0][0]
     b = _gathered("TensorWiseINT8Layout", (128,), 256, per_channel=True)[0][0]
     views, gathered = _pack_gathered([a, b])
+    before = gathered.clone()
     assert comfy.memory_management.cat_gathered(views, gathered) is None
+    assert torch.equal(gathered, before)
     # Different grouped-INT8 bit widths (same layout and params; width is only encoded in _qdata.shape[1]).
     for mixed in (
         [
@@ -276,7 +282,9 @@ def test_cat_gathered_declines_incompatible_weights():
         ],
     ):
         views, gathered = _pack_gathered(mixed)
+        before = gathered.clone()
         assert comfy.memory_management.cat_gathered(views, gathered) is None
+        assert torch.equal(gathered, before)
         assert all(torch.equal(v.dequantize(), w.dequantize()) for v, w in zip(views, mixed))
     # Different codebooks for the same bit width.
     cb_a = torch.linspace(-1.0, 1.0, 8)
@@ -286,12 +294,16 @@ def test_cat_gathered_declines_incompatible_weights():
         QuantizedTensor.from_float(torch.randn(128, 512), "AsymW4A8Int8Layout", bits=3, codebook_tensor=cb_b),
     ]
     views, gathered = _pack_gathered(mixed_cb)
+    before = gathered.clone()
     assert comfy.memory_management.cat_gathered(views, gathered) is None
+    assert torch.equal(gathered, before)
     assert all(torch.equal(v.dequantize(), w.dequantize()) for v, w in zip(views, mixed_cb))
     # Asymmetric correction tensor is (groups, N), not per-row along dim 0 even when groups == N.
     asym = [QuantizedTensor.from_float(torch.randn(16, 256), "AsymW4A8Int8Layout", bits=4, symmetric=False) for _ in range(2)]
     views, gathered = _pack_gathered(asym)
+    before = gathered.clone()
     assert comfy.memory_management.cat_gathered(views, gathered) is None
+    assert torch.equal(gathered, before)
     assert all(torch.equal(v.dequantize(), w.dequantize()) for v, w in zip(views, asym))
     # Out of order.
     _, views, gathered = _gathered("TensorWiseINT8Layout", (128, 128), 512, per_channel=True)
