@@ -300,6 +300,47 @@ python main.py
 The full list of launch options is documented at
 [docs.comfy.org/development/comfyui-server/startup-flags](https://docs.comfy.org/development/comfyui-server/startup-flags).
 
+### Docker Compose (NVIDIA, Linux x86_64)
+
+This deployment builds ComfyUI into a versioned image using a digest-pinned
+PyTorch/CUDA base image. It requires Docker Compose v2 and the NVIDIA Container
+Toolkit on the host. Check out the exact ComfyUI release or commit you want to run,
+then copy `.env.example` to `.env` and set `COMFYUI_VERSION` to that same release
+tag or full commit SHA.
+
+Create a local model-path configuration from the example, then build and start with
+the NVIDIA override:
+
+```
+cp -n .env.example .env
+cp -n extra_model_paths.yaml.example extra_model_paths.yaml
+docker compose -f compose.yaml -f compose.nvidia.yaml up -d --build
+```
+
+The image includes ComfyUI and its Python dependencies. The Compose service keeps
+models, input files, output files, the user directory (including workflows and
+settings), and `extra_model_paths.yaml` outside the image so they survive rebuilds.
+`docker compose down` stops the service without removing this data.
+
+The service binds to `127.0.0.1:8188` by default. Keep this loopback binding when
+using a host-local reverse proxy that provides TLS and authentication; ComfyUI does
+not provide authentication by default. For a trusted private network, set
+`COMFYUI_BIND_ADDRESS` in `.env` to the server's private address and restrict access
+with the host firewall. Do not expose the unauthenticated service directly to the
+internet.
+
+To check the merged Compose configuration before starting the service, run:
+
+```
+docker compose -f compose.yaml -f compose.nvidia.yaml config --quiet
+```
+
+For updates, check out a new release or commit, update `COMFYUI_VERSION`, and rebuild
+with `docker compose -f compose.yaml -f compose.nvidia.yaml up -d --build`. Custom
+nodes and their dependencies should be added to a derived image so the deployment
+remains reproducible. Use a new version tag for each revision; do not rebuild or
+retag an image that is already in use.
+
 ### For AMD cards not officially supported by ROCm
 
 Try running it with this command if you have issues:
