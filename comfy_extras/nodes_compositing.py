@@ -128,18 +128,18 @@ class PorterDuffImageComposite(io.ComfyNode):
 
     @classmethod
     def execute(cls, source: torch.Tensor, source_alpha: torch.Tensor, destination: torch.Tensor, destination_alpha: torch.Tensor, mode) -> io.NodeOutput:
-        batch_size = min(len(source), len(source_alpha), len(destination), len(destination_alpha))
+        batch_size = max(len(source), len(source_alpha), len(destination), len(destination_alpha))
         out_images = []
         out_alphas = []
 
         for i in range(batch_size):
-            src_image = source[i]
-            dst_image = destination[i]
+            src_image = source[i % len(source)]
+            dst_image = destination[i % len(destination)]
 
             assert src_image.shape[2] == dst_image.shape[2] # inputs need to have same number of channels
 
-            src_alpha = source_alpha[i].unsqueeze(2)
-            dst_alpha = destination_alpha[i].unsqueeze(2)
+            src_alpha = source_alpha[i % len(source_alpha)].unsqueeze(2)
+            dst_alpha = destination_alpha[i % len(destination_alpha)].unsqueeze(2)
 
             if dst_alpha.shape[:2] != dst_image.shape[:2]:
                 upscale_input = dst_alpha.unsqueeze(0).permute(0, 3, 1, 2)
