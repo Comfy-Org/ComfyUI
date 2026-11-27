@@ -1,3 +1,4 @@
+import contextlib
 import json
 import torch
 from enum import Enum
@@ -39,6 +40,7 @@ import comfy.utils
 import comfy.checkpoint_convert
 import comfy.ops
 import comfy.model_prefetch
+import comfy.multigpu
 import comfy.storage
 
 from . import clip_vision
@@ -535,6 +537,7 @@ class VAE:
         self.crop_input = True
         self.handles_tiling = False
         self.format_encoded = None
+        self.multigpu_clones = {}
 
         self.audio_sample_rate = 44100
 
@@ -1227,6 +1230,7 @@ class VAE:
         n.device = self.device
         n.vae_dtype = self.vae_dtype
         n.output_device = self.output_device
+        n.multigpu_clones = {d: c.clone() for d, c in self.multigpu_clones.items()}
         if hasattr(self, "conv_out_channels"):
             n.conv_out_channels = self.conv_out_channels
         if hasattr(self, "audio_sample_rate_output"):
@@ -1275,11 +1279,45 @@ class VAE:
     def vae_output_dtype(self):
         return model_management.intermediate_dtype()
 
+    @contextlib.contextmanager
+    def _multigpu_session(self, memory_used: int):
+        active_vaes = [self] + list(self.multigpu_clones.values())
+        patchers = [v.patcher for v in active_vaes]
+        with comfy.model_prefetch.pause_malloc_graph():
+            model_management.load_models_gpu(patchers, memory_required=memory_used, force_full_load=self.disable_offload)
+        pool = comfy.multigpu.MultiGPUThreadPool([v.device for v in active_vaes])
+        entered = []
+        try:
+            for p in patchers:
+                with model_management.cuda_device_context(p.load_device):
+                    p.pre_run()
+                entered.append(p)
+            yield active_vaes, pool
+        finally:
+            pool.shutdown()
+            for p in entered:
+                with model_management.cuda_device_context(p.load_device):
+                    p.cleanup()
+
     def decode_tiled_(self, samples, tile_x=64, tile_y=64, overlap = 16):
         steps = samples.shape[0] * comfy.utils.get_tiled_scale_steps(samples.shape[3], samples.shape[2], tile_x, tile_y, overlap)
         steps += samples.shape[0] * comfy.utils.get_tiled_scale_steps(samples.shape[3], samples.shape[2], tile_x // 2, tile_y * 2, overlap)
         steps += samples.shape[0] * comfy.utils.get_tiled_scale_steps(samples.shape[3], samples.shape[2], tile_x * 2, tile_y // 2, overlap)
         pbar = comfy.utils.ProgressBar(steps)
+
+        if self.multigpu_clones:
+            memory_used = self.memory_used_decode(self._tile_bounded_shape(samples.shape, tile_x * 2, tile_y * 2, None), self.vae_dtype)
+            with self._multigpu_session(memory_used) as (active_vaes, pool):
+                functions = {
+                    v.device: (lambda a, _v=v: _v.first_stage_model.decode(a.to(_v.vae_dtype).to(_v.device)).to(dtype=_v.vae_output_dtype()))
+                    for v in active_vaes
+                }
+                output = self.process_output(
+                    (comfy.multigpu.tiled_scale_multidim_multigpu(samples, functions, tile=(tile_y * 2, tile_x // 2), overlap=overlap, upscale_amount=self.upscale_ratio, out_channels=self.output_channels, output_device=self.output_device, pbar=pbar, pool=pool) +
+                     comfy.multigpu.tiled_scale_multidim_multigpu(samples, functions, tile=(tile_y // 2, tile_x * 2), overlap=overlap, upscale_amount=self.upscale_ratio, out_channels=self.output_channels, output_device=self.output_device, pbar=pbar, pool=pool) +
+                     comfy.multigpu.tiled_scale_multidim_multigpu(samples, functions, tile=(tile_y, tile_x), overlap=overlap, upscale_amount=self.upscale_ratio, out_channels=self.output_channels, output_device=self.output_device, pbar=pbar, pool=pool))
+                    / 3.0)
+                return output
 
         decode_fn = lambda a: self.first_stage_model.decode(a.to(self.vae_dtype).to(self.device)).to(dtype=self.vae_output_dtype())
         output = self.process_output(
@@ -1291,15 +1329,34 @@ class VAE:
 
     def decode_tiled_1d(self, samples, tile_x=256, overlap=32):
         if samples.ndim == 3:
+            memory_shape = samples.shape
             decode_fn = lambda a: self.first_stage_model.decode(a.to(self.vae_dtype).to(self.device)).to(dtype=self.vae_output_dtype())
+            clone_decode_fn_factory = lambda v: (lambda a, _v=v: _v.first_stage_model.decode(a.to(_v.vae_dtype).to(_v.device)).to(dtype=_v.vae_output_dtype()))
         else:
             og_shape = samples.shape
+            memory_shape = og_shape
             samples = samples.reshape((og_shape[0], og_shape[1] * og_shape[2], -1))
             decode_fn = lambda a: self.first_stage_model.decode(a.reshape((-1, og_shape[1], og_shape[2], a.shape[-1])).to(self.vae_dtype).to(self.device)).to(dtype=self.vae_output_dtype())
+            clone_decode_fn_factory = lambda v: (lambda a, _v=v: _v.first_stage_model.decode(a.reshape((-1, og_shape[1], og_shape[2], a.shape[-1])).to(_v.vae_dtype).to(_v.device)).to(dtype=_v.vae_output_dtype()))
+
+        if self.multigpu_clones:
+            memory_used = self.memory_used_decode(self._tile_bounded_shape(memory_shape, tile_x, None, None), self.vae_dtype)
+            with self._multigpu_session(memory_used) as (active_vaes, pool):
+                functions = {v.device: clone_decode_fn_factory(v) for v in active_vaes}
+                return self.process_output(comfy.multigpu.tiled_scale_multidim_multigpu(samples, functions, tile=(tile_x,), overlap=overlap, upscale_amount=self.upscale_ratio, out_channels=self.output_channels, output_device=self.output_device, pool=pool))
 
         return self.process_output(comfy.utils.tiled_scale_multidim(samples, decode_fn, tile=(tile_x,), overlap=overlap, upscale_amount=self.upscale_ratio, out_channels=self.output_channels, output_device=self.output_device))
 
     def decode_tiled_3d(self, samples, tile_t=999, tile_x=32, tile_y=32, overlap=(1, 8, 8)):
+        if self.multigpu_clones:
+            memory_used = self.memory_used_decode(self._tile_bounded_shape(samples.shape, tile_x, tile_y, tile_t), self.vae_dtype)
+            with self._multigpu_session(memory_used) as (active_vaes, pool):
+                functions = {
+                    v.device: (lambda a, _v=v: _v.first_stage_model.decode(a.to(_v.vae_dtype).to(_v.device)).to(dtype=_v.vae_output_dtype()))
+                    for v in active_vaes
+                }
+                return self.process_output(comfy.multigpu.tiled_scale_multidim_multigpu(samples, functions, tile=(tile_t, tile_x, tile_y), overlap=overlap, upscale_amount=self.upscale_ratio, out_channels=self.output_channels, index_formulas=self.upscale_index_formula, output_device=self.output_device, pool=pool))
+
         decode_fn = lambda a: self.first_stage_model.decode(a.to(self.vae_dtype).to(self.device)).to(dtype=self.vae_output_dtype())
         return self.process_output(comfy.utils.tiled_scale_multidim(samples, decode_fn, tile=(tile_t, tile_x, tile_y), overlap=overlap, upscale_amount=self.upscale_ratio, out_channels=self.output_channels, index_formulas=self.upscale_index_formula, output_device=self.output_device))
 
@@ -1313,6 +1370,19 @@ class VAE:
         steps += pixel_samples.shape[0] * comfy.utils.get_tiled_scale_steps(pixel_samples.shape[3], pixel_samples.shape[2], tile_x * 2, tile_y // 2, overlap)
         pbar = comfy.utils.ProgressBar(steps)
 
+        if self.multigpu_clones:
+            memory_used = self.memory_used_encode(self._tile_bounded_shape(pixel_samples.shape, tile_x * 2, tile_y * 2, None), self.vae_dtype)
+            with self._multigpu_session(memory_used) as (active_vaes, pool):
+                functions = {
+                    v.device: (lambda a, _v=v: _v.first_stage_model.encode((_v.process_input(a)).to(_v.vae_dtype).to(_v.device)).to(dtype=_v.vae_output_dtype()))
+                    for v in active_vaes
+                }
+                samples = comfy.multigpu.tiled_scale_multidim_multigpu(pixel_samples, functions, tile=(tile_y, tile_x), overlap=overlap, upscale_amount=(1/self.downscale_ratio), out_channels=self.latent_channels, output_device=self.output_device, pbar=pbar, pool=pool)
+                samples += comfy.multigpu.tiled_scale_multidim_multigpu(pixel_samples, functions, tile=(tile_y * 2, tile_x // 2), overlap=overlap, upscale_amount=(1/self.downscale_ratio), out_channels=self.latent_channels, output_device=self.output_device, pbar=pbar, pool=pool)
+                samples += comfy.multigpu.tiled_scale_multidim_multigpu(pixel_samples, functions, tile=(tile_y // 2, tile_x * 2), overlap=overlap, upscale_amount=(1/self.downscale_ratio), out_channels=self.latent_channels, output_device=self.output_device, pbar=pbar, pool=pool)
+                samples /= 3.0
+                return samples
+
         encode_fn = lambda a: self.first_stage_model.encode((self.process_input(a)).to(self.vae_dtype).to(self.device)).to(dtype=self.vae_output_dtype())
         samples = comfy.utils.tiled_scale(pixel_samples, encode_fn, tile_x, tile_y, overlap, upscale_amount = (1/self.downscale_ratio), out_channels=self.latent_channels, output_device=self.output_device, pbar=pbar)
         samples += comfy.utils.tiled_scale(pixel_samples, encode_fn, tile_x * 2, tile_y // 2, overlap, upscale_amount = (1/self.downscale_ratio), out_channels=self.latent_channels, output_device=self.output_device, pbar=pbar)
@@ -1323,6 +1393,7 @@ class VAE:
     def encode_tiled_1d(self, samples, tile_x=256 * 2048, overlap=64 * 2048):
         if self.latent_dim == 1:
             encode_fn = lambda a: self.first_stage_model.encode((self.process_input(a)).to(self.vae_dtype).to(self.device)).to(dtype=self.vae_output_dtype())
+            clone_encode_fn_factory = lambda v: (lambda a, _v=v: _v.first_stage_model.encode((_v.process_input(a)).to(_v.vae_dtype).to(_v.device)).to(dtype=_v.vae_output_dtype()))
             out_channels = self.latent_channels
             upscale_amount = 1 / self.downscale_ratio
         else:
@@ -1332,14 +1403,30 @@ class VAE:
             overlap = overlap // extra_channel_size
             upscale_amount = 1 / self.downscale_ratio
             encode_fn = lambda a: self.first_stage_model.encode((self.process_input(a)).to(self.vae_dtype).to(self.device)).reshape(1, out_channels, -1).to(dtype=self.vae_output_dtype())
+            clone_encode_fn_factory = lambda v: (lambda a, _v=v: _v.first_stage_model.encode((_v.process_input(a)).to(_v.vae_dtype).to(_v.device)).reshape(1, out_channels, -1).to(dtype=_v.vae_output_dtype()))
 
-        out = comfy.utils.tiled_scale_multidim(samples, encode_fn, tile=(tile_x,), overlap=overlap, upscale_amount=upscale_amount, out_channels=out_channels, output_device=self.output_device)
+        if self.multigpu_clones:
+            memory_used = self.memory_used_encode(self._tile_bounded_shape(samples.shape, tile_x, None, None), self.vae_dtype)
+            with self._multigpu_session(memory_used) as (active_vaes, pool):
+                functions = {v.device: clone_encode_fn_factory(v) for v in active_vaes}
+                out = comfy.multigpu.tiled_scale_multidim_multigpu(samples, functions, tile=(tile_x,), overlap=overlap, upscale_amount=upscale_amount, out_channels=out_channels, output_device=self.output_device, pool=pool)
+        else:
+            out = comfy.utils.tiled_scale_multidim(samples, encode_fn, tile=(tile_x,), overlap=overlap, upscale_amount=upscale_amount, out_channels=out_channels, output_device=self.output_device)
         if self.latent_dim == 1:
             return out
         else:
             return out.reshape(samples.shape[0], self.latent_channels, extra_channel_size, -1)
 
     def encode_tiled_3d(self, samples, tile_t=9999, tile_x=512, tile_y=512, overlap=(1, 64, 64)):
+        if self.multigpu_clones:
+            memory_used = self.memory_used_encode(self._tile_bounded_shape(samples.shape, tile_x, tile_y, tile_t), self.vae_dtype)
+            with self._multigpu_session(memory_used) as (active_vaes, pool):
+                functions = {
+                    v.device: (lambda a, _v=v: _v.first_stage_model.encode((_v.process_input(a)).to(_v.vae_dtype).to(_v.device)).to(dtype=_v.vae_output_dtype()))
+                    for v in active_vaes
+                }
+                return comfy.multigpu.tiled_scale_multidim_multigpu(samples, functions, tile=(tile_t, tile_x, tile_y), overlap=overlap, upscale_amount=self.downscale_ratio, out_channels=self.latent_channels, downscale=True, index_formulas=self.downscale_index_formula, output_device=self.output_device, pool=pool)
+
         encode_fn = lambda a: self.first_stage_model.encode((self.process_input(a)).to(self.vae_dtype).to(self.device)).to(dtype=self.vae_output_dtype())
         return comfy.utils.tiled_scale_multidim(samples, encode_fn, tile=(tile_t, tile_x, tile_y), overlap=overlap, upscale_amount=self.downscale_ratio, out_channels=self.latent_channels, downscale=True, index_formulas=self.downscale_index_formula, output_device=self.output_device)
 
@@ -1371,40 +1458,66 @@ class VAE:
 
         with model_management.cuda_device_context(self.device):
             try:
-                memory_used = self.memory_used_decode(samples_in.shape, self.vae_dtype)
-                with comfy.model_prefetch.pause_malloc_graph():
-                    model_management.load_models_gpu([self.patcher], memory_required=memory_used, force_full_load=self.disable_offload)
-                free_memory = self.patcher.get_free_memory(self.device)
-                batch_number = int(free_memory / memory_used)
-                batch_number = max(1, batch_number)
+                if self.multigpu_clones and samples_in.shape[0] > 1:
+                    memory_used = self.memory_used_decode(samples_in[:1].shape, self.vae_dtype)
+                    with self._multigpu_session(memory_used) as (active_vaes, pool):
+                        free_memory = min(v.patcher.get_free_memory(v.device) for v in active_vaes)
+                        if getattr(self.first_stage_model, "comfy_decode_estimate_is_reliable", False) and memory_used > free_memory:
+                            logging.info("VAE decode needs more than the free VRAM; tiling directly.")
+                            raise model_management.OOM_EXCEPTION(
+                                "decode estimate exceeds free memory; going straight to tiled"
+                            )
+                        batch_number = max(1, min(int(free_memory / max(1, memory_used)), samples_in.shape[0] // len(active_vaes)))
+                        ranges = [(x, min(x + batch_number, samples_in.shape[0])) for x in range(0, samples_in.shape[0], batch_number)]
 
-                # A VAE with a reliable estimate skips the doomed untiled attempt.
-                if getattr(self.first_stage_model, "comfy_decode_estimate_is_reliable", False):
-                    if memory_used > free_memory:
-                        logging.info("VAE decode needs more than the free VRAM; tiling directly.")
-                        raise model_management.OOM_EXCEPTION(
-                            "decode estimate exceeds free memory; going straight to tiled"
-                        )
+                        def _decode_range(rng, _v):
+                            x0, x1 = rng
+                            samples = samples_in[x0:x1].to(device=_v.device, dtype=_v.vae_dtype)
+                            return _v.first_stage_model.decode(samples, **vae_options).to(device=self.output_device, dtype=self.vae_output_dtype(), copy=True)
 
-                # Pre-allocate output for VAEs that support direct buffer writes
-                preallocated = False
-                if getattr(self.first_stage_model, 'comfy_has_chunked_io', False):
+                        range_fns = {v.device: (lambda r, _v=v: _decode_range(r, _v)) for v in active_vaes}
+                        for (x0, x1), out in zip(ranges, pool.map_ordered(ranges, range_fns)):
+                            if pixel_samples is None:
+                                with comfy.model_prefetch.pause_malloc_graph():
+                                    pixel_samples = torch.empty((samples_in.shape[0],) + tuple(out.shape[1:]), device=self.output_device, dtype=self.vae_output_dtype())
+                            pixel_samples[x0:x1].copy_(out)
+                            del out
+                            self.process_output(pixel_samples[x0:x1])
+                else:
+                    memory_used = self.memory_used_decode(samples_in.shape, self.vae_dtype)
                     with comfy.model_prefetch.pause_malloc_graph():
-                        pixel_samples = torch.empty(self.first_stage_model.decode_output_shape(samples_in.shape, **vae_options), device=self.output_device, dtype=self.vae_output_dtype())
-                    preallocated = True
+                        model_management.load_models_gpu([self.patcher], memory_required=memory_used, force_full_load=self.disable_offload)
+                    free_memory = self.patcher.get_free_memory(self.device)
+                    batch_number = int(free_memory / memory_used)
+                    batch_number = max(1, batch_number)
 
-                for x in range(0, samples_in.shape[0], batch_number):
-                    samples = samples_in[x:x + batch_number].to(device=self.device, dtype=self.vae_dtype)
-                    if preallocated:
-                        self.first_stage_model.decode(samples, output_buffer=pixel_samples[x:x+batch_number], **vae_options)
-                    else:
-                        out = self.first_stage_model.decode(samples, **vae_options).to(device=self.output_device, dtype=self.vae_output_dtype(), copy=True)
-                        if pixel_samples is None:
-                            with comfy.model_prefetch.pause_malloc_graph():
-                                pixel_samples = torch.empty((samples_in.shape[0],) + tuple(out.shape[1:]), device=self.output_device, dtype=self.vae_output_dtype())
-                        pixel_samples[x:x+batch_number].copy_(out)
-                        del out
-                    self.process_output(pixel_samples[x:x+batch_number])
+                    # A VAE with a reliable estimate skips the doomed untiled attempt.
+                    if getattr(self.first_stage_model, "comfy_decode_estimate_is_reliable", False):
+                        if memory_used > free_memory:
+                            logging.info("VAE decode needs more than the free VRAM; tiling directly.")
+                            raise model_management.OOM_EXCEPTION(
+                                "decode estimate exceeds free memory; going straight to tiled"
+                            )
+
+                    # Pre-allocate output for VAEs that support direct buffer writes
+                    preallocated = False
+                    if getattr(self.first_stage_model, 'comfy_has_chunked_io', False):
+                        with comfy.model_prefetch.pause_malloc_graph():
+                            pixel_samples = torch.empty(self.first_stage_model.decode_output_shape(samples_in.shape, **vae_options), device=self.output_device, dtype=self.vae_output_dtype())
+                        preallocated = True
+
+                    for x in range(0, samples_in.shape[0], batch_number):
+                        samples = samples_in[x:x + batch_number].to(device=self.device, dtype=self.vae_dtype)
+                        if preallocated:
+                            self.first_stage_model.decode(samples, output_buffer=pixel_samples[x:x+batch_number], **vae_options)
+                        else:
+                            out = self.first_stage_model.decode(samples, **vae_options).to(device=self.output_device, dtype=self.vae_output_dtype(), copy=True)
+                            if pixel_samples is None:
+                                with comfy.model_prefetch.pause_malloc_graph():
+                                    pixel_samples = torch.empty((samples_in.shape[0],) + tuple(out.shape[1:]), device=self.output_device, dtype=self.vae_output_dtype())
+                            pixel_samples[x:x+batch_number].copy_(out)
+                            del out
+                        self.process_output(pixel_samples[x:x+batch_number])
             except Exception as e:
                 model_management.raise_non_oom(e)
                 logging.warning("Warning: Ran out of memory when regular VAE decoding, retrying with tiled VAE decoding.")
@@ -1528,23 +1641,46 @@ class VAE:
 
         with model_management.cuda_device_context(self.device):
             try:
-                memory_used = self.memory_used_encode(pixel_samples.shape, self.vae_dtype)
-                model_management.load_models_gpu([self.patcher], memory_required=memory_used, force_full_load=self.disable_offload)
-                free_memory = self.patcher.get_free_memory(self.device)
-                batch_number = int(free_memory / max(1, memory_used))
-                batch_number = max(1, batch_number)
-                samples = None
-                for x in range(0, pixel_samples.shape[0], batch_number):
-                    pixels_in = self.process_input(pixel_samples[x:x + batch_number]).to(self.vae_dtype)
-                    if getattr(self.first_stage_model, 'comfy_has_chunked_io', False):
-                        out = self.first_stage_model.encode(pixels_in, device=self.device)
-                    else:
-                        pixels_in = pixels_in.to(self.device)
-                        out = self.first_stage_model.encode(pixels_in)
-                    out = out.to(self.output_device).to(dtype=self.vae_output_dtype())
-                    if samples is None:
-                        samples = torch.empty((pixel_samples.shape[0],) + tuple(out.shape[1:]), device=self.output_device, dtype=self.vae_output_dtype())
-                    samples[x:x + batch_number] = out
+                if self.multigpu_clones and pixel_samples.shape[0] > 1:
+                    memory_used = self.memory_used_encode(pixel_samples[:1].shape, self.vae_dtype)
+                    with self._multigpu_session(memory_used) as (active_vaes, pool):
+                        free_memory = min(v.patcher.get_free_memory(v.device) for v in active_vaes)
+                        batch_number = max(1, min(int(free_memory / max(1, memory_used)), pixel_samples.shape[0] // len(active_vaes)))
+                        ranges = [(x, min(x + batch_number, pixel_samples.shape[0])) for x in range(0, pixel_samples.shape[0], batch_number)]
+                        samples = None
+
+                        def _encode_range(rng, _v):
+                            x0, x1 = rng
+                            pixels_in = _v.process_input(pixel_samples[x0:x1]).to(_v.vae_dtype)
+                            if getattr(_v.first_stage_model, "comfy_has_chunked_io", False):
+                                out = _v.first_stage_model.encode(pixels_in, device=_v.device)
+                            else:
+                                out = _v.first_stage_model.encode(pixels_in.to(_v.device))
+                            return out.to(self.output_device).to(dtype=self.vae_output_dtype())
+
+                        range_fns = {v.device: (lambda r, _v=v: _encode_range(r, _v)) for v in active_vaes}
+                        for (x0, x1), out in zip(ranges, pool.map_ordered(ranges, range_fns)):
+                            if samples is None:
+                                samples = torch.empty((pixel_samples.shape[0],) + tuple(out.shape[1:]), device=self.output_device, dtype=self.vae_output_dtype())
+                            samples[x0:x1] = out
+                else:
+                    memory_used = self.memory_used_encode(pixel_samples.shape, self.vae_dtype)
+                    model_management.load_models_gpu([self.patcher], memory_required=memory_used, force_full_load=self.disable_offload)
+                    free_memory = self.patcher.get_free_memory(self.device)
+                    batch_number = int(free_memory / max(1, memory_used))
+                    batch_number = max(1, batch_number)
+                    samples = None
+                    for x in range(0, pixel_samples.shape[0], batch_number):
+                        pixels_in = self.process_input(pixel_samples[x:x + batch_number]).to(self.vae_dtype)
+                        if getattr(self.first_stage_model, 'comfy_has_chunked_io', False):
+                            out = self.first_stage_model.encode(pixels_in, device=self.device)
+                        else:
+                            pixels_in = pixels_in.to(self.device)
+                            out = self.first_stage_model.encode(pixels_in)
+                        out = out.to(self.output_device).to(dtype=self.vae_output_dtype())
+                        if samples is None:
+                            samples = torch.empty((pixel_samples.shape[0],) + tuple(out.shape[1:]), device=self.output_device, dtype=self.vae_output_dtype())
+                        samples[x:x + batch_number] = out
 
             except Exception as e:
                 model_management.raise_non_oom(e)
