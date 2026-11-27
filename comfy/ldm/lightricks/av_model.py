@@ -459,6 +459,7 @@ class LTXAVModel(LTXVModel):
             cross_attention_adaln=cross_attention_adaln,
             ff_bias=ff_bias,
             use_prompt_adaln_single=use_prompt_adaln_single,
+            apply_gated_attention=apply_gated_attention,
             dtype=dtype,
             device=device,
             operations=operations,
