@@ -511,12 +511,12 @@ class PrunaPVideoUpscaleNode(IO.ComfyNode):
                     options=UPSCALE_FPS_OPTIONS,
                     default="source",
                     tooltip="Output frame rate. 'source' keeps the rate of the video, up to 60. "
-                    "A higher rate is interpolated. Output above 30 fps costs twice as much.",
+                    "A higher rate is interpolated. Output above 30 fps costs twice as much, except with turbo.",
                 ),
                 IO.Boolean.Input(
                     "turbo",
                     default=False,
-                    tooltip="Faster upscale with softer detail, at the same price.",
+                    tooltip="Faster upscale with softer detail, at a lower price.",
                 ),
             ],
             outputs=[
@@ -529,16 +529,19 @@ class PrunaPVideoUpscaleNode(IO.ComfyNode):
             ],
             is_api_node=True,
             price_badge=IO.PriceBadge(
-                depends_on=IO.PriceBadgeDepends(widgets=["target", "fps"]),
+                depends_on=IO.PriceBadgeDepends(widgets=["target", "fps", "turbo"]),
                 expr="""
                 (
-                  $rates := $now() < "2026-11-12T17:00:00.000Z"
-                    ? {"720p": 0.00715, "1080p": 0.0143, "2k": 0.0286, "4k": 0.0572}
+                  $turbo := widgets.turbo = true and $now() >= "2026-11-30T17:00:00.000Z";
+                  $rates := $turbo
+                    ? {"720p": 0.005005, "1080p": 0.01001, "2k": 0.02002, "4k": 0.04004}
                     : {"720p": 0.0143, "1080p": 0.0286, "2k": 0.0572, "4k": 0.1144};
                   $rate := $lookup($rates, $string(widgets.target));
-                  widgets.fps = "source"
-                    ? {"type":"range_usd","min_usd": $rate,"max_usd": $rate * 2,"format": {"suffix": "/s"}}
-                    : {"type":"usd","usd": $number(widgets.fps) > 30 ? $rate * 2 : $rate,"format": {"suffix": "/s"}}
+                  $turbo
+                    ? {"type":"usd","usd": $rate,"format": {"suffix": "/s"}}
+                    : widgets.fps = "source"
+                      ? {"type":"range_usd","min_usd": $rate,"max_usd": $rate * 2,"format": {"suffix": "/s"}}
+                      : {"type":"usd","usd": $number(widgets.fps) > 30 ? $rate * 2 : $rate,"format": {"suffix": "/s"}}
                 )
                 """,
             ),

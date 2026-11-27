@@ -15,6 +15,7 @@ import comfy.model_prefetch  # noqa: E402
 import comfy.ops  # noqa: E402
 from comfy.quant_ops import QuantizedTensor  # noqa: E402
 from comfy.text_encoders.llama import MLP, RMSNorm  # noqa: E402
+from comfy.text_encoders.token_stream import stream_generated_tokens  # noqa: E402
 
 
 def _mlp(merged):
@@ -474,7 +475,11 @@ def test_greedy_mtp_matches_plain_greedy(monkeypatch, image_prompt):
     plain = model.generate(embeds.clone(), do_sample=False, max_length=40, mtp=False, position_ids=positions)
     for mtp in (True, "2", "3", "4", "5", "tree2s1", "tree2s2", "tree3s1", "tree4s1m8"):
         discards.clear()
-        assert model.generate(embeds.clone(), do_sample=False, max_length=40, mtp=mtp, position_ids=positions) == plain
+        prefixes = []
+        with stream_generated_tokens(lambda ids: prefixes.append(ids.copy())):
+            assert model.generate(embeds.clone(), do_sample=False, max_length=40, mtp=mtp, position_ids=positions) == plain
+        assert prefixes[0] == plain[:1] and prefixes[-1] == plain
+        assert all(ids == plain[:len(ids)] for ids in prefixes)
         assert discards and min(discards) < max(discards)  # partial acceptance happened
 
 

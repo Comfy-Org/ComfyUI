@@ -1,7 +1,48 @@
-from comfy_api.latest import ComfyExtension, io
+from concurrent.futures import ThreadPoolExecutor
+from time import monotonic
 from typing_extensions import override
 
+from comfy.text_encoders.token_stream import stream_generated_tokens
+from comfy_api.latest import ComfyExtension, io
+from server import PromptServer
+
 VIDEO_TOOLTIP = "Video frames as image batch. Assumed to be 24 FPS; subsampled to the model's frame rate internally."
+
+
+def _generate_text(clip, tokens, node_id, **sampling):
+    server = getattr(PromptServer, "instance", None)
+    client_id = server.client_id if server is not None and node_id is not None else None
+    if client_id is None:
+        return clip.decode(clip.generate(tokens, **sampling))
+
+    def decode_and_send(ids, final=False):
+        text = clip.decode(ids)
+        server.send_progress_text(text if final else text.rstrip("\ufffd"), node_id, client_id)
+        return text
+
+    with ThreadPoolExecutor(max_workers=1) as decoder:
+        pending = None
+        next_preview = 0.0
+
+        def preview_tokens(ids):
+            nonlocal pending, next_preview
+            now = monotonic()
+            if now < next_preview:
+                return
+            next_preview = now + 0.1
+            if pending is not None:
+                if not pending.done():
+                    return
+                pending.result()
+            # Generation keeps appending to this list while the worker decodes.
+            pending = decoder.submit(decode_and_send, ids[:])
+
+        with stream_generated_tokens(preview_tokens):
+            generated_ids = clip.generate(tokens, **sampling)
+        if pending is not None:
+            pending.result()
+        return decoder.submit(decode_and_send, generated_ids, final=True).result()
+
 
 class TextGenerateV2(io.ComfyNode):
     @classmethod
@@ -48,6 +89,7 @@ class TextGenerateV2(io.ComfyNode):
                 io.String.Output(display_name="generated_text"),
                 io.String.Output(display_name="thinking"),
             ],
+            hidden=[io.Hidden.unique_id],
         )
 
     @classmethod
@@ -71,8 +113,9 @@ class TextGenerateV2(io.ComfyNode):
         repetition_penalty = sampling_mode.get("repetition_penalty", 1.0)
         presence_penalty = sampling_mode.get("presence_penalty", 0.0)
 
-        generated_ids = clip.generate(
-            tokens,
+        node_id = cls.hidden.unique_id if cls.hidden else None
+        generated_text = _generate_text(
+            clip, tokens, node_id,
             do_sample=do_sample,
             max_length=max_length,
             temperature=temperature,
@@ -82,17 +125,15 @@ class TextGenerateV2(io.ComfyNode):
             repetition_penalty=repetition_penalty,
             presence_penalty=presence_penalty,
             seed=seed,
-            mtp=mtp
+            mtp=mtp,
         )
-
-        generated_text = clip.decode(generated_ids)
 
         # </think> ends reasoning; without one, reasoning opened by the output or prompt was cut off by max_length
         reasoning, sep, text = generated_text.partition("</think>")
         if not sep and not reasoning.lstrip().startswith("<think>"):
             if isinstance(tokens, dict):
                 tokens = next(iter(tokens.values()))
-            prompt_ids = [t[0] for t in tokens[-1] if isinstance(t, tuple) and isinstance(t[0], int)]
+            prompt_ids = tokens if isinstance(tokens[-1], int) else [t[0] for t in tokens[-1] if isinstance(t, tuple) and isinstance(t[0], int)]
             if not prompt.rstrip().endswith("<think>") and not clip.decode(prompt_ids[-4:]).rstrip().endswith("<think>"):
                 reasoning, text = "", generated_text
 

@@ -1,3 +1,7 @@
+from itertools import count
+from threading import Event, get_ident
+from types import SimpleNamespace
+
 import pytest
 import torch
 
@@ -10,8 +14,11 @@ import comfy.ops  # noqa: E402
 from comfy.text_encoders.flux import KleinTokenizer8B  # noqa: E402
 from comfy.text_encoders.llama import Ovis25_2B  # noqa: E402
 from comfy.text_encoders.ovis import OvisTokenizer  # noqa: E402
+from comfy.text_encoders.token_stream import report_generated_tokens  # noqa: E402
 from comfy.text_encoders.z_image import ZImageTokenizer  # noqa: E402
-from comfy_extras.nodes_textgen import TextGenerateV2  # noqa: E402
+from comfy_api.latest import io  # noqa: E402
+from comfy_extras import nodes_textgen  # noqa: E402
+from server import PromptServer  # noqa: E402
 
 PROMPT = "a red fox in the snow"
 OVIS = "<|im_start|>user\nDescribe the image by detailing the color, quantity, text, shape, size, texture, spatial relationships of the objects and background: {}<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
@@ -81,8 +88,49 @@ class RecordingClip:
 
 def test_generate_text_node_gets_the_chat_template(tokenizer):
     clip = RecordingClip(tokenizer)
-    TextGenerateV2.execute(clip, PROMPT, 8, {"sampling_mode": "off"})
+    nodes_textgen.TextGenerateV2.execute(clip, PROMPT, 8, {"sampling_mode": "off"})
     assert tokenizer.decode(clip.prompt_ids, skip_special_tokens=False) == CHAT.format(PROMPT) + NO_THINK, "Generate Text with its default inputs must reach the chat template"
+
+
+def test_generate_text_streams_decoded_prefix_and_flushes_final_text(tokenizer, monkeypatch):
+    clip = RecordingClip(tokenizer)
+    ids, _ = tokenize(tokenizer, "A🪼</think> Answer", llama_template="{}", min_length=1)
+    assert clip.decode(ids[:2]) == "A\ufffd"
+    previews = []
+    server = SimpleNamespace(client_id="client", send_progress_text=lambda *args: previews.append(args))
+    monkeypatch.setattr(PromptServer, "instance", server, raising=False)
+    monkeypatch.setattr(nodes_textgen, "monotonic", count().__next__)
+    node = nodes_textgen.TextGenerateV2.PREPARE_CLASS_CLONE({"hidden_inputs": {io.Hidden.unique_id: "42"}})
+
+    started, release = Event(), Event()
+    generation_thread = get_ident()
+    decode = clip.decode
+
+    def slow_decode(snapshot):
+        assert get_ident() != generation_thread
+        if not started.is_set():
+            started.set()
+            assert release.wait(5)
+        return decode(snapshot)
+
+    def generate(tokens, **kwargs):
+        generated = ids[:2]
+        report_generated_tokens(generated)
+        try:
+            assert started.wait(5)
+            for token in ids[2:]:
+                generated.append(token)
+                report_generated_tokens(generated)
+            assert not previews
+        finally:
+            release.set()
+        return generated
+
+    monkeypatch.setattr(clip, "decode", slow_decode)
+    monkeypatch.setattr(clip, "generate", generate)
+    result = node.execute(clip, PROMPT, 8, {"sampling_mode": "off"})
+    assert previews == [("A", "42", "client"), ("A🪼</think> Answer", "42", "client")]
+    assert result.args == ("Answer", "A🪼")
 
 
 def tiny_model(vocab_size):

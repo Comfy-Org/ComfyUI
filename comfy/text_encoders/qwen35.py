@@ -19,6 +19,7 @@ from comfy import sd1_clip
 import comfy.text_encoders.qwen_vl
 
 from .llama import SPEC_ROWS, BaseLlama, BaseGenerate, FixedKV, FixedKVCache, Int8FixedKVCache, Llama2_, MLP, RMSNorm, apply_penalty, apply_rope, penalty_active, precompute_freqs_cis, rope_matrix
+from .token_stream import report_generated_tokens
 
 
 @dataclass
@@ -1159,6 +1160,7 @@ class Qwen35(BaseLlama, BaseGenerate, torch.nn.Module):
             return commit, ranks
 
         try:
+            report_generated_tokens(ids)
             while len(ids) < max_length and ids[-1] not in stop_tokens:
                 with (comfy.model_prefetch.malloc_graph_scope(device) if compile_allocations else contextlib.nullcontext()):
                     commit, ranks = step()
@@ -1185,6 +1187,7 @@ class Qwen35(BaseLlama, BaseGenerate, torch.nn.Module):
                 if stop is not None:
                     del commit[stop + 1:]
                 ids.extend(commit)
+                report_generated_tokens(ids)
                 update_progress(len(commit))
         finally:
             console.close()
