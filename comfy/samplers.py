@@ -627,6 +627,13 @@ def sampling_function(model, x, timestep, uncond, cond, cond_scale, model_option
     return cfg_function(model, out[0], out[1], cond_scale, x, timestep, model_options=model_options, cond=cond, uncond=uncond_)
 
 
+def blend_masked_region(noisy, clean, denoise_mask, latent_mask):
+    """Blend a prediction with the conditioning latent as ``noisy * denoise_mask + clean * latent_mask``,
+    except that a fully conditioned position keeps ``clean`` exactly. The arithmetic form alone leaks a
+    non-finite prediction at a conditioned position through ``nan * 0`` and destroys the anchored latent."""
+    blended = noisy * denoise_mask + clean * latent_mask
+    return torch.where(latent_mask >= 1.0, clean, blended)
+
 class KSamplerX0Inpaint:
     def __init__(self, model, sigmas):
         self.inner_model = model
@@ -636,10 +643,10 @@ class KSamplerX0Inpaint:
             if "denoise_mask_function" in model_options:
                 denoise_mask = model_options["denoise_mask_function"](sigma, denoise_mask, extra_options={"model": self.inner_model, "sigmas": self.sigmas})
             latent_mask = 1. - denoise_mask
-            x = x * denoise_mask + self.inner_model.inner_model.scale_latent_inpaint(x=x, sigma=sigma, noise=self.noise, latent_image=self.latent_image, denoise_mask=denoise_mask) * latent_mask
+            x = blend_masked_region(x, self.inner_model.inner_model.scale_latent_inpaint(x=x, sigma=sigma, noise=self.noise, latent_image=self.latent_image, denoise_mask=denoise_mask), denoise_mask, latent_mask)
         out = self.inner_model(x, sigma, model_options=model_options, seed=seed)
         if denoise_mask is not None:
-            out = out * denoise_mask + self.latent_image * latent_mask
+            out = blend_masked_region(out, self.latent_image, denoise_mask, latent_mask)
         return out
 
 def simple_scheduler(model_sampling, steps):
