@@ -553,9 +553,19 @@ class PromptServer():
         @routes.post("/upload/mask")
         async def upload_mask(request):
             post = await request.post()
+            original_ref_json = post.get("original_ref")
+            if not original_ref_json:
+                return web.Response(status=400, text="original_ref is required")
+            if not isinstance(original_ref_json, str):
+                return web.Response(status=400, text="original_ref must be text")
+            try:
+                original_ref = json.loads(original_ref_json)
+            except json.JSONDecodeError:
+                return web.Response(status=400, text="original_ref must be valid JSON")
+            if not isinstance(original_ref, dict) or not isinstance(original_ref.get("filename"), str):
+                return web.Response(status=400, text="original_ref must contain a filename")
 
             def image_save_function(image, post, filepath):
-                original_ref = json.loads(post.get("original_ref"))
                 filename, output_dir = folder_paths.annotated_filepath(original_ref['filename'])
 
                 if not filename:
@@ -1167,8 +1177,27 @@ class PromptServer():
             json_data =  await request.json()
             json_data = self.trigger_on_prompt(json_data)
 
+            def bad_request(message):
+                error = {"type": "invalid_prompt", "message": message, "details": message, "extra_info": {}}
+                return web.json_response({"error": error, "node_errors": {}}, status=400)
+
+            if not isinstance(json_data, dict):
+                return bad_request("Request body must be an object")
+            if "prompt" in json_data:
+                prompt = json_data["prompt"]
+                if not isinstance(prompt, dict):
+                    return bad_request("prompt must be an object")
+                for node in prompt.values():
+                    if not isinstance(node, dict):
+                        return bad_request("Each prompt node must be an object")
+                    if "class_type" in node and not isinstance(node["class_type"], str):
+                        return bad_request("class_type must be a string")
+
             if "number" in json_data:
-                number = float(json_data['number'])
+                try:
+                    number = float(json_data['number'])
+                except (TypeError, ValueError):
+                    return bad_request("number must be numeric")
             else:
                 number = self.number
                 if "front" in json_data:
@@ -1178,7 +1207,6 @@ class PromptServer():
                 self.number += 1
 
             if "prompt" in json_data:
-                prompt = json_data["prompt"]
                 client_prompt_id = json_data.get("prompt_id")
                 if client_prompt_id is None:
                     # Absent or explicit null: the server mints the id.
@@ -1265,6 +1293,8 @@ class PromptServer():
                 json_data = await request.json()
             except json.JSONDecodeError:
                 json_data = {}
+            if not isinstance(json_data, dict):
+                return web.Response(status=400, text="Request body must be an object")
 
             # Check if a specific prompt_id was provided for targeted interruption
             prompt_id = json_data.get('prompt_id')
