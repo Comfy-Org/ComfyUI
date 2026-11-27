@@ -501,7 +501,7 @@ class SparseTensor(VarLenTensor):
         return layout
 
     def __cal_spatial_shape(self, coords):
-        return torch.Size((coords[:, 1:].max(0)[0] + 1).tolist())
+        return torch.Size((coords[:, 1:].long().max(0)[0] + 1).tolist())
 
     @property
     def shape(self) -> torch.Size:
