@@ -851,7 +851,7 @@ class Flux3(Flux2):
     }
 
     sampling_settings = {
-        "shift": 1.93586,  # mu = ln(6.93), the reference timestep shift
+        "shift": 2.77259,  # mu = ln(16), the reference timestep shift
     }
 
     supported_inference_dtypes = [torch.bfloat16, torch.float32]
