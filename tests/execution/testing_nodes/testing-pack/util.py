@@ -334,6 +334,24 @@ class TestMakeListNode:
                 result.append(kwargs[f"value{i}"])
         return (result,)
 
+@VariantSupport()
+class TestArrayValueEcho:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "values": ("ARRAY",),
+            },
+        }
+
+    RETURN_TYPES = ()
+    FUNCTION = "emit"
+    CATEGORY = "Testing/Lists"
+    OUTPUT_NODE = True
+
+    def emit(self, values):
+        return {"ui": {"arrays": [values]}}
+
 UTILITY_NODE_CLASS_MAPPINGS = {
     "TestAccumulateNode": TestAccumulateNode,
     "TestAccumulationHeadNode": TestAccumulationHeadNode,
@@ -347,6 +365,7 @@ UTILITY_NODE_CLASS_MAPPINGS = {
     "TestForLoopClose": TestForLoopClose,
     "TestIntMathOperation": TestIntMathOperation,
     "TestMakeListNode": TestMakeListNode,
+    "TestArrayValueEcho": TestArrayValueEcho,
 }
 UTILITY_NODE_DISPLAY_NAME_MAPPINGS = {
     "TestAccumulateNode": "Accumulate",
@@ -361,4 +380,5 @@ UTILITY_NODE_DISPLAY_NAME_MAPPINGS = {
     "TestForLoopClose": "For Loop Close",
     "TestIntMathOperation": "Int Math Operation",
     "TestMakeListNode": "Make List",
+    "TestArrayValueEcho": "Array Value Echo",
 }
