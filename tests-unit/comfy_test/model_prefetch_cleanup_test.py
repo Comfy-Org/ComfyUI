@@ -1,3 +1,5 @@
+from unittest.mock import Mock, call
+
 import pytest
 import torch
 
@@ -7,6 +9,85 @@ if not torch.cuda.is_available():
     cli_args.cpu = True
 
 import comfy.model_prefetch as model_prefetch  # noqa: E402
+
+
+def test_prefetch_scope_without_graph(monkeypatch):
+    monkeypatch.setattr(model_prefetch, "MALLOC_GRAPHS", {})
+    monkeypatch.setattr(model_prefetch, "MALLOC_GRAPH_BREAKS", 0)
+
+    model_prefetch.prefetch_queue_pop(
+        None, torch.device("cpu"), torch.nn.Module(), malloc_scope="block_42", malloc_close_scope=True,
+    )
+    model_prefetch.prefetch_queue_pop(None, torch.device("cpu"), None, malloc_scope="block")
+
+    assert model_prefetch.MALLOC_GRAPH_BREAKS == 0
+
+
+@pytest.mark.parametrize("queued", [False, True])
+@pytest.mark.parametrize("active", [False, True])
+@pytest.mark.parametrize("close_scope", [False, True])
+@pytest.mark.parametrize("broken", [False, True])
+def test_prefetch_closes_scope_before_opening_next(monkeypatch, queued, active, close_scope, broken):
+    graph = Mock(_comfy_active=active)
+    graph.iterate.return_value = broken
+    monkeypatch.setattr(model_prefetch, "MALLOC_GRAPHS", {model_prefetch.threading.get_ident(): graph})
+    monkeypatch.setattr(model_prefetch, "MALLOC_GRAPH_BREAKS", 0)
+    monkeypatch.setattr(model_prefetch, "pin_modules", lambda *args: (None, False))
+    module = torch.nn.Module()
+    queue = [None, module, None] if queued else None
+    core = Mock()
+
+    model_prefetch.prefetch_queue_pop(
+        queue, torch.device("cpu"), module, core=core,
+        malloc_scope="block_42", malloc_close_scope=close_scope,
+    )
+
+    expected = ([call(None)] if close_scope else []) + [call("block_42")] if active else []
+    assert graph.iterate.call_args_list == expected
+    assert model_prefetch.MALLOC_GRAPH_BREAKS == len(expected) * int(broken)
+    core.assert_called_once_with()
+    if queued:
+        assert len(queue) == 2
+
+
+@pytest.mark.parametrize("queued", [False, True])
+@pytest.mark.parametrize("close_scope", [False, True])
+def test_prefetch_drain_closes_only_one_scope(monkeypatch, queued, close_scope):
+    graph = Mock(_comfy_active=True)
+    graph.iterate.return_value = False
+    monkeypatch.setattr(model_prefetch, "MALLOC_GRAPHS", {model_prefetch.threading.get_ident(): graph})
+    queue = [None, None] if queued else None
+
+    model_prefetch.prefetch_queue_pop(
+        queue, torch.device("cpu"), None, malloc_scope="block", malloc_close_scope=close_scope,
+    )
+
+    graph.iterate.assert_called_once_with(None)
+
+
+@pytest.mark.parametrize("close_scope", [False, True])
+def test_prefetch_replay_closes_only_one_scope(monkeypatch, close_scope):
+    graph = Mock(_comfy_active=True)
+    graph.iterate.return_value = False
+    monkeypatch.setattr(model_prefetch, "MALLOC_GRAPHS", {model_prefetch.threading.get_ident(): graph})
+    monkeypatch.setattr(model_prefetch.args, "disable_cuda_graphs", False)
+    module = torch.nn.Module()
+    module._v_block = object()
+    replay = Mock()
+    module._comfy_graph = {"graph": replay, "signature": object()}
+    monkeypatch.setattr(model_prefetch, "GRAPH_CAPTURE_STREAMS", {torch.device("cuda:0"): object()})
+    monkeypatch.setattr(model_prefetch.comfy_aimdo.model_vbar, "vbar_fault", lambda block: object())
+    monkeypatch.setattr(model_prefetch.comfy_aimdo.model_vbar, "vbar_signature_compare", lambda *args: True)
+    core = Mock()
+
+    model_prefetch.prefetch_queue_pop(
+        [None, module, None], torch.device("cuda:0"), module, core=core, enable_graph=True,
+        malloc_scope="block_42", malloc_close_scope=close_scope,
+    )
+
+    graph.iterate.assert_called_once_with(None)
+    replay.replay.assert_called_once_with()
+    core.assert_not_called()
 
 
 class MTPHead(torch.nn.Module):

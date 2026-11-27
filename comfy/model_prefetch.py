@@ -67,6 +67,12 @@ def malloc_graph_scope(device):
 def malloc_graph_recording():
     return threading.get_ident() in MALLOC_GRAPHS
 
+def _warmup_blas(device):
+    with torch.cuda.device(device):
+        torch.cuda.current_blas_handle()
+        one = torch.empty((2, 2), device=device)
+        torch.addmm(one[0], one, one)
+
 def malloc_graph_begin(device):
     global MALLOC_GRAPH_USED
     if not malloc_graph_enabled(device):
@@ -74,6 +80,13 @@ def malloc_graph_begin(device):
     thread_id = threading.get_ident()
     graph = MALLOC_GRAPHS.get(thread_id)
     if graph is None:
+        # Keep PyTorch's persistent BLAS workspaces outside the allocation graph.
+        _warmup_blas(device)
+        capture_stream = GRAPH_CAPTURE_STREAMS.get(device)
+        if capture_stream is not None:
+            # CUDAGraph.reset() releases workspaces even when its stream is retained.
+            with torch.cuda.stream(capture_stream):
+                _warmup_blas(device)
         graph = comfy_aimdo.malloc_graph.record(
             comfy.model_management.current_stream(device), args.assert_graph_breaks
         )
@@ -223,13 +236,15 @@ def cleanup_prefetch_queues():
     if first_error is not None:
         raise first_error
 
-def prefetch_queue_pop(queue, device, module, dtype=None, core=None, enable_graph=False, generator=None, malloc_scope=None):
+def prefetch_queue_pop(queue, device, module, dtype=None, core=None, enable_graph=False, generator=None, malloc_scope=None, malloc_close_scope=False):
     malloc_graph = MALLOC_GRAPHS.get(threading.get_ident())
     if malloc_graph is not None and not malloc_graph._comfy_active:
         malloc_graph = None
     enable_graph = enable_graph and malloc_graph is not None and not args.disable_cuda_graphs and comfy.model_management.is_device_cuda(device) and getattr(module, "_v_block", None) is not None
     if queue is None:
         if malloc_graph is not None and malloc_scope is not None:
+            if malloc_close_scope and module is not None and malloc_graph.iterate(None):
+                _malloc_graph_break()
             if malloc_graph.iterate(malloc_scope if module is not None else None):
                 _malloc_graph_break()
         if core is not None:
@@ -244,9 +259,7 @@ def prefetch_queue_pop(queue, device, module, dtype=None, core=None, enable_grap
             # Keep PyTorch's persistent BLAS workspaces outside the allocation graph.
             malloc_graph.pause()
             with torch.cuda.stream(capture_stream):
-                torch.cuda.current_blas_handle()
-                one = torch.empty((2, 2), device=device)
-                torch.addmm(one[0], one, one)
+                _warmup_blas(device)
             malloc_graph.resume()
             GRAPH_CAPTURE_STREAMS[device] = capture_stream
 
@@ -260,6 +273,8 @@ def prefetch_queue_pop(queue, device, module, dtype=None, core=None, enable_grap
             graph_hit = comfy_aimdo.model_vbar.vbar_signature_compare(signature, graph["signature"])
 
     if malloc_graph is not None and malloc_scope is not None:
+        if malloc_close_scope and module is not None and not graph_hit and malloc_graph.iterate(None):
+            _malloc_graph_break()
         if malloc_graph.iterate(malloc_scope if module is not None and not graph_hit else None):
             _malloc_graph_break()
 
@@ -301,6 +316,9 @@ def prefetch_queue_pop(queue, device, module, dtype=None, core=None, enable_grap
             if signature is not None:
                 _drop_graph(module)
                 malloc_graph.pause()
+                if graph is not None:
+                    with torch.cuda.stream(capture_stream):
+                        _warmup_blas(device)
                 graph = torch.cuda.CUDAGraph()
                 if generator is not None:
                     graph.register_generator_state(generator)

@@ -1,4 +1,5 @@
 from typing import Tuple
+from contextlib import nullcontext
 import torch
 import torch.nn as nn
 from comfy.ldm.lightricks.model import (
@@ -19,6 +20,7 @@ import comfy.ldm.common_dit
 import comfy.model_management
 import comfy.model_prefetch
 import comfy.quant_ops
+from comfy.cli_args import args, PerformanceFeature
 
 class CompressedTimestep:
     """Store video timestep embeddings in compressed form using per-frame indexing."""
@@ -464,6 +466,7 @@ class LTXAVModel(LTXVModel):
             operations=operations,
             **kwargs,
         )
+        self.diffusion_graphs = PerformanceFeature.DiffusionGraphs in args.fast
 
     def _init_model_components(self, device, dtype, **kwargs):
         """Initialize LTXAV-specific components."""
@@ -855,6 +858,8 @@ class LTXAVModel(LTXVModel):
         v_context_dim = self.caption_channels if self.caption_proj_before_connector is False else video_dim
         a_context_dim = self.caption_channels if self.caption_proj_before_connector is False else audio_dim
 
+        if self.caption_proj_before_connector and self.diffusion_graphs:
+            context = context.clone()
         v_context, a_context = torch.split(
             context, [v_context_dim, a_context_dim], len(context.shape) - 1
         )
@@ -936,92 +941,95 @@ class LTXAVModel(LTXVModel):
 
         # Blocks whose self-attention should be perturbed to a value-passthrough (STG).
         stg_self_attn_blocks = transformer_options.get("stg_self_attn_blocks", ())
+        enable_graph = self.diffusion_graphs and not blocks_replace and not transformer_options.get("patches") and "optimized_attention_override" not in transformer_options
 
-        # Process transformer blocks
-        comfy.model_prefetch.malloc_graph_begin(vx.device)
+        # Record each block independently across mixed-precision boundaries.
         for i, block in enumerate(self.transformer_blocks):
-            comfy.model_prefetch.prefetch_queue_pop(
-                prefetch_queue, vx.device, block, malloc_scope="block"
-            )
             block_transformer_options = transformer_options
             if i in stg_self_attn_blocks:
                 block_transformer_options = {**transformer_options, "stg_skip_self_attn": True}
-            if ("double_block", i) in blocks_replace:
+            def core():
+                nonlocal vx, ax
+                if ("double_block", i) in blocks_replace:
 
-                def block_wrap(args):
-                    out = {}
-                    out["img"] = block(
-                        args["img"],
-                        v_context=args["v_context"],
-                        a_context=args["a_context"],
-                        attention_mask=args["attention_mask"],
-                        v_timestep=args["v_timestep"],
-                        a_timestep=args["a_timestep"],
-                        v_pe=args["v_pe"],
-                        a_pe=args["a_pe"],
-                        v_cross_pe=args["v_cross_pe"],
-                        a_cross_pe=args["a_cross_pe"],
-                        v_cross_scale_shift_timestep=args["v_cross_scale_shift_timestep"],
-                        a_cross_scale_shift_timestep=args["a_cross_scale_shift_timestep"],
-                        v_cross_gate_timestep=args["v_cross_gate_timestep"],
-                        a_cross_gate_timestep=args["a_cross_gate_timestep"],
-                        transformer_options=args["transformer_options"],
-                        self_attention_mask=args.get("self_attention_mask"),
-                        v_prompt_timestep=args.get("v_prompt_timestep"),
-                        a_prompt_timestep=args.get("a_prompt_timestep"),
+                    def block_wrap(args):
+                        out = {}
+                        out["img"] = block(
+                            args["img"],
+                            v_context=args["v_context"],
+                            a_context=args["a_context"],
+                            attention_mask=args["attention_mask"],
+                            v_timestep=args["v_timestep"],
+                            a_timestep=args["a_timestep"],
+                            v_pe=args["v_pe"],
+                            a_pe=args["a_pe"],
+                            v_cross_pe=args["v_cross_pe"],
+                            a_cross_pe=args["a_cross_pe"],
+                            v_cross_scale_shift_timestep=args["v_cross_scale_shift_timestep"],
+                            a_cross_scale_shift_timestep=args["a_cross_scale_shift_timestep"],
+                            v_cross_gate_timestep=args["v_cross_gate_timestep"],
+                            a_cross_gate_timestep=args["a_cross_gate_timestep"],
+                            transformer_options=args["transformer_options"],
+                            self_attention_mask=args.get("self_attention_mask"),
+                            v_prompt_timestep=args.get("v_prompt_timestep"),
+                            a_prompt_timestep=args.get("a_prompt_timestep"),
+                        )
+                        return out
+
+                    out = blocks_replace[("double_block", i)](
+                        {
+                            "img": (vx, ax),
+                            "v_context": v_context,
+                            "a_context": a_context,
+                            "attention_mask": attention_mask,
+                            "v_timestep": v_timestep,
+                            "a_timestep": a_timestep,
+                            "v_pe": v_pe,
+                            "a_pe": a_pe,
+                            "v_cross_pe": av_cross_video_freq_cis,
+                            "a_cross_pe": av_cross_audio_freq_cis,
+                            "v_cross_scale_shift_timestep": av_ca_video_scale_shift_timestep,
+                            "a_cross_scale_shift_timestep": av_ca_audio_scale_shift_timestep,
+                            "v_cross_gate_timestep": av_ca_a2v_gate_noise_timestep,
+                            "a_cross_gate_timestep": av_ca_v2a_gate_noise_timestep,
+                            "transformer_options": block_transformer_options,
+                            "self_attention_mask": self_attention_mask,
+                            "v_prompt_timestep": v_prompt_timestep,
+                            "a_prompt_timestep": a_prompt_timestep,
+                        },
+                        {"original_block": block_wrap},
                     )
-                    return out
+                    vx, ax = out["img"]
+                else:
+                    vx, ax = block(
+                        (vx, ax),
+                        v_context=v_context,
+                        a_context=a_context,
+                        attention_mask=attention_mask,
+                        v_timestep=v_timestep,
+                        a_timestep=a_timestep,
+                        v_pe=v_pe,
+                        a_pe=a_pe,
+                        v_cross_pe=av_cross_video_freq_cis,
+                        a_cross_pe=av_cross_audio_freq_cis,
+                        v_cross_scale_shift_timestep=av_ca_video_scale_shift_timestep,
+                        a_cross_scale_shift_timestep=av_ca_audio_scale_shift_timestep,
+                        v_cross_gate_timestep=av_ca_a2v_gate_noise_timestep,
+                        a_cross_gate_timestep=av_ca_v2a_gate_noise_timestep,
+                        transformer_options=block_transformer_options,
+                        self_attention_mask=self_attention_mask,
+                        v_prompt_timestep=v_prompt_timestep,
+                        a_prompt_timestep=a_prompt_timestep,
+                    )
 
-                out = blocks_replace[("double_block", i)](
-                    {
-                        "img": (vx, ax),
-                        "v_context": v_context,
-                        "a_context": a_context,
-                        "attention_mask": attention_mask,
-                        "v_timestep": v_timestep,
-                        "a_timestep": a_timestep,
-                        "v_pe": v_pe,
-                        "a_pe": a_pe,
-                        "v_cross_pe": av_cross_video_freq_cis,
-                        "a_cross_pe": av_cross_audio_freq_cis,
-                        "v_cross_scale_shift_timestep": av_ca_video_scale_shift_timestep,
-                        "a_cross_scale_shift_timestep": av_ca_audio_scale_shift_timestep,
-                        "v_cross_gate_timestep": av_ca_a2v_gate_noise_timestep,
-                        "a_cross_gate_timestep": av_ca_v2a_gate_noise_timestep,
-                        "transformer_options": block_transformer_options,
-                        "self_attention_mask": self_attention_mask,
-                        "v_prompt_timestep": v_prompt_timestep,
-                        "a_prompt_timestep": a_prompt_timestep,
-                    },
-                    {"original_block": block_wrap},
-                )
-                vx, ax = out["img"]
-            else:
-                vx, ax = block(
-                    (vx, ax),
-                    v_context=v_context,
-                    a_context=a_context,
-                    attention_mask=attention_mask,
-                    v_timestep=v_timestep,
-                    a_timestep=a_timestep,
-                    v_pe=v_pe,
-                    a_pe=a_pe,
-                    v_cross_pe=av_cross_video_freq_cis,
-                    a_cross_pe=av_cross_audio_freq_cis,
-                    v_cross_scale_shift_timestep=av_ca_video_scale_shift_timestep,
-                    a_cross_scale_shift_timestep=av_ca_audio_scale_shift_timestep,
-                    v_cross_gate_timestep=av_ca_a2v_gate_noise_timestep,
-                    a_cross_gate_timestep=av_ca_v2a_gate_noise_timestep,
-                    transformer_options=block_transformer_options,
-                    self_attention_mask=self_attention_mask,
-                    v_prompt_timestep=v_prompt_timestep,
-                    a_prompt_timestep=a_prompt_timestep,
-                )
+            comfy.model_prefetch.prefetch_queue_pop(
+                prefetch_queue, vx.device, block, vx.dtype, core=core, enable_graph=enable_graph,
+                malloc_scope=f"block_{i}", malloc_close_scope=True,
+            )
 
         comfy.model_prefetch.prefetch_queue_pop(
             prefetch_queue, vx.device, None, malloc_scope="block"
         )
-        comfy.model_prefetch.malloc_graph_end()
 
         return [vx, ax]
 
@@ -1100,13 +1108,17 @@ class LTXAVModel(LTXVModel):
             kwargs["a_timestep"] = timestep
 
         # Call parent forward method
-        return super().forward(
-            x,
-            timestep,
-            context,
-            attention_mask,
-            frame_rate,
-            transformer_options,
-            keyframe_idxs,
-            **kwargs,
-        )
+        device = x[0].device if isinstance(x, list) else x.device
+        # The extra STG pass changes both the batch size and the block trace.
+        scope = comfy.model_prefetch.malloc_graph_scope(device) if not transformer_options.get("stg_self_attn_blocks") else nullcontext()
+        with scope:
+            return super().forward(
+                x,
+                timestep,
+                context,
+                attention_mask,
+                frame_rate,
+                transformer_options,
+                keyframe_idxs,
+                **kwargs,
+            )
