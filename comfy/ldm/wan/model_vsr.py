@@ -338,19 +338,27 @@ class RelayFlash(nn.Module):
         return (input_shape[0], 3, frames, height * self.upscale_factor, width * self.upscale_factor)
 
     def decode(self, x, lq_images=None, output_buffer=None, detail=1.0):
-        # detail scales what the model adds to the bicubic upscale of each frame
         out = output_buffer
         if out is None:
             out = torch.empty(self.decode_output_shape(x.shape, lq_images), device=comfy.model_management.intermediate_device())
+        # finished frames go to the output without the GPU waiting on each copy
+        with comfy.model_management.HostWriter(x.device, out, (x.shape[0], 3, *out.shape[-2:])) as writer:
+            for index, frame in enumerate(self.iter_decode_frames(x, lq_images, detail)):
+                writer.write(out[:, :, index], frame.to(out.dtype))
+        return out
+
+    def iter_decode_frames(self, x, lq_images, detail=1.0):
+        """Yield cropped BCHW frames in [0, 1], in display order."""
+        # detail scales what the model adds to the bicubic upscale of each frame
         b, _, _, height, width = x.shape
         frames, lq_height, lq_width = lq_images.shape[:3]
+        out_height, out_width = lq_height * self.upscale_factor, lq_width * self.upscale_factor
         depth = len(self.backbone.blocks)
         keyframes = relay_keyframes(frames)
         device = x.device
         freqs, freqs_past = self.grid_rope(0, height, width, device), self.grid_rope(-1, height, width, device)
         pbar = comfy.utils.ProgressBar(frames)
-        # finished frames go to the output without the GPU waiting on each copy
-        with comfy.model_management.HostWriter(device, out, (b, 3, *out.shape[-2:])) as writer, comfy.utils.model_trange(frames, desc="RelayVSR Flash decode", unit="frame") as console:
+        with comfy.utils.model_trange(frames, desc="RelayVSR Flash decode", unit="frame") as console:
             start = self.prepare_condition(x[:, :, 0], freqs)
             for window, (first, last) in enumerate(zip(keyframes, keyframes[1:] or keyframes)):
                 comfy.model_management.throw_exception_if_processing_interrupted()
@@ -361,12 +369,11 @@ class RelayFlash(nn.Module):
                 lr_window = lq_images[first:last + 1].to(device=device)[..., :3].movedim(-1, 1) * 2.0 - 1.0
                 lr_window = F.pad(lr_window, (0, width * self.latent_stride - lq_width, 0, height * self.latent_stride - lq_height), mode="replicate")
                 for i, frame in enumerate(range(first, last + 1)):
+                    comfy.model_management.throw_exception_if_processing_interrupted()
                     decoded, history = self.decode_frame(lr_window[i:i + 1].expand(b, -1, -1, -1), x.dtype, freqs, freqs_past, condition, history, detail)
                     # the shared keyframe was already output by the previous window, here it only seeds the history
                     if window == 0 or frame > first:
-                        # finished [0, 1] pixels on the GPU, the VAE's process_output is the identity
-                        writer.write(out[:, :, frame], decoded[..., :out.shape[-2], :out.shape[-1]].add_(1.0).div_(2.0).clamp_(0.0, 1.0).to(out.dtype))
+                        yield decoded[..., :out_height, :out_width].add_(1.0).div_(2.0).clamp_(0.0, 1.0)
                         pbar.update(1)
                         console.update(1)
                 start = end
-        return out

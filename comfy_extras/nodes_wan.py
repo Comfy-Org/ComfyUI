@@ -1,4 +1,11 @@
 import math
+import os
+import tempfile
+from contextlib import closing
+from fractions import Fraction
+
+import av
+import folder_paths
 import nodes
 import node_helpers
 import torch
@@ -8,12 +15,15 @@ import comfy.latent_formats
 import comfy.clip_vision
 import comfy.ldm.wan.model_animate2
 import comfy.ldm.wan.model_vsr
+import comfy.model_prefetch
 import comfy.patcher_extension
 import json
 import numpy as np
 from typing import Tuple, TypedDict
 from typing_extensions import override
-from comfy_api.latest import ComfyExtension, io
+from comfy_api.latest import ComfyExtension, io, ui
+from comfy_api.latest._input_impl.video_types import BT709_NCL, set_video_color_properties
+from comfy.cli_args import args
 import logging
 
 class WanImageToVideo(io.ComfyNode):
@@ -1512,6 +1522,113 @@ class VSRDecode(io.ComfyNode):
         return io.NodeOutput(decoded.reshape(-1, *decoded.shape[-3:]))
 
 
+class VSRDecodeAndSave(io.ComfyNode):
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="VSRDecodeAndSave",
+            display_name="VSR Decode and Save Video",
+            category="video",
+            description="Decode RelayVSR frames directly into an MP4 without allocating the full upscaled image batch.",
+            is_experimental=True,
+            is_output_node=True,
+            inputs=[
+                io.Vae.Input("vae"),
+                io.Latent.Input("samples"),
+                io.Image.Input("images", tooltip="The same low-quality video given to RelayVSR Conditioning."),
+                io.Float.Input("fps", default=24.0, min=0.01, max=1000.0, step=0.001),
+                io.String.Input("filename_prefix", default="video/ComfyUI"),
+                io.Float.Input("detail", default=1.0, min=0.0, max=1.0, step=0.01),
+                io.Audio.Input("audio", optional=True, tooltip="Mono, stereo, or 5.1 audio for the upscaled video."),
+            ],
+            hidden=[io.Hidden.prompt, io.Hidden.extra_pnginfo],
+        )
+
+    @classmethod
+    def execute(cls, vae, samples, images, fps, filename_prefix, detail=1.0, audio=None) -> io.NodeOutput:
+        vae.throw_exception_if_invalid()
+        decoder = vae.first_stage_model
+        if not isinstance(decoder, comfy.ldm.wan.model_vsr.RelayFlash):
+            raise ValueError("VSR Decode and Save Video requires a RelayVSR Flash decoder.")
+        latent = samples["samples"]
+        if latent.shape[0] != 1:
+            raise ValueError("VSR Decode and Save Video expects one video latent.")
+        if not len(images):
+            raise ValueError("VSR Decode and Save Video needs at least one source frame.")
+        _, _, frame_count, height, width = decoder.decode_output_shape(latent.shape, images)
+        frame_rate = Fraction(round(fps * 1000), 1000)
+        if audio is not None:
+            sample_rate = int(audio["sample_rate"])
+            waveform = audio["waveform"][0, :, :math.ceil(frame_count * sample_rate / frame_rate)]
+            layout = {1: "mono", 2: "stereo", 6: "5.1"}.get(waveform.shape[0])
+            if layout is None:
+                raise ValueError("VSR Decode and Save Video supports mono, stereo, and 5.1 audio.")
+
+        folder, filename, counter, subfolder, _ = folder_paths.get_save_image_path(
+            filename_prefix, folder_paths.get_output_directory(), width, height
+        )
+        file = f"{filename}_{counter:05}_.mp4"
+        # Rename refuses to overwrite on Windows. Elsewhere, link the completed file into place.
+        publish = os.rename if os.name == "nt" else os.link
+        # Publish only after both streams have been finalized successfully.
+        with tempfile.TemporaryDirectory(dir=folder, prefix=".vsr-") as temp_folder, comfy.model_management.cuda_device_context(vae.device):
+            path = os.path.join(temp_folder, file)
+            if os.name != "nt":
+                # Check the output filesystem before decoding a potentially long video.
+                with open(path, "xb"):
+                    pass
+                probe = os.path.join(temp_folder, "link-probe")
+                try:
+                    publish(path, probe)
+                except OSError as error:
+                    raise RuntimeError(f"VSR Decode and Save Video could not create a hard link in the output directory. Choose an output directory that supports hard links. {error}") from error
+                os.unlink(probe)
+            with av.open(path, mode="w", options={"movflags": "use_metadata_tags+faststart"}) as output:
+                if not args.disable_metadata and cls.hidden is not None:
+                    for key, value in (cls.hidden.extra_pnginfo or {}).items():
+                        output.metadata[key] = json.dumps(value)
+                    if cls.hidden.prompt is not None:
+                        output.metadata["prompt"] = json.dumps(cls.hidden.prompt)
+
+                video_stream = output.add_stream("h264", rate=frame_rate)
+                video_stream.width = width
+                video_stream.height = height
+                video_stream.pix_fmt = "yuv420p"
+                video_stream.options = {"crf": "18"}
+                set_video_color_properties(video_stream.codec_context, "sRGB")
+                audio_stream = None
+                if audio is not None and waveform.shape[-1] > 0:
+                    audio_stream = output.add_stream("aac", rate=sample_rate, layout=layout)
+
+                with comfy.model_prefetch.pause_malloc_graph():
+                    comfy.model_management.load_models_gpu([vae.patcher], memory_required=vae.memory_used_decode(latent.shape, vae.vae_dtype), force_full_load=vae.disable_offload)
+                latent = latent.to(device=vae.device, dtype=vae.vae_dtype)
+                output_dtype = vae.vae_output_dtype()
+                with closing(decoder.iter_decode_frames(latent, images, detail)) as frames:
+                    for decoded in frames:
+                        pixels = (decoded[0].movedim(0, -1).to(output_dtype) * 255).byte().cpu().numpy()
+                        frame = av.VideoFrame.from_ndarray(pixels, format="rgb24").reformat(format="yuv420p", dst_colorspace=BT709_NCL)
+                        set_video_color_properties(frame, "sRGB")
+                        output.mux(video_stream.encode(frame))
+                output.mux(video_stream.encode(None))
+                if audio_stream is not None:
+                    frame = av.AudioFrame.from_ndarray(waveform.float().cpu().contiguous().numpy(), format="fltp", layout=layout)
+                    frame.sample_rate = sample_rate
+                    frame.pts = 0
+                    output.mux(audio_stream.encode(frame))
+                    output.mux(audio_stream.encode(None))
+            while True:
+                comfy.model_management.throw_exception_if_processing_interrupted()
+                try:
+                    publish(path, os.path.join(folder, file))
+                    break
+                except FileExistsError:
+                    counter += 1
+                    file = f"{filename}_{counter:05}_.mp4"
+
+        return io.NodeOutput(ui=ui.PreviewVideo([ui.SavedResult(file, subfolder, io.FolderType.output)]))
+
+
 from comfy.ldm.wan.model_multitalk import InfiniteTalkOuterSampleWrapper, MultiTalkCrossAttnPatch, MultiTalkGetAttnMapPatch, project_audio_features
 class WanInfiniteTalkToVideo(io.ComfyNode):
     class DCValues(TypedDict):
@@ -1701,6 +1818,7 @@ class WanExtension(ComfyExtension):
             WanInfiniteTalkToVideo,
             RelayVSRConditioning,
             VSRDecode,
+            VSRDecodeAndSave,
         ]
 
 async def comfy_entrypoint() -> WanExtension:
