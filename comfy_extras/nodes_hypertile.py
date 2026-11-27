@@ -45,8 +45,18 @@ class HyperTile(io.ComfyNode):
         latent_tile_size = max(32, tile_size) // 8
         temp = None
 
-        def hypertile_in(q, k, v, extra_options):
+        def hypertile_in(q, k, v, extra_options, **kwargs):
             nonlocal temp
+            modern_patch = bool(kwargs)
+
+            # Newer attention implementations expose projected tensors in BHND
+            # format. HyperTile patches the legacy BNC layout, so leave these
+            # tensors untouched while still honoring the new mapping contract.
+            if q.ndim != 3:
+                if modern_patch:
+                    return {"q": q, "k": k, "v": v}
+                return q, k, v
+
             model_chans = q.shape[-2]
             orig_shape = extra_options['original_shape']
             apply_to = []
@@ -67,8 +77,9 @@ class HyperTile(io.ComfyNode):
                 if nh * nw > 1:
                     q = rearrange(q, "b (nh h nw w) c -> (b nh nw) (h w) c", h=h // nh, w=w // nw, nh=nh, nw=nw)
                     temp = (nh, nw, h, w)
-                return q, k, v
 
+            if modern_patch:
+                return {"q": q, "k": k, "v": v}
             return q, k, v
         def hypertile_out(out, extra_options):
             nonlocal temp
