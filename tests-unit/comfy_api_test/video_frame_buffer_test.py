@@ -6,6 +6,7 @@ import av
 import numpy as np
 import pytest
 import torch
+from PIL import Image
 
 from comfy_api.input_impl.video_types import VideoFromFile
 from comfy_api.latest._input_impl.video_types import FrameChunks
@@ -181,6 +182,40 @@ def test_a_refused_reservation_falls_back_to_plain_arrays(tmp_path):
     path = str(tmp_path / "video.mov")
     _write_rgba_video(path, 4)
     _run_with_aimdo(REFUSED_RESERVATION_DECODE, path)
+
+
+ONE_REFUSED_RESERVATION_DECODE = """
+import sys
+import comfy_aimdo.control
+if not comfy_aimdo.control.init():
+    sys.exit("comfy-aimdo unavailable")
+import torch
+import comfy.memory_management
+from comfy_api.latest._input_impl import video_types
+comfy.memory_management.aimdo_enabled = True
+expected = video_types.VideoFromFile(sys.argv[1]).get_components()
+reserve, calls = video_types.reserve_host_buffer, []
+def reserve_or_refuse():
+    calls.append(None)
+    if len(calls) == int(sys.argv[2]):
+        raise RuntimeError("out of address space")
+    return reserve()
+video_types.reserve_host_buffer = reserve_or_refuse
+components = video_types.VideoFromFile(sys.argv[1]).get_components()
+assert len(calls) == 2
+assert torch.equal(components.images, expected.images)
+assert (components.alpha is None) == (expected.alpha is None)
+assert components.alpha is None or torch.equal(components.alpha, expected.alpha)
+"""
+
+
+@pytest.mark.parametrize("mode, extension", [("RGB", ".png"), ("RGBA", ".png"), ("P", ".png"), ("RGB", ".jpg")])
+@pytest.mark.parametrize("refused", [1, 2])  # the images' reservation, then the alpha's
+def test_8_bit_images_decode_the_same_when_one_reservation_is_refused(tmp_path, mode, extension, refused):
+    path = str(tmp_path / ("image" + extension))
+    pixels = np.random.default_rng(0).integers(0, 255, (48, 64, 4), dtype=np.uint8)
+    Image.fromarray(pixels).convert(mode).save(path)
+    _run_with_aimdo(ONE_REFUSED_RESERVATION_DECODE, path, str(refused))
 
 
 # ---- without aimdo: blocks of frames, copied into one tensor at the end ---------------------------------------
