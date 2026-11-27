@@ -21,8 +21,8 @@ def append_zero(x):
     return torch.cat([x, x.new_zeros([1])])
 
 def _safe_nan_to_num(x):
-    # 310P 无 torch.nan_to_num kernel,用基础算子等效替换(只改 NaN,不动有限值);其余设备走上游路径
-    if comfy.model_management.is_ascend_310():
+    # 310P has no nan_to_num kernel, so NaN is replaced with basic ops; all other devices use the upstream path.
+    if comfy.model_management.is_ascend_310(x.device):
         return torch.where(torch.isnan(x), torch.zeros_like(x), x)
     return torch.nan_to_num(x, nan=0.0)
 

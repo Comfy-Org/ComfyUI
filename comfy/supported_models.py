@@ -2194,8 +2194,7 @@ class QwenImage(supported_models_base.BASE):
 
     def __init__(self, unet_config):
         super().__init__(unet_config)
-        if comfy.model_management.is_ascend_310():
-            self.supported_inference_dtypes = [torch.float16] + self.supported_inference_dtypes
+        self.add_ascend_310_inference_dtype()
 
     def get_model(self, state_dict, prefix="", device=None):
         out = model_base.QwenImage(self, device=device)
@@ -2229,8 +2228,7 @@ class QwenImage21(supported_models_base.BASE):
 
     def __init__(self, unet_config):
         super().__init__(unet_config)
-        if comfy.model_management.is_ascend_310():
-            self.supported_inference_dtypes = [torch.float16] + self.supported_inference_dtypes
+        self.add_ascend_310_inference_dtype()
 
     def get_model(self, state_dict, prefix="", device=None):
         return model_base.QwenImage21(self, device=device)

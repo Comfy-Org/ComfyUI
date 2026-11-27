@@ -55,7 +55,9 @@ def repeat_kv_for_gqa(k, v, query_heads, head_dim):
         v = v.repeat_interleave(n_rep, dim=head_dim)
     return k, v
 
-def _npu_sdpa_math_fallback(q, k, v, attn_mask=None, is_causal=False, scale=None):
+def _npu_sdpa_math_fallback(q, k, v, attn_mask=None, is_causal=False, scale=None, enable_gqa=False):
+    if enable_gqa:
+        k, v = repeat_kv_for_gqa(k, v, q.shape[-3], -3)
     if scale is None:
         scale = q.shape[-1] ** -0.5
     attn = torch.matmul(q, k.transpose(-2, -1)) * scale
@@ -64,7 +66,10 @@ def _npu_sdpa_math_fallback(q, k, v, attn_mask=None, is_causal=False, scale=None
         causal = torch.ones((L, S), dtype=torch.bool, device=q.device).tril()
         attn = attn.masked_fill(causal.logical_not().view(1, 1, L, S), float("-inf"))
     if attn_mask is not None:
-        attn = attn + attn_mask
+        if attn_mask.dtype == torch.bool:
+            attn = attn.masked_fill(attn_mask.logical_not(), float("-inf"))
+        else:
+            attn = attn + attn_mask
     attn = torch.softmax(attn, dim=-1, dtype=torch.float32).to(q.dtype)
     return torch.matmul(attn, v)
 
@@ -81,6 +86,7 @@ def scaled_dot_product_attention(q, k, v, *args, **kwargs):
             q, k, v, attn_mask=attn_mask,
             is_causal=args[2] if len(args) > 2 else kwargs.get("is_causal", False),
             scale=args[3] if len(args) > 3 else kwargs.get("scale", None),
+            enable_gqa=kwargs.get("enable_gqa", False),
         )
     return torch.nn.functional.scaled_dot_product_attention(q, k, v, *args, **kwargs)
 
@@ -1079,10 +1085,7 @@ INPUT_ACT_EAGER = {
 @contextlib.contextmanager
 def _input_act_weight(x, input_act, act_weight, act_eps):
     if input_act == "rms_norm" and isinstance(act_weight, torch.nn.Module):
-        cast_fn = getattr(act_weight, "comfy_rmsnorm_cast_weight", None)
-        if cast_fn is None:
-            cast_fn = act_weight.cast_weight
-        with cast_fn(x) as (weight, _):
+        with act_weight.comfy_rmsnorm_cast_weight(x) as (weight, _):
             eps = act_weight.eps
             if eps is None:
                 eps = torch.finfo(torch.float64 if x.dtype == torch.float64 else torch.float32).eps

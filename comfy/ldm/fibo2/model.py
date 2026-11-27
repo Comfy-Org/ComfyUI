@@ -10,7 +10,7 @@ import comfy.model_prefetch
 import comfy.ops
 import comfy.patcher_extension
 import comfy.utils
-from comfy.ldm.lumina.model import FinalLayer, JointAttention, apply_gate, clamp_fp16, modulate, pos_ids_x
+from comfy.ldm.lumina.model import FinalLayer, JointAttention, apply_gate, modulate, pos_ids_x
 from comfy.ldm.modules.attention import AttentionTensorContainer, ComfyAttention, optimized_attention
 from comfy.ldm.modules.diffusionmodules.mmdit import TimestepEmbedder
 
@@ -89,12 +89,12 @@ class Block(nn.Module):
     def forward(self, x, freqs_cis, adaln_input, timestep_zero_index=None, context=None, transformer_options={}):
         scale_msa, gate_msa, scale_mlp, gate_mlp = self.adaLN_modulation(adaln_input).chunk(4, dim=1)
         y = self.attention(modulate(self.attention_norm1(x), scale_msa, timestep_zero_index=timestep_zero_index), None, freqs_cis, transformer_options=transformer_options)
-        x = residual(x, apply_gate(gate_msa.unsqueeze(1).tanh(), self.attention_norm2(clamp_fp16(y)), timestep_zero_index=timestep_zero_index))
+        x = residual(x, apply_gate(gate_msa.unsqueeze(1).tanh(), self.attention_norm2(comfy.model_management.clamp_fp16(y)), timestep_zero_index=timestep_zero_index))
         if self.cross_attention is not None:
             y = self.cross_attention(self.cross_attn_norm1(x), context, transformer_options)
             x = residual(x, self.cross_attn_norm2(y), comfy.ops.cast_to_input(self.cross_attn_gate, y).tanh())
         y = self.feed_forward(modulate(self.ffn_norm1(x), scale_mlp, timestep_zero_index=timestep_zero_index))
-        return residual(x, apply_gate(gate_mlp.unsqueeze(1).tanh(), self.ffn_norm2(clamp_fp16(y)), timestep_zero_index=timestep_zero_index))
+        return residual(x, apply_gate(gate_mlp.unsqueeze(1).tanh(), self.ffn_norm2(comfy.model_management.clamp_fp16(y)), timestep_zero_index=timestep_zero_index))
 
 
 class PerceiverLayer(nn.Module):

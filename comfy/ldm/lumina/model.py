@@ -68,23 +68,6 @@ def apply_gate(gate, x, timestep_zero_index=None):
 #                               Core NextDiT Model                              #
 #############################################################################
 
-def _clamp_fp16_310(x):
-    # 310P 无 torch.nan_to_num kernel,用基础算子等效替换(只改 NaN/±inf,不动有限值)
-    x = torch.where(torch.isnan(x), torch.zeros_like(x), x)
-    x = torch.where(
-        torch.isinf(x),
-        torch.where(x > 0, torch.full_like(x, 65504), torch.full_like(x, -65504)),
-        x,
-    )
-    return x
-
-def clamp_fp16(x):
-    if x.dtype == torch.float16:
-        if comfy.model_management.is_ascend_310():
-            return _clamp_fp16_310(x)
-        return torch.nan_to_num(x, nan=0.0, posinf=65504, neginf=-65504)
-    return x
-
 class JointAttention(nn.Module):
     """Multi-head attention module."""
 
@@ -247,7 +230,7 @@ class FeedForward(nn.Module):
 
     # @torch.compile
     def _forward_silu_gating(self, x1, x3):
-        return clamp_fp16(F.silu(x1) * x3)
+        return comfy.model_management.clamp_fp16(F.silu(x1) * x3)
 
     def forward(self, x):
         return self.w2(self._forward_silu_gating(self.w1(x), self.w3(x)))
@@ -352,7 +335,7 @@ class JointTransformerBlock(nn.Module):
             scale_msa, gate_msa, scale_mlp, gate_mlp = self.adaLN_modulation(adaln_input).chunk(4, dim=1)
 
             x = x + apply_gate(gate_msa.unsqueeze(1).tanh(), self.attention_norm2(
-                clamp_fp16(self.attention(
+                comfy.model_management.clamp_fp16(self.attention(
                     modulate(self.attention_norm1(x), scale_msa, timestep_zero_index=timestep_zero_index),
                     x_mask,
                     freqs_cis,
@@ -360,14 +343,14 @@ class JointTransformerBlock(nn.Module):
                 ))), timestep_zero_index=timestep_zero_index
             )
             x = x + apply_gate(gate_mlp.unsqueeze(1).tanh(), self.ffn_norm2(
-                clamp_fp16(self.feed_forward(
+                comfy.model_management.clamp_fp16(self.feed_forward(
                     modulate(self.ffn_norm1(x), scale_mlp, timestep_zero_index=timestep_zero_index),
                 ))), timestep_zero_index=timestep_zero_index
             )
         else:
             assert adaln_input is None
             x = x + self.attention_norm2(
-                clamp_fp16(self.attention(
+                comfy.model_management.clamp_fp16(self.attention(
                     self.attention_norm1(x),
                     x_mask,
                     freqs_cis,

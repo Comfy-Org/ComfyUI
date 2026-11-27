@@ -21,6 +21,7 @@ import logging
 from . import model_base
 from . import utils
 from . import latent_formats
+import comfy.model_management
 
 class ClipTarget:
     def __init__(self, tokenizer, clip):
@@ -77,6 +78,12 @@ class BASE:
         self.optimizations = self.optimizations.copy()
         for x in self.unet_extra_config:
             self.unet_config[x] = self.unet_extra_config[x]
+
+    def add_ascend_310_inference_dtype(self):
+        """Prepend fp16 on 310P so quantized weights stay on the NPU instead of falling back."""
+        if torch.float16 in self.supported_inference_dtypes or not comfy.model_management.is_ascend_310():
+            return
+        self.supported_inference_dtypes = [torch.float16] + self.supported_inference_dtypes
 
     def get_model(self, state_dict, prefix="", device=None):
         if self.noise_aug_config is not None:

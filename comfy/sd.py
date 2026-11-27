@@ -259,6 +259,9 @@ class CLIP:
         dtype = model_options.get("dtype", None)
         if dtype is None:
             dtype = model_management.text_encoder_dtype(load_device)
+        if dtype == torch.bfloat16 and model_management.is_ascend_310(load_device):
+            # 310P has no bf16 kernels in the text encoders
+            dtype = torch.float16
 
         params['dtype'] = dtype
         params['device'] = model_options.get("initial_device", model_management.text_encoder_initial_device(load_device, offload_device, parameters * model_management.dtype_size(dtype)))

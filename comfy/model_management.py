@@ -18,6 +18,7 @@
 from __future__ import annotations
 
 import psutil
+import functools
 import logging
 from enum import Enum
 from comfy.cli_args import args, PerformanceFeature
@@ -125,11 +126,21 @@ try:
     import torch_npu  # noqa: F401
     _ = torch.npu.device_count()
     npu_available = torch.npu.is_available()
-    torch_npu.npu.set_compile_mode(jit_compile = False)
-    if npu_available and "310" in torch.npu.get_device_name(0):
-        torch.npu.set_mm_bmm_format_nd(False)
 except:
     npu_available = False
+
+if npu_available:
+    # 310P needs the eager aclnn kernels, so jit compile is turned off for every NPU.
+    try:
+        torch_npu.npu.set_compile_mode(jit_compile = False)
+    except AttributeError:
+        logging.warning("torch_npu.npu.set_compile_mode is not available, NPU keeps its default compile mode.")
+    if "310" in torch.npu.get_device_name(0):
+        # the internal mm/bmm tensor format is numerically wrong on 310P
+        try:
+            torch.npu.set_mm_bmm_format_nd(False)
+        except AttributeError:
+            logging.warning("torch.npu.set_mm_bmm_format_nd is not available, 310P keeps the default mm/bmm format.")
 
 try:
     import torch_mlu  # noqa: F401
@@ -160,8 +171,12 @@ def is_ascend_npu():
         return True
     return False
 
+@functools.lru_cache(maxsize=None)
+def _npu_device_name(index):
+    return torch.npu.get_device_name(index)
+
 def is_ascend_310(device=None):
-    """Ascend 310P lacks bf16 and some kernels (e.g. nan_to_num); gate 310-only downgrades here."""
+    """True on Ascend 310P, which lacks bf16 and some kernels; gates 310-only downgrades."""
     if not is_ascend_npu():
         return False
     if isinstance(device, str):
@@ -169,11 +184,25 @@ def is_ascend_310(device=None):
     index = getattr(device, "index", None)
     if index is None:
         index = 0
-    try:
-        name = torch.npu.get_device_name(index)
-    except Exception:
-        name = ""
-    return "310" in name
+    return "310" in _npu_device_name(index)
+
+def clamp_fp16(x):
+    """Clamp fp16 NaN and +/-inf to the dtype limits, other dtypes pass through.
+
+    Models accumulate in fp16, so an overflow has to be pinned to the dtype limits
+    instead of turning the rest of the sampling step into NaN.
+    """
+    if x.dtype != torch.float16:
+        return x
+    if not is_ascend_310(x.device):
+        return torch.nan_to_num(x, nan=0.0, posinf=65504, neginf=-65504)
+    # 310P has no nan_to_num kernel, so the same clamp is done with basic ops.
+    x = torch.where(torch.isnan(x), torch.zeros_like(x), x)
+    return torch.where(
+        torch.isinf(x),
+        torch.where(x > 0, torch.full_like(x, 65504), torch.full_like(x, -65504)),
+        x,
+    )
 
 def is_mlu():
     global mlu_available
