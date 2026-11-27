@@ -22,6 +22,7 @@ import torch
 import torch.nn as nn
 
 import comfy.model_management
+import comfy.ops
 from .base import WeightAdapterBase, WeightAdapterTrainBase
 from comfy.patcher_extension import PatcherInjection
 
@@ -170,8 +171,16 @@ class BypassForwardHook:
                 return adapter_bypass(self.original_forward, x, *args, **kwargs)
 
         # Default bypass: g(f(x) + h(x, f(x)))
+        # Match Linear's input_act (e.g. swiglu) on the LoRA path too; adapters
+        # are trained on the post-activation width.
         base_out = self.original_forward(x, *args, **kwargs)
-        h_out = self.adapter.h(x, base_out)
+        h_x = x
+        input_act = kwargs.get("input_act")
+        if input_act is not None:
+            h_x = comfy.ops._eager_input_act(
+                x, input_act, kwargs.get("act_weight"), kwargs.get("act_eps", 0.0)
+            )
+        h_out = self.adapter.h(h_x, base_out)
         return self.adapter.g(base_out + h_out)
 
     def inject(self):
