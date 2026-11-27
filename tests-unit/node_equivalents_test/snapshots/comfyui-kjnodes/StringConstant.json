@@ -1,0 +1,29 @@
+{
+  "name": "StringConstant",
+  "input": {
+    "required": {
+      "string": [
+        "STRING",
+        {
+          "default": "",
+          "multiline": false
+        }
+      ]
+    }
+  },
+  "input_order": {
+    "required": [
+      "string"
+    ]
+  },
+  "output": [
+    "STRING"
+  ],
+  "output_name": [
+    "STRING"
+  ],
+  "output_is_list": [
+    false
+  ],
+  "pack_commit": "aa2b5ea5e7f61b51f5d26d726f23c1d74e951016"
+}

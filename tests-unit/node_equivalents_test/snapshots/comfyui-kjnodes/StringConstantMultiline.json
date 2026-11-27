@@ -1,0 +1,36 @@
+{
+  "name": "StringConstantMultiline",
+  "input": {
+    "required": {
+      "string": [
+        "STRING",
+        {
+          "default": "",
+          "multiline": true
+        }
+      ],
+      "strip_newlines": [
+        "BOOLEAN",
+        {
+          "default": true
+        }
+      ]
+    }
+  },
+  "input_order": {
+    "required": [
+      "string",
+      "strip_newlines"
+    ]
+  },
+  "output": [
+    "STRING"
+  ],
+  "output_name": [
+    "STRING"
+  ],
+  "output_is_list": [
+    false
+  ],
+  "pack_commit": "aa2b5ea5e7f61b51f5d26d726f23c1d74e951016"
+}
