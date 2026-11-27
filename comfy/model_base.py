@@ -2337,7 +2337,7 @@ class MiniMaxH3(BaseModel):
         a0, a1 = audio_window.index_list[0], audio_window.index_list[-1] + 1
         rescale = comfy.ldm.minimax.model.FRAME_RESCALE
         keyframes = []
-        for kf in payload["keyframes"]:
+        for kf in payload.get("keyframes") or []:
             f = kf["resolved_frame_index"]
             latent = kf.get("latent")
             if latent is not None:
@@ -2357,15 +2357,27 @@ class MiniMaxH3(BaseModel):
                 j0, j1 = max(0, math.ceil(a0 - t)), min(audio.shape[-1], math.ceil(a1 - t))
                 if j1 > j0:
                     keyframes.append({"resolved_frame_index": (t + j0 - a0) / rescale, "audio_latent": audio[..., j0:j1]})
+        refs = []
+        for blk in payload.get("refs") or []:
+            # a reference video as long as the target, like the draft of an IC upscale, follows its timeline
+            if blk["kind"] in ("video", "video_audio") and blk["latent_t"] == window.total_frames:
+                latent = window.get_tensor(blk["latent"])
+                blk = dict(blk, latent=latent, latent_t=latent.shape[2])
+                if blk["ref_audio_t"]:
+                    audio = blk["audio_latent"][..., a0:a1]
+                    blk.update(audio_latent=audio if audio.shape[-1] else None, ref_audio_t=audio.shape[-1])
+            refs.append(blk)
         payload = {k: v for k, v in payload.items() if k != "layout"}  # forward rebuilds it for the window
         payload["keyframes"] = keyframes
-        payload.update(self._cond_latents(keyframes, payload.get("refs")))
+        payload["refs"] = refs
+        payload.update(self._cond_latents(keyframes, refs))
         return payload
 
     def resize_cond_for_context_window(self, cond_key, cond_value, window, x_in, device, retain_index_list=[]):
         if cond_key == "audio_denoise_mask":
             return cond_value._copy_with(window.get_window_for_modality(1).get_tensor(cond_value.cond, device))
-        if cond_key == "minimax_payload" and cond_value.cond.get("keyframes"):
+        if cond_key == "minimax_payload" and (cond_value.cond.get("keyframes") or any(
+                r["kind"] in ("video", "video_audio") and r["latent_t"] == window.total_frames for r in cond_value.cond.get("refs") or [])):
             return cond_value._copy_with(self._window_payload(cond_value.cond, window))
         return super().resize_cond_for_context_window(cond_key, cond_value, window, x_in, device, retain_index_list=retain_index_list)
 
