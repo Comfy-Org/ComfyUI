@@ -435,6 +435,7 @@ class UserManager():
                 try:
                     with os.fdopen(fd, "wb") as f:
                         f.write(body)
+                    os.chmod(tmp_path, 0o666)
                     os.replace(tmp_path, path)
                 except:
                     os.unlink(tmp_path)
