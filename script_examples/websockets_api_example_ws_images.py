@@ -34,6 +34,13 @@ def get_images(ws, prompt):
         out = ws.recv()
         if isinstance(out, str):
             message = json.loads(out)
+            if message['type'] in ('execution_error', 'execution_interrupted') and message['data']['prompt_id'] == prompt_id:
+                data = message['data']
+                node = "{} ({})".format(data['node_id'], data['node_type'])
+                if message['type'] == 'execution_interrupted':
+                    raise RuntimeError("execution interrupted at node {}".format(node))
+                raise RuntimeError("execution failed at node {}: {}: {}".format(
+                    node, data['exception_type'], data['exception_message']))
             if message['type'] == 'executing':
                 data = message['data']
                 if data['prompt_id'] == prompt_id:
@@ -146,8 +153,10 @@ prompt["3"]["inputs"]["seed"] = 5
 
 ws = websocket.WebSocket()
 ws.connect("ws://{}/ws?clientId={}".format(server_address, client_id))
-images = get_images(ws, prompt)
-ws.close() # for in case this example is used in an environment where it will be repeatedly called, like in a Gradio app. otherwise, you'll randomly receive connection timeouts
+try:
+    images = get_images(ws, prompt)
+finally:
+    ws.close()
 #Commented out code to display the output images:
 
 # for node_id in images:
