@@ -2,6 +2,7 @@ import io
 import json
 from unittest.mock import MagicMock, patch
 
+import av
 import pytest
 from aiohttp import FormData
 from aiohttp.test_utils import TestClient, TestServer
@@ -9,7 +10,7 @@ from PIL import Image
 
 from app.assets.manager import AssetsEnabled
 
-from .preview_helpers import duplicate_data_window, write_exr
+from .preview_helpers import duplicate_data_window, write_exr, write_prores
 
 
 class _Args:
@@ -67,15 +68,15 @@ def assets_routes_on():
         yield
 
 
-async def _upload(route: str, exr: bytes, roots, session) -> dict:
+async def _upload(route: str, exr: bytes, roots, session, name: str = "frame.exr") -> dict:
     if route == "/upload/image":
         async with await _client(AssetsEnabled(_Args())) as client:
-            asset = (await (await client.post(route, data=_form("frame.exr", exr))).json())["asset"]
+            asset = (await (await client.post(route, data=_form(name, exr))).json())["asset"]
             return asset | {"preview": await (await client.get(asset["preview_url"])).read()}
     async with await _assets_client() as client:
         if route == "multipart":
             form = FormData()
-            form.add_field("file", exr, filename="frame.exr")
+            form.add_field("file", exr, filename=name)
             form.add_field("tags", json.dumps(["input"]))
             resp = await client.post("/api/assets", data=form)
         else:  # from-hash, over content a previous run already stored
@@ -86,12 +87,12 @@ async def _upload(route: str, exr: bytes, roots, session) -> dict:
                 enable_asset_hashing = True
 
             mode.init(_HashingOn())
-            path = roots / "input" / "frame.exr"
+            path = roots / "input" / name
             path.write_bytes(exr)
             digest = "blake3:" + "ab" * 32
             create_content(session, str(path), hash=digest, size_bytes=len(exr), mtime_ns=path.stat().st_mtime_ns)
             session.commit()
-            resp = await client.post("/api/assets/from-hash", json={"hash": digest, "name": "frame.exr", "tags": ["input"]})
+            resp = await client.post("/api/assets/from-hash", json={"hash": digest, "name": name, "tags": ["input"]})
         asset = await resp.json()
         assert resp.status == 201, asset
         return asset | {"preview": await (await client.get(asset["preview_url"])).read()}
@@ -116,6 +117,31 @@ async def test_an_uploaded_exr_comes_back_with_its_preview(mock_create_session, 
     assert asset["preview_url"] == f"/api/assets/{asset['preview_id']}/content"
     preview = Image.open(io.BytesIO(asset["preview"]))
     assert (preview.format, preview.mode, preview.size) == ("WEBP", mode, (64, 48)), "alpha is kept"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("route", ["/upload/image", "multipart", "from-hash"])
+async def test_an_uploaded_prores_comes_back_with_a_playable_proxy(mock_create_session, roots, tmp_path, assets_routes_on, session, route):
+    mov = write_prores(tmp_path / "src.mov", 64, 48).read_bytes()
+    asset = await _upload(route, mov, roots, session, name="clip.mov")
+
+    assert asset["preview_id"] not in (None, asset["id"])
+    proxy = tmp_path / "proxy.mp4"
+    proxy.write_bytes(asset["preview"])
+    with av.open(str(proxy)) as container:
+        assert container.streams.video[0].codec_context.name == "h264"
+
+
+@pytest.mark.asyncio
+async def test_asset_content_serves_byte_ranges(mock_create_session, roots, tmp_path, assets_routes_on, session):
+    asset = await _upload("multipart", write_prores(tmp_path / "src.mov", 64, 48).read_bytes(), roots, session, name="clip.mov")
+    async with await _assets_client() as client:
+        resp = await client.get(f"/api/assets/{asset['preview_id']}/content", headers={"Range": "bytes=4-11"})
+        body = await resp.read()
+
+    assert resp.status == 206
+    assert resp.headers["Content-Type"] == "video/mp4"
+    assert body == asset["preview"][4:12]
 
 
 @pytest.mark.asyncio

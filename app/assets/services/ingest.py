@@ -52,6 +52,7 @@ from app.assets.services.schemas import (
     UserMetadata,
 )
 from app.assets.services.snapshot_hash import snapshot_hash
+from app.assets.services.video_proxy import needs_video_proxy, write_video_proxy
 from app.database.db import create_session, create_write_session
 
 
@@ -108,11 +109,12 @@ def _live_sibling_preview_id(session: Session, content_id: str) -> str | None:
     return next((preview_id for preview_id, path in rows if os.path.isfile(path)), None)
 
 
-_PREVIEW_FILENAME = re.compile(r"[0-9a-f]{64}\.(jpg|webp)")
+_PREVIEW_FILENAME = re.compile(r"[0-9a-f]{64}\.(jpg|webp|mp4)")
+_PREVIEW_MEDIA = {"jpg": ("image/jpeg", "image"), "webp": ("image/webp", "image"), "mp4": ("video/mp4", "video")}
 
 
-def _probe_output_preview(preview_ref: dict | None) -> tuple[str, str, int, int, os.stat_result] | None:
-    """The file a save node named as its output's preview: trusted by name, so stat only."""
+def _probe_preview(preview_ref: dict | None) -> tuple[str, str, int, int, os.stat_result] | None:
+    """The file named as an asset's preview: trusted by name, so stat only."""
     if preview_ref is None:
         return None
     try:
@@ -122,12 +124,12 @@ def _probe_output_preview(preview_ref: dict | None) -> tuple[str, str, int, int,
         path = os.path.join(folder_paths.get_previews_directory(), filename)
         return path, filename, int(preview_ref["width"]), int(preview_ref["height"]), os.stat(path)
     except Exception:
-        logging.warning("Ignoring the preview named for an output: %r", preview_ref, exc_info=True)
+        logging.warning("Ignoring the preview named for an asset: %r", preview_ref, exc_info=True)
         return None
 
 
-def _link_output_preview(session: Session, record: Asset, preview: tuple[str, str, int, int, os.stat_result]) -> None:
-    """Link the output to its preview's record, creating it on first use; never fails the output."""
+def _link_preview(session: Session, record: Asset, preview: tuple[str, str, int, int, os.stat_result]) -> None:
+    """Link the asset to its preview's record, creating it on first use; never fails the asset."""
     path, filename, width, height, stat_result = preview
     try:
         with session.begin_nested():
@@ -143,18 +145,45 @@ def _link_output_preview(session: Session, record: Asset, preview: tuple[str, st
                 .limit(1)
             )
             if preview_id is None:
+                mime_type, kind = _PREVIEW_MEDIA[filename.rpartition(".")[2]]
                 preview_id = create_record(
                     session,
                     content.id,
                     filename,
-                    mime_type="image/webp" if filename.endswith(".webp") else "image/jpeg",
+                    mime_type=mime_type,
                     tags=["preview"],
-                    system_metadata={"kind": "image", "width": width, "height": height},
+                    system_metadata={"kind": kind, "width": width, "height": height},
                 ).id
             record.preview_id = preview_id
             session.flush()
     except Exception:
         logging.warning("Could not link the preview %s", filename, exc_info=True)
+
+
+def _write_preview_proxy(abs_path: str, system_metadata: dict | None) -> dict | None:
+    """The preview ref of a browser-playable proxy, for a video that needs one."""
+    if not needs_video_proxy(system_metadata):
+        return None
+    try:
+        return write_video_proxy(abs_path)
+    except Exception:
+        logging.warning("Could not write a preview proxy for %s", abs_path, exc_info=True)
+        return None
+
+
+def link_preview(asset_id: str, preview_ref: dict) -> str | None:
+    """Link a generated preview to an asset that has none; None if it is gone or got one meanwhile."""
+    preview = _probe_preview(preview_ref)
+    if preview is None:
+        return None
+    with create_write_session() as session:
+        record = session.get(Asset, asset_id)
+        if record is None or record.preview_id is not None:
+            return None
+        _link_preview(session, record, preview)
+        preview_id = record.preview_id
+        session.commit()
+    return preview_id
 
 
 def _discard_unreferenced_content(session: Session, content_id: str) -> None:
@@ -715,7 +744,9 @@ def create_from_hash(
             return None
         content_id = content.id
         # Read the file before the claim below opens the write transaction.
-        system_metadata = _extract_system_metadata_sync(content.path, mime_type)
+        system_metadata = _extract_system_metadata_sync(
+            content.path, mime_type or mimetypes.guess_type(content.path, strict=False)[0]
+        )
         if not claim_qualified_content(session, content_id, stored_hash):
             session.rollback()
             return None
@@ -815,7 +846,6 @@ def register_executed_output(
     abs_path: str, job_id: str | None = None, preview_ref: dict | None = None
 ) -> RegisteredAsset | None:
     locator = os.path.abspath(abs_path)
-    preview = _probe_output_preview(preview_ref)
     try:
         stat_result = os.stat(locator, follow_symlinks=True)
         size_bytes = stat_result.st_size
@@ -825,6 +855,7 @@ def register_executed_output(
         system_metadata = _extract_system_metadata_sync(
             locator, mime_type, stat_result
         )
+        preview = _probe_preview(preview_ref or _write_preview_proxy(locator, system_metadata))
         with create_write_session() as session:
             created_content_id: str | None = None
             try:
@@ -852,7 +883,7 @@ def register_executed_output(
                     system_metadata=system_metadata,
                 )
                 if preview is not None:
-                    _link_output_preview(session, record, preview)
+                    _link_preview(session, record, preview)
                 # Read before commit: expiry would reload them in a second write transaction.
                 record_id = record.id
                 record_content_id = record.content_id

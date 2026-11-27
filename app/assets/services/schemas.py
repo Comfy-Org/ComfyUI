@@ -112,6 +112,7 @@ class UploadAssetView:
     size: int | None
     mime_type: str | None
     tags: list[str]
+    system_metadata: dict[str, Any] | None
 
 
 @dataclass(frozen=True)

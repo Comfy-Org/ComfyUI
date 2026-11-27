@@ -213,6 +213,7 @@ class AssetsEnabled:
                 size=result.asset.size_bytes,
                 mime_type=result.asset.mime_type,
                 tags=result.tags,
+                system_metadata=result.ref.system_metadata,
             )
         except Exception:
             logging.warning("Failed to register uploaded image as asset", exc_info=True)
