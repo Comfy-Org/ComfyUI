@@ -6,6 +6,11 @@ import logging
 def load_extra_path_config(yaml_path):
     with open(yaml_path, 'r', encoding='utf-8') as stream:
         config = yaml.safe_load(stream)
+    if config is None:
+        # A comment-only or empty YAML parses to None; iterating it crashed
+        # startup with a TypeError.
+        logging.warning(f"Extra path config contains no mappings: {yaml_path}")
+        return
     yaml_dir = os.path.dirname(os.path.abspath(yaml_path))
     for c in config:
         conf = config[c]
