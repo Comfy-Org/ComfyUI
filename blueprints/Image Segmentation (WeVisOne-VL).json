@@ -1,0 +1,759 @@
+{
+  "revision": 0,
+  "last_node_id": 39,
+  "last_link_id": 0,
+  "nodes": [
+    {
+      "id": 36,
+      "type": "1d74ebdb-3aaa-4d28-84fc-abf8b61daae2",
+      "pos": [
+        340,
+        30
+      ],
+      "size": [
+        330,
+        380
+      ],
+      "flags": {},
+      "order": 3,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "image",
+          "type": "IMAGE",
+          "link": null
+        },
+        {
+          "name": "bboxes",
+          "shape": 7,
+          "type": "BOUNDING_BOX",
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "name": "masks",
+          "type": "MASK",
+          "links": []
+        },
+        {
+          "name": "bboxes",
+          "type": "BOUNDING_BOX",
+          "links": []
+        },
+        {
+          "name": "points",
+          "type": "STRING",
+          "links": []
+        },
+        {
+          "name": "text",
+          "type": "STRING",
+          "links": []
+        },
+        {
+          "label": "foreground_image",
+          "name": "IMAGE",
+          "type": "IMAGE",
+          "links": []
+        },
+        {
+          "label": "background_image",
+          "name": "IMAGE_1",
+          "type": "IMAGE",
+          "links": []
+        }
+      ],
+      "properties": {
+        "previewExposures": []
+      },
+      "widgets_values": [
+        "segmentation",
+        "human",
+        false,
+        4096,
+        "wevisone_vl_2b_int8_convrot.safetensors"
+      ],
+      "widgets_values_named": {
+        "task": "segmentation",
+        "query": "human",
+        "individual_masks": false,
+        "max_length": 4096,
+        "clip_name": "wevisone_vl_2b_int8_convrot.safetensors"
+      }
+    }
+  ],
+  "links": [],
+  "version": 0.4,
+  "definitions": {
+    "subgraphs": [
+      {
+        "id": "1d74ebdb-3aaa-4d28-84fc-abf8b61daae2",
+        "version": 1,
+        "state": {
+          "lastGroupId": 3,
+          "lastNodeId": 49,
+          "lastLinkId": 53,
+          "lastRerouteId": 0
+        },
+        "revision": 0,
+        "config": {},
+        "name": "Image Segmentation (WeVisOne-VL)",
+        "inputNode": {
+          "id": -10,
+          "bounding": [
+            440,
+            60,
+            144.369140625,
+            188
+          ]
+        },
+        "outputNode": {
+          "id": -20,
+          "bounding": [
+            1530,
+            -30,
+            156.169921875,
+            168
+          ]
+        },
+        "inputs": [
+          {
+            "id": "41da9b7f-48ba-4b70-a2bf-e3f69ede4e25",
+            "name": "image",
+            "type": "IMAGE",
+            "linkIds": [
+              2,
+              39,
+              43
+            ],
+            "localized_name": "image",
+            "pos": [
+              560.369140625,
+              84
+            ]
+          },
+          {
+            "id": "5f5ec8cb-1ef6-42b5-b30b-4372c13bc26c",
+            "name": "bboxes",
+            "type": "BOUNDING_BOX",
+            "linkIds": [
+              26
+            ],
+            "pos": [
+              560.369140625,
+              104
+            ]
+          },
+          {
+            "id": "afac0e56-0c26-4fe5-8fed-213a4cdd2276",
+            "name": "task",
+            "type": "COMBO",
+            "linkIds": [
+              27
+            ],
+            "pos": [
+              560.369140625,
+              124
+            ]
+          },
+          {
+            "id": "054feb94-47c6-4423-9ea3-f74641388cd3",
+            "name": "query",
+            "type": "STRING",
+            "linkIds": [
+              28
+            ],
+            "pos": [
+              560.369140625,
+              144
+            ]
+          },
+          {
+            "id": "49adf9b1-9086-4122-863e-9d9973edba30",
+            "name": "individual_masks",
+            "type": "BOOLEAN",
+            "linkIds": [
+              29
+            ],
+            "pos": [
+              560.369140625,
+              164
+            ]
+          },
+          {
+            "id": "9cc14703-45c9-46b3-b8c4-dafb8fee92bc",
+            "name": "max_length",
+            "type": "INT",
+            "linkIds": [
+              30
+            ],
+            "pos": [
+              560.369140625,
+              184
+            ]
+          },
+          {
+            "id": "f3a6e151-1934-4465-87ee-2fe0c258c75d",
+            "name": "clip_name",
+            "type": "COMBO",
+            "linkIds": [
+              31
+            ],
+            "pos": [
+              560.369140625,
+              204
+            ]
+          }
+        ],
+        "outputs": [
+          {
+            "id": "0b4ff730-f70a-4f05-a729-1c15054857c0",
+            "name": "masks",
+            "type": "MASK",
+            "linkIds": [
+              4
+            ],
+            "localized_name": "masks",
+            "pos": [
+              1554,
+              -6
+            ]
+          },
+          {
+            "id": "335cb944-e410-4821-aed1-265083396471",
+            "name": "bboxes",
+            "type": "BOUNDING_BOX",
+            "linkIds": [
+              32
+            ],
+            "pos": [
+              1554,
+              14
+            ]
+          },
+          {
+            "id": "7f527adf-de95-40e6-a195-cf2f3aae2677",
+            "name": "points",
+            "type": "STRING",
+            "linkIds": [
+              33
+            ],
+            "pos": [
+              1554,
+              34
+            ]
+          },
+          {
+            "id": "1968209f-bb5a-4dae-912e-694eea2b8e85",
+            "name": "text",
+            "type": "STRING",
+            "linkIds": [
+              34
+            ],
+            "pos": [
+              1554,
+              54
+            ]
+          },
+          {
+            "id": "21db7756-19d8-4577-a75b-a1d6d25d7d66",
+            "name": "IMAGE",
+            "type": "IMAGE",
+            "linkIds": [
+              38
+            ],
+            "label": "foreground_image",
+            "pos": [
+              1554,
+              74
+            ]
+          },
+          {
+            "id": "5a722e81-f599-4c83-b966-4be78f583c06",
+            "name": "IMAGE_1",
+            "type": "IMAGE",
+            "linkIds": [
+              44
+            ],
+            "label": "background_image",
+            "pos": [
+              1554,
+              94
+            ]
+          }
+        ],
+        "widgets": [],
+        "nodes": [
+          {
+            "id": 11,
+            "type": "WeVisOneDetect",
+            "pos": [
+              740,
+              -30
+            ],
+            "size": [
+              430,
+              350
+            ],
+            "flags": {},
+            "order": 1,
+            "mode": 0,
+            "showAdvanced": true,
+            "inputs": [
+              {
+                "localized_name": "clip",
+                "name": "clip",
+                "type": "CLIP",
+                "link": 1
+              },
+              {
+                "localized_name": "image",
+                "name": "image",
+                "type": "IMAGE",
+                "link": 2
+              },
+              {
+                "localized_name": "bboxes",
+                "name": "bboxes",
+                "shape": 7,
+                "type": "BOUNDING_BOX",
+                "link": 26
+              },
+              {
+                "localized_name": "task",
+                "name": "task",
+                "type": "COMBO",
+                "widget": {
+                  "name": "task"
+                },
+                "link": 27
+              },
+              {
+                "localized_name": "query",
+                "name": "query",
+                "type": "STRING",
+                "widget": {
+                  "name": "query"
+                },
+                "link": 28
+              },
+              {
+                "localized_name": "individual_masks",
+                "name": "individual_masks",
+                "type": "BOOLEAN",
+                "widget": {
+                  "name": "individual_masks"
+                },
+                "link": 29
+              },
+              {
+                "localized_name": "max_length",
+                "name": "max_length",
+                "type": "INT",
+                "widget": {
+                  "name": "max_length"
+                },
+                "link": 30
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "masks",
+                "name": "masks",
+                "type": "MASK",
+                "slot_index": 0,
+                "links": [
+                  4,
+                  37,
+                  42
+                ]
+              },
+              {
+                "localized_name": "bboxes",
+                "name": "bboxes",
+                "type": "BOUNDING_BOX",
+                "slot_index": 1,
+                "links": [
+                  32
+                ]
+              },
+              {
+                "localized_name": "points",
+                "name": "points",
+                "type": "STRING",
+                "slot_index": 2,
+                "links": [
+                  33
+                ]
+              },
+              {
+                "localized_name": "text",
+                "name": "text",
+                "type": "STRING",
+                "slot_index": 3,
+                "links": [
+                  34
+                ]
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "WeVisOneDetect"
+            },
+            "widgets_values": [
+              "segmentation",
+              "human",
+              false,
+              4096
+            ],
+            "widgets_values_named": {
+              "task": "segmentation",
+              "query": "human",
+              "individual_masks": false,
+              "max_length": 4096
+            }
+          },
+          {
+            "id": 1,
+            "type": "CLIPLoader",
+            "pos": [
+              750,
+              390
+            ],
+            "size": [
+              420,
+              120
+            ],
+            "flags": {},
+            "order": 0,
+            "mode": 0,
+            "inputs": [
+              {
+                "localized_name": "clip_name",
+                "name": "clip_name",
+                "type": "COMBO",
+                "widget": {
+                  "name": "clip_name"
+                },
+                "link": 31
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "CLIP",
+                "name": "CLIP",
+                "type": "CLIP",
+                "slot_index": 0,
+                "links": [
+                  1
+                ]
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "CLIPLoader",
+              "models": [
+                {
+                  "name": "wevisone_vl_2b_int8_convrot.safetensors",
+                  "url": "https://huggingface.co/Comfy-Org/WeVisOne-VL/resolve/main/text_encoders/wevisone_vl_2b_int8_convrot.safetensors",
+                  "directory": "text_encoders"
+                }
+              ]
+            },
+            "widgets_values": [
+              "wevisone_vl_2b_int8_convrot.safetensors",
+              "stable_diffusion",
+              "default"
+            ],
+            "widgets_values_named": {
+              "clip_name": "wevisone_vl_2b_int8_convrot.safetensors",
+              "type": "stable_diffusion",
+              "device": "default"
+            }
+          },
+          {
+            "id": 37,
+            "type": "InvertMask",
+            "pos": [
+              1220,
+              130
+            ],
+            "size": [
+              180,
+              30
+            ],
+            "flags": {},
+            "order": 2,
+            "mode": 0,
+            "inputs": [
+              {
+                "localized_name": "mask",
+                "name": "mask",
+                "type": "MASK",
+                "link": 37
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "MASK",
+                "name": "MASK",
+                "type": "MASK",
+                "slot_index": 0,
+                "links": [
+                  36
+                ]
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "InvertMask"
+            }
+          },
+          {
+            "id": 38,
+            "type": "JoinImageWithAlpha",
+            "pos": [
+              1220,
+              210
+            ],
+            "size": [
+              200,
+              50
+            ],
+            "flags": {},
+            "order": 3,
+            "mode": 0,
+            "inputs": [
+              {
+                "localized_name": "image",
+                "name": "image",
+                "type": "IMAGE",
+                "link": 39
+              },
+              {
+                "localized_name": "alpha",
+                "name": "alpha",
+                "type": "MASK",
+                "link": 36
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "IMAGE",
+                "name": "IMAGE",
+                "type": "IMAGE",
+                "slot_index": 0,
+                "links": [
+                  38
+                ]
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "JoinImageWithAlpha"
+            }
+          },
+          {
+            "id": 39,
+            "type": "JoinImageWithAlpha",
+            "pos": [
+              1220,
+              320
+            ],
+            "size": [
+              200,
+              50
+            ],
+            "flags": {},
+            "order": 4,
+            "mode": 0,
+            "inputs": [
+              {
+                "localized_name": "image",
+                "name": "image",
+                "type": "IMAGE",
+                "link": 43
+              },
+              {
+                "localized_name": "alpha",
+                "name": "alpha",
+                "type": "MASK",
+                "link": 42
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "IMAGE",
+                "name": "IMAGE",
+                "type": "IMAGE",
+                "slot_index": 0,
+                "links": [
+                  44
+                ]
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "JoinImageWithAlpha"
+            }
+          }
+        ],
+        "groups": [],
+        "links": [
+          {
+            "id": 1,
+            "origin_id": 1,
+            "origin_slot": 0,
+            "target_id": 11,
+            "target_slot": 0,
+            "type": "CLIP"
+          },
+          {
+            "id": 2,
+            "origin_id": -10,
+            "origin_slot": 0,
+            "target_id": 11,
+            "target_slot": 1,
+            "type": "IMAGE"
+          },
+          {
+            "id": 4,
+            "origin_id": 11,
+            "origin_slot": 0,
+            "target_id": -20,
+            "target_slot": 0,
+            "type": "MASK"
+          },
+          {
+            "id": 26,
+            "origin_id": -10,
+            "origin_slot": 1,
+            "target_id": 11,
+            "target_slot": 2,
+            "type": "BOUNDING_BOX"
+          },
+          {
+            "id": 27,
+            "origin_id": -10,
+            "origin_slot": 2,
+            "target_id": 11,
+            "target_slot": 3,
+            "type": "COMBO"
+          },
+          {
+            "id": 28,
+            "origin_id": -10,
+            "origin_slot": 3,
+            "target_id": 11,
+            "target_slot": 4,
+            "type": "STRING"
+          },
+          {
+            "id": 29,
+            "origin_id": -10,
+            "origin_slot": 4,
+            "target_id": 11,
+            "target_slot": 5,
+            "type": "BOOLEAN"
+          },
+          {
+            "id": 30,
+            "origin_id": -10,
+            "origin_slot": 5,
+            "target_id": 11,
+            "target_slot": 6,
+            "type": "INT"
+          },
+          {
+            "id": 31,
+            "origin_id": -10,
+            "origin_slot": 6,
+            "target_id": 1,
+            "target_slot": 0,
+            "type": "COMBO"
+          },
+          {
+            "id": 32,
+            "origin_id": 11,
+            "origin_slot": 1,
+            "target_id": -20,
+            "target_slot": 1,
+            "type": "BOUNDING_BOX"
+          },
+          {
+            "id": 33,
+            "origin_id": 11,
+            "origin_slot": 2,
+            "target_id": -20,
+            "target_slot": 2,
+            "type": "STRING"
+          },
+          {
+            "id": 34,
+            "origin_id": 11,
+            "origin_slot": 3,
+            "target_id": -20,
+            "target_slot": 3,
+            "type": "STRING"
+          },
+          {
+            "id": 36,
+            "origin_id": 37,
+            "origin_slot": 0,
+            "target_id": 38,
+            "target_slot": 1,
+            "type": "MASK"
+          },
+          {
+            "id": 37,
+            "origin_id": 11,
+            "origin_slot": 0,
+            "target_id": 37,
+            "target_slot": 0,
+            "type": "MASK"
+          },
+          {
+            "id": 38,
+            "origin_id": 38,
+            "origin_slot": 0,
+            "target_id": -20,
+            "target_slot": 4,
+            "type": "IMAGE"
+          },
+          {
+            "id": 39,
+            "origin_id": -10,
+            "origin_slot": 0,
+            "target_id": 38,
+            "target_slot": 0,
+            "type": "IMAGE"
+          },
+          {
+            "id": 42,
+            "origin_id": 11,
+            "origin_slot": 0,
+            "target_id": 39,
+            "target_slot": 1,
+            "type": "MASK"
+          },
+          {
+            "id": 43,
+            "origin_id": -10,
+            "origin_slot": 0,
+            "target_id": 39,
+            "target_slot": 0,
+            "type": "IMAGE"
+          },
+          {
+            "id": 44,
+            "origin_id": 39,
+            "origin_slot": 0,
+            "target_id": -20,
+            "target_slot": 5,
+            "type": "IMAGE"
+          }
+        ],
+        "extra": {},
+        "category": "Preprocessors/Segmentation",
+        "description": "Segments objects in an image using WeVisOne-VL, returning alpha mattes, boxes and foreground/background cutouts."
+      }
+    ]
+  },
+  "extra": {}
+}
