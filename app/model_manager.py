@@ -6,15 +6,50 @@ import logging
 import folder_paths
 import glob
 import comfy.utils
+import uuid
+import asyncio
+import ipaddress
+import ntpath
+import tempfile
+from urllib.parse import urlparse, urljoin
+from typing import Awaitable, Callable
+import aiohttp
 from aiohttp import web
 from PIL import Image
 from io import BytesIO
 from folder_paths import map_legacy, filter_files_extensions, filter_files_content_types
 
 
+ALLOWED_MODEL_HOSTS = {"civitai.com", "civitai.red", "huggingface.co"}
+ALLOWED_MODEL_SUFFIXES = (".safetensors", ".sft")
+WHITELISTED_MODEL_URLS = {
+    "https://huggingface.co/stabilityai/stable-zero123/resolve/main/stable_zero123.ckpt",
+    "https://huggingface.co/TencentARC/T2I-Adapter/resolve/main/models/t2iadapter_depth_sd14v1.pth?download=true",
+    "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.1.0/RealESRGAN_x4plus.pth",
+}
+MODEL_CDN_DOMAINS = ("huggingface.co", "hf.co", "r2.cloudflarestorage.com")
+MODEL_CDN_HOSTS = {"release-assets.githubusercontent.com", "objects.githubusercontent.com"}
+DOWNLOAD_CHUNK_SIZE = 1024 * 1024
+# Bounds request validation and result storage, not transfer concurrency.
+MAX_BULK_MODEL_DOWNLOADS = 200
+DOWNLOAD_TIMEOUT = aiohttp.ClientTimeout(total=None, sock_connect=30, sock_read=60)
+DownloadProgressCallback = Callable[[int], Awaitable[None]]
+
+
+class ModelDownloadResolver(aiohttp.ThreadedResolver):
+    async def resolve(self, host, port=0, family=0):
+        addresses = await super().resolve(host, port, family)
+        if any(not ipaddress.ip_address(address["host"]).is_global for address in addresses):
+            raise OSError("Model source resolved to a non-public address")
+        return addresses
+
+
 class ModelFileManager:
-    def __init__(self) -> None:
+    def __init__(self, send_event: Callable[[str, dict, str], None]) -> None:
         self.cache: dict[str, tuple[list[dict], dict[str, float], float]] = {}
+        self.send_event = send_event
+        self._model_downloads: dict[str, tuple[str, str, asyncio.Task]] = {}
+        self._download_destinations: set[str] = set()
 
     def get_cache(self, key: str, default=None) -> tuple[list[dict], dict[str, float], float] | None:
         return self.cache.get(key, default)
@@ -101,6 +136,140 @@ class ModelFileManager:
                     return web.Response(body=img_bytes.getvalue(), content_type="image/webp")
             except:
                 return web.Response(status=404)
+
+        @routes.post("/experiment/models/download_missing")
+        async def download_missing_models(request: web.Request) -> web.Response:
+            try:
+                payload = await request.json()
+                if not isinstance(payload, dict):
+                    raise ValueError("Body must be an object")
+                models = payload.get("models")
+                if not isinstance(models, list) or not 0 < len(models) <= MAX_BULK_MODEL_DOWNLOADS:
+                    raise ValueError(f"Provide between 1 and {MAX_BULK_MODEL_DOWNLOADS} models")
+                client_id = _required_string(payload, "client_id")
+                batch_id = _required_string(payload, "batch_id")
+                hf_token = payload.get("hf_token", "")
+                if not isinstance(hf_token, str) or len(hf_token) > 1024 or any(ord(c) < 33 or ord(c) > 126 for c in hf_token):
+                    raise ValueError("hf_token must be a token without whitespace or control characters")
+                models = [
+                    {key: _required_string(model, key) for key in ("name", "directory", "url")}
+                    for model in models
+                ]
+            except (ValueError, TypeError) as exc:
+                return web.json_response({"error": str(exc), "message": str(exc)}, status=400)
+
+            models = list({tuple(model.values()): model for model in models}.values())
+            results = []
+            seen = {}
+            connector = aiohttp.TCPConnector(resolver=ModelDownloadResolver(), limit=1)
+            async with aiohttp.ClientSession(connector=connector, timeout=DOWNLOAD_TIMEOUT, auto_decompress=False) as session:
+                for model in models:
+                    task_id = uuid.uuid4().hex
+                    destination = None
+                    reserved = False
+                    bytes_downloaded = 0
+                    status = "failed"
+                    error = None
+                    error_code = None
+
+                    def emit(status, error=None):
+                        self.send_event("missing_model_download", {
+                            **model, "task_id": task_id, "batch_id": batch_id,
+                            "status": status, "bytes_downloaded": bytes_downloaded,
+                            **({"error": error} if error else {}),
+                            **({"error_code": error_code} if error_code else {}),
+                        }, client_id)
+
+                    async def progress(size):
+                        nonlocal bytes_downloaded
+                        bytes_downloaded = size
+                        emit("running")
+
+                    try:
+                        allowed, reason = _is_model_download_allowed(model["name"], model["url"])
+                        if not allowed:
+                            status, error = "blocked", reason
+                        else:
+                            destination = _resolve_download_destination(model["directory"], model["name"])
+                            if destination in seen:
+                                status = seen[destination]["status"]
+                                error = seen[destination].get("error")
+                                error_code = seen[destination].get("error_code")
+                            elif os.path.isfile(destination):
+                                status = "skipped_existing"
+                            elif destination in self._download_destinations:
+                                error = "This model is already being downloaded"
+                            else:
+                                self._download_destinations.add(destination)
+                                reserved = True
+                                task = asyncio.create_task(_download_file(session, model["url"], destination, progress, hf_token=hf_token))
+                                self._model_downloads[task_id] = (client_id, batch_id, task)
+                                try:
+                                    await asyncio.shield(task)
+                                    status = "downloaded"
+                                except asyncio.CancelledError:
+                                    if not task.cancelled():
+                                        task.cancel()
+                                        await asyncio.gather(task, return_exceptions=True)
+                                        raise
+                                    status = "canceled"
+                    except aiohttp.ClientResponseError as exc:
+                        error = f"Download failed (HTTP {exc.status})"
+                        if str(exc.request_info.real_url.origin()) == "https://huggingface.co":
+                            if exc.status in (401, 403, 451) and exc.headers and exc.headers.get("X-Error-Code") == "GatedRepo":
+                                error_code = "hf_gated"
+                                error = "Request access on the Hugging Face repository, then retry with a token from the approved account"
+                            elif exc.status == 401:
+                                error_code = "hf_authentication"
+                                error = "Provide a valid Hugging Face read token and retry"
+                            elif exc.status in (403, 451):
+                                error_code = "hf_access_denied"
+                                error = "Hugging Face denied access; check the account's repository access and token permissions"
+                    except asyncio.TimeoutError:
+                        error_code = "transfer_timeout"
+                        error = "Download timed out; try again"
+                    except aiohttp.ClientError:
+                        error = "Could not download model; check the connection and try again"
+                    except (ValueError, OSError) as exc:
+                        error = str(exc)
+                    finally:
+                        self._model_downloads.pop(task_id, None)
+                        if reserved:
+                            self._download_destinations.discard(destination)
+
+                    result = {
+                        **model, "status": status,
+                        **({"error": error} if error else {}),
+                        **({"error_code": error_code} if error_code else {}),
+                    }
+                    results.append(result)
+                    if destination is not None:
+                        seen[destination] = result
+                    emit("completed" if status == "downloaded" else status, error)
+
+            self.clear_cache()
+            return web.json_response({
+                "downloaded": sum(r["status"] == "downloaded" for r in results),
+                "skipped": sum(r["status"] == "skipped_existing" for r in results),
+                "canceled": sum(r["status"] == "canceled" for r in results),
+                "failed": sum(r["status"] in ("failed", "blocked") for r in results),
+                "results": results,
+            })
+
+        @routes.post("/experiment/models/download_missing/cancel")
+        async def cancel_download_missing_model(request: web.Request) -> web.Response:
+            try:
+                payload = await request.json()
+                task_id = _required_string(payload, "task_id")
+                client_id = _required_string(payload, "client_id")
+                batch_id = _required_string(payload, "batch_id")
+            except (ValueError, TypeError) as exc:
+                return web.json_response({"error": str(exc), "message": str(exc)}, status=400)
+            download = self._model_downloads.get(task_id)
+            if download is None or download[:2] != (client_id, batch_id):
+                return web.json_response({"error": "Download task not found", "message": "Download task not found"}, status=404)
+            download[2].cancel()
+            return web.json_response({"ok": True, "task_id": task_id})
 
     def get_model_file_list(self, folder_name: str):
         folder_name = map_legacy(folder_name)
@@ -219,3 +388,111 @@ class ModelFileManager:
 
     def __exit__(self, exc_type, exc_value, traceback):
         self.clear_cache()
+
+
+def _required_string(payload: object, key: str) -> str:
+    value = payload.get(key) if isinstance(payload, dict) else None
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"Field '{key}' must be a non-empty string")
+    return value.strip()
+
+
+def _validate_model_url(url: str, *, redirect: bool = False) -> None:
+    parsed = urlparse(url)
+    host = parsed.hostname or ""
+    if parsed.scheme != "https" or parsed.username or parsed.password or parsed.port not in (None, 443):
+        raise ValueError("Model downloads require a public HTTPS URL")
+    allowed = host in ALLOWED_MODEL_HOSTS or url in WHITELISTED_MODEL_URLS
+    if redirect:
+        allowed = allowed or host in MODEL_CDN_HOSTS or any(
+            host == domain or host.endswith("." + domain) for domain in MODEL_CDN_DOMAINS
+        )
+    if not allowed:
+        raise ValueError("Model download source is not allowed")
+
+
+def _is_model_download_allowed(model_name: str, model_url: str) -> tuple[bool, str | None]:
+    try:
+        _validate_model_url(model_url)
+    except ValueError as exc:
+        return False, str(exc)
+    suffixes = ALLOWED_MODEL_SUFFIXES
+    if model_url in WHITELISTED_MODEL_URLS:
+        suffixes = (os.path.splitext(urlparse(model_url).path)[1],)
+    if not model_name.endswith(suffixes):
+        return False, f"Only allowed suffixes are: {', '.join(suffixes)}"
+    return True, None
+
+
+def _resolve_download_destination(directory: str, model_name: str) -> str:
+    directory = map_legacy(directory)
+    if directory in ("configs", "custom_nodes") or directory not in folder_paths.folder_names_and_paths:
+        raise ValueError("Unknown model directory")
+    model_paths = folder_paths.get_folder_paths(directory)
+    if not model_paths:
+        raise ValueError("No paths configured for this model directory")
+    if ntpath.isabs(model_name) or ntpath.splitdrive(model_name)[0] or "\x00" in model_name:
+        raise ValueError("Model name must be a relative path")
+    normalized_name = model_name.replace("\\", "/")
+    if ".." in normalized_name.split("/"):
+        raise ValueError("Model path escapes configured model directory")
+    if not os.path.splitext(normalized_name)[1]:
+        raise ValueError("Model name must include a file extension")
+    paths = [os.path.join(base, normalized_name) for base in model_paths]
+    for base, path in zip(model_paths, paths):
+        if not folder_paths.is_within_directory(base, path):
+            raise ValueError("Model path escapes configured model directory")
+        if os.path.isfile(path):
+            return os.path.realpath(path)
+    return os.path.realpath(paths[0])
+
+
+async def _download_file(
+    session: aiohttp.ClientSession,
+    url: str,
+    destination: str,
+    progress_callback: DownloadProgressCallback,
+    *,
+    hf_token: str = "",
+) -> None:
+    for hop in range(11):
+        _validate_model_url(url, redirect=hop > 0)
+        parsed = urlparse(url)
+        headers = {}
+        if hf_token and (parsed.scheme, parsed.hostname, parsed.port) in (("https", "huggingface.co", None), ("https", "huggingface.co", 443)):
+            headers["Authorization"] = f"Bearer {hf_token}"
+        async with session.get(url, allow_redirects=False, headers=headers) as response:
+            if response.status in (301, 302, 303, 307, 308):
+                location = response.headers.get("Location")
+                if not location:
+                    raise ValueError("Model redirect has no destination")
+                url = urljoin(url, location)
+                continue
+            response.raise_for_status()
+            if response.status != 200 or response.content_type in ("text/html", "application/json"):
+                raise ValueError("Source did not return a model file")
+            parent = os.path.dirname(destination)
+            os.makedirs(parent, exist_ok=True)
+            with tempfile.NamedTemporaryFile(dir=parent, suffix=".temp", delete=False) as file_handle:
+                temp_file = file_handle.name
+                try:
+                    downloaded = 0
+                    last_emit = time.monotonic()
+                    await progress_callback(0)
+                    async for chunk in response.content.iter_chunked(DOWNLOAD_CHUNK_SIZE):
+                        file_handle.write(chunk)
+                        downloaded += len(chunk)
+                        if time.monotonic() - last_emit >= 0.25:
+                            await progress_callback(downloaded)
+                            last_emit = time.monotonic()
+                    if downloaded == 0:
+                        raise ValueError("Source returned an empty file")
+                    file_handle.close()
+                    await progress_callback(downloaded)
+                    # Publishing with a hard link fails if another writer installed the file.
+                    os.link(temp_file, destination)
+                finally:
+                    file_handle.close()
+                    os.unlink(temp_file)
+            return
+    raise ValueError("Too many model download redirects")
