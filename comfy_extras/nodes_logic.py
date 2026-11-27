@@ -96,6 +96,7 @@ class BranchNode(io.ComfyNode):
             description="Select from connected inputs by name. Inputs can be renamed by double clicking them.",
             search_aliases=["switch", "choice", "pick"],
             is_experimental=True,
+            static_lazy_selection=True,
             inputs=[
                 _io.Autogrow.Input("autogrow", template=template),
                 io.String.Input("branch", extra_dict={"widgetType": "COMFY_BRANCH_SELECTOR"}),
@@ -132,6 +133,7 @@ class SwitchNode(io.ComfyNode):
             display_name="If/Else Switch",
             category="utilities/logic",
             is_experimental=True,
+            static_lazy_selection=True,
             inputs=[
                 io.Boolean.Input("switch"),
                 io.MatchType.Input("on_false", template=template, lazy=True, optional=True),
