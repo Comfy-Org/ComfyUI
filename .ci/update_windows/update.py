@@ -4,6 +4,8 @@ import sys
 import os
 import shutil
 import filecmp
+import importlib.util
+import tempfile
 
 def pull(repo, remote_name='origin', branch='master'):
     for remote in repo.remotes:
@@ -144,10 +146,77 @@ if self_update and not files_equal(update_py_path, repo_update_py_path) and file
     shutil.copy(repo_update_py_path, os.path.join(cur_path, "update_new.py"))
     exit()
 
-if not os.path.exists(req_path) or not files_equal(repo_req_path, req_path):
+TORCH_PACKAGES = {'torch', 'torchvision', 'torchaudio'}
+
+
+def get_installed_torch_versions():
+    """Get current versions of torch packages without importing them.
+
+    Returns a dict of {package_name: version_string} for installed torch packages
+    that have a platform-specific build variant (e.g. +rocm, +xpu).
+    """
+    result = {}
+    for pkg_name in TORCH_PACKAGES:
+        try:
+            spec = importlib.util.find_spec(pkg_name)
+            if spec is None:
+                continue
+            for folder in spec.submodule_search_locations:
+                ver_file = os.path.join(folder, "version.py")
+                if os.path.isfile(ver_file):
+                    ver_spec = importlib.util.spec_from_file_location(f"{pkg_name}_version", ver_file)
+                    module = importlib.util.module_from_spec(ver_spec)
+                    ver_spec.loader.exec_module(module)
+                    version = module.__version__
+                    if '+' in version:
+                        result[pkg_name] = version
+                    break
+        except Exception:
+            pass
+    return result
+
+
+def pip_install_requirements(requirements_path):
+    """Install requirements while preserving platform-specific torch builds.
+
+    If torch is installed with a non-standard build variant (ROCm, DirectML, XPU, etc.),
+    uses pip constraints to pin torch packages and prevent them from being overwritten
+    by default PyPI builds.
+    """
     import subprocess
+
+    torch_versions = get_installed_torch_versions()
+    constraint_file = None
+
+    if torch_versions:
+        variant = list(torch_versions.values())[0].split('+')[1]
+        print("Detected platform-specific PyTorch build: +{}".format(variant))  # noqa: T201
+        print("Constraining torch packages to prevent overwrite: {}".format(  # noqa: T201
+            ', '.join('{}=={}'.format(k, v) for k, v in torch_versions.items())
+        ))
+        constraint_file = tempfile.NamedTemporaryFile(
+            mode='w', suffix='.txt', delete=False, prefix='torch_constraints_'
+        )
+        for pkg, ver in torch_versions.items():
+            constraint_file.write("{}=={}\n".format(pkg, ver))
+        constraint_file.close()
+
     try:
-        subprocess.check_call([sys.executable, '-s', '-m', 'pip', 'install', '-r', repo_req_path])
+        cmd = [sys.executable, '-s', '-m', 'pip', 'install', '-r', requirements_path]
+        if constraint_file:
+            cmd += ['-c', constraint_file.name]
+        subprocess.check_call(cmd)
+    finally:
+        if constraint_file:
+            try:
+                os.unlink(constraint_file.name)
+            except OSError:
+                pass
+
+
+if not os.path.exists(req_path) or not files_equal(repo_req_path, req_path):
+    try:
+        pip_install_requirements(repo_req_path)
         shutil.copy(repo_req_path, req_path)
     except:
         pass
