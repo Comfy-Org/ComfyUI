@@ -14,6 +14,7 @@ import os
 import importlib.util
 import shutil
 import importlib.metadata
+import subprocess
 import folder_paths
 import time
 from comfy.cli_args import enables_dynamic_vram
@@ -53,7 +54,15 @@ if __name__ == "__main__":
         and args.default_device is None
         and os.environ.get("CUDA_VISIBLE_DEVICES") is None
     ):
-        os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+        gpu = "0"
+        if "rocm" in cuda_malloc.get_torch_version_noimport():
+            # ROCm lists the integrated GPU of Ryzen desktop CPUs before the discrete card.
+            probe = "import torch; print(next((i for i in range(torch.cuda.device_count()) if not torch.cuda.get_device_properties(i).is_integrated), 0))"
+            try:
+                gpu = subprocess.run([sys.executable, "-c", probe], capture_output=True, text=True, timeout=60).stdout.strip() or "0"
+            except subprocess.TimeoutExpired:
+                pass
+        os.environ["CUDA_VISIBLE_DEVICES"] = gpu
         logging.warning("On windows we are currently forcing single GPU mode in ComfyUI due to a Nvidia related issue, if you want to disable this use: --cuda-device all")
 
     if args.enable_asset_hashing and args.disable_assets:
