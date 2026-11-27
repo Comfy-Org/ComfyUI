@@ -4,8 +4,9 @@ def model_options_long_clip(sd, tokenizer_data, model_options):
     w = sd.get("clip_l.text_model.embeddings.position_embedding.weight", None)
     if w is None:
         w = sd.get("clip_g.text_model.embeddings.position_embedding.weight", None)
+        model_name = "clip_g" if w is not None else None
     else:
-        model_name = "clip_g"
+        model_name = "clip_l"
 
     if w is None:
         w = sd.get("text_model.embeddings.position_embedding.weight", None)
@@ -14,8 +15,6 @@ def model_options_long_clip(sd, tokenizer_data, model_options):
                 model_name = "clip_g"
             elif "text_model.encoder.layers.1.mlp.fc1.weight" in sd:
                 model_name = "clip_l"
-    else:
-        model_name = "clip_l"
 
     if w is not None:
         tokenizer_data = tokenizer_data.copy()
