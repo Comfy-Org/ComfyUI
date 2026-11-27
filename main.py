@@ -287,9 +287,16 @@ def dynamic_vram_supported():
         return True
     if comfy.model_management.is_amd():
         if comfy.model_management.rocm_version >= (7, 14):
-            return True
+            from comfy.hip_vmm_capability import hip_vmm_supported
+            return hip_vmm_supported(comfy.model_management.get_all_torch_devices())
     return False
 
+
+# Keep the existing explicit override behaviour. It skips the automatic
+# capability gate and may fail if the selected AMD device lacks HIP VMM.
+if args.enable_dynamic_vram and comfy.model_management.is_amd():
+    logging.warning("Explicit --enable-dynamic-vram bypasses AMD HIP VMM capability checks; "
+                    "VBAR allocation may fail on unsupported devices.")
 
 if args.enable_dynamic_vram or (enables_dynamic_vram() and dynamic_vram_supported()):
     if (not args.enable_dynamic_vram) and (comfy.model_management.torch_version_numeric < (2, 8)):
