@@ -1,0 +1,38 @@
+# Holds the workflow templates this build ships against this build's own node
+# registry. A template that stops working is a release blocker, and nothing
+# else in CI notices, because the templates come from a pinned
+# comfyui-workflow-templates release rather than from this repo.
+#
+# Structural only -- no models, no GPU, no server -- so it can run on every
+# pull request as well as on a release branch, which is where a renamed input
+# has to be caught: in the PR that renames it, not during the pre-stable soak.
+name: Test workflow templates
+
+on:
+  push:
+    branches: [ main, master, release/** ]
+  pull_request:
+    branches: [ main, master, release/** ]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        persist-credentials: false
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.12'
+    - name: Install requirements
+      run: |
+        python -m pip install --upgrade pip
+        pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+        pip install -r requirements.txt
+        pip install -r tests-unit/requirements.txt
+    - name: Check shipped templates against this build's nodes
+      run: python -m pytest tests-unit/templates_test -q
