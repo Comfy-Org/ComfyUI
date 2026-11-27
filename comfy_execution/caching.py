@@ -24,6 +24,20 @@ def include_unique_id_in_input(class_type: str) -> bool:
     NODE_CLASS_CONTAINS_UNIQUE_ID[class_type] = "UNIQUE_ID" in class_def.INPUT_TYPES().get("hidden", {}).values()
     return NODE_CLASS_CONTAINS_UNIQUE_ID[class_type]
 
+
+def cache_key_inputs(dynprompt, node_id):
+    return dynprompt.get_node(node_id)["inputs"]
+
+
+def linked_input_ids(dynprompt, node_id):
+    if not dynprompt.has_node(node_id):
+        return
+    inputs = cache_key_inputs(dynprompt, node_id)
+    for key in sorted(inputs.keys()):
+        if is_link(inputs[key]):
+            yield inputs[key][0]
+
+
 class CacheKeySet(ABC):
     def __init__(self, dynprompt, node_ids, is_changed_cache):
         self.keys = {}
@@ -85,11 +99,17 @@ class CacheKeySetInputSignature(CacheKeySet):
         super().__init__(dynprompt, node_ids, is_changed_cache)
         self.dynprompt = dynprompt
         self.is_changed_cache = is_changed_cache
+        # Unequal to itself, so a small key never matches another prompt and cache providers skip it.
+        self.small_key_marker = float("NaN")
+        self.uncacheable = {}
+        self.full_key_entries = 0
 
     def include_node_id_in_input(self) -> bool:
         return False
 
     async def add_keys(self, node_ids):
+        # Decided afresh on each call: a node override between calls can change a node's ancestry.
+        self.uncacheable = {}
         for node_id in node_ids:
             if node_id in self.keys:
                 continue
@@ -100,6 +120,8 @@ class CacheKeySetInputSignature(CacheKeySet):
             self.subcache_keys[node_id] = (node_id, node["class_type"])
 
     async def get_node_signature(self, dynprompt, node_id):
+        if await self.is_uncacheable(dynprompt, node_id):
+            return to_hashable([self.small_key_marker, node_id])
         signature = []
         ancestors, order_mapping = self.get_ordered_ancestry(dynprompt, node_id)
         signature.append(await self.get_immediate_node_signature(dynprompt, node_id, order_mapping))
@@ -117,7 +139,7 @@ class CacheKeySetInputSignature(CacheKeySet):
         signature = [class_type, await self.is_changed_cache.get(node_id)]
         if self.include_node_id_in_input() or (hasattr(class_def, "NOT_IDEMPOTENT") and class_def.NOT_IDEMPOTENT) or include_unique_id_in_input(class_type):
             signature.append(node_id)
-        inputs = node["inputs"]
+        inputs = cache_key_inputs(dynprompt, node_id)
         for key in sorted(inputs.keys()):
             if is_link(inputs[key]):
                 (ancestor_id, ancestor_socket) = inputs[key]
@@ -135,18 +157,65 @@ class CacheKeySetInputSignature(CacheKeySet):
         self.get_ordered_ancestry_internal(dynprompt, node_id, ancestors, order_mapping)
         return ancestors, order_mapping
 
+    # An explicit stack, not recursion: an unrolled loop chains more ancestors than the recursion limit allows.
     def get_ordered_ancestry_internal(self, dynprompt, node_id, ancestors, order_mapping):
-        if not dynprompt.has_node(node_id):
-            return
-        inputs = dynprompt.get_node(node_id)["inputs"]
-        input_keys = sorted(inputs.keys())
-        for key in input_keys:
-            if is_link(inputs[key]):
-                ancestor_id = inputs[key][0]
+        stack = [linked_input_ids(dynprompt, node_id)]
+        while stack:
+            for ancestor_id in stack[-1]:
                 if ancestor_id not in order_mapping:
                     ancestors.append(ancestor_id)
                     order_mapping[ancestor_id] = len(ancestors) - 1
-                    self.get_ordered_ancestry_internal(dynprompt, ancestor_id, ancestors, order_mapping)
+                    stack.append(linked_input_ids(dynprompt, ancestor_id))
+                    break
+            else:
+                stack.pop()
+
+    async def is_uncacheable(self, dynprompt, node_id):
+        stack = [node_id]
+        entered = set()
+        while stack:
+            current = stack[-1]
+            if current in self.uncacheable:
+                stack.pop()
+            elif current not in entered:
+                entered.add(current)
+                stack.extend(a for a in linked_input_ids(dynprompt, current) if a not in entered and a not in self.uncacheable)
+            else:
+                stack.pop()
+                self.uncacheable[current] = await self.is_immediately_uncacheable(dynprompt, current) or any(
+                    self.uncacheable.get(ancestor_id, False) for ancestor_id in linked_input_ids(dynprompt, current)
+                )
+        return self.uncacheable[node_id]
+
+    async def is_immediately_uncacheable(self, dynprompt, node_id):
+        from comfy_execution.cache_provider import _contains_self_unequal
+        if not dynprompt.has_node(node_id):
+            return True
+        inputs = cache_key_inputs(dynprompt, node_id)
+        values = [value[1] if is_link(value) else value for value in inputs.values()]
+        return _contains_self_unequal(to_hashable([await self.is_changed_cache.get(node_id), values]))
+
+# Full keys list every ancestor, so their total size grows with the square of an unrolled loop's length.
+FULL_KEY_BUDGET = 250_000
+
+
+async def check_full_key_budget(cache, node_ids):
+    if not isinstance(cache, BasicCache):
+        return
+    keys = CacheKeySetInputSignature(cache.dynprompt, [], cache.is_changed_cache)
+    entries = cache.cache_key_set.full_key_entries
+    for node_id in node_ids:
+        if not await keys.is_uncacheable(cache.dynprompt, node_id):
+            entries += 1 + len(keys.get_ordered_ancestry(cache.dynprompt, node_id)[0])
+            if entries > FULL_KEY_BUDGET:
+                raise ValueError(
+                    "This prompt's expanded nodes (such as loops with cache iterations on) would need more than "
+                    f"{FULL_KEY_BUDGET:,} cache key entries. One cached loop with a one-node body reaches that at "
+                    "about 350 passes; chained or nested cached loops reach it sooner, independent ones later. "
+                    "Turn off cache iterations, or run fewer passes at a time."
+                )
+    cache.cache_key_set.full_key_entries = entries
+
 
 class BasicCache:
     def __init__(self, key_class, enable_providers=False):
@@ -334,11 +403,11 @@ class BasicCache:
             _logger.warning(f"Failed to build cache context for node {node_id}: {e}")
             return None
 
-    async def _ensure_subcache(self, node_id, children_ids):
+    async def _ensure_subcache(self, node_id, children_ids, key_class=None):
         subcache_key = self.cache_key_set.get_subcache_key(node_id)
         subcache = self.subcaches.get(subcache_key, None)
         if subcache is None:
-            subcache = BasicCache(self.key_class)
+            subcache = BasicCache(key_class or self.key_class)
             self.subcaches[subcache_key] = subcache
         await subcache.set_prompt(self.dynprompt, children_ids, self.is_changed_cache)
         return subcache
@@ -481,8 +550,8 @@ class LRUCache(BasicCache):
         BasicCache.set_local(self, node_id, value)
 
     async def ensure_subcache_for(self, node_id, children_ids):
-        # Just uses subcaches for tracking 'live' nodes
-        await super()._ensure_subcache(node_id, children_ids)
+        # Just uses subcaches for tracking 'live' nodes, so they key by id; the children's keys are added below
+        await super()._ensure_subcache(node_id, children_ids, CacheKeySetID)
 
         await self.cache_key_set.add_keys(children_ids)
         self._mark_used(node_id)

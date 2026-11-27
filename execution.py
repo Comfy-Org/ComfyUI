@@ -32,6 +32,7 @@ from comfy_execution.caching import (
     LRUCache,
     RAMPressureCache,
     RAM_CACHE_LARGE_INTERMEDIATE,
+    check_full_key_budget,
 )
 from comfy_execution.graph import (
     DynamicPrompt,
@@ -618,6 +619,7 @@ async def execute(server: "ExecutionServer", dynprompt, caches, current_item, ex
                             new_output_links.append((from_node_id, from_socket))
                     cached_outputs.append((True, node_outputs))
             new_node_ids = set(new_node_ids)
+            await check_full_key_budget(caches.outputs, new_node_ids)
             for cache in caches.all:
                 subcache = await cache.ensure_subcache_for(unique_id, new_node_ids)
                 subcache.clean_unused()
