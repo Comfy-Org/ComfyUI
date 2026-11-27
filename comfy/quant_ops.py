@@ -48,6 +48,11 @@ except ImportError as e:
     class QuantizedTensor:
         pass
 
+    class QuantizedLayout:
+        @classmethod
+        def linear_input_act(cls, *args, **kwargs):
+            return NotImplemented
+
     class _CKFp8Layout:
         pass
 
