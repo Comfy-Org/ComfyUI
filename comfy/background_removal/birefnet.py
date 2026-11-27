@@ -394,6 +394,47 @@ class SwinTransformer(nn.Module):
 
         return tuple(outs)
 
+def _deform_conv2d_via_grid_sample(input, offset, weight, bias, padding, mask, stride):
+    # torchvision.ops.deform_conv2d decomposed into grid_sample + 1x1 conv, for
+    # devices (Ascend NPU) that have no kernel for the fused op and silently
+    # fall back to CPU. Covers the domain BiRefNet uses: 2-D NCHW, dilation 1,
+    # groups 1, rectangular kernel, optional modulation mask.
+    batch, in_channels, height, width = input.shape
+    out_channels, _, kernel_h, kernel_w = weight.shape
+    taps = kernel_h * kernel_w
+    _, _, out_h, out_w = offset.shape
+    device = input.device
+
+    # bilinear sampling in reduced precision loses coordinate fidelity, so the
+    # grid is built and sampled in fp32 and the result cast back
+    compute_dtype = torch.float32 if input.dtype in (torch.float16, torch.bfloat16) else input.dtype
+    input = input.to(compute_dtype)
+    offset = offset.to(compute_dtype)
+
+    ys = torch.arange(kernel_h, device=device) - padding
+    xs = torch.arange(kernel_w, device=device) - padding
+    out_ys = torch.arange(out_h, device=device, dtype=compute_dtype) * stride[0]
+    out_xs = torch.arange(out_w, device=device, dtype=compute_dtype) * stride[1]
+    base_y = (out_ys.view(out_h, 1) + ys.view(1, kernel_h)).permute(1, 0)
+    base_x = (out_xs.view(out_w, 1) + xs.view(1, kernel_w)).permute(1, 0)
+
+    off_y = offset[:, 0::2].reshape(batch, kernel_h, kernel_w, out_h, out_w)
+    off_x = offset[:, 1::2].reshape(batch, kernel_h, kernel_w, out_h, out_w)
+    y = (base_y.view(1, kernel_h, 1, out_h, 1) + off_y).reshape(batch, taps, out_h, out_w)
+    x = (base_x.view(1, 1, kernel_w, 1, out_w) + off_x).reshape(batch, taps, out_h, out_w)
+
+    grid = torch.stack(
+        ((2.0 * x + 1.0) / width - 1.0, (2.0 * y + 1.0) / height - 1.0), dim=-1,
+    ).reshape(batch, taps * out_h, out_w, 2)
+    sampled = F.grid_sample(input, grid, mode="bilinear", padding_mode="zeros", align_corners=False)
+    sampled = sampled.reshape(batch, in_channels, taps, out_h, out_w)
+    if mask is not None:
+        sampled = sampled * mask.unsqueeze(1)
+
+    weight = weight.to(compute_dtype).reshape(out_channels, in_channels * taps).view(out_channels, in_channels * taps, 1, 1)
+    sampled = sampled.reshape(batch, in_channels * taps, out_h, out_w)
+    return F.conv2d(sampled, weight, bias=None if bias is None else bias.to(compute_dtype)).to(input.dtype)
+
 class DeformableConv2d(nn.Module):
     def __init__(self,
                  in_channels,
@@ -434,6 +475,18 @@ class DeformableConv2d(nn.Module):
         offset = self.offset_conv(x)
         modulator = 2. * torch.sigmoid(self.modulator_conv(x))
         with comfy.ops.CastBiasWeightContext(self.regular_conv, x, offloadable=True) as (weight, _bias):
+            if x.device.type == "npu" and self.stride == (1, 1):
+                # torchvision's fused deform_conv2d has no Ascend NPU kernel and
+                # silently falls back to host CPU; run the decomposition on-device
+                return _deform_conv2d_via_grid_sample(
+                    input=x,
+                    offset=offset,
+                    weight=weight,
+                    bias=None,
+                    padding=self.padding,
+                    mask=modulator,
+                    stride=self.stride,
+                )
             return deform_conv2d(
                 input=x,
                 offset=offset,
