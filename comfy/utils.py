@@ -22,6 +22,8 @@ import math
 import struct
 import ctypes
 import os
+import sys
+import mmap
 import comfy.memory_management
 import comfy.storage
 from comfy.anonymous_file import create_anonymous_file
@@ -77,7 +79,9 @@ _TYPES = {
     "BOOL": torch.bool,
     "F8_E4M3": torch.float8_e4m3fn,
     "F8_E5M2": torch.float8_e5m2,
+    "F8_E8M0": torch.float8_e8m0fnu,
     "C64": torch.complex64,
+    "C128": torch.complex128,
 
     "U64": torch.uint64,
     "U32": torch.uint32,
@@ -127,6 +131,25 @@ def _incomplete_safetensors_error(message, ckpt):
     return ValueError("{}\n\nFile path: {}\n\nThe safetensors file is corrupt/incomplete. Check the file size and make sure you have copied/downloaded it correctly.".format(message, ckpt))
 
 
+class _PyMMapShim:
+    """Pure-Python stand-in for comfy_aimdo.model_mmap.ModelMMAP on platforms
+    without the native library (e.g. macOS). The mapping is file backed, so the
+    kernel can evict clean pages under memory pressure and re-fault them from
+    disk on demand instead of keeping the whole checkpoint resident."""
+
+    def __init__(self, mm):
+        self._mm = mm
+
+    def get(self):
+        return -1  # address is not meaningful; memoryview already wraps the mapping
+
+    def get_file_handle(self):
+        return self._mm
+
+    def bounce(self):
+        return False
+
+
 def load_safetensors(ckpt):
     import comfy_aimdo.model_mmap
 
@@ -135,9 +158,20 @@ def load_safetensors(ckpt):
         raise _incomplete_safetensors_error("The safetensors header is incomplete.", ckpt)
 
     file_lock = threading.Lock()
-    model_mmap = comfy_aimdo.model_mmap.ModelMMAP(ckpt)
-    f = model_mmap.get_file_handle()
-    mv = memoryview((ctypes.c_uint8 * file_size).from_address(model_mmap.get()))
+    native_mmap = True
+    try:
+        model_mmap = comfy_aimdo.model_mmap.ModelMMAP(ckpt)
+        f = model_mmap.get_file_handle()
+        mv = memoryview((ctypes.c_uint8 * file_size).from_address(model_mmap.get()))
+    except Exception:
+        # The comfy-aimdo native library is only available on Windows/Linux;
+        # fall back to a Python mmap so the weights stay in evictable file
+        # pages instead of being copied into anonymous memory.
+        native_mmap = False
+        f = open(ckpt, "rb")
+        mm = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_COPY)
+        model_mmap = _PyMMapShim(mm)
+        mv = memoryview(mm)
 
     header_size = struct.unpack("<Q", mv[:8])[0]
     if header_size > _SAFETENSORS_MAX_HEADER_SIZE:
@@ -157,6 +191,18 @@ def load_safetensors(ckpt):
 
     mv = mv[data_base_offset:]
     data_size = len(mv)
+
+    # Validate the layout the same way safetensors does: the tensor data
+    # ranges must be contiguous, non-overlapping and cover the buffer
+    # exactly, so two tensors can never silently alias the same bytes.
+    expected_offset = 0
+    tensor_header = [(name, info) for name, info in header.items() if name != "__metadata__"]
+    for name, info in sorted(tensor_header, key=lambda item: item[1]["data_offsets"][0]):
+        if info["data_offsets"][0] != expected_offset:
+            raise _invalid_safetensors_error("The safetensors data layout is invalid.", ckpt)
+        expected_offset = info["data_offsets"][1]
+    if expected_offset != data_size:
+        raise _invalid_safetensors_error("The safetensors data layout is invalid.", ckpt)
 
     sd = {}
     for name, info in header.items():
@@ -180,9 +226,14 @@ def load_safetensors(ckpt):
                 warnings.filterwarnings("ignore", message="The given buffer is not writable")
                 tensor = torch.frombuffer(mv[start:end], dtype=dtype).view(info["shape"])
                 storage = tensor.untyped_storage()
-                setattr(storage,
-                        "_comfy_tensor_file_slice",
-                        comfy.memory_management.TensorFileSlice(f, file_lock, data_base_offset + start, end - start))
+                if native_mmap:
+                    setattr(storage,
+                            "_comfy_tensor_file_slice",
+                            comfy.memory_management.TensorFileSlice(f, file_lock, data_base_offset + start, end - start))
+                # Without the native mapping there is no file-slice reader
+                # behind these tensors: an in-place update lands in the
+                # copy-on-write pages, so the slice must not be attached or
+                # later device transfers would read the stale file bytes.
                 setattr(storage, "_comfy_tensor_mmap_refs", (model_mmap, mv))
                 sd[name] = tensor
 
@@ -195,7 +246,7 @@ def load_torch_file(ckpt, safe_load=False, device=None, return_metadata=False):
     metadata = None
     if ckpt.lower().endswith(".safetensors") or ckpt.lower().endswith(".sft"):
         try:
-            if comfy.memory_management.aimdo_enabled:
+            if comfy.memory_management.aimdo_enabled or (MMAP_TORCH_FILES and not DISABLE_MMAP and sys.platform == "darwin" and device.type == "cpu"):
                 sd, metadata = load_safetensors(ckpt)
                 if not return_metadata:
                     metadata = None

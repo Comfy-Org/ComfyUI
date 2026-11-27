@@ -836,8 +836,9 @@ class LoadedModel:
                 if freed >= memory_to_free:
                     return False
         self.model.detach(unpatch_weights)
-        self.model_finalizer.detach()
-        self.model_finalizer = None
+        if self.model_finalizer is not None:
+            self.model_finalizer.detach()
+            self.model_finalizer = None
         self.real_model = None
         return True
 
@@ -1015,6 +1016,20 @@ def load_models_gpu(models, memory_required=0, force_patch_weights=False, minimu
         else:
             vram_set_state = vram_state
         lowvram_model_memory = 0
+        if vram_set_state == VRAMState.SHARED and (args.lowvram or args.novram) and not force_full_load:
+            # Honor the explicit --lowvram/--novram flags on MPS instead of
+            # always loading the whole model into the shared memory pool,
+            # which OOMs when the model is larger than the unified memory.
+            vram_set_state = VRAMState.LOW_VRAM if args.lowvram else VRAMState.NO_VRAM
+            if vram_set_state == VRAMState.NO_VRAM and not model.is_dynamic() and loaded_model.model_loaded_memory() >= loaded_model.model_memory():
+                # partially_load() keeps a fully resident model as-is instead
+                # of shrinking it to the streaming budget, so a model left
+                # fully resident by an earlier force_full_load call must be
+                # unloaded first for the requested streaming to happen. Under
+                # --lowvram a fully resident model fits the budget and is kept,
+                # so it is not unloaded and reloaded on every prompt.
+                logging.info("unloading fully resident {} for --novram streaming".format(model.model.__class__.__name__))
+                loaded_model.model_unload()
         if (vram_set_state == VRAMState.LOW_VRAM or vram_set_state == VRAMState.NORMAL_VRAM) and not force_full_load:
             loaded_memory = loaded_model.model_loaded_memory()
             current_free_mem = get_free_memory(torch_dev) + loaded_memory
