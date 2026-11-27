@@ -1064,7 +1064,7 @@ class LTXVReferenceAudio(io.ComfyNode):
 
             sigma = args["sigma"]
             sigma_ = sigma[0].item()
-            if sigma_ > sigma_start or sigma_ < sigma_end:
+            if sigma_ > sigma_start or sigma_ <= sigma_end:
                 return args["denoised"]
 
             cond_pred = args["cond_denoised"]
@@ -1126,7 +1126,7 @@ class LTXVSpatioTemporalGuidance(io.ComfyNode):
                 return args["denoised"]
 
             sigma_ = args["sigma"][0].item()
-            if sigma_ > sigma_start or sigma_ < sigma_end:
+            if sigma_ > sigma_start or sigma_ <= sigma_end:
                 return args["denoised"]
 
             cond_pred = args["cond_denoised"]
@@ -1180,7 +1180,7 @@ class LTXVModalityGuidance(io.ComfyNode):
                 return args["denoised"]
 
             sigma_ = args["sigma"][0].item()
-            if sigma_ > sigma_start or sigma_ < sigma_end:
+            if sigma_ > sigma_start or sigma_ <= sigma_end:
                 return args["denoised"]
 
             cond_pred = args["cond_denoised"]
