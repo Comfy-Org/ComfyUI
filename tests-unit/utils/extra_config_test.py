@@ -8,6 +8,57 @@ from utils.extra_config import load_extra_path_config
 import folder_paths
 
 
+@pytest.mark.parametrize("relative_base_path", [False, True])
+@pytest.mark.parametrize("reuse_alias", [False, True])
+def test_load_extra_path_config_shared_yaml_mapping(
+    clear_folder_paths, tmp_path, relative_base_path, reuse_alias
+):
+    base_path = "shared_models" if relative_base_path else str(tmp_path / "shared_models")
+    model_config = {
+        "base_path": base_path,
+        "is_default": True,
+        "checkpoints": "checkpoints",
+    }
+    config = {
+        "first": model_config,
+        "second": model_config if reuse_alias else model_config.copy(),
+    }
+    yaml_path = tmp_path / "extra_model_paths.yaml"
+    yaml_path.write_text(yaml.safe_dump(config), encoding="utf-8")
+
+    load_extra_path_config(str(yaml_path))
+
+    assert folder_paths.get_folder_paths("checkpoints") == [
+        str(tmp_path / "shared_models" / "checkpoints")
+    ]
+
+
+@pytest.mark.parametrize("reuse_alias", [False, True])
+def test_load_extra_path_config_shared_yaml_mapping_default_priority(
+    clear_folder_paths, tmp_path, reuse_alias
+):
+    preferred = {
+        "is_default": True,
+        "checkpoints": str(tmp_path / "preferred"),
+    }
+    config = {
+        "first": preferred,
+        "middle": {
+            "is_default": True,
+            "checkpoints": str(tmp_path / "middle"),
+        },
+        "last": preferred if reuse_alias else preferred.copy(),
+    }
+    yaml_path = tmp_path / "extra_model_paths.yaml"
+    yaml_path.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
+
+    load_extra_path_config(str(yaml_path))
+
+    assert folder_paths.get_folder_paths("checkpoints") == [
+        str(tmp_path / "preferred"), str(tmp_path / "middle")
+    ]
+
+
 @pytest.fixture()
 def clear_folder_paths():
     # Clear the global dictionary before each test to ensure isolation
