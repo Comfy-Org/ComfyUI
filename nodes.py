@@ -1877,6 +1877,7 @@ class LoadImageOutput(LoadImage):
                     "image_folder": "output",
                     "remote": {
                         "route": "/internal/files/output",
+                        "query_params": {"content_type": "image"},
                         "refresh_button": True,
                         "control_after_refresh": "first",
                     },
