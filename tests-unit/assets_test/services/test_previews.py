@@ -44,7 +44,6 @@ def test_upload_decodes_are_bounded(tmp_path, height, skipped):
 
 
 def test_an_exr_with_no_frame_is_skipped():
-    # StopIteration out of to_thread would hang the upload on Python 3.10 and 3.11.
     empty = MagicMock()
     empty.__enter__.return_value.decode.return_value = iter(())
     with patch.object(previews, "read_exr_windows", return_value=[(4, 4)]), patch.object(previews.av, "open", return_value=empty):
