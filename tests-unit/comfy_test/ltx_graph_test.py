@@ -87,7 +87,8 @@ def test_ltxav_prepared_context_uses_one_buffer(graphs, batch_size):
 @pytest.mark.parametrize("graphs", [False, True])
 @pytest.mark.parametrize("replacement", [False, True])
 @pytest.mark.parametrize("stg", [False, True])
-def test_ltxav_prefetch_owns_both_block_paths(monkeypatch, graphs, replacement, stg):
+@pytest.mark.parametrize("patch", [None, "patches", "optimized_attention_override"])
+def test_ltxav_prefetch_owns_both_block_paths(monkeypatch, graphs, replacement, stg, patch):
     events = []
     queue = object()
 
@@ -107,15 +108,19 @@ def test_ltxav_prefetch_owns_both_block_paths(monkeypatch, graphs, replacement, 
         out["img"] = (out["img"][0] + 10, out["img"][1])
         return out
 
-    def pop(actual_queue, device, module, dtype=None, core=None, enable_graph=False, malloc_scope=None):
+    def pop(actual_queue, device, module, dtype=None, core=None, enable_graph=False, malloc_scope=None, malloc_close_scope=False):
         assert actual_queue is queue
-        assert malloc_scope == "block"
         if module is None:
+            assert malloc_scope == "block"
+            assert malloc_close_scope is False
             assert core is None
             events.append("drain")
         else:
+            assert malloc_scope == f"block_{module.index}"
+            assert malloc_close_scope is True
+            graph_core = graphs and not replacement and patch is None
             assert dtype == torch.float32
-            assert enable_graph == (graphs and not replacement)
+            assert enable_graph == graph_core
             events.append(("prefetch", module.index))
             core()
 
@@ -128,6 +133,8 @@ def test_ltxav_prefetch_owns_both_block_paths(monkeypatch, graphs, replacement, 
     model.diffusion_graphs = graphs
     model.transformer_blocks = torch.nn.ModuleList([Block(i) for i in range(3)])
     options = {"stg_self_attn_blocks": (1,)} if stg else {}
+    if patch:
+        options[patch] = {"test": object()}
     if replacement:
         options["patches_replace"] = {"dit": {("double_block", 1): replace}}
     result = model._process_transformer_blocks(

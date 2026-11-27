@@ -201,12 +201,21 @@ def test_blas_warmup_uses_requested_device(monkeypatch):
 
 
 @pytest.mark.parametrize("enabled", [False, True])
-def test_blas_warmup_precedes_new_allocation_recordings(monkeypatch, enabled):
+@pytest.mark.parametrize("retained_capture_stream", [False, True])
+def test_blas_warmup_precedes_new_allocation_recordings(monkeypatch, enabled, retained_capture_stream):
     prefetch = comfy.model_prefetch
     events = []
     device = torch.device("cuda:1")
     stream = object()
+    capture_stream = object()
     graphs = {}
+
+    @contextmanager
+    def use_capture_stream(actual_stream):
+        assert actual_stream is capture_stream
+        events.append("capture_stream")
+        yield
+        events.append("default_stream")
 
     def record(actual_stream, assert_breaks):
         assert actual_stream is stream
@@ -221,16 +230,137 @@ def test_blas_warmup_precedes_new_allocation_recordings(monkeypatch, enabled):
 
     monkeypatch.setattr(prefetch, "MALLOC_GRAPHS", graphs)
     monkeypatch.setattr(prefetch, "MALLOC_GRAPH_USED", False)
+    monkeypatch.setattr(prefetch, "GRAPH_CAPTURE_STREAMS", {device: capture_stream} if retained_capture_stream else {torch.device("cuda:0"): object()})
     monkeypatch.setattr(prefetch, "malloc_graph_enabled", lambda device: enabled)
     monkeypatch.setattr(prefetch, "_warmup_blas", warmup)
     monkeypatch.setattr(prefetch.comfy_aimdo.malloc_graph, "record", record)
     monkeypatch.setattr(comfy.model_management, "current_stream", lambda device: stream)
     monkeypatch.setattr(prefetch.ck, "set_allocation_context", lambda context: None, raising=False)
+    monkeypatch.setattr(torch.cuda, "stream", use_capture_stream)
     for _ in range(2):
         prefetch.malloc_graph_begin(device)
         prefetch.malloc_graph_end()
     graphs.clear()
     prefetch.malloc_graph_begin(device)
     prefetch.malloc_graph_end()
-    assert events == (["warmup", "record", "pop", "push", "pop", "warmup", "record", "pop"] if enabled else [])
+    warmup_events = ["warmup"] + (["capture_stream", "warmup", "default_stream"] if retained_capture_stream else [])
+    recording_events = warmup_events + ["record", "pop"]
+    assert events == (recording_events + ["push", "pop"] + recording_events if enabled else [])
     assert prefetch.MALLOC_GRAPH_USED == enabled
+
+
+@pytest.mark.parametrize("recapture", [False, True])
+@pytest.mark.parametrize("core_error", [False, True])
+def test_blas_workspace_is_restored_after_graph_reset(monkeypatch, recapture, core_error):
+    prefetch = comfy.model_prefetch
+    device = torch.device("cuda:1")
+    events = []
+    workspace = {"ready": True, "paused": False}
+    module = torch.nn.Module()
+    module._v_block = object()
+    signature = object()
+    capture_stream = SimpleNamespace(wait_stream=lambda stream: None)
+    current_stream = SimpleNamespace(wait_stream=lambda stream: None)
+
+    class Graph:
+        def reset(self):
+            events.append("reset")
+            workspace["ready"] = False
+
+        def replay(self):
+            assert workspace["ready"]
+            events.append("replay")
+
+    if recapture:
+        module._comfy_graph = {"graph": Graph(), "signature": object()}
+
+    def pause(sync=False):
+        workspace["paused"] = True
+        events.append("pause")
+
+    def resume(sync=False):
+        workspace["paused"] = False
+
+    def synchronize():
+        assert not workspace["paused"]
+        events.append("synchronize")
+
+    @contextmanager
+    def capture(graph, stream, capture_error_mode):
+        assert workspace["ready"] and workspace["paused"]
+        assert stream is capture_stream and capture_error_mode == "thread_local"
+        assert events[-2:] == ["synchronize", "pause"]
+        events.append("capture")
+        try:
+            yield
+        finally:
+            events.append("capture_end")
+
+    @contextmanager
+    def stream(actual):
+        assert actual is capture_stream
+        yield
+
+    def warmup(actual):
+        assert actual == device
+        assert workspace["paused"] and not workspace["ready"]
+        events.append("warmup")
+        workspace["ready"] = True
+
+    def core():
+        assert workspace["ready"]
+        events.append("core")
+        if core_error:
+            raise ValueError("core failed")
+
+    malloc = SimpleNamespace(
+        _comfy_active=True, _comfy_cuda_graph_modules=set(),
+        iterate=lambda name: False, pause=pause, resume=resume, use_stream=stream,
+    )
+    monkeypatch.setattr(prefetch, "MALLOC_GRAPHS", {prefetch.threading.get_ident(): malloc})
+    monkeypatch.setattr(prefetch, "GRAPH_CAPTURE_STREAMS", {device: capture_stream})
+    monkeypatch.setattr(prefetch, "GRAPH_WARMED_MODULES", {module})
+    monkeypatch.setattr(prefetch.args, "disable_cuda_graphs", False)
+    monkeypatch.setattr(prefetch, "pin_modules", lambda *args: (None, True))
+    monkeypatch.setattr(prefetch, "_warmup_blas", warmup)
+    monkeypatch.setattr(prefetch.comfy_aimdo.model_vbar, "vbar_fault", lambda block: signature)
+    monkeypatch.setattr(prefetch.comfy_aimdo.model_vbar, "vbar_unpin", lambda block: None)
+    monkeypatch.setattr(prefetch.comfy_aimdo.model_vbar, "vbar_signature_compare", lambda a, b: False)
+    monkeypatch.setattr(comfy.model_management, "synchronize", synchronize)
+    monkeypatch.setattr(comfy.model_management, "current_stream", lambda device: current_stream)
+    monkeypatch.setattr(torch.cuda, "stream", stream)
+    monkeypatch.setattr(torch.cuda, "CUDAGraph", Graph)
+    monkeypatch.setattr(torch.cuda, "graph", capture)
+
+    if core_error:
+        with pytest.raises(ValueError, match="core failed"):
+            prefetch.prefetch_queue_pop([None, module, None], device, module, core=core, enable_graph=True, malloc_scope="block")
+        assert events[-2:] == ["core", "capture_end"]
+        assert events.count("synchronize") == 1
+        assert not hasattr(module, "_comfy_graph")
+        return
+    prefetch.prefetch_queue_pop([None, module, None], device, module, core=core, enable_graph=True, malloc_scope="block")
+    assert events.count("warmup") == int(recapture)
+    if recapture:
+        assert events.index("reset") < events.index("pause") < events.index("warmup") < events.index("capture")
+    assert events[-4:] == ["core", "pause", "capture_end", "replay"]
+    assert module._comfy_graph["signature"] is signature
+    monkeypatch.setattr(prefetch.comfy_aimdo.model_vbar, "vbar_signature_compare", lambda a, b: True)
+    prefetch.prefetch_queue_pop([None, module, None], device, module, core=core, enable_graph=True, malloc_scope="block")
+    assert events.count("warmup") == int(recapture)
+    assert events.count("capture") == events.count("core") == 1
+    assert events[-1] == "replay"
+    assert events.count("synchronize") == 1
+
+    other = torch.nn.Module()
+    other._v_block = object()
+    prefetch.GRAPH_WARMED_MODULES.add(other)
+    prefetch.prefetch_queue_pop([None, other, None], device, other, core=core, enable_graph=True, malloc_scope="block")
+    assert events.count("capture") == 2
+    assert events.count("synchronize") == 2
+
+    malloc._comfy_cuda_graph_modules = set()
+    prefetch._drop_graph(module)
+    workspace["ready"] = True
+    prefetch.prefetch_queue_pop([None, module, None], device, module, core=core, enable_graph=True, malloc_scope="block")
+    assert events.count("synchronize") == 3
