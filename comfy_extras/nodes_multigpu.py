@@ -278,6 +278,13 @@ class SelectCLIPDeviceNode(io.ComfyNode):
         return io.NodeOutput(clip)
 
 
+def _prune_vae_multigpu_collision(vae: VAE):
+    """Drop any multigpu VAE clone whose device matches the primary VAE."""
+    if vae.device in vae.multigpu_clones:
+        logging.info(f"Select VAE Device: pruning MultiGPU VAE clone on {vae.device} that now collides with the primary VAE.")
+        vae.multigpu_clones.pop(vae.device)
+
+
 class SelectVAEDeviceNode(io.ComfyNode):
     """
     Place the VAE on a specific device (default / gpu:N).
@@ -338,6 +345,41 @@ class SelectVAEDeviceNode(io.ComfyNode):
         # deepclone_multigpu may have produced a fresh first_stage_model.
         vae.first_stage_model = vae.patcher.model
         vae.device = vae.patcher.load_device
+        _prune_vae_multigpu_collision(vae)
+        return io.NodeOutput(vae)
+
+
+class MultiGPUVAENode(io.ComfyNode):
+    """
+    Prepares a VAE to run tiled encode/decode (and multi-item batches) across multiple GPUs.
+
+    Composes with Select VAE Device and VAE Compute Dtype. On single-GPU or CPU setups,
+    passes the VAE through unchanged.
+    """
+
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="MultiGPUVAE",
+            display_name="MultiGPU VAE",
+            category="advanced/multigpu",
+            description=cleandoc(cls.__doc__),
+            inputs=[
+                io.Vae.Input("vae"),
+                io.Int.Input("max_gpus", default=2, min=1, step=1),
+            ],
+            outputs=[
+                io.Vae.Output(),
+            ],
+        )
+
+    @classmethod
+    def execute(cls, vae: VAE, max_gpus: int) -> io.NodeOutput:
+        try:
+            vae = comfy.multigpu.create_vae_multigpu_deepclones(vae, max_gpus, reuse_loaded=True)
+        except RuntimeError as e:
+            logging.warning(f"MultiGPU VAE: cannot create per-device clones, passing through unchanged. ({e})")
+            return io.NodeOutput(vae.clone())
         return io.NodeOutput(vae)
 
 
@@ -394,6 +436,7 @@ class MultiGPUExtension(ComfyExtension):
             SelectModelDeviceNode,
             SelectCLIPDeviceNode,
             SelectVAEDeviceNode,
+            MultiGPUVAENode,
             # MultiGPUOptionsNode,
         ]
 

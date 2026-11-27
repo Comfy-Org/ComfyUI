@@ -564,6 +564,7 @@ class NonCausalViT3DDecoder(nn.Module):
 
 class MiniMaxH3VideoVAE(nn.Module):
     comfy_has_chunked_io = True
+    comfy_supports_multigpu_chunked = True
 
     def __init__(
         self,
@@ -816,15 +817,23 @@ class MiniMaxH3VideoVAE(nn.Module):
 
     # temporal chunking
 
-    def encode_temporal(self, x, device):
+    def _encode_temporal_chunk(self, clip_x, device):
+        clip_x = clip_x.to(device)
+        if clip_x.shape[2] < self.clip_length:
+            pad_frames = clip_x[:, :, -1:].repeat(1, 1, self.clip_length - clip_x.shape[2], 1, 1)
+            clip_x = torch.cat([clip_x, pad_frames], dim=2)
+        return self._adaptive_encode(self._normalize_pixels(clip_x))
+
+    def encode_temporal(self, x, device, chunk_map=None):
         # chunked input io: x may live on the CPU, clips move to the device as they encode
-        z_list = []
-        for i in range(math.ceil(x.shape[2] / self.clip_length)):
-            clip_x = x[:, :, i * self.clip_length:(i + 1) * self.clip_length, :, :].to(device)
-            if clip_x.shape[2] < self.clip_length:
-                pad_frames = clip_x[:, :, -1:].repeat(1, 1, self.clip_length - clip_x.shape[2], 1, 1)
-                clip_x = torch.cat([clip_x, pad_frames], dim=2)
-            z_list.append(self._adaptive_encode(self._normalize_pixels(clip_x)))
+        clips = [
+            x[:, :, i * self.clip_length:(i + 1) * self.clip_length, :, :]
+            for i in range(math.ceil(x.shape[2] / self.clip_length))
+        ]
+        if chunk_map is not None and len(clips) > 1:
+            z_list = [z_i.to(device) for z_i in chunk_map(clips)]
+        else:
+            z_list = [self._encode_temporal_chunk(clip_x, device) for clip_x in clips]
 
         z = torch.cat(z_list, dim=2)
         if self.token_drop > 0:
@@ -899,7 +908,7 @@ class MiniMaxH3VideoVAE(nn.Module):
                 output_buffer[i:i + 1, :, f0:f0 + part.shape[2]].copy_(self._finalize_pixels(part))
         return output_buffer
 
-    def decode_temporal(self, z, output_buffer=None):
+    def decode_temporal(self, z, output_buffer=None, chunk_map=None):
         chunk_dec = self.tokens_chunk_size * self.vae_ratio_t
         split_count = int(self.token_drop > 0) + 1
 
@@ -930,13 +939,13 @@ class MiniMaxH3VideoVAE(nn.Module):
                 )
                 write_pos += copy_frames
 
-        for i in range(num_chunks):
-            t_start_idx = i * self.tokens_chunk_size
-            t_end_idx = t_start_idx + self.tokens_chunk_size + self.token_overlap
-            clip_z = z[:, :, t_start_idx:t_end_idx, :, :]
+        clips = [
+            z[:, :, i * self.tokens_chunk_size:i * self.tokens_chunk_size + self.tokens_chunk_size + self.token_overlap, :, :]
+            for i in range(num_chunks)
+        ]
+        decoded_clips = chunk_map(clips) if chunk_map is not None and num_chunks > 1 else (self._adaptive_decode(c) for c in clips)
 
-            clip_dec = self._adaptive_decode(clip_z)
-
+        for i, clip_dec in enumerate(decoded_clips):
             for j in range(split_count):
                 f_start_idx = j * chunk_dec
                 f_end_idx = min(f_start_idx + chunk_dec, clip_dec.shape[2])
@@ -945,6 +954,8 @@ class MiniMaxH3VideoVAE(nn.Module):
 
                 if j == 0:
                     if dec_overlap is not None:
+                        if dec_overlap.device != clip_dec_chunk.device:
+                            dec_overlap = dec_overlap.to(clip_dec_chunk.device)
                         clip_dec_chunk = self.blend(
                             dec_overlap, clip_dec_chunk, self.frame_overlap, dim=-3
                         )
@@ -957,12 +968,12 @@ class MiniMaxH3VideoVAE(nn.Module):
                 write_part(dec_overlap)
                 dec_overlap = None
 
-            del clip_dec, clip_z, clip_dec_chunk
+            del clip_dec, clip_dec_chunk
 
         return dec
 
 
-    def encode(self, x, device=None):
+    def encode(self, x, device=None, chunk_map=None):
         # x: [B, 3, T, H, W] in [-1, 1] -> normalized latents [B, 24, T_lat, H/16, W/16]
         if x.ndim == 4:
             x = x.unsqueeze(2)
@@ -973,7 +984,7 @@ class MiniMaxH3VideoVAE(nn.Module):
             moments = self._adaptive_encode(self._normalize_pixels(x.to(device)))
             moments = moments[:, :, -1:, :, :]
         else:
-            moments = self.encode_temporal(x, device)
+            moments = self.encode_temporal(x, device, chunk_map=chunk_map)
 
         mean = torch.chunk(moments.float(), 2, dim=1)[0]
 
@@ -989,7 +1000,7 @@ class MiniMaxH3VideoVAE(nn.Module):
         # tiling is always on internally (the Sol decoder cannot tile at all); ignore tiling fallbacks
         return self.decode(z)
 
-    def decode(self, z, output_buffer=None):
+    def decode(self, z, output_buffer=None, chunk_map=None):
         # z: [B, 24, T_lat, H_lat, W_lat] normalized latents -> float32 pixels [B, 3, T, H, W] in [0, 1]
         latents_mean = self.latents_mean.view(1, -1, 1, 1, 1).to(z)
         latents_std = self.latents_std.view(1, -1, 1, 1, 1).to(z)
@@ -1010,11 +1021,12 @@ class MiniMaxH3VideoVAE(nn.Module):
                 return dec
             output_buffer.copy_(dec)
             return output_buffer
-        return self.decode_temporal(z, output_buffer)
+        return self.decode_temporal(z, output_buffer, chunk_map=chunk_map)
 
 
 class H3ImageVAE(MiniMaxH3VideoVAE):
     """The H3 encoder with a single-frame decoder; subclasses attach the decoder."""
+    comfy_supports_multigpu_chunked = False
 
     def __init__(self):
         super().__init__(still_frame=0, decoder=False)
