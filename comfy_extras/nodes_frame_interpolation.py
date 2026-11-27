@@ -66,10 +66,15 @@ class FrameInterpolationModelLoader(io.ComfyNode):
         sd = {k: v for k, v in sd.items() if not k.startswith(("teacher.", "caltime."))}
 
         try:
-            head_ch, channels = detect_rife_config(sd)
+            cfg = detect_rife_config(sd)
         except (KeyError, ValueError):
             raise ValueError("Unrecognized frame interpolation model format")
-        model = IFNet(head_ch=head_ch, channels=channels)
+        if len(cfg) == 4:
+            head_ch, channels, lite_head, out_ch = cfg
+            model = IFNet(head_ch=head_ch, channels=channels, lite_head=lite_head, out_ch=out_ch)
+        else:
+            head_ch, channels = cfg
+            model = IFNet(head_ch=head_ch, channels=channels)
         model.load_state_dict(sd)
         return model
 

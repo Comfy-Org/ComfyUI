@@ -31,6 +31,20 @@ class Head(nn.Module):
         return self.cnn3(x)
 
 
+class HeadLite(nn.Module):
+    """RIFE 4.7 / 4.9 2-layer head (`encode.0` Conv2d + `encode.1` ConvTranspose2d without intermediate activation)."""
+
+    def __init__(self, out_ch=4, device=None, dtype=None, operations=ops):
+        super().__init__()
+        self.encode = nn.Sequential(
+            operations.Conv2d(3, 16, 3, 2, 1, device=device, dtype=dtype),
+            operations.ConvTranspose2d(16, out_ch, 4, 2, 1, device=device, dtype=dtype),
+        )
+
+    def forward(self, x):
+        return self.encode(x)
+
+
 class ResConv(nn.Module):
     def __init__(self, c, device=None, dtype=None, operations=ops):
         super().__init__()
@@ -43,13 +57,13 @@ class ResConv(nn.Module):
 
 
 class IFBlock(nn.Module):
-    def __init__(self, in_planes, c=64, device=None, dtype=None, operations=ops):
+    def __init__(self, in_planes, c=64, out_ch=13, device=None, dtype=None, operations=ops):
         super().__init__()
         self.conv0 = nn.Sequential(
             nn.Sequential(operations.Conv2d(in_planes, c // 2, 3, 2, 1, device=device, dtype=dtype), nn.LeakyReLU(0.2, True)),
             nn.Sequential(operations.Conv2d(c // 2, c, 3, 2, 1, device=device, dtype=dtype), nn.LeakyReLU(0.2, True)))
         self.convblock = nn.Sequential(*(ResConv(c, device=device, dtype=dtype, operations=operations) for _ in range(8)))
-        self.lastconv = nn.Sequential(operations.ConvTranspose2d(c, 4 * 13, 4, 2, 1, device=device, dtype=dtype), nn.PixelShuffle(2))
+        self.lastconv = nn.Sequential(operations.ConvTranspose2d(c, 4 * out_ch, 4, 2, 1, device=device, dtype=dtype), nn.PixelShuffle(2))
 
     def forward(self, x, flow=None, scale=1):
         x = F.interpolate(x, scale_factor=1.0 / scale, mode="bilinear")
@@ -62,16 +76,37 @@ class IFBlock(nn.Module):
 
 
 class IFNet(nn.Module):
-    def __init__(self, head_ch=4, channels=(192, 128, 96, 64, 32), device=None, dtype=None, operations=ops):
+    def __init__(
+        self,
+        head_ch=4,
+        channels=(192, 128, 96, 64, 32),
+        lite_head=False,
+        out_ch=13,
+        device=None,
+        dtype=None,
+        operations=ops,
+    ):
         super().__init__()
-        self.encode = Head(out_ch=head_ch, device=device, dtype=dtype, operations=operations)
-        block_in = [7 + 2 * head_ch] + [8 + 4 + 8 + 2 * head_ch] * 4
-        self.blocks = nn.ModuleList([IFBlock(block_in[i], channels[i], device=device, dtype=dtype, operations=operations) for i in range(5)])
-        self.scale_list = [16, 8, 4, 2, 1]
+        self.lite_head = lite_head
+        if lite_head:
+            self.encode = HeadLite(out_ch=head_ch, device=device, dtype=dtype, operations=operations).encode
+        else:
+            self.encode = Head(out_ch=head_ch, device=device, dtype=dtype, operations=operations)
+        feat_ch = out_ch - 5
+        num_blocks = len(channels)
+        sub_in = (8 + 4 + 2 * head_ch) if lite_head else (8 + 4 + feat_ch + 2 * head_ch)
+        block_in = [7 + 2 * head_ch] + [sub_in] * (num_blocks - 1)
+        self.blocks = nn.ModuleList(
+            [IFBlock(block_in[i], channels[i], out_ch=out_ch, device=device, dtype=dtype, operations=operations) for i in range(num_blocks)]
+        )
+        all_scales = [16, 8, 4, 2, 1]
+        self.scale_list = [8, 4, 2, 1] if num_blocks == 4 else all_scales[-num_blocks:]
         self.pad_align = 64
         self._warp_grids = {}
 
     def get_dtype(self):
+        if self.lite_head:
+            return self.encode[0].weight.dtype
         return self.encode.cnn0.weight.dtype
 
     def memory_used_forward(self, shape, dtype):
@@ -110,8 +145,13 @@ class IFNet(nn.Module):
             if flow is None:
                 flow, mask, feat = block(torch.cat((img0, img1, f0, f1, timestep), 1), None, scale=self.scale_list[i])
             else:
+                cat_tensors = (
+                    (warped_img0, warped_img1, self.warp(f0, flow[:, :2]), self.warp(f1, flow[:, 2:4]), timestep, mask)
+                    if self.lite_head
+                    else (warped_img0, warped_img1, self.warp(f0, flow[:, :2]), self.warp(f1, flow[:, 2:4]), timestep, mask, feat)
+                )
                 fd, mask, feat = block(
-                    torch.cat((warped_img0, warped_img1, self.warp(f0, flow[:, :2]), self.warp(f1, flow[:, 2:4]), timestep, mask, feat), 1),
+                    torch.cat(cat_tensors, 1),
                     flow, scale=self.scale_list[i])
                 flow = flow.add_(fd)
             warped_img0 = self.warp(img0, flow[:, :2])
@@ -120,12 +160,18 @@ class IFNet(nn.Module):
 
 
 def detect_rife_config(state_dict):
-    head_ch = state_dict["encode.cnn3.weight"].shape[1]  # ConvTranspose2d: (in_ch, out_ch, kH, kW)
+    lite_head = "encode.1.weight" in state_dict
+    if lite_head:
+        head_ch = state_dict["encode.1.weight"].shape[1]
+    else:
+        head_ch = state_dict["encode.cnn3.weight"].shape[1]  # ConvTranspose2d: (in_ch, out_ch, kH, kW)
     channels = []
     for i in range(5):
         key = f"blocks.{i}.conv0.1.0.weight"
         if key in state_dict:
             channels.append(state_dict[key].shape[0])
-    if len(channels) != 5:
-        raise ValueError(f"Unsupported RIFE model: expected 5 blocks, found {len(channels)}")
-    return head_ch, channels
+    if len(channels) not in (4, 5):
+        raise ValueError(f"Unsupported RIFE model: expected 4 or 5 blocks, found {len(channels)}")
+    last_w = state_dict["blocks.0.lastconv.0.weight"]
+    out_ch = last_w.shape[1] // 4
+    return head_ch, channels, lite_head, out_ch
