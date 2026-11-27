@@ -982,8 +982,10 @@ def load_models_gpu(models, memory_required=0, force_patch_weights=False, minimu
                 to_unload = [i] + to_unload
         for i in to_unload:
             model_to_unload = current_loaded_models.pop(i)
-            model_to_unload.model.detach(unpatch_all=False)
-            model_to_unload.model_finalizer.detach()
+            if model_to_unload.model is not None:
+                model_to_unload.model.detach(unpatch_all=False)
+            if model_to_unload.model_finalizer is not None:
+                model_to_unload.model_finalizer.detach()
 
     total_memory_required = {}
     total_pins_required = {}
@@ -1063,10 +1065,17 @@ def cleanup_models_gc():
         gc.collect()
         soft_empty_cache()
 
+        to_delete = []
         for i in range(len(current_loaded_models)):
             cur = current_loaded_models[i]
             if cur.is_dead():
                 logging.warning("WARNING, memory leak with model {}. Please make sure it is not being referenced from somewhere.".format(cur.real_model().__class__.__name__))
+                to_delete = [i] + to_delete
+
+        for i in to_delete:
+            x = current_loaded_models.pop(i)
+            if x.model_finalizer is not None:
+                x.model_finalizer.detach()
 
 
 def archive_model_dtypes(model):
