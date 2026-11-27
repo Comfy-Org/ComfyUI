@@ -1943,6 +1943,9 @@ class ModelPatcherDynamic(ModelPatcher):
         for key in list(self.backup_buffers.keys()):
             owner, buf = self.backup_buffers.pop(key)
             comfy.utils.set_attr_buffer(owner, key.rsplit(".", 1)[-1], buf)
+        for m in self.model.modules():
+            if hasattr(m, "comfy_patched_weights"):
+                del m.comfy_patched_weights
         self.model.model_loaded_weight_memory = 0
         return restored
 
@@ -2087,10 +2090,12 @@ class ModelPatcherDynamic(ModelPatcher):
                             delattr(m, "_v")
                         force_load_param(self, "weight", device_to)
                         force_load_param(self, "bias", device_to)
+                        m.comfy_patched_weights = True
                     else:
                         if vbar is not None and not hasattr(m, "_v"):
                             m._v = vbar.alloc(v_weight_size)
                         allocated_size += v_weight_size
+                        m.comfy_patched_weights = False
 
                     for param in params:
                         if param not in ("weight", "bias"):
