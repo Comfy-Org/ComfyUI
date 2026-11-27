@@ -263,6 +263,9 @@ QUANT_ALGOS["w6a8_int8"] = {
     "comfy_tensor_layout": "AsymW4A8Int8Layout",
     "quantize_input": False,
 }
+# 3-bit (8-entry codebook, 3K/8-byte rows) and 5-bit (uniform, 5K/8-byte rows) widths of the same layout
+for _fmt in ("w3a8_int8", "w5a8_int8"):
+    QUANT_ALGOS[_fmt] = dict(QUANT_ALGOS["w6a8_int8"])
 
 
 # ==============================================================================

@@ -44,6 +44,8 @@ STARTING_POINT_ID_PATTERN = r"<starting_point_id:(.*)>"
 
 
 class SupportedOpenAIModel(str, Enum):
+    gpt_6_2_astra = "gpt-6.2-astra"
+    gpt_6_2_sol = "gpt-6.2-sol"
     gpt_6_astra = "gpt-6-astra"
     gpt_6_1_sol = "gpt-6.1-sol"
     gpt_6_1_terra = "gpt-6.1-terra"
@@ -67,6 +69,8 @@ _O_SERIES_EFFORTS = ("low", "medium", "high")
 _GPT_5_EFFORTS = ("minimal", "low", "medium", "high")
 _GPT_5_6_EFFORTS = ("none", "low", "medium", "high", "xhigh", "max")
 SUPPORTED_REASONING_EFFORTS: dict[str, tuple[str, ...]] = {
+    SupportedOpenAIModel.gpt_6_2_astra: ("low", "medium", "high", "xhigh", "max"),
+    SupportedOpenAIModel.gpt_6_2_sol: ("low", "medium", "high", "xhigh", "max"),
     SupportedOpenAIModel.gpt_6_astra: ("low", "medium", "high", "xhigh", "max"),
     SupportedOpenAIModel.gpt_6_1_sol: ("low", "medium", "high", "xhigh", "max"),
     SupportedOpenAIModel.gpt_6_1_terra: _GPT_5_6_EFFORTS,
@@ -1357,7 +1361,6 @@ class OpenAIChatNode(IO.ComfyNode):
             node_id="OpenAIChatNode",
             display_name="OpenAI ChatGPT",
             category="partner/text/OpenAI",
-            essentials_category="Text Generation",
             description="Generate text responses from an OpenAI model.",
             inputs=[
                 IO.String.Input(
@@ -1375,6 +1378,7 @@ class OpenAIChatNode(IO.ComfyNode):
                 IO.Combo.Input(
                     "model",
                     options=SupportedOpenAIModel,
+                    default=SupportedOpenAIModel.gpt_6_2_sol,
                     tooltip="The model used to generate the response",
                 ),
                 IO.Image.Input(
@@ -1407,7 +1411,17 @@ class OpenAIChatNode(IO.ComfyNode):
                 expr="""
                 (
                   $m := widgets.model;
-                  $contains($m, "gpt-6-astra") ? {
+                  $contains($m, "gpt-6.2-astra") ? {
+                    "type": "list_usd",
+                    "usd": [0.01144, 0.0572],
+                    "format": { "approximate": true, "separator": "-", "suffix": " per 1K tokens" }
+                  }
+                  : $contains($m, "gpt-6.2-sol") ? {
+                    "type": "list_usd",
+                    "usd": [0.00286, 0.0143],
+                    "format": { "approximate": true, "separator": "-", "suffix": " per 1K tokens" }
+                  }
+                  : $contains($m, "gpt-6-astra") ? {
                     "type": "list_usd",
                     "usd": [0.0143, 0.0715],
                     "format": { "approximate": true, "separator": "-", "suffix": " per 1K tokens" }
@@ -1491,13 +1505,14 @@ class OpenAIChatNode(IO.ComfyNode):
                 )
                 """,
             ),
+            is_deprecated=True,
         )
 
     @classmethod
     def get_message_content_from_response(cls, response: OpenAIResponse) -> list[OutputContent]:
         """Extract message content from the API response."""
         for output in response.output:
-            if output.type == "message":
+            if output.type == "message" and output.phase != "commentary":
                 return output.content
         raise TypeError("No output message found in response")
 
@@ -1593,6 +1608,194 @@ class OpenAIChatNode(IO.ComfyNode):
             completed_statuses=["incomplete", "completed"],
         )
         return IO.NodeOutput(cls.get_text_from_message_content(cls.get_message_content_from_response(result_response)))
+
+
+OPENAI_CHAT_V2_DEFAULT_EFFORT: dict[str, str] = {
+    "gpt-6.2-sol": "medium",
+    "gpt-6.2-astra": "medium",
+    "gpt-6-astra": "medium",
+    "gpt-6.1-sol": "medium",
+    "gpt-6.1-terra": "medium",
+    "gpt-6-sol": "medium",
+    "gpt-6-luna": "medium",
+    "gpt-5.6-sol": "medium",
+    "gpt-5.6-terra": "medium",
+    "gpt-5.6-luna": "medium",
+    "gpt-5.5-pro": "high",
+    "gpt-5.5": "medium",
+}
+
+
+def _openai_chat_v2_model_inputs(model_id: str, default_effort: str):
+    return [
+        IO.String.Input(
+            "prompt",
+            multiline=True,
+            default="",
+            tooltip="Text input to the model.",
+        ),
+        IO.Autogrow.Input(
+            "images",
+            template=IO.Autogrow.TemplateNames(
+                IO.Image.Input("image"),
+                names=[f"image_{i}" for i in range(1, 17)],
+                min=0,
+            ),
+            tooltip="Optional image(s) to use as context for the model.",
+        ),
+        IO.Custom("OPENAI_INPUT_FILES").Input(
+            "files",
+            optional=True,
+            tooltip="Optional file(s) to use as context for the model. "
+            "Accepts inputs from the OpenAI ChatGPT Input Files node.",
+        ),
+        IO.Combo.Input(
+            "reasoning_effort",
+            options=list(SUPPORTED_REASONING_EFFORTS[model_id]),
+            default=default_effort,
+            tooltip="How much the model reasons before answering. Higher levels use more tokens and take longer.",
+        ),
+        IO.Int.Input(
+            "max_output_tokens",
+            default=32768,
+            min=16,
+            max=128000,
+            tooltip="Maximum tokens to generate, including reasoning tokens. "
+            "A low value with a high reasoning_effort can leave no room for the answer.",
+            advanced=True,
+        ),
+        IO.Int.Input(
+            "seed",
+            default=42,
+            min=0,
+            max=2147483647,
+            control_after_generate=True,
+            tooltip="Seed controls whether the node should re-run; results are non-deterministic regardless of seed.",
+        ),
+        IO.String.Input(
+            "system_prompt",
+            multiline=True,
+            default="",
+            advanced=True,
+            tooltip="Foundational instructions that dictate the model's behavior.",
+        ),
+    ]
+
+
+class OpenAIChatNodeV2(IO.ComfyNode):
+
+    @classmethod
+    def define_schema(cls):
+        return IO.Schema(
+            node_id="OpenAIChatNodeV2",
+            display_name="OpenAI ChatGPT",
+            category="partner/text/OpenAI",
+            essentials_category="Text Generation",
+            description="Generate text responses with OpenAI's GPT models. "
+            "Provide a text prompt and, optionally, images or files as context.",
+            inputs=[
+                IO.DynamicCombo.Input(
+                    "model",
+                    options=[
+                        IO.DynamicCombo.Option(model_id, _openai_chat_v2_model_inputs(model_id, default_effort))
+                        for model_id, default_effort in OPENAI_CHAT_V2_DEFAULT_EFFORT.items()
+                    ],
+                    tooltip="The model used to generate the response.",
+                ),
+            ],
+            outputs=[
+                IO.String.Output(),
+            ],
+            hidden=[
+                IO.Hidden.auth_token_comfy_org,
+                IO.Hidden.api_key_comfy_org,
+                IO.Hidden.unique_id,
+            ],
+            is_api_node=True,
+            price_badge=IO.PriceBadge(
+                depends_on=IO.PriceBadgeDepends(widgets=["model"]),
+                expr="""
+                (
+                  $rates := {
+                    "gpt-6.2-astra": [0.01144, 0.0572],
+                    "gpt-6.2-sol": [0.00286, 0.0143],
+                    "gpt-6-astra": [0.0143, 0.0715],
+                    "gpt-6.1-sol": [0.00286, 0.0143],
+                    "gpt-6.1-terra": [0.00143, 0.00715],
+                    "gpt-6-sol": [0.00286, 0.0143],
+                    "gpt-6-luna": [0.000143, 0.000715],
+                    "gpt-5.6-sol": [0.005, 0.03],
+                    "gpt-5.6-terra": [0.0025, 0.015],
+                    "gpt-5.6-luna": [0.001, 0.006],
+                    "gpt-5.5-pro": [0.03, 0.18],
+                    "gpt-5.5": [0.005, 0.03]
+                  };
+                  {
+                    "type": "list_usd",
+                    "usd": $lookup($rates, widgets.model),
+                    "format": { "approximate": true, "separator": "-", "suffix": " per 1K tokens" }
+                  }
+                )
+                """,
+            ),
+        )
+
+    @classmethod
+    async def execute(cls, model: dict) -> IO.NodeOutput:
+        validate_string(model["prompt"], strip_whitespace=True, min_length=1)
+        content: list[InputTextContent | InputImageContent | InputFileContent] = [
+            InputTextContent(text=model["prompt"], type="input_text"),
+        ]
+        for image in (model.get("images") or {}).values():
+            if image is None:
+                continue
+            for i in range(image.shape[0]):
+                content.append(
+                    InputImageContent(
+                        detail="auto",
+                        image_url=f"data:image/png;base64,{tensor_to_base64_string(image[i].unsqueeze(0))}",
+                        type="input_image",
+                    )
+                )
+        if model.get("files"):
+            content.extend(model["files"])
+
+        create_response = await sync_op(
+            cls,
+            ApiEndpoint(path=RESPONSES_ENDPOINT, method="POST"),
+            response_model=OpenAIResponse,
+            data=OpenAICreateResponse(
+                input=[InputMessage(content=content, role="user")],
+                store=True,
+                stream=False,
+                model=model["model"],
+                instructions=model["system_prompt"] or None,
+                max_output_tokens=model["max_output_tokens"],
+                reasoning=Reasoning(effort=model["reasoning_effort"]),
+            ),
+        )
+        response = await poll_op(
+            cls,
+            ApiEndpoint(path=f"{RESPONSES_ENDPOINT}/{create_response.id}"),
+            response_model=OpenAIResponse,
+            status_extractor=lambda r: r.status,
+            completed_statuses=["incomplete", "completed"],
+        )
+        text = "\n".join(
+            item.text
+            for output in response.output or []
+            if output.type == "message" and output.phase != "commentary"
+            for item in output.content or []
+            if item.type == "output_text" and item.text
+        )
+        if not text:
+            reason = response.incomplete_details.reason if response.incomplete_details else None
+            if reason == "max_output_tokens":
+                raise ValueError("The response ran out of tokens before the answer was written. Increase max_output_tokens.")
+            if response.status == "incomplete":
+                raise ValueError(f"OpenAI stopped the response before the answer was written (reason: {reason}).")
+            raise ValueError("OpenAI returned no text output.")
+        return IO.NodeOutput(text)
 
 
 class OpenAIInputFiles(IO.ComfyNode):
@@ -1703,6 +1906,7 @@ class OpenAIChatConfig(IO.ComfyNode):
             outputs=[
                 IO.Custom("OPENAI_CHAT_CONFIG").Output(),
             ],
+            is_deprecated=True,
         )
 
     @classmethod
@@ -1742,6 +1946,7 @@ class OpenAIExtension(ComfyExtension):
             OpenAIGPTImageGIFNode,
             OpenAIGPTImageSVGNode,
             OpenAIChatNode,
+            OpenAIChatNodeV2,
             OpenAIInputFiles,
             OpenAIChatConfig,
         ]

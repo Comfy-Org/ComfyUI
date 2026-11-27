@@ -92,7 +92,7 @@ def tensor_to_filelike(tensor, max_pixels: int = 2048 * 2048):
     """
     array = tensor.cpu().numpy()
     array = (array * 255).astype("uint8")
-    image = Image.fromarray(array, "RGB")
+    image = Image.fromarray(array)
 
     original_width, original_height = image.size
     original_pixels = original_width * original_height
@@ -164,8 +164,7 @@ def check_rodin_status(response: Rodin3DCheckStatusResponse) -> str:
     status_list = [str(job.status) for job in response.jobs]
     logging.info("[ Rodin3D API - CheckStatus ] Generate Status: %s", status_list)
     if any(job.status == JobStatus.Failed for job in response.jobs):
-        logging.error("[ Rodin3D API - CheckStatus ] Generate Failed: %s, Please try again.", status_list)
-        raise Exception("[ Rodin3D API ] Generate Failed, Please Try again.")
+        return "failed"
     if all_done:
         return "DONE"
     return "Generating"
@@ -557,8 +556,8 @@ def _rodin_multipart_parser(data: dict[str, Any]) -> aiohttp.FormData:
         if isinstance(value, bool):
             form.add_field(key, "true" if value else "false")
         elif isinstance(value, list):
-            for item in value:
-                form.add_field(key, str(item))
+            for i, item in enumerate(value):
+                form.add_field(f"{key}[{i}]" if key == "bbox_condition" else key, str(item))
         elif isinstance(value, (bytes, bytearray)):
             form.add_field(key, value)
         else:
@@ -807,7 +806,7 @@ def _build_common_inputs(*, include_image_only: bool) -> list:
                 display_mode=IO.NumberDisplay.number,
                 optional=True,
                 advanced=True,
-                tooltip="Bounding-box width (Y axis). Set to 0 with the others to skip bbox.",
+                tooltip="Bounding-box width (side to side). Set to 0 with the others to skip bbox.",
             ),
             IO.Int.Input(
                 "bbox_height",
@@ -817,7 +816,7 @@ def _build_common_inputs(*, include_image_only: bool) -> list:
                 display_mode=IO.NumberDisplay.number,
                 optional=True,
                 advanced=True,
-                tooltip="Bounding-box height (Z axis).",
+                tooltip="Bounding-box height (vertical).",
             ),
             IO.Int.Input(
                 "bbox_length",
@@ -827,7 +826,7 @@ def _build_common_inputs(*, include_image_only: bool) -> list:
                 display_mode=IO.NumberDisplay.number,
                 optional=True,
                 advanced=True,
-                tooltip="Bounding-box length (X axis).",
+                tooltip="Bounding-box length (front to back).",
             ),
             IO.Int.Input(
                 "height_cm",
@@ -1081,7 +1080,7 @@ class Rodin3D_Gen25_Text(IO.ComfyNode):
         bbox_length: int,
         height_cm: int,
     ) -> IO.NodeOutput:
-        validate_string(prompt, field_name="prompt", min_length=1, max_length=2500)
+        validate_string(prompt, field_name="prompt", min_length=1, max_length=1024)
         request = _build_request(
             mode_input=mode,
             material=material,

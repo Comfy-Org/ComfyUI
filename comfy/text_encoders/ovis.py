@@ -16,8 +16,14 @@ class OvisTokenizer(sd1_clip.SD1Tokenizer):
         super().__init__(embedding_directory=embedding_directory, tokenizer_data=tokenizer_data, name="qwen3_2b", tokenizer=Qwen3Tokenizer)
         self.llama_template = "<|im_start|>user\nDescribe the image by detailing the color, quantity, text, shape, size, texture, spatial relationships of the objects and background: {}<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
 
-    def tokenize_with_weights(self, text, return_word_ids=False, llama_template=None, **kwargs):
-        if llama_template is None:
+    def tokenize_with_weights(self, text, return_word_ids=False, llama_template=None, thinking=None, system_prompt="", skip_template=False, **kwargs):
+        if thinking is not None and llama_template is None:  # TextGenerate (it always passes thinking): plain Qwen3 chat, not the image description prompt
+            llama_text = text
+            if not skip_template:  # hybrid Qwen3 chat template: the model opens its own think block, an empty one disables reasoning
+                llama_text = "<|im_start|>user\n" + text + "<|im_end|>\n<|im_start|>assistant\n" + ("" if thinking else "<think>\n\n</think>\n\n")
+                if system_prompt:
+                    llama_text = "<|im_start|>system\n" + system_prompt + "<|im_end|>\n" + llama_text
+        elif llama_template is None:
             llama_text = self.llama_template.format(text)
         else:
             llama_text = llama_template.format(text)

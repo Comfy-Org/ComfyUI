@@ -42,6 +42,27 @@ CACHE_SCENARIOS = [
         "should_have_header": True,
     },
     {
+        "name": "user_css_keeps_handler_cache",
+        "path": "/user.css",
+        "status": 200,
+        "expected_cache": None,
+        "should_have_header": False,
+    },
+    {
+        "name": "userdata_user_css_keeps_handler_cache",
+        "path": "/api/userdata/user.css",
+        "status": 200,
+        "expected_cache": None,
+        "should_have_header": False,
+    },
+    {
+        "name": "nested_user_css_still_no_store",
+        "path": "/extensions/pack/user.css",
+        "status": 200,
+        "expected_cache": "no-store",
+        "should_have_header": True,
+    },
+    {
         "name": "index_json_no_store",
         "path": "/api/index.json",
         "status": 200,

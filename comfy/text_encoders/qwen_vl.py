@@ -6,6 +6,27 @@ import math
 from comfy.ldm.modules.attention import optimized_attention_for_device
 
 
+def smart_resize(height, width, factor, min_pixels, max_pixels):
+    # the Qwen2-VL processor's target size: multiples of factor, pixel count within [min_pixels, max_pixels]
+    h_bar = round(height / factor) * factor
+    w_bar = round(width / factor) * factor
+    if h_bar * w_bar > max_pixels:
+        beta = math.sqrt((height * width) / max_pixels)
+        h_bar = max(factor, math.floor(height / beta / factor) * factor)
+        w_bar = max(factor, math.floor(width / beta / factor) * factor)
+    elif h_bar * w_bar < min_pixels:
+        beta = math.sqrt(min_pixels / (height * width))
+        h_bar = math.ceil(height * beta / factor) * factor
+        w_bar = math.ceil(width * beta / factor) * factor
+    return h_bar, w_bar
+
+
+def resize_8bit(image, height, width):
+    # the Qwen2-VL processor's resize: torch's uint8 antialiased bicubic (two passes, each rounded to 8 bit), which matches PIL
+    image = image.movedim(-1, 1).mul(255).round().clamp(0, 255).to(device="cpu", dtype=torch.uint8)
+    return F.interpolate(image, size=(height, width), mode="bicubic", antialias=True).float().div(255).movedim(1, -1)
+
+
 def process_qwen2vl_images(
     images: torch.Tensor,
     min_pixels: int = 3136,
@@ -29,19 +50,7 @@ def process_qwen2vl_images(
 
     img = images[0]
 
-    factor = patch_size * merge_size
-
-    h_bar = round(height / factor) * factor
-    w_bar = round(width / factor) * factor
-
-    if h_bar * w_bar > max_pixels:
-        beta = math.sqrt((height * width) / max_pixels)
-        h_bar = max(factor, math.floor(height / beta / factor) * factor)
-        w_bar = max(factor, math.floor(width / beta / factor) * factor)
-    elif h_bar * w_bar < min_pixels:
-        beta = math.sqrt(min_pixels / (height * width))
-        h_bar = math.ceil(height * beta / factor) * factor
-        w_bar = math.ceil(width * beta / factor) * factor
+    h_bar, w_bar = smart_resize(height, width, patch_size * merge_size, min_pixels, max_pixels)
 
     img_resized = F.interpolate(
         img.unsqueeze(0),
