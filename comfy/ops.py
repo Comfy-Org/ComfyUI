@@ -55,11 +55,33 @@ def repeat_kv_for_gqa(k, v, query_heads, head_dim):
         v = v.repeat_interleave(n_rep, dim=head_dim)
     return k, v
 
+def _npu_sdpa_math_fallback(q, k, v, attn_mask=None, is_causal=False, scale=None):
+    if scale is None:
+        scale = q.shape[-1] ** -0.5
+    attn = torch.matmul(q, k.transpose(-2, -1)) * scale
+    if is_causal:
+        L, S = q.shape[-2], k.shape[-2]
+        causal = torch.ones((L, S), dtype=torch.bool, device=q.device).tril()
+        attn = attn.masked_fill(causal.logical_not().view(1, 1, L, S), float("-inf"))
+    if attn_mask is not None:
+        attn = attn + attn_mask
+    attn = torch.softmax(attn, dim=-1, dtype=torch.float32).to(q.dtype)
+    return torch.matmul(attn, v)
+
+
 def scaled_dot_product_attention(q, k, v, *args, **kwargs):
     attn_mask = args[0] if len(args) > 0 else kwargs.get("attn_mask")
     if kwargs.get("enable_gqa", False) and attn_mask is not None:
         k, v = repeat_kv_for_gqa(k, v, q.shape[-3], -3)
         kwargs["enable_gqa"] = False
+    if comfy.model_management.is_ascend_310(device=q.device if hasattr(q, 'device') else None):
+        # 310P lacks a fused SDPA kernel (ERR01007 / "can not cast format when output is input").
+        # Use a portable math implementation instead of the fused NPU kernel.
+        return _npu_sdpa_math_fallback(
+            q, k, v, attn_mask=attn_mask,
+            is_causal=args[2] if len(args) > 2 else kwargs.get("is_causal", False),
+            scale=args[3] if len(args) > 3 else kwargs.get("scale", None),
+        )
     return torch.nn.functional.scaled_dot_product_attention(q, k, v, *args, **kwargs)
 
 

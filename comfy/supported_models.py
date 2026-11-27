@@ -2192,6 +2192,11 @@ class QwenImage(supported_models_base.BASE):
     vae_key_prefix = ["vae."]
     text_encoder_key_prefix = ["text_encoders."]
 
+    def __init__(self, unet_config):
+        super().__init__(unet_config)
+        if comfy.model_management.is_ascend_310():
+            self.supported_inference_dtypes = [torch.float16] + self.supported_inference_dtypes
+
     def get_model(self, state_dict, prefix="", device=None):
         out = model_base.QwenImage(self, device=device)
         return out
@@ -2221,6 +2226,11 @@ class QwenImage21(supported_models_base.BASE):
 
     vae_key_prefix = ["vae."]
     text_encoder_key_prefix = ["text_encoders."]
+
+    def __init__(self, unet_config):
+        super().__init__(unet_config)
+        if comfy.model_management.is_ascend_310():
+            self.supported_inference_dtypes = [torch.float16] + self.supported_inference_dtypes
 
     def get_model(self, state_dict, prefix="", device=None):
         return model_base.QwenImage21(self, device=device)

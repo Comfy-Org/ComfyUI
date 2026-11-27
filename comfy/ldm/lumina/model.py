@@ -68,8 +68,20 @@ def apply_gate(gate, x, timestep_zero_index=None):
 #                               Core NextDiT Model                              #
 #############################################################################
 
+def _clamp_fp16_310(x):
+    # 310P 无 torch.nan_to_num kernel,用基础算子等效替换(只改 NaN/±inf,不动有限值)
+    x = torch.where(torch.isnan(x), torch.zeros_like(x), x)
+    x = torch.where(
+        torch.isinf(x),
+        torch.where(x > 0, torch.full_like(x, 65504), torch.full_like(x, -65504)),
+        x,
+    )
+    return x
+
 def clamp_fp16(x):
     if x.dtype == torch.float16:
+        if comfy.model_management.is_ascend_310():
+            return _clamp_fp16_310(x)
         return torch.nan_to_num(x, nan=0.0, posinf=65504, neginf=-65504)
     return x
 

@@ -126,6 +126,8 @@ try:
     _ = torch.npu.device_count()
     npu_available = torch.npu.is_available()
     torch_npu.npu.set_compile_mode(jit_compile = False)
+    if npu_available and "310" in torch.npu.get_device_name(0):
+        torch.npu.set_mm_bmm_format_nd(False)
 except:
     npu_available = False
 
@@ -157,6 +159,21 @@ def is_ascend_npu():
     if npu_available:
         return True
     return False
+
+def is_ascend_310(device=None):
+    """Ascend 310P lacks bf16 and some kernels (e.g. nan_to_num); gate 310-only downgrades here."""
+    if not is_ascend_npu():
+        return False
+    if isinstance(device, str):
+        device = torch.device(device)
+    index = getattr(device, "index", None)
+    if index is None:
+        index = 0
+    try:
+        name = torch.npu.get_device_name(index)
+    except Exception:
+        name = ""
+    return "310" in name
 
 def is_mlu():
     global mlu_available
@@ -2077,7 +2094,7 @@ def should_use_bf16(device=None, model_params=0, prioritize_performance=True, ma
         return torch.xpu.is_bf16_supported()
 
     if is_ascend_npu():
-        return True
+        return not is_ascend_310(device)
 
     if is_ixuca():
         return True

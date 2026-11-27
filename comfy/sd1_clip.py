@@ -731,6 +731,8 @@ class SD1ClipModel(torch.nn.Module):
 
         clip_model = model_options.get("{}_class".format(self.clip), clip_model)
         model_options = {**model_options, "model_name": self.clip}
+        if dtype == torch.bfloat16 and model_management.is_ascend_310():
+            dtype = torch.float16
         setattr(self, self.clip, clip_model(device=device, dtype=dtype, model_options=model_options, **kwargs))
 
         self.dtypes = set()
