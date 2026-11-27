@@ -395,6 +395,9 @@ class VAEComputeDtype(io.ComfyNode):
         if compute_dtype is not None:
             vae.vae_dtype = compute_dtype
             vae.patcher.set_model_compute_dtype(compute_dtype)
+            for clone_vae in vae.multigpu_clones.values():
+                clone_vae.vae_dtype = compute_dtype
+                clone_vae.patcher.set_model_compute_dtype(compute_dtype)
         return io.NodeOutput(vae)
 
 
