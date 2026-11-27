@@ -71,9 +71,12 @@ class LogInterceptor(io.TextIOWrapper):
 
     def flush(self):
         super().flush()
+        if not self._flush_callbacks:
+            return
+        with self._lock:
+            entries, self._logs_since_flush = self._logs_since_flush, []
         for cb in self._flush_callbacks:
-            cb(self._logs_since_flush)
-            self._logs_since_flush = []
+            cb(entries)
 
     def on_flush(self, callback):
         self._flush_callbacks.append(callback)
