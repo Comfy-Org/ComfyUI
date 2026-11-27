@@ -46,14 +46,15 @@ async def test_get_model_folders_includes_registered_extensions(aiohttp_client, 
         # Match-all registrations are exposed honestly, not substituted.
         assert folders['test_match_all']['extensions'] == []
 
-async def test_get_model_preview_safetensors(aiohttp_client, app, tmp_path):
+@pytest.mark.parametrize("model_name", ["test_model", "model [fp16]"])
+async def test_get_model_preview_safetensors(aiohttp_client, app, tmp_path, model_name):
     img = Image.new('RGB', (100, 100), 'white')
     img_byte_arr = BytesIO()
     img.save(img_byte_arr, format='PNG')
     img_byte_arr.seek(0)
     img_b64 = base64.b64encode(img_byte_arr.getvalue()).decode('utf-8')
 
-    safetensors_file = tmp_path / "test_model.safetensors"
+    safetensors_file = tmp_path / f"{model_name}.safetensors"
     header_bytes = json.dumps({
         "__metadata__": {
             "ssmd_cover_images": json.dumps([img_b64])
@@ -68,7 +69,7 @@ async def test_get_model_preview_safetensors(aiohttp_client, app, tmp_path):
         'test_folder': ([str(tmp_path)], None)
     }):
         client = await aiohttp_client(app)
-        response = await client.get('/experiment/models/preview/test_folder/0/test_model.safetensors')
+        response = await client.get(f'/experiment/models/preview/test_folder/0/{model_name}.safetensors')
 
         # Verify response
         assert response.status == 200
@@ -82,3 +83,29 @@ async def test_get_model_preview_safetensors(aiohttp_client, app, tmp_path):
 
         # Clean up
         img.close()
+
+
+@pytest.mark.parametrize("directory_name", ["models", "models [shared]"])
+@pytest.mark.parametrize("model_name", ["model", "model [fp16]"])
+@pytest.mark.parametrize("preview_suffix", [".png", ".preview.png"])
+async def test_get_model_preview_literal_path(
+    aiohttp_client, app, tmp_path, directory_name, model_name, preview_suffix
+):
+    """Model and directory brackets are literal parts of preview paths."""
+    model_dir = tmp_path / directory_name
+    model_dir.mkdir()
+    preview = model_dir / f"{model_name}{preview_suffix}"
+    Image.new("RGB", (12, 10), "red").save(preview)
+
+    with patch('folder_paths.folder_names_and_paths', {
+        'test_folder': ([str(model_dir)], {'.safetensors'})
+    }):
+        client = await aiohttp_client(app)
+        response = await client.get(
+            f'/experiment/models/preview/test_folder/0/{model_name}.safetensors'
+        )
+
+        assert response.status == 200
+        assert response.content_type == "image/webp"
+        with Image.open(BytesIO(await response.read())) as image:
+            assert image.size == (12, 10)
