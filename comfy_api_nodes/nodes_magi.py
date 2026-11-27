@@ -75,12 +75,12 @@ def _fit_durations(durations: list[float]) -> list[float]:
 def _fit_reference_videos(videos: list[Input.Video]) -> list[Input.Video]:
     durations = []
     for i, video in enumerate(videos, 1):
-        seconds = video.get_frame_count() / float(video.get_frame_rate())
+        seconds = min(video.get_duration(), video.get_frame_count() / float(video.get_frame_rate()))
         if seconds < MIN_REFERENCE_SECONDS:
             raise ValueError(f"Reference video {i} is {seconds:.2f} s; it must be at least 2 s.")
         durations.append(seconds)
     return [
-        video.as_trimmed(duration=fitted) if fitted < seconds else video
+        video.as_trimmed(start_time=0, duration=fitted) if fitted < seconds else video
         for video, seconds, fitted in zip(videos, durations, _fit_durations(durations))
     ]
 
