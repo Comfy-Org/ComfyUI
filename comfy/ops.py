@@ -448,6 +448,10 @@ def cast_bias_weight(s, input=None, dtype=None, device=None, bias_dtype=None, of
         return format_return((weight, bias, offload_state), offloadable)
 
 
+    if getattr(s.weight, "is_meta", False) or getattr(s.bias, "is_meta", False):
+        if device is None or torch.device(device).type != "meta":
+            materialize_meta_param(s, ["weight", "bias"])
+
     if offloadable and (device != s.weight.device or
                         (s.bias is not None and device != s.bias.device)):
         offload_stream = comfy.model_management.get_offload_stream(device)
@@ -576,31 +580,44 @@ class disable_weight_init:
         setattr(module, name, torch.nn.Parameter(torch.zeros(param.shape, device=device, dtype=param.dtype), requires_grad=False))
 
     @staticmethod
+    def _meta_placeholder(module, name, shape):
+        dtype = getattr(module, f"{name}_comfy_model_dtype", None) or torch.get_default_dtype()
+        return torch.nn.Parameter(torch.empty(shape, device="meta", dtype=dtype), requires_grad=False)
+
+    @staticmethod
     def _lazy_load_from_state_dict(module, state_dict, prefix, local_metadata,
                                    missing_keys, unexpected_keys, weight_shape,
                                    bias_shape=None):
         assign_to_params_buffers = local_metadata.get("assign_to_params_buffers", False)
         prefix_len = len(prefix)
+        weight_loaded = False
+        bias_loaded = False
         for k, v in state_dict.items():
             key = k[prefix_len:]
             if key == "weight":
                 if not assign_to_params_buffers:
                     v = v.clone()
                 module.weight = torch.nn.Parameter(v, requires_grad=False)
+                weight_loaded = True
             elif bias_shape is not None and key == "bias" and v is not None:
                 if not assign_to_params_buffers:
                     v = v.clone()
                 module.bias = torch.nn.Parameter(v, requires_grad=False)
+                bias_loaded = True
             else:
                 unexpected_keys.append(k)
 
-        if module.weight is None:
-            module.weight = torch.nn.Parameter(torch.zeros(weight_shape), requires_grad=False)
+        if not weight_loaded:
+            if module.weight is None:
+                module.weight = disable_weight_init._meta_placeholder(module, "weight", weight_shape)
             missing_keys.append(prefix + "weight")
 
-        if bias_shape is not None and module.bias is None and getattr(module, "comfy_need_lazy_init_bias", False):
-            module.bias = torch.nn.Parameter(torch.zeros(bias_shape), requires_grad=False)
-            missing_keys.append(prefix + "bias")
+        if bias_shape is not None and not bias_loaded:
+            if module.bias is None and getattr(module, "comfy_need_lazy_init_bias", False):
+                module.bias = disable_weight_init._meta_placeholder(module, "bias", bias_shape)
+                missing_keys.append(prefix + "bias")
+            elif module.bias is not None:
+                missing_keys.append(prefix + "bias")
 
     class Linear(torch.nn.Linear, CastWeightBiasOp):
 
@@ -639,7 +656,7 @@ class disable_weight_init:
                 local_metadata,
                 missing_keys,
                 unexpected_keys,
-                weight_shape=(self.in_features, self.out_features),
+                weight_shape=(self.out_features, self.in_features),
                 bias_shape=(self.out_features,),
             )
 
@@ -656,6 +673,9 @@ class disable_weight_init:
             if self.comfy_cast_weights or len(self.weight_function) > 0 or len(self.bias_function) > 0:
                 return self.forward_comfy_cast_weights(*args, **kwargs)
             else:
+                input_tensor = args[0] if args else kwargs.get("input")
+                if (getattr(self.weight, "is_meta", False) or getattr(self.bias, "is_meta", False)) and not getattr(input_tensor, "is_meta", False):
+                    materialize_meta_param(self, ("weight", "bias"))
                 return super().forward(*args, **kwargs)
 
     class Conv1d(torch.nn.Conv1d, CastWeightBiasOp):
@@ -883,6 +903,8 @@ class disable_weight_init:
 
         def host_rows(self, input, out_dtype=None):
             # table not resident: gather the rows from the host copy instead of streaming the table
+            if getattr(self.weight, "is_meta", False) and not getattr(input, "is_meta", False):
+                materialize_meta_param(self, ("weight",))
             x = self.weight[input.reshape(-1).cpu()].to(input.device)
             x = x.view(*input.shape, x.shape[-1])
             return x if out_dtype is None else x.to(dtype=out_dtype)
@@ -894,6 +916,9 @@ class disable_weight_init:
             else:
                 if "out_dtype" in kwargs:
                     kwargs.pop("out_dtype")
+                input_tensor = args[0] if args else kwargs.get("input")
+                if getattr(self.weight, "is_meta", False) and not getattr(input_tensor, "is_meta", False):
+                    materialize_meta_param(self, ("weight",))
                 return super().forward(*args, **kwargs)
 
     @classmethod
