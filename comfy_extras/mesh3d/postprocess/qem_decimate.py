@@ -325,7 +325,8 @@ def _edge_errors(
             opt = torch.where(wander_bad, midpoint, opt)
 
     v4 = torch.cat([opt, torch.ones((n_edges, 1), device=device, dtype=dtype)], dim=1)
-    err = torch.abs(torch.einsum("ei,eij,ej->e", v4, Qe, v4))
+    # elementwise, not einsum: as a batched 4x4 GEMM this is 3-100x slower on ROCm
+    err = torch.abs(((v4.unsqueeze(-1) * Qe).sum(dim=-2) * v4).sum(dim=-1))
 
     length_ok = el * el > mesh_scale_sq * 1e-10
     error_ok = err < max_err
