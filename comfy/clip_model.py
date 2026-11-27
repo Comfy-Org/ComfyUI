@@ -165,6 +165,7 @@ class CLIPTextModel_(torch.nn.Module):
             x = embeds + comfy.ops.cast_to(self.embeddings.position_embedding.weight, dtype=dtype, device=embeds.device)
         else:
             x = self.embeddings(input_tokens, dtype=dtype)
+        x = x.to(dtype)
 
         mask = None
         if attention_mask is not None:
