@@ -92,6 +92,10 @@ class ResponseError(BaseModel):
     message: str = Field(...)
 
 
+class IncompleteDetails(BaseModel):
+    reason: str | None = Field(None, description="Why the response is incomplete: `max_output_tokens` or `content_filter`.")
+
+
 class OutputTokensDetails(BaseModel):
     reasoning_tokens: int = Field(..., description="The number of reasoning tokens.")
 
@@ -127,6 +131,7 @@ class OutputMessage(BaseModel):
     type: str = Field(..., description="The type of output item")
     content: list[OutputContent] | None = Field(None, description="The content of the message")
     role: str | None = Field(None, description="The role of the message")
+    phase: str | None = Field(None, description="`commentary` for progress updates, `final_answer` for the answer")
 
 
 class OpenAIResponse(ModelResponseProperties, ResponseProperties):
@@ -136,6 +141,7 @@ class OpenAIResponse(ModelResponseProperties, ResponseProperties):
     )
     error: ResponseError | None = Field(None)
     id: str | None = Field(None, description="Unique identifier for this Response.")
+    incomplete_details: IncompleteDetails | None = Field(None)
     object: str | None = Field(None, description="The object type of this resource - always set to `response`.")
     output: list[OutputMessage] | None = Field(None)
     parallel_tool_calls: bool | None = Field(True)
