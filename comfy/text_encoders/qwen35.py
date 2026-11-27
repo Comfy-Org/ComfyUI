@@ -610,9 +610,23 @@ class Qwen35VisionPatchEmbed(nn.Module):
         kernel_size = [self.temporal_patch_size, self.patch_size, self.patch_size]
         self.proj = ops.Conv3d(self.in_channels, self.embed_dim, kernel_size=kernel_size, stride=kernel_size, bias=True, device=device, dtype=dtype)
 
+        # stride == kernel_size, so the conv is a plain matmul over flattened patches.
+        # Doing it as a linear also avoids native Conv3d, which segfaults on ROCm with MIOpen disabled.
+        # Only for the stock comfy Conv3d: custom operations that override forward or the
+        # weight cast keep their own path.
+        stock = comfy.ops.disable_weight_init.Conv3d
+        proj_type = type(self.proj)
+        self._as_linear = (isinstance(self.proj, stock)
+                           and proj_type.forward is stock.forward
+                           and proj_type.forward_comfy_cast_weights is stock.forward_comfy_cast_weights)
+
     def forward(self, x):
-        x = x.view(-1, self.in_channels, self.temporal_patch_size, self.patch_size, self.patch_size)
-        return self.proj(x).view(-1, self.embed_dim)
+        if not self._as_linear:
+            x = x.view(-1, self.in_channels, self.temporal_patch_size, self.patch_size, self.patch_size)
+            return self.proj(x).view(-1, self.embed_dim)
+        x = x.reshape(-1, self.in_channels * self.temporal_patch_size * self.patch_size * self.patch_size)
+        with comfy.ops.CastBiasWeightContext(self.proj, x, offloadable=True) as (weight, bias):
+            return F.linear(x, weight.reshape(self.embed_dim, -1), bias)
 
 
 class Qwen35VisionMLP(nn.Module):
