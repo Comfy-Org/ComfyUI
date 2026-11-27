@@ -126,3 +126,18 @@ def test_malloc_graph_cleanup_failure_still_cleans_queues(monkeypatch):
 
     assert model_prefetch.PREFETCH_QUEUES == []
     assert not hasattr(module, "_prefetch")
+
+
+def test_cleanup_releases_block_pin_without_module_records(monkeypatch):
+    module = torch.nn.Linear(2, 2)
+    module._v_block = "block"
+    module._v_block_faulted = True
+    calls = []
+    monkeypatch.setattr(model_prefetch.comfy_aimdo.model_vbar, "vbar_unpin", calls.append)
+    model_prefetch.PREFETCH_QUEUES = [[(None, (module, []))]]
+
+    model_prefetch.cleanup_prefetch_queues()
+
+    assert calls == ["block"]
+    assert not hasattr(module, "_v_block_faulted")
+    assert model_prefetch.PREFETCH_QUEUES == []

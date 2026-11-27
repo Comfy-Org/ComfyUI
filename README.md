@@ -74,7 +74,7 @@ Other paths:
 
 ### Manual install
 
-First install PyTorch for your GPU, then:
+First you need a python environment with a working pytorch, you can find instructions for that in the [docs/installation.md](docs/installation.md).
 
 ```bash
 git clone https://github.com/Comfy-Org/ComfyUI.git
