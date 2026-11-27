@@ -186,7 +186,7 @@ class OpenAIGPTImage1(IO.ComfyNode):
                 IO.Combo.Input(
                     "background",
                     default="auto",
-                    options=["auto", "opaque", "transparent"],
+                    options=["auto", "opaque"],
                     tooltip="Return image with or without background",
                     optional=True,
                 ),
@@ -205,7 +205,7 @@ class OpenAIGPTImage1(IO.ComfyNode):
                         "2160x3840",
                         "Custom",
                     ],
-                    tooltip="Image size. Select 'Custom' to use the custom width and height (GPT Image 2 only).",
+                    tooltip="Image size. Select 'Custom' to use the custom width and height.",
                     optional=True,
                 ),
                 IO.Int.Input(
@@ -230,7 +230,7 @@ class OpenAIGPTImage1(IO.ComfyNode):
                 ),
                 IO.Combo.Input(
                     "model",
-                    options=["gpt-image-1.5", "gpt-image-2"],
+                    options=["gpt-image-2"],
                     default="gpt-image-2",
                     optional=True,
                 ),
@@ -240,7 +240,7 @@ class OpenAIGPTImage1(IO.ComfyNode):
                     min=1024,
                     max=3840,
                     step=16,
-                    tooltip="Used only when `size` is 'Custom'. Must be a multiple of 16 (GPT Image 2 only).",
+                    tooltip="Used only when `size` is 'Custom'. Must be a multiple of 16.",
                     optional=True,
                 ),
                 IO.Int.Input(
@@ -249,7 +249,7 @@ class OpenAIGPTImage1(IO.ComfyNode):
                     min=1024,
                     max=3840,
                     step=16,
-                    tooltip="Used only when `size` is 'Custom'. Must be a multiple of 16 (GPT Image 2 only).",
+                    tooltip="Used only when `size` is 'Custom'. Must be a multiple of 16.",
                     optional=True,
                 ),
             ],
@@ -267,11 +267,6 @@ class OpenAIGPTImage1(IO.ComfyNode):
                 expr="""
                 (
                   $ranges := {
-                    "gpt-image-1.5": {
-                      "low":    [0.009, 0.02],
-                      "medium": [0.034, 0.062],
-                      "high":   [0.133, 0.22]
-                    },
                     "gpt-image-2": {
                       "low":    [0.0058, 0.0228],
                       "medium": [0.0492, 0.2016],
@@ -315,8 +310,6 @@ class OpenAIGPTImage1(IO.ComfyNode):
             raise ValueError("Cannot use a mask without an input image")
 
         if size == "Custom":
-            if model != "gpt-image-2":
-                raise ValueError("Custom resolution is only supported by GPT Image 2 model")
             if custom_width % 16 != 0 or custom_height % 16 != 0:
                 raise ValueError(f"Custom width and height must be multiples of 16, got {custom_width}x{custom_height}")
             if max(custom_width, custom_height) > 3840:
@@ -332,12 +325,6 @@ class OpenAIGPTImage1(IO.ComfyNode):
                     f"Custom resolution total pixels must be between 655,360 and 8,294,400, got {total_pixels}"
                 )
             size = f"{custom_width}x{custom_height}"
-        elif model == "gpt-image-1.5":
-            if size not in ("auto", "1024x1024", "1024x1536", "1536x1024"):
-                raise ValueError(f"Resolution {size} is only supported by GPT Image 2 model")
-
-        if model not in ("gpt-image-1.5", "gpt-image-2"):
-            raise ValueError(f"Unknown model: {model}")
 
         if image is not None:
             files = []
@@ -421,11 +408,10 @@ GPT_IMAGE_MODELS = (
     "gpt-image-2.5-flare",
     "gpt-image-2.5-sunburst",
     "gpt-image-2",
-    "gpt-image-1.5",
 )
 
 
-def _gpt_image_shared_inputs(qualities: tuple[str, ...] = GPT_IMAGE_QUALITIES):
+def _gpt_image_shared_inputs(qualities: tuple[str, ...]):
     """Inputs shared by all GPT Image models (quality + reference images + mask)."""
     return [
         IO.Combo.Input(
@@ -449,25 +435,6 @@ def _gpt_image_shared_inputs(qualities: tuple[str, ...] = GPT_IMAGE_QUALITIES):
             tooltip="Optional mask for inpainting (white areas will be replaced). "
             "Requires exactly one reference image.",
         ),
-    ]
-
-
-def _gpt_image_legacy_model_inputs():
-    """Per-model widget set for legacy gpt-image-1.5 (4 base sizes, transparent bg allowed)."""
-    return [
-        IO.Combo.Input(
-            "size",
-            default="auto",
-            options=["auto", "1024x1024", "1024x1536", "1536x1024"],
-            tooltip="Image size.",
-        ),
-        IO.Combo.Input(
-            "background",
-            default="auto",
-            options=["auto", "opaque", "transparent"],
-            tooltip="Return image with or without background.",
-        ),
-        *_gpt_image_shared_inputs(),
     ]
 
 
@@ -618,7 +585,6 @@ class OpenAIGPTImageNodeV2(IO.ComfyNode):
                             "gpt-image-2",
                             _gpt_image_2_model_inputs(("auto", "opaque"), GPT_IMAGE_QUALITIES),
                         ),
-                        IO.DynamicCombo.Option("gpt-image-1.5", _gpt_image_legacy_model_inputs()),
                     ],
                 ),
                 IO.Int.Input(
@@ -653,11 +619,6 @@ class OpenAIGPTImageNodeV2(IO.ComfyNode):
                 expr="""
                 (
                   $ranges := {
-                    "gpt-image-1.5": {
-                      "low":    [0.009, 0.02],
-                      "medium": [0.034, 0.062],
-                      "high":   [0.133, 0.22]
-                    },
                     "gpt-image-2": {
                       "low":    [0.0019, 0.0237],
                       "medium": [0.0186, 0.2135],
@@ -714,7 +675,6 @@ class OpenAIGPTImageNodeV2(IO.ComfyNode):
                     }
                   };
                   $perImage := {
-                    "gpt-image-1.5": [0.0016, 0.0016],
                     "gpt-image-2": [0.0098, 0.0147],
                     "gpt-image-2.5-flare": [0.0117, 0.0176],
                     "gpt-image-2.5-sunburst": [0.0117, 0.0176],
@@ -762,8 +722,8 @@ class OpenAIGPTImageNodeV2(IO.ComfyNode):
         size = model["size"]
         background = model["background"]
         quality = model["quality"]
-        custom_width = model.get("custom_width", 1024)
-        custom_height = model.get("custom_height", 1024)
+        custom_width = model["custom_width"]
+        custom_height = model["custom_height"]
         complexity = model.get("complexity")
 
         images_dict = model.get("images") or {}
