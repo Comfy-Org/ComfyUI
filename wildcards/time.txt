@@ -1,0 +1,11 @@
+in the morning
+at noon
+at afternoon
+at evening
+at blue hour
+at golden hour
+at sunset
+at sunrise
+at midnight
+at night
+
