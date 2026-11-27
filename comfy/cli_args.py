@@ -264,6 +264,7 @@ parser.add_argument(
 
 parser.add_argument("--user-directory", type=is_valid_directory, default=None, help="Set the ComfyUI user directory with an absolute path. Overrides --base-directory.")
 parser.add_argument("--models-directory", type=is_valid_directory, default=None, help="Set the ComfyUI models directory. Overrides the models folder in --base-directory.")
+parser.add_argument("--custom-nodes-directory", type=is_valid_directory, default=None, help="Set the ComfyUI custom_nodes directory. Overrides the custom_nodes folder in --base-directory.")
 
 parser.add_argument("--enable-compress-response-body", action="store_true", help="Enable compressing response body.")
 
