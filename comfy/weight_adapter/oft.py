@@ -25,7 +25,8 @@ class OFTDiff(WeightAdapterTrainBase):
         else:
             self.rescaled = False
         self.block_num, self.block_size, _ = blocks.shape
-        self.constraint = float(alpha)
+        # alpha is the constraint, lycoris stores it unscaled
+        self.constraint = float(alpha) * self.block_num * self.block_size
         self.alpha = torch.nn.Parameter(torch.tensor(alpha), requires_grad=False)
 
     def __call__(self, w):
@@ -220,10 +221,12 @@ class OFTAdapter(WeightAdapterBase):
             # for Q = -Q^T
             q = blocks - blocks.transpose(1, 2)
             normed_q = q
-            if alpha > 0:  # alpha in oft/boft is for constraint
+            # alpha in oft/boft is the constraint, lycoris stores it unscaled
+            constraint = alpha * block_num * block_size
+            if constraint > 0:
                 q_norm = torch.norm(q) + 1e-8
-                if q_norm > alpha:
-                    normed_q = q * alpha / q_norm
+                if q_norm > constraint:
+                    normed_q = q * constraint / q_norm
             # use float() to prevent unsupported type in .inverse()
             r = (I + normed_q) @ (I - normed_q).float().inverse()
             r = r.to(weight)
@@ -266,11 +269,12 @@ class OFTAdapter(WeightAdapterBase):
         q = blocks - blocks.transpose(1, 2)
         normed_q = q
 
-        # Apply constraint if alpha > 0
-        if alpha > 0:
+        # Apply constraint, lycoris stores it unscaled
+        constraint = alpha * block_num * block_size
+        if constraint > 0:
             q_norm = torch.norm(q) + 1e-8
-            if q_norm > alpha:
-                normed_q = q * alpha / q_norm
+            if q_norm > constraint:
+                normed_q = q * constraint / q_norm
 
         # Cayley transform: R = (I + Q)(I - Q)^-1
         r = (I + normed_q) @ (I - normed_q).float().inverse()
