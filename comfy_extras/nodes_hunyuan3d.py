@@ -83,7 +83,7 @@ class Hunyuan3Dv2ConditioningMultiView(IO.ComfyNode):
             if e is not None:
                 if pos_embeds is None:
                     pos_embeds = get_1d_sincos_pos_embed_from_grid_torch(e.last_hidden_state.shape[-1], torch.arange(4))
-                out.append(e.last_hidden_state + pos_embeds[i].reshape(1, 1, -1))
+                out.append(e.last_hidden_state + pos_embeds[i].reshape(1, 1, -1).to(e.last_hidden_state))
 
         embeds = torch.cat(out, dim=1)
         positive = [[embeds, {}]]
