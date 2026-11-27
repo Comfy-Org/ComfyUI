@@ -20,6 +20,16 @@ CANCEL_TERMINAL = 'terminal'
 CANCEL_UNKNOWN = 'unknown'
 
 
+def is_hidden_job(item) -> bool:
+    """Whether a queue or history item was submitted with ``"hidden": true`` in its extra_data.
+
+    A client running its own internal jobs on the server (for example an agent's
+    model calls) marks them this way, and the job, queue and history lists and the
+    queue count leave them out for every client. Lookups by id still return them.
+    """
+    return item[3].get("hidden") is True
+
+
 class JobStatus:
     """Job status constants."""
     PENDING = 'pending'

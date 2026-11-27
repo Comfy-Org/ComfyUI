@@ -1436,22 +1436,23 @@ class PromptQueue:
             for x in range(len(self.queue)):
                 if function(self.queue[x]):
                     if len(self.queue) == 1:
-                        self.wipe_queue()
+                        self.wipe_queue()  # notifies the server
                     else:
                         self.queue.pop(x)
                         heapq.heapify(self.queue)
-                    self.server.queue_updated()
+                        self.server.queue_updated()
                     return True
         return False
 
-    def get_history(self, prompt_id=None, max_items=None, offset=-1, map_function=None):
+    def get_history(self, prompt_id=None, max_items=None, offset=-1, map_function=None, filter_function=None):
         with self.mutex:
             if prompt_id is None:
                 out = {}
                 i = 0
+                keys = [k for k in self.history if filter_function is None or filter_function(self.history[k])]
                 if offset < 0 and max_items is not None:
-                    offset = len(self.history) - max_items
-                for k in self.history:
+                    offset = len(keys) - max_items
+                for k in keys:
                     if i >= offset:
                         p = self.history[k]
                         if map_function is not None:

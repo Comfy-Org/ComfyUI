@@ -86,7 +86,7 @@ def validation(monkeypatch):
 async def client(validation, user_dir):
     prompt_server = server.PromptServer(None, MagicMock(enabled=False))
     prompt_server.prompt_queue = MagicMock()
-    prompt_server.prompt_queue.get_tasks_remaining.return_value = 0
+    prompt_server.prompt_queue.get_current_queue_volatile.return_value = ([], [])
     for route in prompt_server.routes:
         if isinstance(route, web.RouteDef) and (route.method, route.path) in (("POST", "/prompt"), ("GET", "/features"), ("GET", "/ws")):
             prompt_server.app.router.add_route(route.method, "/api" + route.path, route.handler)
