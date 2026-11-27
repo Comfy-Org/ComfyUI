@@ -54,12 +54,26 @@ def assert_host_values():
     assert system_memory.virtual_memory_available() == HOST_AVAILABLE
 
 
-@pytest.mark.parametrize("platform", ["darwin", "win32"])
+@pytest.mark.parametrize("platform", ["darwin", "freebsd"])
 def test_non_linux_returns_psutil_values(cgroup, monkeypatch, platform):
     cgroup.proc("0::/\n")
     v2(cgroup.v2_root, limit=32 * GIB, current=8 * GIB, inactive_file=0)
     monkeypatch.setattr(sys, "platform", platform)
     assert_host_values()
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="uses the Windows memory status API")
+def test_windows_available_memory_without_full_query(monkeypatch):
+    total = system_memory.virtual_memory_total()
+    monkeypatch.setattr(system_memory.psutil, "virtual_memory", lambda: pytest.fail("unexpected full memory query"))
+    assert 0 <= system_memory.virtual_memory_available() <= total
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="uses the Windows memory status API")
+def test_windows_available_memory_fallback(monkeypatch):
+    monkeypatch.setattr(system_memory, "_get_memory_status", lambda status: 0)
+    monkeypatch.setattr(system_memory.psutil, "virtual_memory", lambda: SimpleNamespace(total=HOST_TOTAL, available=HOST_AVAILABLE))
+    assert system_memory.virtual_memory_available() == HOST_AVAILABLE
 
 
 def test_no_cgroup_files_returns_psutil_values(cgroup):
