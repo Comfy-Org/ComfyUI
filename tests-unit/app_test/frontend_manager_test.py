@@ -468,3 +468,28 @@ def test_template_asset_map_skips_missing_assets():
         asset_map = FrontendManager.template_asset_map()
 
     assert asset_map == {"example.json": "/templates/example.json"}
+
+
+def test_default_frontend_path_resolves_install_symlinks(tmp_path):
+    """Package managers that symlink the install site (uv's symlink link mode
+    points site-packages entries at a cache that may live on another drive)
+    left the static route rooted behind a symlink, and aiohttp's web.static
+    refuses to follow symlinks inside the served tree by design — so every
+    static asset 404'd (issue #17190). The package paths are resolved to their
+    real directories once at startup; symlinks created inside the tree at
+    request time are still refused."""
+    import os
+
+    real_static = tmp_path / "cache" / "static"
+    real_static.mkdir(parents=True)
+    site = tmp_path / "site-packages" / "comfyui_frontend_package"
+    site.parent.mkdir(parents=True)
+    try:
+        os.symlink(real_static.parent, site)
+    except OSError:
+        pytest.skip("creating symlinks requires privileges on this platform")
+
+    with patch("importlib.resources.files", return_value=site):
+        path = FrontendManager.default_frontend_path()
+
+    assert path == os.path.realpath(str(real_static))
