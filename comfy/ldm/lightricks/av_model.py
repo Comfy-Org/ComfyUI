@@ -943,7 +943,7 @@ class LTXAVModel(LTXVModel):
         stg_self_attn_blocks = transformer_options.get("stg_self_attn_blocks", ())
         enable_graph = self.diffusion_graphs and not blocks_replace and not transformer_options.get("patches") and "optimized_attention_override" not in transformer_options
 
-        # Process transformer blocks
+        # Record each block independently across mixed-precision boundaries.
         for i, block in enumerate(self.transformer_blocks):
             block_transformer_options = transformer_options
             if i in stg_self_attn_blocks:
@@ -1024,7 +1024,7 @@ class LTXAVModel(LTXVModel):
 
             comfy.model_prefetch.prefetch_queue_pop(
                 prefetch_queue, vx.device, block, vx.dtype, core=core, enable_graph=enable_graph,
-                malloc_scope="block",
+                malloc_scope=f"block_{i}", malloc_close_scope=True,
             )
 
         comfy.model_prefetch.prefetch_queue_pop(
