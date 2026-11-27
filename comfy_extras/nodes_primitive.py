@@ -93,6 +93,29 @@ class Boolean(io.ComfyNode):
         return io.NodeOutput(value)
 
 
+class Combo(io.ComfyNode):
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="PrimitiveCombo",
+            display_name="Combo",
+            category="utilities/primitive",
+            inputs=[
+                io.Combo.Input("value", options=[], socketless=True),
+            ],
+            outputs=[io.Combo.Output()],
+        )
+
+    @classmethod
+    def validate_inputs(cls, value) -> bool:
+        # Options come from the linked combo inputs, which validate this value against their own options.
+        return True
+
+    @classmethod
+    def execute(cls, value) -> io.NodeOutput:
+        return io.NodeOutput(value)
+
+
 class PrimitivesExtension(ComfyExtension):
     @override
     async def get_node_list(self) -> list[type[io.ComfyNode]]:
@@ -102,6 +125,7 @@ class PrimitivesExtension(ComfyExtension):
             Int,
             Float,
             Boolean,
+            Combo,
         ]
 
 async def comfy_entrypoint() -> PrimitivesExtension:

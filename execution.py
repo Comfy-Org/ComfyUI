@@ -875,6 +875,39 @@ class PromptExecutor:
             self._notify_prompt_lifecycle("end", prompt_id)
 
 
+def combo_value_error(input_name, val, input_type, extra_info, target=""):
+    if input_type == io.Combo.io_type:
+        combo_options = extra_info.get("options", [])
+    else:
+        combo_options = input_type
+    is_multiselect = extra_info.get("multiselect", False)
+    if is_multiselect and isinstance(val, list):
+        invalid_vals = [v for v in val if v not in combo_options]
+    else:
+        invalid_vals = [val] if val not in combo_options else []
+    if not invalid_vals:
+        return None
+
+    input_config = (input_type, extra_info)
+    # Don't send back gigantic lists like if they're lots of
+    # scanned model filepaths
+    if len(combo_options) > 20:
+        list_info = f"(list of length {len(combo_options)})"
+        input_config = None
+    else:
+        list_info = str(combo_options)
+
+    return {
+        "type": "value_not_in_list",
+        "message": "Value not in list",
+        "details": f"{input_name}: {', '.join(repr(v) for v in invalid_vals)} not in {list_info}{target}",
+        "extra_info": {
+            "input_name": input_name,
+            "input_config": input_config,
+            "received_value": val,
+        }
+    }
+
 async def validate_inputs(prompt_id, prompt, item, validated, visiting=None):
     if visiting is None:
         visiting = []
@@ -1020,6 +1053,18 @@ async def validate_inputs(prompt_id, prompt, item, validated, visiting=None):
                 }]
                 validated[o_id] = (False, reasons, o_id)
                 continue
+
+            # A PrimitiveCombo holds a constant chosen from its targets' options; check it against this
+            # input's options and report it on the PrimitiveCombo, where the user can change it.
+            # Only this node fails; the PrimitiveCombo stays valid for targets that accept the value.
+            if o_class_type == "PrimitiveCombo" and x not in validate_function_inputs and not validate_has_kwargs and (isinstance(input_type, list) or input_type == io.Combo.io_type):
+                error = combo_value_error("value", prompt[o_id]['inputs']['value'], input_type, extra_info, f" of {class_type} {unique_id} input '{x}'")
+                if error is not None:
+                    o_valid, o_errors, _ = validated[o_id]
+                    if error not in o_errors:
+                        validated[o_id] = (o_valid, o_errors + [error], o_id)
+                    valid = False
+                    continue
         else:
             try:
                 # Unwraps values wrapped in __value__ key or typed wrapper.
@@ -1087,37 +1132,8 @@ async def validate_inputs(prompt_id, prompt, item, validated, visiting=None):
                     continue
 
                 if isinstance(input_type, list) or input_type == io.Combo.io_type:
-                    if input_type == io.Combo.io_type:
-                        combo_options = extra_info.get("options", [])
-                    else:
-                        combo_options = input_type
-                    is_multiselect = extra_info.get("multiselect", False)
-                    if is_multiselect and isinstance(val, list):
-                        invalid_vals = [v for v in val if v not in combo_options]
-                    else:
-                        invalid_vals = [val] if val not in combo_options else []
-                    if invalid_vals:
-                        input_config = info
-                        list_info = ""
-
-                        # Don't send back gigantic lists like if they're lots of
-                        # scanned model filepaths
-                        if len(combo_options) > 20:
-                            list_info = f"(list of length {len(combo_options)})"
-                            input_config = None
-                        else:
-                            list_info = str(combo_options)
-
-                        error = {
-                            "type": "value_not_in_list",
-                            "message": "Value not in list",
-                            "details": f"{x}: {', '.join(repr(v) for v in invalid_vals)} not in {list_info}",
-                            "extra_info": {
-                                "input_name": x,
-                                "input_config": input_config,
-                                "received_value": val,
-                            }
-                        }
+                    error = combo_value_error(x, val, input_type, extra_info)
+                    if error is not None:
                         errors.append(error)
                         continue
 
@@ -1267,12 +1283,13 @@ async def validate_prompt(prompt_id, prompt, partial_execution_list: Union[list[
                     logging.error(f"  - {reason['message']}: {reason['details']}")
             errors += [(o, reasons)]
             for node_id, result in validated.items():
-                valid = result[0]
                 reasons = result[1]
                 # If a node upstream has errors, the nodes downstream will also
                 # be reported as invalid, but there will be no errors attached.
                 # So don't return those nodes as having errors in the response.
-                if valid is not True and len(reasons) > 0:
+                # A valid PrimitiveCombo can still carry errors for the targets that rejected its value,
+                # and gains more as later outputs validate.
+                if len(reasons) > 0:
                     if node_id not in node_errors:
                         class_type = prompt[node_id]['class_type']
                         node_errors[node_id] = {
@@ -1283,6 +1300,7 @@ async def validate_prompt(prompt_id, prompt, partial_execution_list: Union[list[
                         logging.error(f"* {class_type} {node_id}:")
                         for reason in reasons:
                             logging.error(f"  - {reason['message']}: {reason['details']}")
+                    node_errors[node_id]["errors"] = reasons
                     node_errors[node_id]["dependent_outputs"].append(o)
             logging.error("Output will be ignored")
 
