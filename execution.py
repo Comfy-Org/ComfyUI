@@ -1351,6 +1351,9 @@ class PromptQueue:
     def get(self, timeout=None):
         with self.not_empty:
             while len(self.queue) == 0:
+                # set_flag may have notified while the worker was busy; return so the flags are handled now
+                if self.flags:
+                    return None
                 self.not_empty.wait(timeout=timeout)
                 if timeout is not None and len(self.queue) == 0:
                     return None

@@ -1,3 +1,5 @@
+import time
+
 import pytest
 import torch
 
@@ -12,6 +14,7 @@ try:
     import main
 finally:
     args.cpu = _original_cpu
+import execution
 
 class LoopEscape(Exception):
     pass
@@ -155,3 +158,12 @@ def test_prompt_worker_resumes_scan_once_the_queue_is_empty(monkeypatch) -> None
 
 def test_prompt_worker_keeps_scan_paused_while_prompts_are_queued(monkeypatch) -> None:
     assert _paused_when_the_worker_asks_for_the_next_prompt(monkeypatch, queued_after_first=1) == [True]
+
+
+def test_prompt_queue_get_returns_for_flags_set_while_the_worker_was_busy() -> None:
+    queue = execution.PromptQueue(server=None)
+    # set_flag notified before anyone waited, as when /free arrives while the worker finishes a prompt
+    queue.set_flag("unload_models", True)
+    start = time.perf_counter()
+    assert queue.get(timeout=5) is None
+    assert time.perf_counter() - start < 1
