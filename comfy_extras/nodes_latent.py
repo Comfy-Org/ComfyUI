@@ -515,6 +515,11 @@ class ReplaceVideoLatentFrames(io.ComfyNode):
         if index + source_frames > dest_frames:
             logging.warning(f"ReplaceVideoLatentFrames: Source latent frames {source_frames} do not fit within destination latent frames {dest_frames} at the specified index {index}.")
             return io.NodeOutput(destination)
+        dest_batch = destination["samples"].shape[0]
+        source_batch = source["samples"].shape[0]
+        if source_batch not in (1, dest_batch):
+            logging.warning(f"ReplaceVideoLatentFrames: Source latent batch {source_batch} does not match destination latent batch {dest_batch}.")
+            return io.NodeOutput(destination)
         s = source.copy()
         s_source = source["samples"]
         s_destination = destination["samples"].clone()
