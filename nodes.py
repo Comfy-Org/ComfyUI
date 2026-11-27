@@ -2437,6 +2437,7 @@ async def init_builtin_extra_nodes():
         "nodes_custom_sampler.py",
         "nodes_hypertile.py",
         "nodes_model_advanced.py",
+        "nodes_prism.py",
         "nodes_model_downscale.py",
         "nodes_images.py",
         "nodes_video_model.py",
