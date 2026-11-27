@@ -108,14 +108,38 @@ if args.deterministic:
     logging.info("Using deterministic algorithms for pytorch")
     torch.use_deterministic_algorithms(True, warn_only=True)
 
+directml_enabled = False
+if args.directml is not None:
+    logging.warning("WARNING: torch-directml barely works, is very slow, has not been updated in over 1 year and might be removed soon, please don't use it, there are better options.")
+    import torch_directml
+    directml_enabled = True
+    device_index = args.directml
+    if device_index < 0:
+        directml_device = torch_directml.device()
+    else:
+        directml_device = torch_directml.device(device_index)
+    logging.info("Using directml with device: {}".format(torch_directml.device_name(device_index)))
+    # torch_directml.disable_tiled_resources(True)
+    lowvram_available = False #TODO: need to find a way to get free memory in directml before this can be enabled by default.
+
+vulkan_enabled = False
+if args.vulkan is not None:
+    import torchvulkan
+    vulkan_enabled = True
+    default_vulkan_device = torch.device(f"vulkan:{args.vulkan}")
+    torch.set_default_device(default_vulkan_device)
+    torchvulkan.set_device(default_vulkan_device)
+    logging.info("Using vulkan with device: {}".format(args.vulkan))
+    lowvram_available = False # not quite ready yet.
+
 try:
     _ = torch.xpu.device_count()
-    xpu_available = torch.xpu.is_available()
+    xpu_available = torch.xpu.is_available() and (not vulkan_enabled)
 except:
     xpu_available = False
 
 try:
-    if torch.backends.mps.is_available():
+    if torch.backends.mps.is_available() and (not vulkan_enabled):
         cpu_state = CPUState.MPS
         import torch.mps
 except:
@@ -124,14 +148,14 @@ except:
 try:
     import torch_npu  # noqa: F401
     _ = torch.npu.device_count()
-    npu_available = torch.npu.is_available()
+    npu_available = torch.npu.is_available() and (not vulkan_enabled)
 except:
     npu_available = False
 
 try:
     import torch_mlu  # noqa: F401
     _ = torch.mlu.device_count()
-    mlu_available = torch.mlu.is_available()
+    mlu_available = torch.mlu.is_available() and (not vulkan_enabled)
 except:
     mlu_available = False
 
@@ -142,6 +166,13 @@ except:
 
 if args.cpu:
     cpu_state = CPUState.CPU
+
+def is_vulkan():
+    global cpu_state
+    global vulkan_enabled
+    if cpu_state == CPUState.GPU and vulkan_enabled:
+        return True
+    return False
 
 def is_intel_xpu():
     global cpu_state
@@ -184,7 +215,10 @@ def get_torch_device():
     if cpu_state == CPUState.CPU:
         return torch.device("cpu")
     else:
-        if is_intel_xpu():
+        if is_vulkan():
+            global default_vulkan_device
+            return default_vulkan_device
+        elif is_intel_xpu():
             return torch.device("xpu", torch.xpu.current_device())
         elif is_ascend_npu():
             return torch.device("npu", torch.npu.current_device())
@@ -200,7 +234,10 @@ def get_all_torch_devices(exclude_current=False):
         # NVIDIA + AMD/ROCm both expose their GPUs through torch.cuda.*;
         # without the AMD arm, single-GPU ROCm users get an empty list
         # which silently turns unload_all_models() into a no-op.
-        if is_nvidia() or is_amd():
+        if is_vulkan():
+            for i in range(torchvulkan.device_count()):
+                devices.append(torch.device("vulkan", i))
+        elif is_nvidia() or is_amd():
             for i in range(torch.cuda.device_count()):
                 devices.append(torch.device("cuda", i))
         elif is_intel_xpu():
@@ -302,7 +339,16 @@ def get_total_memory(dev=None, torch_total_too=False):
         mem_total = comfy.system_memory.virtual_memory_total()
         mem_total_torch = mem_total
     else:
-        if is_intel_xpu():
+        if is_vulkan():
+            stats = torchvulkan.memory_stats(dev)
+            mem_reserved = stats['reserved_bytes.all.current']
+            mem_total_vk = torchvulkan.get_device_properties(dev).total_memory
+            mem_total_torch = mem_reserved
+            mem_total = mem_total_vk
+        elif directml_enabled:
+            mem_total = 1024 * 1024 * 1024 #TODO
+            mem_total_torch = mem_total
+        elif is_intel_xpu():
             stats = torch.xpu.memory_stats(dev)
             mem_reserved = stats['reserved_bytes.all.current']
             mem_total_xpu = torch.xpu.get_device_properties(dev).total_memory
@@ -403,6 +449,8 @@ else:
 def is_nvidia():
     global cpu_state
     if cpu_state == CPUState.GPU:
+        if is_vulkan():
+            return False
         if torch.version.cuda:
             return True
     return False
@@ -410,6 +458,8 @@ def is_nvidia():
 def is_amd():
     global cpu_state
     if cpu_state == CPUState.GPU:
+        if is_vulkan():
+            return False
         if torch.version.hip:
             return True
     return False
@@ -471,6 +521,8 @@ try:
     if is_intel_xpu() or is_ascend_npu() or is_mlu() or is_ixuca():
         if args.use_split_cross_attention == False and args.use_quad_cross_attention == False:
             ENABLE_PYTORCH_ATTENTION = True
+    if is_vulkan():
+        ENABLE_PYTORCH_ATTENTION = False # For now, until fused attention is implemented. Otherwise, VRAM consumption is too high
 except:
     pass
 
@@ -600,7 +652,9 @@ if DISABLE_SMART_MEMORY:
 
 def get_torch_device_name(device):
     if hasattr(device, 'type'):
-        if device.type == "cuda":
+        if device.type == "vulkan":
+            return f"Vulkan {device.index}: {torchvulkan.get_device_name(device)}"
+        elif device.type == "cuda":
             try:
                 allocator_backend = torch.cuda.get_allocator_backend()
             except:
@@ -610,6 +664,8 @@ def get_torch_device_name(device):
             return "{} {}".format(device, torch.xpu.get_device_name(device))
         else:
             return "{}".format(device.type)
+    elif is_vulkan():
+        return f"Vulkan {device.index}" # versions with get_device_name not yet implemented
     elif is_intel_xpu():
         return "{} {}".format(device, torch.xpu.get_device_name(device))
     elif is_ascend_npu():
@@ -1344,6 +1400,8 @@ def pick_weight_dtype(dtype, fallback_dtype, device=None):
     return dtype
 
 def device_supports_non_blocking(device):
+    if is_vulkan():
+        return False
     if args.force_non_blocking:
         return True
     if is_device_mps(device):
@@ -1437,6 +1495,7 @@ def get_cast_buffer(offload_stream, device, size, ref):
     return cast_buffer
 
 def get_aimdo_cast_buffer(offload_stream, device):
+    if is_vulkan(): raise NotImplementedError
     cast_buffer = STREAM_AIMDO_CAST_BUFFERS.get(offload_stream, None)
     if cast_buffer is None:
         cast_buffer = comfy_aimdo.vram_buffer.VRAMBuffer(DEFAULT_AIMDO_CAST_BUFFER_RESERVATION_SIZE, device.index)
@@ -1496,6 +1555,7 @@ def cleanup_vbar_casts():
         raise first_error
 
 def reset_cast_buffers():
+    if is_vulkan(): raise NotImplementedError
     global LARGEST_CASTED_WEIGHT
     global LARGEST_AIMDO_CASTED_WEIGHT
 
@@ -1680,6 +1740,7 @@ def get_disk_swap_total():
 
 def is_integrated_gpu():
     device = get_torch_device()
+    print(device.type)
     return device.type == "cuda" and bool(torch.cuda.get_device_properties(device).is_integrated)
 
 DISABLE_PINNED_MEMORY = args.disable_pinned_memory
@@ -1849,6 +1910,8 @@ def xformers_enabled():
     global cpu_state
     if cpu_state != CPUState.GPU:
         return False
+    if is_vulkan():
+        return False
     if is_intel_xpu():
         return False
     if is_ascend_npu():
@@ -1894,6 +1957,8 @@ def pytorch_attention_flash_attention():
             return True #if you have pytorch attention enabled on AMD it probably supports at least mem efficient attention
         if is_ixuca():
             return True
+        if is_vulkan():
+            return False # TODO: check if flash attention implemented yet
     return False
 
 def force_upcast_attention_dtype():
@@ -1922,7 +1987,17 @@ def get_free_memory(dev=None, torch_free_too=False):
         mem_free_total = comfy.system_memory.virtual_memory_available()
         mem_free_torch = mem_free_total
     else:
-        if is_intel_xpu():
+        if directml_enabled:
+            mem_free_total = 1024 * 1024 * 1024 #TODO
+            mem_free_torch = mem_free_total
+        elif is_vulkan():
+            stats = torchvulkan.memory_stats(dev)
+            mem_active = stats['active_bytes.all.current']
+            mem_reserved = stats['reserved_bytes.all.current']
+            mem_free_vk = torchvulkan.get_device_properties(dev).total_memory - mem_reserved
+            mem_free_torch = mem_reserved - mem_active
+            mem_free_total = mem_free_vk + mem_free_torch
+        elif is_intel_xpu():
             stats = torch.xpu.memory_stats(dev)
             mem_active = stats['active_bytes.all.current']
             mem_reserved = stats['reserved_bytes.all.current']
@@ -2008,6 +2083,14 @@ def should_use_fp16(device=None, model_params=0, prioritize_performance=True, ma
 
     if cpu_mode():
         return False
+    
+    if is_vulkan():
+        # Current torchvulkan release does not have dtype checking support.
+        # This feature is implemented, and will be available in future releases.
+        props = torchvulkan.get_device_properties(device)
+        if hasattr(props, "has_fp16"):
+            return props.has_fp16
+        return False
 
     if is_intel_xpu():
         return torch.xpu.get_device_properties(device).has_fp16
@@ -2070,6 +2153,12 @@ def should_use_bf16(device=None, model_params=0, prioritize_performance=True, ma
         return True
 
     if cpu_mode():
+        return False
+    
+    if is_vulkan():
+        props = torchvulkan.get_device_properties(device)
+        if hasattr(props, "has_bf16"):
+            return props.has_bf16
         return False
 
     if is_intel_xpu():
@@ -2165,7 +2254,13 @@ def supports_mxfp8_compute(device=None):
 def supports_fp64(device=None):
     if (device is not None and is_device_mps(device)) or mps_mode():
         return False
-
+    
+    if is_vulkan():
+        props = torchvulkan.get_device_properties(device)
+        if hasattr(props, "has_fp64"):
+            return props.has_fp64
+        return False
+    
     if is_intel_xpu():
         return False
 
@@ -2189,7 +2284,13 @@ def supports_int8_compute(device=None):
     # https://github.com/pytorch/pytorch/issues/141287
     if (device is not None and is_device_mps(device)) or mps_mode():
         return False
-
+    
+    if is_vulkan():
+        props = torchvulkan.get_device_properties(device)
+        if hasattr(props, "has_int8"):
+            return props.has_int8
+        return False
+    
     if is_intel_xpu():
         return False
 
@@ -2222,6 +2323,8 @@ def lora_compute_dtype(device):
 def synchronize():
     if cpu_mode():
         return
+    if is_vulkan():
+        torchvulkan.synchronize()
     if is_intel_xpu():
         torch.xpu.synchronize()
     elif is_ascend_npu():
@@ -2237,6 +2340,9 @@ def soft_empty_cache(force=False):
     global cpu_state
     if cpu_state == CPUState.MPS:
         torch.mps.empty_cache()
+    elif is_vulkan():
+        torchvulkan.synchronize()
+        torchvulkan.empty_cache()
     elif is_intel_xpu():
         torch.xpu.synchronize()
         torch.xpu.empty_cache()
