@@ -250,19 +250,6 @@ def prefetch_queue_pop(queue, device, module, dtype=None, core=None, enable_grap
             malloc_graph.resume()
             GRAPH_CAPTURE_STREAMS[device] = capture_stream
 
-    signature = None
-    graph_hit = False
-    graph = getattr(module, "_comfy_graph", None) if enable_graph else None
-    if graph is not None:
-        signature = comfy_aimdo.model_vbar.vbar_fault(module._v_block)
-        if signature is not None:
-            module._v_block_faulted = True
-            graph_hit = comfy_aimdo.model_vbar.vbar_signature_compare(signature, graph["signature"])
-
-    if malloc_graph is not None and malloc_scope is not None:
-        if malloc_graph.iterate(malloc_scope if module is not None and not graph_hit else None):
-            _malloc_graph_break()
-
     consumed = queue.pop(0)
     if consumed is not None:
         offload_stream, prefetch_state = consumed
@@ -272,13 +259,26 @@ def prefetch_queue_pop(queue, device, module, dtype=None, core=None, enable_grap
         if comfy_modules is not None:
             cleanup_prefetched_modules(prefetched_module, comfy_modules)
 
+    prefetch = queue[0]
+    signature = None
+    graph_hit = False
+    graph = getattr(module, "_comfy_graph", None) if enable_graph else None
+    if graph is not None:
+        signature = comfy_aimdo.model_vbar.vbar_fault(module._v_block)
+        if signature is not None:
+            module._v_block_faulted = True
+            queue[0] = (None, (module, []))
+            graph_hit = comfy_aimdo.model_vbar.vbar_signature_compare(signature, graph["signature"])
+
+    if malloc_graph is not None and malloc_scope is not None:
+        if malloc_graph.iterate(malloc_scope if module is not None and not graph_hit else None):
+            _malloc_graph_break()
+
     if graph_hit:
-        queue[0] = (None, (module, []))
         graph["graph"].replay()
         return
 
     fully_faulted = False
-    prefetch = queue[0]
     if prefetch is not None:
         comfy_modules = []
         prefetch_modules = prefetch if isinstance(prefetch, (list, tuple)) else (prefetch,)
