@@ -25,10 +25,11 @@ def app(custom_node_manager):
     return app
 
 
-async def test_get_workflow_templates(aiohttp_client, app, tmp_path):
+@pytest.mark.parametrize("root_name", ["custom_nodes", "custom_nodes[1]"])
+async def test_get_workflow_templates(aiohttp_client, app, tmp_path, root_name):
     client = await aiohttp_client(app)
     # Setup temporary custom nodes file structure with 1 workflow file
-    custom_nodes_dir = tmp_path / "custom_nodes"
+    custom_nodes_dir = tmp_path / root_name
     example_workflows_dir = (
         custom_nodes_dir / "ComfyUI-TestExtension1" / "example_workflows"
     )
@@ -58,9 +59,14 @@ async def test_build_translations_empty_when_no_locales(custom_node_manager, tmp
         assert translations == {}
 
 
-async def test_build_translations_loads_all_files(custom_node_manager, tmp_path):
+@pytest.mark.parametrize("root_name, extension_name", [
+    ("custom_nodes", "test-extension"),
+    ("custom_nodes[1]", "test-extension"),
+    ("custom_nodes", "test-extension[1]"),
+])
+async def test_build_translations_loads_all_files(custom_node_manager, tmp_path, root_name, extension_name):
     # Setup test directory structure
-    custom_nodes_dir = tmp_path / "custom_nodes" / "test-extension"
+    custom_nodes_dir = tmp_path / root_name / extension_name
     locales_dir = custom_nodes_dir / "locales" / "en"
     locales_dir.mkdir(parents=True)
 
@@ -78,7 +84,7 @@ async def test_build_translations_loads_all_files(custom_node_manager, tmp_path)
     (locales_dir / "settings.json").write_text(json.dumps(settings))
 
     with patch(
-        "folder_paths.get_folder_paths", return_value=[tmp_path / "custom_nodes"]
+        "folder_paths.get_folder_paths", return_value=[tmp_path / root_name]
     ):
         translations = custom_node_manager.build_translations()
 
