@@ -66,15 +66,18 @@ def _npu_sdpa_math_fallback(q, k, v, attn_mask=None, is_causal=False, scale=None
     if is_causal:
         L, S = q.shape[-2], k.shape[-2]
         causal = torch.ones((L, S), dtype=torch.bool, device=q.device).tril()
-        attn = attn.masked_fill(causal.logical_not().view(1, 1, L, S), float("-inf"))
+        # a two dimensional mask broadcasts over the leading dims and keeps the rank of the input
+        attn = attn.masked_fill(causal.logical_not(), float("-inf"))
     if attn_mask is not None:
         if attn_mask.dtype == torch.bool:
             attn = attn.masked_fill(attn_mask.logical_not(), float("-inf"))
         else:
             attn = attn + attn_mask
+    # sdpa returns zeros for a row with no allowed key, softmax would leave NaN there
+    fully_masked = torch.isneginf(attn).all(dim=-1, keepdim=True)
     attn = torch.softmax(attn, dim=-1, dtype=torch.float32).to(q.dtype)
-    # a row with no allowed key has no finite score, softmax leaves NaN there where sdpa returns zeros
-    attn = torch.where(torch.isnan(attn), torch.zeros_like(attn), attn)
+    # only those rows are zeroed, a NaN from a real numerical failure still surfaces
+    attn = torch.where(fully_masked, torch.zeros_like(attn), attn)
     return torch.matmul(attn, v)
 
 
