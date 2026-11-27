@@ -695,6 +695,9 @@ class disable_weight_init:
         def _conv_forward(self, input, weight, bias, autopad=None, *args, **kwargs):
             if autopad == "causal_zero":
                 weight = weight[:, :, -input.shape[2]:, :, :]
+                if input.shape[2] == 1 and torch.version.hip and self.padding_mode == "zeros" and self.padding[0] == 0:
+                    # one frame against one temporal tap is a 2D conv, and ROCm's conv2d is several times faster than its conv3d
+                    return torch.nn.functional.conv2d(input.squeeze(2), weight.squeeze(2), bias, self.stride[1:], self.padding[1:], self.dilation[1:], self.groups).unsqueeze(2)
             if NVIDIA_MEMORY_CONV_BUG_WORKAROUND and weight.dtype in (torch.float16, torch.bfloat16):
                 out = torch.cudnn_convolution(input, weight, self.padding, self.stride, self.dilation, self.groups, benchmark=False, deterministic=False, allow_tf32=True)
                 if bias is not None:
