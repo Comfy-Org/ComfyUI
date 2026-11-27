@@ -1,6 +1,7 @@
 """Real ComfyUI processes sharing one install's database: an assets-off instance must
 not block an assets-on one, and must warn when another process holds the database."""
 
+import os
 import socket
 import subprocess
 import sys
@@ -127,8 +128,65 @@ def test_assets_off_start_warns_and_continues_when_the_database_is_held(tmp_path
     assert "Traceback" not in result.stderr
 
 
-def test_assets_on_start_still_fails_when_the_database_is_held(tmp_path, held_lock):
-    result = _quick_start(tmp_path, "--enable-assets")
+@pytest.mark.parametrize("flags", [("--enable-assets",), ("--windows-standalone-build", "--enable-assets")])
+def test_assets_on_start_still_fails_when_the_database_is_held(tmp_path, held_lock, flags):
+    result = _quick_start(tmp_path, *flags)
 
     assert result.returncode == 1, result.stderr
     assert LOCK_HELD in result.stderr
+
+
+def test_portable_second_instance_starts_without_assets_when_database_is_held(tmp_path, held_lock):
+    result = _quick_start(tmp_path, "--windows-standalone-build")
+
+    assert result.returncode == 0, result.stderr
+    assert IN_USE in result.stderr
+    assert "doesn't use that database and will start anyway" in result.stderr
+
+
+def test_simultaneous_portable_starts_share_one_database_lock(tmp_path):
+    script = """
+import os
+import time
+from pathlib import Path
+import main
+original_init_db = main.init_db
+def init_db():
+    original_init_db()
+    time.sleep(6)
+main.init_db = init_db
+Path(os.environ["COMFY_READY"]).touch()
+while not Path(os.environ["COMFY_GO"]).exists():
+    time.sleep(0.01)
+try:
+    main.start_comfyui()
+except SystemExit:
+    print(f"assets={main.feature_flags.SERVER_FEATURE_FLAGS['assets']}", flush=True)
+    raise
+"""
+    go = tmp_path / "go"
+    processes = []
+    try:
+        for index in range(2):
+            env = os.environ.copy()
+            env["COMFY_READY"] = str(tmp_path / f"ready-{index}")
+            env["COMFY_GO"] = str(go)
+            processes.append(subprocess.Popen(
+                [sys.executable, "-c", script, *_comfy_args(tmp_path, "--quick-test-for-ci", "--windows-standalone-build")[2:]],
+                cwd=REPO_ROOT, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            ))
+        deadline = time.monotonic() + 120
+        while not all((tmp_path / f"ready-{index}").exists() for index in range(2)):
+            assert all(process.poll() is None for process in processes)
+            assert time.monotonic() < deadline
+            time.sleep(0.1)
+        go.touch()
+        results = [process.communicate(timeout=120) for process in processes]
+        assert all(process.returncode == 0 for process in processes), results
+        assert sorted("assets=True" in stdout for stdout, _ in results) == [False, True]
+        assert any(IN_USE in stderr for _, stderr in results)
+    finally:
+        for process in processes:
+            if process.poll() is None:
+                process.kill()
+            process.wait()
