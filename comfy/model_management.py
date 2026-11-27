@@ -181,6 +181,8 @@ def is_ascend_310(device=None):
         return False
     if isinstance(device, str):
         device = torch.device(device)
+    if device is not None and device.type != "npu":
+        return False
     index = getattr(device, "index", None)
     if index is None:
         index = 0

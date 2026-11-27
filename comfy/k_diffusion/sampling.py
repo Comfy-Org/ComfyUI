@@ -21,10 +21,16 @@ def append_zero(x):
     return torch.cat([x, x.new_zeros([1])])
 
 def _safe_nan_to_num(x):
-    # 310P has no nan_to_num kernel, so NaN is replaced with basic ops; all other devices use the upstream path.
-    if comfy.model_management.is_ascend_310(x.device):
-        return torch.where(torch.isnan(x), torch.zeros_like(x), x)
-    return torch.nan_to_num(x, nan=0.0)
+    # 310P has no nan_to_num kernel, so the same replacement is done with basic ops.
+    if not comfy.model_management.is_ascend_310(x.device):
+        return torch.nan_to_num(x, nan=0.0)
+    finfo = torch.finfo(x.dtype)
+    x = torch.where(torch.isnan(x), torch.zeros_like(x), x)
+    return torch.where(
+        torch.isinf(x),
+        torch.where(x > 0, torch.full_like(x, finfo.max), torch.full_like(x, finfo.min)),
+        x,
+    )
 
 
 def get_sigmas_karras(n, sigma_min, sigma_max, rho=7., device='cpu'):

@@ -60,7 +60,9 @@ def _npu_sdpa_math_fallback(q, k, v, attn_mask=None, is_causal=False, scale=None
         k, v = repeat_kv_for_gqa(k, v, q.shape[-3], -3)
     if scale is None:
         scale = q.shape[-1] ** -0.5
-    attn = torch.matmul(q, k.transpose(-2, -1)) * scale
+    # the dot product overflows half precision before the scale is applied
+    compute_dtype = torch.float32 if q.dtype in (torch.float16, torch.bfloat16) else q.dtype
+    attn = torch.matmul(q.to(compute_dtype), k.to(compute_dtype).transpose(-2, -1)) * scale
     if is_causal:
         L, S = q.shape[-2], k.shape[-2]
         causal = torch.ones((L, S), dtype=torch.bool, device=q.device).tril()
@@ -71,6 +73,8 @@ def _npu_sdpa_math_fallback(q, k, v, attn_mask=None, is_causal=False, scale=None
         else:
             attn = attn + attn_mask
     attn = torch.softmax(attn, dim=-1, dtype=torch.float32).to(q.dtype)
+    # a row with no allowed key has no finite score, softmax leaves NaN there where sdpa returns zeros
+    attn = torch.where(torch.isnan(attn), torch.zeros_like(attn), attn)
     return torch.matmul(attn, v)
 
 
