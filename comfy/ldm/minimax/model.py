@@ -34,6 +34,8 @@ FRAME_RESCALE = 5.0 / 3.0
 VISUAL_COND_TIMESTEP = 0.999
 AUDIO_COND_TIMESTEP = 1.0
 
+# tokens per MLP chunk in DiTBlock; only bounds the fc1/swiglu buffer, results are unchanged
+MLP_TOKEN_CHUNK = 16384
 
 def time_shift_sigma(sigma, from_shift, to_shift):
     # invert sigma = s*b/(1+(s-1)*b) to the base grid, re-apply the other shift
@@ -270,6 +272,24 @@ def _mod_gate(x, gate, other, segments):
     return x
 
 
+def _window_segments(segments, start, stop):
+    # clip contiguous segments to a token window and shift them to window-local offsets
+    window = []
+    for a, b, row in segments:
+        lo, hi = max(a, start), min(b, stop)
+        if lo < hi:
+            if isinstance(row, torch.Tensor):
+                # per-token mod rows travel with their tokens: keep only the slice inside the window
+                row = row[lo - a:hi - a]
+            window.append((lo - start, hi - start, row))
+    return window
+
+
+def _token_chunks(tokens):
+    for start in range(0, tokens, MLP_TOKEN_CHUNK):
+        yield start, min(start + MLP_TOKEN_CHUNK, tokens)
+
+
 class RefinerBlock(nn.Module):
     def __init__(self, hidden, heads, head_dim, ffn, eps, qk_eps, dtype=None, device=None, operations=None):
         super().__init__()
@@ -281,7 +301,12 @@ class RefinerBlock(nn.Module):
     def forward(self, x, transformer_options={}):
         # attn/mlp outputs are fresh: accumulate residuals in place
         x = self.attn(self.norm1(x), transformer_options=transformer_options).add_(x)
-        return self.mlp(self.norm2(x)).add_(x)
+        h = self.norm2(x)
+        if h.shape[0] <= MLP_TOKEN_CHUNK:
+            return self.mlp(h).add_(x)
+        for start, stop in _token_chunks(h.shape[0]):
+            x[start:stop].add_(self.mlp(h[start:stop]))
+        return x
 
 
 class TokenRefiner(nn.Module):
@@ -317,8 +342,18 @@ class DiTBlock(nn.Module):
         shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = self.adaln_proj(t_emb)
         h = _mod_scale_shift(self.norm1(x), shift_msa, scale_msa, mod_segments)
         x = _mod_gate(x, gate_msa, attention(h, rope_freqs=rope_freqs, transformer_options=transformer_options), mod_segments)
+        del h
         h = _mod_scale_shift(self.norm2(x), shift_mlp, scale_mlp, mod_segments)
-        return _mod_gate(x, gate_mlp, self.mlp(h), mod_segments)
+        if h.shape[0] <= MLP_TOKEN_CHUNK:
+            return _mod_gate(x, gate_mlp, self.mlp(h), mod_segments)
+        # the MLP acts on each token on its own, so run it over token chunks and fold each
+        # chunk's gated output into the residual stream as soon as it exists: the
+        # [tokens, 2 * ffn] fc1/swiglu buffer then only has to cover one chunk instead of the
+        # whole packed sequence (~6 GB for a 15 s 1344x768 clip)
+        for start, stop in _token_chunks(h.shape[0]):
+            _mod_gate(x[start:stop], gate_mlp, self.mlp(h[start:stop]), _window_segments(mod_segments, start, stop))
+        del h
+        return x
 
 
 class FinalLayer(nn.Module):
