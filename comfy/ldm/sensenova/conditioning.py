@@ -53,10 +53,12 @@ def reference_grid(height, width, patch_size):
     )
 
 
-def image_token_mask(input_ids):
+def image_token_mask(input_ids, *, starts_in_image=False):
     # Image-control IDs generated outside an image block remain text embeddings.
     positions = torch.arange(input_ids.shape[-1], device=input_ids.device)
     starts = torch.where(input_ids == IMAGE_START_ID, positions, -1).cummax(dim=-1).values
+    if starts_in_image:
+        starts = starts.clamp_min(0)
     ends = torch.where(input_ids == IMAGE_END_ID, positions, -1).cummax(dim=-1).values
     return (input_ids == IMAGE_CONTEXT_ID) & (starts > ends)
 
@@ -121,14 +123,21 @@ def _image_tokens(token_height, token_width):
     )
 
 
-def expand_interleave_inputs(input_ids, reference_images, image_only):
+def expand_interleave_inputs(input_ids, reference_images, image_only, *, multi_turn=False):
     references = split_reference_batches(reference_images or [])
     if references:
         reference_grids = [
             reference_grid(image.shape[-3], image.shape[-2], MERGED_PATCH_SIZE)
             for image in references
         ]
-        input_ids = condition_input_ids(input_ids, reference_grids, image_only=image_only, append_image_start=False, image_labels=False)
+        input_ids = condition_input_ids(
+            input_ids,
+            reference_grids,
+            image_only=image_only,
+            append_image_start=multi_turn,
+            image_labels=False,
+            multi_turn=multi_turn,
+        )
     return input_ids, references
 
 
@@ -148,8 +157,15 @@ def _image_label_tokens(index):
     return (IMAGE_LABEL_ID, HYPHEN_ID, *digits, COLON_ID)
 
 
+def _user_message_start(values):
+    for index in range(len(values) - 1):
+        if values[index] == IM_START_ID and values[index + 1] == USER_ID:
+            return index
+    return None
+
+
 def condition_input_ids(
-    input_ids, reference_grids, image_only=False, append_image_start=True, image_labels=True
+    input_ids, reference_grids, image_only=False, append_image_start=True, image_labels=True, *, multi_turn=False
 ):
     image_blocks = [_image_tokens(height, width) for height, width in reference_grids]
     if image_only:
@@ -168,29 +184,34 @@ def condition_input_ids(
         return torch.tensor([values], dtype=torch.long, device=input_ids.device)
 
     values = input_ids[0].tolist()
-    starts = [index for index, value in enumerate(values) if value == IM_START_ID]
-    insert_at = starts[1] + 3 if len(starts) > 1 else len(values)
+    user_start = _user_message_start(values) if multi_turn else None
+    if user_start is not None:
+        insert_at = user_start + 3
+    else:
+        starts = [index for index, value in enumerate(values) if value == IM_START_ID]
+        insert_at = starts[1] + 3 if len(starts) > 1 else len(values)
     inserted = []
     for index, block in enumerate(image_blocks):
         if image_labels and len(image_blocks) > 1:
             inserted.extend(_image_label_tokens(index))
         inserted.extend(block)
-        inserted.append(NEWLINE_ID)
+        if not multi_turn:
+            inserted.append(NEWLINE_ID)
     values[insert_at:insert_at] = inserted
     return torch.tensor([values], dtype=torch.long, device=input_ids.device)
 
 
-def thw_indexes(input_ids, reference_grids):
+def thw_indexes(input_ids, reference_grids, *, starts_in_image=False, start_time=0):
     values = input_ids[0]
     image_start_shift = torch.cat(
         (
-            torch.zeros(1, dtype=torch.long, device=values.device),
+            torch.tensor([int(starts_in_image)], dtype=torch.long, device=values.device),
             (values == IMAGE_START_ID).long(),
         )
     )[:-1]
-    selected = image_token_mask(input_ids)[0]
+    selected = image_token_mask(input_ids, starts_in_image=starts_in_image)[0]
     not_image = (~selected).long()
-    time_indexes = (image_start_shift + not_image).cumsum(0) - 1
+    time_indexes = (image_start_shift + not_image).cumsum(0) - 1 + start_time
     height_indexes = torch.zeros_like(time_indexes)
     width_indexes = torch.zeros_like(time_indexes)
     height_positions = []
@@ -216,3 +237,44 @@ def block_causal_mask(time_indexes, dtype=torch.float32):
     allowed = same_block | causal
     mask = torch.zeros((1, 1, length, length), dtype=dtype, device=values.device)
     return mask.masked_fill_(~allowed[None, None], float("-inf"))
+
+
+def multi_turn_suffix_ids(turn_ids, image_tokens, *, image_only=False):
+    if image_only:
+        next_turn = [
+            IM_START_ID,
+            USER_ID,
+            NEWLINE_ID,
+            IM_END_ID,
+            NEWLINE_ID,
+            IM_START_ID,
+            ASSISTANT_ID,
+            NEWLINE_ID,
+            IMAGE_START_ID,
+        ]
+    else:
+        values = turn_ids[0].tolist()
+        next_turn = values[_user_message_start(values):]
+    return turn_ids.new_tensor([*image_tokens, IM_END_ID, NEWLINE_ID, *next_turn]).unsqueeze(0)
+
+
+def prepare_incremental_prefix_inputs(
+    suffix_ids, reference_images, patch_size, dtype, *, past_length, start_time
+):
+    references = preprocess_references(reference_images) if reference_images else []
+    reference_grids = [
+        reference_grid(image.shape[-2], image.shape[-1], patch_size)
+        for image in references
+    ]
+    starts_in_image = bool(suffix_ids.shape[1] and int(suffix_ids[0, 0]) == IMAGE_CONTEXT_ID)
+    indexes = thw_indexes(
+        suffix_ids, reference_grids, starts_in_image=starts_in_image, start_time=start_time
+    )
+    suffix_mask = block_causal_mask(indexes, dtype=dtype)
+    if past_length > 0:
+        suffix_length = suffix_ids.shape[1]
+        mask = suffix_mask.new_zeros((1, 1, suffix_length, past_length + suffix_length))
+        mask[..., past_length:] = suffix_mask
+    else:
+        mask = suffix_mask
+    return suffix_ids, references or None, indexes, mask

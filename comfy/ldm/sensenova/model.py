@@ -13,7 +13,7 @@ from comfy.ldm.modules.diffusionmodules.mmdit import TimestepEmbedder
 from comfy.text_encoders.llama import BaseGenerate, FixedKV
 from comfy.text_encoders.token_stream import report_generated_tokens
 
-from .conditioning import IM_END_ID, MERGED_PATCH_SIZE, image_token_mask
+from .conditioning import IMAGE_CONTEXT_ID, IM_END_ID, MERGED_PATCH_SIZE, image_token_mask
 from .sampling import resolution_noise_scale
 
 
@@ -232,9 +232,13 @@ class Attention(nn.Module):
         return query, key, value
 
     def forward_prefix(
-        self, hidden_states, rope, attention_mask, transformer_options
+        self, hidden_states, rope, attention_mask, transformer_options,
+        past_key=None, past_value=None,
     ):
         query, key, value = self._project(hidden_states, rope)
+        if past_key is not None:
+            key = torch.cat((past_key, key), dim=2)
+            value = torch.cat((past_value, value), dim=2)
         query = AttentionTensorContainer(query)
         output = optimized_attention(
             query,
@@ -301,12 +305,17 @@ class DecoderLayer(nn.Module):
         self.input_layernorm = operations.RMSNorm(HIDDEN_SIZE, eps=1e-6, device=device, dtype=dtype)
         self.post_attention_layernorm = operations.RMSNorm(HIDDEN_SIZE, eps=1e-6, device=device, dtype=dtype)
 
-    def forward_prefix(self, prefix, prefix_rope, prefix_mask, transformer_options):
+    def forward_prefix(
+        self, prefix, prefix_rope, prefix_mask, transformer_options,
+        past_key=None, past_value=None,
+    ):
         prefix_attention, prefix_key, prefix_value = self.self_attn.forward_prefix(
             self.input_layernorm(prefix),
             prefix_rope,
             prefix_mask,
             transformer_options,
+            past_key=past_key,
+            past_value=past_value,
         )
         prefix = prefix + prefix_attention
         prefix = prefix + self.mlp(self.post_attention_layernorm(prefix))
@@ -408,7 +417,8 @@ class SenseNovaTextModel(nn.Module, BaseGenerate):
                 self.vision_model(_pad_to_merged_patch_size(reference))
                 for reference in reference_images
             ]
-            selected = image_token_mask(text_input_ids)
+            starts_in_image = bool(text_input_ids.shape[1] and int(text_input_ids[0, 0]) == IMAGE_CONTEXT_ID)
+            selected = image_token_mask(text_input_ids, starts_in_image=starts_in_image)
             prefix = prefix.clone()
             prefix[:, :prefix_length][selected] = torch.cat(reference_embeds, dim=1).reshape(
                 -1, HIDDEN_SIZE
@@ -466,7 +476,11 @@ class SenseNovaTextModel(nn.Module, BaseGenerate):
         text_suffix=None,
         compute_dtype=None,
         interrupt=None,
+        past_keys=None,
+        past_values=None,
+        output_device=None,
     ):
+        output_device = torch.device(output_device) if output_device is not None else None
         prefix, prefix_indexes, prefix_mask, prefix_time = self._prepare_prefix(
             text_input_ids, reference_images, prefix_indexes, prefix_mask, text_suffix, compute_dtype
         )
@@ -485,15 +499,42 @@ class SenseNovaTextModel(nn.Module, BaseGenerate):
                     interrupt()
                 comfy.model_prefetch.prefetch_queue_pop(prefetch, prefix.device, layer, prefix.dtype, malloc_scope="prefix")
                 transformer_options["block_index"] = layer_index
-                output, prefix_key, prefix_value = layer.forward_prefix(
-                    prefix,
-                    prefix_rope,
-                    prefix_mask,
-                    transformer_options,
-                )
+                if past_keys is not None:
+                    with comfy.model_prefetch.pause_malloc_graph():
+                        past_key = past_keys[layer_index].to(device=prefix.device, dtype=prefix.dtype, non_blocking=True)
+                        past_value = past_values[layer_index].to(device=prefix.device, dtype=prefix.dtype, non_blocking=True)
+                    output, prefix_key, prefix_value = layer.forward_prefix(
+                        prefix,
+                        prefix_rope,
+                        prefix_mask,
+                        transformer_options,
+                        past_key=past_key,
+                        past_value=past_value,
+                    )
+                    del past_key, past_value
+                else:
+                    output, prefix_key, prefix_value = layer.forward_prefix(
+                        prefix,
+                        prefix_rope,
+                        prefix_mask,
+                        transformer_options,
+                    )
                 with comfy.model_prefetch.pause_malloc_graph():
-                    prefix_keys.append(prefix_key.clone())
-                    prefix_values.append(prefix_value.clone())
+                    if output_device is not None and output_device != prefix_key.device:
+                        if past_keys is not None and past_keys[layer_index].device == output_device:
+                            past_length = past_keys[layer_index].shape[2]
+                            new_key = prefix_key[:, :, past_length:].to(output_device)
+                            new_value = prefix_value[:, :, past_length:].to(output_device)
+                            past_key_out = past_keys[layer_index].to(dtype=new_key.dtype)
+                            past_value_out = past_values[layer_index].to(dtype=new_value.dtype)
+                            prefix_keys.append(torch.cat((past_key_out, new_key), dim=2))
+                            prefix_values.append(torch.cat((past_value_out, new_value), dim=2))
+                        else:
+                            prefix_keys.append(prefix_key.to(output_device))
+                            prefix_values.append(prefix_value.to(output_device))
+                    else:
+                        prefix_keys.append(prefix_key.clone())
+                        prefix_values.append(prefix_value.clone())
                 prefix.copy_(output)
                 del output, prefix_key, prefix_value
             comfy.model_prefetch.prefetch_queue_pop(prefetch, prefix.device, None, malloc_scope="prefix")
@@ -508,6 +549,9 @@ class SenseNovaTextModel(nn.Module, BaseGenerate):
         transformer_options=None,
         text_suffix=None,
         compute_dtype=None,
+        past_keys=None,
+        past_values=None,
+        output_device=None,
     ):
         _, prefix_keys, prefix_values, prefix_time = (
             self._preprocess_prefix_state(
@@ -518,6 +562,9 @@ class SenseNovaTextModel(nn.Module, BaseGenerate):
                 transformer_options,
                 text_suffix,
                 compute_dtype,
+                past_keys=past_keys,
+                past_values=past_values,
+                output_device=output_device,
             )
         )
         return prefix_keys, prefix_values, prefix_time

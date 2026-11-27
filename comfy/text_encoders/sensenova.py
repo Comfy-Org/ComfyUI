@@ -13,7 +13,7 @@ import comfy.utils
 from comfy.ldm.sensenova import model as sensenova_model
 from comfy.ldm.sensenova.conditioning import (
     IMAGE_START_ID, IM_END_ID, MERGED_PATCH_SIZE,
-    prepare_prefix_inputs, split_reference_batches,
+    prepare_incremental_prefix_inputs, prepare_prefix_inputs, split_reference_batches,
 )
 from comfy.text_encoders.llama import generate_dtype
 
@@ -219,6 +219,27 @@ class SenseNovaTextEncoder(sensenova_model.SenseNovaTextModel):
         return torch.tensor([[int(value[0]) for value in batch] for batch in tokens["sensenova_u15"]], dtype=torch.long)
 
     def _prefix_arguments(self, tokens, dtype):
+        past_keys = tokens.get("past_prefix_keys")
+        past_values = tokens.get("past_prefix_values")
+        past_time = tokens.get("past_prefix_time")
+        if past_keys is not None and past_values is not None and past_time is not None:
+            suffix_ids, references, indexes, mask = prepare_incremental_prefix_inputs(
+                tokens["suffix_input_ids"],
+                tokens.get("suffix_reference_latents"),
+                MERGED_PATCH_SIZE,
+                dtype,
+                past_length=int(past_keys[0].shape[2]),
+                start_time=int(past_time[0].item()),
+            )
+            return dict(
+                text_input_ids=suffix_ids.to(self.execution_device),
+                reference_images=[image.to(device=self.execution_device, dtype=dtype) for image in references] if references else None,
+                prefix_indexes=indexes.to(self.execution_device),
+                prefix_mask=mask.to(self.execution_device),
+                text_suffix=None,
+                past_keys=past_keys,
+                past_values=past_values,
+            )
         input_ids = self._input_ids(tokens)
         thinking_start = tokens.get("sensenova_thinking_start")
         text_suffix = None
@@ -241,12 +262,13 @@ class SenseNovaTextEncoder(sensenova_model.SenseNovaTextModel):
 
     def encode_token_weights(self, tokens):
         dtype = generate_dtype(self.execution_device)
+        device = comfy.model_management.intermediate_device()
         try:
             keys, values, time = self.preprocess_prefix(
                 **self._prefix_arguments(tokens, dtype), compute_dtype=dtype,
                 transformer_options={"prefetch_dynamic_vbars": True},
+                output_device=device,
             )
-            device = comfy.model_management.intermediate_device()
             input_ids = self._input_ids(tokens).to(device)
             extra = {
                 "text_input_ids": input_ids,
@@ -267,6 +289,8 @@ class SenseNovaTextEncoder(sensenova_model.SenseNovaTextModel):
         dtype = generate_dtype(self.execution_device)
         prefix = self._prefix_arguments(tokens, dtype)
         prefix.pop("text_suffix")
+        prefix.pop("past_keys", None)
+        prefix.pop("past_values", None)
         progress = comfy.utils.ProgressBar(max_length)
         try:
             with tqdm(total=max_length, desc="Generating tokens", unit="token") as console:
