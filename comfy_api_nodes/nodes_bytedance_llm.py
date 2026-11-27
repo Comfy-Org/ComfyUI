@@ -16,15 +16,13 @@ from comfy_api_nodes.apis.bytedance_llm import (
     BytePlusResponseObject,
 )
 from comfy_api_nodes.util import (
-    ApiEndpoint,
     get_number_of_images,
-    sync_op,
+    router_op,
     upload_images_to_comfyapi,
     upload_video_to_comfyapi,
     validate_string,
 )
 
-BYTEPLUS_RESPONSES_ENDPOINT = "/proxy/byteplus/api/v3/responses"
 SEED_MAX_IMAGES = 20
 SEED_MAX_VIDEOS = 4
 
@@ -214,9 +212,9 @@ class ByteDanceSeedNode(IO.ComfyNode):
             content.extend(await _build_video_content_blocks(cls, video_inputs))
         content.append(BytePlusInputText(text=prompt))
 
-        response = await sync_op(
+        response = await router_op(
             cls,
-            ApiEndpoint(path=BYTEPLUS_RESPONSES_ENDPOINT, method="POST"),
+            f"byteplus/{model_id}",
             response_model=BytePlusResponseObject,
             data=BytePlusResponseCreateRequest(
                 model=model_id,

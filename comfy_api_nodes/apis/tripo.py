@@ -7,12 +7,10 @@ from pydantic import BaseModel, Field, RootModel
 class TripoModelVersion(str, Enum):
     v3_1_20260211 = "v3.1-20260211"
     v3_0_20250812 = "v3.0-20250812"
-    v2_5_20250123 = "v2.5-20250123"
 
 
 class TripoTextureModelVersion(str, Enum):
     v3_0_20250812 = "v3.0-20250812"
-    v2_5_20250123 = "v2.5-20250123"
 
 
 class TripoGeometryQuality(str, Enum):
@@ -370,6 +368,11 @@ class TripoHighpolyToLowpolyRequest(BaseModel):
     part_names: list[str] | None = Field(None, description="Parts to retopologize; whole model when omitted")
 
 
+class TripoMeshUvRequest(BaseModel):
+    input: str = Field(..., description="The task ID of the model to unwrap")
+    bake: bool | None = Field(None, description="Whether to bake the existing textures onto the new UV layout")
+
+
 class TripoGenerateMultiviewImageRequest(BaseModel):
     input: str = Field(..., description="URL or file token of the source image")
 
@@ -497,6 +500,7 @@ class TripoTaskOutput(BaseModel):
     seg_model_url: str | None = Field(None, description="Smart segmentation: segmented GLB")
     seg_task_id: str | None = Field(None, description="Smart segmentation: the mesh_segmentation task")
     model_task_id: str | None = Field(None, description="Smart segmentation: the imported or generated model task")
+    uv_render_url: str | None = Field(None, description="Smart UV: preview image of the new UV layout")
 
 
 class TripoTask(BaseModel):

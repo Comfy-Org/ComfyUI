@@ -16,6 +16,7 @@ import comfy.ldm.common_dit
 import comfy.clip_model
 
 from . import qwen_vl
+from .token_stream import report_generated_tokens
 
 # widest speculative verify (draft chain or tree rows) the decode caches serve in one step
 SPEC_ROWS = 8
@@ -445,6 +446,7 @@ class Ovis25_2BConfig:
     rope_scale = None
     final_norm: bool = True
     lm_head: bool = False
+    stop_tokens = [151643, 151645]
 
 @dataclass
 class Qwen25_7BVLI_Config:
@@ -1291,6 +1293,7 @@ class BaseGenerate:
 
                 token_id = decode_tokens[0].item()
                 generated_token_ids.append(token_id)
+                report_generated_tokens(generated_token_ids)
 
                 if step == 0 and hasattr(self.model.embed_tokens, "_v"):
                     # prefill's transients can evict body pages and lower the VBAR watermark: let the decode fault them back
@@ -1465,7 +1468,7 @@ class Qwen3_8B(BaseLlama, BaseQwen3, BaseGenerate, torch.nn.Module):
         self.model = Llama2_(config, device=device, dtype=dtype, ops=operations)
         self.dtype = dtype
 
-class Ovis25_2B(BaseLlama, torch.nn.Module):
+class Ovis25_2B(BaseLlama, BaseGenerate, torch.nn.Module):
     def __init__(self, config_dict, dtype, device, operations):
         super().__init__()
         config = Ovis25_2BConfig(**config_dict)

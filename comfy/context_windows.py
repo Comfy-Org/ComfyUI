@@ -585,12 +585,13 @@ class IndexListContextHandler(ContextHandlerABC):
         total_windows = len(enumerated_context_windows)
 
         # Initialize per-modality accumulators (length 1 for single-modality)
-        accum = [[torch.zeros_like(m) for _ in conds] for m in window_state.latents]
+        accum_device = comfy.model_management.intermediate_device()
+        accum = [[torch.zeros_like(m, device=accum_device) for _ in conds] for m in window_state.latents]
         modalities = list(zip(window_state.latents, window_state.modality_dims))
         if self.fuse_method.name == ContextFuseMethods.RELATIVE:
-            counts = [[torch.ones(get_shape_for_dim(m, d), device=m.device) for _ in conds] for m, d in modalities]
+            counts = [[torch.ones(get_shape_for_dim(m, d), device=accum_device) for _ in conds] for m, d in modalities]
         else:
-            counts = [[torch.zeros(get_shape_for_dim(m, d), device=m.device) for _ in conds] for m, d in modalities]
+            counts = [[torch.zeros(get_shape_for_dim(m, d), device=accum_device) for _ in conds] for m, d in modalities]
         biases = [[([0.0] * m.shape[d]) for _ in conds] for m, d in modalities]
 
         for callback in comfy.patcher_extension.get_all_callbacks(IndexListCallbacks.EXECUTE_START, self.callbacks):
@@ -604,7 +605,7 @@ class IndexListContextHandler(ContextHandlerABC):
             for result in results:
                 # result.sub_conds_out is per-cond, per-modality: list[list[Tensor]]
                 for mod_idx in range(num_modalities):
-                    mod_out = [result.sub_conds_out[ci][mod_idx] for ci in range(len(conds))]
+                    mod_out = [result.sub_conds_out[ci][mod_idx].to(accum_device) for ci in range(len(conds))]
                     modality_window = result.window.get_window_for_modality(mod_idx)
                     self.combine_context_window_results(
                         window_state.latents[mod_idx], mod_out, result.sub_conds, modality_window,
@@ -619,7 +620,7 @@ class IndexListContextHandler(ContextHandlerABC):
                 for mod_idx in range(num_modalities):
                     if self.fuse_method.name != ContextFuseMethods.RELATIVE:
                         accum[mod_idx][ci] /= counts[mod_idx][ci]
-                    f = accum[mod_idx][ci]
+                    f = accum[mod_idx][ci].to(x_in.device)
 
                     # if guide frames were injected, append them to the end of the fused latents for the next step
                     if window_state.guide_latents[mod_idx] is not None:
@@ -734,7 +735,7 @@ class IndexListContextHandler(ContextHandlerABC):
         else:
             # add conds and counts based on weights of fuse method
             weights = get_context_weights(window.context_length, x_in.shape[window.dim], window.index_list, self, sigma=timestep, context_overlap=window.context_overlap)
-            weights_tensor = match_weights_to_dim(weights, x_in, window.dim, device=x_in.device)
+            weights_tensor = match_weights_to_dim(weights, x_in, window.dim, device=conds_final[0].device)
             for i in range(len(sub_conds_out)):
                 window.add_window(conds_final[i], sub_conds_out[i] * weights_tensor)
                 window.add_window(counts_final[i], weights_tensor)

@@ -1,9 +1,11 @@
 # Generic utility nodes for the SPLAT type (3D gaussian splats)
 
 import gzip
+import itertools
 import logging
 import math
 import struct
+import sys
 from io import BytesIO
 
 import numpy as np
@@ -22,6 +24,14 @@ from comfy_extras.nodes_camera import _lookat_camera_info, _mat_to_quat, _quat_m
 from comfy_extras.nodes_mesh_postprocess import _build_triangle_bvh, _closest_points_on_mesh_bvh, _prepare_gpu_mesh_processing
 from comfy_extras.nodes_save_3d import pack_variable_mesh_batch
 from server import PromptServer
+
+try:  # .spz v4 streams are zstd-compressed
+    if sys.version_info >= (3, 14):
+        from compression import zstd
+    else:
+        from backports import zstd
+except ImportError:
+    zstd = None
 
 _C0 = 0.28209479177387814  # SH band-0 constant: DC coefficient -> base RGB
 _SURFEL_SOLID_RES = 384    # resolution of the solid that signs the surfels, never output
@@ -344,8 +354,9 @@ def _parse_ksplat_gaussian(data: bytes):
 
 
 def _parse_spz_gaussian(data: bytes):
-    # Niantic .spz (gzip-wrapped), versions 1-3. Base color only (SH skipped). See spark's SpzReader.
-    raw = gzip.decompress(data)
+    # Niantic .spz, versions 1-3 gzip-wrapped, version 4 zstd streams. Base color only (SH skipped).
+    # See spark's SpzReader and spz's load-spz.cc.
+    raw = gzip.decompress(data) if data[:2] == b'\x1f\x8b' else data
     if struct.unpack_from('<I', raw, 0)[0] != _SPZ_MAGIC:
         raise ValueError("File3DToSplat: invalid .spz (bad magic)")
     version = struct.unpack_from('<I', raw, 4)[0]
@@ -353,10 +364,18 @@ def _parse_spz_gaussian(data: bytes):
     frac_bits = raw[13]
     off = 16
 
+    if version == 4:  # TOC of (compressed, uncompressed) u64 sizes, then one zstd stream per array in v3 order
+        if zstd is None:
+            raise RuntimeError("File3DToSplat: .spz v4 needs zstd (Python 3.14 built with zstd, or pip install backports.zstd)")
+        toc = struct.unpack_from('<I', raw, 16)[0]
+        sizes = struct.unpack_from('<10Q', raw, toc)[::2]                       # first 5 streams, SH is not read
+        starts = itertools.accumulate(sizes, initial=toc + 16 * raw[15])
+        raw, off = b''.join(zstd.decompress(data[s:s + size]) for s, size in zip(starts, sizes)), 0
+
     if version == 1:
         xyz = np.frombuffer(raw, '<f2', count=n * 3, offset=off).astype(np.float32).reshape(n, 3)
         off += n * 6
-    elif version in (2, 3):
+    elif version in (2, 3, 4):
         b = np.frombuffer(raw, np.uint8, count=n * 9, offset=off).reshape(n, 3, 3).astype(np.int64)
         v = (b[..., 2] << 16) | (b[..., 1] << 8) | b[..., 0]
         v = np.where(v & 0x800000, v - 0x1000000, v)                             # sign-extend 24-bit
@@ -374,7 +393,7 @@ def _parse_spz_gaussian(data: bytes):
     off += n * 3
     scale = np.exp(sb / 16.0 - 10.0)
 
-    if version == 3:                                                             # smallest-three quaternion
+    if version >= 3:                                                             # smallest-three quaternion
         qb = np.frombuffer(raw, np.uint8, count=n * 4, offset=off).reshape(n, 4).astype(np.int64)
         combined = qb[:, 0] | (qb[:, 1] << 8) | (qb[:, 2] << 16) | (qb[:, 3] << 24)
         largest = (combined >> 30) & 3
@@ -406,7 +425,7 @@ _GAUSSIAN_PARSERS = {"ply": _parse_ply_gaussian, "splat": _parse_splat_gaussian,
 def _detect_splat_format(data: bytes) -> str:
     if data[:3] == b'ply':
         return "ply"
-    if data[:2] == b'\x1f\x8b':            # gzip -> spz
+    if data[:2] == b'\x1f\x8b' or data[:4] == b'NGSP':   # gzip (v1-3) or plain-header v4 -> spz
         return "spz"
     if len(data) >= 2 and data[0] == 0 and data[1] >= 1:   # ksplat version 0.x header
         return "ksplat"

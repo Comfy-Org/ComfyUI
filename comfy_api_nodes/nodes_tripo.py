@@ -22,6 +22,7 @@ from comfy_api_nodes.apis.tripo import (
     TripoMeshCompletionRequest,
     TripoMeshSegmentationRequest,
     TripoMeshSmartSegmentRequest,
+    TripoMeshUvRequest,
     TripoModelVersion,
     TripoMultiviewEditPrompt,
     TripoMultiviewToModelRequest,
@@ -67,7 +68,7 @@ MIXAMO_RETARGET_ERROR = "Tripo cannot retarget animation presets onto a v1.0 rig
 
 FACE_LIMIT_TOOLTIP = (
     "Maximum face count. -1 lets Tripo pick adaptively (about 1.4M faces on v3.x standard, 2M on detailed). "
-    "Tripo clamps silently: v2.5 at 500,000, quad meshes at 150,000."
+    "Tripo clamps quad meshes silently at 150,000."
 )
 
 
@@ -117,6 +118,12 @@ async def poll_until_finished(
     url = get_model_url_from_response(response_poll)
     file_format = Path(urlparse(url).path).suffix.lstrip(".").lower() or "glb"
     return task_id, await download_url_to_file_3d(url, file_format, task_id=task_id)
+
+
+async def download_model(cls: type[IO.ComfyNode], response_poll: TripoTaskResponse) -> Types.File3D:
+    url = get_model_url_from_response(response_poll)
+    file_format = Path(urlparse(url).path).suffix.lstrip(".").lower() or "glb"
+    return await download_url_to_file_3d(url, file_format, cls=cls)
 
 
 async def check_riggable(node_cls: type[IO.ComfyNode], model_task_id: str) -> tuple[bool, str]:
@@ -181,10 +188,14 @@ def check_smart_low_poly_face_limit(smart_low_poly: bool | None, face_limit: int
         )
 
 
-def glb_or_fbx_output(task_id: str, model: Types.File3D, legacy: bool = True) -> IO.NodeOutput:
+def glb_or_fbx_pair(model: Types.File3D) -> tuple[Types.File3D | None, Types.File3D | None]:
     if model.format not in ("glb", "fbx"):
         raise RuntimeError(f"Tripo returned a file of type {model.format.upper() or 'unknown'} where GLB or FBX was expected")
-    outputs = (task_id, model if model.format == "glb" else None, model if model.format == "fbx" else None)
+    return model if model.format == "glb" else None, model if model.format == "fbx" else None
+
+
+def glb_or_fbx_output(task_id: str, model: Types.File3D, legacy: bool = True) -> IO.NodeOutput:
+    outputs = (task_id, *glb_or_fbx_pair(model))
     return IO.NodeOutput(f"{task_id}.{model.format}", *outputs) if legacy else IO.NodeOutput(*outputs)
 
 
@@ -304,7 +315,6 @@ def generation_price_badge(untextured: int, textured: int) -> IO.PriceBadge:
     return IO.PriceBadge(
         depends_on=IO.PriceBadgeDepends(
             widgets=[
-                "model_version",
                 "texture",
                 "quad",
                 "smart_low_poly",
@@ -314,10 +324,9 @@ def generation_price_badge(untextured: int, textured: int) -> IO.PriceBadge:
         ),
         expr=f"""
                 (
-                  $isV3OrLater := $contains(widgets.model_version,"v3.");
                   $tq := widgets.texture_quality;
                   $textureAddon := widgets.texture ? ($tq = "extreme" ? 20 : ($tq = "detailed" ? 10 : 0)) : 0;
-                  $geometryAddon := (widgets.geometry_quality = "detailed" and $isV3OrLater) ? 20 : 0;
+                  $geometryAddon := widgets.geometry_quality = "detailed" ? 20 : 0;
                   $credits := (widgets.texture ? {textured} : {untextured})
                     + (widgets.quad ? 5 : 0)
                     + (widgets.smart_low_poly ? 10 : 0)
@@ -930,7 +939,6 @@ def texture_model_inputs(legacy: bool) -> list:
             options=TripoTextureModelVersion,
             default=TripoTextureModelVersion.v3_0_20250812,
             optional=True,
-            tooltip="Texture model: v3.0 for meshes generated with v3.x, v2.5 for meshes generated with v2.5.",
         ),
         IO.Image.Input(
             "style_image",
@@ -1537,6 +1545,55 @@ class TripoRetopologyNode(IO.ComfyNode):
             ),
         )
         return glb_or_fbx_output(*await poll_until_finished(cls, response, average_duration=200))
+
+
+class TripoSmartUVNode(IO.ComfyNode):
+
+    @classmethod
+    def define_schema(cls):
+        return IO.Schema(
+            node_id="TripoSmartUVNode",
+            display_name="Tripo: Smart UV",
+            category="partner/3d/Tripo",
+            description="Re-unwraps the UVs of a model and remaps its textures, rig and animation onto the new layout. "
+            "The input must not exceed 80,000 triangles (a quad counts as two); reduce larger models with "
+            "Tripo: Retopology or a face_limit first.",
+            inputs=[
+                IO.Custom("MODEL_TASK_ID,RIG_TASK_ID,RETARGET_TASK_ID,SEGMENT_TASK_ID").Input("model_task_id"),
+                IO.Boolean.Input(
+                    "bake",
+                    default=True,
+                    tooltip="Bake the existing textures onto the new UV layout. Off skips the bake and returns the model without its colour textures.",
+                ),
+            ],
+            outputs=[
+                *model_outputs(
+                    False,
+                    glb_tooltip="Empty when the source model is FBX.",
+                    fbx_tooltip="Only populated when the source model is FBX, e.g. a quad mesh.",
+                ),
+                IO.Image.Output(display_name="UV atlas"),
+            ],
+            hidden=hidden_inputs(),
+            is_api_node=True,
+            is_output_node=True,
+            price_badge=IO.PriceBadge(
+                expr="""{"type":"usd","usd":0.2, "format": {"approximate": true}}""",
+            ),
+        )
+
+    @classmethod
+    async def execute(cls, model_task_id, bake: bool = True) -> IO.NodeOutput:
+        response = await sync_op(
+            cls,
+            endpoint=ApiEndpoint(path="/proxy/tripo/v3/mesh/uv", method="POST"),
+            response_model=TripoTaskResponse,
+            data=TripoMeshUvRequest(input=model_task_id, bake=bake),
+        )
+        response_poll = await poll_task(cls, response)
+        model = await download_model(cls, response_poll)
+        atlas = await download_url_to_image_tensor(response_poll.data.output.uv_render_url, cls=cls)
+        return IO.NodeOutput(response_poll.data.task_id, *glb_or_fbx_pair(model), atlas)
 
 
 IDENTITY_TRANSFORM = [1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0]
@@ -2639,6 +2696,7 @@ class TripoExtension(ComfyExtension):
             TripoSegmentNode,
             TripoMeshCompleteNode,
             TripoRetopologyNode,
+            TripoSmartUVNode,
             TripoSmartSegmentNode,
             TripoConversionNode,
         ]

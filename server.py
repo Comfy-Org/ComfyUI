@@ -61,7 +61,7 @@ if dependencies_available():
 
 from app import agent_host
 import app.api_v2 as api_v2
-from app.user_manager import UserManager
+from app.user_manager import UserManager, user_css_file_response
 from app.model_manager import ModelFileManager
 from app.custom_node_manager import CustomNodeManager
 from app.subgraph_manager import SubgraphManager
@@ -1290,6 +1290,9 @@ class PromptServer():
                 web.static('/docs', embedded_docs_path)
             ])
 
+        async def get_user_css(request):
+            return user_css_file_response(os.path.join(self.web_root, "user.css"))
+        self.app.router.add_get("/user.css", get_user_css)
         self.app.add_routes([
             web.static('/', self.web_root),
         ])

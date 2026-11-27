@@ -97,6 +97,20 @@ def isolated_pack_policy(monkeypatch: pytest.MonkeyPatch):
 
 
 @pytest.mark.asyncio
+async def test_missing_custom_nodes_folder_before_valid_pack(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    custom_nodes_path = tmp_path / "custom_nodes"
+    _, prestartup_sentinel, import_sentinel = _make_directory_pack(custom_nodes_path)
+    paths = [str(tmp_path / "missing"), str(custom_nodes_path)]
+    monkeypatch.setitem(folder_paths.folder_names_and_paths, "custom_nodes", (paths, set()))
+
+    _load_execute_prestartup_script()()
+    await nodes.init_external_custom_nodes()
+
+    assert prestartup_sentinel.exists()
+    assert import_sentinel.exists()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("mode", "has_entry", "tampered", "denied", "expected_to_run"),
     [
