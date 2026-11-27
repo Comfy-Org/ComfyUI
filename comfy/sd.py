@@ -1458,7 +1458,29 @@ class VAE:
 
         with model_management.cuda_device_context(self.device):
             try:
-                if self.multigpu_clones and samples_in.shape[0] > 1:
+                can_chunk_multigpu = (
+                    bool(self.multigpu_clones)
+                    and getattr(self.first_stage_model, "comfy_supports_multigpu_chunked", False)
+                    and not getattr(self.first_stage_model, "noncausal", False)
+                    and samples_in.ndim == 5
+                    and samples_in.shape[2] > 1
+                    and not vae_options
+                )
+                if can_chunk_multigpu:
+                    memory_used = self.memory_used_decode(samples_in[:1].shape, self.vae_dtype)
+                    with self._multigpu_session(memory_used) as (active_vaes, pool):
+                        with comfy.model_prefetch.pause_malloc_graph():
+                            pixel_samples = torch.empty(self.first_stage_model.decode_output_shape(samples_in.shape), device=self.output_device, dtype=self.vae_output_dtype())
+                        chunk_fns = {
+                            v.device: (lambda clip, _v=v: _v.first_stage_model._adaptive_decode(clip.to(device=_v.device, dtype=_v.vae_dtype)).to(self.output_device))
+                            for v in active_vaes
+                        }
+                        chunk_map = lambda clips: pool.map_ordered(clips, chunk_fns)
+                        for b in range(samples_in.shape[0]):
+                            samples_b = samples_in[b:b + 1].to(dtype=self.vae_dtype)
+                            self.first_stage_model.decode(samples_b, output_buffer=pixel_samples[b:b + 1], chunk_map=chunk_map)
+                            self.process_output(pixel_samples[b:b + 1])
+                elif self.multigpu_clones and samples_in.shape[0] > 1:
                     memory_used = self.memory_used_decode(samples_in[:1].shape, self.vae_dtype)
                     with self._multigpu_session(memory_used) as (active_vaes, pool):
                         free_memory = min(v.patcher.get_free_memory(v.device) for v in active_vaes)
@@ -1641,7 +1663,28 @@ class VAE:
 
         with model_management.cuda_device_context(self.device):
             try:
-                if self.multigpu_clones and pixel_samples.shape[0] > 1:
+                can_chunk_multigpu = (
+                    bool(self.multigpu_clones)
+                    and getattr(self.first_stage_model, "comfy_supports_multigpu_chunked", False)
+                    and pixel_samples.ndim == 5
+                    and pixel_samples.shape[2] > self.first_stage_model.clip_length
+                )
+                if can_chunk_multigpu:
+                    memory_used = self.memory_used_encode(pixel_samples[:1].shape, self.vae_dtype)
+                    with self._multigpu_session(memory_used) as (active_vaes, pool):
+                        chunk_fns = {
+                            v.device: (lambda clip, _v=v: _v.first_stage_model._encode_temporal_chunk(clip, _v.device).to(self.device))
+                            for v in active_vaes
+                        }
+                        chunk_map = lambda clips: pool.map_ordered(clips, chunk_fns)
+                        samples = None
+                        for b in range(pixel_samples.shape[0]):
+                            pixels_in = self.process_input(pixel_samples[b:b + 1]).to(self.vae_dtype)
+                            out = self.first_stage_model.encode(pixels_in, device=self.device, chunk_map=chunk_map).to(self.output_device).to(dtype=self.vae_output_dtype())
+                            if samples is None:
+                                samples = torch.empty((pixel_samples.shape[0],) + tuple(out.shape[1:]), device=self.output_device, dtype=self.vae_output_dtype())
+                            samples[b:b + 1] = out
+                elif self.multigpu_clones and pixel_samples.shape[0] > 1:
                     memory_used = self.memory_used_encode(pixel_samples[:1].shape, self.vae_dtype)
                     with self._multigpu_session(memory_used) as (active_vaes, pool):
                         free_memory = min(v.patcher.get_free_memory(v.device) for v in active_vaes)
