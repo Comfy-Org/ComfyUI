@@ -22,6 +22,7 @@ returned alongside the embeddings as "minimax_token_tags".
 
 import torch
 import torch.nn.functional as F
+import comfy.model_management
 import comfy.ops
 import comfy.sd1_clip
 from .qwen3vl import Qwen3VL, Qwen3VLSDTokenizer
@@ -82,7 +83,7 @@ class MiniMaxQwen3VL(Qwen3VL):
     def preprocess_embed(self, embed, device):
         if embed["type"] == "image" and embed.get("minimax_video_block", False):
             flatten, grid = process_video_block(embed["data"])
-            merged, deepstack = self.visual(flatten.to(device, dtype=torch.float32), grid)
+            merged, deepstack = self.visual(flatten.to(device, dtype=comfy.model_management.text_encoder_compute_dtype(device)), grid)
             return merged, {"grid": grid, "deepstack": deepstack}
         return super().preprocess_embed(embed, device)
 

@@ -5,6 +5,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from tokenizers import Tokenizer
 
+import comfy.model_management
 import comfy.ops
 from comfy import sd1_clip
 from comfy.ldm.modules.attention import optimized_attention_for_device
@@ -247,7 +248,7 @@ class MingImageEncoder(nn.Module):
             return self.query_tokens, None
         if embed["type"] == "image":
             pixels, grid = qwen_vl.process_qwen2vl_images(embed["data"], min_pixels=451584, max_pixels=451584)
-            feats = self.vision(pixels.to(device, dtype=torch.float32), grid)
+            feats = self.vision(pixels.to(device, dtype=comfy.model_management.text_encoder_compute_dtype(device)), grid)
             return F.normalize(self.linear_proj(feats), dim=-1), grid
         return None, None
 

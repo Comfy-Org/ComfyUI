@@ -812,7 +812,7 @@ class Qwen35VisionModel(nn.Module):
         # premerge: optional {block index: None}, filled with those blocks' outputs (before any merger)
         x = self.patch_embed(x)
         pos_embeds = self.fast_pos_embed_interpolate(grid_thw).to(x.device)
-        x = x + pos_embeds
+        x = x + pos_embeds.to(x.dtype)
         rotary_pos_emb = self.rot_pos_emb(grid_thw).to(x.device)
         seq_len = x.shape[0]
         x = x.reshape(seq_len, -1)
@@ -896,11 +896,11 @@ class Qwen35(BaseLlama, BaseGenerate, torch.nn.Module):
         if embed["type"] == "image":
             # Qwen3.5 normalizes to [-1, 1] (mean/std 0.5), same as Qwen3-VL.
             image, grid = comfy.text_encoders.qwen_vl.process_qwen2vl_images(embed["data"], patch_size=16, image_mean=[0.5, 0.5, 0.5], image_std=[0.5, 0.5, 0.5])
-            return self.visual(image.to(device, dtype=torch.float32), grid), grid
+            return self.visual(image.to(device, dtype=comfy.model_management.text_encoder_compute_dtype(device)), grid), grid
         if embed["type"] == "video":
             height, width = embed["size"]
             video, grid = comfy.text_encoders.qwen_vl.process_qwen2vl_video(embed["data"], height, width, patch_size=16, image_mean=[0.5, 0.5, 0.5], image_std=[0.5, 0.5, 0.5])
-            return self.visual(video.to(device, dtype=torch.float32), grid), grid
+            return self.visual(video.to(device, dtype=comfy.model_management.text_encoder_compute_dtype(device)), grid), grid
         return None, None
 
     def forward(self, x, attention_mask=None, embeds=None, num_tokens=None, intermediate_output=None, final_layer_norm_intermediate=True, dtype=None, embeds_info=[], past_key_values=None):
