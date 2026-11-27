@@ -333,7 +333,7 @@ def parse_parentheses(string):
             else:
                 current_item += char
             nesting_level += 1
-        elif char == ")":
+        elif char == ")" and nesting_level > 0:
             nesting_level -= 1
             if nesting_level == 0:
                 result.append(current_item + ")")
