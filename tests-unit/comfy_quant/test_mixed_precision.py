@@ -451,5 +451,27 @@ class TestMixedPrecisionOps(unittest.TestCase):
         self.assertEqual(saved_conf["linear_dtype"], "int8")
         self.assertNotIn("quant_group_size", saved_conf)
 
+    def test_asym_w4a8_int8_linear_input_act_matches_input_dtype(self):
+        q_weight = QuantizedTensor.from_float(
+            torch.randn(16, 256, dtype=torch.bfloat16),
+            "AsymW4A8Int8Layout",
+        )
+        x = torch.randn(2, 256, dtype=torch.float32)
+
+        out = ops._try_quantized_linear_input_act(
+            x,
+            q_weight,
+            None,
+            input_act=None,
+            act_weight=None,
+            act_eps=0.0,
+            residual=None,
+            residual_scale=None,
+        )
+
+        self.assertIsNot(out, NotImplemented)
+        self.assertEqual(out.dtype, torch.float32)
+        self.assertEqual(q_weight._params.orig_dtype, torch.bfloat16)
+
 if __name__ == "__main__":
     unittest.main()
