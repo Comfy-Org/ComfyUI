@@ -74,9 +74,11 @@ def get_area_and_mult(conds, x_in, timestep_in):
 
         mask = mask * mask_strength
         mask = mask.unsqueeze(1).repeat((input_x.shape[0] // mask.shape[0], input_x.shape[1]) + (1, ) * (mask.ndim - 1))
+        mult = mask * strength
+    elif area is None:
+        mult = strength  # uniform weight over the whole input, no latent sized tensor needed
     else:
-        mask = torch.ones_like(input_x)
-    mult = mask * strength
+        mult = torch.ones_like(input_x) * strength
 
     if 'mask' not in conds and area is not None:
         fuzz = 8
@@ -224,17 +226,14 @@ def _calc_cond_batch(model: BaseModel, conds: list[list[dict]], x_in: torch.Tens
     # aggregation) is duplicated there with per-device scheduling layered on top.
     if 'multigpu_clones' in model_options:
         return _calc_cond_batch_multigpu(model, conds, x_in, timestep, model_options)
-    out_conds = []
-    out_counts = []
+    out_conds = [None] * len(conds)
+    out_counts = [None] * len(conds)
     # separate conds by matching hooks
     hooked_to_run: dict[comfy.hooks.HookGroup,list[tuple[tuple,int]]] = {}
     default_conds = []
     has_default_conds = False
 
     for i in range(len(conds)):
-        out_conds.append(torch.zeros_like(x_in))
-        out_counts.append(torch.ones_like(x_in) * 1e-37)
-
         cond = conds[i]
         default_c = []
         if cond is not None:
@@ -337,6 +336,13 @@ def _calc_cond_batch(model: BaseModel, conds: list[list[dict]], x_in: torch.Tens
             for o in range(batch_chunks):
                 cond_index = cond_or_uncond[o]
                 a = area[o]
+                if out_conds[cond_index] is None:
+                    # allocated after the model call instead of up front so the latent sized buffers don't add to its peak memory
+                    out_conds[cond_index] = torch.zeros_like(x_in)
+                    out_counts[cond_index] = x_in.new_full((), 1e-37)
+                if torch.is_tensor(mult[o]) and out_counts[cond_index].ndim == 0:
+                    # area and mask weights vary over the input, so the count needs the full shape
+                    out_counts[cond_index] = out_counts[cond_index].expand_as(x_in).clone()
                 if a is None:
                     out_conds[cond_index] += output[o] * mult[o]
                     out_counts[cond_index] += mult[o]
@@ -349,9 +355,13 @@ def _calc_cond_batch(model: BaseModel, conds: list[list[dict]], x_in: torch.Tens
                         out_cts = out_cts.narrow(i + 2, a[i + dims], a[i])
                     out_c += output[o] * mult[o]
                     out_cts += mult[o]
+            del output  # not kept alive through the next model call when the conds run in separate batches
 
     for i in range(len(out_conds)):
-        out_conds[i] /= out_counts[i]
+        if out_conds[i] is None:  # no output for this cond, e.g. outside its timestep range
+            out_conds[i] = torch.zeros_like(x_in)
+        else:
+            out_conds[i] /= out_counts[i]
 
     return out_conds
 
