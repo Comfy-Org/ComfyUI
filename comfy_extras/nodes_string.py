@@ -4,6 +4,7 @@ import string
 from typing_extensions import override
 
 from comfy_api.latest import ComfyExtension, io
+from comfy_api.latest._io import _DynamicGroup
 
 
 class StringFormat(io.ComfyNode):
@@ -57,6 +58,36 @@ class StringConcatenate(io.ComfyNode):
     @classmethod
     def execute(cls, string_a, string_b, delimiter):
         return io.NodeOutput(delimiter.join((string_a, string_b)))
+
+
+class StringConcatenateMulti(io.ComfyNode):
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="StringConcatenateMulti",
+            search_aliases=["concatenate", "text concat", "join text", "merge text", "combine strings", "string concat", "append text", "combine text", "multiple text"],
+            display_name="Concatenate Text (Multiple)",
+            category="text",
+            description="Join 2 to 20 strings of text with a delimiter. Add one input per string.",
+            inputs=[
+                _DynamicGroup.Input(
+                    "texts",
+                    template=[io.String.Input("text", multiline=True)],
+                    min=2,
+                    max=20,
+                    tooltip="Each row is one string of text, joined in order.",
+                    group_name="Text",
+                ),
+                io.String.Input("delimiter", multiline=False, default=""),
+            ],
+            outputs=[
+                io.String.Output(),
+            ]
+        )
+
+    @classmethod
+    def execute(cls, texts: list[dict], delimiter):
+        return io.NodeOutput(delimiter.join(row["text"] for row in texts if row["text"] is not None))
 
 
 class StringSubstring(io.ComfyNode):
@@ -496,6 +527,7 @@ class StringExtension(ComfyExtension):
         return [
             StringFormat,
             StringConcatenate,
+            StringConcatenateMulti,
             StringSubstring,
             StringLength,
             CaseConverter,
