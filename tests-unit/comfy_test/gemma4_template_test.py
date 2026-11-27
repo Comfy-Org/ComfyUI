@@ -8,7 +8,9 @@ from comfy.cli_args import args
 if not torch.cuda.is_available():
     args.cpu = True
 
+import comfy.sd1_clip as sd1_clip  # noqa: E402
 import comfy.text_encoders.gemma4 as gemma4  # noqa: E402
+import comfy.text_encoders.lt as lt  # noqa: E402
 
 PROMPT = "describe a cute anime girl with fennec ears"
 THOUGHT_BLOCK = "<|channel>thought\n<channel|>"
@@ -59,3 +61,54 @@ def test_thinking_disabled_primes_a_thought_channel(variant):
 @pytest.mark.parametrize("thinking", [False, True])
 def test_skip_template_passes_text_through_unchanged(variant, thinking):
     assert build_template(variant, skip_template=True, thinking=thinking) == PROMPT
+
+
+class _StubBackendTokenizer:
+    def __call__(self, text):
+        return {"input_ids": [10, 11] if text else []}
+
+    def get_vocab(self):
+        return {"a": 10, "b": 11}
+
+    @classmethod
+    def from_pretrained(cls, *args, **kwargs):
+        return cls()
+
+
+@pytest.mark.parametrize(
+    ("mixin", "embedding_key"),
+    [
+        (lt.Gemma3_Tokenizer, "gemma3_12b"),
+        (gemma4.Gemma4_Tokenizer, "gemma4"),
+    ],
+)
+def test_gemma_tokenizers_forward_kwargs_for_min_length_and_options(mixin, embedding_key):
+    tok_cls = type(f"Test{mixin.__name__}", (mixin, sd1_clip.SDTokenizer), {})
+    tokenizer = tok_cls(
+        None,
+        pad_with_end=False,
+        embedding_size=3840,
+        embedding_key=embedding_key,
+        tokenizer_class=_StubBackendTokenizer,
+        has_start_token=True,
+        has_end_token=False,
+        pad_to_max_length=False,
+        max_length=99999999,
+        min_length=1024,
+        pad_left=True,
+        disable_weights=True,
+        start_token=2,
+    )
+
+    default_tokens = tokenizer.tokenize_with_weights("hi", skip_template=True)[0]
+    assert len(default_tokens) == 1024
+    assert [t for t, _ in default_tokens[-3:]] == [2, 10, 11]
+
+    unpadded = tokenizer.tokenize_with_weights("hi", skip_template=True, min_length=1)[0]
+    assert [t for t, _ in unpadded] == [2, 10, 11]
+
+    custom = tokenizer.tokenize_with_weights(
+        "hi", skip_template=True, tokenizer_options={f"{embedding_key}_min_length": 16}
+    )[0]
+    assert len(custom) == 16
+    assert [t for t, _ in custom[-3:]] == [2, 10, 11]
