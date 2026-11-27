@@ -505,7 +505,9 @@ class PromptServer():
 
                 if not image_is_duplicate:
                     if image_save_function is not None:
-                        image_save_function(image, post, filepath)
+                        error_response = image_save_function(image, post, filepath)
+                        if error_response is not None:
+                            return error_response, None, None
                     else:
                         with open(filepath, "wb") as f:
                             f.write(image.file.read())
@@ -593,6 +595,8 @@ class PromptServer():
                         new_alpha = mask_pil.getchannel('A')
                         original_pil.putalpha(new_alpha)
                         original_pil.save(filepath, compress_level=4, pnginfo=metadata)
+                else:
+                    return web.Response(status=404)
 
             return image_upload(post, image_save_function)
 
