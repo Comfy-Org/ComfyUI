@@ -68,7 +68,7 @@ def _summarize_chunk(
             query = query.float()
             key_t = key_t.float()
             attn_weights = torch.baddbmm(
-                torch.empty(1, 1, 1, device=query.device, dtype=query.dtype),
+                torch.zeros(1, 1, 1, device=query.device, dtype=query.dtype),
                 query,
                 key_t,
                 alpha=scale,
@@ -76,7 +76,7 @@ def _summarize_chunk(
             )
     else:
         attn_weights = torch.baddbmm(
-            torch.empty(1, 1, 1, device=query.device, dtype=query.dtype),
+            torch.zeros(1, 1, 1, device=query.device, dtype=query.dtype),
             query,
             key_t,
             alpha=scale,
@@ -149,7 +149,7 @@ def _get_attention_scores_no_kv_chunking(
             query = query.float()
             key_t = key_t.float()
             attn_scores = torch.baddbmm(
-                torch.empty(1, 1, 1, device=query.device, dtype=query.dtype),
+                torch.zeros(1, 1, 1, device=query.device, dtype=query.dtype),
                 query,
                 key_t,
                 alpha=scale,
@@ -157,7 +157,7 @@ def _get_attention_scores_no_kv_chunking(
             )
     else:
         attn_scores = torch.baddbmm(
-            torch.empty(1, 1, 1, device=query.device, dtype=query.dtype),
+            torch.zeros(1, 1, 1, device=query.device, dtype=query.dtype),
             query,
             key_t,
             alpha=scale,
