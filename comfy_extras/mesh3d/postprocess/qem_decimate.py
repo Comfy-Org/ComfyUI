@@ -824,14 +824,15 @@ def _repair_nonmanifold_edges(
 
 
 def _kitchen_op(name: str, tensor: torch.Tensor):
-    """comfy-kitchen's op `name` when its CUDA backend can run it on `tensor`, else None."""
+    """comfy-kitchen's op `name` when its CUDA or HIP backend can run it on `tensor`, else None."""
     ck = getattr(comfy.quant_ops, "ck", None)
     if ck is None or not hasattr(ck, name) or not tensor.is_cuda:
         return None
-    cuda = ck.list_backends().get("cuda", {})
-    if not (cuda.get("available", False) and not cuda.get("disabled", True) and name in cuda.get("capabilities", ())):
+    backend = "hip" if torch.version.hip else "cuda"
+    info = ck.list_backends().get(backend, {})
+    if not (info.get("available", False) and not info.get("disabled", True) and name in info.get("capabilities", ())):
         return None
-    floor = ck.registry.get_constraints("cuda", name).min_compute_capability
+    floor = ck.registry.get_constraints(backend, name).min_compute_capability
     if floor is not None and torch.cuda.get_device_capability(tensor.device) < floor:
         return None
     return getattr(ck, name)
