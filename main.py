@@ -114,6 +114,9 @@ if __name__ == "__main__":
 
     if "rocm" in cuda_malloc.get_torch_version_noimport():
         os.environ['OCL_SET_SVM_SIZE'] = '4194304'  # 4TB. Much larger than the ROCM 64GB/256GB defaults for Aimdos liberal VA use
+        if os.name == "nt" and enables_dynamic_vram():
+            os.environ.setdefault('GPU_RESOURCE_CACHE_SIZE', '64')  # MiB. The default is 1/8 of the VRAM and hipMemGetInfo counts that cache as free.
+            os.environ.setdefault('PYTORCH_ALLOC_CONF', 'expandable_segments:True')  # Otherwise big allocations land in shared memory once dynamic vram has fragmented the VRAM.
 
 
 def handle_comfyui_manager_unavailable():
