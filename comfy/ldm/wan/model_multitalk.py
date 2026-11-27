@@ -110,9 +110,7 @@ def get_audio_embeds(encoded_audio, audio_start, audio_end):
     return torch.cat(audio_embs, dim=0)
 
 
-def project_audio_features(audio_proj, encoded_audio, audio_start, audio_end):
-    audio_embs = get_audio_embeds(encoded_audio, audio_start, audio_end)
-
+def project_audio_frames(audio_proj, audio_embs):
     first_frame_audio_emb_s = audio_embs[:, :1, ...]
     latter_frame_audio_emb = audio_embs[:, 1:, ...]
     latter_frame_audio_emb = rearrange(latter_frame_audio_emb, "b (n_t n) w s c -> b n_t n w s c", n=4)
@@ -127,7 +125,11 @@ def project_audio_features(audio_proj, encoded_audio, audio_start, audio_end):
     latter_middle_frame_audio_emb = rearrange(latter_middle_frame_audio_emb, "b n_t n w s c -> b n_t (n w) s c")
     latter_frame_audio_emb_s = torch.cat([latter_first_frame_audio_emb, latter_middle_frame_audio_emb, latter_last_frame_audio_emb], dim=2)
 
-    audio_emb = audio_proj(first_frame_audio_emb_s, latter_frame_audio_emb_s)
+    return audio_proj(first_frame_audio_emb_s, latter_frame_audio_emb_s)
+
+
+def project_audio_features(audio_proj, encoded_audio, audio_start, audio_end):
+    audio_emb = project_audio_frames(audio_proj, get_audio_embeds(encoded_audio, audio_start, audio_end))
     audio_emb = torch.cat(audio_emb.split(1), dim=2)
 
     return audio_emb
