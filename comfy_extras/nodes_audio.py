@@ -363,6 +363,8 @@ def f32_pcm(wav: torch.Tensor) -> torch.Tensor:
     """Convert audio to float 32 bits PCM format."""
     if wav.dtype.is_floating_point:
         return wav
+    elif wav.dtype == torch.uint8:
+        return (wav.float() - 128) / (2 ** 7)
     elif wav.dtype == torch.int16:
         return wav.float() / (2 ** 15)
     elif wav.dtype == torch.int32:
