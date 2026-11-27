@@ -34,6 +34,14 @@ def _walk_graph(start_ids, edges, stop_at=(), return_stops=False):
     return stops if return_stops else found
 
 
+def outputs_reaching(prompt, outputs, node_ids):
+    parents = {
+        node_id: [value[0] for value in node.get("inputs", {}).values() if is_link(value) and value[0] in prompt]
+        for node_id, node in prompt.items()
+    }
+    return {output_id for output_id in outputs if _walk_graph([output_id], parents, node_ids, return_stops=True)}
+
+
 def _loop_validation_error(error_type, message, details, actors, children, outputs):
     reached_outputs = _walk_graph(actors, children).intersection(outputs)
     return LoopValidationError(error_type, message, details, actors, reached_outputs)
