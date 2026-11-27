@@ -201,18 +201,25 @@ def cat_gathered(tensors, gathered):
     inner_tensors, ctx = tensors[0].__tensor_flatten__()
     rows = [t._params.orig_shape[0] for t in tensors]
     orig_shape = (sum(rows), *tensors[0]._params.orig_shape[1:])
-    for t in tensors[1:]:
+    qdata0 = tensors[0]._qdata
+    if qdata0.ndim == 0 or qdata0.shape[0] != rows[0]:
+        return None
+    for t, n in zip(tensors[1:], rows[1:]):
         other_inner, other_ctx = t.__tensor_flatten__()
         other_ctx["non_tensor_fields"]["orig_shape"] = (rows[0], *t._params.orig_shape[1:])
         if (other_inner != inner_tensors or other_ctx["layout_cls"] != ctx["layout_cls"]
-                or other_ctx["non_tensor_fields"] != ctx["non_tensor_fields"]):
+                or other_ctx["non_tensor_fields"] != ctx["non_tensor_fields"]
+                or t._qdata.shape != (n, *qdata0.shape[1:]) or t._qdata.dtype != qdata0.dtype):
             return None
     fields = {}
     for attr in inner_tensors[1:]:
         values = [getattr(t, attr) for t in tensors]
-        if all(v.ndim > 0 and v.shape[0] == n and v.shape[1:] == values[0].shape[1:] and v.dtype == values[0].dtype for v, n in zip(values, rows)):
+        if attr == "_param_correction":
+            return None
+        if (attr not in ("_param_codebook", "_param_decode_lut")
+                and all(v.ndim > 0 and v.shape[0] == n and v.shape[1:] == values[0].shape[1:] and v.dtype == values[0].dtype for v, n in zip(values, rows))):
             fields[attr] = torch.cat(values)
-        elif all(torch.equal(v, values[0]) for v in values[1:]):
+        elif all(v.dtype == values[0].dtype and torch.equal(v, values[0]) for v in values[1:]):
             fields[attr] = values[0].clone()
         else:
             return None

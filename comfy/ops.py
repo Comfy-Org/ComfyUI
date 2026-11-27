@@ -1129,7 +1129,7 @@ class CombinedLinear:
                     or s._full_precision_mm or s.comfy_force_forward or s.bias is not None):
                 return
             # Other formats may concatenate but cannot run the combined linear_input_act path.
-            if s.quant_format not in ("int8_tensorwise", "asym_w4a8_int8", "w6a8_int8"):
+            if s.quant_format != "int8_tensorwise" and s.quant_format not in _GROUPED_INT8_FORMATS:
                 return
             weights.append(s._v_weight)
         # Members are loaded back to back, so their VBAR allocations are consecutive in member order.
