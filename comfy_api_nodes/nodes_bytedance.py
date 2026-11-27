@@ -20,6 +20,7 @@ from comfy_api_nodes.apis.bytedance import (
     RECOMMENDED_PRESETS_SEEDREAM_5_LITE,
     RECOMMENDED_PRESETS_SEEDREAM_5_PRO,
     SEEDANCE2_REF_VIDEO_PIXEL_LIMITS,
+    SEEDREAM_AUTO_SIZES,
     VIDEO_TASKS_EXECUTION_TIME,
     GetAssetResponse,
     Image2VideoTaskCreationRequest,
@@ -639,6 +640,7 @@ def _seedream_model_inputs(
     *,
     max_ref_images: int,
     presets: list,
+    auto_sizes: list[str],
     default_preset: str,
     min_size: int,
     supports_background: bool,
@@ -652,9 +654,15 @@ def _seedream_model_inputs(
     inputs = [
         IO.Combo.Input(
             "size_preset",
-            options=[label for label, _, _ in presets],
+            options=auto_sizes + [label for label, _, _ in presets],
             default=default_preset,
-            tooltip="Pick a recommended size. Select Custom to use the width and height below.",
+            tooltip="Pick a recommended size. Select Custom to use the width and height below."
+            + (
+                " Auto lets the model choose the aspect ratio: it usually keeps the shape of a single reference image, "
+                "otherwise it picks one that fits the prompt."
+                if auto_sizes
+                else ""
+            ),
         ),
         IO.Int.Input(
             "width",
@@ -791,7 +799,8 @@ class ByteDanceSeedreamNodeV3(IO.ComfyNode):
                             _seedream_model_inputs(
                                 max_ref_images=10,
                                 presets=RECOMMENDED_PRESETS_SEEDREAM_5_5,
-                                default_preset="(2K) 2048x2048 (1:1)",
+                                auto_sizes=["(1K) Auto", "(1.5K) Auto", "(2K) Auto"],
+                                default_preset="(2K) Auto",
                                 min_size=240,
                                 supports_background=True,
                                 max_width=8594,
@@ -806,7 +815,8 @@ class ByteDanceSeedreamNodeV3(IO.ComfyNode):
                             _seedream_model_inputs(
                                 max_ref_images=10,
                                 presets=RECOMMENDED_PRESETS_SEEDREAM_5_PRO,
-                                default_preset="(1K) 1024x1024 (1:1)",
+                                auto_sizes=["(1K) Auto", "(2K) Auto"],
+                                default_preset="(1K) Auto",
                                 min_size=1024,
                                 supports_background=False,
                                 max_width=4514,
@@ -821,7 +831,8 @@ class ByteDanceSeedreamNodeV3(IO.ComfyNode):
                             _seedream_model_inputs(
                                 max_ref_images=10,
                                 presets=RECOMMENDED_PRESETS_SEEDREAM_5_FLASH,
-                                default_preset="(1K) 1024x1024 (1:1)",
+                                auto_sizes=["(1K) Auto", "(1.5K) Auto", "(2K) Auto"],
+                                default_preset="(1K) Auto",
                                 min_size=1024,
                                 supports_background=False,
                                 max_width=4514,
@@ -836,6 +847,7 @@ class ByteDanceSeedreamNodeV3(IO.ComfyNode):
                             _seedream_model_inputs(
                                 max_ref_images=14,
                                 presets=RECOMMENDED_PRESETS_SEEDREAM_5_LITE,
+                                auto_sizes=[],
                                 default_preset="(2K) 2048x2048 (1:1)",
                                 min_size=1024,
                                 supports_background=False,
@@ -847,6 +859,7 @@ class ByteDanceSeedreamNodeV3(IO.ComfyNode):
                             _seedream_model_inputs(
                                 max_ref_images=10,
                                 presets=RECOMMENDED_PRESETS_SEEDREAM_4_5,
+                                auto_sizes=[],
                                 default_preset="(2K) 2048x2048 (1:1)",
                                 min_size=1024,
                                 supports_background=False,
@@ -858,6 +871,7 @@ class ByteDanceSeedreamNodeV3(IO.ComfyNode):
                             _seedream_model_inputs(
                                 max_ref_images=10,
                                 presets=RECOMMENDED_PRESETS_SEEDREAM_4_0,
+                                auto_sizes=[],
                                 default_preset="(1K) 1024x1024 (1:1)",
                                 min_size=1024,
                                 supports_background=False,
@@ -975,9 +989,12 @@ class ByteDanceSeedreamNodeV3(IO.ComfyNode):
         if w is None or h is None:
             w, h = width, height
 
+        size = f"{w}x{h}"
         out_num_pixels = w * h
         mp_provided = out_num_pixels / 1_000_000.0
-        if is_5_5:
+        if size_preset in SEEDREAM_AUTO_SIZES:
+            size = SEEDREAM_AUTO_SIZES[size_preset]
+        elif is_5_5:
             if out_num_pixels < 921_600:
                 raise ValueError(
                     f"Minimum image resolution for the selected model is 0.92MP, but {mp_provided:.2f}MP provided."
@@ -1053,7 +1070,7 @@ class ByteDanceSeedreamNodeV3(IO.ComfyNode):
                 model=model_id,
                 prompt=prompt,
                 image=reference_images_urls,
-                size=f"{w}x{h}",
+                size=size,
                 seed=seed,
                 sequential_image_generation=None if is_pro_or_flash or is_5_5 else sequential_image_generation,
                 sequential_image_generation_options=(
@@ -1097,6 +1114,7 @@ class ByteDanceSeedreamNodeV2(ByteDanceSeedreamNodeV3):
                             _seedream_model_inputs(
                                 max_ref_images=10,
                                 presets=RECOMMENDED_PRESETS_SEEDREAM_5_PRO,
+                                auto_sizes=[],
                                 default_preset="(1K) 1024x1024 (1:1)",
                                 min_size=1024,
                                 supports_background=False,
@@ -1110,6 +1128,7 @@ class ByteDanceSeedreamNodeV2(ByteDanceSeedreamNodeV3):
                             _seedream_model_inputs(
                                 max_ref_images=14,
                                 presets=RECOMMENDED_PRESETS_SEEDREAM_5_LITE,
+                                auto_sizes=[],
                                 default_preset="(2K) 2048x2048 (1:1)",
                                 min_size=1024,
                                 supports_background=False,
@@ -1120,6 +1139,7 @@ class ByteDanceSeedreamNodeV2(ByteDanceSeedreamNodeV3):
                             _seedream_model_inputs(
                                 max_ref_images=10,
                                 presets=RECOMMENDED_PRESETS_SEEDREAM_4_5,
+                                auto_sizes=[],
                                 default_preset="(2K) 2048x2048 (1:1)",
                                 min_size=1024,
                                 supports_background=False,
@@ -1130,6 +1150,7 @@ class ByteDanceSeedreamNodeV2(ByteDanceSeedreamNodeV3):
                             _seedream_model_inputs(
                                 max_ref_images=10,
                                 presets=RECOMMENDED_PRESETS_SEEDREAM_4_0,
+                                auto_sizes=[],
                                 default_preset="(1K) 1024x1024 (1:1)",
                                 min_size=1024,
                                 supports_background=False,

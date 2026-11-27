@@ -256,6 +256,12 @@ _PRESETS_SEEDREAM_4K = [
 
 _CUSTOM_PRESET = [("Custom", None, None)]
 
+SEEDREAM_AUTO_SIZES = {
+    "(1K) Auto": "1K",
+    "(1.5K) Auto": "1.5K",
+    "(2K) Auto": "2K",
+}
+
 RECOMMENDED_PRESETS_SEEDREAM_5_PRO = (
     _PRESETS_SEEDREAM_1K + _PRESETS_SEEDREAM_2K + _CUSTOM_PRESET
 )
