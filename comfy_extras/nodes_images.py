@@ -820,10 +820,11 @@ class SaveSVGNode(IO.ComfyNode):
 
         # Prepare metadata JSON
         metadata_dict = {}
-        if cls.hidden.prompt is not None:
-            metadata_dict["prompt"] = cls.hidden.prompt
-        if cls.hidden.extra_pnginfo is not None:
-            metadata_dict.update(cls.hidden.extra_pnginfo)
+        if not args.disable_metadata:
+            if cls.hidden.prompt is not None:
+                metadata_dict["prompt"] = cls.hidden.prompt
+            if cls.hidden.extra_pnginfo is not None:
+                metadata_dict.update(cls.hidden.extra_pnginfo)
 
         # Convert metadata to JSON string
         metadata_json = json.dumps(metadata_dict, indent=2) if metadata_dict else None

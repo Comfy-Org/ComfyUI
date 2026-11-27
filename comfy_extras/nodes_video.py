@@ -40,12 +40,13 @@ class SaveWEBM(io.ComfyNode):
         file = f"{filename}_{counter:05}_.webm"
         container = av.open(os.path.join(full_output_folder, file), mode="w")
 
-        if cls.hidden.prompt is not None:
-            container.metadata["prompt"] = json.dumps(cls.hidden.prompt)
+        if not args.disable_metadata:
+            if cls.hidden.prompt is not None:
+                container.metadata["prompt"] = json.dumps(cls.hidden.prompt)
 
-        if cls.hidden.extra_pnginfo is not None:
-            for x in cls.hidden.extra_pnginfo:
-                container.metadata[x] = json.dumps(cls.hidden.extra_pnginfo[x])
+            if cls.hidden.extra_pnginfo is not None:
+                for x in cls.hidden.extra_pnginfo:
+                    container.metadata[x] = json.dumps(cls.hidden.extra_pnginfo[x])
 
         # Save transparency when the images carry an alpha channel (RGBA) and the codec supports it.
         # vp9 -> yuva420p; other codecs have no usable alpha path, so the alpha is ignored.
