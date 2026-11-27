@@ -120,9 +120,26 @@ class TopologicalSort:
         self.pendingNodes = {}
         self.blockCount = {} # Number of nodes this node is directly blocked by
         self.blocking = {} # Which nodes are blocked by this node
+        self.readyNodes = set()
         self.externalBlocks = 0
         self.externalBlockResults = {}
         self.unblockedEvent = asyncio.Event()
+
+    def _ensure_ready_nodes(self):
+        if not hasattr(self, "readyNodes"):
+            self.readyNodes = {
+                node_id for node_id in self.pendingNodes
+                if self.blockCount[node_id] == 0
+            }
+
+    def _mark_ready(self, node_id):
+        self._ensure_ready_nodes()
+        if node_id in self.pendingNodes:
+            self.readyNodes.add(node_id)
+
+    def _mark_blocked(self, node_id):
+        self._ensure_ready_nodes()
+        self.readyNodes.discard(node_id)
 
     def get_input_info(self, unique_id, input_name):
         node = self.dynprompt.get_node(unique_id)
@@ -148,6 +165,7 @@ class TopologicalSort:
             if to_node_id not in self.blocking[from_node_id]:
                 self.blocking[from_node_id][to_node_id] = {}
                 self.blockCount[to_node_id] += 1
+                self._mark_blocked(to_node_id)
             self.blocking[from_node_id][to_node_id][from_socket] = True
 
     def add_node(self, node_unique_id, include_lazy=False, subgraph_nodes=None):
@@ -162,6 +180,7 @@ class TopologicalSort:
             self.pendingNodes[unique_id] = True
             self.blockCount[unique_id] = 0
             self.blocking[unique_id] = {}
+            self.readyNodes.add(unique_id)
 
             inputs = self.dynprompt.get_node(unique_id)["inputs"]
             for input_name in inputs:
@@ -184,6 +203,7 @@ class TopologicalSort:
         assert node_id in self.blockCount, "Can't add external block to a node that isn't pending"
         self.externalBlocks += 1
         self.blockCount[node_id] += 1
+        self._mark_blocked(node_id)
         def unblock(value=None):
             self.release_external_block(node_id, value)
         return unblock
@@ -191,6 +211,8 @@ class TopologicalSort:
     def release_external_block(self, node_id, value=None):
         self.externalBlocks -= 1
         self.blockCount[node_id] -= 1
+        if self.blockCount[node_id] == 0:
+            self._mark_ready(node_id)
         if value is not None:
             self.externalBlockResults[node_id] = value
         self.unblockedEvent.set()
@@ -202,12 +224,17 @@ class TopologicalSort:
         return False
 
     def get_ready_nodes(self):
-        return [node_id for node_id in self.pendingNodes if self.blockCount[node_id] == 0]
+        self._ensure_ready_nodes()
+        return list(self.readyNodes)
 
     def pop_node(self, unique_id):
         del self.pendingNodes[unique_id]
+        self._ensure_ready_nodes()
+        self.readyNodes.discard(unique_id)
         for blocked_node_id in self.blocking[unique_id]:
             self.blockCount[blocked_node_id] -= 1
+            if self.blockCount[blocked_node_id] == 0:
+                self._mark_ready(blocked_node_id)
         del self.blocking[unique_id]
         self.externalBlockResults.pop(unique_id, None)
 
@@ -281,9 +308,13 @@ class ExecutionList(TopologicalSort):
             for blocked_node_id in self.blocking[node_id]:
                 if blocked_node_id not in node_ids:
                     self.blockCount[blocked_node_id] -= 1
+                    if self.blockCount[blocked_node_id] == 0:
+                        self._mark_ready(blocked_node_id)
             del self.pendingNodes[node_id]
             del self.blockCount[node_id]
             del self.blocking[node_id]
+            self._ensure_ready_nodes()
+            self.readyNodes.discard(node_id)
             self.execution_cache.pop(node_id, None)
             self.execution_cache_listeners.pop(node_id, None)
         for listeners in self.execution_cache_listeners.values():
