@@ -2,6 +2,7 @@ import asyncio
 import bisect
 import itertools
 import logging
+import math
 import time
 import torch
 from typing import Sequence, Mapping, Dict
@@ -505,6 +506,34 @@ RAM_CACHE_DEFAULT_RAM_USAGE = 0.05
 RAM_CACHE_OLD_WORKFLOW_OOM_MULTIPLIER = 1.3
 
 RAM_CACHE_LARGE_INTERMEDIATE = 512 * 1024 ** 2
+
+#Thresholds in GB from a Cache RAM Settings node in the prompt, or None. The node is read here, it never executes.
+def cache_ram_from_prompt(prompt, total_ram_gb):
+    found = None
+    for node in prompt.values():
+        if node.get("class_type") != "CacheRAMSettings":
+            continue
+        inputs = node.get("inputs")
+        if not isinstance(inputs, Mapping):
+            logging.warning("Cache RAM Settings: node has no inputs, ignoring it.")
+            continue
+        try:
+            active = float(inputs.get("active", 10.0))
+            inactive = float(inputs.get("inactive", 25.0))
+            if math.isnan(active) or math.isnan(inactive):
+                raise ValueError
+        except (TypeError, ValueError, OverflowError):
+            logging.warning("Cache RAM Settings: active and inactive must be numbers, ignoring the node.")
+            continue
+        if inputs.get("unit", "percent") == "percent":
+            active = total_ram_gb * active / 100.0
+            inactive = total_ram_gb * inactive / 100.0
+        active = min(max(active, 0.0), total_ram_gb)
+        inactive = min(max(inactive, active), total_ram_gb)
+        if found is not None:
+            active, inactive = max(active, found[0]), max(inactive, found[1])
+        found = (active, inactive)
+    return found
 
 
 def all_outputs_dynamic(outputs):
