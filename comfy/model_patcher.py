@@ -2058,6 +2058,9 @@ class ModelPatcherDynamic(ModelPatcher):
                         return
                     if key in self.backup:
                         comfy.utils.set_attr_param(self.model, key, self.backup[key].weight)
+                        weight, _, _ = get_key_weight(self.model, key)
+                    if getattr(weight, "is_meta", False):
+                        comfy.ops.materialize_meta_param(m, [param_key])
                     self.patch_weight_to_device(key, device_to=device_to, force_cast=True)
                     weight, _, _ = get_key_weight(self.model, key)
                     if weight is not None:
