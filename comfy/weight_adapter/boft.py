@@ -83,7 +83,7 @@ class BOFTAdapter(WeightAdapterBase):
                 if q_norm > alpha:
                     normed_q = q * alpha / q_norm
             # use float() to prevent unsupported type in .inverse()
-            r = (I + normed_q) @ (I - normed_q).float().inverse()
+            r = (I + normed_q).float() @ (I - normed_q).float().inverse()
             r = r.to(weight)
             inp = org = weight
 
@@ -153,8 +153,8 @@ class BOFTAdapter(WeightAdapterBase):
                 normed_q = q * alpha / q_norm
 
         # Cayley transform: R = (I + Q)(I - Q)^-1
-        r = (I + normed_q) @ (I - normed_q).float().inverse()
-        return r, boft_m, boft_b
+        r = (I + normed_q).float() @ (I - normed_q).float().inverse()
+        return r.to(dtype), boft_m, boft_b
 
     def g(self, y: torch.Tensor) -> torch.Tensor:
         """
