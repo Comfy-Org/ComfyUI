@@ -32,6 +32,7 @@ def execution_list():
     result.execution_cache_listeners["start"] = {("first", 0), ("end", 0)}
     result.externalBlocks = 0
     result.externalBlockResults = {}
+    result.keep_block_results = False
     result.unblockedEvent = asyncio.Event()
     return result
 
@@ -91,6 +92,17 @@ def test_external_block_carries_a_result_to_its_node():
     assert graph.get_external_block_result("end") == [1, 2]
     assert graph.externalBlocks == 0
     assert graph.blockCount["end"] == 2
+
+
+@pytest.mark.parametrize("keep_block_results", [False, True])
+def test_completed_node_keeps_its_block_result_only_without_an_output_cache(keep_block_results):
+    graph = execution_list()
+    graph.keep_block_results = keep_block_results
+    graph.externalBlockResults["start"] = [1, 2]
+
+    graph.complete_node_execution()
+
+    assert ("start" in graph.externalBlockResults) == keep_block_results
 
 
 def test_multiple_external_blocks_can_be_released():

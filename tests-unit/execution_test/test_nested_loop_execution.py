@@ -6,9 +6,11 @@ import nodes
 
 import comfy_extras.nodes_loop as nodes_loop
 from comfy_api.latest import io
+from comfy_execution.graph import ExecutionList
 from comfy_execution.graph_utils import GraphBuilder
 from comfy_execution.validation import validate_loops
-from execution import PromptExecutor
+import execution
+from execution import CacheType, PromptExecutor
 
 
 class Constant:
@@ -332,14 +334,15 @@ def register_internal_loop_nodes(monkeypatch):
     monkeypatch.setattr(PromptExecutor, "execute", execute_validated)
 
 
-def execute_prompt(prompt, prompt_id, outputs):
-    executor = PromptExecutor(Server(), cache_type=False, cache_args={"ram": 0, "ram_inactive": 0})
+def execute_prompt(prompt, prompt_id, outputs, cache_type=False):
+    executor = PromptExecutor(Server(), cache_type=cache_type, cache_args={"ram": 0, "ram_inactive": 0})
     executor.execute(prompt, prompt_id, execute_outputs=outputs)
     assert executor.success
     return executor
 
 
-def test_nested_loops_execute_each_body_once_without_final_requeue():
+@pytest.mark.parametrize("cache_type", [False, CacheType.NONE])
+def test_nested_loops_execute_each_body_once_without_final_requeue(cache_type):
     Increment.calls = []
     Capture.values = []
 
@@ -390,7 +393,7 @@ def test_nested_loops_execute_each_body_once_without_final_requeue():
             "inputs": {"value": ["outer_close", 0]},
         },
     }
-    execute_prompt(prompt, "nested-loop-test", ["capture"])
+    execute_prompt(prompt, "nested-loop-test", ["capture"], cache_type)
     assert Increment.calls == [1, 2, 3, 4]
     assert Capture.values == [4]
 
@@ -780,7 +783,7 @@ def test_loop_repeats_runtime_expanded_descendants():
     assert Increment.calls == [1, 2, 3]
 
 
-def run_nested_accumulation(producer_name):
+def run_nested_accumulation(producer_name, cache_type):
     Capture.values = []
 
     prompt = {
@@ -819,12 +822,13 @@ def run_nested_accumulation(producer_name):
             "inputs": {"value": ["outer_close", 0]},
         },
     }
-    execute_prompt(prompt, "nested-loop-accumulation-test", ["capture"])
+    execute_prompt(prompt, "nested-loop-accumulation-test", ["capture"], cache_type)
     return Capture.values
 
 
-def test_nested_loop_concatenates_lists():
-    assert run_nested_accumulation("TestPair") == [
+@pytest.mark.parametrize("cache_type", [False, CacheType.NONE])
+def test_nested_loop_concatenates_lists(cache_type):
+    assert run_nested_accumulation("TestPair", cache_type) == [
         0,
         "0",
         1,
@@ -836,10 +840,67 @@ def test_nested_loop_concatenates_lists():
     ]
 
 
-def test_nested_loop_does_not_flatten_list_backed_scalars():
-    assert run_nested_accumulation("TestListBackedScalar") == [
+@pytest.mark.parametrize("cache_type", [False, CacheType.NONE])
+def test_nested_loop_does_not_flatten_list_backed_scalars(cache_type):
+    assert run_nested_accumulation("TestListBackedScalar", cache_type) == [
         [[0]],
         [[1]],
         [[0]],
         [[1]],
     ]
+
+
+def incrementing_loop(tag, initial):
+    return {
+        tag: {"class_type": "StartLoop", "inputs": {"mode": "simple", "mode.num_iterations": 2, "initial_iteration_value": initial}},
+        f"{tag}_increment": {"class_type": "TestIncrement", "inputs": {"value": [tag, 4]}},
+        f"{tag}_close": {
+            "class_type": "EndLoop",
+            "inputs": {"output_value": [f"{tag}_increment", 0], "next_iteration_value": [f"{tag}_increment", 0], "accumulate": False},
+        },
+    }
+
+
+@pytest.mark.parametrize("cache_type", [False, CacheType.NONE])
+def test_chained_loops_run_each_body_once(cache_type):
+    Increment.calls = []
+    Capture.values = []
+    prompt = {
+        "start": {"class_type": "TestConstant", "inputs": {"value": 0}},
+        **incrementing_loop("first", ["start", 0]),
+        **incrementing_loop("second", ["first_close", 0]),
+        "capture": {"class_type": "TestCapture", "inputs": {"value": ["second_close", 0]}},
+    }
+
+    execute_prompt(prompt, "chained-loops", ["capture"], cache_type)
+
+    assert Capture.values == [4]
+    assert Increment.calls == [1, 2, 3, 4]
+
+
+@pytest.mark.parametrize("cache_type", [False, CacheType.LRU, CacheType.RAM_PRESSURE, CacheType.NONE])
+def test_only_a_run_without_an_output_cache_keeps_loop_results(monkeypatch, cache_type):
+    execution_lists = []
+    kept_after_a_node = []
+
+    class RecordingExecutionList(ExecutionList):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            execution_lists.append(self)
+
+        def complete_node_execution(self):
+            node_id = self.staged_node_id
+            super().complete_node_execution()
+            kept_after_a_node.append(node_id in self.externalBlockResults)
+
+    monkeypatch.setattr(execution, "ExecutionList", RecordingExecutionList)
+    prompt = {
+        "start": {"class_type": "TestConstant", "inputs": {"value": 0}},
+        **incrementing_loop("first", ["start", 0]),
+        "capture": {"class_type": "TestCapture", "inputs": {"value": ["first_close", 0]}},
+    }
+
+    execute_prompt(prompt, "loop-result-lifetime", ["capture"], cache_type)
+
+    assert any(kept_after_a_node) == (cache_type == CacheType.NONE)
+    assert len(execution_lists) == 1 and not execution_lists[0].externalBlockResults, "loop results outlived the prompt"

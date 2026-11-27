@@ -792,7 +792,8 @@ class PromptExecutor:
                 # A forced output node counts as uncached while planning, so a node
                 # that consumes its result waits for it to run again.
                 execution_list = ExecutionList(dynamic_prompt, self.caches.outputs, self.prompt_model_tracker.add,
-                                               force_rerun=force_rerun if args.force_output_rerun else None)
+                                               force_rerun=force_rerun if args.force_output_rerun else None,
+                                               keep_block_results=self.cache_type == CacheType.NONE)
                 current_outputs = self.caches.outputs.all_node_ids()
                 for node_id in list(execute_outputs):
                     execution_list.add_node(node_id)
@@ -855,6 +856,8 @@ class PromptExecutor:
                             emit_cached_output(self.server, node_id, _node_meta(dynamic_prompt, node_id), cached, prompt_id, ui_node_outputs, self.asset_manager)
                     self.add_message("execution_success", { "prompt_id": prompt_id }, broadcast=False)
 
+                # The finished list can outlive the prompt until garbage collection, so drop its kept loop results now.
+                execution_list.externalBlockResults.clear()
                 ui_outputs = {}
                 meta_outputs = {}
                 for node_id, ui_info in ui_node_outputs.items():
