@@ -3197,19 +3197,21 @@ class ByteDance2ReferenceNodeV2(IO.ComfyNode):
                     ),
                 ),
             )
-        for key in reference_audios:
+        audio_urls = await asyncio.gather(
+            *(
+                upload_audio_to_comfyapi(
+                    cls,
+                    reference_audios[key],
+                    container_format="mp3",
+                    codec_name="libmp3lame",
+                    mime_type="audio/mpeg",
+                )
+                for key in reference_audios
+            )
+        )
+        for url in audio_urls:
             content.append(
-                TaskAudioContent(
-                    audio_url=TaskAudioContentUrl(
-                        url=await upload_audio_to_comfyapi(
-                            cls,
-                            reference_audios[key],
-                            container_format="mp3",
-                            codec_name="libmp3lame",
-                            mime_type="audio/mpeg",
-                        ),
-                    ),
-                ),
+                TaskAudioContent(audio_url=TaskAudioContentUrl(url=url)),
             )
         for url in reference_image_assets.values():
             content.append(

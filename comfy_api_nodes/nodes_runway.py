@@ -11,6 +11,7 @@ User Guides:
 
 """
 
+import asyncio
 from enum import Enum
 
 from typing_extensions import override
@@ -795,9 +796,13 @@ class RunwayAleph2VideoToVideoNode(IO.ComfyNode):
             if len(keyframes.items) > 5:
                 raise ValueError("Aleph2 supports at most 5 keyframes.")
             for item in keyframes.items:
-                image_url = await upload_image_to_comfyapi(cls, item.image, mime_type="image/png")
                 if item.mode == KEYFRAME_MODE_SECONDS:
                     _check_seconds(item.value, "Keyframe timestamp")
+            image_urls = await asyncio.gather(
+                *(upload_image_to_comfyapi(cls, item.image, mime_type="image/png") for item in keyframes.items)
+            )
+            for item, image_url in zip(keyframes.items, image_urls):
+                if item.mode == KEYFRAME_MODE_SECONDS:
                     keyframe_models.append(RunwayAleph2KeyframeSeconds(seconds=item.value, uri=image_url))
                 else:
                     keyframe_models.append(RunwayAleph2KeyframeAt(at=item.value, uri=image_url))
@@ -807,10 +812,14 @@ class RunwayAleph2VideoToVideoNode(IO.ComfyNode):
             if len(prompt_images.items) > 5:
                 raise ValueError("Aleph2 supports at most 5 prompt images.")
             for item in prompt_images.items:
-                image_url = await upload_image_to_comfyapi(cls, item.image, mime_type="image/png")
-                position: RunwayAleph2TimestampPosition | RunwayAleph2RelativePosition
                 if item.mode == PROMPT_IMAGE_MODE_TIMESTAMP:
                     _check_seconds(item.value, "Prompt image timestamp")
+            image_urls = await asyncio.gather(
+                *(upload_image_to_comfyapi(cls, item.image, mime_type="image/png") for item in prompt_images.items)
+            )
+            for item, image_url in zip(prompt_images.items, image_urls):
+                position: RunwayAleph2TimestampPosition | RunwayAleph2RelativePosition
+                if item.mode == PROMPT_IMAGE_MODE_TIMESTAMP:
                     position = RunwayAleph2TimestampPosition(timestampSeconds=item.value)
                 else:
                     position = RunwayAleph2RelativePosition(positionPercentage=item.value)

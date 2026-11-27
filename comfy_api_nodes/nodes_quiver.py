@@ -1,3 +1,4 @@
+import asyncio
 from io import BytesIO
 
 from typing_extensions import override
@@ -340,10 +341,10 @@ class QuiverTextToSVGNode(IO.ComfyNode):
 
         references = None
         if reference_images:
-            references = []
-            for key in reference_images:
-                url = await upload_image_to_comfyapi(cls, reference_images[key], mime_type="image/png")
-                references.append(QuiverImageObject(url=url))
+            urls = await asyncio.gather(
+                *(upload_image_to_comfyapi(cls, image, mime_type="image/png") for image in reference_images.values())
+            )
+            references = [QuiverImageObject(url=url) for url in urls]
 
         instructions_val = instructions.strip() if instructions else None
         if instructions_val == "":
@@ -499,10 +500,10 @@ class QuiverTextToSVGNodeV2(IO.ComfyNode):
         references = None
         reference_images = model.get("reference_images")
         if reference_images:
-            references = []
-            for key in reference_images:
-                url = await upload_image_to_comfyapi(cls, reference_images[key], mime_type="image/png")
-                references.append(QuiverImageObject(url=url))
+            urls = await asyncio.gather(
+                *(upload_image_to_comfyapi(cls, image, mime_type="image/png") for image in reference_images.values())
+            )
+            references = [QuiverImageObject(url=url) for url in urls]
 
         instructions = (model.get("instructions") or "").strip() or None
 

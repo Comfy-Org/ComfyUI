@@ -1,3 +1,4 @@
+import asyncio
 import uuid
 from io import BytesIO
 
@@ -637,19 +638,22 @@ class PrunaReferenceToVideoNode(IO.ComfyNode):
         if sum(audio["waveform"].shape[-1] / audio["sample_rate"] for audio in audios) > MAX_REFERENCE_SECONDS:
             raise ValueError("Reference audio must be 15 seconds or shorter in total.")
 
-        image_urls = [
-            await upload_image_to_comfyapi(cls, image, mime_type="image/png", wait_label=f"Uploading image {i}")
-            for i, image in enumerate(images, 1)
-        ]
-        video_urls = [
-            await upload_video_to_comfyapi(
-                cls,
-                downscale_video_to_max_pixels(video, MAX_REFERENCE_VIDEO_PIXELS),
-                wait_label=f"Uploading video {i}",
-            )
-            for i, video in enumerate(videos, 1)
-        ]
-        audio_urls = [await _upload_audio(cls, audio) for audio in audios]
+        videos = [downscale_video_to_max_pixels(video, MAX_REFERENCE_VIDEO_PIXELS) for video in videos]
+        image_urls, video_urls, audio_urls = await asyncio.gather(
+            asyncio.gather(
+                *(
+                    upload_image_to_comfyapi(cls, image, mime_type="image/png", wait_label=f"Uploading image {i}")
+                    for i, image in enumerate(images, 1)
+                )
+            ),
+            asyncio.gather(
+                *(
+                    upload_video_to_comfyapi(cls, video, wait_label=f"Uploading video {i}")
+                    for i, video in enumerate(videos, 1)
+                )
+            ),
+            asyncio.gather(*(_upload_audio(cls, audio) for audio in audios)),
+        )
         first_frame_url = None
         if first_frame is not None:
             first_frame_url = await upload_image_to_comfyapi(

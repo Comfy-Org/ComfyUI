@@ -661,7 +661,7 @@ async def router_sync_op(
     )
 
 
-def _display_text(
+def display_text(
     node_cls: type[IO.ComfyNode],
     text: str | None,
     *,
@@ -717,7 +717,7 @@ def _display_time_progress(
             else:
                 time_line += " (taking longer than usual)"
     text = f"{time_line}\n\n{extra_text}" if extra_text else time_line
-    _display_text(node_cls, text, status=status, price=price)
+    display_text(node_cls, text, status=status, price=price)
 
 
 def _estimate_progress_pct(elapsed_seconds: float, p50_seconds: int | None, p90_seconds: int | None) -> int:

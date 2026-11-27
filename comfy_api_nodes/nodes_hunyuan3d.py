@@ -1,3 +1,4 @@
+import asyncio
 import zipfile
 from io import BytesIO
 
@@ -331,7 +332,7 @@ class TencentImageToModelNode(IO.ComfyNode):
         if model == "3.1" and generate_type["generate_type"].lower() == "lowpoly":
             raise ValueError("The LowPoly option is currently unavailable for the 3.1 model.")
         validate_image_dimensions(image, min_width=128, min_height=128)
-        multiview_images = []
+        views = {}
         for k, v in {
             "left": image_left,
             "right": image_right,
@@ -340,17 +341,18 @@ class TencentImageToModelNode(IO.ComfyNode):
             if v is None:
                 continue
             validate_image_dimensions(v, min_width=128, min_height=128)
-            multiview_images.append(
-                Hunyuan3DViewImage(
-                    ViewType=k,
-                    ViewImageUrl=await upload_image_to_comfyapi(
-                        cls,
-                        downscale_image_tensor_by_max_side(v, max_side=4900),
-                        mime_type="image/webp",
-                        total_pixels=24_010_000,
-                    ),
+            views[k] = downscale_image_tensor_by_max_side(v, max_side=4900)
+        image = downscale_image_tensor_by_max_side(image, max_side=4900)
+        view_urls, image_url = await asyncio.gather(
+            asyncio.gather(
+                *(
+                    upload_image_to_comfyapi(cls, v, mime_type="image/webp", total_pixels=24_010_000)
+                    for v in views.values()
                 )
-            )
+            ),
+            upload_image_to_comfyapi(cls, image, mime_type="image/webp", total_pixels=24_010_000),
+        )
+        multiview_images = [Hunyuan3DViewImage(ViewType=k, ViewImageUrl=url) for k, url in zip(views, view_urls)]
         response = await sync_op(
             cls,
             ApiEndpoint(path="/proxy/tencent/hunyuan/3d-pro", method="POST"),
@@ -359,12 +361,7 @@ class TencentImageToModelNode(IO.ComfyNode):
                 Model=model,
                 FaceCount=face_count,
                 GenerateType=generate_type["generate_type"],
-                ImageUrl=await upload_image_to_comfyapi(
-                    cls,
-                    downscale_image_tensor_by_max_side(image, max_side=4900),
-                    mime_type="image/webp",
-                    total_pixels=24_010_000,
-                ),
+                ImageUrl=image_url,
                 MultiViewImages=multiview_images if multiview_images else None,
                 EnablePBR=generate_type.get("pbr", None),
                 PolygonType=generate_type.get("polygon_type", None),

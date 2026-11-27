@@ -3,6 +3,7 @@ API Nodes for Gemini Multimodal LLM Usage via Remote API
 See: https://cloud.google.com/vertex-ai/generative-ai/docs/model-reference/inference
 """
 
+import asyncio
 import base64
 import os
 from fnmatch import fnmatch
@@ -120,18 +121,11 @@ async def create_image_parts(
 
     # Number of images we'll send as URLs (fileData)
     num_url_images = min(effective_max, 10)  # Vertex API max number of image links
-    upload_kwargs: dict = {"wait_label": "Uploading reference images"}
-    if effective_max > num_url_images:
-        # Split path (e.g. 11+ images): suppress per-image counter to avoid a confusing dual-fraction label.
-        upload_kwargs = {
-            "wait_label": f"Uploading reference images ({num_url_images}+)",
-            "show_batch_index": False,
-        }
     reference_images_urls = await upload_images_to_comfyapi(
         cls,
         images_list,
         max_images=num_url_images,
-        **upload_kwargs,
+        wait_label="Uploading reference images",
     )
     for reference_image_url in reference_images_urls:
         image_parts.append(
@@ -431,13 +425,12 @@ async def build_gemini_media_parts(
         + [("image", f) for f in _flatten_images(images)]
     )
 
+    url_parts = await asyncio.gather(*(_media_url_part(cls, kind, payload) for kind, payload in units[:url_budget]))
     parts: list[GeminiPart] = []
-    url_used = 0
     inline_bytes = 0
-    for kind, payload in units:
-        if url_used < url_budget:
-            part = await _media_url_part(cls, kind, payload)
-            url_used += 1
+    for i, (kind, payload) in enumerate(units):
+        if i < url_budget:
+            part = url_parts[i]
         else:
             part, nbytes = _media_inline_part(kind, payload)
             inline_bytes += nbytes

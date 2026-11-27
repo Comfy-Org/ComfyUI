@@ -4,6 +4,7 @@ For source of truth on the allowed permutations of request fields, please refere
 - [Compatibility Table](https://app.klingai.com/global/dev/document-api/apiReference/model/skillsMap)
 """
 
+import asyncio
 import logging
 import re
 
@@ -2104,14 +2105,18 @@ class MotionControl(IO.ComfyNode):
         else:
             validate_video_duration(reference_video, min_duration=3, max_duration=30)
         validate_video_dimensions(reference_video, min_width=340, min_height=340, max_width=3850, max_height=3850)
+        image_url, video_url = await asyncio.gather(
+            upload_image_to_comfyapi(cls, reference_image),
+            upload_video_to_comfyapi(cls, reference_video),
+        )
         response = await sync_op(
             cls,
             ApiEndpoint(path="/proxy/kling/v1/videos/motion-control", method="POST"),
             response_model=TaskStatusResponse,
             data=MotionControlRequest(
                 prompt=prompt,
-                image_url=(await upload_images_to_comfyapi(cls, reference_image))[0],
-                video_url=await upload_video_to_comfyapi(cls, reference_video),
+                image_url=image_url,
+                video_url=video_url,
                 keep_original_sound="yes" if keep_original_sound else "no",
                 character_orientation=character_orientation,
                 mode=mode,
@@ -2539,8 +2544,10 @@ class KlingFirstLastFrameNode(IO.ComfyNode):
         validate_image_aspect_ratio(first_frame, (1, 2.5), (2.5, 1))
         validate_image_dimensions(end_frame, min_width=300, min_height=300)
         validate_image_aspect_ratio(end_frame, (1, 2.5), (2.5, 1))
-        image_url = await upload_image_to_comfyapi(cls, first_frame, wait_label="Uploading first frame")
-        image_tail_url = await upload_image_to_comfyapi(cls, end_frame, wait_label="Uploading end frame")
+        image_url, image_tail_url = await asyncio.gather(
+            upload_image_to_comfyapi(cls, first_frame, wait_label="Uploading first frame"),
+            upload_image_to_comfyapi(cls, end_frame, wait_label="Uploading end frame"),
+        )
         if model["resolution"] == "4k":
             mode = "4k"
         elif model["resolution"] == "1080p":
@@ -2644,15 +2651,19 @@ class KlingAvatarNode(IO.ComfyNode):
         validate_image_dimensions(image, min_width=300, min_height=300)
         validate_image_aspect_ratio(image, (1, 2.5), (2.5, 1))
         validate_audio_duration(sound_file, min_duration=2, max_duration=300)
+        image_url, sound_file_url = await asyncio.gather(
+            upload_image_to_comfyapi(cls, image),
+            upload_audio_to_comfyapi(
+                cls, sound_file, container_format="mp3", codec_name="libmp3lame", mime_type="audio/mpeg"
+            ),
+        )
         response = await sync_op(
             cls,
             ApiEndpoint(path="/proxy/kling/v1/videos/avatar/image2video", method="POST"),
             response_model=TaskStatusResponse,
             data=KlingAvatarRequest(
-                image=await upload_image_to_comfyapi(cls, image),
-                sound_file=await upload_audio_to_comfyapi(
-                    cls, sound_file, container_format="mp3", codec_name="libmp3lame", mime_type="audio/mpeg"
-                ),
+                image=image_url,
+                sound_file=sound_file_url,
                 prompt=prompt or None,
                 mode=mode,
             ),
@@ -2743,6 +2754,18 @@ class KlingTryOnNode(IO.ComfyNode):
         seed: int,
     ) -> IO.NodeOutput:
         _ = seed
+        garment_url, person_url = await asyncio.gather(
+            upload_image_to_comfyapi(
+                cls,
+                downscale_image_tensor_by_max_side(garment_image, max_side=2048),
+                wait_label="Uploading garment image",
+            ),
+            upload_image_to_comfyapi(
+                cls,
+                downscale_image_tensor_by_max_side(person_image, max_side=2048),
+                wait_label="Uploading person image",
+            ),
+        )
         response = await sync_op(
             cls,
             ApiEndpoint(path="/proxy/kling/solutions/virtual_try_on", method="POST"),
@@ -2751,19 +2774,11 @@ class KlingTryOnNode(IO.ComfyNode):
                 contents=[
                     KlingSolutionContent(
                         type="product_image",
-                        url=await upload_image_to_comfyapi(
-                            cls,
-                            downscale_image_tensor_by_max_side(garment_image, max_side=2048),
-                            wait_label="Uploading garment image",
-                        ),
+                        url=garment_url,
                     ),
                     KlingSolutionContent(
                         type="person_image",
-                        url=await upload_image_to_comfyapi(
-                            cls,
-                            downscale_image_tensor_by_max_side(person_image, max_side=2048),
-                            wait_label="Uploading person image",
-                        ),
+                        url=person_url,
                     ),
                 ],
                 settings=KlingTryOnSettings(keep_pose=keep_pose),
@@ -2913,12 +2928,17 @@ def _validate_kling4_videos(videos: list[Input.Video], max_seconds: float) -> No
 async def _kling4_media_contents(
     cls: type[IO.ComfyNode], images: list[torch.Tensor], videos: list[tuple[str, Input.Video]]
 ) -> list[Kling4Content]:
-    contents = []
-    if images:
-        urls = await upload_images_to_comfyapi(cls, images, max_images=10, wait_label="Uploading reference images")
-        contents.extend(Kling4Content(type="refer_image", url=url, id=f"image_{i}") for i, url in enumerate(urls, 1))
-    for i, (video_type, video) in enumerate(videos, 1):
-        url = await upload_video_to_comfyapi(cls, video, wait_label=f"Uploading video {i}")
+    image_urls, video_urls = await asyncio.gather(
+        upload_images_to_comfyapi(cls, images, max_images=10, wait_label="Uploading reference images"),
+        asyncio.gather(
+            *(
+                upload_video_to_comfyapi(cls, video, wait_label=f"Uploading video {i}")
+                for i, (_, video) in enumerate(videos, 1)
+            )
+        ),
+    )
+    contents = [Kling4Content(type="refer_image", url=url, id=f"image_{i}") for i, url in enumerate(image_urls, 1)]
+    for i, ((video_type, _), url) in enumerate(zip(videos, video_urls), 1):
         contents.append(Kling4Content(type=video_type, url=url, id=f"video_{i}"))
     return contents
 
@@ -3230,10 +3250,18 @@ class Kling4ReferenceToVideoNode(IO.ComfyNode):
             prompt = f"The video starts exactly on @first_frame. {prompt}"
         if model.get("last_frame") is not None:
             prompt = f"{prompt} The video ends exactly on @last_frame."
+        media_contents, keyframe_urls = await asyncio.gather(
+            _kling4_media_contents(cls, images, [("feature_video", video) for video in videos]),
+            asyncio.gather(
+                *(
+                    upload_image_to_comfyapi(cls, image, wait_label=f"Uploading {name.replace('_', ' ')}")
+                    for name, image in keyframes
+                )
+            ),
+        )
         contents = [Kling4Content(type="prompt", text=prompt)]
-        contents.extend(await _kling4_media_contents(cls, images, [("feature_video", video) for video in videos]))
-        for name, image in keyframes:
-            url = await upload_image_to_comfyapi(cls, image, wait_label=f"Uploading {name.replace('_', ' ')}")
+        contents.extend(media_contents)
+        for (name, _), url in zip(keyframes, keyframe_urls):
             contents.append(Kling4Content(type=name, url=url, id=name))
         return await _run_kling_task(
             cls,
@@ -3539,8 +3567,10 @@ class Kling4LongImageNode(IO.ComfyNode):
             prompt = _kling4_webpage_prompt(skill["prompt"], skill["style_image"], skill["subject_image"])
             validate_string(prompt, min_length=1, max_length=166000)
             contents = [Kling4Content(type="prompt", text=prompt)]
-            for index, kind, image in refs:
-                url = await upload_image_to_comfyapi(cls, image, wait_label=f"Uploading {kind} image")
+            urls = await asyncio.gather(
+                *(upload_image_to_comfyapi(cls, image, wait_label=f"Uploading {kind} image") for _, kind, image in refs)
+            )
+            for (index, kind, _), url in zip(refs, urls):
                 contents.append(Kling4Content(type=f"{kind}_refer_image", url=url, id=f"image_{index}"))
             settings = Kling4LongImageSettings(skill="webpage", resolution=skill["resolution"].lower())
         else:

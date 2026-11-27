@@ -1,3 +1,5 @@
+import asyncio
+
 from typing_extensions import override
 
 from comfy_api.latest import IO, ComfyExtension, Input
@@ -489,10 +491,9 @@ class ViduStartEndToVideoNode(IO.ComfyNode):
             resolution=resolution,
             movement_amplitude=movement_amplitude,
         )
-        payload.images = [
-            (await upload_images_to_comfyapi(cls, frame, max_images=1, mime_type="image/png"))[0]
-            for frame in (first_frame, end_frame)
-        ]
+        payload.images = await asyncio.gather(
+            *(upload_image_to_comfyapi(cls, frame, mime_type="image/png") for frame in (first_frame, end_frame))
+        )
         results = await execute_task(cls, VIDU_START_END_VIDEO, payload)
         return IO.NodeOutput(await download_url_to_video_output(results[0].url))
 
@@ -825,20 +826,19 @@ class Vidu2ReferenceVideoNode(IO.ComfyNode):
                 validate_image_dimensions(im, min_width=128, min_height=128)
         if total_images > 7:
             raise ValueError("Too many reference images; the maximum allowed is 7.")
-        subjects_param: list[SubjectReference] = []
-        for i in subjects:
-            subjects_param.append(
-                SubjectReference(
-                    id=i,
-                    images=await upload_images_to_comfyapi(
-                        cls,
-                        subjects[i],
-                        max_images=3,
-                        mime_type="image/png",
-                        wait_label=f"Uploading reference images for {i}",
-                    ),
-                ),
+        subject_urls = await asyncio.gather(
+            *(
+                upload_images_to_comfyapi(
+                    cls,
+                    subjects[i],
+                    max_images=3,
+                    mime_type="image/png",
+                    wait_label=f"Uploading reference images for {i}",
+                )
+                for i in subjects
             )
+        )
+        subjects_param = [SubjectReference(id=i, images=urls) for i, urls in zip(subjects, subject_urls)]
         payload = TaskCreationRequest(
             model=model,
             prompt=prompt,
@@ -965,10 +965,9 @@ class Vidu2StartEndToVideoNode(IO.ComfyNode):
             seed=seed,
             resolution=resolution,
             movement_amplitude=movement_amplitude,
-            images=[
-                (await upload_images_to_comfyapi(cls, frame, max_images=1, mime_type="image/png"))[0]
-                for frame in (first_frame, end_frame)
-            ],
+            images=await asyncio.gather(
+                *(upload_image_to_comfyapi(cls, frame, mime_type="image/png") for frame in (first_frame, end_frame))
+            ),
         )
         results = await execute_task(cls, VIDU_START_END_VIDEO, payload)
         return IO.NodeOutput(await download_url_to_video_output(results[0].url))
@@ -1255,22 +1254,30 @@ class ViduMultiFrameVideoNode(IO.ComfyNode):
         for i in range(1, frame_count + 1):
             validate_image_aspect_ratio(frames[f"end_image{i}"], (1, 4), (4, 1))
             validate_string(frames[f"prompt{i}"], max_length=2000)
-        start_image_url = await upload_image_to_comfyapi(
-            cls,
-            start_image,
-            mime_type="image/png",
-            wait_label="Uploading start image",
-        )
-        for i in range(1, frame_count + 1):
-            image_settings.append(
-                FrameSetting(
-                    prompt=frames[f"prompt{i}"],
-                    key_image=await upload_image_to_comfyapi(
+        start_image_url, key_image_urls = await asyncio.gather(
+            upload_image_to_comfyapi(
+                cls,
+                start_image,
+                mime_type="image/png",
+                wait_label="Uploading start image",
+            ),
+            asyncio.gather(
+                *(
+                    upload_image_to_comfyapi(
                         cls,
                         frames[f"end_image{i}"],
                         mime_type="image/png",
                         wait_label=f"Uploading end image({i})",
-                    ),
+                    )
+                    for i in range(1, frame_count + 1)
+                )
+            ),
+        )
+        for i, key_image_url in enumerate(key_image_urls, 1):
+            image_settings.append(
+                FrameSetting(
+                    prompt=frames[f"prompt{i}"],
+                    key_image=key_image_url,
                     duration=frames[f"duration{i}"],
                 )
             )
@@ -1706,10 +1713,9 @@ class Vidu3StartEndToVideoNode(IO.ComfyNode):
             seed=seed,
             resolution=model["resolution"],
             audio=model["audio"],
-            images=[
-                (await upload_images_to_comfyapi(cls, frame, max_images=1, mime_type="image/png"))[0]
-                for frame in (first_frame, end_frame)
-            ],
+            images=await asyncio.gather(
+                *(upload_image_to_comfyapi(cls, frame, mime_type="image/png") for frame in (first_frame, end_frame))
+            ),
         )
         results = await execute_task(cls, VIDU_START_END_VIDEO, payload)
         return IO.NodeOutput(await download_url_to_video_output(results[0].url))
@@ -1943,6 +1949,27 @@ class Vidu4ReferenceVideoNode(IO.ComfyNode):
             raise ValueError("Reference audio requires 'audio' to be enabled.")
         for audio in reference_audios:
             validate_audio_duration(audio, min_duration=3, max_duration=12)
+        image_urls, sound_urls = await asyncio.gather(
+            upload_images_to_comfyapi(
+                cls,
+                reference_images,
+                max_images=15,
+                mime_type="image/png",
+                wait_label="Uploading reference images",
+            ),
+            asyncio.gather(
+                *(
+                    upload_audio_to_comfyapi(
+                        cls,
+                        audio,
+                        container_format="mp3",
+                        codec_name="libmp3lame",
+                        mime_type="audio/mpeg",
+                    )
+                    for audio in reference_audios
+                )
+            ),
+        )
         payload = TaskCreationRequest(
             model=VIDU_Q4_MODELS[model["model"]],
             prompt=model["prompt"].strip(),
@@ -1951,23 +1978,8 @@ class Vidu4ReferenceVideoNode(IO.ComfyNode):
             aspect_ratio=model["aspect_ratio"],
             resolution=model["resolution"],
             audio=model["audio"],
-            images=await upload_images_to_comfyapi(
-                cls,
-                reference_images,
-                max_images=15,
-                mime_type="image/png",
-                wait_label="Uploading reference images",
-            ),
-            sounds=[
-                await upload_audio_to_comfyapi(
-                    cls,
-                    audio,
-                    container_format="mp3",
-                    codec_name="libmp3lame",
-                    mime_type="audio/mpeg",
-                )
-                for audio in reference_audios
-            ],
+            images=image_urls,
+            sounds=sound_urls,
         )
         results = await execute_task(cls, VIDU_REFERENCE_VIDEO, payload, max_poll_attempts=1440)
         return IO.NodeOutput(await download_url_to_video_output(results[0].url))

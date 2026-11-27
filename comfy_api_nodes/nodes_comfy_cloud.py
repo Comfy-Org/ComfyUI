@@ -1,3 +1,4 @@
+import asyncio
 import contextlib
 import math
 import posixpath
@@ -817,16 +818,14 @@ class ComfyCloudMiniMaxH3ReferenceToVideoNode(IO.ComfyNode):
             raise ValueError(f"At most {_MINIMAX_H3_MAX_AUDIO_REFERENCES} reference audio inputs are supported.")
         # Numbered by connection order, which is the order the prompt's
         # <Picture i> tags refer to them in.
-        assets = {
-            f"reference_image_{index}": await _minimax_h3_asset(cls, image)
-            for index, image in enumerate(images, 1)
-        }
+        image_assets, audio_assets = await asyncio.gather(
+            asyncio.gather(*(_minimax_h3_asset(cls, image) for image in images)),
+            asyncio.gather(*(_minimax_h3_audio_asset(cls, audio) for audio in audios)),
+        )
+        assets = {f"reference_image_{index}": asset for index, asset in enumerate(image_assets, 1)}
         if ref_video is not None:
             assets["ref_video"] = await _minimax_h3_video_asset(cls, ref_video)
-        assets.update({
-            f"ref_audio_{index}": await _minimax_h3_audio_asset(cls, audio)
-            for index, audio in enumerate(audios, 1)
-        })
+        assets.update({f"ref_audio_{index}": asset for index, asset in enumerate(audio_assets, 1)})
         return await _run_video_workflow(
             cls,
             "minimax-h3/reference-to-video",

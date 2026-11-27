@@ -1,3 +1,4 @@
+import asyncio
 import re
 
 from typing_extensions import override
@@ -778,11 +779,11 @@ class WanReferenceVideoApi(IO.ComfyNode):
         shot_type: str,
         watermark: bool,
     ):
-        reference_video_urls = []
         for i in reference_videos:
             validate_video_duration(reference_videos[i], min_duration=2, max_duration=30)
-        for i in reference_videos:
-            reference_video_urls.append(await upload_video_to_comfyapi(cls, reference_videos[i]))
+        reference_video_urls = await asyncio.gather(
+            *(upload_video_to_comfyapi(cls, reference_videos[i]) for i in reference_videos)
+        )
         width, height = RES_IN_PARENS.search(size).groups()
         response = await router_op(
             cls,
@@ -1378,14 +1379,13 @@ class Wan2VideoEditApi(IO.ComfyNode):
         validate_string(model["prompt"], strip_whitespace=False, min_length=1)
         validate_video_duration(video, min_duration=2, max_duration=10)
         duration = 0 if model["duration"] == "auto" else int(model["duration"])
-        media = [Wan27MediaItem(type="video", url=await upload_video_to_comfyapi(cls, video))]
         reference_images = model.get("reference_images", {})
-        for key in reference_images:
-            media.append(
-                Wan27MediaItem(
-                    type="reference_image", url=await upload_image_to_comfyapi(cls, image=reference_images[key])
-                )
-            )
+        video_url, image_urls = await asyncio.gather(
+            upload_video_to_comfyapi(cls, video),
+            asyncio.gather(*(upload_image_to_comfyapi(cls, image=reference_images[key]) for key in reference_images)),
+        )
+        media = [Wan27MediaItem(type="video", url=video_url)]
+        media.extend(Wan27MediaItem(type="reference_image", url=url) for url in image_urls)
         response = await router_op(
             cls,
             f"wan/{model['model']}",
@@ -1524,20 +1524,14 @@ class Wan2ReferenceVideoApi(IO.ComfyNode):
         watermark: bool,
     ):
         validate_string(model["prompt"], strip_whitespace=False, min_length=1)
-        media = []
         reference_videos = model.get("reference_videos", {})
-        for key in reference_videos:
-            media.append(
-                Wan27MediaItem(type="reference_video", url=await upload_video_to_comfyapi(cls, reference_videos[key]))
-            )
         reference_images = model.get("reference_images", {})
-        for key in reference_images:
-            media.append(
-                Wan27MediaItem(
-                    type="reference_image",
-                    url=await upload_image_to_comfyapi(cls, image=reference_images[key]),
-                )
-            )
+        video_urls, image_urls = await asyncio.gather(
+            asyncio.gather(*(upload_video_to_comfyapi(cls, reference_videos[key]) for key in reference_videos)),
+            asyncio.gather(*(upload_image_to_comfyapi(cls, image=reference_images[key]) for key in reference_images)),
+        )
+        media = [Wan27MediaItem(type="reference_video", url=url) for url in video_urls]
+        media.extend(Wan27MediaItem(type="reference_image", url=url) for url in image_urls)
         if not media:
             raise ValueError("At least one reference video or reference image must be provided.")
         if len(media) > 5:
@@ -1810,28 +1804,25 @@ class Wan3ReferenceToVideoApi(IO.ComfyNode):
         validate_string(prompt, strip_whitespace=False, max_length=20000)
         if not prompt.strip() and not (reference_images or reference_videos or reference_audios):
             raise ValueError("Provide a prompt or at least one reference input.")
-        media = []
-        for key in reference_images:
-            media.append(
-                Wan3MediaItem(type="reference_image", url=await upload_image_to_comfyapi(cls, reference_images[key]))
-            )
-        for key in reference_videos:
-            media.append(
-                Wan3MediaItem(type="reference_video", url=await upload_video_to_comfyapi(cls, reference_videos[key]))
-            )
-        for key in reference_audios:
-            media.append(
-                Wan3MediaItem(
-                    type="reference_audio",
-                    url=await upload_audio_to_comfyapi(
+        image_urls, video_urls, audio_urls = await asyncio.gather(
+            asyncio.gather(*(upload_image_to_comfyapi(cls, reference_images[key]) for key in reference_images)),
+            asyncio.gather(*(upload_video_to_comfyapi(cls, reference_videos[key]) for key in reference_videos)),
+            asyncio.gather(
+                *(
+                    upload_audio_to_comfyapi(
                         cls,
                         reference_audios[key],
                         container_format="mp3",
                         codec_name="libmp3lame",
                         mime_type="audio/mpeg",
-                    ),
+                    )
+                    for key in reference_audios
                 )
-            )
+            ),
+        )
+        media = [Wan3MediaItem(type="reference_image", url=url) for url in image_urls]
+        media.extend(Wan3MediaItem(type="reference_video", url=url) for url in video_urls)
+        media.extend(Wan3MediaItem(type="reference_audio", url=url) for url in audio_urls)
         response = await router_op(
             cls,
             f"wan/{model['model']}",
@@ -2436,14 +2427,13 @@ class HappyHorseVideoEditApi(IO.ComfyNode):
     ):
         validate_string(model["prompt"], strip_whitespace=False, min_length=1)
         validate_video_duration(video, min_duration=3, max_duration=60)
-        media = [Wan27MediaItem(type="video", url=await upload_video_to_comfyapi(cls, video))]
         reference_images = model.get("reference_images", {})
-        for key in reference_images:
-            media.append(
-                Wan27MediaItem(
-                    type="reference_image", url=await upload_image_to_comfyapi(cls, image=reference_images[key])
-                )
-            )
+        video_url, image_urls = await asyncio.gather(
+            upload_video_to_comfyapi(cls, video),
+            asyncio.gather(*(upload_image_to_comfyapi(cls, image=reference_images[key]) for key in reference_images)),
+        )
+        media = [Wan27MediaItem(type="video", url=video_url)]
+        media.extend(Wan27MediaItem(type="reference_image", url=url) for url in image_urls)
         response = await router_op(
             cls,
             f"wan/{model['model']}",
@@ -2634,14 +2624,10 @@ class HappyHorseReferenceVideoApi(IO.ComfyNode):
         for key in reference_images:
             validate_image_dimensions(reference_images[key], min_width=400, min_height=400)
             validate_image_aspect_ratio(reference_images[key], (1, 2.5), (2.5, 1), strict=False)
-        media = []
-        for key in reference_images:
-            media.append(
-                Wan27MediaItem(
-                    type="reference_image",
-                    url=await upload_image_to_comfyapi(cls, image=reference_images[key]),
-                )
-            )
+        image_urls = await asyncio.gather(
+            *(upload_image_to_comfyapi(cls, image=reference_images[key]) for key in reference_images)
+        )
+        media = [Wan27MediaItem(type="reference_image", url=url) for url in image_urls]
         if not media:
             raise ValueError("At least one reference image must be provided.")
 

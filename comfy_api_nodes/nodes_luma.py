@@ -1,3 +1,5 @@
+import asyncio
+
 import torch
 from typing_extensions import override
 
@@ -59,10 +61,8 @@ async def _luma2_upload_image_refs(
 ) -> list[Luma2ImageRef] | None:
     if not refs:
         return None
-    out: list[Luma2ImageRef] = []
-    for key in refs:
-        url = await upload_image_to_comfyapi(cls, refs[key])
-        out.append(Luma2ImageRef(url=url))
+    urls = await asyncio.gather(*(upload_image_to_comfyapi(cls, image) for image in refs.values()))
+    out = [Luma2ImageRef(url=url) for url in urls]
     if len(out) > max_count:
         raise ValueError(f"Maximum {max_count} reference images are allowed.")
     return out or None
@@ -271,15 +271,19 @@ class LumaImageEditNode(IO.ComfyNode):
         seed: int,
     ) -> IO.NodeOutput:
         validate_string(prompt, min_length=1, max_length=6000)
+        source_url, image_ref = await asyncio.gather(
+            upload_image_to_comfyapi(cls, source),
+            _luma2_upload_image_refs(cls, model.get("image_ref"), max_count=8),
+        )
         request = Luma2GenerationRequest(
             prompt=prompt,
             model=model["model"],
             type="image_edit",
-            source=Luma2ImageRef(url=await upload_image_to_comfyapi(cls, source)),
+            source=Luma2ImageRef(url=source_url),
             style=model["style"] if model["style"] != "auto" else None,
             output_format="png",
             web_search=model["web_search"],
-            image_ref=await _luma2_upload_image_refs(cls, model.get("image_ref"), max_count=8),
+            image_ref=image_ref,
         )
         final = await router_op(cls, f"luma_2/{request.model}", response_model=Luma2Generation, data=request)
         return IO.NodeOutput(await download_url_to_image_tensor(final.output[0].url))
@@ -603,10 +607,10 @@ class LumaRay32KeyframesToVideoNode(IO.ComfyNode):
                     f"Two keyframes resolve to the same output frame ({a}) for a {duration} video "
                     f"(valid range 0-{maxframe}); give each keyframe a distinct position."
                 )
-        refs: list[Luma2ImageRef] = []
-        for _, image in placed:
-            url = await upload_image_to_comfyapi(cls, image, mime_type="image/png")
-            refs.append(Luma2ImageRef(url=url))
+        urls = await asyncio.gather(
+            *(upload_image_to_comfyapi(cls, image, mime_type="image/png") for _, image in placed)
+        )
+        refs = [Luma2ImageRef(url=url) for url in urls]
         request = Luma2GenerationRequest(
             prompt=prompt,
             model="ray-3.2",
