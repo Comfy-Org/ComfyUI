@@ -891,7 +891,6 @@ def free_memory(memory_required, device, keep_loaded=[], for_dynamic=False, pins
     cleanup_models_gc()
     if not for_dynamic:
         detail("Non dynamic memory free called! memory_required=%s pins_required=%s ram_required=%s", memory_required, pins_required, ram_required)
-    unloaded_model = []
     can_unload = []
     unloaded_models = []
 
@@ -899,32 +898,33 @@ def free_memory(memory_required, device, keep_loaded=[], for_dynamic=False, pins
         shift_model = current_loaded_models[i]
         if device is None or shift_model.device == device:
             if shift_model not in keep_loaded and not shift_model.is_dead():
-                can_unload.append((-shift_model.model_offloaded_memory(), sys.getrefcount(shift_model.model), shift_model.model_memory(), i))
+                can_unload.append((-shift_model.model_offloaded_memory(), sys.getrefcount(shift_model.model), shift_model.model_memory(), i, shift_model))
                 shift_model.currently_used = False
 
     can_unload_sorted = sorted(can_unload)
     for x in can_unload_sorted:
-        i = x[-1]
+        #unloading can free other models, their finalizer pops from current_loaded_models so the indexes can't be used here
+        shift_model = x[-1]
+        if shift_model.model is None:
+            continue
         memory_to_free = 1e32
         if not DISABLE_SMART_MEMORY or device is None:
             memory_to_free = 0 if device is None else memory_required - get_free_memory(device)
-            if current_loaded_models[i].model.is_dynamic() and for_dynamic:
+            if shift_model.model.is_dynamic() and for_dynamic:
                 #don't actually unload dynamic models for the sake of other dynamic models
                 #as that works on-demand.
-                memory_required -= current_loaded_models[i].model.loaded_size()
+                memory_required -= shift_model.model.loaded_size()
                 memory_to_free = 0
-        if memory_to_free > 0 and current_loaded_models[i].model_unload(memory_to_free):
-            logging.debug(f"Unloading {current_loaded_models[i].model.model.__class__.__name__}")
-            unloaded_model.append(i)
-
-    for i in sorted(unloaded_model, reverse=True):
-        unloaded_models.append(current_loaded_models.pop(i))
+        if memory_to_free > 0 and shift_model.model_unload(memory_to_free):
+            logging.debug(f"Unloading {shift_model.model.model.__class__.__name__}")
+            current_loaded_models[:] = [m for m in current_loaded_models if m is not shift_model]
+            unloaded_models.append(shift_model)
 
     if not for_dynamic and pins_required > 0:
         ensure_pin_budget(pins_required)
         ensure_pin_registerable(pins_required)
 
-    if len(unloaded_model) > 0:
+    if len(unloaded_models) > 0:
         soft_empty_cache()
     elif device is not None:
         if vram_state != VRAMState.HIGH_VRAM:
