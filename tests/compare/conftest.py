@@ -27,12 +27,11 @@ def args_pytest(pytestconfig):
     return args
 
 
-def gather_file_basenames(directory: str):
-    files = []
-    for file in os.listdir(directory):
-        if file.endswith(".png"):
-            files.append(file)
-    return files
+def gather_file_basenames(directory: str) -> list[str]:
+    assert isinstance(directory, str), f"directory must be str, got {type(directory).__name__}"
+    if not os.path.isdir(directory):
+        return []
+    return [file for file in os.listdir(directory) if file.endswith(".png")]
 
 # Creates the list of baseline file names to use as a fixture
 def pytest_generate_tests(metafunc):
