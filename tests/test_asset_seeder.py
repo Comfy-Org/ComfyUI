@@ -92,6 +92,7 @@ class TestEnqueueScanStartsImmediately:
                 phase=ScanPhase.ENRICH,
                 prune_first=False,
                 compute_hashes=True,
+                _queued=True,
             )
 
     def test_no_pending_when_started_immediately(self, seeder):
@@ -237,6 +238,7 @@ class TestPendingScanDrain:
                 prune_first=False,
                 compute_hashes=True,
                 _start_paused=False,
+                _queued=True,
             )
 
         assert seeder._pending_scan is None
