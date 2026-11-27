@@ -6,13 +6,25 @@ from comfy.cli_args import args
 
 args.cpu = True
 
+import comfy.hooks
 import comfy.model_management
 import comfy.ops
 import comfy.sd
 import nodes
 from comfy_extras.nodes_hidream_o1 import HiDreamO1ReferenceImages
 from comfy.ldm.sensenova import model as sensenova_model
-from comfy.ldm.sensenova.conditioning import prepare_interleave_image
+from comfy.ldm.sensenova.conditioning import (
+    IMAGE_CONTEXT_ID,
+    IMAGE_END_ID,
+    IMAGE_START_ID,
+    IM_END_ID,
+    IM_START_ID,
+    NEWLINE_ID,
+    multi_turn_suffix_ids,
+    prepare_incremental_prefix_inputs,
+    prepare_interleave_image,
+    prepare_prefix_inputs,
+)
 from comfy.text_encoders.sensenova import (
     INTERLEAVE_SYSTEM_MESSAGE,
     SenseNovaQwenTokenizer,
@@ -26,6 +38,7 @@ from comfy_extras.nodes_sensenova import (
     append_interleave_image,
     append_interleave_tokens,
     expand_interleave_metadata,
+    expand_multi_turn_metadata,
     SenseNovaConditioning,
     SenseNovaInterleaveDecode,
 )
@@ -1042,3 +1055,393 @@ def test_sensenova_generate_requires_clip_for_text():
             conditioning=[[torch.empty(1), {}]],
             task={"task": "image thinking"}, max_tokens=8,
         )
+
+
+def test_sensenova_multi_turn_continues_scheduled_clip(native_sensenova_clip, monkeypatch):
+    clip = native_sensenova_clip
+    hook = comfy.hooks.WeightHook()
+    hook.hook_keyframe.add(comfy.hooks.HookKeyframe(0.25))
+    hook.hook_keyframe.add(comfy.hooks.HookKeyframe(0.75, start_percent=0.5))
+    clip.patcher.forced_hooks = comfy.hooks.HookGroup()
+    clip.patcher.forced_hooks.add(hook)
+    clip.use_clip_schedule = True
+    calls = []
+
+    def encode(tokens):
+        assert "past_prefix_keys" not in tokens
+        ids = clip.cond_stage_model._input_ids(tokens)
+        kv = torch.full((1, 1, ids.shape[1], 1), hook.strength)
+        calls.append(hook.strength)
+        return ids.unsqueeze(-1).float(), None, {"text_input_ids": ids, "prefix_keys": [kv], "prefix_values": [kv]}
+
+    monkeypatch.setattr(clip.cond_stage_model, "encode_token_weights", encode)
+    positive = nodes.CLIPTextEncode().encode(clip, "first")[0]
+    negative = nodes.CLIPTextEncode().encode(clip, "")[0]
+    for entries in (positive, negative):
+        entries[0][1]["strength"] = 0.3
+        entries[1][1]["strength"] = 0.9
+    calls.clear()
+    initial, _, neg_history, _ = SenseNovaConditioning.execute(
+        clip=clip, conditioning=positive, negative=negative, task={"task": "multi-turn edit"}, max_tokens=1,
+    ).args
+    assert calls == [0.25, 0.75] * 2
+    assert [m["strength"] for _, m in initial] == [0.3, 0.9]
+
+    # The active schedule changes between turns. Only overlapping ranges contribute.
+    hook.hook_keyframe.keyframes[1].start_percent = 0.75
+    current = nodes.CLIPTextEncode().encode(clip, "second")[0]
+    sampler_hooks = comfy.hooks.HookGroup()
+    sampler_hooks.add(comfy.hooks.WeightHook())
+    current[0][1].update(start_percent=0.1, end_percent=0.95, hooks=sampler_hooks)
+    clip.apply_hooks_to_conds = clip.patcher.forced_hooks
+    calls.clear()
+    continued, _, neg, _ = SenseNovaConditioning.execute(
+        clip=clip, conditioning=current, negative=neg_history,
+        task={"task": "multi-turn edit", "previous": initial, "samples": {"samples": torch.zeros(1, 3, 32, 32)}},
+        max_tokens=1,
+    ).args
+    assert calls == [0.25, 0.25, 0.75] * 2
+    for entries, history in ((continued, initial), (neg, neg_history)):
+        assert [(m["clip_start_percent"], m["clip_end_percent"]) for _, m in entries] == [
+            (0.0, 0.5), (0.5, 0.75), (0.75, 1.0),
+        ]
+        for (_, meta), weight in zip(entries, (0.25, 0.25, 0.75), strict=True):
+            assert meta["text_input_ids"].shape[1] > history[0][1]["text_input_ids"].shape[1]
+            assert torch.all(meta["prefix_keys"][0] == weight)
+            assert torch.all(meta["prefix_values"][0] == weight)
+    assert [m["strength"] for _, m in neg] == [0.3, 0.9, 0.9]
+    assert [m["hooks"] for _, m in continued] == [sampler_hooks, sampler_hooks, clip.apply_hooks_to_conds]
+    assert all(m["hooks"] is clip.apply_hooks_to_conds for _, m in neg)
+    assert [(m.get("start_percent"), m.get("end_percent")) for _, m in continued] == [
+        (0.1, 0.95), (0.1, 0.95), (None, None),
+    ]
+
+
+def test_sensenova_multi_turn_empty_prompt_places_reference_in_user_message():
+    metadata = {"text_input_ids": _tokenize_generation_prompt(""), "reference_latents": [torch.zeros(1, 32, 32, 3)]}
+    expanded = expand_multi_turn_metadata(metadata, image_only=False)
+    ids = expanded["text_input_ids"][0].tolist()
+    decoded = SenseNovaQwenTokenizer().tokenizer.decode(ids, skip_special_tokens=False)
+    assert decoded == "<|im_start|>user\n<img><IMG_CONTEXT></img><|im_end|>\n<|im_start|>assistant\n<img>"
+
+
+def test_sensenova_multi_turn_edit_builds_protocol_and_uses_incremental_cache():
+    tokenizer = SenseNovaQwenTokenizer()
+
+    class RecordingClip:
+        def __init__(self):
+            self.calls = []
+
+        def encode_from_tokens_scheduled(self, tokens):
+            self.calls.append(dict(tokens))
+            ids = tokens["text_input_ids"]
+            refs = tokens.get("reference_latents") or []
+            seq_len = int(ids.shape[1])
+            return [
+                [
+                    ids.unsqueeze(-1).float(),
+                    {
+                        "text_input_ids": ids,
+                        "reference_latents": refs,
+                        "prefix_keys": [torch.zeros((1, 8, seq_len, 128))],
+                        "prefix_values": [torch.zeros((1, 8, seq_len, 128))],
+                        "prefix_time": torch.tensor([seq_len]),
+                        "sensenova_reference_count": len(refs),
+                    },
+                ]
+            ]
+
+    def encode_prompt(prompt):
+        ids = torch.tensor(
+            [[token for token, _ in tokenizer.tokenize_with_weights(
+                f"<|im_start|>system\nSYS<|im_end|>\n<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n<img>",
+                disable_weights=True,
+            )[0]]],
+            dtype=torch.long,
+        )
+        return [[ids.unsqueeze(-1).float(), {"text_input_ids": ids, "sensenova_prompt": prompt}]]
+
+    clip = RecordingClip()
+    seed = torch.full((1, 32, 32, 3), 0.5)
+    turn0_in = encode_prompt("turn one")
+    turn0_in[0][1]["reference_latents"] = [seed]
+
+    cond0, text0, neg0, req0 = SenseNovaConditioning.execute(
+        clip=clip,
+        conditioning=turn0_in,
+        task={"task": "multi-turn edit", "previous": None, "samples": None},
+        max_tokens=16,
+    ).args
+    assert text0 == "" and neg0 == [] and req0 is True
+    assert len(clip.calls) == 1
+    assert "past_prefix_keys" not in clip.calls[0]
+    decoded0 = tokenizer.tokenizer.decode(cond0[0][1]["text_input_ids"][0].tolist(), skip_special_tokens=False)
+    assert "<img><IMG_CONTEXT></img>turn one<|im_end|>" in decoded0
+
+    # Inject a stale thinking key to verify narrow metadata boundary strips it
+    cond0[0][1]["sensenova_thinking_start"] = 3
+    samples0 = {"samples": torch.tensor([[[[-2.0, 2.0]]]]).repeat(1, 3, 32, 16)}
+    cond1, text1, neg1, req1 = SenseNovaConditioning.execute(
+        clip=clip,
+        conditioning=encode_prompt("turn two"),
+        task={"task": "multi-turn edit", "previous": cond0, "samples": samples0},
+        max_tokens=16,
+    ).args
+    assert text1 == "" and neg1 == [] and req1 is True
+    assert len(clip.calls) == 2
+    assert "past_prefix_keys" in clip.calls[1]
+    assert "sensenova_thinking_start" not in cond1[0][1]
+    assert cond1[0][1]["reference_latents"][1].min().item() == 0.0
+    assert cond1[0][1]["reference_latents"][1].max().item() == 1.0
+    decoded1 = tokenizer.tokenizer.decode(cond1[0][1]["text_input_ids"][0].tolist(), skip_special_tokens=False)
+    assert decoded1.endswith(
+        "<img><IMG_CONTEXT></img><|im_end|>\n<|im_start|>user\nturn two<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n<img>"
+    )
+
+
+@pytest.mark.parametrize("device", [
+    "cpu", pytest.param("cuda", marks=pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")),
+])
+def test_sensenova_incremental_prefix_matches_full_prefill(monkeypatch, device):
+    monkeypatch.setattr(sensenova_model, "HIDDEN_SIZE", 32)
+    monkeypatch.setattr(sensenova_model, "INTERMEDIATE_SIZE", 64)
+    monkeypatch.setattr(sensenova_model, "NUM_LAYERS", 2)
+    monkeypatch.setattr(sensenova_model, "NUM_HEADS", 2)
+    monkeypatch.setattr(sensenova_model, "NUM_KV_HEADS", 1)
+    monkeypatch.setattr(sensenova_model, "HEAD_DIM", 16)
+
+    torch.manual_seed(0)
+    text_model = sensenova_model.SenseNovaTextModel(
+        has_lm_head=False, device=device, dtype=torch.float32, operations=comfy.ops.manual_cast
+    )
+    text_model.vision_model = PatchEmbedding(3, 32, kernel_size=32, stride=32, device=device)
+    for name, param in text_model.named_parameters():
+        if 'norm' in name:
+            torch.nn.init.ones_(param)
+        else:
+            torch.nn.init.normal_(param, std=0.05)
+    text_model.eval()
+
+    img0 = torch.rand(1, 32, 32, 3, device=device)
+    img1 = torch.rand(1, 32, 32, 3, device=device)
+    turn0_ids = torch.tensor([[IM_START_ID, 872, NEWLINE_ID, 151670, IMAGE_CONTEXT_ID, IMAGE_END_ID, 100, IM_END_ID, NEWLINE_ID, IM_START_ID, 77091, NEWLINE_ID, 151670]], dtype=torch.long, device=device)
+    suffix_ids = torch.tensor([[IMAGE_CONTEXT_ID, IMAGE_END_ID, IM_END_ID, NEWLINE_ID, IM_START_ID, 872, NEWLINE_ID, 200, IM_END_ID, NEWLINE_ID, IM_START_ID, 77091, NEWLINE_ID, 151670]], dtype=torch.long, device=device)
+    full_ids = torch.cat((turn0_ids, suffix_ids), dim=1)
+
+    ids0, refs0, idx0, mask0 = prepare_prefix_inputs(turn0_ids, [img0], 32, torch.float32, expand_images=False)
+    k0, v0, t0 = text_model.preprocess_prefix(ids0, refs0, idx0, mask0, compute_dtype=torch.float32, output_device="cpu")
+    assert all(t.device.type == "cpu" for t in [*k0, *v0])
+
+    s_ids, s_refs, s_idx, s_mask = prepare_incremental_prefix_inputs(
+        suffix_ids, [img1], 32, torch.float32, past_length=int(k0[0].shape[2]), start_time=int(t0[0].item())
+    )
+    k_inc, v_inc, t_inc = text_model.preprocess_prefix(
+        s_ids, s_refs, s_idx, s_mask, compute_dtype=torch.float32, past_keys=k0, past_values=v0
+    )
+
+    f_ids, f_refs, f_idx, f_mask = prepare_prefix_inputs(full_ids, [img0, img1], 32, torch.float32, expand_images=False)
+    k_full, v_full, t_full = text_model.preprocess_prefix(f_ids, f_refs, f_idx, f_mask, compute_dtype=torch.float32)
+
+    assert torch.equal(t_inc, t_full)
+    for layer_idx in range(len(k_full)):
+        torch.testing.assert_close(k_inc[layer_idx], k_full[layer_idx], atol=1e-5, rtol=1e-5)
+        torch.testing.assert_close(v_inc[layer_idx], v_full[layer_idx], atol=1e-5, rtol=1e-5)
+
+    # Also verify incremental vs full prefill when the new turn adds an extra reference image
+    img2 = torch.rand(1, 32, 32, 3, device=device)
+    suffix_with_ref = torch.tensor([[IMAGE_CONTEXT_ID, IMAGE_END_ID, IM_END_ID, NEWLINE_ID, IM_START_ID, 872, NEWLINE_ID, IMAGE_START_ID, IMAGE_CONTEXT_ID, IMAGE_END_ID, 200, IM_END_ID, NEWLINE_ID, IM_START_ID, 77091, NEWLINE_ID, IMAGE_START_ID]], dtype=torch.long, device=device)
+    full_with_ref = torch.cat((turn0_ids, suffix_with_ref), dim=1)
+    s2_ids, s2_refs, s2_idx, s2_mask = prepare_incremental_prefix_inputs(
+        suffix_with_ref, [img1, img2], 32, torch.float32, past_length=int(k0[0].shape[2]), start_time=int(t0[0].item())
+    )
+    k_inc2, v_inc2, t_inc2 = text_model.preprocess_prefix(
+        s2_ids, s2_refs, s2_idx, s2_mask, compute_dtype=torch.float32, past_keys=k0, past_values=v0
+    )
+    f2_ids, f2_refs, f2_idx, f2_mask = prepare_prefix_inputs(full_with_ref, [img0, img1, img2], 32, torch.float32, expand_images=False)
+    k_full2, v_full2, t_full2 = text_model.preprocess_prefix(f2_ids, f2_refs, f2_idx, f2_mask, compute_dtype=torch.float32)
+    assert torch.equal(t_inc2, t_full2)
+    for layer_idx in range(len(k_full2)):
+        torch.testing.assert_close(k_inc2[layer_idx], k_full2[layer_idx], atol=1e-5, rtol=1e-5)
+        torch.testing.assert_close(v_inc2[layer_idx], v_full2[layer_idx], atol=1e-5, rtol=1e-5)
+
+    # Verify streaming output_device="cpu" matches default incremental output
+    k_stream, v_stream, t_stream = text_model.preprocess_prefix(
+        s2_ids, s2_refs, s2_idx, s2_mask, compute_dtype=torch.float32,
+        past_keys=k0, past_values=v0, output_device=torch.device("cpu"),
+    )
+    assert torch.equal(t_stream, t_full2)
+    for layer_idx in range(len(k_full2)):
+        assert k_stream[layer_idx].device == torch.device("cpu")
+        assert v_stream[layer_idx].device.type == "cpu"
+        torch.testing.assert_close(k_stream[layer_idx], k_full2[layer_idx].cpu(), atol=1e-5, rtol=1e-5)
+        torch.testing.assert_close(v_stream[layer_idx], v_full2[layer_idx].cpu(), atol=1e-5, rtol=1e-5)
+
+
+def test_sensenova_multi_turn_edit_handles_empty_prompt_new_refs_and_clip_mismatch():
+    tokenizer = SenseNovaQwenTokenizer()
+
+    class PatcherStub:
+        def __init__(self, patches_uuid):
+            self.model = object()
+            self.patches_uuid = patches_uuid
+            self.forced_hooks = None
+            self.injections = {}
+
+    class RecordingClip:
+        def __init__(self, cond_stage_model=None, patches_uuid=None):
+            self.calls = []
+            if patches_uuid is not None:
+                self.cond_stage_model = cond_stage_model
+                self.patcher = PatcherStub(patches_uuid)
+                self.use_clip_schedule = False
+                self.layer_idx = None
+
+        def encode_from_tokens_scheduled(self, tokens):
+            self.calls.append(dict(tokens))
+            ids = tokens["text_input_ids"]
+            refs = tokens.get("reference_latents") or []
+            seq_len = int(ids.shape[1])
+            return [
+                [
+                    ids.unsqueeze(-1).float(),
+                    {
+                        "text_input_ids": ids,
+                        "reference_latents": refs,
+                        "prefix_keys": [torch.zeros((1, 8, seq_len, 128))],
+                        "prefix_values": [torch.zeros((1, 8, seq_len, 128))],
+                        "prefix_time": torch.tensor([seq_len]),
+                        "sensenova_reference_count": len(refs),
+                    },
+                ]
+            ]
+
+    def encode_prompt(prompt, include_system=True):
+        text = (
+            f"<|im_start|>system\nSYS<|im_end|>\n<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n<img>"
+            if include_system
+            else f"<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n<img>"
+        )
+        ids = torch.tensor(
+            [[token for token, _ in tokenizer.tokenize_with_weights(text, disable_weights=True)[0]]],
+            dtype=torch.long,
+        )
+        return [[ids.unsqueeze(-1).float(), {"text_input_ids": ids, "sensenova_prompt": prompt}]]
+
+    # 1. Empty prompt without system message keeps the user turn in multi_turn_suffix_ids
+    empty_turn_ids = encode_prompt("", include_system=False)[0][1]["text_input_ids"]
+    suffix_empty = multi_turn_suffix_ids(empty_turn_ids, [IMAGE_CONTEXT_ID, IMAGE_END_ID])
+    decoded_empty = tokenizer.tokenizer.decode(suffix_empty[0].tolist(), skip_special_tokens=False)
+    assert decoded_empty == "<IMG_CONTEXT></img><|im_end|>\n<|im_start|>user\n<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n<img>"
+
+    shared_model = object()
+    clip_a = RecordingClip(cond_stage_model=shared_model, patches_uuid="uuid-1")
+    seed = torch.full((1, 32, 32, 3), 0.5)
+    turn0_in = encode_prompt("turn one")
+    turn0_in[0][1]["reference_latents"] = [seed]
+    neg0_in = encode_prompt("", include_system=False)
+    neg0_in[0][1]["reference_latents"] = [seed]
+    mask = torch.ones(1, 4, 4)
+    turn0_in[0][1].update(mask=mask, area=(4, 4, 0, 0), strength=0.25)
+    neg0_in[0][1]["strength"] = 0.5
+
+    cond0, _, neg0, _ = SenseNovaConditioning.execute(
+        clip=clip_a,
+        conditioning=turn0_in,
+        negative=neg0_in,
+        task={"task": "multi-turn edit", "previous": None, "samples": None},
+        max_tokens=16,
+    ).args
+
+    assert cond0[0][1]["mask"] is mask and cond0[0][1]["area"] == (4, 4, 0, 0)
+    assert cond0[0][1]["strength"] == 0.25 and neg0[0][1]["strength"] == 0.5
+    assert "mask" not in clip_a.calls[0] and "strength" not in clip_a.calls[1]
+
+    # 2. Current turn new reference image is expanded and placed after previous sampler output;
+    #    negative branch does not duplicate previous reference images.
+    samples0 = {"samples": torch.full((1, 3, 32, 32), 0.25)}
+    new_ref = torch.full((1, 32, 32, 3), 0.75)
+    turn1_in = encode_prompt("add this hat")
+    turn1_in[0][1].update(reference_latents=[new_ref], area=(2, 2, 1, 1), strength=0.75)
+    cond1, _, neg1, _ = SenseNovaConditioning.execute(
+        clip=clip_a,
+        conditioning=turn1_in,
+        negative=neg0,
+        task={"task": "multi-turn edit", "previous": cond0, "samples": samples0},
+        max_tokens=16,
+    ).args
+    assert cond1[0][1]["area"] == (2, 2, 1, 1) and cond1[0][1]["strength"] == 0.75
+    assert "mask" not in cond1[0][1] and neg1[0][1]["strength"] == 0.5
+    assert "area" not in clip_a.calls[2] and "strength" not in clip_a.calls[3]
+    assert "past_prefix_keys" in clip_a.calls[2]
+    assert len(cond1[0][1]["reference_latents"]) == 3
+    assert torch.equal(cond1[0][1]["reference_latents"][2], new_ref)
+    assert len(clip_a.calls[2]["suffix_reference_latents"]) == 2
+    assert torch.equal(clip_a.calls[2]["suffix_reference_latents"][1], new_ref)
+    assert len(neg1[0][1]["reference_latents"]) == 2
+    decoded1 = tokenizer.tokenizer.decode(cond1[0][1]["text_input_ids"][0].tolist(), skip_special_tokens=False)
+    assert decoded1.endswith(
+        "<img><IMG_CONTEXT></img><|im_end|>\n<|im_start|>user\n<img><IMG_CONTEXT></img>add this hat<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n<img>"
+    )
+
+    # 3. Same model with different patches_uuid (e.g. LoRA) or different CLIP falls back to full prefill
+    clip_patched = RecordingClip(cond_stage_model=shared_model, patches_uuid="uuid-2")
+    SenseNovaConditioning.execute(
+        clip=clip_patched,
+        conditioning=encode_prompt("turn two"),
+        task={"task": "multi-turn edit", "previous": cond0, "samples": samples0},
+        max_tokens=16,
+    )
+    assert "past_prefix_keys" not in clip_patched.calls[0]
+
+    # Same model + same patches_uuid (unmodified clone) reuses cache
+    clip_clone = RecordingClip(cond_stage_model=shared_model, patches_uuid="uuid-1")
+    SenseNovaConditioning.execute(
+        clip=clip_clone,
+        conditioning=encode_prompt("turn two"),
+        task={"task": "multi-turn edit", "previous": cond0, "samples": samples0},
+        max_tokens=16,
+    )
+    assert "past_prefix_keys" in clip_clone.calls[0]
+
+    def resume(clip, previous=cond0, negative=None):
+        return SenseNovaConditioning.execute(
+            clip=clip, conditioning=turn1_in, negative=negative,
+            task={"task": "multi-turn edit", "previous": previous, "samples": samples0}, max_tokens=16,
+        ).args
+
+    # A text-ended history is invalid both with the original CLIP and on a cache miss.
+    prev_ids = cond0[0][1]["text_input_ids"].clone()
+    prev_ids[0, -1] = IM_END_ID
+    text_history = [[cond0[0][0], {**cond0[0][1], "text_input_ids": prev_ids}]]
+    for clip in (clip_a, clip_patched):
+        with pytest.raises(ValueError, match="ends with an image request"):
+            resume(clip, previous=text_history)
+
+    for attr, owner, active, inactive in (("forced_hooks", clip_a.patcher, object(), None),
+                                          ("injections", clip_a.patcher, {"bypass_lora": [object()]}, {}),
+                                          ("use_clip_schedule", clip_a, True, False)):
+        setattr(owner, attr, active)
+        hooked, *_ = resume(clip_a)
+        assert "past_prefix_keys" not in clip_a.calls[-1]
+        setattr(owner, attr, inactive)
+        resume(clip_a, previous=hooked)
+        assert "past_prefix_keys" not in clip_a.calls[-1]
+
+    # Attaching a batch to encoded negative conditioning adds it to the next user message.
+    extra = torch.rand(2, 32, 32, 3)
+    _, neg_with_refs = HiDreamO1ReferenceImages.execute(positive=cond0, negative=neg0, images={"image_1": extra}).args
+    _, _, edited_negative, _ = resume(clip_a, negative=neg_with_refs)
+    neg_meta = edited_negative[0][1]
+    assert "past_prefix_keys" not in clip_a.calls[-1]
+    assert neg_meta["sensenova_reference_count"] == 4
+    torch.testing.assert_close(torch.cat(neg_meta["reference_latents"][2:]), extra)
+    neg_ids = neg_meta["text_input_ids"]
+    decoded = tokenizer.tokenizer.decode(neg_ids[0].tolist(), skip_special_tokens=False)
+    assert decoded.endswith("<|im_start|>user\n<img><IMG_CONTEXT></img><img><IMG_CONTEXT></img><|im_end|>\n<|im_start|>assistant\n<img>")
+    prepare_prefix_inputs(neg_ids, neg_meta["reference_latents"], 32, torch.float32, expand_images=False)
+    resume(clip_a, negative=edited_negative)
+    assert "past_prefix_keys" in clip_a.calls[-1]
+
+    replaced = [[neg0[0][0], {**neg0[0][1], "reference_latents": [new_ref]}]]
+    resume(clip_a, negative=replaced)
+    assert "past_prefix_keys" not in clip_a.calls[-1]
