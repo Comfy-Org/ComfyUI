@@ -40,7 +40,8 @@ class ContextWindowsManualNode(io.ComfyNode):
 
     @classmethod
     def execute(cls, model: io.Model.Type, context_length: int, context_overlap: int, context_schedule: str, context_stride: int, closed_loop: bool, fuse_method: str, dim: int, freenoise: bool,
-                cond_retain_index_list: list[int]=[], split_conds_to_windows: bool=False, latent_retain_index_list: list[int]=[], causal_window_fix: bool=True) -> io.Model:
+                cond_retain_index_list: list[int]=[], split_conds_to_windows: bool=False, latent_retain_index_list: list[int]=[], causal_window_fix: bool=True,
+                sequential_steps: int=0, sequential_carry: int=2) -> io.Model:
         model = model.clone()
         model.model_options["context_handler"] = comfy.context_windows.IndexListContextHandler(
             context_schedule=comfy.context_windows.get_matching_context_schedule(context_schedule),
@@ -55,10 +56,12 @@ class ContextWindowsManualNode(io.ComfyNode):
             split_conds_to_windows=split_conds_to_windows,
             latent_retain_index_list=latent_retain_index_list,
             causal_window_fix=causal_window_fix,
+            sequential_steps=sequential_steps,
+            sequential_carry=sequential_carry,
         )
         # make memory usage calculation only take into account the context window latents
         comfy.context_windows.create_prepare_sampling_wrapper(model)
-        if freenoise: # no other use for this wrapper at this time
+        if freenoise or sequential_steps > 0:
             comfy.context_windows.create_sampler_sample_wrapper(model)
         return io.NodeOutput(model)
 
@@ -149,6 +152,8 @@ class MiniMaxH3ContextWindowsNode(ContextWindowsManualNode):
             io.Int.Input("context_length", min=22, max=nodes.MAX_RESOLUTION, step=17, default=124, tooltip="The length of the context window in real frames. Must be 17*n + 5."),
             io.Int.Input("context_overlap", min=5, step=17, default=39, tooltip="The overlap of the context window in real frames. Must be 17*n + 5."),
             io.Combo.Input("fuse_method", options=comfy.context_windows.ContextFuseMethods.LIST_STATIC, default=comfy.context_windows.ContextFuseMethods.PYRAMID, tooltip="The method to use to fuse the context windows."),
+            io.Int.Input("sequential_steps", default=0, min=0, max=10000, tooltip="Steps sampled window by window before the joint finish, each window continuing from the end of the previous one. Keeps long text-to-video shots continuous and replaces FreeNoise; 0 samples every step jointly."),
+            io.Int.Input("carry_frames", default=5, min=5, max=nodes.MAX_RESOLUTION, step=17, tooltip="Frames at the end of the previous window that each window keeps fixed during the sequential steps. Must be 17*n + 5; values at or above the overlap keep the whole overlap."),
             io.Boolean.Input("freenoise", default=True, tooltip="Whether to apply FreeNoise noise shuffling, improves window blending.", advanced=True),
             io.Boolean.Input("split_conds_to_windows", default=False, tooltip="Whether to split multiple conditionings (created by ConditionCombine) to each window based on region index.", advanced=True),
         ]
@@ -156,12 +161,13 @@ class MiniMaxH3ContextWindowsNode(ContextWindowsManualNode):
 
     @classmethod
     def execute(cls, model: io.Model.Type, context_length: int, context_overlap: int, fuse_method: str, freenoise: bool,
-                split_conds_to_windows: bool=False) -> io.Model:
+                split_conds_to_windows: bool=False, sequential_steps: int=0, carry_frames: int=5) -> io.Model:
         # length and overlap of 5n + 2 latents start every static window on a chunk boundary
         context_length = video_latent_t(context_length)
         context_overlap = min(video_latent_t(context_overlap), context_length - 5)
         return super().execute(model, context_length, context_overlap, comfy.context_windows.ContextSchedules.STATIC_STANDARD, 1, False, fuse_method, dim=2, freenoise=freenoise,
-                               split_conds_to_windows=split_conds_to_windows, causal_window_fix=False)
+                               split_conds_to_windows=split_conds_to_windows, causal_window_fix=False, sequential_steps=sequential_steps,
+                               sequential_carry=video_latent_t(carry_frames))
 
 
 class ContextWindowsExtension(ComfyExtension):

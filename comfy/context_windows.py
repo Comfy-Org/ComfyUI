@@ -343,7 +343,7 @@ ContextResults = collections.namedtuple("ContextResults", ['window_idx', 'sub_co
 class IndexListContextHandler(ContextHandlerABC):
     def __init__(self, context_schedule: ContextSchedule, fuse_method: ContextFuseMethod, context_length: int=1, context_overlap: int=0, context_stride: int=1,
                  closed_loop: bool=False, dim:int=0, freenoise: bool=False, cond_retain_index_list: list[int]=[], split_conds_to_windows: bool=False,
-                 latent_retain_index_list: list[int]=[], causal_window_fix: bool=True):
+                 latent_retain_index_list: list[int]=[], causal_window_fix: bool=True, sequential_steps: int=0, sequential_carry: int=2):
         self.context_schedule = context_schedule
         self.fuse_method = fuse_method
         self.context_length = context_length
@@ -357,6 +357,9 @@ class IndexListContextHandler(ContextHandlerABC):
         self.split_conds_to_windows = split_conds_to_windows
         self.latent_retain_index_list = [int(x.strip()) for x in latent_retain_index_list.split(",")] if latent_retain_index_list else []
         self.causal_window_fix = causal_window_fix
+        self.sequential_steps = sequential_steps
+        # primary-stream latents a sequential warmup window holds from the previous window, the rest of the overlap regenerates
+        self.sequential_carry = sequential_carry
 
         self.callbacks = {}
 
@@ -639,6 +642,107 @@ class IndexListContextHandler(ContextHandlerABC):
             for callback in comfy.patcher_extension.get_all_callbacks(IndexListCallbacks.EXECUTE_CLEANUP, self.callbacks):
                 callback(self, model, x_in, conds, timestep, model_options)
 
+    def sample_sequential(self, executor, guider, sigmas, extra_args, callback, noise, latent_image, denoise_mask, disable_pbar):
+        """Sample the first sequential_steps window by window, each continuing the previous one, then finish jointly."""
+        model = guider.inner_model
+        self._model = model
+        steps = min(self.sequential_steps, len(sigmas) - 1)
+        window_state = self._build_window_state(noise, list(guider.conds.values()), model)
+        windows = [window_state.prepare_window(w, model) for w in self.get_context_windows(model, window_state.latents[0], extra_args["model_options"])]
+        if len(windows) == 1:
+            return executor(guider, sigmas, extra_args, callback, noise, latent_image, denoise_mask, disable_pbar)
+
+        total_steps = len(windows) * steps + len(sigmas) - 1 - steps
+        # a separate call so the window pass's full-length buffers are freed before the joint finish
+        state = self._sample_windows(executor, guider, sigmas[:steps + 1], extra_args, callback, noise, latent_image, denoise_mask, disable_pbar,
+                                     window_state, windows, total_steps)
+        if steps == len(sigmas) - 1:
+            return state
+        # joint finish: the noise that reproduces the assembled state from the original latent, so user masks still inpaint from it
+        sigma = sigmas[steps]
+        model_sampling = model.model_sampling
+        state -= model_sampling.noise_scaling(sigma, torch.zeros_like(state), latent_image)
+        state /= model_sampling.noise_scaling(sigma, torch.ones_like(state), torch.zeros_like(state))
+
+        def joint_callback(i, x0, x, total):
+            if callback is not None:
+                callback(len(windows) * steps + i, x0, x, total_steps)
+
+        return executor(guider, sigmas[steps:], extra_args, joint_callback, state, latent_image, denoise_mask, disable_pbar)
+
+    def _sample_windows(self, executor, guider, sigmas, extra_args, callback, noise, latent_image, denoise_mask, disable_pbar, window_state, windows, total_steps):
+        """Sample each window over sigmas, holding the end of the previous one, and return the assembled state at sigmas[-1]."""
+        model = guider.inner_model
+        steps = len(sigmas) - 1
+        cond_lists = list(guider.conds.values())
+        dims = window_state.modality_dims
+
+        def unpack(t, shapes):
+            return list(comfy.utils.unpack_latents(t, shapes)) if window_state.is_multimodal else [t]
+
+        def pack(parts):
+            return comfy.utils.pack_latents(parts) if window_state.is_multimodal else (parts[0], [parts[0].shape])
+
+        shapes = window_state.latent_shapes
+        noise_parts = unpack(noise, shapes)
+        mask_parts = unpack(denoise_mask, shapes) if denoise_mask is not None else None
+        state = [torch.empty_like(p) for p in noise_parts]
+        clean = [p.clone() for p in unpack(latent_image, shapes)]  # latest prediction per row: the carry source and the preview
+        owned = [0] * len(dims)  # per stream: first index no earlier window has sampled
+        # the warmup windows fit one window, so they skip the context handler
+        warm_args = {**extra_args, "model_options": {k: v for k, v in extra_args["model_options"].items() if k != "context_handler"}}
+        conds, latent_shapes = guider.conds, model.latent_shapes
+
+        for wi, window in enumerate(windows):
+            if extra_args.get("seed") is not None:
+                warm_args["seed"] = extra_args["seed"] + wi  # stochastic samplers draw fresh noise per window
+            mod_windows = [window.get_window_for_modality(m) for m in range(len(dims))]
+            sub_noise, sub_shapes = pack([w.get_tensor(p) for w, p in zip(mod_windows, noise_parts)])
+            sub_latent, _ = pack([w.get_tensor(p) for w, p in zip(mod_windows, clean)])
+            masks = [w.get_tensor(p) for w, p in zip(mod_windows, mask_parts)] if mask_parts is not None else None
+            for m, w in enumerate(mod_windows):
+                held = owned[m] - w.index_list[0]
+                if held > 0:
+                    # hold the primary stream's last sequential_carry sampled rows and every other stream's whole overlap
+                    start = max(0, held - self.sequential_carry) if m == 0 else 0
+                    if masks is None:
+                        masks = [torch.ones_like(p) for p in unpack(sub_noise, sub_shapes)]
+                    masks[m].narrow(dims[m], start, held - start).zero_()
+            sub_mask = pack(masks)[0] if masks is not None else None
+
+            sub_conds = [self.get_resized_cond(c, window_state.latents[0], window) for c in cond_lists]
+            window_state.patch_latent_shapes(sub_conds, sub_shapes)
+            if sub_mask is not None:
+                mask_conds = model.denoise_mask_conds(sub_mask, sub_shapes)
+                for c in sub_conds:
+                    for item in c or []:
+                        item["model_conds"].update(mask_conds)
+
+            def window_callback(i, x0, x, total):
+                for m, (w, p) in enumerate(zip(mod_windows, unpack(x0, sub_shapes))):
+                    clean[m].narrow(dims[m], w.index_list[0], len(w.index_list)).copy_(p)
+                if callback is not None:
+                    full = pack(clean)[0]
+                    callback(wi * steps + i, full, full, total_steps)
+
+            guider.conds = dict(zip(conds.keys(), sub_conds))
+            model.latent_shapes = sub_shapes if window_state.is_multimodal else latent_shapes
+            try:
+                out = executor(guider, sigmas, warm_args, window_callback, sub_noise, sub_latent, sub_mask, disable_pbar)
+            finally:
+                guider.conds, model.latent_shapes = conds, latent_shapes
+            # the sampler returns the inverse noise scaled state, undo it to get the state at sigmas[-1]
+            out = model.model_sampling.noise_scaling(sigmas[-1], torch.zeros_like(out), out)
+
+            # the first window to sample a row owns its state
+            for m, (w, x_part) in enumerate(zip(mod_windows, unpack(out, sub_shapes))):
+                local = max(0, owned[m] - w.index_list[0])
+                n = len(w.index_list) - local
+                state[m].narrow(dims[m], w.index_list[0] + local, n).copy_(x_part.narrow(dims[m], local, n))
+                owned[m] = w.index_list[-1] + 1
+
+        return pack(state)[0]
+
     def evaluate_context_windows(self, calc_cond_batch: Callable, model: BaseModel, x_in: torch.Tensor, conds,
                                 timestep: torch.Tensor, enumerated_context_windows: list[tuple[int, IndexListContextWindow]],
                                 model_options, window_state: WindowingState, total_windows: int = None,
@@ -777,12 +881,12 @@ def _sampler_sample_wrapper(executor, guider, sigmas, extra_args, callback, nois
     handler: IndexListContextHandler = model_options.get("context_handler", None)
     if handler is None:
         raise Exception("context_handler not found in sampler_sample_wrapper; this should never happen, something went wrong.")
-    if not handler.freenoise:
-        return executor(guider, sigmas, extra_args, callback, noise, *args, **kwargs)
-
-    conds = [guider.conds.get('positive', guider.conds.get('negative', []))]
-    noise = handler._apply_freenoise(noise, conds, extra_args["seed"], guider.model_patcher.model)
-
+    if handler.sequential_steps > 0:
+        # windows continue each other through the carry, FreeNoise would only repeat noise between them
+        return handler.sample_sequential(executor, guider, sigmas, extra_args, callback, noise, *args, **kwargs)
+    if handler.freenoise:
+        conds = [guider.conds.get('positive', guider.conds.get('negative', []))]
+        noise = handler._apply_freenoise(noise, conds, extra_args["seed"], guider.model_patcher.model)
     return executor(guider, sigmas, extra_args, callback, noise, *args, **kwargs)
 
 def create_sampler_sample_wrapper(model: ModelPatcher):
