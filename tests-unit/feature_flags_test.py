@@ -161,7 +161,7 @@ class TestParseCliFeatureFlags:
         result = _parse_cli_feature_flags()
         assert result == {"show_signin_button": True}
 
-    @pytest.mark.parametrize("key", ["partner_node_token", "local_web_sso"])
+    @pytest.mark.parametrize("key", ["partner_node_token", "local_web_sso", "local_mcp_connect"])
     def test_frontend_strict_bool_flags_parse_to_bool(self, monkeypatch, key):
         monkeypatch.setattr("comfy_api.feature_flags.args", type("Args", (), {"feature_flag": [f"{key}=true"]})())
         assert _parse_cli_feature_flags()[key] is True
@@ -197,6 +197,9 @@ class TestCliFeatureFlagRegistry:
     @pytest.mark.parametrize("key", ["partner_node_token", "local_web_sso"])
     def test_local_sso_flags_are_on_by_default(self, key):
         assert CLI_FEATURE_FLAG_REGISTRY[key]["default"] is True
+
+    def test_local_mcp_connect_is_off_by_default(self):
+        assert CLI_FEATURE_FLAG_REGISTRY["local_mcp_connect"]["default"] is False
 
     def test_server_features_report_registry_defaults(self, monkeypatch):
         monkeypatch.setattr("comfy_api.feature_flags.args", type("Args", (), {"feature_flag": []})())

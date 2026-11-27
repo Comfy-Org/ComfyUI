@@ -32,7 +32,8 @@ async def cache_control(
     )
 
     if request.path.endswith(".js") or request.path.endswith(".css") or is_entry_point:
-        response.headers.setdefault("Cache-Control", "no-store")
+        if request.path not in ("/user.css", "/api/userdata/user.css", "/userdata/user.css"):
+            response.headers.setdefault("Cache-Control", "no-store")
         return response
 
     # Early return for non-image files - no cache headers needed

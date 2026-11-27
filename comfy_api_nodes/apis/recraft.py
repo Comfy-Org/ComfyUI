@@ -298,6 +298,11 @@ class RecraftImageGenerationRequest(BaseModel):
     random_seed: int | None = Field(None, description="Seed for video generation")
 
 
+class RecraftVectorizeRequest(BaseModel):
+    version: str = Field(...)
+    shape_stacking: str = Field(...)
+
+
 class RecraftReturnedObject(BaseModel):
     image_id: str = Field(..., description='Unique identifier for the generated image')
     url: str = Field(..., description='URL to access the generated image')

@@ -19,7 +19,7 @@ LAPLACIAN = ((0.0, -1.0, 0.0), (-1.0, 4.0, -1.0), (0.0, -1.0, 0.0))
 
 def warp(x, flow, grid, norm):
     # backward warp: sample x at each pixel's position + flow, norm maps flow pixels to grid units
-    return F.grid_sample(x, torch.addcmul(grid, flow.movedim(1, -1), norm), mode="bilinear", padding_mode="border", align_corners=True)
+    return F.grid_sample(x, torch.addcmul(grid, flow.movedim(1, -1), norm).clamp_(-1, 1), mode="bilinear", padding_mode="zeros", align_corners=True)
 
 
 def gaussian_blur(x, kernel):

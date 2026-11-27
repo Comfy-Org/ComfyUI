@@ -34,6 +34,7 @@ import comfy.system_memory
 import comfy.utils
 import comfy.quant_ops
 import comfy_aimdo.host_buffer
+import comfy_aimdo.model_vbar
 import comfy_aimdo.vram_buffer
 from comfy.internal_logging import detail
 
@@ -1394,6 +1395,7 @@ STREAM_CAST_BUFFERS = {}
 LARGEST_CASTED_WEIGHT = (None, 0)
 STREAM_AIMDO_CAST_BUFFERS = {}
 LARGEST_AIMDO_CASTED_WEIGHT = (None, 0)
+PENDING_VBAR_CASTS = {}
 CROSS_STEP_STATE = weakref.WeakSet()
 
 DEFAULT_AIMDO_CAST_BUFFER_RESERVATION_SIZE = 16 * 1024 ** 3
@@ -1440,6 +1442,58 @@ def get_aimdo_cast_buffer(offload_stream, device):
         cast_buffer = comfy_aimdo.vram_buffer.VRAMBuffer(DEFAULT_AIMDO_CAST_BUFFER_RESERVATION_SIZE, device.index)
         STREAM_AIMDO_CAST_BUFFERS[offload_stream] = cast_buffer
     return cast_buffer
+
+def cleanup_cast_module(s):
+    prefetch = getattr(s, "_prefetch", None)
+    if prefetch is None:
+        return
+    try:
+        for param_key in ("weight", "bias"):
+            lowvram_fn = getattr(s, param_key + "_lowvram_function", None)
+            if lowvram_fn is not None:
+                lowvram_fn.clear_prepared()
+        if prefetch["signature"] is not None:
+            comfy_aimdo.model_vbar.vbar_unpin(s._v)
+    finally:
+        delattr(s, "_prefetch")
+
+def uncast_weights(offload_state):
+    if offload_state is None:
+        return
+    offload_stream, weight_a, bias_a = offload_state
+    allocation = None
+    if isinstance(weight_a, torch.device):
+        cast = PENDING_VBAR_CASTS.pop(bias_a, None)
+        if cast is None:
+            return
+        allocation, _ = cast
+        device = weight_a
+    elif offload_stream is None:
+        return
+    elif weight_a is not None:
+        device = weight_a.device
+    elif bias_a is not None:
+        device = bias_a.device
+    else:
+        return
+    with cuda_device_context(device) if allocation is not None else nullcontext():
+        try:
+            if offload_stream is not None:
+                offload_stream.wait_stream(current_stream(device))
+        finally:
+            if allocation is not None:
+                comfy_aimdo.model_vbar.vbar_unpin(allocation)
+
+def cleanup_vbar_casts():
+    first_error = None
+    for _, offload_state in list(PENDING_VBAR_CASTS.values()):
+        try:
+            uncast_weights(offload_state)
+        except Exception as e:
+            if first_error is None:
+                first_error = e
+    if first_error is not None:
+        raise first_error
 
 def reset_cast_buffers():
     global LARGEST_CASTED_WEIGHT
@@ -2120,6 +2174,12 @@ def supports_fp64(device=None):
 
     return True
 
+def slow_int8_compute(device=None):
+    if is_nvidia() and (device is None or torch.device(device).type == "cuda"):
+        # GB300 supports INT8, but its throughput is poor for matmul and attention.
+        return "GB300" in torch.cuda.get_device_name(device).upper()
+    return False
+
 def supports_int8_compute(device=None):
     if is_device_cpu(device):
         return False
@@ -2136,7 +2196,7 @@ def supports_int8_compute(device=None):
     if is_ixuca():
         return False
 
-    return True
+    return not slow_int8_compute(device)
 
 def extended_fp16_support():
     # TODO: check why some models work with fp16 on newer torch versions but not on older
