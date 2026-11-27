@@ -26,8 +26,7 @@ class ModelMergeSimple:
     def merge(self, model1, model2, ratio):
         m = model1.clone()
         kp = model2.get_key_patches("diffusion_model.")
-        for k in kp:
-            m.add_patches({k: kp[k]}, 1.0 - ratio, ratio)
+        m.add_patches(kp, 1.0 - ratio, ratio)
         return (m, )
 
 class ModelSubtract:
@@ -45,8 +44,7 @@ class ModelSubtract:
     def merge(self, model1, model2, multiplier):
         m = model1.clone()
         kp = model2.get_key_patches("diffusion_model.")
-        for k in kp:
-            m.add_patches({k: kp[k]}, - multiplier, multiplier)
+        m.add_patches(kp, - multiplier, multiplier)
         return (m, )
 
 class ModelAdd:
@@ -63,8 +61,7 @@ class ModelAdd:
     def merge(self, model1, model2):
         m = model1.clone()
         kp = model2.get_key_patches("diffusion_model.")
-        for k in kp:
-            m.add_patches({k: kp[k]}, 1.0, 1.0)
+        m.add_patches(kp, 1.0, 1.0)
         return (m, )
 
 
