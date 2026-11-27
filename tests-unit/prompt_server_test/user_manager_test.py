@@ -27,6 +27,24 @@ def app(user_manager):
     return app
 
 
+@pytest.fixture
+def real_path_app(tmp_path, monkeypatch):
+    """App whose paths resolve for real under tmp_path.
+
+    Unlike the ``app`` fixture above this keeps the real
+    ``get_request_user_filepath``, so tests can observe what the routes do to the
+    filesystem.
+    """
+    monkeypatch.setattr("folder_paths.user_directory", str(tmp_path))
+    monkeypatch.setattr("app.user_manager.args.multi_user", False)
+    manager = UserManager()
+    app = web.Application()
+    routes = web.RouteTableDef()
+    manager.add_routes(routes)
+    app.add_routes(routes)
+    return app
+
+
 async def test_listuserdata_empty_directory(aiohttp_client, app, tmp_path):
     client = await aiohttp_client(app)
     resp = await client.get("/userdata?dir=test_dir")
@@ -120,6 +138,36 @@ async def test_listuserdata_normalized_separator(aiohttp_client, app, tmp_path):
             assert "/" in result[0]["path"]  # Ensure forward slash is used
             assert "\\" not in result[0]["path"]  # Ensure backslash is not present
             assert result[0]["path"] == "subdir/file1.txt"
+
+
+@pytest.mark.parametrize("existing_user_directory", [False, True])
+async def test_listuserdata_does_not_create_directories(
+    aiohttp_client, real_path_app, tmp_path, existing_user_directory
+):
+    # A read-only listing of a missing directory must not leave anything behind,
+    # neither the requested directory nor the user directory that holds it.
+    user_directory = tmp_path / "default"
+    if existing_user_directory:
+        user_directory.mkdir()
+
+    client = await aiohttp_client(real_path_app)
+    resp = await client.get("/userdata?dir=missing/nested")
+
+    assert resp.status == 404
+    assert not (user_directory / "missing").exists()
+    assert existing_user_directory == user_directory.exists()
+
+
+async def test_post_userdata_creates_missing_directories(
+    aiohttp_client, real_path_app, tmp_path
+):
+    # Uploads still create the parent directories they are asked to write into.
+    client = await aiohttp_client(real_path_app)
+    content = b"test content"
+    resp = await client.post("/userdata/nested%2Fdir%2Ftest.txt", data=content)
+
+    assert resp.status == 200
+    assert (tmp_path / "default" / "nested" / "dir" / "test.txt").read_bytes() == content
 
 
 async def test_post_userdata_new_file(aiohttp_client, app, tmp_path):
