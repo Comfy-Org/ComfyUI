@@ -16,6 +16,9 @@ def model_options_long_clip(sd, tokenizer_data, model_options):
             elif "text_model.encoder.layers.1.mlp.fc1.weight" in sd:
                 model_name = "clip_l"
 
+    if w is not None and model_name is None:
+        raise ValueError("Cannot determine CLIP-L or CLIP-G from a bare position embedding")
+
     if w is not None:
         tokenizer_data = tokenizer_data.copy()
         model_options = model_options.copy()

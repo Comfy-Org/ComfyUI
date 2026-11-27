@@ -1,3 +1,4 @@
+import pytest
 import torch
 
 from comfy.text_encoders.long_clipl import model_options_long_clip
@@ -25,3 +26,12 @@ def test_prefixed_clip_l_state_dict_configures_clip_l():
 
     assert tokenizer_data["clip_l_max_length"] == 248
     assert model_options["clip_l_model_config"]["max_position_embeddings"] == 248
+
+
+def test_bare_embedding_without_layer_marker_fails_clearly():
+    state_dict = {
+        "text_model.embeddings.position_embedding.weight": torch.zeros(248, 768)
+    }
+
+    with pytest.raises(ValueError, match="Cannot determine CLIP-L or CLIP-G"):
+        model_options_long_clip(state_dict, {}, {})
