@@ -6,6 +6,7 @@ from contextlib import closing
 import logging
 import os
 import sqlite3
+import subprocess
 import sys
 from pathlib import Path
 
@@ -37,6 +38,7 @@ class _AssetsOn:
 def db_path(tmp_path, monkeypatch):
     path = str(tmp_path / "comfyui.db")
     monkeypatch.setattr(db_module.args, "database_url", f"sqlite:///{path}")
+    monkeypatch.setattr(db_module.args, "disable_assets", False)
     monkeypatch.setattr(db_module, "Session", None)
     monkeypatch.setattr(db_module, "WriteSession", None)
     monkeypatch.setattr(db_module, "_db_lock", None)
@@ -48,6 +50,8 @@ def db_path(tmp_path, monkeypatch):
 
 def _startup_error(caplog, asset_manager=None, *, kind, level=logging.ERROR):
     with caplog.at_level(level), pytest.raises(SystemExit) as stopped:
+        main.skip_assets_for_a_newer_database()  # as at startup: not newer, so assets stay on
+        assert not main.args.disable_assets
         main.setup_database(asset_manager or _AssetsOn())
     assert stopped.value.code == 1
     assert "--disable-assets" in caplog.text
@@ -55,10 +59,16 @@ def _startup_error(caplog, asset_manager=None, *, kind, level=logging.ERROR):
     return caplog.text
 
 
-def _stamp(path, revision):
-    with sqlite3.connect(path) as conn:
+def _sqlalchemy_quotes_question_marks():
+    return make_url(URL.create("sqlite", database="/a?/b.db").render_as_string()).database == "/a?/b.db"
+
+
+def _stamp(path, revision, journal_mode="delete"):
+    with closing(sqlite3.connect(path)) as conn:
+        conn.execute(f"PRAGMA journal_mode={journal_mode}")
         conn.execute("CREATE TABLE alembic_version (version_num VARCHAR(32) NOT NULL)")
         conn.execute("INSERT INTO alembic_version VALUES (?)", (revision,))
+        conn.commit()
 
 
 def test_lock_held_by_another_comfyui(db_path, caplog):
@@ -109,14 +119,185 @@ def test_corrupt_read_only_database_is_reported_as_corrupt(db_path, caplog):
     assert f"The asset database '{db_path}' is corrupt" in error
 
 
-def test_database_from_a_newer_comfyui(db_path, caplog):
+def _stamp_left_by_killed_writer(path, revision):
+    """Committed but never checkpointed: the stamp lives only in the -wal a killed newer ComfyUI left."""
+    script = (
+        "import os, sqlite3, sys; conn = sqlite3.connect(sys.argv[1]); "
+        "conn.execute('PRAGMA journal_mode=wal'); conn.execute('PRAGMA wal_autocheckpoint=0'); "
+        "conn.execute('CREATE TABLE alembic_version (version_num VARCHAR(32) NOT NULL)'); "
+        "conn.execute('INSERT INTO alembic_version VALUES (?)', (sys.argv[2],)); conn.commit(); "
+        "os.kill(os.getpid(), 9)"
+    )
+    subprocess.run([sys.executable, "-c", script, path, revision])
+    assert os.path.getsize(path + "-wal") > 0
+
+
+def _files(directory):
+    return {name: Path(directory, name).read_bytes() for name in os.listdir(directory) if not name.endswith(".lock")}
+
+
+@pytest.mark.parametrize("left_by", ["rollback_journal", "wal", "killed_wal_writer"])
+def test_database_from_a_newer_comfyui_turns_assets_off_and_is_left_as_it_is(db_path, caplog, left_by):
+    if left_by == "killed_wal_writer":
+        _stamp_left_by_killed_writer(db_path, "0099_from_a_newer_release")
+    else:
+        _stamp(db_path, "0099_from_a_newer_release", "wal" if left_by == "wal" else "delete")
+    before = _files(os.path.dirname(db_path))
+
+    with caplog.at_level(logging.WARNING):
+        main.skip_assets_for_a_newer_database()
+
+    assert main.args.disable_assets
+    assert "ASSETS_DISABLED: newer_revision\n" in caplog.text
+    assert "ASSETS_STARTUP_FAILED" not in caplog.text
+    assert f"The asset database '{db_path}' was upgraded by a newer version of ComfyUI (revision '0099_from_a_newer_release')" in caplog.text
+    assert "run the newer version again" in caplog.text
+    assert "move or rename that database file" in caplog.text
+    after = _files(os.path.dirname(db_path))
+    # The database and any WAL it had are untouched (not checkpointed, not switched to WAL, no backup).
+    # A read can only add the -shm index, or an empty -wal next to a WAL database that had none.
+    for name in ("comfyui.db", "comfyui.db-wal"):
+        assert after.get(name) == before.get(name) or (name not in before and after[name] == b"")
+    assert set(after) <= {"comfyui.db", "comfyui.db-wal", "comfyui.db-shm"}
+    assert not os.path.exists(db_path + ".lock")  # only init_db takes the lock, and it never ran
+    assert db_module.Session is None
+
+
+@pytest.mark.parametrize(
+    "folder",
+    [
+        "100%20x",
+        pytest.param(
+            "a?b#c",
+            marks=pytest.mark.skipif(
+                sys.platform == "win32" or not _sqlalchemy_quotes_question_marks(),
+                reason="? isn't allowed in Windows paths, and SQLAlchemy before 2.1 can't put one in a URL",
+            ),
+        ),
+    ],
+)
+def test_newer_database_in_a_folder_with_uri_characters(tmp_path, monkeypatch, db_path, caplog, folder):
+    path = tmp_path / folder / "comfyui.db"
+    path.parent.mkdir()
+    _stamp(str(path), "0099_from_a_newer_release")
+    monkeypatch.setattr(db_module.args, "database_url", URL.create("sqlite", database=str(path)).render_as_string())
+
+    with caplog.at_level(logging.WARNING):
+        main.skip_assets_for_a_newer_database()
+
+    assert main.args.disable_assets
+    assert f"The asset database '{path}' was upgraded by a newer version of ComfyUI" in caplog.text
+
+
+def test_newer_database_the_check_cannot_read_still_stops_as_newer_revision(db_path, caplog, monkeypatch):
     _stamp(db_path, "0099_from_a_newer_release")
+    monkeypatch.setattr(db_module, "_unknown_revisions", lambda path: None)  # e.g. a hot rollback journal
 
     error = _startup_error(caplog, kind="newer_revision")
+
+    assert "ASSETS_DISABLED" not in error
 
     assert f"The asset database '{db_path}' was last used by a newer version of ComfyUI" in error
     assert "0099_from_a_newer_release" in error
     assert "Update ComfyUI" in error
+
+
+def test_disable_assets_never_reads_the_database(db_path, monkeypatch, caplog):
+    _stamp(db_path, "0099_from_a_newer_release")
+    monkeypatch.setattr(main.args, "disable_assets", True)
+    monkeypatch.setattr(main, "newer_database", lambda: pytest.fail("checked the database with assets off"))
+
+    with caplog.at_level(logging.WARNING):
+        main.skip_assets_for_a_newer_database()
+
+    assert "ASSETS_DISABLED" not in caplog.text
+
+
+def test_newer_database_at_the_legacy_path_stays_where_the_newer_comfyui_left_it(tmp_path, monkeypatch, db_path, caplog):
+    user_dir = tmp_path / "user"
+    user_dir.mkdir()
+    legacy = tmp_path / "install" / "user" / "comfyui.db"
+    legacy.parent.mkdir(parents=True)
+    _stamp(str(legacy), "0099_from_a_newer_release", "wal")
+    before = legacy.read_bytes()
+    monkeypatch.setattr(db_module.args, "database_url", None)
+    monkeypatch.setattr(db_module, "get_legacy_default_db_path", lambda: str(legacy))
+    monkeypatch.setattr(folder_paths, "get_user_directory", lambda: str(user_dir))
+
+    with caplog.at_level(logging.WARNING):
+        main.skip_assets_for_a_newer_database()
+
+    assert main.args.disable_assets
+    assert f"The asset database '{legacy}' was upgraded by a newer version of ComfyUI" in caplog.text
+    assert legacy.read_bytes() == before
+    assert not (legacy.parent / "comfyui.db.bak").exists()
+    assert not (user_dir / "comfyui.db").exists()
+
+
+def test_database_at_this_versions_head_keeps_assets_on(db_path):
+    _stamp(db_path, ScriptDirectory.from_config(db_module.get_alembic_config()).get_current_head())
+
+    main.skip_assets_for_a_newer_database()
+
+    assert not main.args.disable_assets
+
+
+@pytest.mark.parametrize("beside_legacy", ["user_database", "legacy_backup"])
+def test_newer_legacy_database_that_will_not_be_moved_keeps_assets_on(tmp_path, monkeypatch, db_path, beside_legacy):
+    user_dir = tmp_path / "user"
+    user_dir.mkdir()
+    legacy = tmp_path / "install" / "user" / "comfyui.db"
+    legacy.parent.mkdir(parents=True)
+    _stamp(str(legacy), "0099_from_a_newer_release")
+    if beside_legacy == "user_database":
+        _stamp(str(user_dir / "comfyui.db"), ScriptDirectory.from_config(db_module.get_alembic_config()).get_current_head())
+    else:
+        legacy.with_name("comfyui.db.bak").write_bytes(b"")
+    monkeypatch.setattr(db_module.args, "database_url", None)
+    monkeypatch.setattr(db_module, "get_legacy_default_db_path", lambda: str(legacy))
+    monkeypatch.setattr(folder_paths, "get_user_directory", lambda: str(user_dir))
+
+    main.skip_assets_for_a_newer_database()
+
+    assert not main.args.disable_assets
+
+
+def test_newer_legacy_database_is_not_checked_with_an_explicit_database_url(tmp_path, monkeypatch, db_path):
+    legacy = tmp_path / "install" / "user" / "comfyui.db"
+    legacy.parent.mkdir(parents=True)
+    _stamp(str(legacy), "0099_from_a_newer_release")
+    monkeypatch.setattr(db_module, "get_legacy_default_db_path", lambda: str(legacy))
+
+    main.skip_assets_for_a_newer_database()
+
+    assert not main.args.disable_assets
+
+
+def test_any_unknown_revision_among_several_turns_assets_off(db_path, caplog):
+    head = ScriptDirectory.from_config(db_module.get_alembic_config()).get_current_head()
+    _stamp(db_path, head)
+    with closing(sqlite3.connect(db_path)) as conn:
+        conn.execute("INSERT INTO alembic_version VALUES ('0099_from_a_newer_release')")
+        conn.commit()
+
+    with caplog.at_level(logging.WARNING):
+        main.skip_assets_for_a_newer_database()
+
+    assert main.args.disable_assets
+    assert "(revision '0099_from_a_newer_release')" in caplog.text
+    assert head not in caplog.text
+
+
+def test_revision_cannot_add_lines_to_the_log(db_path, caplog):
+    _stamp(db_path, "0099\n[ERROR] ASSETS_STARTUP_FAILED: corrupt \u00e9")
+
+    with caplog.at_level(logging.WARNING):
+        main.skip_assets_for_a_newer_database()
+
+    assert main.args.disable_assets
+    assert "\n[ERROR] ASSETS_STARTUP_FAILED" not in caplog.text
+    # Escaped to ASCII, so it also survives a console that can't encode it.
+    assert "(revision '0099\\n[ERROR] ASSETS_STARTUP_FAILED: corrupt \\xe9')" in caplog.text
 
 
 def test_failed_upgrade(db_path, caplog):
@@ -269,10 +450,6 @@ def test_opens_from_an_install_folder_with_a_percent_sign(tmp_path, monkeypatch,
 
     with sqlite3.connect(db_path) as conn:
         assert conn.execute("SELECT version_num FROM alembic_version").fetchone()[0] == _head()
-
-
-def _sqlalchemy_quotes_question_marks():
-    return make_url(URL.create("sqlite", database="/a?/b.db").render_as_string()).database == "/a?/b.db"
 
 
 @pytest.mark.parametrize(
