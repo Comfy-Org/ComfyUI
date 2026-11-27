@@ -5,6 +5,7 @@ class Magi2TextToVideoRequest(BaseModel):
     prompt: str = Field(...)
     duration: int = Field(...)
     aspect_ratio: str = Field(...)
+    resolution: str = Field(...)
     generate_audio: bool = Field(...)
     seed: int = Field(...)
 
@@ -15,6 +16,7 @@ class Magi2ImageToVideoRequest(BaseModel):
     prompt: str = Field(...)
     duration: int = Field(...)
     aspect_ratio: str = Field(...)
+    resolution: str = Field(...)
     generate_audio: bool = Field(...)
     seed: int = Field(...)
 
@@ -26,6 +28,7 @@ class Magi2ReferenceToVideoRequest(BaseModel):
     audios: list[str] | None = Field(None)
     duration: int = Field(...)
     aspect_ratio: str = Field(...)
+    resolution: str = Field(...)
     generate_audio: bool = Field(...)
     seed: int = Field(...)
 

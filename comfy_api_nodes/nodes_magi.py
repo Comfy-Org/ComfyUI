@@ -42,6 +42,7 @@ def _settings_inputs(aspect_ratios: list[str], aspect_default: str, aspect_toolt
     return [
         IO.Int.Input("duration", default=5, min=4, max=30, step=1, display_mode=IO.NumberDisplay.number),
         IO.Combo.Input("aspect_ratio", options=aspect_ratios, default=aspect_default, tooltip=aspect_tooltip),
+        IO.Combo.Input("resolution", options=["1080p"]),
         IO.Boolean.Input("generate_audio", default=True),
         IO.Int.Input(
             "seed",
@@ -147,6 +148,7 @@ class Magi2TextToVideoApi(IO.ComfyNode):
         prompt: str,
         duration: int,
         aspect_ratio: str,
+        resolution: str,
         generate_audio: bool,
         seed: int,
     ) -> IO.NodeOutput:
@@ -159,6 +161,7 @@ class Magi2TextToVideoApi(IO.ComfyNode):
                 prompt=prompt,
                 duration=duration,
                 aspect_ratio=aspect_ratio,
+                resolution=resolution,
                 generate_audio=generate_audio,
                 seed=seed,
             ),
@@ -202,6 +205,7 @@ class Magi2ImageToVideoApi(IO.ComfyNode):
         prompt: str,
         duration: int,
         aspect_ratio: str,
+        resolution: str,
         generate_audio: bool,
         seed: int,
         last_frame: Input.Image | None = None,
@@ -223,6 +227,7 @@ class Magi2ImageToVideoApi(IO.ComfyNode):
                 prompt=prompt,
                 duration=duration,
                 aspect_ratio=aspect_ratio,
+                resolution=resolution,
                 generate_audio=generate_audio,
                 seed=seed,
             ),
@@ -295,6 +300,7 @@ class Magi2ReferenceToVideoApi(IO.ComfyNode):
         reference_audios: IO.Autogrow.Type,
         duration: int,
         aspect_ratio: str,
+        resolution: str,
         generate_audio: bool,
         seed: int,
     ) -> IO.NodeOutput:
@@ -326,6 +332,7 @@ class Magi2ReferenceToVideoApi(IO.ComfyNode):
                 audios=audio_urls,
                 duration=duration,
                 aspect_ratio=aspect_ratio,
+                resolution=resolution,
                 generate_audio=generate_audio,
                 seed=seed,
             ),
