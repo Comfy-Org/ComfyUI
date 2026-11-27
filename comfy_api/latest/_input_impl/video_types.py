@@ -159,6 +159,8 @@ class HostFrames:
         self.count = 0
 
     def append(self, frame: np.ndarray) -> None:
+        if frame.dtype == np.uint8:
+            frame = frame.astype(np.float32) / 255.0
         self.shape = self.shape or frame.shape
         address = self.hostbuf.extend(frame.nbytes, reallocate=self.count == 0, register=False)
         row = (ctypes.c_uint8 * frame.nbytes).from_address(address)
@@ -673,7 +675,7 @@ class VideoFromFile(VideoInput):
         with av.open(self.__file, mode='r') as container:
             return container.format.name
 
-    def _decode_frames(self, container, video_stream, audio_stream, audio_frames, alphas):
+    def _decode_frames(self, container, video_stream, audio_stream, audio_frames, alphas, frames):
         start_time, duration = self.get_active_trim_window()
 
         start_pts = int(start_time / video_stream.time_base)
@@ -723,7 +725,7 @@ class VideoFromFile(VideoInput):
                                     alpha_channel = True
                                     break
                             if frame.format.name in ("yuvj420p", "yuvj422p", "yuvj444p", "rgb24", "rgba", "pal8"):
-                                if isinstance(alphas, HostFrames):  # it holds float32; blocks keep 8 bits until tensor()
+                                if isinstance(frames, HostFrames):  # the store the frames go into holds float32
                                     process_image_format = lambda a: np.divide(a, 255.0, dtype=np.float32)
                                 if alpha_channel:
                                     image_format = 'rgba'
@@ -824,7 +826,7 @@ class VideoFromFile(VideoInput):
         frames = frame_store()
         alphas = frame_store()
 
-        images = frames_to_tensor(self._decode_frames(container, video_stream, audio_stream, audio_frames, alphas), frames)
+        images = frames_to_tensor(self._decode_frames(container, video_stream, audio_stream, audio_frames, alphas, frames), frames)
         if isinstance(alphas, HostFrames):
             alphas = alphas.tensor() if alphas.count > 0 else None
         else:
