@@ -515,7 +515,7 @@ class TrimAudioDuration(IO.ComfyNode):
         if start_frame >= end_frame:
             raise ValueError("TrimAudioDuration: Start time must be less than end time and be within the audio length.")
 
-        return IO.NodeOutput({"waveform": waveform[..., start_frame:end_frame], "sample_rate": sample_rate})
+        return IO.NodeOutput({"waveform": waveform[..., start_frame:end_frame].clone(), "sample_rate": sample_rate})
 
     trim = execute  # TODO: remove
 
