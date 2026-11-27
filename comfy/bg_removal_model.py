@@ -41,10 +41,10 @@ class BackgroundRemovalModel():
     def get_sd(self):
         return self.model.state_dict()
 
-    def encode_image(self, image):
+    def encode_image(self, image, image_size=None):
         comfy.model_management.load_model_gpu(self.patcher)
         H, W = image.shape[1], image.shape[2]
-        pixel_values = comfy.clip_model.clip_preprocess(image.to(self.load_device), size=self.image_size, mean=self.image_mean, std=self.image_std, crop=False)
+        pixel_values = comfy.clip_model.clip_preprocess(image.to(self.load_device), size=image_size or self.image_size, mean=self.image_mean, std=self.image_std, crop=False)
 
         if pixel_values.shape[0] > 1:
             out = torch.cat([
