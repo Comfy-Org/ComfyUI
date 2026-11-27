@@ -458,7 +458,7 @@ def attention_split(q, k, v, heads, mask=None, attn_precision=None, skip_reshape
     cleared_cache = False
     while True:
         try:
-            slice_size = q.shape[1] // steps if (q.shape[1] % steps) == 0 else q.shape[1]
+            slice_size = math.ceil(q.shape[1] / steps)
             for i in range(0, q.shape[1], slice_size):
                 end = i + slice_size
                 if upcast:
