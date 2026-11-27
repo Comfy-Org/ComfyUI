@@ -152,7 +152,10 @@ class Block(nn.Module):
         y = modulate(x, self.norm2, mod, 3, ref)
         y = self.proj["ffn_up_gate"](y)
         # situ on the [hidden | gate] halves; int8 weights fold it into the activation quantization
-        return residual(x, comfy.ops.linear_input_act(self.proj["ffn_down"], y, "situ"), mod, 5, ref)
+        x = residual(x, comfy.ops.linear_input_act(self.proj["ffn_down"], y, "situ"), mod, 5, ref)
+        if x.dtype == torch.float16:
+            x.clamp_(-65504, 65504)
+        return x
 
 
 class MOSSImage(nn.Module):
