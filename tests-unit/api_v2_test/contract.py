@@ -25,7 +25,7 @@ OPERATIONS = {(method.upper(), path) for path, item in SPEC["paths"].items() for
 ROUTE_EXTENSIONS = set()
 
 # Reviewed-contract marker: update only after reviewing a normative contract change.
-REVIEWED_NORMATIVE_DIGEST = "f72efe0be562226e41225dbb11422b22bb7cdc402bbbbaa680e1c1d84fac4b88"
+REVIEWED_NORMATIVE_DIGEST = "bf1c7c67734142b2f05af1489cae88f90cbc2ca8942f4e24ac3d1e8050a0bd36"
 
 _PROSE_KEYS = {"description", "summary", "example", "examples"}
 _OAS_ONLY_KEYS = {"example", "examples", "discriminator", "xml", "externalDocs", "nullable"}

@@ -72,15 +72,19 @@ paths:
 
         without a declared length is cut off when it passes that limit, and
 
-        no 413 is sent: a cut-off while the fields before `file` are read
+        the server sends no 413 (an edge proxy in front of Comfy Cloud can
+
+        still refuse it with its own 413 — see the 413 response): a cut-off
+
+        while the fields before `file` are read
 
         fails with 422 `invalid_body`, and a cut-off inside the file usually
 
         fails with 500 `upstream_error`. Nothing after the `file` field is
 
-        read, so a body that only passes the limit there is uploaded
+        read, so a body that only passes the limit there is usually
 
-        normally.
+        uploaded normally.
 
         Deployment-scoped surfaces neither strip location metadata nor apply
 
@@ -90,9 +94,15 @@ paths:
 
         that limit is refused with the same plain 413; a body sent without a
 
-        declared length is cut off when it passes the limit, and the upload
+        declared length is cut off when it passes the limit before the `file`
 
-        then fails with an error response that is not guaranteed to be a 413.
+        part ends, and the upload then fails with an error response that is
+
+        not guaranteed to be a 413. Nothing after the `file` field is read,
+
+        so a body that only passes the limit there is usually uploaded
+
+        normally.
 
         The uploaded asset is referenceable immediately; any content scanning
 
@@ -122,11 +132,19 @@ paths:
         response does not say any of these were skipped.
 
 
-        An upload is a single request. v1 expects files of up to ~100 MB;
+        An upload is a single request. v1 expects files of up to ~100 MB.
 
-        the hard cap is the body limit of the surface it is sent to (above).
+        For an image on Comfy Cloud the hard cap is the 50 MiB image cap
 
-        Chunked/resumable large uploads are a deliberate open question.
+        above; for other files it is the body limit of the surface the
+
+        upload is sent to (above). The self-hosted proxy instead applies a
+
+        per-file cap (100 MiB by default) that counts only the `file` bytes
+
+        (see the 413 response). Chunked/resumable large uploads are a
+
+        deliberate open question.
 
 
         Cloud''s hosted API caps every part sent before `file` at 8 KiB,
@@ -145,9 +163,9 @@ paths:
 
         still counts those bytes toward the size limit above; without one,
 
-        a body that only exceeds the limit there is uploaded normally,
+        a body that only exceeds the limit there is usually uploaded
 
-        since nothing after `file` is read.
+        normally, since nothing after `file` is read.
 
 
         On Comfy Cloud an upload fails with 422 `upload_timed_out` when no
@@ -238,9 +256,9 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorEnvelope'
         '413':
-          description: The upload is over the body limit. On Comfy Cloud (200 MB, 200,000,000 bytes) and on deployment-scoped surfaces (110 MB, 110,000,000 bytes) the request declared a `Content-Length` over it; the server's body limit sends this before the upload is handled, so the body is not an `ErrorEnvelope` and its shape is not part of this contract. The self-hosted proxy instead refuses a file over its configured cap (100 MiB by default) with an `ErrorEnvelope` whose code is `payload_too_large`.
+          description: 'The upload is over a body limit, sent by the edge proxy or the server''s body limit. On Comfy Cloud (200 MB, 200,000,000 bytes) and on deployment-scoped surfaces (110 MB, 110,000,000 bytes) the server''s own body limit (the Echo layer) sends a plain 413 before the upload is handled when the request declared a `Content-Length` over it; a body without a declared length is not guaranteed this 413. An edge proxy in front of the surface can also refuse a large body — including a chunked one, whether or not a `Content-Length` is declared — with its own 413; in production a CDN edge in front of Comfy Cloud refuses a body over its upload cap before it reaches the server. This spec attaches no schema to the 413 response, so none of these bodies can be decoded from it: the server''s 413 is not an `ErrorEnvelope`, and while the self-hosted proxy refuses a file over its configured cap (100 MiB by default) with an `ErrorEnvelope` whose code is `payload_too_large`, that body is untyped here too. Because the server can refuse on the declared `Content-Length` (and the edge before the body is read), a client that writes the whole body before reading the response may see the connection reset and lose the 413. Check the body size before sending; `Expect: 100-continue` helps only when every hop in front of the server waits for the server''s answer instead of replying `100 Continue` itself.'
         '422':
-          description: '`idempotency_key_reuse`, `input_blocked` (the bytes are already stored and flagged by content moderation, so `file_path` is not registered for them), `upload_timed_out` (the client stopped sending or sent too slowly; the server cannot recover the upload, so retry it from a faster connection), or validation failure — including a `tags` set over the limits above or a disallowed tag (`invalid_request` on a deployment or the self-hosted proxy; a deployment answers a body that is not `multipart/form-data` with a boundary with a plain 500 instead). On a deployment that includes a truncated `file` part: the body ends inside the part, before the delimiter that ends it. A body that stops right at that delimiter, without the final `--`, is not rejected: the part reads as complete and is stored. Comfy Cloud''s asset upload answers validation failure instead with `invalid_content_type` (the request is not `multipart/form-data` with a boundary), `invalid_body` (a malformed multipart body or upload field) or `validation_error` (the platform refused the upload, for example an image over the size cap or a disallowed tag). Cloud refuses a malformed multipart body with `invalid_body` when the fault is found before the `file` part. Cloud stops parsing at `file`, so parts after it are never read, and a body that ends inside the streamed file currently gets 500 `upstream_error` instead. The exception is an upload with `expected_hash`: if Cloud accepts the upload before the whole file is read, it reads the rest. A body that ends inside the `file` part, before its delimiter, then gets `invalid_body`, and a complete body gets 500 `upstream_error` instead of 201 or 409; in both cases the asset is already stored, holding only the part of the file read before the upload was accepted. `invalid_body` also covers `tags` parts over the 8 KiB combined cap described under `tags`, and a body sent without a declared length that is cut off at the body limit, as described for this operation. Cloud uses the same code for a missing `file`; a missing `content_type`, or one that breaks the rules under `content_type`; a missing `file_path`, or one that is absolute, starts with `.`, contains `..`, is not already in clean form (no `//`, no `.` segment such as `/./`, and no trailing `/`) or breaks the rules under `file_path`; a `content_type`, `file_path` or `expected_hash` part over 8 KiB; and a non-empty `expected_hash` that is not `blake3:` followed by 64 lowercase hex characters. A `content_type` or `file_path` sent only after `file` counts as missing (see the field-order rule above). Any Content-Type other than `multipart/form-data` with a `boundary` (including a missing or unparseable one) gets `invalid_content_type` on Cloud. On Comfy Cloud and on a deployment, an `expected_hash` part that is present but empty is a malformed field (`invalid_body` on Comfy Cloud, `invalid_request` on a deployment), not an omitted hash.'
+          description: '`idempotency_key_reuse`, `input_blocked` (the bytes are already stored and flagged by content moderation, so `file_path` is not registered for them), `upload_timed_out` (the client stopped sending or sent too slowly; the server cannot recover the upload, so retry it from a faster connection), or validation failure — including a `tags` set over the limits above or a disallowed tag (`invalid_request` on a deployment or the self-hosted proxy; a deployment answers with a plain 500 a body whose Content-Type is missing, is neither `multipart/form-data` nor `multipart/mixed`, is otherwise unparseable as a media type (an unquoted empty `boundary=` among these; a quoted empty `boundary=""` parses and fails here with `invalid_request`), or carries no `boundary` parameter; a `multipart/mixed` body with a boundary is parsed like a form and either succeeds or fails here instead). On a deployment that includes a truncated `file` part: the body ends inside the part, before the delimiter that ends it. A body that stops right at that delimiter, without the final `--`, is not rejected: the part reads as complete and is stored. Comfy Cloud''s asset upload answers validation failure instead with `invalid_content_type` (the request is not `multipart/form-data` with a boundary), `invalid_body` (a malformed multipart body or upload field) or `validation_error` (the platform refused the upload, for example an image over the size cap or a disallowed tag). Cloud refuses a malformed multipart body with `invalid_body` when the fault is found before the `file` part. Cloud stops parsing at `file`, so parts after it are never read, and a body that ends inside the streamed file currently gets 500 `upstream_error` instead. The exception is an upload with `expected_hash`: if Cloud accepts the upload before the whole file is read, it reads the rest. A body that ends inside the `file` part, before its delimiter, then gets `invalid_body`, and a complete body gets 500 `upstream_error` instead of 201 or 409; in both cases the asset is already stored, holding only the part of the file read before the upload was accepted. `invalid_body` also covers `tags` parts over the 8 KiB combined cap described under `tags`, and a body sent without a declared length that is cut off at the body limit, as described for this operation. Cloud uses the same code for a missing `file`; a missing `content_type`, or one that breaks the rules under `content_type`; a missing `file_path`, or one that is absolute, starts with `.`, contains `..`, is not already in clean form (no `//`, no `.` segment such as `/./`, and no trailing `/`) or breaks the rules under `file_path`; a `content_type`, `file_path` or `expected_hash` part over 8 KiB; and a non-empty `expected_hash` that is not `blake3:` followed by 64 lowercase hex characters. A `content_type` or `file_path` sent only after `file` counts as missing (see the field-order rule above). Any Content-Type other than `multipart/form-data` with a `boundary` (including a missing or unparseable one) gets `invalid_content_type` on Cloud. On Comfy Cloud and on a deployment, an `expected_hash` part that is present but empty is a malformed field (`invalid_body` on Comfy Cloud, `invalid_request` on a deployment), not an omitted hash.'
           content:
             application/json:
               schema:
@@ -372,7 +390,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorEnvelope'
         '422':
-          description: 'The `tags` or `expires_in` is malformed, `tags` breaks the limits above or holds a disallowed tag, or (on a deployment) the `file_path` is malformed: `invalid_request` on a deployment. On Cloud a tag with a malformed shape is `invalid_body`, and a refusal by the platform (for example a disallowed tag) is `validation_error`. Cloud answers a malformed `file_path` with 404 `blob_not_found` instead (see `file_path`). A deployment checks the tags even when an identical reference exists.'
+          description: 'The `tags` or `expires_in` is malformed, `tags` breaks the limits above or holds a disallowed tag, or (on a deployment) the `file_path` is malformed: `invalid_request` on a deployment. On Cloud a tag with a malformed shape, or a tag set breaking the limits above, is `invalid_body`, checked before anything else is looked up; a refusal by the platform (for example a disallowed tag) is `validation_error`. Cloud answers a malformed `file_path` with 404 `blob_not_found` instead (see `file_path`). A deployment checks the tags even when an identical reference exists. Also `invalid_request`, on Cloud too, when the platform refuses the forwarded `file_path` and `tags` as too large to mint from. On Comfy Cloud, also `invalid_request` when the request body exceeds 1,000,000 bytes (for a chunked body, when its JSON value runs past that); the serverless gateway applies its general request-body limit (10 MB) instead.'
           content:
             application/json:
               schema:
@@ -707,7 +725,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorEnvelope'
         '422':
-          description: '`invalid_workflow` (with per-node details), `workflow_format_ui`, `missing_asset`, `idempotency_key_reuse`, `metadata_invalid` (for a bad key or value, the message and `details.key` name the key; for more than 16 pairs, the message gives the count and there are no `details`), or `metadata_not_supported` (a surface that keeps no job labels yet).'
+          description: '`invalid_workflow` (with per-node details), `workflow_format_ui`, `missing_asset`, `idempotency_key_reuse`, `metadata_invalid` (for a bad key or value, the message and `details.key` name the key; for more than 16 pairs, the message gives the count and there are no `details`), or `metadata_not_supported` (a surface that keeps no job labels yet). On a deployment, also `model_not_ready` (the workflow names a model file still being added to the deployment; send it again once the file shows Ready) or `model_failed` (the file was not added; remove it and add it again). A workflow whose running nodes load a library model the deployment''s Release model policy does not allow is `invalid_workflow`, with `model_not_allowed` node errors.'
           content:
             application/json:
               schema:
@@ -1167,7 +1185,7 @@ components:
           schema:
             $ref: '#/components/schemas/ErrorEnvelope'
     DeploymentLookupUnavailable:
-      description: 'On deployment-scoped surfaces, `deployment_lookup_unavailable`: the deployment this address names could not be looked up just now. The request was refused before it did anything (nothing was created, read, changed or canceled), so the same request can be sent again after `Retry-After`. Every operation at a deployment''s address can answer this way. A job submit can also answer this 503 with `database_unavailable`: the job could not be saved just now and nothing was started, so the same request can be sent again after `Retry-After`. No other operation answers `database_unavailable`. On Comfy Cloud an asset upload can also answer this 503 with `upload_busy`: the server is busy with other uploads and nothing was stored, so the same upload can be sent again after `Retry-After`. Any operation can also answer this 503 with `auth_unavailable`: the credential could not be checked just now, so the same request can be sent again after `Retry-After`. A job status read can also answer it with `output_unavailable`: an output of the job could not be prepared just now, and the job is unchanged. A transient storage failure clears on a later read after `Retry-After`; an output whose stored address is broken answers it on every read until the platform repairs the output.'
+      description: 'On deployment-scoped surfaces, `deployment_lookup_unavailable`: the deployment this address names could not be looked up just now. The request was refused before it did anything (nothing was created, read, changed or canceled), so the same request can be sent again after `Retry-After`. Every operation at a deployment''s address can answer this way. A job submit can also answer this 503 with `database_unavailable`: the job could not be saved just now and nothing was started, so the same request can be sent again after `Retry-After`. No other operation answers `database_unavailable`. On Comfy Cloud an asset upload can also answer this 503 with `upload_busy`: the server is busy with other uploads and nothing was stored, so the same upload can be sent again after `Retry-After`. Any operation can also answer this 503 with `auth_unavailable`: the credential could not be checked just now, so the same request can be sent again after `Retry-After`. A job status read can also answer it with `output_unavailable`: an output of the job could not be prepared just now, and the job is unchanged. A transient storage failure clears on a later read after `Retry-After`; an output whose stored address is broken answers it on every read until the platform repairs the output. A job submit also answers `deployment_lookup_unavailable` when a node the workflow would run loads a model from the workspace''s library and the model policy of the deployment''s Release could not be read just now: nothing was started, so the same request can be sent again after `Retry-After`.'
       headers:
         Retry-After:
           $ref: '#/components/headers/RetryAfter'
@@ -1552,6 +1570,9 @@ components:
         message:
           type: string
           description: Why the job failed, written for a person to read. On a serverless deployment, where ComfyUI refused the workflow, it names the rejected nodes it has room for and their reasons, which `node_errors` carries in full. Its wording may change; read `code` and `node_errors` rather than matching this text.
+        category:
+          type: string
+          description: 'Stored category of a user-caused failure on a serverless deployment: invalid_input, content_refused, out_of_gpu_memory, missing_model_or_node, workflow_logic or other. Clients tolerate unknown values as other. Absent for platform or unattributed failures, nonfailed jobs, reports recorded before categories were available, and account-scrubbed content. Comfy Cloud does not set this field. Reads never classify the failure again. This describes the stored report, not first-failure attribution or a guarantee of accuracy.'
         node_id:
           type: string
           nullable: true
@@ -1587,7 +1608,7 @@ components:
             $ref: '#/components/schemas/JobNodeErrorReason'
     JobNodeErrorReason:
       type: object
-      description: 'One problem found with a node. `type` is the code for it: ComfyUI''s (for example `value_not_in_list`, `value_bigger_than_max`, `dependency_cycle`), or one of the gateway''s, sent where its submit checks are switched on: `unknown_node_class` (a node class the deployment''s build does not contain), `waits_for_browser` (a node the workflow would run whose class waits for a browser tab to answer while the job runs, which a deployment never has), `invalid_node` (the node is not a JSON object), `invalid_inputs` (its `inputs` is present but not an object, refused only where the deployment''s ComfyUI would fail such a node anyway, so no workflow that runs today is refused), or `invalid_class_type` (its `class_type` is missing or is not a non-empty string). ComfyUI''s `missing_node_type` means the same as `unknown_node_class`, found after dispatch rather than at submit. For either, `message` ends naming the node pack that provides the class where the Comfy node registry knows one. `details` usually starts with the input it is about.'
+      description: 'One problem found with a node. `type` is the code for it: ComfyUI''s (for example `value_not_in_list`, `value_bigger_than_max`, `dependency_cycle`), or one of the gateway''s. The gateway always sends `model_not_allowed`: a node the workflow would run loads a model from the workspace''s library that the deployment''s Release model policy does not allow, because the build runs only the models it allows and this one is not among them, or because the policy blocks it; add the model to the build to use it. Where its submit checks are switched on, it also sends `unknown_node_class` (a node class the deployment''s build does not contain), `waits_for_browser` (a node the workflow would run whose class waits for a browser tab to answer while the job runs, which a deployment never has), `invalid_node` (the node is not a JSON object), `invalid_inputs` (its `inputs` is present but not an object, refused only where the deployment''s ComfyUI would fail such a node anyway, so no workflow that runs today is refused), or `invalid_class_type` (its `class_type` is missing or is not a non-empty string). ComfyUI''s `missing_node_type` means the same as `unknown_node_class`, found after dispatch rather than at submit. For either, `message` ends naming the node pack that provides the class where the Comfy node registry knows one. `details` usually starts with the input it is about.'
       required:
       - type
       - message
@@ -1632,7 +1653,9 @@ components:
 
         operation: the deployment the address names could not be looked up
 
-        just now; nothing was done, so retry), `database_unavailable` (503 +
+        just now, or, on a job submit, the model policy of its Release could
+
+        not be read; nothing was done, so retry), `database_unavailable` (503 +
 
         Retry-After, only on a job submit: the job could not be saved just
 
