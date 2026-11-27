@@ -4,7 +4,7 @@ import os
 import sys
 from unittest.mock import Mock, patch, mock_open
 
-from utils.extra_config import load_extra_path_config
+from utils.extra_config import load_extra_path_config, restore_extra_path_config
 import folder_paths
 
 
@@ -301,3 +301,66 @@ def test_load_extra_path_config_no_base_path(
     actual_diffusion = folder_paths.folder_names_and_paths["diffusion_models"][0]
     assert len(actual_diffusion) == 1, "Should have one path for 'diffusion_models'."
     assert actual_diffusion[0] == os.path.abspath(expected_unet)
+
+
+def _write_config(tmp_path, body):
+    path = tmp_path / "extra_model_paths.yaml"
+    path.write_text(body, encoding="utf-8")
+    return str(path)
+
+
+def test_restore_readds_paths_a_custom_node_replaced(clear_folder_paths, tmp_path):
+    shared = os.path.normpath(str(tmp_path / "shared"))
+    install = os.path.normpath(str(tmp_path / "install"))
+    config = _write_config(tmp_path, f"""
+shared:
+  base_path: {shared}
+  is_default: true
+  facerestore_models: facerestore_models/
+install:
+  base_path: {install}
+  facerestore_models: facerestore_models/
+""")
+    load_extra_path_config(config)
+    node_path = os.path.join(shared, "facerestore_models")
+    # What e.g. ReActor does at import: replace the whole entry with one models_dir path.
+    folder_paths.folder_names_and_paths["facerestore_models"] = ([node_path], {".pth"})
+
+    restore_extra_path_config(config)
+
+    paths, exts = folder_paths.folder_names_and_paths["facerestore_models"]
+    assert paths == [node_path, os.path.join(install, "facerestore_models")]
+    assert exts == {".pth"}
+
+
+def test_restore_leaves_untouched_entries_as_they_are(clear_folder_paths, tmp_path):
+    config = _write_config(tmp_path, f"""
+a:
+  base_path: {tmp_path / "a"}
+  loras: loras/
+b:
+  base_path: {tmp_path / "b"}
+  is_default: true
+  loras: loras/
+""")
+    load_extra_path_config(config)
+    folder_paths.add_model_folder_path("loras", str(tmp_path / "node_first"), is_default=True)
+    before = list(folder_paths.folder_names_and_paths["loras"][0])
+
+    restore_extra_path_config(config)
+
+    assert folder_paths.folder_names_and_paths["loras"][0] == before
+
+
+def test_restore_skips_folders_that_no_longer_exist(clear_folder_paths, tmp_path):
+    config = _write_config(tmp_path, f"""
+a:
+  base_path: {tmp_path / "a"}
+  gone: gone/
+""")
+    load_extra_path_config(config)
+    del folder_paths.folder_names_and_paths["gone"]
+
+    restore_extra_path_config(config)
+
+    assert "gone" not in folder_paths.folder_names_and_paths
