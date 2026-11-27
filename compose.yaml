@@ -1,0 +1,17 @@
+services:
+  comfyui:
+    image: comfyui:${COMFYUI_VERSION:?Set COMFYUI_VERSION in .env to a release tag or commit SHA}
+    build:
+      context: .
+      args:
+        COMFYUI_REVISION: ${COMFYUI_VERSION:?Set COMFYUI_VERSION in .env to a release tag or commit SHA}
+    init: true
+    restart: unless-stopped
+    ports:
+      - "${COMFYUI_BIND_ADDRESS:-0.0.0.0}:${COMFYUI_PORT:-8188}:8188"
+    volumes:
+      - ./models:/comfyui/models
+      - ./input:/comfyui/input
+      - ./output:/comfyui/output
+      - ./user:/comfyui/user
+      - ./extra_model_paths.yaml:/comfyui/extra_model_paths.yaml:ro

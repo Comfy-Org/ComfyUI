@@ -1,0 +1,14 @@
+.git
+.env
+.venv
+venv*/
+__pycache__/
+*.py[cod]
+models/
+input/
+output/
+temp/
+custom_nodes/
+user/
+extra_model_paths.yaml
+web_custom_versions/
