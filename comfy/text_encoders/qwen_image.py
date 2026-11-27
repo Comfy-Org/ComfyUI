@@ -1,9 +1,80 @@
 from transformers import Qwen2Tokenizer
-from comfy import sd1_clip
+from comfy import model_management, sd1_clip
 import comfy.text_encoders.llama
+import math
 import os
 import torch
 import numbers
+
+def _estimate_qwen_image_memory(sections, config, vision_config, device=None, embedding_dtype=None):
+    if not sections or not any(sections):
+        return 0
+
+    lengths = []
+    weighted = False
+    image_tokens = 0
+    vision_peak = 0
+    patch = vision_config["patch_size"]
+    factor = patch * vision_config["spatial_merge_size"]
+    vision_hidden = vision_config["hidden_size"]
+    deepstack = len(vision_config.get("deepstack_visual_indexes", []))
+    for section in sections:
+        length = 0
+        for token, weight, *_ in section:
+            weighted |= weight != 1.0
+            if torch.is_tensor(token):
+                length += math.prod(token.shape[:-1])
+            elif isinstance(token, dict) and token.get("type") == "embedding":
+                length += math.prod(token["data"].shape[:-1])
+            elif isinstance(token, dict) and token.get("type") == "image":
+                # Match process_qwen2vl_images, which processes only data[0].
+                height, width = token["data"].shape[1:3]
+                h = round(height / factor) * factor
+                w = round(width / factor) * factor
+                if h * w > 12845056:
+                    scale = math.sqrt(height * width / 12845056)
+                    h = max(factor, math.floor(height / scale / factor) * factor)
+                    w = max(factor, math.floor(width / scale / factor) * factor)
+                elif h * w < 3136:
+                    scale = math.sqrt(3136 / (height * width))
+                    h = math.ceil(height * scale / factor) * factor
+                    w = math.ceil(width * scale / factor) * factor
+                merged = (h // factor) * (w // factor)
+                patches = (h // patch) * (w // patch)
+                length += merged
+                image_tokens += merged
+                # Global visual attention runs before spatial merging, also in Qwen2.5's full-attention blocks.
+                vision = 4 * patches * (16 * vision_hidden + 3 * vision_config["intermediate_size"] + 24 * patch * patch)
+                vision += 16 * merged * config.hidden_size
+                vision += 8 * vision_config["num_heads"] * patches * patches
+                vision += 4 * vision_hidden * max(3 * vision_hidden, vision_config["intermediate_size"], 4 * config.hidden_size)
+                vision_peak = max(vision_peak, vision)
+            else:
+                length += 1
+        lengths.append(length)
+
+    batch = len(sections) + int(weighted)
+    seq = max(max(lengths), max(map(len, sections)))
+    hidden = config.hidden_size
+    query = config.num_attention_heads * config.head_dim
+    kv = config.num_key_value_heads * config.head_dim
+    # SDClipModel supplies FP32 embeddings even with quantized weights.
+    retained = 2 * batch * seq * hidden * 4
+    if device is not None and model_management.intermediate_device() == torch.device(device):
+        retained += 2 * batch * seq * hidden * 4
+    image_features = image_tokens * hidden * (1 + 2 * deepstack) * 4
+    activations = batch * seq * (6 * hidden + max(3 * config.intermediate_size, 4 * query + 4 * kv)) * 4
+    masks = max(9 * batch, 4 * (batch + 2)) * seq * seq + 8 * batch * seq
+    # Conservative score/softmax workspace without inspecting the selected attention backend.
+    attention = 2 * batch * config.num_attention_heads * seq * seq * 4
+    cast_weight = hidden * max(config.intermediate_size, query) * 4
+    language_peak = retained + image_features + activations + masks + attention + cast_weight
+    # Raw FP8 Embedding casts the entire vocabulary before looking up FP32 rows.
+    embedding_peak = 0
+    if embedding_dtype in (torch.float8_e4m3fn, torch.float8_e5m2):
+        embedding_peak = retained + image_features + config.vocab_size * hidden * 4
+    return max(language_peak, retained + image_features + vision_peak, embedding_peak)
+
 
 class Qwen25_7BVLITokenizer(sd1_clip.SDTokenizer):
     def __init__(self, embedding_directory=None, tokenizer_data={}):
@@ -94,4 +165,12 @@ def te(dtype_llama=None, llama_quantization_metadata=None):
             if dtype_llama is not None:
                 dtype = dtype_llama
             super().__init__(device=device, dtype=dtype, model_options=model_options)
+            # CLIP uses this flag to select the non-dynamic patcher and reserve encode workspace.
+            self.disable_offload = True
+
+        def memory_estimation_function(self, token_weight_pairs, device=None):
+            model = getattr(self, self.clip).transformer.model
+            vision_config = dict(patch_size=14, spatial_merge_size=2, hidden_size=1280, intermediate_size=3420, num_heads=16)
+            return _estimate_qwen_image_memory(token_weight_pairs.get(self.clip_name, []), model.config, vision_config, device, model.embed_tokens.weight.dtype)
+
     return QwenImageTEModel_

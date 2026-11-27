@@ -3,6 +3,7 @@ import numbers
 import torch
 
 import comfy.text_encoders.qwen3vl
+from comfy.text_encoders.qwen_image import _estimate_qwen_image_memory
 from comfy import sd1_clip
 
 VISION_BLOCK = "<|vision_start|><|image_pad|><|vision_end|>"
@@ -43,6 +44,13 @@ class QwenImage21Qwen3VLClipModel(comfy.text_encoders.qwen3vl.Qwen3VLClipModel):
 class QwenImage21TEModel(sd1_clip.SD1ClipModel):
     def __init__(self, device="cpu", dtype=None, model_options={}):
         super().__init__(device=device, dtype=dtype, name="qwen3vl_8b", clip_model=QwenImage21Qwen3VLClipModel, model_options=model_options)
+        # CLIP uses this flag to select the non-dynamic patcher and reserve encode workspace.
+        self.disable_offload = True
+
+    def memory_estimation_function(self, token_weight_pairs, device=None):
+        model = getattr(self, self.clip).transformer.model
+        vision_config = {**comfy.text_encoders.qwen3vl.QWEN3VL_VISION_COMMON, **comfy.text_encoders.qwen3vl.QWEN3VL_VISION["qwen3vl_8b"]}
+        return _estimate_qwen_image_memory(token_weight_pairs.get(self.clip_name, []), model.config, vision_config, device, model.embed_tokens.weight.dtype)
 
     def encode_token_weights(self, token_weight_pairs):
         out, pooled, extra = super().encode_token_weights(token_weight_pairs)
