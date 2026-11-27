@@ -47,7 +47,7 @@ def _run_fast_phase(scan_seeder, monkeypatch, count, fail_batch=None):
     monkeypatch.setattr(seeder_module, "collect_paths_for_roots", lambda *_args, **_kwargs: [])
     monkeypatch.setattr(seeder_module, "build_asset_specs", lambda *_args, **_kwargs: (specs, set(), 0))
     monkeypatch.setattr(seeder_module, "tick_watch_list", lambda _progress=None: None)
-    result = scan_seeder._run_fast_phase(("input",))
+    result = scan_seeder._run_fast_phase(("input",), False)
     return result, batches, sleeps
 
 
