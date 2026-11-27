@@ -164,7 +164,7 @@ def _write_in_batches(
     committed: list[int],
 ) -> None:
     """Apply ``write_batch`` to ``items`` a batch per transaction, appending the count
-    each batch reports to ``committed`` once it commits. Retry file-open failures in
+    each batch reports to ``committed`` once it commits. Retry transient write failures in
     a new transaction. A failure leaves the batches before it committed, and
     ``committed`` says how much they wrote."""
     for start in range(0, len(items), WRITE_BATCH_ROWS):
@@ -179,7 +179,11 @@ def _write_in_batches(
             except OperationalError as exc:
                 if (
                     not isinstance(exc.orig, sqlite3.OperationalError)
-                    or str(exc.orig) != "unable to open database file"
+                    or str(exc.orig) not in (
+                        "unable to open database file",
+                        "attempt to write a readonly database",
+                        "database is locked",
+                    )
                     or attempt == WRITE_MAX_ATTEMPTS - 1
                 ):
                     raise
