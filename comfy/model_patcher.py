@@ -34,6 +34,7 @@ import tqdm
 import comfy.float
 import comfy.hooks
 import comfy.lora
+import comfy.memory_management
 import comfy.model_management
 import comfy.model_prefetch
 import comfy.ops
@@ -1106,8 +1107,13 @@ class ModelPatcher:
                 logging.debug("lowvram: loaded module regularly {} {}".format(n, m))
                 m.comfy_patched_weights = True
 
-            for x in load_completely:
-                x[2].to(device_to)
+            staging = comfy.model_management.weight_staging_bytes(device_to)
+            if staging > 0:
+                with comfy.model_management.reserve_pinned_bytes(staging):
+                    comfy.memory_management.move_modules_reading_files([x[2] for x in load_completely], device_to, staging)
+            else:
+                for x in load_completely:
+                    x[2].to(device_to)
 
             for x in offloaded:
                 n = x[1]

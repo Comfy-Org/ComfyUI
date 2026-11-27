@@ -1,7 +1,10 @@
 import math
+import collections
 import ctypes
 import dataclasses
+import os
 import torch
+from concurrent.futures import ThreadPoolExecutor
 from typing import NamedTuple
 
 import comfy_aimdo.host_buffer
@@ -115,6 +118,183 @@ def read_tensor_file_slice_into(tensor, destination, stream=None, destination2=N
         return True
     finally:
         view.release()
+
+def _read_file_slice(info, address):
+    """Read a TensorFileSlice into host memory at ``address``."""
+    view = memoryview((ctypes.c_ubyte * info.size).from_address(address))
+    try:
+        done = 0
+        if hasattr(os, "preadv"):
+            # Positional reads need no lock, so several slices of one file can be read at once.
+            fd = info.file_ref.fileno()
+            while done < info.size:
+                n = os.preadv(fd, [view[done:]], info.offset + done)
+                if n <= 0:
+                    raise OSError("unexpected end of file")
+                done += n
+        else:
+            with info.lock:
+                info.file_ref.seek(info.offset)
+                while done < info.size:
+                    n = info.file_ref.readinto(view[done:])
+                    if not n:
+                        raise OSError("unexpected end of file")
+                    done += n
+    finally:
+        view.release()
+
+
+def _mmap_file_slice_tensors(module, seen):
+    """(holder, source, slice) for every CPU tensor of ``module`` that is a whole mmap'd file slice.
+
+    .to() moves a module's whole subtree, and a parent and its child can both be listed,
+    so each tensor goes to the first module that reaches it; ``seen`` holds their ids.
+    """
+    found = []
+    for m in module.modules():
+        for tensors in (m._parameters, m._buffers):
+            for t in tensors.values():
+                if t is None or id(t) in seen:
+                    continue
+                seen.add(id(t))
+                # .data is a separate tensor on the same storage, so it still points at the
+                # mmap after the holder is swapped to its pinned copy.
+                src = t._qdata if isinstance(t, QuantizedTensor) else t.data
+                info = getattr(src.untyped_storage(), "_comfy_mmap_file_slice", None)
+                if (info is not None and src.device.type == "cpu" and src.storage_offset() == 0
+                        and src.is_contiguous() and src.nbytes == info.size):
+                    found.append((t, src, info))
+    return found
+
+
+_STAGING_ALIGN = 256
+
+
+class _StagingArena:
+    """A pinned host buffer for one load, allocated on first use and unpinned and freed on close."""
+
+    def __init__(self, size):
+        self.size = size
+        self.buffer = None
+        self.failed = False
+
+    def get(self):
+        """The pinned buffer, or None if it cannot be pinned."""
+        if self.buffer is None and not self.failed:
+            buffer = torch.empty(self.size, dtype=torch.uint8)
+            if torch.cuda.cudart().cudaHostRegister(buffer.data_ptr(), self.size, 1) == 0:
+                self.buffer = buffer
+            else:
+                import comfy.model_management  # model_management imports this module
+                comfy.model_management.discard_cuda_async_error()
+                self.failed = True
+        return self.buffer
+
+    def close(self):
+        if self.buffer is not None:
+            torch.cuda.cudart().cudaHostUnregister(self.buffer.data_ptr())
+            self.buffer = None
+
+
+def move_modules_reading_files(modules, device, max_staged_bytes, workers=4):
+    """module.to(device) for each module, reading its mmap'd weights from their file first.
+
+    ROCm copies pageable host memory to the GPU by locking the source pages, which
+    runs at about 2.3 GB/s from an mmap'd checkpoint. Reading the file into pinned
+    memory and copying from there is several times faster. The weights are read into
+    one pinned buffer of ``max_staged_bytes``, used as a ring: modules are read ahead
+    on ``workers`` threads while earlier ones are copied, and a module's region is
+    reused once its synchronous .to() has returned. The buffer is pinned only once a
+    module needs it and is released before returning. A module larger than the buffer,
+    and tensors without a file slice or whose read fails, move as before.
+    """
+    staging = _StagingArena(max_staged_bytes)
+    try:
+        _move_through_ring(modules, device, staging, workers)
+    finally:
+        staging.close()
+
+
+def _move_through_ring(modules, device, staging, workers):
+    seen = set()
+    plan = []
+    for module in modules:
+        found = _mmap_file_slice_tensors(module, seen)
+        plan.append((module, found, sum(-(-info.size // _STAGING_ALIGN) * _STAGING_ALIGN for _, _, info in found)))
+    # Pin no more than this load can use: pinning costs about 0.3 ms per MiB, which a
+    # small model would not win back.
+    staging.size = min(staging.size, sum(size for _, _, size in plan if size <= staging.size))
+    capacity = staging.size
+
+    def read(found, start, arena):
+        staged = []
+        offset = start
+        for holder, src, info in found:
+            pinned = arena[offset:offset + info.size].view(src.dtype).view(src.shape)
+            offset += -(-info.size // _STAGING_ALIGN) * _STAGING_ALIGN
+            try:
+                _read_file_slice(info, pinned.data_ptr())
+            except OSError:
+                continue
+            staged.append((holder, src, pinned))
+        return staged
+
+    def move(module, staged):
+        for holder, src, pinned in staged:
+            if isinstance(holder, QuantizedTensor):
+                holder._qdata = pinned
+            else:
+                holder.data = pinned
+        try:
+            module.to(device)
+        finally:
+            # Any holder still on the staging buffer goes back to the mmap, as the buffer
+            # is about to be reused: one that .to() replaced rather than moved (quantized
+            # modules register new Parameters) may still be referenced, e.g. as a patch
+            # backup, and if .to() raised, the module itself keeps its CPU holders.
+            for holder, src, pinned in staged:
+                if isinstance(holder, QuantizedTensor):
+                    if holder._qdata is pinned:
+                        holder._qdata = src
+                elif holder.data_ptr() == pinned.data_ptr():
+                    holder.data = src
+
+    pending = collections.deque()  # (module, start, end, future), oldest first
+    head = 0
+
+    def place(size):
+        """Start of a free ring region of ``size`` bytes, or None while it is still in use."""
+        for start in (head, 0):
+            if start + size <= capacity and all(start + size <= s or e <= start for _, s, e, _ in pending):
+                return start
+        return None
+
+    with ThreadPoolExecutor(workers) as pool:
+        for module, found, size in plan:
+            if size > capacity:
+                while pending:
+                    old, _, _, staged = pending.popleft()
+                    move(old, staged.result())
+                module.to(device)
+                continue
+            arena = staging.get() if found else None
+            if found and arena is None:
+                while pending:
+                    old, _, _, staged = pending.popleft()
+                    move(old, staged.result())
+                module.to(device)
+                continue
+            start = place(size)
+            while start is None:
+                old, _, _, staged = pending.popleft()
+                move(old, staged.result())
+                start = place(size)
+            pending.append((module, start, start + size, pool.submit(read, found, start, arena)))
+            head = start + size
+        while pending:
+            old, _, _, staged = pending.popleft()
+            move(old, staged.result())
+
 
 class TensorGeometry(NamedTuple):
     shape: any

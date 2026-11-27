@@ -189,6 +189,34 @@ def load_safetensors(ckpt):
     return sd, header.get("__metadata__", {}),
 
 
+def _safetensors_file_slices(ckpt):
+    """Where each tensor's bytes sit in a safetensors file, for reading them without the mmap.
+
+    The slices share one open file object. Returns None if the header cannot be read;
+    safe_open reports a malformed file itself.
+    """
+    try:
+        f = open(ckpt, "rb")
+    except OSError:
+        return None
+    try:
+        header_size = struct.unpack("<Q", f.read(8))[0]
+        if header_size > _SAFETENSORS_MAX_HEADER_SIZE:
+            raise ValueError("header too large")
+        header = json.loads(f.read(header_size))
+        lock = threading.Lock()
+        base = 8 + header_size
+        slices = {}
+        for name, info in header.items():
+            if name != "__metadata__":
+                start, end = info["data_offsets"]
+                slices[name] = comfy.memory_management.TensorFileSlice(f, lock, base + start, end - start)
+        return slices
+    except (OSError, struct.error, ValueError, KeyError, TypeError):
+        f.close()
+        return None
+
+
 def load_torch_file(ckpt, safe_load=False, device=None, return_metadata=False):
     if device is None:
         device = torch.device("cpu")
@@ -202,10 +230,15 @@ def load_torch_file(ckpt, safe_load=False, device=None, return_metadata=False):
             else:
                 with safetensors.safe_open(ckpt, framework="pt", device=device.type) as f:
                     sd = {}
+                    file_slices = None
+                    if not DISABLE_MMAP and device.type == "cpu":
+                        file_slices = _safetensors_file_slices(ckpt)
                     for k in f.keys():
                         tensor = f.get_tensor(k)
                         if DISABLE_MMAP:  # TODO: Not sure if this is the best way to bypass the mmap issues
                             tensor = tensor.to(device=device, copy=True)
+                        elif file_slices is not None and k in file_slices and tensor.numel() > 0:
+                            tensor.untyped_storage()._comfy_mmap_file_slice = file_slices[k]
                         sd[k] = tensor
                     if return_metadata:
                         metadata = f.metadata()
@@ -1026,6 +1059,10 @@ def copy_to_param(obj, attr, value):
         obj = getattr(obj, name)
     prev = getattr(obj, attrs[-1])
     prev.data.copy_(value)
+    # The storage no longer holds the file's bytes, so it must not be re-read from the file.
+    storage = (prev._qdata if hasattr(prev, "_qdata") else prev).untyped_storage()
+    if hasattr(storage, "_comfy_mmap_file_slice"):
+        del storage._comfy_mmap_file_slice
 
 def get_attr(obj, attr: str):
     """Retrieves a nested attribute from an object using dot notation.

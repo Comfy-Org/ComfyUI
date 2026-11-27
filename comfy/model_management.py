@@ -18,6 +18,7 @@
 from __future__ import annotations
 
 import psutil
+import contextlib
 import logging
 from enum import Enum
 from comfy.cli_args import args, PerformanceFeature
@@ -1713,6 +1714,33 @@ def discard_cuda_async_error():
     except RuntimeError:
         #Dump it! We already know about it from the synchronous return
         pass
+
+def weight_staging_bytes(device):
+    """Pinned bytes the legacy loader may stage file reads through for ``device``, or 0.
+
+    Only ROCm needs it (see memory_management.move_modules_reading_files). It follows the
+    pinned-memory policy (--disable-pinned-memory, integrated GPUs), stays within the unused
+    part of the pinning budget and within the RAM that ensure_pin_budget keeps free, and is
+    capped at 128 MiB. Staging is transient, so it never evicts pins to make room; it is
+    counted in TOTAL_PINNED_MEMORY while it runs (see reserve_pinned_bytes).
+    """
+    if not is_amd() or not is_device_cuda(device) or MAX_PINNED_MEMORY <= 0:
+        return 0
+    budget = min(128 * 1024 * 1024, MAX_PINNED_MEMORY - TOTAL_PINNED_MEMORY)
+    if not args.high_ram:
+        headroom = max(comfy.memory_management.RAM_CACHE_HEADROOM / 2, 2048 * 1024 ** 2)
+        budget = min(budget, comfy.system_memory.virtual_memory_available() - headroom)
+    return int(max(0, budget))
+
+@contextlib.contextmanager
+def reserve_pinned_bytes(size):
+    """Count ``size`` pinned bytes held outside PINNED_MEMORY against the budget while active."""
+    global TOTAL_PINNED_MEMORY
+    TOTAL_PINNED_MEMORY += size
+    try:
+        yield
+    finally:
+        TOTAL_PINNED_MEMORY -= size
 
 def pin_memory(tensor, evict_active=True):
     global TOTAL_PINNED_MEMORY
