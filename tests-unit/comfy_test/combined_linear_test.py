@@ -1,3 +1,7 @@
+import copy
+import gc
+import weakref
+
 import pytest
 import torch
 
@@ -22,6 +26,38 @@ def test_combined_linear_declines_without_running_split_or_activation():
     assert comfy.ops.linear_input_act(combined, x, "model_owned_activation") is NotImplemented
     assert torch.equal(x, original)
 
+
+
+class _Pair(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.a = comfy.ops.manual_cast.Linear(16, 24, bias=False)
+        self.b = comfy.ops.manual_cast.Linear(16, 40, bias=False)
+        self.combined = comfy.ops.CombinedLinear((self.a, self.b))
+
+
+def test_combined_linear_members_are_freed_with_their_model_without_gc():
+    model = _Pair()
+    assert model.a._combined_linear is model.combined
+    weights = [weakref.ref(model.a.weight), weakref.ref(model.b.weight)]
+    enabled = gc.isenabled()
+    gc.disable()
+    try:
+        del model
+        assert all(w() is None for w in weights)
+    finally:
+        if enabled:
+            gc.enable()
+
+
+def test_combined_linear_deepcopy_points_members_at_the_copy():
+    model = _Pair()
+    clone = copy.deepcopy(model)
+    assert clone.combined is not model.combined
+    assert clone.combined.linears == (clone.a, clone.b)
+    assert clone.a._combined_linear is clone.combined
+    assert clone.b._combined_linear is clone.combined
+    assert model.a._combined_linear is model.combined
 
 def _gathered(layout, rows, k, **kwargs):
     weights = [QuantizedTensor.from_float(torch.randn(n, k), layout, **kwargs) for n in rows]
