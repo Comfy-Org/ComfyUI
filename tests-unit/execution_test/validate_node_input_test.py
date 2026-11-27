@@ -65,6 +65,44 @@ def test_non_string():
     assert not validate_node_input(obj1, obj2)
 
 
+@pytest.mark.parametrize("strict", [False, True])
+@pytest.mark.parametrize(
+    "received_type,input_type,expected",
+    [
+        (["simple", "karras"], ["simple", "karras", "AYS SD1"], True),
+        (["karras", "simple"], ["simple", "karras"], True),
+        (["simple", "karras"], ["simple"], False),
+        (["simple", "karras"], ["karras", "exponential"], False),
+        (["simple"], ["exponential"], False),
+        (["a,b"], ["a", "b"], False),
+        ([1, 2], [1, 2, 3], True),
+        ([[1]], [[1], [2]], True),
+        ([[3]], [[1], [2]], False),
+        ([1], [1, [2]], True),
+        ([[1]], [1, 2], False),
+    ],
+)
+def test_combo_options(received_type, input_type, strict, expected):
+    assert validate_node_input(received_type, input_type, strict) == expected
+
+
+def test_large_combo_options_do_not_require_quadratic_comparisons():
+    class Option(str):
+        comparisons = 0
+        __hash__ = str.__hash__
+
+        def __eq__(self, other):
+            Option.comparisons += 1
+            return super().__eq__(other)
+
+    count = 1000
+    supported = [Option(str(index)) for index in range(count)]
+    received = [Option(str(index)) for index in reversed(range(count))]
+
+    assert validate_node_input(received, supported)
+    assert Option.comparisons < count * 4
+
+
 class NotEqualsOverrideTest(str):
     """Test class for ``__ne__`` override."""
 
