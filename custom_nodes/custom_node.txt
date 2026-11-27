@@ -1,0 +1,55 @@
+# 1. ComfyUI-Manager
+git clone https://github.com/ltdrdata/ComfyUI-Manager
+pip install -r ComfyUI-Manager/requirements.txt
+
+# 2. rgthree-comfy
+git clone https://github.com/rgthree/rgthree-comfy
+pip install -r rgthree-comfy/requirements.txt
+
+# 3. ComfyUI-Inpaint-CropAndStitch
+git clone https://github.com/lquesada/ComfyUI-Inpaint-CropAndStitch
+pip install -r ComfyUI-Inpaint-CropAndStitch/requirements.txt
+
+# 4. ComfyUI-RMBG
+git clone https://github.com/1038lab/ComfyUI-RMBG
+pip install -r ComfyUI-RMBG/requirements.txt
+
+# 5. ComfyUI-SeedVR2_VideoUpscaler
+# git clone https://github.com/numz/ComfyUI-SeedVR2_VideoUpscaler
+# pip install -r ComfyUI-SeedVR2_VideoUpscaler/requirements.txt
+
+# 6. ComfyUI-to-Python-Extension
+git clone https://github.com/QuangHoang059/ComfyUI-to-Python-Extension
+pip install -r ComfyUI-to-Python-Extension/requirements.txt
+
+# 7. ComfyUI_essentials
+git clone https://github.com/cubiq/ComfyUI_essentials
+pip install -r ComfyUI_essentials/requirements.txt
+
+# 8. ComfyMath
+git clone https://github.com/evanspearman/ComfyMath
+pip install -r ComfyMath/requirements.txt
+
+# 9. ComfyUI-Color-Matcher
+git clone https://github.com/okdalto/ComfyUI-Color-Matcher
+pip install -r ComfyUI-Color-Matcher/requirements.txt
+
+# 10. ComfyUI-KJNodes
+git clone https://github.com/kijai/ComfyUI-KJNodes
+pip install -r ComfyUI-KJNodes/requirements.txt
+
+# 11. ComfyUI_Swwan
+git clone https://github.com/aining2022/ComfyUI_Swwan
+pip install -r ComfyUI_Swwan/requirements.txt
+
+# 12. RES4LYF
+git clone https://github.com/ClownsharkBatwing/RES4LYF
+pip install -r RES4LYF/requirements.txt
+
+# 13. RESPaddleOCR4LYF
+git clone https://github.com/QuangHoang059/ComfyUI_PaddleOCR
+pip install -r ComfyUI_PaddleOCR/requirements.txt
+
+# 14. ComfyUI-GGUF (UnetLoaderGGUF / CLIPLoaderGGUF - load .gguf)
+git clone https://github.com/city96/ComfyUI-GGUF
+pip install -r ComfyUI-GGUF/requirements.txt
