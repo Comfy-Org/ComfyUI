@@ -366,4 +366,3 @@ class TextgenExtension(ComfyExtension):
 
 async def comfy_entrypoint() -> TextgenExtension:
     return TextgenExtension()
-    
