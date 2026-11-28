@@ -135,3 +135,31 @@ def test_hls_blend_modes_extreme_luminance_no_nans(mode, rgb1, rgb2):
     out = Blend.execute(_rgb_image(rgb1), _rgb_image(rgb2), 1.0, mode).result[0]
     assert torch.isfinite(out).all()
     assert (out >= 0.0).all() and (out <= 1.0).all()
+
+
+@pytest.mark.parametrize("mode", ["luminosity", "color"])
+@pytest.mark.parametrize("b1,b2", [(2, 1), (1, 2)])
+def test_hls_blend_modes_broadcast_singleton_batch(mode, b1, b2):
+    img1 = _rgb_image((0.4, 0.4, 0.4), alpha=0.6).repeat(b1, 1, 1, 1)
+    img2 = _rgb_image((0.8, 0.2, 0.2), alpha=0.2).repeat(b2, 1, 1, 1)
+
+    out = Blend.execute(img1, img2, 1.0, mode).result[0]
+
+    assert out.shape == (max(b1, b2), 4, 4, 4)
+    assert torch.allclose(out[..., 3], torch.full((max(b1, b2), 4, 4), 0.6))
+    assert torch.isfinite(out).all()
+
+
+def test_color_blend_clamps_bicubic_overshoot_before_hls():
+    # Sharp 2x2 red/white checkerboard upscaled to 4x4 via bicubic produces negative
+    # channel overshoot; clamping before rgb_to_hls preserves image1's lightness.
+    gray = _rgb_image((0.5, 0.5, 0.5), size=4)
+    small = torch.tensor(
+        [[[[1.0, 0.0, 0.0], [1.0, 1.0, 1.0]], [[1.0, 1.0, 1.0], [1.0, 0.0, 0.0]]]],
+        dtype=torch.float32,
+    )
+
+    out = Blend.execute(gray, small, 1.0, "color").result[0]
+
+    lightness = (out.max(dim=-1).values + out.min(dim=-1).values) / 2
+    assert torch.allclose(lightness, torch.full_like(lightness, 0.5), atol=1e-4)

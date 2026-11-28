@@ -66,15 +66,17 @@ class Blend(io.ComfyNode):
         elif mode == "difference":
             return img1 - img2
         elif mode in ("luminosity", "color"):
-            hls1 = kornia.color.rgb_to_hls(img1[..., :3].float().permute(0, 3, 1, 2))
-            hls2 = kornia.color.rgb_to_hls(img2[..., :3].float().permute(0, 3, 1, 2))
+            rgb1, rgb2 = torch.broadcast_tensors(img1[..., :3], img2[..., :3])
+            hls1 = kornia.color.rgb_to_hls(rgb1.float().clamp(0, 1).permute(0, 3, 1, 2))
+            hls2 = kornia.color.rgb_to_hls(rgb2.float().clamp(0, 1).permute(0, 3, 1, 2))
             if mode == "luminosity":
                 combined = torch.cat([hls1[:, 0:1], hls2[:, 1:2], hls1[:, 2:3]], dim=1)
             else:
                 combined = torch.cat([hls2[:, 0:1], hls1[:, 1:2], hls2[:, 2:3]], dim=1)
             rgb = kornia.color.hls_to_rgb(combined).permute(0, 2, 3, 1).to(img1.dtype)
             if img1.shape[-1] == 4:
-                return torch.cat([rgb, img1[..., 3:4]], dim=-1)
+                alpha = img1[..., 3:4].expand(rgb.shape[0], -1, -1, -1)
+                return torch.cat([rgb, alpha], dim=-1)
             return rgb
         raise ValueError(f"Unsupported blend mode: {mode}")
 
