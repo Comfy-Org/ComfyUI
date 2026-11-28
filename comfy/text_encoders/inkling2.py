@@ -14,7 +14,7 @@ import torch.nn.functional as F
 
 import comfy.ops
 import comfy.sd1_clip as sd1_clip
-from comfy.ldm.modules.attention import optimized_attention_for_device
+from comfy.ldm.modules.attention import AttentionTensorContainer, ComfyAttention, optimized_attention_for_device
 
 
 class Inkling2Config:
@@ -414,7 +414,10 @@ def inkling_attention(query_states, key_states, value_states, attention_mask, sc
             attn_weights = attn_weights + position_bias_fn(q_start, q_end, kv_start, kv_end).to(attn_weights.dtype)
         elif position_bias is not None:
             attn_weights = attn_weights + position_bias[:, :, q_start:q_end, kv_start:kv_end].to(attn_weights.dtype)
-        if attention_mask is not None:
+        if callable(attention_mask):
+            # Built for this block only; no full sequence-by-sequence mask is materialized.
+            attn_weights = attn_weights + attention_mask(q_start, q_end, kv_start, kv_end)
+        elif attention_mask is not None:
             attn_weights = attn_weights + attention_mask[:, :, q_start:q_end, kv_start:kv_end]
         if sliding_window is not None:
             q_offset = kv_len - q_len
@@ -564,6 +567,14 @@ class Inkling2Experts(nn.Module):
                 final_hidden_states.index_add_(0, token_idx, current_hidden_states.to(torch.float32))
         return final_hidden_states.to(hidden_states.dtype)
     def _forward_single(self, hidden_states, top_k_index, top_k_weights, gate_softcap, up_softcap):
+        if not self._quantized:
+            return self._forward_single_banked(hidden_states, top_k_index, top_k_weights, gate_softcap, up_softcap)
+        # Match the multi-token path: both banks must be resident on the compute device
+        # before their weights and scales are gathered for decode.
+        with self.w13.bank_resident(hidden_states), self.w2.bank_resident(hidden_states):
+            return self._forward_single_banked(hidden_states, top_k_index, top_k_weights, gate_softcap, up_softcap)
+
+    def _forward_single_banked(self, hidden_states, top_k_index, top_k_weights, gate_softcap, up_softcap):
         # Sync-free single-token path: gather the routed experts with tensor indexing, dequantize
         # them to compute dtype, then one batched matmul pair. No host syncs -> CUDA-graph safe.
         ids = top_k_index[0]
@@ -947,12 +958,13 @@ class Inkling2TextModel(nn.Module):
         cfg = self.config
         batch, seq_len, _ = embeds.shape
         device = embeds.device
-        tap = None
+        scalar_tap = None
+        list_taps = None
+        capture_all = intermediate_output == "all"
         if isinstance(intermediate_output, int):
-            tap = intermediate_output + cfg.num_hidden_layers if intermediate_output < 0 else intermediate_output
-            if not 0 <= tap < cfg.num_hidden_layers:
-                raise ValueError("Invalid Inkling2 layer tap {}; expected -{} <= layer < {}".format(
-                    intermediate_output, cfg.num_hidden_layers, cfg.num_hidden_layers))
+            scalar_tap = _normalize_layer_tap(intermediate_output, cfg.num_hidden_layers)
+        elif isinstance(intermediate_output, list):
+            list_taps = [_normalize_layer_tap(t, cfg.num_hidden_layers) for t in intermediate_output]
         tap_out = {}
         if past_key_values is not None and seq_len == 1:
             position_ids = past_key_values[0].pos.reshape(1, 1)
@@ -962,23 +974,27 @@ class Inkling2TextModel(nn.Module):
         # full query-by-key distance matrix here.
         relative_distance = None
 
-        def build_mask(layer_type):
-            if attention_mask is None:
-                causal = torch.ones(seq_len, seq_len, device=device, dtype=torch.bool).tril()
-                neg = torch.zeros(1, 1, seq_len, seq_len, device=device, dtype=torch.float32)
-                neg.masked_fill_(~causal, float("-inf"))
-                return neg
-            key_mask = attention_mask.to(device)[:, None, None, :].to(torch.float32)
-            causal = torch.ones(seq_len, seq_len, device=device, dtype=torch.bool).tril()
-            mask = (attention_mask.to(device)[:, :, None] > 0) & causal[None]
-            mask = mask[:, None, :, :] & (key_mask > 0)
-            out = torch.zeros(batch, 1, seq_len, seq_len, device=device, dtype=torch.float32)
-            out.masked_fill_(~mask, float("-inf"))
-            return out
+        if attention_mask is None:
+            def block_mask(q_start, q_end, kv_start, kv_end):
+                q_pos = torch.arange(q_start, q_end, device=device)
+                kv_pos = torch.arange(kv_start, kv_end, device=device)
+                causal = kv_pos[None, :] <= q_pos[:, None]
+                out = torch.zeros(q_end - q_start, kv_end - kv_start, device=device, dtype=torch.float32)
+                out.masked_fill_(~causal, float("-inf"))
+                return out[None, None]
+        else:
+            pad = attention_mask.to(device)
 
-        # Same causal mask for every attention flavor; build it once.
-        mask_all = build_mask(None)
-        masks = {lt: mask_all for lt in set(cfg.layer_types)}
+            def block_mask(q_start, q_end, kv_start, kv_end):
+                q_pos = torch.arange(q_start, q_end, device=device)
+                kv_pos = torch.arange(kv_start, kv_end, device=device)
+                causal = kv_pos[None, :] <= q_pos[:, None]
+                allowed = ((pad[:, q_start:q_end] > 0)[:, :, None] &
+                           (pad[:, kv_start:kv_end] > 0)[:, None, :] & causal[None])
+                out = torch.zeros(pad.shape[0], 1, q_end - q_start, kv_end - kv_start,
+                                  device=device, dtype=torch.float32)
+                out.masked_fill_(~allowed[:, None], float("-inf"))
+                return out
 
         hidden_states = embeds
         block_states = embeds.new_zeros(*embeds.shape[:-1], 0, embeds.shape[-1]).to(torch.float32)
@@ -986,15 +1002,15 @@ class Inkling2TextModel(nn.Module):
         used_caches = []
 
         def run_layer(layer, hidden_states, block_states, messages, pass_idx=0):
-            mask = masks["hybrid_sliding"] if layer.self_attn.sliding_window is not None else masks["hybrid"]
             cache = None
             if past_key_values is not None:
                 cache = past_key_values[self.cache_slot(layer.layer_idx, pass_idx)]
-            new_hidden = layer(hidden_states, block_states, messages, mask, relative_distance, position_ids,
+            new_hidden = layer(hidden_states, block_states, messages, block_mask, relative_distance, position_ids,
                                past_key_value=cache)
-            if tap is not None and layer.layer_idx == tap:
+            if (scalar_tap is not None and layer.layer_idx == scalar_tap) or capture_all or \
+                    (list_taps is not None and layer.layer_idx in list_taps):
                 # Loop layers run several times; keep the final application's output.
-                tap_out["hidden"] = new_hidden.clone()
+                tap_out[layer.layer_idx] = new_hidden.clone()
             if cache is not None and all(cache is not c for c in used_caches):
                 used_caches.append(cache)
             if layer.is_block_boundary:
@@ -1037,7 +1053,12 @@ class Inkling2TextModel(nn.Module):
         hidden_states = _query_kv_attention(query_states, final_states, final_states.shape[-1])[:, :, 0]
         if intermediate_output is None:
             return self.norm(hidden_states)
-        intermediate = tap_out.get("hidden")
+        if capture_all:
+            intermediate = torch.cat([tap_out[i].unsqueeze(1) for i in range(cfg.num_hidden_layers)], dim=1)
+        elif list_taps is not None:
+            intermediate = torch.cat([tap_out[i].unsqueeze(1) for i in list_taps], dim=1)
+        else:
+            intermediate = tap_out.get(scalar_tap)
         if intermediate is not None and final_layer_norm_intermediate:
             intermediate = self.norm(intermediate)
         return self.norm(hidden_states), intermediate
@@ -1125,6 +1146,7 @@ class VisionAttention(nn.Module):
         self.k_proj = ops.Linear(hidden_size, hidden_size, bias=True, device=device, dtype=dtype)
         self.v_proj = ops.Linear(hidden_size, hidden_size, bias=True, device=device, dtype=dtype)
         self.out_proj = ops.Linear(hidden_size, hidden_size, bias=True, device=device, dtype=dtype)
+        self.comfy_attention = ComfyAttention()
 
     def forward(self, x, cu_seqlens, position_embeddings):
         seq_len = x.shape[0]
@@ -1143,7 +1165,9 @@ class VisionAttention(nn.Module):
         lengths = (cu_seqlens[1:] - cu_seqlens[:-1]).tolist()
         for qs, ks, vs in zip(torch.split(q, lengths, dim=2), torch.split(k, lengths, dim=2),
                               torch.split(v, lengths, dim=2)):
-            out = attn(qs, ks, vs, self.num_heads, skip_reshape=True, skip_output_reshape=True)
+            qs, ks, vs = AttentionTensorContainer(qs), AttentionTensorContainer(ks), AttentionTensorContainer(vs)
+            out = attn(qs, ks, vs, self.num_heads, skip_reshape=True, skip_output_reshape=True,
+                       preferred_attention=self.comfy_attention)
             outputs.append(out.transpose(1, 2))
         attn_output = torch.cat(outputs, dim=1)
         return self.out_proj(attn_output.reshape(seq_len, -1))
@@ -1301,6 +1325,16 @@ def _reset_inference_cache(pkv):
             ring.zero_()
 
 
+def _normalize_layer_tap(layer, num_layers):
+    if not isinstance(layer, int):
+        raise ValueError("Invalid Inkling2 layer tap {!r}".format(layer))
+    tap = layer + num_layers if layer < 0 else layer
+    if not 0 <= tap < num_layers:
+        raise ValueError("Invalid Inkling2 layer tap {}; expected -{} <= layer < {}".format(
+            layer, num_layers, num_layers))
+    return tap
+
+
 _THINKING_TOKEN = 200008  # <|content_thinking|>
 _TEXT_TOKEN = 200004  # <|content_text|>
 _CHANNEL_TOKENS = frozenset({
@@ -1308,24 +1342,53 @@ _CHANNEL_TOKENS = frozenset({
 })
 
 
-def _visible_answer_ids(generated_ids):
-    """Concatenate the contents of every <|content_text|> block, dropping reasoning.
+class _AnswerStream:
+    """Incrementally tracks the active output channel and visible answer tokens.
 
-    Returns the ids unchanged when the thinking channel was never opened, and an empty
-    list when generation stopped before the first answer block.
+    prompt_channel is the channel the prompt left open: "text", "thinking", or None when
+    the model chooses. Tokens generated before a channel is known are kept provisionally
+    and discarded if a thinking marker turns out to open a reasoning section.
     """
-    if _THINKING_TOKEN not in generated_ids:
-        return generated_ids
-    visible = []
-    in_text = False
-    for token in generated_ids:
+
+    def __init__(self, prompt_channel=None):
+        self.known = prompt_channel is not None
+        self.in_text = prompt_channel == "text"
+        self.visible = []
+        self.provisional = 0
+
+    def add(self, token):
+        if not self.known:
+            if token == _THINKING_TOKEN:
+                if self.provisional:
+                    del self.visible[-self.provisional:]
+                    self.provisional = 0
+                self.known = True
+                self.in_text = False
+            elif token == _TEXT_TOKEN:
+                self.provisional = 0
+                self.known = True
+                self.in_text = True
+            else:
+                self.visible.append(token)
+                self.provisional += 1
+            return
         if token == _TEXT_TOKEN:
-            in_text = True
+            self.in_text = True
         elif token in _CHANNEL_TOKENS:
-            in_text = False
-        elif in_text:
-            visible.append(token)
-    return visible
+            self.in_text = False
+        elif self.in_text:
+            self.visible.append(token)
+
+    def ids(self):
+        return self.visible
+
+
+def _visible_answer_ids(generated_ids, prompt_channel=None):
+    """Concatenate the contents of every <|content_text|> block, dropping reasoning."""
+    stream = _AnswerStream(prompt_channel)
+    for token in generated_ids:
+        stream.add(token)
+    return stream.ids()
 
 
 class Inkling2(nn.Module):
@@ -1387,15 +1450,11 @@ class Inkling2(nn.Module):
                                      intermediate_output=intermediate_output,
                                      final_layer_norm_intermediate=final_layer_norm_intermediate)
         if isinstance(outputs, tuple):
-            out, intermediate = outputs
-        else:
-            out, intermediate = outputs, None
-        if isinstance(intermediate_output, list) or intermediate_output == "all":
-            intermediate = out  # full hidden states; Comfy taps handle selection
-        return out, intermediate
+            return outputs
+        return outputs, None
 
     def generate(self, embeds, do_sample, max_length, temperature, top_k, top_p, min_p, repetition_penalty, seed,
-                 presence_penalty=0.0, mtp=False, strip_thinking=True):
+                 presence_penalty=0.0, mtp=False, strip_thinking=True, prompt_channel=None):
         from .token_stream import report_generated_tokens
         from tqdm import tqdm
         import comfy.model_management
@@ -1448,6 +1507,7 @@ class Inkling2(nn.Module):
             return torch.multinomial(probs, 1, generator=generator).squeeze(-1)
 
         generated_ids = []
+        answer_stream = _AnswerStream(prompt_channel) if strip_thinking else None
         graphs_ok = device.type == "cuda" and not getattr(getattr(comfy.model_management, "args", None),
                                                            "disable_cuda_graphs", False)
         graph_used = False
@@ -1461,6 +1521,7 @@ class Inkling2(nn.Module):
             logits_buf = torch.empty(batch, unembed.shape[0], device=device, dtype=torch.float32)
             graph = None
             step_fn = None
+            s = None
             try:
                 hidden = llm(current, attention_mask=None, past_key_values=pkv)
                 logits = project_logits(hidden)
@@ -1489,6 +1550,10 @@ class Inkling2(nn.Module):
                         graph_used = True
                     except Exception as exc:
                         print("inkling2: CUDA graph capture failed, using eager decode:", exc)
+                        if s is not None:
+                            # Warmup may still have work queued on the side stream; order
+                            # it before the reset writes the same cache tensors.
+                            torch.cuda.current_stream(device).wait_stream(s)
                         _reset_inference_cache(pkv)
                         hidden = llm(current, attention_mask=None, past_key_values=pkv)
                         logits = project_logits(hidden)
@@ -1501,9 +1566,13 @@ class Inkling2(nn.Module):
                     if tid in stop_tokens:
                         break
                     generated_ids.append(tid)
-                    # Keep the Generate Text preview aligned with the stripped result:
-                    # reasoning tokens are withheld until the first answer block.
-                    report_generated_tokens(_visible_answer_ids(generated_ids) if strip_thinking else generated_ids)
+                    if answer_stream is not None:
+                        # Track the output channel incrementally; preview and final result
+                        # share the same visible ID list. Reasoning stays hidden.
+                        answer_stream.add(tid)
+                        report_generated_tokens(answer_stream.ids())
+                    else:
+                        report_generated_tokens(generated_ids)
                     pbar.update(1)
                     if step == max_length - 1:
                         break
@@ -1519,10 +1588,11 @@ class Inkling2(nn.Module):
                 # belongs to this call; drop both on completion and cancellation.
                 step_fn = None
                 graph = None
+                s = None
                 pkv = tok_buf = logits_buf = None
         self._graph_used = graph_used
-        if strip_thinking:
-            generated_ids = _visible_answer_ids(generated_ids)
+        if answer_stream is not None:
+            generated_ids = answer_stream.ids()
         return generated_ids
 
 
@@ -1623,10 +1693,26 @@ class Inkling2ClipModel(sd1_clip.SDClipModel):
         if isinstance(tokens, dict):
             tokens = next(iter(tokens.values()))
         tokens_only = [[t[0] for t in b] for b in tokens]
+        # The last channel marker after <|message_model|> is the channel the continuation
+        # starts in (for example a skip_template prompt ending in <|content_thinking|>).
+        prompt_channel = None
+        for batch_tokens in tokens_only:
+            last_model = -1
+            for i, t in enumerate(batch_tokens):
+                if isinstance(t, int) and t == 200001:  # <|message_model|>
+                    last_model = i
+            for t in batch_tokens[last_model + 1:]:
+                if not isinstance(t, int):
+                    continue
+                if t == 200004:  # <|content_text|>
+                    prompt_channel = "text"
+                elif t == 200008:  # <|content_thinking|>
+                    prompt_channel = "thinking"
         dev = self.execution_device or next(self.transformer.parameters()).device
         embeds, _, _, _ = self.process_tokens(tokens_only, dev)
         return self.transformer.generate(embeds, do_sample, max_length, temperature, top_k, top_p, min_p,
-                                         repetition_penalty, seed, presence_penalty=presence_penalty)
+                                         repetition_penalty, seed, presence_penalty=presence_penalty,
+                                         prompt_channel=prompt_channel)
 
 
 class Inkling2TEModel(sd1_clip.SD1ClipModel):
