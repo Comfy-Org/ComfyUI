@@ -4,7 +4,7 @@ import logging
 
 from comfy.cli_args import args
 
-from PIL import ImageFile, UnidentifiedImageError
+from PIL import ExifTags, Image, ImageFile, UnidentifiedImageError
 
 def conditioning_set_values(conditioning, values={}, append=False):
     c = []
@@ -64,6 +64,40 @@ def pillow(fn, arg):
         if prev_value is not None:
             ImageFile.LOAD_TRUNCATED_IMAGES = prev_value
     return x
+
+def image_exif_orientation(path):
+    """EXIF orientation (1-8) of an image file, read from its header without decoding pixels. 1 when absent or unreadable."""
+    try:
+        with Image.open(path) as img:
+            if img.format == "PNG":
+                # PngImageFile.getexif() decodes the whole image when there is no eXIf chunk before IDAT.
+                exif = Image.Exif()
+                if img.info.get("exif"):
+                    exif.load(img.info["exif"])
+            else:
+                exif = img.getexif()
+            orientation = int(exif.get(ExifTags.Base.Orientation, 1))
+    except Exception:
+        return 1
+    return orientation if 1 <= orientation <= 8 else 1
+
+def apply_exif_orientation(images, orientation):
+    """Apply an EXIF orientation (1-8) to a [B, H, W, C] tensor, matching PIL.ImageOps.exif_transpose."""
+    if orientation == 2:
+        images = images.flip(2)
+    elif orientation == 3:
+        images = images.flip(1, 2)
+    elif orientation == 4:
+        images = images.flip(1)
+    elif orientation == 5:
+        images = images.transpose(1, 2)
+    elif orientation == 6:
+        images = images.rot90(-1, dims=(1, 2))
+    elif orientation == 7:
+        images = images.transpose(1, 2).flip(1, 2)
+    elif orientation == 8:
+        images = images.rot90(1, dims=(1, 2))
+    return images.contiguous()
 
 def hasher():
     hashfuncs = {
