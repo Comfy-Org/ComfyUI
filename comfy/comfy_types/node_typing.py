@@ -129,9 +129,9 @@ class InputTypeOptions(TypedDict):
     # class InputTypeNumber(InputTypeOptions):
     # default: float | int
     min: NotRequired[float]
-    """The minimum value of a number (``FLOAT`` | ``INT``)"""
+    """The minimum value of a number (``FLOAT`` | ``INT``), or the fewest options a ``COMBO`` may select; setting ``min`` or ``max`` on a ``COMBO`` makes its value a list."""
     max: NotRequired[float]
-    """The maximum value of a number (``FLOAT`` | ``INT``)"""
+    """The maximum value of a number (``FLOAT`` | ``INT``), or the most options a ``COMBO`` may select."""
     step: NotRequired[float]
     """The amount to increment or decrement a widget by when stepping up/down (``FLOAT`` | ``INT``)"""
     round: NotRequired[float]

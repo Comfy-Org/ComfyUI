@@ -400,17 +400,28 @@ class MultiCombo(ComfyTypeI):
     class Input(Combo.Input):
         def __init__(self, id: str, options: list[str], display_name: str=None, optional=False, tooltip: str=None, lazy: bool=None,
                     default: list[str]=None, placeholder: str=None, chip: bool=None, control_after_generate: bool | ControlAfterGenerate=None,
-                    socketless: bool=None, extra_dict=None, raw_link: bool=None, advanced: bool=None):
-            super().__init__(id, options, display_name, optional, tooltip, lazy, default, control_after_generate, socketless=socketless, extra_dict=extra_dict, raw_link=raw_link, advanced=advanced)
+                    socketless: bool=None, extra_dict=None, raw_link: bool=None, advanced: bool=None,
+                    upload: UploadType=None, image_folder: FolderType=None, min: int=None, max: int=None):
+            '''`min`/`max` bound how many files an upload picker may select; `min=0` with `max=1` is an optional single file picker.'''
+            if (min is not None or max is not None) and upload is None:
+                raise ValueError(f"MultiCombo '{id}': min and max require upload")
+            if min is not None and max is not None and min > max:
+                raise ValueError(f"MultiCombo '{id}': min ({min}) is greater than max ({max})")
+            super().__init__(id, options, display_name, optional, tooltip, lazy, default, control_after_generate,
+                             upload=upload, image_folder=image_folder, socketless=socketless, extra_dict=extra_dict, raw_link=raw_link, advanced=advanced)
             self.multiselect = True
             self.placeholder = placeholder
             self.chip = chip
+            self.min = min
+            self.max = max
             self.default: list[str]
 
         def as_dict(self):
             # Frontend expects `multi_select` to be an object config (not a boolean).
             # Keep top-level `multiselect` from Combo.Input for backwards compatibility.
             return super().as_dict() | prune_dict({
+                "min": self.min,
+                "max": self.max,
                 "multi_select": prune_dict({
                     "placeholder": self.placeholder,
                     "chip": self.chip,
