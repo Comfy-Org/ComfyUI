@@ -28,7 +28,7 @@ class Blend(io.ComfyNode):
                 io.Image.Input("image1"),
                 io.Image.Input("image2"),
                 io.Float.Input("blend_factor", default=0.5, min=0.0, max=1.0, step=0.01),
-                io.Combo.Input("blend_mode", options=["normal", "multiply", "screen", "overlay", "soft_light", "difference"]),
+                io.Combo.Input("blend_mode", options=["normal", "multiply", "screen", "overlay", "soft_light", "difference", "luminosity", "color"]),
             ],
             outputs=[
                 io.Image.Output(),
@@ -65,6 +65,17 @@ class Blend(io.ComfyNode):
             return torch.where(img2 <= 0.5, img1 - (1 - 2 * img2) * img1 * (1 - img1), img1 + (2 * img2 - 1) * (cls.g(img1) - img1))
         elif mode == "difference":
             return img1 - img2
+        elif mode in ("luminosity", "color"):
+            hls1 = kornia.color.rgb_to_hls(img1[..., :3].float().permute(0, 3, 1, 2))
+            hls2 = kornia.color.rgb_to_hls(img2[..., :3].float().permute(0, 3, 1, 2))
+            if mode == "luminosity":
+                combined = torch.cat([hls1[:, 0:1], hls2[:, 1:2], hls1[:, 2:3]], dim=1)
+            else:
+                combined = torch.cat([hls2[:, 0:1], hls1[:, 1:2], hls2[:, 2:3]], dim=1)
+            rgb = kornia.color.hls_to_rgb(combined).permute(0, 2, 3, 1).to(img1.dtype)
+            if img1.shape[-1] == 4:
+                return torch.cat([rgb, img1[..., 3:4]], dim=-1)
+            return rgb
         raise ValueError(f"Unsupported blend mode: {mode}")
 
     @classmethod
