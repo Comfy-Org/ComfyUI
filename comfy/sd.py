@@ -1838,7 +1838,7 @@ def detect_te_model(sd):
             return TEModel.QWEN25_3B
         if weight.shape[0] == 512:
             return TEModel.QWEN25_7B
-    if "model.llm.unembed.weight" in sd and ("model.llm.layers.0.attn.wq_du.weight" in sd or "model.llm.layers.0.self_attn.q_proj.linear.weight" in sd):
+    if "model.llm.unembed.weight" in sd and "model.llm.layers.0.self_attn.q_proj.linear.weight" in sd:
         return TEModel.INKLING2
     if "model.language_model.layers.0.linear_attn.A_log" in sd and "model.language_model.layers.0.input_layernorm.weight" in sd:
         weight = sd['model.language_model.layers.0.input_layernorm.weight']

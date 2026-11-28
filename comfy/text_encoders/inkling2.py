@@ -14,6 +14,7 @@ import torch.nn.functional as F
 
 import comfy.ops
 import comfy.sd1_clip as sd1_clip
+from comfy.ldm.modules.attention import optimized_attention_for_device
 
 
 class Inkling2Config:
@@ -199,9 +200,24 @@ class RelativePositionBias(_CachedCast, nn.Module):
                      else ScaledL2Clip(num_heads, config.d_rel, config.rel_l2_clip_threshold))
         self.proj = nn.Parameter(torch.empty(config.d_rel, rel_extent))
 
-    def forward(self, hidden_states, relative_distance, position_ids):
+    def precompute(self, hidden_states, position_ids):
+        """Query-side relative projection states [B, S, H, d_rel] for blockwise bias."""
         relative_states = self.linear(hidden_states).view(*hidden_states.shape[:-1], self.num_heads, -1)
-        relative_states = self.norm(relative_states, position_ids)
+        return self.norm(relative_states, position_ids)
+
+    def bias(self, relative_states, q_start, q_end, kv_start, kv_end):
+        """Relative bias [B, H, q_end - q_start, kv_end - kv_start] for one query block."""
+        q_pos = torch.arange(q_start, q_end, device=relative_states.device)
+        kv_pos = torch.arange(kv_start, kv_end, device=relative_states.device)
+        relative_distance = q_pos[:, None] - kv_pos[None, :]
+        rel_logits = (relative_states[:, q_start:q_end].to(torch.bfloat16) @
+                      self._cached_cast("proj", torch.bfloat16)).to(torch.float32).transpose(1, 2)
+        gather_index = relative_distance.clamp(0, self.rel_extent - 1).expand(*rel_logits.shape[:2], -1, -1)
+        position_bias = rel_logits.gather(-1, gather_index)
+        return position_bias.masked_fill((relative_distance < 0) | (relative_distance >= self.rel_extent), 0.0)
+
+    def forward(self, hidden_states, relative_distance, position_ids):
+        relative_states = self.precompute(hidden_states, position_ids)
         rel_logits = (relative_states.to(torch.bfloat16) @ self._cached_cast("proj", torch.bfloat16)).to(torch.float32).transpose(1, 2)
         gather_index = relative_distance.clamp(0, self.rel_extent - 1).expand(*rel_logits.shape[:2], -1, -1)
         position_bias = rel_logits.gather(-1, gather_index)
@@ -243,7 +259,9 @@ class ShortConvolution(nn.Module):
         k = self.conv_kernel_size
         x = x.to(torch.float32)
         residual = x
-        if state is not None and x.shape[1] == 1:
+        # Only take the decode path once a ring exists; a single-token prefill on a fresh
+        # cache must go through the multi-token path to create it.
+        if state is not None and x.shape[1] == 1 and name in state.conv:
             ring = state.conv[name]  # [B, K, C]
             ring.index_copy_(1, (state.pos % k).view(1), x)
             idx = (state.pos - (k - 1) + torch.arange(k, device=x.device)) % k  # ctx[j] = x[t-(K-1)+j]
@@ -286,7 +304,7 @@ class DynamicShortConvolution(nn.Module):
 
         x = x.to(torch.float32)
         residual = x
-        if state is not None and seq_len == 1:
+        if state is not None and seq_len == 1 and name in state.conv:
             ring = state.conv[name]  # [B, K, C]
             ring.index_copy_(1, (state.pos % k).view(1), x)
             idx = (state.pos - torch.arange(k, device=x.device)) % k  # ctx[j] = x[t-j]
@@ -359,32 +377,59 @@ class GatedOutputProjection(nn.Module):
 
 
 def inkling_attention(query_states, key_states, value_states, attention_mask, scaling, sinks,
-                      position_bias=None, sliding_window=None):
-    """Eager attention with optional sinks / position bias / sliding window, softmax in fp32."""
-    num_key_value_groups = query_states.shape[1] // key_states.shape[1]
-    if num_key_value_groups > 1:
-        b, _, slen, head_dim = key_states.shape
-        key_states = key_states[:, :, None, :, :].expand(b, key_states.shape[1], num_key_value_groups, slen, head_dim)
-        key_states = key_states.reshape(b, -1, slen, head_dim)
-        value_states = value_states[:, :, None, :, :].expand(b, value_states.shape[1], num_key_value_groups, slen, head_dim)
-        value_states = value_states.reshape(b, -1, slen, head_dim)
-    attn_weights = torch.matmul(query_states.to(torch.float32), key_states.to(torch.float32).transpose(2, 3)) * scaling
-    if position_bias is not None:
-        attn_weights = attn_weights + position_bias.to(attn_weights.dtype)
-    if attention_mask is not None:
-        attn_weights = attn_weights + attention_mask
+                      position_bias=None, sliding_window=None, position_bias_fn=None,
+                      max_score_elements=64 * 1024 * 1024):
+    """Eager attention with optional sinks / position bias / sliding window, softmax in fp32.
+
+    Queries are processed in blocks sized to max_score_elements, and each block only keeps
+    its relevant keys, so a long prefill never materializes a full query-by-key score
+    tensor. position_bias_fn(q_start, q_end, kv_start, kv_end) computes the relative
+    position bias for just the current block.
+    """
+    batch, num_heads, q_len, head_dim = query_states.shape
+    kv_len = key_states.shape[2]
+    num_key_value_groups = num_heads // key_states.shape[1]
+
     if sliding_window is not None:
-        q_len, kv_len = attn_weights.shape[-2], attn_weights.shape[-1]
-        q_pos = torch.arange(kv_len - q_len, kv_len, device=attn_weights.device)
-        kv_pos = torch.arange(kv_len, device=attn_weights.device)
-        dist = kv_pos[None, :] - q_pos[:, None]
-        attn_weights = attn_weights.masked_fill((dist > sliding_window - 1) | (dist < -(sliding_window - 1)), float("-inf"))
-    if sinks is not None:
-        combined = torch.cat([attn_weights, sinks.to(attn_weights.dtype)], dim=-1)
-        attn_weights = F.softmax(combined, dim=-1)[..., :-1]
+        block = min(q_len, 1024)
     else:
-        attn_weights = F.softmax(attn_weights, dim=-1)
-    attn_output = torch.matmul(attn_weights.to(value_states.dtype), value_states)
+        block = max(1, min(q_len, max_score_elements // max(1, batch * num_heads * kv_len)))
+
+    outputs = []
+    for q_start in range(0, q_len, block):
+        q_end = min(q_start + block, q_len)
+        kv_start, kv_end = 0, kv_len
+        if sliding_window is not None:
+            # Keys outside the window of every query in this block are fully masked.
+            kv_start = max(0, q_start - (sliding_window - 1))
+            kv_end = min(kv_len, q_end + sliding_window - 1)
+        q = query_states[:, :, q_start:q_end]
+        k = key_states[:, :, kv_start:kv_end]
+        v = value_states[:, :, kv_start:kv_end]
+        if num_key_value_groups > 1:
+            k = k[:, :, None].expand(batch, -1, num_key_value_groups, -1, head_dim).reshape(batch, -1, k.shape[2], head_dim)
+            v = v[:, :, None].expand(batch, -1, num_key_value_groups, -1, head_dim).reshape(batch, -1, v.shape[2], head_dim)
+        attn_weights = torch.matmul(q.to(torch.float32), k.to(torch.float32).transpose(2, 3)) * scaling
+        if position_bias_fn is not None:
+            attn_weights = attn_weights + position_bias_fn(q_start, q_end, kv_start, kv_end).to(attn_weights.dtype)
+        elif position_bias is not None:
+            attn_weights = attn_weights + position_bias[:, :, q_start:q_end, kv_start:kv_end].to(attn_weights.dtype)
+        if attention_mask is not None:
+            attn_weights = attn_weights + attention_mask[:, :, q_start:q_end, kv_start:kv_end]
+        if sliding_window is not None:
+            q_offset = kv_len - q_len
+            q_pos = torch.arange(q_offset + q_start, q_offset + q_end, device=attn_weights.device)
+            kv_pos = torch.arange(kv_start, kv_end, device=attn_weights.device)
+            dist = kv_pos[None, :] - q_pos[:, None]
+            attn_weights = attn_weights.masked_fill((dist > sliding_window - 1) | (dist < -(sliding_window - 1)), float("-inf"))
+        if sinks is not None:
+            sink_block = sinks[:, :, q_start:q_end] if sinks.shape[2] == q_len else sinks
+            combined = torch.cat([attn_weights, sink_block.to(attn_weights.dtype)], dim=-1)
+            attn_weights = F.softmax(combined, dim=-1)[..., :-1]
+        else:
+            attn_weights = F.softmax(attn_weights, dim=-1)
+        outputs.append(torch.matmul(attn_weights.to(v.dtype), v))
+    attn_output = outputs[0] if len(outputs) == 1 else torch.cat(outputs, dim=2)
     return attn_output.transpose(1, 2).contiguous()
 
 
@@ -530,14 +575,14 @@ class Inkling2Experts(nn.Module):
         if self._quantized:
             w13, scale13 = _batched_bank_weights(self.w13, ids)
             w2, scale2 = _batched_bank_weights(self.w2, ids)
-            if w13 is None:  # layout without concatenable scale tiles: per-expert dequant
+            if w13 is None or w2 is None:  # layout without concatenable scale tiles: per-expert dequant
                 w13 = _per_expert_bank_weights(self.w13, ids)
                 w2 = _per_expert_bank_weights(self.w2, ids)
                 scale13 = scale2 = None
         else:
             w13 = self.w13.index_select(0, ids)
             w2 = self.w2.index_select(0, ids)
-        if w13 is None:
+        if w13 is None or w2 is None:
             expert_ids = ids.tolist()  # fallback: per-expert loop with one sync
             out = torch.zeros(self.hidden_dim, device=x.device, dtype=torch.float32)
             for j, e in enumerate(expert_ids):
@@ -577,7 +622,7 @@ class TopKRouter(nn.Module):
         self.hidden_dim = config.hidden_size
         self.weight = nn.Parameter(torch.empty(self.num_experts, self.hidden_dim, dtype=torch.float32))
         self.bias = nn.Parameter(torch.zeros(self.num_experts, dtype=torch.float32), requires_grad=False)
-        self.routed_scaling_factor = 8.0
+        self.routed_scaling_factor = config.route_scale
 
     def forward(self, hidden_states):
         hidden_states = hidden_states.to(torch.float32)
@@ -696,6 +741,12 @@ class Inkling2Attention(nn.Module):
         if device is not None:
             self.to(device)
 
+    def position_bias_fn(self, hidden_states, position_ids):
+        """Blockwise relative bias provider for inkling_attention prefill chunks."""
+        relative_states = self.rel_logits_proj.precompute(hidden_states, position_ids)
+        return lambda q_start, q_end, kv_start, kv_end: self.rel_logits_proj.bias(
+            relative_states, q_start, q_end, kv_start, kv_end)
+
     def forward(self, hidden_states, key_hidden_states, value_hidden_states, attention_mask,
                 relative_distance, position_ids, past_key_value=None):
         query_states = self.q_proj(hidden_states, position_ids)
@@ -724,14 +775,13 @@ class Inkling2Attention(nn.Module):
             else:
                 past_key_value.k[:, :, :key_states.shape[2]].copy_(key_states)
                 past_key_value.v[:, :, :value_states.shape[2]].copy_(value_states)
-                position_bias = self.rel_logits_proj(hidden_states, relative_distance, position_ids)
                 attn_output = inkling_attention(query_states, key_states, value_states, attention_mask, self.scaling,
-                                                sinks, position_bias=position_bias,
+                                                sinks, position_bias_fn=self.position_bias_fn(hidden_states, position_ids),
                                                 sliding_window=self.sliding_window)
         else:
-            position_bias = self.rel_logits_proj(hidden_states, relative_distance, position_ids)
             attn_output = inkling_attention(query_states, key_states, value_states, attention_mask, self.scaling,
-                                            sinks, position_bias=position_bias, sliding_window=self.sliding_window)
+                                            sinks, position_bias_fn=self.position_bias_fn(hidden_states, position_ids),
+                                            sliding_window=self.sliding_window)
         attn_output = attn_output.reshape(hidden_states.shape[0], hidden_states.shape[1], -1)
         return self.o_proj(attn_output, hidden_states)
 
@@ -892,16 +942,25 @@ class Inkling2TextModel(nn.Module):
             return layer_idx
         return cfg.num_hidden_layers + (pass_idx - 1) * (cfg.loop_end - cfg.loop_start) + (layer_idx - cfg.loop_start)
 
-    def forward(self, embeds, attention_mask=None, past_key_values=None):
+    def forward(self, embeds, attention_mask=None, past_key_values=None, intermediate_output=None,
+                final_layer_norm_intermediate=False):
         cfg = self.config
         batch, seq_len, _ = embeds.shape
         device = embeds.device
+        tap = None
+        if isinstance(intermediate_output, int):
+            tap = intermediate_output + cfg.num_hidden_layers if intermediate_output < 0 else intermediate_output
+            if not 0 <= tap < cfg.num_hidden_layers:
+                raise ValueError("Invalid Inkling2 layer tap {}; expected -{} <= layer < {}".format(
+                    intermediate_output, cfg.num_hidden_layers, cfg.num_hidden_layers))
+        tap_out = {}
         if past_key_values is not None and seq_len == 1:
             position_ids = past_key_values[0].pos.reshape(1, 1)
         else:
             position_ids = torch.arange(seq_len, device=device).unsqueeze(0).expand(batch, -1)
-        relative_distance = (torch.arange(seq_len, device=device)[:, None] -
-                             torch.arange(seq_len, device=device)[None, :])
+        # Relative bias is computed per query block inside attention; do not build a
+        # full query-by-key distance matrix here.
+        relative_distance = None
 
         def build_mask(layer_type):
             if attention_mask is None:
@@ -933,6 +992,9 @@ class Inkling2TextModel(nn.Module):
                 cache = past_key_values[self.cache_slot(layer.layer_idx, pass_idx)]
             new_hidden = layer(hidden_states, block_states, messages, mask, relative_distance, position_ids,
                                past_key_value=cache)
+            if tap is not None and layer.layer_idx == tap:
+                # Loop layers run several times; keep the final application's output.
+                tap_out["hidden"] = new_hidden.clone()
             if cache is not None and all(cache is not c for c in used_caches):
                 used_caches.append(cache)
             if layer.is_block_boundary:
@@ -973,7 +1035,12 @@ class Inkling2TextModel(nn.Module):
         query_states = self.attn_res.output_query.to(torch.float32).reshape(-1, final_states.shape[-1]) \
             .expand(*final_states.shape[:-2], -1, -1)
         hidden_states = _query_kv_attention(query_states, final_states, final_states.shape[-1])[:, :, 0]
-        return self.norm(hidden_states)
+        if intermediate_output is None:
+            return self.norm(hidden_states)
+        intermediate = tap_out.get("hidden")
+        if intermediate is not None and final_layer_norm_intermediate:
+            intermediate = self.norm(intermediate)
+        return self.norm(hidden_states), intermediate
 
     def middle_cycle_queries(self):
         queries = self.middle_cycle_cross_pass_queries.unflatten(0, (-1, 2))
@@ -1071,13 +1138,13 @@ class VisionAttention(nn.Module):
         q = q.transpose(0, 1).unsqueeze(0)
         k = k.transpose(0, 1).unsqueeze(0)
         v = v.transpose(0, 1).unsqueeze(0)
+        attn = optimized_attention_for_device(x.device, mask=False)
         outputs = []
         lengths = (cu_seqlens[1:] - cu_seqlens[:-1]).tolist()
         for qs, ks, vs in zip(torch.split(q, lengths, dim=2), torch.split(k, lengths, dim=2),
                               torch.split(v, lengths, dim=2)):
-            attn = torch.matmul(qs.to(torch.float32), ks.to(torch.float32).transpose(-1, -2)) * self.scaling
-            attn = F.softmax(attn, dim=-1)
-            outputs.append(torch.matmul(attn.to(vs.dtype), vs).transpose(1, 2))
+            out = attn(qs, ks, vs, self.num_heads, skip_reshape=True, skip_output_reshape=True)
+            outputs.append(out.transpose(1, 2))
         attn_output = torch.cat(outputs, dim=1)
         return self.out_proj(attn_output.reshape(seq_len, -1))
 
@@ -1222,6 +1289,45 @@ def process_inkling2_images(image, token_patch=40):
 
 # --------------------------------------------------- top level transformer
 
+def _reset_inference_cache(pkv):
+    """Reset token positions and clear the convolution rings, in place.
+
+    A prefill restart must drop warmup values from the conv rings as well as the position
+    counter. Zeroing in place keeps the tensor addresses a captured CUDA graph reads.
+    """
+    for cache in pkv:
+        cache.pos.zero_()
+        for ring in cache.conv.values():
+            ring.zero_()
+
+
+_THINKING_TOKEN = 200008  # <|content_thinking|>
+_TEXT_TOKEN = 200004  # <|content_text|>
+_CHANNEL_TOKENS = frozenset({
+    199999, 200000, 200001, 200002, 200003, 200005, 200006, 200008, 200010, 200022, 200024, 200049, 200054, 200057,
+})
+
+
+def _visible_answer_ids(generated_ids):
+    """Concatenate the contents of every <|content_text|> block, dropping reasoning.
+
+    Returns the ids unchanged when the thinking channel was never opened, and an empty
+    list when generation stopped before the first answer block.
+    """
+    if _THINKING_TOKEN not in generated_ids:
+        return generated_ids
+    visible = []
+    in_text = False
+    for token in generated_ids:
+        if token == _TEXT_TOKEN:
+            in_text = True
+        elif token in _CHANNEL_TOKENS:
+            in_text = False
+        elif in_text:
+            visible.append(token)
+    return visible
+
+
 class Inkling2(nn.Module):
     """Comfy TE transformer for Inkling-2. State-dict keys match the checkpoint (model.llm.*, model.visual.*)."""
 
@@ -1237,6 +1343,17 @@ class Inkling2(nn.Module):
         self.unpadded_vocab_size = self.model_config.unpadded_vocab_size
         if device is not None:
             self.to(device)
+
+    def load_state_dict(self, state_dict, strict=True, assign=False):
+        # The detector in comfy/sd.py historically also recognized the original TML key
+        # layout (.attn.wq_du/.attn.wr_du). This encoder only registers the repacked
+        # ComfyUI names, and CLIP loads with strict=False, so refuse that layout loudly
+        # instead of silently leaving the query projections unloaded.
+        if any(k.endswith((".attn.wq_du.weight", ".attn.wr_du.weight")) for k in state_dict):
+            raise RuntimeError(
+                "Inkling2 checkpoint uses the original TML key layout (.attn.wq_du/.attn.wr_du); "
+                "repack it to the ComfyUI layout (.self_attn.q_proj.linear/...) before loading.")
+        return super().load_state_dict(state_dict, strict=strict, assign=assign)
 
     def get_input_embeddings(self):
         llm = self.model.llm
@@ -1258,13 +1375,21 @@ class Inkling2(nn.Module):
             return self.model.visual(pixel_values.to(device=device, dtype=torch.float32), grid), grid
         return None, None
 
-    def encode_hidden(self, embeds, attention_mask=None):
-        return self.model.llm(embeds.to(torch.bfloat16), attention_mask=attention_mask)
+    def encode_hidden(self, embeds, attention_mask=None, intermediate_output=None,
+                      final_layer_norm_intermediate=False):
+        return self.model.llm(embeds.to(torch.bfloat16), attention_mask=attention_mask,
+                              intermediate_output=intermediate_output,
+                              final_layer_norm_intermediate=final_layer_norm_intermediate)
 
     def forward(self, tokens=None, attention_mask=None, embeds=None, num_tokens=None, intermediate_output=None,
                 final_layer_norm_intermediate=False, dtype=None, embeds_info=None, **kwargs):
-        out = self.encode_hidden(embeds, attention_mask=attention_mask)
-        intermediate = None
+        outputs = self.encode_hidden(embeds, attention_mask=attention_mask,
+                                     intermediate_output=intermediate_output,
+                                     final_layer_norm_intermediate=final_layer_norm_intermediate)
+        if isinstance(outputs, tuple):
+            out, intermediate = outputs
+        else:
+            out, intermediate = outputs, None
         if isinstance(intermediate_output, list) or intermediate_output == "all":
             intermediate = out  # full hidden states; Comfy taps handle selection
         return out, intermediate
@@ -1325,26 +1450,20 @@ class Inkling2(nn.Module):
         generated_ids = []
         graphs_ok = device.type == "cuda" and not getattr(getattr(comfy.model_management, "args", None),
                                                            "disable_cuda_graphs", False)
-        gcache = getattr(self, "_graph_cache", None)
-        if gcache is None:
-            gcache = {}
-            self._graph_cache = gcache
-        entry = gcache.get((batch, cap)) if graphs_ok else None
+        graph_used = False
 
         with torch.no_grad():
-            if entry is not None:
-                pkv, graph, tok_buf, logits_buf = entry
-                for c in pkv:
-                    c.pos.zero_()
+            # Graph and KV cache are scoped to this call so both are released when it
+            # returns or is cancelled, and a captured graph can never outlive the
+            # parameter storage it recorded.
+            pkv = llm.init_kv_cache(batch, cap, device, torch.bfloat16)
+            tok_buf = torch.zeros(batch, 1, dtype=torch.long, device=device)
+            logits_buf = torch.empty(batch, unembed.shape[0], device=device, dtype=torch.float32)
+            graph = None
+            step_fn = None
+            try:
                 hidden = llm(current, attention_mask=None, past_key_values=pkv)
                 logits = project_logits(hidden)
-            else:
-                pkv = llm.init_kv_cache(batch, cap, device, torch.bfloat16)
-                hidden = llm(current, attention_mask=None, past_key_values=pkv)
-                logits = project_logits(hidden)
-                tok_buf = torch.zeros(batch, 1, dtype=torch.long, device=device)
-                logits_buf = torch.empty(batch, unembed.shape[0], device=device, dtype=torch.float32)
-                graph = None
                 if graphs_ok:
                     try:
                         def step_fn():
@@ -1359,51 +1478,51 @@ class Inkling2(nn.Module):
                             for _ in range(2):
                                 step_fn()
                         torch.cuda.current_stream(device).wait_stream(s)
-                        for c in pkv:
-                            c.pos.zero_()
+                        # Warmup advanced positions and filled the conv rings: restart
+                        # from the prompt and clear both before capturing.
+                        _reset_inference_cache(pkv)
                         _ = llm(current, attention_mask=None, past_key_values=pkv)
                         g = torch.cuda.CUDAGraph()
                         with torch.cuda.graph(g, stream=s):
                             step_fn()
                         graph = g
-                        gcache[(batch, cap)] = (pkv, graph, tok_buf, logits_buf)
+                        graph_used = True
                     except Exception as exc:
                         print("inkling2: CUDA graph capture failed, using eager decode:", exc)
-                        for c in pkv:
-                            c.pos.zero_()
+                        _reset_inference_cache(pkv)
                         hidden = llm(current, attention_mask=None, past_key_values=pkv)
                         logits = project_logits(hidden)
 
-            pbar = comfy.utils.ProgressBar(max_length)
-            for step in tqdm(range(max_length), desc="Generating tokens"):
-                # Graph replay runs no python ops, so check the interrupt flag ourselves.
-                comfy.model_management.throw_exception_if_processing_interrupted()
-                tid = int(sample_step(logits).item())
-                if tid in stop_tokens:
-                    break
-                generated_ids.append(tid)
-                report_generated_tokens(generated_ids)
-                pbar.update(1)
-                if step == max_length - 1:
-                    break
-                tok_buf.fill_(tid)
-                if graph is not None:
-                    graph.replay()
-                    logits = logits_buf
-                else:
-                    hidden = llm(embed_module(tok_buf).to(torch.bfloat16), attention_mask=None, past_key_values=pkv)
-                    logits = project_logits(hidden)
-        self._graph_used = graph is not None
-        # Strip the reasoning section: if the model opened the thinking channel (<|content_thinking|>),
-        # keep only the answer that follows the last <|content_text|> marker (matches the node's
-        # text/thinking split for <think> models; the raw reasoning is not part of the visible answer).
-        if strip_thinking and 200008 in generated_ids:
-            answer = None
-            for i, t in enumerate(generated_ids):
-                if t == 200004:  # <|content_text|>
-                    answer = i
-            # no answer marker: generation was cut off inside the reasoning section
-            generated_ids = generated_ids[answer + 1:] if answer is not None else []
+                pbar = comfy.utils.ProgressBar(max_length)
+                for step in tqdm(range(max_length), desc="Generating tokens"):
+                    # Graph replay runs no python ops, so check the interrupt flag ourselves.
+                    comfy.model_management.throw_exception_if_processing_interrupted()
+                    tid = int(sample_step(logits).item())
+                    if tid in stop_tokens:
+                        break
+                    generated_ids.append(tid)
+                    # Keep the Generate Text preview aligned with the stripped result:
+                    # reasoning tokens are withheld until the first answer block.
+                    report_generated_tokens(_visible_answer_ids(generated_ids) if strip_thinking else generated_ids)
+                    pbar.update(1)
+                    if step == max_length - 1:
+                        break
+                    tok_buf.fill_(tid)
+                    if graph is not None:
+                        graph.replay()
+                        logits = logits_buf
+                    else:
+                        hidden = llm(embed_module(tok_buf).to(torch.bfloat16), attention_mask=None, past_key_values=pkv)
+                        logits = project_logits(hidden)
+            finally:
+                # The captured graph owns graph-private allocations, and the KV cache
+                # belongs to this call; drop both on completion and cancellation.
+                step_fn = None
+                graph = None
+                pkv = tok_buf = logits_buf = None
+        self._graph_used = graph_used
+        if strip_thinking:
+            generated_ids = _visible_answer_ids(generated_ids)
         return generated_ids
 
 
