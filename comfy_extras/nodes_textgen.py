@@ -105,7 +105,7 @@ class TextGenerateV2(io.ComfyNode):
         )
 
     @classmethod
-    def execute(cls, clip, prompt, max_length, sampling_mode, image=None, thinking=False, use_default_template=True, video=None, audio=None, mtp="auto", system_prompt="", max_image_megapixels=1.0, images: io.Autogrow.Type = None, videos: io.Autogrow.Type = None, audios: io.Autogrow.Type = None) -> io.NodeOutput:
+    def execute(cls, clip, prompt, max_length, sampling_mode, image=None, thinking=False, use_default_template=True, video=None, audio=None, mtp="auto", system_prompt="", images: io.Autogrow.Type = None, videos: io.Autogrow.Type = None, audios: io.Autogrow.Type = None, max_image_megapixels=1.0) -> io.NodeOutput:
 
         mtp = {"off": False, "auto": True}.get(mtp, mtp)
 
@@ -169,7 +169,7 @@ class TextGenerate(TextGenerateV2):
             display_name="Generate Text (DEPRECATED)",
             category=parent_schema.category,
             is_deprecated=True,
-            inputs=[old_inputs.get(i.id, i) for i in parent_schema.inputs],
+            inputs=[old_inputs.get(i.id, i) for i in parent_schema.inputs if i.id != "max_image_megapixels"],
             outputs=parent_schema.outputs,
         )
 
@@ -314,7 +314,7 @@ class TextGenerateLTX2Prompt(TextGenerate):
             node_id="TextGenerateLTX2Prompt",
             display_name="Generate LTX2 Prompt",
             category=parent_schema.category,
-            inputs=[i for i in parent_schema.inputs if i.id != "max_image_megapixels"],
+            inputs=parent_schema.inputs,
             outputs=parent_schema.outputs,
             search_aliases=["prompt enhance", "LLM", "gemma"],
         )
