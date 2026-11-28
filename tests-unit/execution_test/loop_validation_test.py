@@ -1,11 +1,12 @@
 import asyncio
+from types import SimpleNamespace
 
 import pytest
 
 import nodes
 from comfy_execution.validation import LoopValidationError, validate_loops
-from comfy_extras.nodes_loop import EndLoop, StartLoop
-from execution import validate_prompt
+from comfy_extras.nodes_loop import EndLoop, LoopIteration, LoopProgress, LoopResult, StartLoop
+from execution import PromptExecutor, validate_prompt
 
 
 def node(class_type, **inputs):
@@ -351,6 +352,73 @@ def test_prompt_validation_includes_end_after_terminated_output(monkeypatch):
     assert node_errors == {}
     assert prompt["start"]["_loop_end"] == "end"
     assert "carry" in prompt["start"]["_loop_body"]
+
+
+def test_prompt_validation_traces_legacy_dynamic_inputs_in_loops(monkeypatch):
+    class Double:
+        @classmethod
+        def INPUT_TYPES(cls):
+            return {"required": {"value": ("INT",)}}
+
+        RETURN_TYPES = ("INT",)
+        FUNCTION = "execute"
+
+        def execute(self, value):
+            return (value * 2,)
+
+    class DynamicBody:
+        @classmethod
+        def INPUT_TYPES(cls):
+            return {"required": {"left": ("INT",)}}
+
+        RETURN_TYPES = ("INT",)
+        FUNCTION = "execute"
+
+        def execute(self, left, **kwargs):
+            return (left + kwargs["extra"],)
+
+    captured = []
+
+    class Capture(Output):
+        FUNCTION = "execute"
+
+        def execute(self, value):
+            captured.append(value)
+            return ()
+
+    class Server:
+        client_id = None
+
+        def send_sync(self, *args, **kwargs):
+            pass
+
+        def send_progress_text(self, *args, **kwargs):
+            pass
+
+    server = Server()
+    monkeypatch.setattr("comfy_extras.nodes_loop.PromptServer", SimpleNamespace(instance=server))
+    for node_class in (StartLoop, EndLoop, LoopIteration, LoopProgress, LoopResult, Double, DynamicBody, Capture):
+        monkeypatch.setitem(nodes.NODE_CLASS_MAPPINGS, node_class.__name__, node_class)
+    prompt = {
+        "start": node("StartLoop", mode="simple", cache_iterations=False, **{"mode.num_iterations": 3}),
+        "branch": node("Double", value=["start", 0]),
+        "body": node("DynamicBody", left=["start", 0], extra=["branch", 0]),
+        "end": node("EndLoop", output_value=["body", 0], accumulate=True),
+        "output": node("Capture", value=["end", 0]),
+    }
+
+    valid, error, good_outputs, node_errors = asyncio.run(validate_prompt("prompt", prompt, None))
+
+    assert valid
+    assert error is None
+    assert good_outputs == ["output"]
+    assert node_errors == {}
+
+    executor = PromptExecutor(server, cache_type=False, cache_args={"ram": 0, "ram_inactive": 0})
+    executor.execute(prompt, "prompt", execute_outputs=good_outputs)
+
+    assert executor.success
+    assert captured == [0, 3, 6]
 
 
 def test_prompt_validation_reports_every_ambiguous_boundary(monkeypatch):

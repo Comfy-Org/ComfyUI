@@ -54,7 +54,9 @@ def validate_loops(prompt, outputs, node_ids, start_nodes, end_nodes):
     continuation = _walk_graph(outputs, all_children, start_nodes)
     continuation.difference_update(set(start_nodes).difference(node_ids))
     node_ids.update(continuation)
-    node_ids.update(_walk_graph(set(end_nodes).intersection(continuation), all_parents, start_nodes))
+    # Prompt validation can miss links supplied as dynamic inputs by legacy nodes.
+    active_ends = set(end_nodes).intersection(node_ids)
+    node_ids.update(_walk_graph(active_ends, all_parents, start_nodes))
     parents = {
         node_id: {
             value[0]
