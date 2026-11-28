@@ -38,40 +38,38 @@ class SaveWEBM(io.ComfyNode):
         )
 
         file = f"{filename}_{counter:05}_.webm"
-        container = av.open(os.path.join(full_output_folder, file), mode="w")
+        with ui.output_file(os.path.join(full_output_folder, file)) as output, av.open(output.path, mode="w") as container:
+            if cls.hidden.prompt is not None:
+                container.metadata["prompt"] = json.dumps(cls.hidden.prompt)
 
-        if cls.hidden.prompt is not None:
-            container.metadata["prompt"] = json.dumps(cls.hidden.prompt)
+            if cls.hidden.extra_pnginfo is not None:
+                for x in cls.hidden.extra_pnginfo:
+                    container.metadata[x] = json.dumps(cls.hidden.extra_pnginfo[x])
 
-        if cls.hidden.extra_pnginfo is not None:
-            for x in cls.hidden.extra_pnginfo:
-                container.metadata[x] = json.dumps(cls.hidden.extra_pnginfo[x])
+            # Save transparency when the images carry an alpha channel (RGBA) and the codec supports it.
+            # vp9 -> yuva420p; other codecs have no usable alpha path, so the alpha is ignored.
+            save_alpha = images.shape[-1] == 4 and codec == "vp9"
 
-        # Save transparency when the images carry an alpha channel (RGBA) and the codec supports it.
-        # vp9 -> yuva420p; other codecs have no usable alpha path, so the alpha is ignored.
-        save_alpha = images.shape[-1] == 4 and codec == "vp9"
+            codec_map = {"vp9": "libvpx-vp9", "av1": "libsvtav1"}
+            stream = container.add_stream(codec_map[codec], rate=Fraction(round(fps * 1000), 1000))
+            stream.width = images.shape[-2]
+            stream.height = images.shape[-3]
+            stream.pix_fmt = "yuva420p" if save_alpha else ("yuv420p10le" if codec == "av1" else "yuv420p")
+            stream.bit_rate = 0
+            stream.options = {'crf': str(crf)}
+            if codec == "av1":
+                stream.options["preset"] = "6"
 
-        codec_map = {"vp9": "libvpx-vp9", "av1": "libsvtav1"}
-        stream = container.add_stream(codec_map[codec], rate=Fraction(round(fps * 1000), 1000))
-        stream.width = images.shape[-2]
-        stream.height = images.shape[-3]
-        stream.pix_fmt = "yuva420p" if save_alpha else ("yuv420p10le" if codec == "av1" else "yuv420p")
-        stream.bit_rate = 0
-        stream.options = {'crf': str(crf)}
-        if codec == "av1":
-            stream.options["preset"] = "6"
+            for frame in images:
+                if save_alpha:
+                    frame = av.VideoFrame.from_ndarray(torch.clamp(frame[..., :4] * 255, min=0, max=255).to(device=torch.device("cpu"), dtype=torch.uint8).numpy(), format="rgba")
+                else:
+                    frame = av.VideoFrame.from_ndarray(torch.clamp(frame[..., :3] * 255, min=0, max=255).to(device=torch.device("cpu"), dtype=torch.uint8).numpy(), format="rgb24")
+                for packet in stream.encode(frame):
+                    container.mux(packet)
+            container.mux(stream.encode())
 
-        for frame in images:
-            if save_alpha:
-                frame = av.VideoFrame.from_ndarray(torch.clamp(frame[..., :4] * 255, min=0, max=255).to(device=torch.device("cpu"), dtype=torch.uint8).numpy(), format="rgba")
-            else:
-                frame = av.VideoFrame.from_ndarray(torch.clamp(frame[..., :3] * 255, min=0, max=255).to(device=torch.device("cpu"), dtype=torch.uint8).numpy(), format="rgb24")
-            for packet in stream.encode(frame):
-                container.mux(packet)
-        container.mux(stream.encode())
-        container.close()
-
-        return io.NodeOutput(images, ui=ui.PreviewVideo([ui.SavedResult(file, subfolder, io.FolderType.output)]))
+        return io.NodeOutput(images, ui=ui.PreviewVideo([ui.SavedResult(output.filename, subfolder, io.FolderType.output)]))
 
 def _save_video_codec_input(supported_codecs: list[str], *, optional=False, hidden=False):
     codec_options = []
@@ -195,15 +193,16 @@ class SaveVideo(io.ComfyNode):
             if len(metadata) > 0:
                 saved_metadata = metadata
         file = f"{filename}_{counter:05}_.{Types.VideoContainer.get_extension(format_name)}"
-        video.save_to(
-            os.path.join(full_output_folder, file),
-            format=Types.VideoContainer(format_name),
-            codec=Types.VideoCodec(codec_name),
-            metadata=saved_metadata,
-            crf=encoding.get("crf"),
-        )
+        with ui.output_file(os.path.join(full_output_folder, file)) as output:
+            video.save_to(
+                output.path,
+                format=Types.VideoContainer(format_name),
+                codec=Types.VideoCodec(codec_name),
+                metadata=saved_metadata,
+                crf=encoding.get("crf"),
+            )
 
-        return io.NodeOutput(video, ui=ui.PreviewVideo([ui.SavedResult(file, subfolder, io.FolderType.output)]))
+        return io.NodeOutput(video, ui=ui.PreviewVideo([ui.SavedResult(output.filename, subfolder, io.FolderType.output)]))
 
 
 class CreateVideo(io.ComfyNode):
