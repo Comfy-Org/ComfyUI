@@ -875,7 +875,7 @@ class PromptExecutor:
             self._notify_prompt_lifecycle("end", prompt_id)
 
 
-COMBO_UPLOAD_FLAGS = ("image_upload", "animated_image_upload", "video_upload", "audio_upload", "file_upload")
+COMBO_UPLOAD_FLAGS = ("image_upload", "animated_image_upload", "video_upload", "audio_upload", "file_upload", "mesh_upload")
 
 
 def combo_selection_limits(extra_info):

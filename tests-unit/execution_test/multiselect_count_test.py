@@ -54,6 +54,7 @@ def v1_picker(upload_flag="image_upload", **bounds):
     pytest.param(lambda **bounds: v3_picker(upload=io.UploadType.model, **bounds), id="v3-file-upload"),
     pytest.param(v1_picker, id="v1-image-without-multiselect"),
     pytest.param(lambda **bounds: v1_picker(upload_flag="audio_upload", **bounds), id="v1-audio-without-multiselect"),
+    pytest.param(lambda **bounds: v1_picker(upload_flag="mesh_upload", **bounds), id="v1-mesh-only-without-multiselect"),
 ])
 @pytest.mark.parametrize("bounds,value,expected_errors", [
     pytest.param({"min": 0, "max": 2}, {"__value__": []}, set(), id="empty-allowed-by-min-0"),
