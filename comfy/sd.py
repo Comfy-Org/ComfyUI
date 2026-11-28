@@ -83,6 +83,7 @@ import comfy.text_encoders.anima
 import comfy.text_encoders.ace15
 import comfy.text_encoders.longcat_image
 import comfy.text_encoders.qwen35
+import comfy.text_encoders.inkling2
 import comfy.text_encoders.qwen3vl
 import comfy.text_encoders.wevisone
 import comfy.text_encoders.minimax
@@ -1713,6 +1714,7 @@ class CLIPType(Enum):
     MOSS_IMAGE = 38
     FIBO2 = 39
     PAN2 = 40
+    INKLING2 = 41
 
 
 
@@ -1780,6 +1782,7 @@ class TEModel(Enum):
     WEVISONE_2B = 39
     WEVISONE_4B = 40
     QWEN3VL_2B = 41
+    INKLING2 = 42
 
 
 def detect_te_model(sd):
@@ -1835,6 +1838,8 @@ def detect_te_model(sd):
             return TEModel.QWEN25_3B
         if weight.shape[0] == 512:
             return TEModel.QWEN25_7B
+    if "model.llm.unembed.weight" in sd and ("model.llm.layers.0.attn.wq_du.weight" in sd or "model.llm.layers.0.self_attn.q_proj.linear.weight" in sd):
+        return TEModel.INKLING2
     if "model.language_model.layers.0.linear_attn.A_log" in sd and "model.language_model.layers.0.input_layernorm.weight" in sd:
         weight = sd['model.language_model.layers.0.input_layernorm.weight']
         if weight.shape[0] == 1024:
@@ -2079,6 +2084,13 @@ def load_text_encoder_state_dicts(state_dicts=[], embedding_directory=None, clip
         elif te_model == TEModel.JINA_CLIP_2:
             clip_target.clip = comfy.text_encoders.jina_clip_2.JinaClip2TextModelWrapper
             clip_target.tokenizer = comfy.text_encoders.jina_clip_2.JinaClip2TokenizerWrapper
+        elif te_model == TEModel.INKLING2:
+            quant = comfy.utils.detect_layer_quantization(clip_data[0], "")
+            if quant is not None:
+                model_options = model_options.copy()
+                model_options["quantization_metadata"] = quant
+            clip_target.clip = comfy.text_encoders.inkling2.te(dtype_llama=torch.bfloat16, llama_quantization_metadata=quant)
+            clip_target.tokenizer = comfy.text_encoders.inkling2.tokenizer()
         elif te_model in (TEModel.QWEN35_08B, TEModel.QWEN35_2B, TEModel.QWEN35_4B, TEModel.QWEN35_9B, TEModel.QWEN35_27B):
             clip_data[0] = comfy.utils.state_dict_prefix_replace(clip_data[0], {"model.language_model.": "model.", "model.visual.": "visual.", "lm_head.": "model.lm_head."})
             if clip_type == CLIPType.MOSS_IMAGE and te_model == TEModel.QWEN35_9B:  # MOSS-Image: stock Qwen3.5-9B, last hidden state, open think block.
