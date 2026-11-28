@@ -6,6 +6,10 @@ from typing_extensions import override
 
 from comfy_api.latest import IO, ComfyExtension, Input, Types
 from comfy_api_nodes.apis.hunyuan3d import (
+    Hunyuan3D36GenerateType,
+    Hunyuan3D36Request,
+    Hunyuan3D36Result,
+    Hunyuan3D36ViewImage,
     Hunyuan3DViewImage,
     InputGenerateType,
     ResultFile3D,
@@ -27,6 +31,7 @@ from comfy_api_nodes.util import (
     download_url_to_image_tensor,
     downscale_image_tensor_by_max_side,
     poll_op,
+    router_op,
     sync_op,
     upload_3d_model_to_comfyapi,
     upload_image_to_comfyapi,
@@ -408,6 +413,249 @@ class TencentImageToModelNode(IO.ComfyNode):
         )
 
 
+def _hy3d36_generate_type_input() -> IO.DynamicCombo.Input:
+    return IO.DynamicCombo.Input(
+        "generate_type",
+        options=[
+            IO.DynamicCombo.Option(
+                "Normal",
+                [
+                    IO.Combo.Input("texture_resolution", options=["2k", "4k", "8k"], default="4k"),
+                    IO.Boolean.Input("pbr", default=False),
+                    IO.Boolean.Input(
+                        "bake_lighting",
+                        default=False,
+                        tooltip="Bake lighting and shadows into the texture. "
+                        "Off keeps flat base colors that relight correctly in 3D apps.",
+                    ),
+                ],
+            ),
+            IO.DynamicCombo.Option("Geometry", []),
+        ],
+        tooltip="Geometry returns an untextured mesh as GLB only.",
+    )
+
+
+async def _hy3d36_node_output(result: Hunyuan3D36Result) -> IO.NodeOutput:
+    urls = {f.type.lower(): f.url for f in result.data}
+    glb = await download_url_to_file_3d(urls["glb"], "glb", task_id=result.request_id)
+    if "obj" not in urls:
+        return IO.NodeOutput(glb, None, None, None, None, None)
+    obj = await download_and_extract_obj_zip(urls["obj"])
+    empty = torch.zeros(1, 1, 1, 3)
+    return IO.NodeOutput(
+        glb,
+        obj.obj,
+        obj.texture,
+        empty if obj.metallic is None else obj.metallic,
+        empty if obj.normal is None else obj.normal,
+        empty if obj.roughness is None else obj.roughness,
+    )
+
+
+class TencentHunyuan3D36TextToModelNode(IO.ComfyNode):
+
+    @classmethod
+    def define_schema(cls):
+        return IO.Schema(
+            node_id="TencentHunyuan3D36TextToModelNode",
+            display_name="Hunyuan3D 3.6: Text to Model",
+            category="partner/3d/Tencent",
+            inputs=[
+                IO.String.Input("prompt", multiline=True, default="", tooltip="Up to 1024 characters."),
+                IO.Combo.Input(
+                    "style",
+                    options=["none", "cartoon", "china_style", "cyberpunk", "qinghuaci", "sculpture"],
+                    default="none",
+                    tooltip="qinghuaci is blue-and-white porcelain.",
+                ),
+                IO.Int.Input(
+                    "face_count",
+                    default=500000,
+                    min=1000,
+                    max=2000000,
+                    tooltip="Approximate target; the result can differ.",
+                ),
+                _hy3d36_generate_type_input(),
+                IO.Int.Input(
+                    "seed",
+                    default=42,
+                    min=0,
+                    max=2147483647,
+                    display_mode=IO.NumberDisplay.number,
+                    control_after_generate=True,
+                    tooltip="Seed controls whether the node should re-run; "
+                    "results are non-deterministic regardless of seed.",
+                ),
+            ],
+            outputs=[
+                IO.File3DGLB.Output(display_name="GLB"),
+                IO.File3DOBJ.Output(display_name="OBJ"),
+                IO.Image.Output(display_name="texture_image"),
+                IO.Image.Output(display_name="metallic"),
+                IO.Image.Output(display_name="normal"),
+                IO.Image.Output(display_name="roughness"),
+            ],
+            hidden=[
+                IO.Hidden.auth_token_comfy_org,
+                IO.Hidden.api_key_comfy_org,
+                IO.Hidden.unique_id,
+            ],
+            is_api_node=True,
+            is_output_node=True,
+            price_badge=IO.PriceBadge(
+                depends_on=IO.PriceBadgeDepends(widgets=["generate_type"]),
+                expr="""
+                widgets.generate_type = "geometry"
+                  ? {"type":"usd","usd":1.144}
+                  : {"type":"usd","usd":2.86}
+                """,
+            ),
+        )
+
+    @classmethod
+    async def execute(
+        cls,
+        prompt: str,
+        style: str,
+        face_count: int,
+        generate_type: Hunyuan3D36GenerateType,
+        seed: int,
+    ) -> IO.NodeOutput:
+        _ = seed
+        validate_string(prompt, field_name="prompt", min_length=1, max_length=1024)
+        result = await router_op(
+            cls,
+            "tencent/hy-3d-3.6",
+            response_model=Hunyuan3D36Result,
+            data=Hunyuan3D36Request(
+                prompt=prompt,
+                style=None if style == "none" else style,
+                generate_type=generate_type["generate_type"],
+                face_count=face_count,
+                tex_res=generate_type.get("texture_resolution"),
+                enable_pbr=generate_type.get("pbr"),
+                bake_lighting=generate_type.get("bake_lighting"),
+            ),
+        )
+        return await _hy3d36_node_output(result)
+
+
+class TencentHunyuan3D36ImageToModelNode(IO.ComfyNode):
+
+    @classmethod
+    def define_schema(cls):
+        return IO.Schema(
+            node_id="TencentHunyuan3D36ImageToModelNode",
+            display_name="Hunyuan3D 3.6: Image(s) to Model",
+            category="partner/3d/Tencent",
+            inputs=[
+                IO.Image.Input("image", tooltip="Front view."),
+                IO.Image.Input("image_left", optional=True),
+                IO.Image.Input("image_right", optional=True),
+                IO.Image.Input("image_back", optional=True),
+                IO.Int.Input(
+                    "face_count",
+                    default=500000,
+                    min=1000,
+                    max=2000000,
+                    tooltip="Approximate target; the result can differ.",
+                ),
+                _hy3d36_generate_type_input(),
+                IO.Int.Input(
+                    "seed",
+                    default=42,
+                    min=0,
+                    max=2147483647,
+                    display_mode=IO.NumberDisplay.number,
+                    control_after_generate=True,
+                    tooltip="Seed controls whether the node should re-run; "
+                    "results are non-deterministic regardless of seed.",
+                ),
+            ],
+            outputs=[
+                IO.File3DGLB.Output(display_name="GLB"),
+                IO.File3DOBJ.Output(display_name="OBJ"),
+                IO.Image.Output(display_name="texture_image"),
+                IO.Image.Output(display_name="metallic"),
+                IO.Image.Output(display_name="normal"),
+                IO.Image.Output(display_name="roughness"),
+            ],
+            hidden=[
+                IO.Hidden.auth_token_comfy_org,
+                IO.Hidden.api_key_comfy_org,
+                IO.Hidden.unique_id,
+            ],
+            is_api_node=True,
+            is_output_node=True,
+            price_badge=IO.PriceBadge(
+                depends_on=IO.PriceBadgeDepends(
+                    widgets=["generate_type"],
+                    inputs=["image_left", "image_right", "image_back"],
+                ),
+                expr="""
+                (
+                  $multiview := inputs.image_left.connected or inputs.image_right.connected
+                    or inputs.image_back.connected;
+                  widgets.generate_type = "geometry"
+                    ? {"type":"usd","usd": $multiview ? 1.144 : 0.858}
+                    : {"type":"usd","usd": $multiview ? 2.86 : 2.002}
+                )
+                """,
+            ),
+        )
+
+    @classmethod
+    async def execute(
+        cls,
+        image: Input.Image,
+        face_count: int,
+        generate_type: Hunyuan3D36GenerateType,
+        seed: int,
+        image_left: Input.Image | None = None,
+        image_right: Input.Image | None = None,
+        image_back: Input.Image | None = None,
+    ) -> IO.NodeOutput:
+        _ = seed
+        validate_image_dimensions(image, min_width=128, min_height=128)
+        views = []
+        for view_type, view in (("left", image_left), ("right", image_right), ("back", image_back)):
+            if view is None:
+                continue
+            validate_image_dimensions(view, min_width=128, min_height=128)
+            views.append(
+                Hunyuan3D36ViewImage(
+                    view_type=view_type,
+                    view_image_url=await upload_image_to_comfyapi(
+                        cls,
+                        downscale_image_tensor_by_max_side(view, max_side=4900),
+                        mime_type="image/webp",
+                        total_pixels=24_010_000,
+                    ),
+                )
+            )
+        result = await router_op(
+            cls,
+            "tencent/hy-3d-3.6",
+            response_model=Hunyuan3D36Result,
+            data=Hunyuan3D36Request(
+                image_url=await upload_image_to_comfyapi(
+                    cls,
+                    downscale_image_tensor_by_max_side(image, max_side=4900),
+                    mime_type="image/webp",
+                    total_pixels=24_010_000,
+                ),
+                multi_view_images=views or None,
+                generate_type=generate_type["generate_type"],
+                face_count=face_count,
+                tex_res=generate_type.get("texture_resolution"),
+                enable_pbr=generate_type.get("pbr"),
+                bake_lighting=generate_type.get("bake_lighting"),
+            ),
+        )
+        return await _hy3d36_node_output(result)
+
+
 class TencentModelTo3DUVNode(IO.ComfyNode):
 
     @classmethod
@@ -757,6 +1005,8 @@ class TencentHunyuan3DExtension(ComfyExtension):
         return [
             TencentTextToModelNode,
             TencentImageToModelNode,
+            TencentHunyuan3D36TextToModelNode,
+            TencentHunyuan3D36ImageToModelNode,
             TencentModelTo3DUVNode,
             Tencent3DTextureEditNode,
             Tencent3DPartNode,
