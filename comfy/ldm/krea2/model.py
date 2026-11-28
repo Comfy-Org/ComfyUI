@@ -19,6 +19,7 @@ import comfy.utils
 from comfy.ldm.flux.layers import EmbedND, timestep_embedding
 from comfy.ldm.flux.math import apply_rope
 from comfy.ldm.modules.attention import AttentionTensorContainer, ComfyAttention, optimized_attention_masked
+from . import sm120
 
 
 class RMSNorm(nn.Module):
@@ -32,6 +33,11 @@ class RMSNorm(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         dtype = x.dtype
         weight = comfy.model_management.cast_to(self.scale, dtype=torch.float32, device=x.device) + 1.0
+        profile = sm120.current_sample()
+        if profile is not None:
+            result = sm120.rms_norm(profile, x, weight, self.eps)
+            if result is not None:
+                return result
         return F.rms_norm(x.float(), (x.shape[-1],), weight=weight, eps=self.eps).to(dtype)
 
 
@@ -166,6 +172,14 @@ class TextFusionTransformer(nn.Module):
         return x
 
 
+def _modulate(x, scale, shift):
+    scaled = (1 + scale) * x
+    # Hooks can return a shift that promotes or broadcasts the scaled activation.
+    if shift.dtype == scale.dtype and shift.shape == scale.shape:
+        return scaled.add_(shift)
+    return scaled + shift
+
+
 class SingleStreamBlock(nn.Module):
     def __init__(self, features, heads, multiplier, bias=False, kvheads=None, device=None, dtype=None, operations=None):
         super().__init__()
@@ -213,8 +227,16 @@ class SingleStreamBlock(nn.Module):
             del mlp
             return x
 
-        x = x + pregate * self.attn((1 + prescale) * self.prenorm(x) + preshift, freqs, mask, transformer_options=transformer_options)
-        x = x + postgate * self.mlp((1 + postscale) * self.postnorm(x) + postshift)
+        profile = sm120.current_sample()
+        if profile is not None:
+            pre = sm120.affine(profile, self.prenorm(x), 1 + prescale, preshift)
+            x = sm120.affine(profile, x, pregate, self.attn(pre, freqs, mask, transformer_options=transformer_options), residual=True)
+            del pre
+            post = sm120.affine(profile, self.postnorm(x), 1 + postscale, postshift)
+            return sm120.affine(profile, x, postgate, self.mlp(post), residual=True)
+
+        x = x + pregate * self.attn(_modulate(self.prenorm(x), prescale, preshift), freqs, mask, transformer_options=transformer_options)
+        x = x + postgate * self.mlp(_modulate(self.postnorm(x), postscale, postshift))
         return x
 
 
@@ -227,7 +249,7 @@ class LastLayer(nn.Module):
 
     def forward(self, x, tvec):
         scale, shift = self.modulation(tvec)
-        x = (1 + scale) * self.norm(x) + shift
+        x = _modulate(self.norm(x), scale, shift)
         return self.linear(x)
 
 
@@ -303,8 +325,9 @@ class SingleStreamDiT(nn.Module):
         bs, _, h_orig, w_orig = x.shape
         patch = self.patch
 
-        # context arrives as (B, seq, txtlayers*txtdim); reshape to (B, txtlayers, seq, txtdim).
-        context = self._unpack_context(context)
+        prepared = kwargs.get("krea2_prepared_text")
+        if prepared is None:
+            context = self._unpack_context(context)
 
         img, imgpos, h_, w_ = self.process_img(x)
         img_tokens = img.shape[1]
@@ -338,7 +361,7 @@ class SingleStreamDiT(nn.Module):
             t0 = self.tmlp(timestep_embedding(torch.zeros_like(timesteps), self.tdim).unsqueeze(1).to(img.dtype))
             tvec = torch.cat((tvec, self.tproj(t0)), dim=0)
 
-        context = self.txtfusion(context, mask=None, transformer_options=transformer_options)
+        context = self.txtfusion(context, mask=None, transformer_options=transformer_options) if prepared is None else prepared
         context = self.txtmlp(context)
 
         txtlen = context.shape[1]
@@ -380,6 +403,9 @@ class SingleStreamDiT(nn.Module):
         if temporal:
             out = out.reshape(b5, t5, self.channels, h_orig, w_orig).movedim(1, 2)
         return out
+
+    def preprocess_text_embeds(self, context):
+        return self.txtfusion(self._unpack_context(context))
 
     def _unpack_context(self, context):
         # context: (B, seq, txtlayers*txtdim) -> (B, seq, txtlayers, txtdim).

@@ -2843,6 +2843,13 @@ class Krea2(BaseModel):
         cross_attn = kwargs.get("cross_attn", None)
         if cross_attn is not None:
             out['c_crossattn'] = comfy.conds.CONDRegular(cross_attn)
+            profile = comfy.ldm.krea2.model.sm120.current_sample()
+            if profile is not None and kwargs.get("prompt_type") == "positive":
+                prepared = self.diffusion_model.preprocess_text_embeds(
+                    cross_attn.to(device=kwargs["device"], dtype=self.get_dtype_inference())
+                )
+                out["krea2_prepared_text"] = comfy.conds.CONDRegular(prepared)
+                profile.text_preparations += 1
         ref_latents = kwargs.get("reference_latents", None)
         if ref_latents is not None:
             latents = []

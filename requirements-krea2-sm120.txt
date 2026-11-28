@@ -1,0 +1,2 @@
+# Optional package for Windows x64 and GeForce RTX 5090.
+comfyui-krea2-sm120 @ https://github.com/Evangelion91/comfyui-krea2-performance/releases/download/sm120-v0.1.0/comfyui_krea2_sm120-0.1.0-py3-none-win_amd64.whl#sha256=decbd4eaab94e92a5313f5f1bc2082d09be0fef510f01d4eca48c641688607d0 ; sys_platform == "win32" and platform_machine == "AMD64"

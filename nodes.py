@@ -43,6 +43,7 @@ from app import governance
 import folder_paths
 import latent_preview
 import node_helpers
+from utils.fast_png import save_unfiltered_rgb_png
 
 if args.enable_manager:
     import comfyui_manager
@@ -1702,10 +1703,11 @@ class SaveImage:
     def save_images(self, images, filename_prefix="ComfyUI", prompt=None, extra_pnginfo=None):
         filename_prefix += self.prefix_append
         full_output_folder, filename, counter, subfolder, filename_prefix = folder_paths.get_save_image_path(filename_prefix, self.output_dir, images[0].shape[1], images[0].shape[0])
+        fast_png = type(self) is SaveImage and args.fast_unfiltered_rgb_png
         results = list()
         for (batch_number, image) in enumerate(images):
             i = 255. * image.cpu().numpy()
-            img = Image.fromarray(np.clip(i, 0, 255).astype(np.uint8))
+            pixels = np.clip(i, 0, 255).astype(np.uint8)
             metadata = None
             if not args.disable_metadata:
                 metadata = PngInfo()
@@ -1717,7 +1719,11 @@ class SaveImage:
 
             filename_with_batch_num = filename.replace("%batch_num%", str(batch_number))
             file = f"{filename_with_batch_num}_{counter:05}_.png"
-            img.save(os.path.join(full_output_folder, file), pnginfo=metadata, compress_level=self.compress_level)
+            path = os.path.join(full_output_folder, file)
+            if fast_png and pixels.ndim == 3 and pixels.shape[-1] == 3 and pixels.size:
+                save_unfiltered_rgb_png(path, pixels, metadata)
+            else:
+                Image.fromarray(pixels).save(path, pnginfo=metadata, compress_level=self.compress_level)
             results.append({
                 "filename": file,
                 "subfolder": subfolder,

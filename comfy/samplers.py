@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+from contextlib import nullcontext
 import comfy.model_management
+from comfy.cli_args import args
+from comfy.ldm.krea2 import sm120
 from .k_diffusion import sampling as k_diffusion_sampling
 from .extra_samplers import uni_pc
 from typing import TYPE_CHECKING, Callable, NamedTuple, Any
@@ -1461,4 +1464,6 @@ class KSampler:
 
         sampler = sampler_object(self.sampler)
 
-        return sample(self.model, noise, positive, negative, cfg, self.device, sampler, sigmas, self.model_options, latent_image=latent_image, denoise_mask=denoise_mask, callback=callback, disable_pbar=disable_pbar, seed=seed)
+        profile = sm120.sample_scope(args.krea2_sm120, self, noise, positive, negative, cfg, sigmas, denoise_mask) if args.krea2_sm120 is not None else nullcontext()
+        with profile:
+            return sample(self.model, noise, positive, negative, cfg, self.device, sampler, sigmas, self.model_options, latent_image=latent_image, denoise_mask=denoise_mask, callback=callback, disable_pbar=disable_pbar, seed=seed)
