@@ -9,6 +9,40 @@ class InputGenerateType(TypedDict):
     pbr: bool
 
 
+class Hunyuan3D36GenerateType(TypedDict):
+    generate_type: str
+    texture_resolution: str
+    pbr: bool
+    bake_lighting: bool
+
+
+class Hunyuan3D36ViewImage(BaseModel):
+    view_type: str = Field(...)
+    view_image_url: str = Field(...)
+
+
+class Hunyuan3D36Request(BaseModel):
+    prompt: str | None = Field(None)
+    image_url: str | None = Field(None)
+    multi_view_images: list[Hunyuan3D36ViewImage] | None = Field(None)
+    style: str | None = Field(None)
+    generate_type: str = Field(...)
+    face_count: int = Field(...)
+    tex_res: str | None = Field(None)
+    enable_pbr: bool | None = Field(None)
+    bake_lighting: bool | None = Field(None)
+
+
+class Hunyuan3D36ResultFile(BaseModel):
+    type: str = Field(...)
+    url: str = Field(...)
+
+
+class Hunyuan3D36Result(BaseModel):
+    request_id: str = Field("")
+    data: list[Hunyuan3D36ResultFile] = Field([])
+
+
 class Hunyuan3DViewImage(BaseModel):
     ViewType: str = Field(..., description="Valid values: back, left, right.")
     ViewImageUrl: str = Field(...)
