@@ -31,6 +31,7 @@ from comfy.comfy_types import IO, ComfyNodeABC, InputTypeDict, FileLocator
 from comfy_api.internal import register_versions, ComfyAPIWithVersion
 from comfy_api.version_list import supported_versions
 from comfy_api.latest import io, ComfyExtension, InputImpl
+from comfy_api.v4 import _packs as v4_packs
 
 import comfy.clip_vision
 
@@ -39,7 +40,7 @@ from comfy.cli_args import args
 
 import importlib
 
-from app import governance
+from app import extension_packs, governance
 import folder_paths
 import latent_preview
 import node_helpers
@@ -2226,6 +2227,8 @@ NODE_DISPLAY_NAME_MAPPINGS = {
 
 EXTENSION_WEB_DIRS = {}
 
+EXTENSION_PACKS = []
+
 # Dictionary of successfully loaded module names and associated directories.
 LOADED_MODULE_DIRS = {}
 
@@ -2252,6 +2255,7 @@ def get_module_name(module_path: str) -> str:
     return base_path
 
 
+@v4_packs._loading_pack
 async def load_custom_node(module_path: str, ignore=set(), module_parent="custom_nodes") -> bool:
     module_name = get_module_name(module_path)
     if os.path.isfile(module_path):
@@ -2331,6 +2335,8 @@ async def load_custom_node(module_path: str, ignore=set(), module_parent="custom
                 if not isinstance(node_list, list):
                     logging.warning(f"comfy_entrypoint in {module_path} did not return a list of nodes, skipping.")
                     return False
+                if not await v4_packs._add_pack(module_path, extension, node_list):
+                    return False
                 for node_cls in node_list:
                     node_cls: io.ComfyNode
                     schema = node_cls.GET_SCHEMA()
@@ -2367,6 +2373,7 @@ async def init_external_custom_nodes():
     base_node_names = set(NODE_CLASS_MAPPINGS.keys())
     node_paths = folder_paths.get_folder_paths("custom_nodes")
     node_import_times = []
+    module_paths = []
     for custom_node_path in node_paths:
         try:
             possible_modules = os.listdir(os.path.realpath(custom_node_path))
@@ -2396,9 +2403,18 @@ async def init_external_custom_nodes():
                 logging.warning(refusal)
                 continue
 
-            time_before = time.perf_counter()
-            success = await load_custom_node(module_path, base_node_names, module_parent="custom_nodes")
-            node_import_times.append((time.perf_counter() - time_before, module_path, success))
+            module_paths.append(module_path)
+
+    pack_identities, pack_refusals = extension_packs.check_custom_nodes(module_paths)
+    for module_path in module_paths:
+        if module_path in pack_refusals:
+            node_import_times.append((0.0, module_path, False))
+            continue
+        time_before = time.perf_counter()
+        success = await load_custom_node(module_path, base_node_names, module_parent="custom_nodes")
+        node_import_times.append((time.perf_counter() - time_before, module_path, success))
+
+    EXTENSION_PACKS[:] = extension_packs.pack_records(EXTENSION_WEB_DIRS, pack_identities)
 
     if len(node_import_times) > 0:
         logging.info("\nImport times for custom nodes:")

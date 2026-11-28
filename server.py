@@ -45,6 +45,7 @@ import node_helpers
 from comfyui_version import __version__
 from app.frontend_management import FrontendManager, parse_version
 from comfy_api.internal import _ComfyNodeInternal
+from comfy_api.v4 import _packs as v4_packs
 from app.assets.event_log import emit
 from app.database.db import dependencies_available
 
@@ -433,6 +434,10 @@ class PromptServer():
                     name) + "/" + os.path.relpath(f, dir).replace("\\", "/"), files)))
 
             return web.json_response(extensions)
+
+        @routes.get("/extension_packs")
+        async def get_extension_packs(request):
+            return web.json_response(nodes.EXTENSION_PACKS)
 
         def get_dir_by_type(dir_type):
             if dir_type is None:
@@ -1392,6 +1397,7 @@ class PromptServer():
         self.app.add_routes([
             web.static('/', self.web_root),
         ])
+        v4_packs._mount_routes(self)
 
     def get_queue_info(self):
         prompt_info = {}

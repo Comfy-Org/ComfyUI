@@ -37,6 +37,7 @@ import comfy_aimdo.host_buffer
 import comfy_aimdo.model_vbar
 import comfy_aimdo.vram_buffer
 from comfy.internal_logging import detail
+from comfy_api._exceptions import InterruptProcessingException
 
 from typing import TYPE_CHECKING
 if TYPE_CHECKING:
@@ -2284,8 +2285,6 @@ def debug_memory_summary():
         return torch.cuda.memory.memory_summary()
     return ""
 
-class InterruptProcessingException(BaseException):
-    pass
 
 interrupt_processing_mutex = threading.RLock()
 
