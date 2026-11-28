@@ -16,12 +16,12 @@ pytestmark = pytest.mark.asyncio
 OPTIONS = ["a.png", "b.png", "c.png"]
 
 
-def v3_picker(**bounds):
+def v3_picker(upload=io.UploadType.image, **bounds):
     class Picker(io.ComfyNode):
         @classmethod
         def define_schema(cls):
             return io.Schema(node_id="Picker", inputs=[
-                io.MultiCombo.Input("image", options=OPTIONS, default=[], upload=io.UploadType.image, **bounds),
+                io.MultiCombo.Input("image", options=OPTIONS, default=[], upload=upload, **bounds),
             ], outputs=[], is_output_node=True)
 
         @classmethod
@@ -31,11 +31,13 @@ def v3_picker(**bounds):
     return Picker
 
 
-def v1_picker(**bounds):
+def v1_picker(upload_flag="image_upload", **bounds):
+    upload = {upload_flag: True} if upload_flag else {}
+
     class Picker:
         @classmethod
         def INPUT_TYPES(cls):
-            return {"required": {"image": (OPTIONS, {"image_upload": True, **bounds})}}
+            return {"required": {"image": (OPTIONS, {**upload, **bounds})}}
 
         RETURN_TYPES = ()
         FUNCTION = "run"
@@ -47,7 +49,12 @@ def v1_picker(**bounds):
     return Picker
 
 
-@pytest.mark.parametrize("make_picker", [v3_picker, v1_picker], ids=["v3-multicombo", "v1-combo-without-multiselect"])
+@pytest.mark.parametrize("make_picker", [
+    pytest.param(v3_picker, id="v3-image"),
+    pytest.param(lambda **bounds: v3_picker(upload=io.UploadType.model, **bounds), id="v3-file-upload"),
+    pytest.param(v1_picker, id="v1-image-without-multiselect"),
+    pytest.param(lambda **bounds: v1_picker(upload_flag="audio_upload", **bounds), id="v1-audio-without-multiselect"),
+])
 @pytest.mark.parametrize("bounds,value,expected_errors", [
     pytest.param({"min": 0, "max": 2}, {"__value__": []}, set(), id="empty-allowed-by-min-0"),
     pytest.param({"min": 0, "max": 2}, {"__value__": ["b.png", "a.png"]}, set(), id="two-within-max"),
@@ -78,3 +85,13 @@ async def test_unbounded_combo_still_rejects_a_list(monkeypatch):
 
     assert valid is False
     assert {error["type"] for error in errors["probe"]["errors"]} == {"value_not_in_list"}
+
+
+async def test_bounded_combo_without_upload_flag_still_rejects_a_list(monkeypatch):
+    monkeypatch.setitem(nodes.NODE_CLASS_MAPPINGS, "Picker", v1_picker(upload_flag=None, min=0, max=2))
+    prompt = {"probe": {"class_type": "Picker", "inputs": {"image": {"__value__": ["a.png"]}}}}
+
+    valid, _, _, errors = await execution.validate_prompt("count", prompt, None)
+
+    assert valid is False
+    assert "probe" in errors

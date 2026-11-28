@@ -875,7 +875,12 @@ class PromptExecutor:
             self._notify_prompt_lifecycle("end", prompt_id)
 
 
+COMBO_UPLOAD_FLAGS = ("image_upload", "animated_image_upload", "video_upload", "audio_upload", "file_upload")
+
+
 def combo_selection_limits(extra_info):
+    if not any(extra_info.get(flag) for flag in COMBO_UPLOAD_FLAGS):
+        return None
     minimum = extra_info.get("min")
     maximum = extra_info.get("max")
     if minimum is None and maximum is None:
@@ -1093,7 +1098,8 @@ async def validate_inputs(prompt_id, prompt, item, validated, visiting=None):
 
             if x not in validate_function_inputs and not validate_has_kwargs:
                 is_combo = isinstance(input_type, list) or input_type == io.Combo.io_type
-                if not is_combo and "min" in extra_info and val < extra_info["min"]:
+                is_bounded_selection = is_combo and combo_selection_limits(extra_info) is not None
+                if not is_bounded_selection and "min" in extra_info and val < extra_info["min"]:
                     error = {
                         "type": "value_smaller_than_min",
                         "message": "Value {} smaller than min of {}".format(val, extra_info["min"]),
@@ -1106,7 +1112,7 @@ async def validate_inputs(prompt_id, prompt, item, validated, visiting=None):
                     }
                     errors.append(error)
                     continue
-                if not is_combo and "max" in extra_info and val > extra_info["max"]:
+                if not is_bounded_selection and "max" in extra_info and val > extra_info["max"]:
                     error = {
                         "type": "value_bigger_than_max",
                         "message": "Value {} bigger than max of {}".format(val, extra_info["max"]),
@@ -1125,7 +1131,7 @@ async def validate_inputs(prompt_id, prompt, item, validated, visiting=None):
                         combo_options = extra_info.get("options", [])
                     else:
                         combo_options = input_type
-                    accepts_list = extra_info.get("multiselect", False) or combo_selection_limits(extra_info) is not None
+                    accepts_list = extra_info.get("multiselect", False) or is_bounded_selection
                     if accepts_list and isinstance(val, list):
                         invalid_vals = [v for v in val if v not in combo_options]
                     else:
