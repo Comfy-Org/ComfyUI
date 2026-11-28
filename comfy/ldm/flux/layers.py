@@ -114,7 +114,7 @@ class QKNorm(torch.nn.Module):
 
     def norm_rope_(self, q: Tensor, k: Tensor, pe: Tensor):
         """Normalizes and rotates q and k, [B, heads, N, dim] views of one q|k|v projection, in place."""
-        with self.query_norm.cast_weight(q) as (q_scale, _), self.key_norm.cast_weight(k) as (k_scale, _):
+        with self.query_norm.comfy_rmsnorm_cast_weight(q) as (q_scale, _), self.key_norm.comfy_rmsnorm_cast_weight(k) as (k_scale, _):
             # token-major, the projection's own layout; eps is the default of the norms above
             comfy.quant_ops.ck.rms_rope_(q.transpose(1, 2), k.transpose(1, 2), pe.transpose(1, 2), q_scale, k_scale, torch.finfo(torch.float32).eps)
 
@@ -297,8 +297,7 @@ class DoubleStreamBlock(nn.Module):
         del txt_attn
         txt += apply_mod(self.txt_mlp(modulated_norm(txt, self.txt_norm2, txt_mod2.scale, txt_mod2.shift, modulation_dims_txt)), txt_mod2.gate, None, modulation_dims_txt)
 
-        if txt.dtype == torch.float16:
-            txt = torch.nan_to_num(txt, nan=0.0, posinf=65504, neginf=-65504)
+        txt = comfy.model_management.clamp_fp16(txt)
 
         return img, txt
 
@@ -388,7 +387,7 @@ class SingleStreamBlock(nn.Module):
             chunk_attention = transformer_options.get("chunked_attention_override")
             if chunk_attention is not None and x.shape[0] == 1 and attn_mask is None and "attn1_patch" not in transformer_patches:
                 # an attention that takes the q|k|v projection chunk rows at a time, q and k still to be normalized and rotated by pe; None when it declines
-                with self.norm.query_norm.cast_weight(x) as (q_scale, _), self.norm.key_norm.cast_weight(x) as (k_scale, _):
+                with self.norm.query_norm.comfy_rmsnorm_cast_weight(x) as (q_scale, _), self.norm.key_norm.comfy_rmsnorm_cast_weight(x) as (k_scale, _):
                     attn = chunk_attention(lambda chunk: self.qkv_chunks(x, mod, mlp, chunk), self.num_heads, pe, q_scale, k_scale, torch.finfo(torch.float32).eps, transformer_options)
 
         if attn is None:
@@ -435,8 +434,7 @@ class SingleStreamBlock(nn.Module):
             mlp = self.mlp_activation(mlp)
             output = self.linear2(torch.cat((attn, mlp), 2))
         x += apply_mod(output, mod.gate, None, modulation_dims)
-        if x.dtype == torch.float16:
-            x = torch.nan_to_num(x, nan=0.0, posinf=65504, neginf=-65504)
+        x = comfy.model_management.clamp_fp16(x)
         return x
 
 

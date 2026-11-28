@@ -14,10 +14,23 @@ import comfy.model_patcher
 import comfy.model_sampling
 
 import comfy.memory_management
+import comfy.model_management
 from comfy.utils import model_trange as trange
 
 def append_zero(x):
     return torch.cat([x, x.new_zeros([1])])
+
+def _safe_nan_to_num(x):
+    # 310P has no nan_to_num kernel, so the same replacement is done with basic ops.
+    if not comfy.model_management.is_ascend_310(x.device):
+        return torch.nan_to_num(x, nan=0.0)
+    finfo = torch.finfo(x.dtype)
+    x = torch.where(torch.isnan(x), torch.zeros_like(x), x)
+    return torch.where(
+        torch.isinf(x),
+        torch.where(x > 0, torch.full_like(x, finfo.max), torch.full_like(x, finfo.min)),
+        x,
+    )
 
 
 def get_sigmas_karras(n, sigma_min, sigma_max, rho=7., device='cpu'):
@@ -1503,8 +1516,8 @@ def res_multistep(model, x, sigmas, extra_args=None, callback=None, disable=None
             c2 = (t_prev - t_old) / h
 
             phi1_val, phi2_val = phi1_fn(-h), phi2_fn(-h)
-            b1 = torch.nan_to_num(phi1_val - phi2_val / c2, nan=0.0)
-            b2 = torch.nan_to_num(phi2_val / c2, nan=0.0)
+            b1 = _safe_nan_to_num(phi1_val - phi2_val / c2)
+            b2 = _safe_nan_to_num(phi2_val / c2)
 
             if cfg_pp:
                 x = x + (denoised - uncond_denoised)
@@ -1651,7 +1664,7 @@ def sample_er_sde(model, x, sigmas, extra_args=None, callback=None, disable=None
                 old_denoised_d = denoised_d
 
             if s_noise > 0:
-                x = x + alpha_t * noise_sampler(sigmas[i], sigmas[i + 1]) * s_noise * (er_lambda_t ** 2 - er_lambda_s ** 2 * r ** 2).sqrt().nan_to_num(nan=0.0)
+                x = x + alpha_t * noise_sampler(sigmas[i], sigmas[i + 1]) * s_noise * _safe_nan_to_num((er_lambda_t ** 2 - er_lambda_s ** 2 * r ** 2).sqrt())
         old_denoised = denoised
     return x
 

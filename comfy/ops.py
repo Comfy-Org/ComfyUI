@@ -55,11 +55,46 @@ def repeat_kv_for_gqa(k, v, query_heads, head_dim):
         v = v.repeat_interleave(n_rep, dim=head_dim)
     return k, v
 
+def _npu_sdpa_math_fallback(q, k, v, attn_mask=None, is_causal=False, scale=None, enable_gqa=False):
+    if enable_gqa:
+        k, v = repeat_kv_for_gqa(k, v, q.shape[-3], -3)
+    if scale is None:
+        scale = q.shape[-1] ** -0.5
+    # the dot product overflows half precision before the scale is applied
+    compute_dtype = torch.float32 if q.dtype in (torch.float16, torch.bfloat16) else q.dtype
+    attn = torch.matmul(q.to(compute_dtype), k.to(compute_dtype).transpose(-2, -1)) * scale
+    if is_causal:
+        L, S = q.shape[-2], k.shape[-2]
+        causal = torch.ones((L, S), dtype=torch.bool, device=q.device).tril()
+        # a two dimensional mask broadcasts over the leading dims and keeps the rank of the input
+        attn = attn.masked_fill(causal.logical_not(), float("-inf"))
+    if attn_mask is not None:
+        if attn_mask.dtype == torch.bool:
+            attn = attn.masked_fill(attn_mask.logical_not(), float("-inf"))
+        else:
+            attn = attn + attn_mask
+    # sdpa returns zeros for a row with no allowed key, softmax would leave NaN there
+    fully_masked = torch.isneginf(attn).all(dim=-1, keepdim=True)
+    attn = torch.softmax(attn, dim=-1, dtype=torch.float32).to(q.dtype)
+    # only those rows are zeroed, a NaN from a real numerical failure still surfaces
+    attn = torch.where(fully_masked, torch.zeros_like(attn), attn)
+    return torch.matmul(attn, v)
+
+
 def scaled_dot_product_attention(q, k, v, *args, **kwargs):
     attn_mask = args[0] if len(args) > 0 else kwargs.get("attn_mask")
     if kwargs.get("enable_gqa", False) and attn_mask is not None:
         k, v = repeat_kv_for_gqa(k, v, q.shape[-3], -3)
         kwargs["enable_gqa"] = False
+    if comfy.model_management.is_ascend_310(device=q.device if hasattr(q, 'device') else None):
+        # 310P lacks a fused SDPA kernel (ERR01007 / "can not cast format when output is input").
+        # Use a portable math implementation instead of the fused NPU kernel.
+        return _npu_sdpa_math_fallback(
+            q, k, v, attn_mask=attn_mask,
+            is_causal=args[2] if len(args) > 2 else kwargs.get("is_causal", False),
+            scale=args[3] if len(args) > 3 else kwargs.get("scale", None),
+            enable_gqa=kwargs.get("enable_gqa", False),
+        )
     return torch.nn.functional.scaled_dot_product_attention(q, k, v, *args, **kwargs)
 
 
@@ -766,11 +801,11 @@ class disable_weight_init:
             self.bias = None
             return None
 
-        def cast_weight(self, input):
+        def comfy_rmsnorm_cast_weight(self, input):
             return CastBiasWeightContext(self if self.weight is not None else None, input, offloadable=True)
 
         def forward_comfy_cast_weights(self, input):
-            with self.cast_weight(input) as (weight, bias):
+            with self.comfy_rmsnorm_cast_weight(input) as (weight, bias):
                 return torch.nn.functional.rms_norm(input, self.normalized_shape, weight, self.eps)
 
         def forward(self, *args, **kwargs):
@@ -1057,7 +1092,7 @@ INPUT_ACT_EAGER = {
 @contextlib.contextmanager
 def _input_act_weight(x, input_act, act_weight, act_eps):
     if input_act == "rms_norm" and isinstance(act_weight, torch.nn.Module):
-        with act_weight.cast_weight(x) as (weight, _):
+        with act_weight.comfy_rmsnorm_cast_weight(x) as (weight, _):
             eps = act_weight.eps
             if eps is None:
                 eps = torch.finfo(torch.float64 if x.dtype == torch.float64 else torch.float32).eps

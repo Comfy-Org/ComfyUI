@@ -2192,6 +2192,10 @@ class QwenImage(supported_models_base.BASE):
     vae_key_prefix = ["vae."]
     text_encoder_key_prefix = ["text_encoders."]
 
+    def __init__(self, unet_config):
+        super().__init__(unet_config)
+        self.add_ascend_310_inference_dtype()
+
     def get_model(self, state_dict, prefix="", device=None):
         out = model_base.QwenImage(self, device=device)
         return out
@@ -2221,6 +2225,10 @@ class QwenImage21(supported_models_base.BASE):
 
     vae_key_prefix = ["vae."]
     text_encoder_key_prefix = ["text_encoders."]
+
+    def __init__(self, unet_config):
+        super().__init__(unet_config)
+        self.add_ascend_310_inference_dtype()
 
     def get_model(self, state_dict, prefix="", device=None):
         return model_base.QwenImage21(self, device=device)

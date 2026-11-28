@@ -6,6 +6,7 @@ import torch
 from torch import Tensor, nn
 from einops import rearrange, repeat
 import comfy.ldm.common_dit
+import comfy.model_management
 import comfy.patcher_extension
 
 from .layers import (
@@ -277,8 +278,7 @@ class Flux(nn.Module):
                     if add is not None:
                         img[:, :add.shape[1]] += add
 
-        if img.dtype == torch.float16:
-            img = torch.nan_to_num(img, nan=0.0, posinf=65504, neginf=-65504)
+        img = comfy.model_management.clamp_fp16(img)
 
         img = torch.cat((txt, img), 1)
 
