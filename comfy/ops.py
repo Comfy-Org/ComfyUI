@@ -29,6 +29,7 @@ import comfy.memory_management
 import comfy.pinned_memory
 import comfy.rmsnorm
 import comfy.utils
+from comfy.ldm.krea2 import sm120
 
 import comfy_aimdo.model_vbar
 import comfy_aimdo.torch
@@ -1571,6 +1572,11 @@ def mixed_precision_ops(quant_config={}, compute_dtype=torch.bfloat16, full_prec
                 return _quantized_weight_state_dict(self, sd, prefix, extra_quant_params=("input_scale", "pre_quant_scale"))
 
             def _forward(self, input, weight, bias):
+                profile = sm120.current_sample()
+                if profile is not None:
+                    result = sm120.linear(profile, input, weight, bias)
+                    if result is not None:
+                        return result
                 return torch.nn.functional.linear(input, weight, bias)
 
             def forward_comfy_cast_weights(
