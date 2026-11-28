@@ -325,7 +325,7 @@ class LazyCastingQuantizedParam:
 
 class LazyCastingParamPiece(torch.nn.Parameter):
     def __new__(cls, caster, state_dict_key, tensor):
-        return super().__new__(cls, tensor)
+        return super().__new__(cls, tensor, requires_grad=False)
 
     def __init__(self, caster, state_dict_key, tensor):
         self.caster = caster
