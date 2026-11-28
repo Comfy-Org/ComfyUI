@@ -402,7 +402,9 @@ class MultiCombo(ComfyTypeI):
                     default: list[str]=None, placeholder: str=None, chip: bool=None, control_after_generate: bool | ControlAfterGenerate=None,
                     socketless: bool=None, extra_dict=None, raw_link: bool=None, advanced: bool=None,
                     upload: UploadType=None, image_folder: FolderType=None, min: int=None, max: int=None):
-            '''`min`/`max` bound how many options may be selected; `min=0` with `max=1` is an optional single file picker.'''
+            '''`min`/`max` bound how many files an upload picker may select; `min=0` with `max=1` is an optional single file picker.'''
+            if (min is not None or max is not None) and upload is None:
+                raise ValueError(f"MultiCombo '{id}': min and max require upload")
             if min is not None and max is not None and min > max:
                 raise ValueError(f"MultiCombo '{id}': min ({min}) is greater than max ({max})")
             super().__init__(id, options, display_name, optional, tooltip, lazy, default, control_after_generate,

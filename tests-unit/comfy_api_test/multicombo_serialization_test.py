@@ -102,4 +102,10 @@ def test_multicombo_serializes_upload_and_selection_counts():
 
 def test_multicombo_rejects_min_greater_than_max():
     with pytest.raises(ValueError):
-        MultiCombo.Input(id="image", options=["a.png"], min=2, max=1)
+        MultiCombo.Input(id="image", options=["a.png"], upload=UploadType.image, min=2, max=1)
+
+
+@pytest.mark.parametrize("bounds", [{"min": 2}, {"max": 3}, {"min": 0, "max": 1}])
+def test_multicombo_rejects_bounds_without_upload(bounds):
+    with pytest.raises(ValueError):
+        MultiCombo.Input(id="providers", options=["a", "b", "c"], **bounds)
