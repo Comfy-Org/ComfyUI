@@ -1,0 +1,21 @@
+{
+  "additional_special_tokens": [
+    "<|endoftext|>",
+    "<|message_user|>",
+    "<|message_model|>",
+    "<|message_system|>",
+    "<|message_tool|>",
+    "<|content_text|>",
+    "<|content_image|>",
+    "<|content_model_end_sampling|>",
+    "<|content_thinking|>",
+    "<|end_message|>",
+    "<|content_tool_error|>",
+    "<|content_xml|>",
+    "<|begin_of_text|>",
+    "<|content_invoke_tool_json|>",
+    "<|content_invoke_tool_text|>"
+  ],
+  "eos_token": "<|content_model_end_sampling|>",
+  "pad_token": "<|endoftext|>"
+}
