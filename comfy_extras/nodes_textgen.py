@@ -1,12 +1,23 @@
+import math
 from concurrent.futures import ThreadPoolExecutor
 from time import monotonic
 from typing_extensions import override
 
+import comfy.utils
 from comfy.text_encoders.token_stream import stream_generated_tokens
 from comfy_api.latest import ComfyExtension, io
 from server import PromptServer
 
 VIDEO_TOOLTIP = "Video frames as image batch. Assumed to be 24 FPS; subsampled to the model's frame rate internally."
+
+
+def _limit_megapixels(image, max_mp):
+    height, width = image.shape[1:3]
+    max_pixels = max_mp * 1024 * 1024
+    if height * width <= max_pixels:
+        return image
+    scale = math.sqrt(max_pixels / (height * width))
+    return comfy.utils.common_upscale(image.movedim(-1, 1), max(1, round(width * scale)), max(1, round(height * scale)), "area", "disabled").movedim(1, -1)
 
 
 def _generate_text(clip, tokens, node_id, **sampling):
@@ -84,6 +95,7 @@ class TextGenerateV2(io.ComfyNode):
                 io.Boolean.Input("use_default_template", optional=True, default=True, tooltip="Use the built in system prompt/template if the model has one.", advanced=True),
                 io.Combo.Input("mtp", options=["auto", "off", "2", "3", "4", "5", "tree2s1", "tree2s2", "tree3s1", "tree4s1m8"], default="auto", optional=True, tooltip="Speculative decoding with the checkpoint's multi-token-prediction head. No effect without MTP weights. auto adapts the draft depth and breadth to observed token matches and execution cost; 2-5 pins a constant draft depth; tree modes pin both breadth and depth. Sampled output stays correctly distributed but differs from non-MTP output for the same seed."),
                 io.String.Input("system_prompt", force_input=True, optional=True, tooltip="Replaces the system prompt in the model's chat template. Ignored when the default template is not used."),
+                io.Float.Input("max_image_megapixels", display_name="Max Image Megapixels", default=1.0, min=0.1, max=10.0, step=0.1, optional=True, tooltip="Input images larger than this many megapixels are downscaled to it before being read. Smaller images are left as they are."),
             ],
             outputs=[
                 io.String.Output(display_name="generated_text"),
@@ -93,11 +105,11 @@ class TextGenerateV2(io.ComfyNode):
         )
 
     @classmethod
-    def execute(cls, clip, prompt, max_length, sampling_mode, image=None, thinking=False, use_default_template=True, video=None, audio=None, mtp="auto", system_prompt="", images: io.Autogrow.Type = None, videos: io.Autogrow.Type = None, audios: io.Autogrow.Type = None) -> io.NodeOutput:
+    def execute(cls, clip, prompt, max_length, sampling_mode, image=None, thinking=False, use_default_template=True, video=None, audio=None, mtp="auto", system_prompt="", max_image_megapixels=1.0, images: io.Autogrow.Type = None, videos: io.Autogrow.Type = None, audios: io.Autogrow.Type = None) -> io.NodeOutput:
 
         mtp = {"off": False, "auto": True}.get(mtp, mtp)
 
-        images = [batch[i:i + 1] for batch in (images or {}).values() if batch is not None for i in range(batch.shape[0])]
+        images = [_limit_megapixels(batch[i:i + 1], max_image_megapixels) for batch in (images or {}).values() if batch is not None for i in range(batch.shape[0])]
         videos = [v for v in (videos or {}).values() if v is not None]
         audios = [a for a in (audios or {}).values() if a is not None]
 
@@ -302,7 +314,7 @@ class TextGenerateLTX2Prompt(TextGenerate):
             node_id="TextGenerateLTX2Prompt",
             display_name="Generate LTX2 Prompt",
             category=parent_schema.category,
-            inputs=parent_schema.inputs,
+            inputs=[i for i in parent_schema.inputs if i.id != "max_image_megapixels"],
             outputs=parent_schema.outputs,
             search_aliases=["prompt enhance", "LLM", "gemma"],
         )
